@@ -80,6 +80,7 @@ import { logger } from "../utils/logger.js";
 import type { PermissionMode } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
+  getAutoCompactMinNewTokens,
   getAutoCompactThresholdPct,
   getCouncilRounds,
   getCurrentModel,
@@ -140,6 +141,7 @@ import {
   estimateConversationTokens,
   extractUserContent,
   generateCompactionSummary,
+  isCompactionThrash,
   POST_TURN_MIN_TOKENS,
   prepareCompaction,
   proposeCompaction,
@@ -397,6 +399,9 @@ export class Agent {
   private _turnUserGoalExcerpt = "";
   /** Compaction statistics tracking count and total tokens saved. */
   private _compactionStats: { count: number; totalSaved: number } = { count: 0, totalSaved: 0 };
+  /** Token count immediately after the last successful compaction (or null if none yet this
+   *  session). Used by the cross-turn anti-thrash guard in postTurnCompact. */
+  private _lastCompactionTokensAfter: number | null = null;
   /**
    * Pinned message sequences. A pinned user message is preserved verbatim across
    * compaction — it is re-injected as a system note immediately after the
@@ -558,11 +563,10 @@ export class Agent {
       // apiBase — otherwise the rebuilt factory binds the new provider's
       // strategy to the OLD provider's URL, sending requests to the wrong
       // host. Evidence: session 2492d6579b1d — user switched defaultProvider
-      // siliconflow→ (via UI), this.baseURL was still api.deepseek.com from
-      // startup, SiliconflowStrategy.createFactory was created with that
-      // baseURL, requests landed at api.deepseek.com which rejected the SF-
-      // style model id ("deepseek-v4-flash") with "supported API
-      // model names are deepseek-v4-pro or deepseek-v4-flash".
+      // (via UI), this.baseURL was still the old provider's apiBase from
+      // startup, the rebuilt strategy factory was created with that stale
+      // baseURL, and requests landed at the wrong host which rejected the
+      // model id.
       // A user-supplied custom baseURL is preserved only when it does NOT
       // match any known provider's apiBase (i.e. it's a real override, not
       // a stale default).
@@ -651,7 +655,7 @@ export class Agent {
     this.apiKey = apiKey;
     // Drop baseURL when it points at a DIFFERENT provider's default apiBase
     // (e.g. caller passed the legacy anthropic URL while providerId is
-    // siliconflow — without this we'd send siliconflow requests to
+    // deepseek — without this we'd send deepseek requests to
     // api.anthropic.com or similar). User-supplied custom URLs that don't
     // match any known provider's apiBase are preserved as real overrides.
     const stale = isAnyProviderApiBase(baseURL) && baseURL !== apiBaseFor(this.providerId);
@@ -874,6 +878,7 @@ export class Agent {
     });
 
     this._compactionStats = { count: 0, totalSaved: 0 };
+    this._lastCompactionTokensAfter = null;
     this._pinnedSeqs.clear();
 
     if (!this.sessionStore) {
@@ -1116,7 +1121,7 @@ export class Agent {
     // where orchestrator/task/title traffic is actually spending.
     // Best-effort: failures inside appendCostLog are swallowed (see cost-log.ts).
     const breakdown = source === "message" ? (this._lastPromptBreakdown ?? undefined) : undefined;
-    // Sanitize actualInputTokens for providers (e.g. SiliconFlow) that return
+    // Sanitize actualInputTokens for providers that return
     // implausibly low prompt_tokens (e.g. 10) regardless of prompt size.
     const estIn = breakdown ? Math.ceil(((breakdown.systemChars ?? 0) + (breakdown.messagesChars ?? 0)) / 4) : 0;
     const actualInput = sanitizeInputTokens(totalInput, estIn);
@@ -1814,6 +1819,7 @@ export class Agent {
     // grossSaved tells the user how many context tokens were reclaimed — a real benefit that
     // reduces subsequent turn costs.
     const tokensAfter = estimateConversationTokens(system, this.messages);
+    this._lastCompactionTokensAfter = tokensAfter;
     const saved = Math.max(0, preparation.tokensBefore - tokensAfter);
     const pct = preparation.tokensBefore > 0 ? ((saved / preparation.tokensBefore) * 100).toFixed(1) : "0.0";
     this._compactionStats.count++;
@@ -1885,6 +1891,13 @@ export class Agent {
         tokens,
         thresholdPct,
         minMeaningfulTokens,
+      });
+    }
+    const minNew = getAutoCompactMinNewTokens();
+    if (isCompactionThrash(tokens, this._lastCompactionTokensAfter, minNew)) {
+      return log(false, `anti-thrash (only ${tokens - (this._lastCompactionTokensAfter ?? 0)} new < ${minNew})`, {
+        tokens,
+        lastAfter: this._lastCompactionTokensAfter,
       });
     }
     log(true, `over-threshold (${tokens} >= ${minMeaningfulTokens})`, { tokens, thresholdPct, minMeaningfulTokens });

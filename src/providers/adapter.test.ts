@@ -1,6 +1,6 @@
 /**
  * Tests for src/providers/adapter.ts
- * Verifies createAdapter factory dispatches to all 6 provider IDs.
+ * Verifies createAdapter factory dispatches to all provider IDs.
  */
 import { describe, expect, it } from "vitest";
 import { ALL_PROVIDER_IDS, createAdapter } from "./adapter.js";
@@ -8,34 +8,14 @@ import type { ProviderId } from "./types.js";
 
 describe("createAdapter", () => {
   it("creates an adapter for each ProviderId", () => {
-    const ids: ProviderId[] = [
-      "anthropic",
-      "openai",
-      "google",
-      "deepseek",
-      "siliconflow",
-      "xai",
-      "ollama",
-      "zai",
-      "opencode-go",
-    ];
+    const ids: ProviderId[] = ["anthropic", "openai", "deepseek", "xai", "ollama", "zai", "opencode-go"];
     for (const id of ids) {
       const adapter = createAdapter(id, { model: "test-model", apiKey: "test-key-long-enough-for-test" });
       expect(typeof adapter.stream).toBe("function");
     }
   });
 
-  it("ALL_PROVIDER_IDS contains all 9 providers", () => {
-    expect(ALL_PROVIDER_IDS).toEqual([
-      "anthropic",
-      "openai",
-      "google",
-      "deepseek",
-      "siliconflow",
-      "xai",
-      "ollama",
-      "zai",
-      "opencode-go",
-    ]);
+  it("ALL_PROVIDER_IDS contains all 7 providers", () => {
+    expect(ALL_PROVIDER_IDS).toEqual(["anthropic", "openai", "deepseek", "xai", "ollama", "zai", "opencode-go"]);
   });
 });

@@ -4,7 +4,18 @@ vi.mock("../../ee/bridge.js", () => ({
   searchByText: vi.fn().mockResolvedValue([]),
 }));
 
-import { runDiscovery } from "../discovery.js";
+let capturedPrompt = "";
+vi.mock("ai", () => ({
+  generateText: vi.fn(async ({ prompt }: { prompt: string }) => {
+    capturedPrompt = prompt;
+    return { text: "[]" };
+  }),
+}));
+vi.mock("../../providers/runtime.js", () => ({
+  resolveModelRuntime: vi.fn(() => ({ model: {} })),
+}));
+
+import { createModelClarificationProposer, runDiscovery } from "../discovery.js";
 import { clearDiscoveryCache } from "../discovery-cache.js";
 import type { DiscoveryInteractionHandler, ModelCard } from "../discovery-types.js";
 
@@ -233,5 +244,13 @@ describe("runDiscovery()", () => {
     );
     expect(result.interviewed).toBe(false);
     expect(result.accepted).toBe(true);
+  });
+});
+
+describe("createModelClarificationProposer() prompt", () => {
+  it("does NOT inject the scoreSufficiency regex hint for a vague/underspecified prompt", async () => {
+    const proposer = createModelClarificationProposer({} as any, "test-model");
+    await proposer({ raw: "todo app", l1: { taskType: "generate", confidence: 0.5 } });
+    expect(capturedPrompt).not.toContain("local heuristic flags this prompt as underspecified");
   });
 });

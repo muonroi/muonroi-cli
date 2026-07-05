@@ -48,7 +48,7 @@
 //   - A4 (tool_call write-ahead)            — persistToolCallWriteAhead
 //   - A5 (message_seq write-ahead)          — persistMessageWriteAhead
 //   - O1 (providerOptions shape forensics)  — extractProviderOptionsShape
-//   - siliconflow reasoning-strip           — turnCaps.sanitizeHistory
+//   - reasoning-strip (provider quirk)       — turnCaps.sanitizeHistory
 
 import { generateText, type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
 import { getEffectiveCouncilRoleCount } from "../council/leader.js";
@@ -62,6 +62,8 @@ import * as phaseTracker from "../ee/phase-tracker.js";
 import { buildScope as buildScopeForVeto } from "../ee/scope.js";
 import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
 import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
+import { isGsdHardGateEnabled } from "../gsd/flags.js";
+import { evaluateMutationGate } from "../gsd/mutation-gate.js";
 import type {
   PostToolUseFailureHookInput,
   PostToolUseHookInput,
@@ -154,6 +156,7 @@ import {
 import { resolveShell } from "../utils/shell.js";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
+import { foldDynamicTailIntoUserMessage, splitFrontAndDynamicTail } from "./cache-prefix.js";
 import { relaxCompactionSettings } from "./compaction";
 import type { CouncilManager } from "./council-manager.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
@@ -219,6 +222,7 @@ import { planSteerInjection } from "./steer-inbox.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { applyAnthropicPromptCaching, compactSubAgentMessages, cumulativeMessageChars } from "./subagent-compactor.js";
 import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
+import { shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 import {
   buildToolRepetitionAbortMessage,
@@ -556,6 +560,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   } = args;
 
   // Put all extracted code here:
+  // Auto-recover budget for "cap" (tool-round ceiling) halts: compact
+  // the history and keep going instead of stopping and asking the user
+  // to /compact. Turn-scoped (not per-stream-attempt) so a stream-error
+  // retry or stall reprompt (`continue streamAttempt`) cannot reset the
+  // counter and exceed the intended cap of 2 auto-compactions per turn.
+  let toolLimitAutoRecoverCount = 0;
+  const TOOL_LIMIT_AUTO_RECOVER_CAP = 2;
   let stallTriggered = false;
   // Time-to-first-byte stall RE-PROMPT: some providers (observed:
   // xai/grok-build-0.1) accept the request then never send the first byte —
@@ -614,7 +625,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // decisions deserve debate regardless of length).
   const autoCouncilTypes = new Set(["plan", "analyze"]);
   const configuredRoleCount = getEffectiveCouncilRoleCount();
-  const heavyTier = (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
+  // Task 8 Step 7: prefer the complexity assessor's own auto-council verdict
+  // (pilCtx.gsdAutoCouncil, set at message-processor.ts:685 when the assessor ran)
+  // over the raw heavy-tier heuristic below — the assessor already reasoned about
+  // depth + task shape, so its verdict is the more intelligent router. Fall back to
+  // the heuristic when the assessor didn't run (gsdAutoCouncil undefined).
+  const assessorAutoCouncil = (pilCtx as { gsdAutoCouncil?: boolean }).gsdAutoCouncil;
+  const heavyTier =
+    typeof assessorAutoCouncil === "boolean"
+      ? assessorAutoCouncil
+      : (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
   const autoCouncilConfidence = getAutoCouncilConfidence();
   const autoCouncilMinRoles = getAutoCouncilMinRoles();
   const _complexityFromTrace = (pilCtx as { _intentTrace?: { complexity?: "low" | "medium" | "high" } })._intentTrace
@@ -1052,6 +1072,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           "ee_write",
         ]);
 
+        // Task 8: native GSD mutation gate. Read once per turn (not per call) since
+        // hardGateEnabled/directAnswer don't change mid-turn; the gate itself
+        // re-reads STATE.md per call (cheap fs read) so it stays live if the
+        // model advances phase/verdict mid-turn via gsd_* tools.
+        const gsdHardGateEnabled = isGsdHardGateEnabled();
+        const gsdDirectAnswer = (pilCtx as { directAnswer?: boolean }).directAnswer;
+
         for (const name of Object.keys(tools)) {
           const tool = tools[name];
           if (
@@ -1062,6 +1089,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           ) {
             const originalExecute = tool.execute;
             tool.execute = async (input: any, context: any) => {
+              const gate = evaluateMutationGate(deps.bash.getCwd(), {
+                toolName: name,
+                hardGateEnabled: gsdHardGateEnabled,
+                directAnswer: gsdDirectAnswer,
+              });
+              if (gate.blocked) {
+                return { success: false, output: gate.reason, error: gate.reason };
+              }
               return writeMutex.run(() => originalExecute(input, context));
             };
           }
@@ -1175,7 +1210,44 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         const mcpCapabilityBlock = buildMcpCapabilityBlock(Object.keys(tools));
         const systemWithCaps = mcpCapabilityBlock ? `${systemWithShell}${mcpCapabilityBlock}` : systemWithShell;
 
-        const systemForModel = runtime.modelId.startsWith("claude")
+        // Task 3 — non-Claude prompt-cache prefix stability. On non-Claude the
+        // system is a single string; per-turn-dynamic content (dynamicSuffix +
+        // PIL suffix + MCP roster) that sits AFTER the byte-stable staticPrefix
+        // but BEFORE the conversation shifts the cached prefix and nukes the
+        // cache on PIL-active turns (session 47a774d272da: pil_active=1 ⟺
+        // cache_read=0). We keep the front byte-stable and relocate the dynamic
+        // tail into the trailing user message (variant b) — NOT a mid-conversation
+        // system-role message, which OpenAI-compatible providers (DeepSeek/GLM)
+        // do not reliably accept. Claude keeps its untouched two-block split.
+        const _isClaudeModel = runtime.modelId.startsWith("claude");
+        const { front: _nonClaudeFront, dynamicTail: _nonClaudeDynamicTail } = _isClaudeModel
+          ? { front: systemWithCaps, dynamicTail: "" }
+          : splitFrontAndDynamicTail({
+              modelId: runtime.modelId,
+              systemWithCaps,
+              staticPrefix: systemParts.staticPrefix,
+            });
+        // Only relocate when the enriched user message is actually present to
+        // receive the tail; otherwise fall back to the original single string so
+        // no instruction content is dropped.
+        const _willFoldDynamicTail =
+          !_isClaudeModel &&
+          _nonClaudeDynamicTail.trim().length > 0 &&
+          (deps.messages as unknown[]).includes(userModelMessage);
+
+        if (process.env.MUONROI_DEBUG_CACHE_PREFIX === "1") {
+          try {
+            console.error(
+              `[cache-prefix] model=${runtime.modelId} staticPrefixLen=${systemParts.staticPrefix.length} ` +
+                `frontLen=${_nonClaudeFront.length} dynTailLen=${_nonClaudeDynamicTail.length} ` +
+                `fold=${_willFoldDynamicTail} msgCount=${(deps.messages as unknown[]).length}`,
+            );
+          } catch (err) {
+            console.error(`[cache-prefix] log failed: ${(err as Error)?.message}`);
+          }
+        }
+
+        const systemForModel = _isClaudeModel
           ? [
               {
                 role: "system" as const,
@@ -1187,7 +1259,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 content: systemWithCaps.slice(systemParts.staticPrefix.length),
               },
             ]
-          : systemWithCaps;
+          : _willFoldDynamicTail
+            ? _nonClaudeFront
+            : systemWithCaps;
 
         // Capture prompt-size breakdown so recordUsage can attach it to the
         // cost-log entry. Without this, "system prompt is huge" is unfalsifiable.
@@ -1259,7 +1333,11 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Substitute the enriched user message for the current turn so the LLM sees PIL additions,
         // while leaving the DB-persisted `deps.messages` clean for future turns.
         const _messagesForCall = (deps.messages as any[]).map((m: any) =>
-          m === userModelMessage ? userEnrichedMessage : m,
+          m === userModelMessage
+            ? _willFoldDynamicTail
+              ? foldDynamicTailIntoUserMessage(userEnrichedMessage, _nonClaudeDynamicTail)
+              : userEnrichedMessage
+            : m,
         );
         if (wireDebug.enabled) {
           wireDebug.logRequest({
@@ -1285,6 +1363,34 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         const _baseDynamicStopWhen = createToolLoopCapPredicate({
           initialCap: deps.maxToolRounds,
           ask: async (info) => {
+            // Auto-recover a "cap" (tool-round ceiling) halt: compact the history and keep
+            // going, instead of stopping and telling the user to /compact
+            // (prompts.ts). Capped so a runaway turn still terminates;
+            // pattern-loop halts are excluded (agent is stuck).
+            if (shouldAutoRecoverToolLimit(info, toolLimitAutoRecoverCount, TOOL_LIMIT_AUTO_RECOVER_CAP)) {
+              toolLimitAutoRecoverCount++;
+              try {
+                const _cw = runtime.modelInfo?.contextWindow ?? 0;
+                if (_cw > 0) {
+                  await deps.compactForContext(provider, system, _cw, signal, deps.getCompactionSettings(_cw), false);
+                }
+              } catch (err) {
+                logger.error("orchestrator", "tool-limit auto-recover compaction failed", {
+                  message: err instanceof Error ? err.message : String(err),
+                });
+              }
+              const _ar2 = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                | { emitEvent: (e: unknown) => void }
+                | undefined;
+              _ar2?.emitEvent({
+                t: "event",
+                kind: "toast",
+                level: "info",
+                text: `đạt giới hạn bước — đã tự nén ngữ cảnh và tiếp tục (lần ${toolLimitAutoRecoverCount}/${TOOL_LIMIT_AUTO_RECOVER_CAP})`,
+              });
+              return "continue";
+            }
+
             if (info.kind === "pattern") {
               if (patternLoopInjectCount < 1) {
                 patternLoopInjectCount++;

@@ -3,7 +3,7 @@
  *
  * Generic helpers for Authorization Code + PKCE browser-redirect OAuth flows.
  * Usable for any provider that supports the standard OAuth 2.0 browser-redirect
- * grant (e.g. Google Gemini). Not for device-code flows (see device-flow.ts).
+ * grant. Not for device-code flows (see device-flow.ts).
  *
  * Re-exports generatePKCE from device-flow.ts so callers need only one import.
  */

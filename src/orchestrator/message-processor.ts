@@ -48,7 +48,7 @@
 //   - A4 (tool_call write-ahead)            — persistToolCallWriteAhead
 //   - A5 (message_seq write-ahead)          — persistMessageWriteAhead
 //   - O1 (providerOptions shape forensics)  — extractProviderOptionsShape
-//   - siliconflow reasoning-strip           — turnCaps.sanitizeHistory
+//   - reasoning-strip (provider quirk)       — turnCaps.sanitizeHistory
 
 import { generateText, type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
 import { recordArtifact } from "../ee/artifact-cache.js";
@@ -61,9 +61,10 @@ import * as phaseTracker from "../ee/phase-tracker.js";
 import { buildScope as buildScopeForVeto } from "../ee/scope.js";
 import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
 import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
-import { isGsdNativeEnabled } from "../gsd/flags.js";
+import { assessComplexity } from "../gsd/complexity-assessor.js";
+import { isComplexityAssessorEnabled, isGsdNativeEnabled, isPilGateEnrichEnabled } from "../gsd/flags.js";
 import { getGsdLoopHost } from "../gsd/loop-host.js";
-import { syncWorkflowContext } from "../gsd/workflow-engine.js";
+import { readState, syncWorkflowContext } from "../gsd/workflow-engine.js";
 import type {
   PostToolUseFailureHookInput,
   PostToolUseHookInput,
@@ -212,6 +213,7 @@ import {
   recordCompaction,
   recordElision,
 } from "./session-experience.js";
+import { shouldRunGate } from "./should-run-gate.js";
 import { attemptStallRescue, pushStallToolResult, type StallToolResult } from "./stall-rescue.js";
 import {
   createStallWatchdog,
@@ -399,6 +401,73 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
     modelInfo: ReturnType<typeof getModelInfo>;
     signal: AbortSignal;
   }): AsyncGenerator<StreamChunk, void, unknown>;
+}
+
+/**
+ * Single-shot leader-tier LLM runner for the GSD complexity assessor
+ * (Task 4 `assessComplexity`). Mirrors the orchestrator's own council LLM
+ * construction (`createCouncilLLM` — see `runCouncil` / `runProductLoop` in
+ * orchestrator.ts) so the assessor call auto-records usage as
+ * `source=council` (no cost-leak) instead of a bespoke unaccounted call.
+ * Leader model resolution goes ONLY through `resolvePlanCouncilLeader` —
+ * Zero Hardcode Rule, no literal model/provider IDs here.
+ */
+function buildLeaderAssessorRunner(
+  deps: MessageProcessorDeps,
+  sessionModel: string,
+): (prompt: string) => Promise<string> {
+  return async (prompt: string) => {
+    const { createCouncilLLM } = await import("../council/llm.js");
+    const { resolvePlanCouncilLeader } = await import("../council/leader.js");
+    const leader = await resolvePlanCouncilLeader(sessionModel);
+    const stats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
+    const llm = createCouncilLLM(deps.bash, deps.mode, deps.session?.id, stats);
+    // Small budget — this is a single classification, not a synthesis.
+    return llm.generate(
+      leader.modelId,
+      "You are a task complexity assessor.",
+      prompt,
+      512,
+      undefined,
+      AbortSignal.timeout(PIL_GATE_DEADLINE_MS),
+    );
+  };
+}
+
+/**
+ * Turn-start PIL gate budget: the assessor + heavy-tier critics run BEFORE the
+ * model message is assembled, so they must be short — a slow gate call would
+ * delay every turn, not just heavy ones. `createCouncilLLM.generate` has no
+ * per-call timeout of its own (`llm.ts:331` defaults to 5 minutes), so this
+ * deadline is threaded explicitly as the `signal` arg on every gate call.
+ */
+const PIL_GATE_DEADLINE_MS = 2500;
+
+/**
+ * Heavy-tier gate critic runner (Task 4 `runGateCritics`). Reuses the council
+ * LLM (billed `source=council`, no cost leak) with the same tight deadline as
+ * the assessor — three critics run in parallel via `Promise.all` inside
+ * `runGateCritics`, each individually bounded by this signal.
+ */
+function buildGateCriticRunner(
+  deps: MessageProcessorDeps,
+  sessionModel: string,
+): import("../gsd/pil-gate-critic.js").RunCriticFn {
+  return async (prompt: string): Promise<string> => {
+    const { createCouncilLLM } = await import("../council/llm.js");
+    const { resolvePlanCouncilLeader } = await import("../council/leader.js");
+    const leader = await resolvePlanCouncilLeader(sessionModel);
+    const stats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
+    const llm = createCouncilLLM(deps.bash, deps.mode, deps.session?.id, stats);
+    return llm.generate(
+      leader.modelId,
+      "You are a prompt-enrichment critic.",
+      prompt,
+      512,
+      undefined,
+      AbortSignal.timeout(PIL_GATE_DEADLINE_MS),
+    );
+  };
 }
 
 /**
@@ -633,14 +702,85 @@ export class MessageProcessor {
     }
     const { pilCtx, _stepCeiling, _pilStart, _naturalCeiling, _ceilingTaskType, _ceilingSize } = prepResult!;
 
-    if (isGsdNativeEnabled() && pilCtx.intentKind !== "chitchat") {
+    const cwd = deps.bash.getCwd();
+    if (
+      isGsdNativeEnabled() &&
+      shouldRunGate(pilCtx, () => {
+        try {
+          return readState(cwd).phase;
+        } catch (err) {
+          // Missing/corrupt .planning state is the normal "no active run" case, not an error.
+          console.error(
+            `[pil-gate] readState failed while checking resume phase (treating as no active run): ${(err as Error).message}`,
+          );
+          return null;
+        }
+      })
+    ) {
       try {
-        const depth =
-          (pilCtx as { modelDepthTier?: "quick" | "standard" | "heavy" | null }).modelDepthTier ??
-          (pilCtx as { complexityTier?: string }).complexityTier ??
-          "standard";
-        const cwd = deps.bash.getCwd();
         const sessionModel = deps.session?.model ?? "unknown";
+        let depth: "quick" | "standard" | "heavy" = pilCtx.modelDepthTier ?? pilCtx.complexityTier ?? "standard";
+
+        // Leader-tier assessor enrichment: OVERRIDES the fast-classifier depth
+        // before it's written to SDK STATE.md. `assessComplexity` itself never
+        // throws (every internal step is caught, degrading to `priorDepth`),
+        // but this inner try/catch is defensive fail-open insurance so even an
+        // unexpected throw here keeps `depth` at its fast-classifier value —
+        // syncWorkflowContext below is never skipped because of the assessor.
+        let brief = "";
+        if (isComplexityAssessorEnabled()) {
+          try {
+            const { buildGateContextBundle } = await import("../gsd/pil-gate-context.js");
+            const bundle = buildGateContextBundle({
+              cwd,
+              conversationDigest: deps.buildRecentTurnsSummary(),
+              brainData: pilCtx._brainData,
+            });
+            const assessed = await assessComplexity({
+              cwd,
+              raw: pilCtx.raw,
+              priorDepth: depth,
+              confidence: pilCtx.confidence,
+              bundle,
+              sessionModelId: sessionModel,
+              runAssessor: buildLeaderAssessorRunner(deps, sessionModel), // single-shot leader call
+            });
+            depth = assessed.depth;
+            // Keep the native depth slot authoritative: write the assessed depth
+            // back to pilCtx.modelDepthTier so every downstream consumer that reads
+            // it (tool-engine depthTier -> gsd tool registration + gsd_verify depth
+            // + layer-derived tiering) sees the SAME value the mutation gate reads
+            // from STATE.md. Without this, the gate (readState().depth) and gsd_verify
+            // (pilCtx.modelDepthTier) diverge on any assessor override. Same pilCtx
+            // ref, and this block runs before executeToolEngine in the same turn.
+            pilCtx.modelDepthTier = depth;
+            if (assessed.assessed) pilCtx.gsdAutoCouncil = assessed.autoCouncil;
+
+            if (isPilGateEnrichEnabled() && assessed.enrichedPrompt) {
+              let verdict = assessed.quality?.verdict ?? "enriched";
+              brief = assessed.enrichedPrompt;
+              if (depth === "heavy") {
+                const { runGateCritics } = await import("../gsd/pil-gate-critic.js");
+                const critiqued = await runGateCritics({
+                  draftBrief: brief,
+                  draftVerdict: verdict,
+                  bundle,
+                  runCritic: buildGateCriticRunner(deps, sessionModel),
+                });
+                verdict = critiqued.verdict;
+                brief = critiqued.brief;
+              }
+              if (verdict === "adequate") brief = "";
+            }
+          } catch (assessErr) {
+            brief = "";
+            console.error(`[pil-gate] enrichment failed, using raw prompt: ${(assessErr as Error).message}`);
+          }
+        }
+
+        if (brief) {
+          pilCtx.enriched = `[PIL Gate brief]\n${brief.slice(0, 1500)}\n\n${pilCtx.enriched}`;
+        }
         getGsdLoopHost().ensureHost(cwd, sessionModel);
         syncWorkflowContext(cwd, sessionModel, depth);
       } catch (err) {

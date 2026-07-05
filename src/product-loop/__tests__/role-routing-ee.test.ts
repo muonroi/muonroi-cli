@@ -7,9 +7,9 @@ const inventory: ModelInfo[] = [
   { id: "anthropic-premium-1", provider: "anthropic", tier: "premium" } as ModelInfo,
   { id: "openai-premium-1", provider: "openai", tier: "premium" } as ModelInfo,
   { id: "openai-balanced-1", provider: "openai", tier: "balanced" } as ModelInfo,
-  { id: "google-balanced-1", provider: "google", tier: "balanced" } as ModelInfo,
+  { id: "xai-balanced-1", provider: "xai", tier: "balanced" } as ModelInfo,
   { id: "deepseek-fast-1", provider: "deepseek", tier: "fast" } as ModelInfo,
-  { id: "siliconflow-balanced-1", provider: "siliconflow", tier: "balanced" } as ModelInfo,
+  { id: "zai-balanced-1", provider: "zai", tier: "balanced" } as ModelInfo,
 ];
 
 describe("resolveRoles + EE override", () => {

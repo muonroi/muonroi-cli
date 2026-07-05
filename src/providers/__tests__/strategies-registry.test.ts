@@ -11,15 +11,7 @@ import { getProviderCapabilities } from "../capabilities.js";
 import { getProviderStrategy } from "../strategies/registry.js";
 import type { ProviderId } from "../types.js";
 
-const PROVIDER_IDS: ReadonlyArray<ProviderId> = [
-  "anthropic",
-  "openai",
-  "google",
-  "deepseek",
-  "siliconflow",
-  "xai",
-  "ollama",
-];
+const PROVIDER_IDS: ReadonlyArray<ProviderId> = ["anthropic", "openai", "deepseek", "xai", "ollama"];
 
 describe("strategy registry", () => {
   test("each ProviderId yields a stable singleton instance", () => {

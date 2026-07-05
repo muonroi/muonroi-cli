@@ -63,19 +63,9 @@ export type ProviderStream = AsyncGenerator<StreamChunk, void, unknown>;
 
 /**
  * Supported provider identifiers.
- * 'google' maps to Gemini/Agy via @ai-sdk/google; 'deepseek' and 'siliconflow'
- * share the OpenAI-compatible adapter with different baseURLs.
+ * 'deepseek' shares the OpenAI-compatible adapter with a custom baseURL.
  */
-export type ProviderId =
-  | "anthropic"
-  | "openai"
-  | "google"
-  | "deepseek"
-  | "siliconflow"
-  | "xai"
-  | "ollama"
-  | "zai"
-  | "opencode-go";
+export type ProviderId = "anthropic" | "openai" | "deepseek" | "xai" | "ollama" | "zai" | "opencode-go";
 
 /**
  * Single source of truth for the canonical ordering of all provider IDs.
@@ -87,9 +77,7 @@ export type ProviderId =
 export const ALL_PROVIDER_IDS = [
   "anthropic",
   "openai",
-  "google",
   "deepseek",
-  "siliconflow",
   "xai",
   "ollama",
   "zai",
@@ -107,7 +95,7 @@ export function iterProviders(): readonly ProviderId[] {
 export interface ProviderConfig {
   /** BYOK API key. Ollama may be keyless; defaults to env OLLAMA_API_KEY when present. */
   apiKey?: string;
-  /** Base URL override for OpenAI-compatible providers (deepseek/siliconflow) + ollama VPS. */
+  /** Base URL override for OpenAI-compatible providers (deepseek) + ollama VPS. */
   baseURL?: string;
   /** AI model identifier, e.g. "claude-3-5-haiku-latest". */
   model: string;
@@ -119,7 +107,7 @@ export interface ProviderConfig {
    *
    * Adding OAuth for a new provider:
    *   1. Add an entry to `providers/auth/registry.ts` (login flow + token store).
-   *   2. Ensure that provider's adapter honors `oauthHeaders` (see openai.ts/anthropic.ts/gemini.ts).
+   *   2. Ensure that provider's adapter honors `oauthHeaders` (see openai.ts/anthropic.ts).
    *   3. Done — `createAdapterAsync` dispatches via the registry; no other code edits required.
    */
   oauthHeaders?: Record<string, string>;

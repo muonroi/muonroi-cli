@@ -25,6 +25,7 @@ import { buildIdealContinuationPrompt } from "../scaffold/continuation-prompt.js
 import { continueAsCouncil } from "../scaffold/continue-as-council.js";
 import { initNewProject } from "../scaffold/init-new.js";
 import { pointToExisting } from "../scaffold/point-to-existing.js";
+import { statusBarStore, wireStatusBar } from "../state/status-bar-store.js";
 import { logUIInteraction } from "../storage/index.js";
 import type { StoredSchedule } from "../tools/schedule";
 import type {
@@ -154,7 +155,6 @@ import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal"
 import { SLASH_MENU_ITEMS, type SlashMenuItem, VISIBLE_SLASH_MENU_ITEMS } from "./slash/menu-items.js";
 import { dispatchSlash } from "./slash/registry.js";
 import { StatusBar } from "./status-bar/index.js";
-import { statusBarStore, wireStatusBar } from "./status-bar/store.js";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
 import { dark } from "./theme";
 import { relaunchWithSession } from "./utils/relaunch.js";

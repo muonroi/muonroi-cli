@@ -209,8 +209,8 @@ export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrai
 
   // @ai-sdk/openai-compatible's chat schema exposes `strictJsonSchema: false`
   // for providers that don't honour OpenAI's strict JSON schema mode.
-  // DeepSeek (and DeepSeek-compatible providers like SiliconFlow) only
-  // support `response_format: {type: "json_object"}` — they reject the full
+  // DeepSeek only supports `response_format: {type: "json_object"}` — it
+  // rejects the full
   // schema response_format. Setting strictJsonSchema=false makes AI SDK fall
   // back to lenient json_object mode silently (no "responseFormat not
   // supported" warning) while still steering the model toward JSON output.
@@ -222,7 +222,7 @@ export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrai
   const mergedProviderOptions: Record<string, Record<string, unknown>> = {
     ...((runtime.providerOptions ?? {}) as Record<string, Record<string, unknown>>),
   };
-  if (provider === "deepseek" || provider === "siliconflow") {
+  if (provider === "deepseek") {
     mergedProviderOptions[provider] = {
       ...(mergedProviderOptions[provider] ?? {}),
       strictJsonSchema: false,

@@ -1078,11 +1078,10 @@ program
     changeDirectoryOrExit(options.directory);
 
     // Boot model registry BEFORE any key resolution path runs —
-    // detectProviderForModel consults the catalog's alias map to route e.g.
-    // "deepseek-v4-flash" to provider "siliconflow". With an empty registry
-    // it falls back to a prefix match ("deepseek") and the CLI loads the
-    // wrong provider's key. Affects both runBackgroundDelegation and the
-    // main interactive/headless path below.
+    // detectProviderForModel consults the catalog's alias map to route model
+    // ids to the correct provider. With an empty registry it falls back to a
+    // prefix match and the CLI may load the wrong provider's key. Affects both
+    // runBackgroundDelegation and the main interactive/headless path below.
     let catalogLoadFailed = false;
     await loadCatalog().catch(() => {
       catalogLoadFailed = true;
@@ -1424,9 +1423,7 @@ keys
 
 keys
   .command("login <provider>")
-  .description(
-    "Log in to a provider via OAuth subscription (supported: openai, google/agy, xai). 'google'/'agy' now uses agy client creds.",
-  )
+  .description("Log in to a provider via OAuth subscription (supported: openai, xai).")
   .action(async (provider: string) => {
     const { runKeysLogin } = await import("./cli/keys.js");
     await runKeysLogin(provider);

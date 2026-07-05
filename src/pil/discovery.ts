@@ -10,7 +10,6 @@ import type {
   ModelClarificationProposer,
   ProjectContext,
 } from "./discovery-types.js";
-import { scoreSufficiency } from "./layer1-intent.js";
 import { isMetaAnalysisPrompt } from "./layer6-output.js";
 import { scanProjectContext } from "./layer15-context-scan.js";
 import { modelCardToQuestion, resolveGapsNonInteractive } from "./layer16-clarity.js";
@@ -303,11 +302,6 @@ export function createModelClarificationProposer(providerFactory: any, modelId: 
         ? `\nCurrent CLI enrichment / context (use this to decide what is already known):\n${input.additionalContext}`
         : "";
 
-      const sufficiency = scoreSufficiency({ rawText: input.raw });
-      const forceDirective = !sufficiency.sufficient
-        ? `\nNote: a local heuristic flags this prompt as underspecified (missing: ${sufficiency.missing.join(", ")}). Show a clarifying card ONLY for a missing aspect that genuinely forks the deliverable and that you cannot resolve with a reasonable assumption. If you can proceed on a stated assumption, do so and return [].`
-        : "";
-
       const special = isMetaAnalysisPrompt(input.raw)
         ? `\nIf the request is a self-evaluation, meta-analysis or review of the CLI by the agent running inside it, do NOT ask about repo path, current directory, absolute path, local repo location or "which directory". Scope is always the full project root. Focus questions and recommends on which CLI internals (PIL, discovery, tools, compaction, EE, model BE, loop guard) to evaluate or specific improvements to assess after fixes. Use the enrichment context.`
         : "";
@@ -319,7 +313,7 @@ export function createModelClarificationProposer(providerFactory: any, modelId: 
       const prompt = `You are the AI agent executing inside muonroi-cli.
 ${envHeader}User request: "${input.raw}"
 Task type from CLI: ${input.l1.taskType}
-${contextStr}${forceDirective}
+${contextStr}
 
 You design question cards shown to the user *before* you start working.
 Each card is a structured question with selectable options.

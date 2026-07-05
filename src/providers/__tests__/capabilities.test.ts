@@ -3,7 +3,7 @@ import { getProviderCapabilities } from "../capabilities.js";
 
 describe("ProviderCapabilities", () => {
   describe("supportsResponseTool — reliable providers", () => {
-    for (const id of ["openai", "anthropic", "google", "xai"] as const) {
+    for (const id of ["openai", "anthropic", "xai"] as const) {
       it(`${id} reports true for all task types`, () => {
         const caps = getProviderCapabilities(id);
         expect(caps.supportsResponseTool("general")).toBe(true);
@@ -15,7 +15,7 @@ describe("ProviderCapabilities", () => {
   });
 
   describe("supportsResponseTool — DeepSeek family", () => {
-    for (const id of ["deepseek", "siliconflow"] as const) {
+    for (const id of ["deepseek"] as const) {
       it(`${id} reports false for general (token leak), true for structured`, () => {
         const caps = getProviderCapabilities(id);
         expect(caps.supportsResponseTool("general")).toBe(false);

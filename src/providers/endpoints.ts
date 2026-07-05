@@ -25,17 +25,9 @@ export const PROVIDER_ENDPOINTS: Record<ProviderId, ProviderEndpoints> = {
     apiBase: "https://api.openai.com/v1",
     consoleUrl: "https://platform.openai.com/api-keys",
   },
-  google: {
-    apiBase: "https://generativelanguage.googleapis.com/v1beta",
-    consoleUrl: "https://aistudio.google.com/app/apikey",
-  },
   deepseek: {
     apiBase: "https://api.deepseek.com",
     consoleUrl: "https://platform.deepseek.com/api_keys",
-  },
-  siliconflow: {
-    apiBase: "https://api.siliconflow.com/v1",
-    consoleUrl: "https://cloud.siliconflow.com/account/ak",
   },
   xai: {
     apiBase: "https://api.x.ai/v1",
@@ -67,11 +59,10 @@ export function consoleUrlFor(provider: ProviderId): string {
 
 /**
  * Default base URLs for OpenAI-compatible providers only. Used by adapters
- * that share the OpenAI SDK shape (deepseek, siliconflow, xai).
+ * that share the OpenAI SDK shape (deepseek, xai).
  */
-export const OPENAI_COMPATIBLE_BASE_URLS: Record<"deepseek" | "siliconflow" | "xai" | "zai" | "opencode-go", string> = {
+export const OPENAI_COMPATIBLE_BASE_URLS: Record<"deepseek" | "xai" | "zai" | "opencode-go", string> = {
   deepseek: PROVIDER_ENDPOINTS.deepseek.apiBase,
-  siliconflow: PROVIDER_ENDPOINTS.siliconflow.apiBase,
   xai: PROVIDER_ENDPOINTS.xai.apiBase,
   zai: PROVIDER_ENDPOINTS.zai.apiBase,
   "opencode-go": PROVIDER_ENDPOINTS["opencode-go"].apiBase,

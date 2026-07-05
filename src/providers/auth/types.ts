@@ -2,7 +2,7 @@
  * src/providers/auth/types.ts
  *
  * Provider OAuth interfaces and token shapes.
- * Designed to be extensible for Anthropic / Google OAuth in the future.
+ * Designed to be extensible for additional provider OAuth in the future.
  */
 
 import type { ProviderId } from "../types.js";

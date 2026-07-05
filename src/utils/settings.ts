@@ -218,6 +218,9 @@ export interface UserSettings {
   autoCompactAfterTurn?: boolean;
   /** Minimum % of context window to trigger post-turn auto-compact (default 0.25 = 25%, range 0.05-0.50). */
   autoCompactThresholdPct?: number;
+  /** Minimum new tokens accumulated since the last compaction before another
+   *  post-turn compaction may fire. Prevents cache-reset thrash. Default 20000. */
+  autoCompactMinNewTokens?: number;
   roleModels?: Partial<Record<ModelRole, string>>;
   councilRounds?: number;
   autoCouncil?: boolean;
@@ -268,9 +271,7 @@ export interface UserSettings {
   providers?: {
     anthropic?: ProviderKeyConfig;
     openai?: ProviderKeyConfig;
-    google?: ProviderKeyConfig;
     deepseek?: ProviderKeyConfig;
-    siliconflow?: ProviderKeyConfig;
     xai?: ProviderKeyConfig;
     ollama?: { baseURL?: string };
     zai?: ProviderKeyConfig;
@@ -626,27 +627,12 @@ export function getProviderConfigs(
     configs.openai = { apiKey: openaiKey, baseURL: p.openai?.baseURL };
   }
 
-  // Google Gemini
-  const googleKey = process.env.GOOGLE_API_KEY ?? p.google?.apiKey;
-  if (googleKey) {
-    configs.google = { apiKey: googleKey, baseURL: p.google?.baseURL };
-  }
-
   // DeepSeek
   const deepseekKey = process.env.DEEPSEEK_API_KEY ?? p.deepseek?.apiKey;
   if (deepseekKey) {
     configs.deepseek = {
       apiKey: deepseekKey,
       baseURL: p.deepseek?.baseURL ?? apiBaseFor("deepseek"),
-    };
-  }
-
-  // SiliconFlow
-  const siliconflowKey = process.env.SILICONFLOW_API_KEY ?? p.siliconflow?.apiKey;
-  if (siliconflowKey) {
-    configs.siliconflow = {
-      apiKey: siliconflowKey,
-      baseURL: p.siliconflow?.baseURL ?? apiBaseFor("siliconflow"),
     };
   }
 
@@ -971,6 +957,12 @@ export function getAutoCompactThresholdPct(): number {
   const val = loadUserSettings().autoCompactThresholdPct;
   if (typeof val === "number" && val >= 0.05 && val <= 0.5) return val;
   return 0.4; // default 40% — Reduced from 25% after session bf58d0f46b51 analysis: 13 compacts in 43min generated 1.3M uncached tokens. Higher threshold = fewer compacts = less compaction overhead. For DeepSeek 128K context: fires at 51K instead of 32K.
+}
+
+export function getAutoCompactMinNewTokens(): number {
+  const val = loadUserSettings().autoCompactMinNewTokens;
+  if (typeof val === "number" && val >= 0 && val <= 200_000) return val;
+  return 20_000; // Observed thrash: re-compact after ~14K new tokens (session ff932f8568e8).
 }
 
 /**

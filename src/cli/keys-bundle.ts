@@ -7,7 +7,7 @@
  * Format (JSON):
  *   { v:1, kdf:"scrypt", salt:hex, iv:hex, tag:hex, ct:base64 }
  *
- * Plaintext payload (JSON): { providers: { deepseek: "sk-...", siliconflow: "sf-..." } }
+ * Plaintext payload (JSON): { providers: { deepseek: "sk-...", xai: "xai-..." } }
  *
  * Crypto:
  *   - scrypt(passphrase, salt, 32) → 256-bit key

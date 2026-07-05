@@ -18,6 +18,8 @@ export interface CouncilContextBundle {
   depth: string;
   contextMd: string;
   researchMd: string;
+  /** Complexity assessor's rationale (ASSESSMENT.md) — the prior step's output. */
+  assessment: string;
   priorConcerns: string[];
   acceptanceCriteria: string[];
   /** Total chars across all sections (telemetry). */
@@ -107,6 +109,10 @@ export function renderCouncilContextBlock(
     lines.push("", "### Research findings (RESEARCH.md)", "", digest);
   }
 
+  if (bundle.assessment) {
+    lines.push("", "### Complexity assessment", "", cap(bundle.assessment, 600));
+  }
+
   if (bundle.acceptanceCriteria.length) {
     lines.push("", "### Acceptance criteria (verify contract)", "");
     for (const c of bundle.acceptanceCriteria.slice(0, 12)) lines.push(`- ${c}`);
@@ -136,12 +142,14 @@ export function buildCouncilContextBundle(cwd: string, opts: BuildBundleOpts): C
   const researchMd = readArtifact(cwd, "RESEARCH.md");
   const planBody = readArtifact(cwd, "PLAN.md");
   const reviewMd = readArtifact(cwd, "PLAN-REVIEW.md");
+  const assessment = readArtifact(cwd, "ASSESSMENT.md");
 
   const acceptanceCriteria = extractAcceptanceCriteria(planBody);
   const priorConcerns = extractPriorConcerns(reviewMd);
   const hadPriorConcerns = (opts.revisionCycle ?? 0) > 0 && priorConcerns.length > 0;
 
-  const totalChars = state.raw.length + contextMd.length + researchMd.length + reviewMd.length + planBody.length;
+  const totalChars =
+    state.raw.length + contextMd.length + researchMd.length + reviewMd.length + planBody.length + assessment.length;
 
   return {
     state,
@@ -149,6 +157,7 @@ export function buildCouncilContextBundle(cwd: string, opts: BuildBundleOpts): C
     depth: opts.depth,
     contextMd,
     researchMd,
+    assessment,
     priorConcerns,
     acceptanceCriteria,
     totalChars,

@@ -15,7 +15,6 @@ import { ALL_PROVIDER_IDS } from "./types.js";
 
 function normalizeKeychainProvider(p: string): ProviderId | null {
   const lower = p.toLowerCase();
-  if (lower === "agy") return "google"; // agy alias for google provider
   if ((ALL_PROVIDER_IDS as readonly string[]).includes(lower)) return lower as ProviderId;
   return null;
 }
@@ -23,9 +22,7 @@ function normalizeKeychainProvider(p: string): ProviderId | null {
 const SETTINGS_KEY_MAP: Partial<Record<ProviderId, string>> = {
   anthropic: "anthropic",
   openai: "openai",
-  google: "google",
   deepseek: "deepseek",
-  siliconflow: "siliconflow",
   xai: "xai",
   zai: "zai",
   "opencode-go": "opencode-go",
@@ -36,9 +33,7 @@ const KEYCHAIN_SERVICE = "muonroi-cli";
 const ACCOUNT_BY_PROVIDER: Record<ProviderId, string> = {
   anthropic: "anthropic",
   openai: "openai",
-  google: "google",
   deepseek: "deepseek",
-  siliconflow: "siliconflow",
   xai: "xai",
   ollama: "ollama",
   zai: "zai",
@@ -48,9 +43,7 @@ const ACCOUNT_BY_PROVIDER: Record<ProviderId, string> = {
 const ENV_BY_PROVIDER: Record<ProviderId, string> = {
   anthropic: "ANTHROPIC_API_KEY",
   openai: "OPENAI_API_KEY",
-  google: "GOOGLE_API_KEY",
   deepseek: "DEEPSEEK_API_KEY",
-  siliconflow: "SILICONFLOW_API_KEY",
   xai: "XAI_API_KEY",
   ollama: "OLLAMA_API_KEY",
   zai: "ZAI_API_KEY",
@@ -280,7 +273,7 @@ export async function getOAuthTokens(provider: ProviderId): Promise<import("./au
 
 /**
  * Find the first provider with an available API key.
- * Checks in priority order: anthropic, openai, google, deepseek, siliconflow, ollama.
+ * Checks in priority order: anthropic, openai, deepseek, ollama.
  * Returns null if no provider has a key (unlikely — ollama is keyless fallback).
  */
 export async function firstAvailableProvider(): Promise<ProviderId | null> {

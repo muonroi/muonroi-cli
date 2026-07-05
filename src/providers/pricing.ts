@@ -2,7 +2,7 @@
  * src/providers/pricing.ts
  *
  * Pricing lookup: catalog-first, then static fallback for providers not in catalog
- * (anthropic, openai, google — they're not in catalog.json).
+ * (anthropic, openai — they're not in catalog.json).
  * Phase 1 ships static; Phase 4 (WEB-02) adds remote fetch.
  * PROV-06 requirement.
  *
@@ -31,7 +31,7 @@ export interface PricePerMillion {
   cache_write_per_million_usd?: number;
 }
 
-// Static fallback for providers not in catalog (anthropic, openai, google).
+// Static fallback for providers not in catalog (anthropic, openai).
 // verified 2026-04-29 from official provider pricing pages; cache prices
 // re-verified 2026-05-08 against deepseek-platform / openai / anthropic docs
 export const STATIC_PRICING_FALLBACK: Record<string, Record<string, PricePerMillion>> = {
@@ -72,10 +72,6 @@ export const STATIC_PRICING_FALLBACK: Record<string, Record<string, PricePerMill
       cached_input_per_million_usd: 7.5,
     },
   },
-  google: {
-    "gemini-2.5-flash": { input_per_million_usd: 0.3, output_per_million_usd: 2.5 }, // ai.google.dev/pricing
-    "gemini-pro-latest": { input_per_million_usd: 1.25, output_per_million_usd: 10.0 }, // ai.google.dev/pricing
-  },
   deepseek: {
     // DeepSeek V4 chat: $0.27/M input miss, $0.027/M input hit, $1.10/M output
     // (api-docs.deepseek.com/quick_start/pricing). Flash/Pro split below mirrors
@@ -91,11 +87,6 @@ export const STATIC_PRICING_FALLBACK: Record<string, Record<string, PricePerMill
       output_per_million_usd: 2.19,
     },
   },
-  siliconflow: {
-    "Qwen/Qwen2.5-Coder-32B-Instruct": { input_per_million_usd: 0.18, output_per_million_usd: 0.18 },
-    "deepseek-ai/DeepSeek-V4-Flash": { input_per_million_usd: 0.1, output_per_million_usd: 0.4 },
-    "deepseek-ai/DeepSeek-V4-Pro": { input_per_million_usd: 2.0, output_per_million_usd: 8.0 },
-  },
   ollama: {
     // local-only — zero variable cost
     "*": { input_per_million_usd: 0, output_per_million_usd: 0 },
@@ -105,7 +96,7 @@ export const STATIC_PRICING_FALLBACK: Record<string, Record<string, PricePerMill
 /**
  * Look up pricing for a (provider, model) pair.
  * Checks catalog first (preferred — single source of truth).
- * Falls back to static table for models not in catalog (anthropic, openai, google, legacy providers).
+ * Falls back to static table for models not in catalog (anthropic, openai, legacy providers).
  * Returns undefined if provider or model is not found in either source.
  * Ollama uses a '*' wildcard in the static table that matches any model.
  */

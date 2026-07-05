@@ -398,7 +398,7 @@ function extractIdTokenClaim<T>(idToken: string | undefined, key: string): T | u
 
 function buildOpenAIAuthorizeUrl(opts: OpenAIAuthorizeUrlOpts): string {
   // Build the query string by hand — generic helpers like buildAuthorizeUrl()
-  // inject Google-specific params (access_type=offline, prompt=consent) that
+  // inject extra params (access_type=offline, prompt=consent) that
   // OpenAI's auth backend rejects with "Authentication Error".
   const params = new URLSearchParams({
     response_type: "code",

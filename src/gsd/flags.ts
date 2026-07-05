@@ -8,3 +8,31 @@ export function isGsdNativeEnabled(): boolean {
   if (raw === "0" || raw?.toLowerCase() === "false") return false;
   return true;
 }
+
+/**
+ * Leader-tier complexity assessor over the native depth slot — default ON
+ * when native GSD is on. Opt out: MUONROI_GSD_ASSESSOR=0.
+ */
+export function isComplexityAssessorEnabled(): boolean {
+  if (!isGsdNativeEnabled()) return false;
+  return process.env.MUONROI_GSD_ASSESSOR !== "0";
+}
+
+/**
+ * Native mutation gate — default ON when native GSD is on. Delegates to the SDK's
+ * own `canExecute(cwd, depth)` at the write-mutex wrapper so mutation tools are
+ * blocked until plan-review passes at standard/heavy depth. Opt out: MUONROI_GSD_HARD_GATE=0.
+ */
+export function isGsdHardGateEnabled(): boolean {
+  if (!isGsdNativeEnabled()) return false;
+  return process.env.MUONROI_GSD_HARD_GATE !== "0";
+}
+
+/**
+ * PIL prompt-gate full-context enrichment (conversation digest, EE recall,
+ * prior PLAN.md excerpt) — default ON when native GSD is on. Opt out:
+ * MUONROI_PIL_GATE_ENRICH=0.
+ */
+export function isPilGateEnrichEnabled(): boolean {
+  return isGsdNativeEnabled() && process.env.MUONROI_PIL_GATE_ENRICH !== "0";
+}

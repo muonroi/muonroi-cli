@@ -44,6 +44,37 @@ type SpawnOptions = {
 };
 
 // ---------------------------------------------------------------------------
+// Internal: teardown-safe stream error guards
+// ---------------------------------------------------------------------------
+
+/**
+ * Attach `'error'` listeners to both transport streams so a broken-pipe write
+ * (EPIPE / UV_EPIPE -4047 on Windows) or a peer reset (ECONNRESET) during
+ * process teardown is logged and swallowed instead of surfacing as an
+ * *uncaught* stream error that crashes the whole vitest worker.
+ *
+ * Root cause of the flake: when the child is killed in `afterAll`, an in-flight
+ * `inWrite.write()` (driver sendKey/sendType) or a half-open `outRead` races the
+ * child's death. A WritableStream with no `'error'` listener rethrows EPIPE as
+ * an unhandled exception — under full-suite load this reliably reproduces on
+ * `events.spec.ts` and fails the file even though every assertion passed.
+ *
+ * Logging (not silent swallow) satisfies the No-Silent-Catch rule — teardown
+ * broken-pipe is expected, but a mid-test error still gets a diagnostic line.
+ */
+function attachStreamErrorGuards(inWrite: NodeJS.WritableStream, outRead: NodeJS.ReadableStream): void {
+  const guard = (label: string) => (err: NodeJS.ErrnoException) => {
+    // EPIPE / ECONNRESET / ERR_STREAM_DESTROYED are all normal teardown races.
+    const code = err?.code ?? "unknown";
+    if (code !== "EPIPE" && code !== "ECONNRESET" && code !== "ERR_STREAM_DESTROYED") {
+      console.error(`[test-spawn] ${label} stream error (${code}): ${err?.message}`);
+    }
+  };
+  inWrite.on("error", guard("inWrite"));
+  outRead.on("error", guard("outRead"));
+}
+
+// ---------------------------------------------------------------------------
 // Internal: Windows named-pipe transport
 // ---------------------------------------------------------------------------
 
@@ -179,6 +210,8 @@ async function spawnWindows(args: string[], opts: SpawnOptions): Promise<SpawnRe
   };
   proc.once("exit", cleanup);
 
+  attachStreamErrorGuards(inSocket, outSocket);
+
   return {
     proc,
     inWrite: inSocket, // host writes commands → child reads on MUONROI_HARNESS_IN_PIPE
@@ -200,6 +233,8 @@ function spawnPosix(args: string[], opts: SpawnOptions): SpawnResult {
 
   const outRead = proc.stdio[3] as NodeJS.ReadableStream;
   const inWrite = proc.stdio[4] as NodeJS.WritableStream;
+
+  attachStreamErrorGuards(inWrite, outRead);
 
   return { proc, inWrite, outRead, cleanup: () => {} };
 }

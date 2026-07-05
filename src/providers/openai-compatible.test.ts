@@ -1,6 +1,6 @@
 /**
  * Tests for src/providers/openai-compatible.ts
- * Verifies DeepSeek + SiliconFlow share the OpenAI-compatible adapter.
+ * Verifies DeepSeek uses the OpenAI-compatible adapter.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createMockFullStream, loadFixtureChunks } from "./__test-utils__/load-fixture.js";
@@ -32,15 +32,6 @@ describe("createOpenAICompatibleAdapter", () => {
       baseURL: "https://api.deepseek.com/v1",
     });
     expect(adapter.id).toBe("deepseek");
-  });
-
-  it('sets id to "siliconflow" when configured as siliconflow', () => {
-    const adapter = createOpenAICompatibleAdapter({
-      id: "siliconflow",
-      model: "Qwen/Qwen2.5-Coder-32B-Instruct",
-      apiKey: "test-key-xxxxxxxxxxxxxxxxxxxx",
-    });
-    expect(adapter.id).toBe("siliconflow");
   });
 
   it("streams text-delta events from deepseek fixture", async () => {

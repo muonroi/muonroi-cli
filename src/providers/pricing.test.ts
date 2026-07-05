@@ -53,12 +53,6 @@ describe("lookupPricing", () => {
     expect(p!.output_per_million_usd).toBe(10.0);
   });
 
-  it("static fallback: google gemini-2.5-flash returns pricing", () => {
-    const p = lookupPricing("google", "gemini-2.5-flash");
-    expect(p).toBeDefined();
-    expect(p!.input_per_million_usd).toBe(0.3);
-  });
-
   it("static fallback: deepseek deepseek-v4-flash with cached_input rate", () => {
     const p = lookupPricing("deepseek", "deepseek-v4-flash");
     expect(p).toBeDefined();
@@ -89,9 +83,9 @@ describe("lookupPricing", () => {
     expect(p!.output_per_million_usd).toBe(0);
   });
 
-  it("STATIC_PRICING_FALLBACK map has entries for all 6 providers", () => {
+  it("STATIC_PRICING_FALLBACK map has entries for all providers", () => {
     expect(Object.keys(STATIC_PRICING_FALLBACK)).toEqual(
-      expect.arrayContaining(["anthropic", "openai", "google", "deepseek", "siliconflow", "ollama"]),
+      expect.arrayContaining(["anthropic", "openai", "deepseek", "ollama"]),
     );
   });
 });

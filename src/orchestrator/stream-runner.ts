@@ -25,7 +25,7 @@
 //   - C1 (DeepSeek cache split read)        — onFinish normalization
 //   - C3 (cross-turn dedup wrap)            — wrapToolSetWithDedup
 //   - F1 (sub-agent cumulative cap)         — wrapToolSetWithCap
-//   - siliconflow reasoning-strip           — taskCaps.sanitizeHistory
+//   - reasoning-strip (provider quirk)       — taskCaps.sanitizeHistory
 
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
 import { recordArtifact } from "../ee/artifact-cache.js";
@@ -559,8 +559,8 @@ export class StreamRunner {
         providerOptions: childProviderOptions,
       });
     }
-    // SiliconFlow DeepSeek thinking-mode rejects assistant history with
-    // `reasoning` parts (HTTP 400 code 20015). The siliconflow capability
+    // Some DeepSeek thinking-mode endpoints reject assistant history with
+    // `reasoning` parts (HTTP 400 code 20015). A provider capability
     // override strips them; every other provider's capability is identity.
     const subMessagesForCall = taskCaps.sanitizeHistory(childMessages) as typeof childMessages;
     // Phase 4 Plan 04 (4B) — mirror top-level scope-ceiling integration.
@@ -608,11 +608,11 @@ export class StreamRunner {
       experimental_repairToolCall: repairToolCallHook,
       prepareStep: ({ messages, stepNumber }) => {
         if (stepNumber < 1) return undefined;
-        // SiliconFlow internal multi-step loop: AI-SDK accumulates streamed
-        // reasoning parts into in-flight assistant history and re-POSTs them
-        // on the next step within the same streamText call — orchestrator-
-        // level strip at call setup never sees this. Strip per step too via
-        // the capability hook (identity for non-siliconflow providers).
+        // Internal multi-step loop: AI-SDK accumulates streamed reasoning
+        // parts into in-flight assistant history and re-POSTs them on the
+        // next step within the same streamText call — orchestrator-level
+        // strip at call setup never sees this. Strip per step too via the
+        // capability hook (identity for providers without the quirk).
         const stripped = taskCaps.sanitizeHistory(messages) as typeof messages;
         // G1 + G2 — pass the sub-agent's model context window so the
         // compactor can use a token-aware threshold and shrink the keep

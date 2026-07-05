@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
 import type { TaskRequest, ToolResult } from "../types/index.js";
@@ -5,6 +6,9 @@ import { ensurePlanningWorkspace } from "./config-bridge.js";
 import { isGsdNativeEnabled } from "./flags.js";
 import { getGsdLoopHost, loopHostContext, taskToRunPerspectiveFn } from "./loop-host.js";
 import { planningArtifact } from "./paths.js";
+import type { PlanPerspective } from "./plan-council-prompts.js";
+import { runVerifyCouncil } from "./verify-council.js";
+import type { VerifyPerspective } from "./verify-council-prompts.js";
 import {
   advancePhase,
   buildGsdStatusPayload,
@@ -35,6 +39,31 @@ export interface GsdWorkflowToolOpts {
 
 function json(data: unknown): string {
   return JSON.stringify(data, null, 2);
+}
+
+/**
+ * Adapts `taskToRunPerspectiveFn` (typed for plan-council `PlanPerspective`) to the verify
+ * council's `VerifyPerspective` shape. Safe: `resolveGsdPerspectiveAgent` only special-cases
+ * `id === "research"` (a plan-only id that never appears in `VerifyPerspectiveId`), so every
+ * verify perspective routes to the same "verify" subagent regardless of id — only the id
+ * value is threaded through for the task description string.
+ */
+function verifyRunPerspectiveFn(
+  runTask: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>,
+  sessionModelId: string,
+): (prompt: string, p: VerifyPerspective) => Promise<string> {
+  const planFn = taskToRunPerspectiveFn(runTask, sessionModelId);
+  return (prompt, p) => planFn(prompt, p as unknown as PlanPerspective);
+}
+
+/** Best-effort implementation diff for the verify council. Empty on any failure — never throws. */
+function readImplementationDiff(cwd: string): string {
+  try {
+    return execFileSync("git", ["diff", "HEAD"], { cwd, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  } catch (err) {
+    console.error(`[gsd] verify-council diff capture failed: ${(err as Error).message}`);
+    return "";
+  }
 }
 
 export function shouldRegisterGsdTools(depth?: string): boolean {
@@ -185,22 +214,66 @@ export function registerGsdWorkflowTools(tools: ToolSet, opts: GsdWorkflowToolOp
           error: "gsd_verify requires non-empty evidence when passed=true",
         });
       }
-      if (input.evidence?.trim()) {
-        const verdictLine = passed ? "verdict: pass" : "verdict: fail";
-        writeFileSync(planningArtifact(cwd, "VERIFY.md"), `${verdictLine}\n\n${input.evidence.trim()}\n`, "utf8");
+
+      // Layer 2: council adjudication ONLY when the deterministic floor passed at non-quick
+      // depth. The council verdict OVERRIDES the model's self-reported `passed` — "tests green
+      // but doesn't meet the goal" is caught here. A `passed=false` floor never reaches the
+      // council (cheap: no LLM spend on an already-known failure).
+      let effectivePassed = passed;
+      let councilConcerns: string[] = [];
+      if (passed && depth !== "quick") {
+        try {
+          const diff = readImplementationDiff(cwd);
+          const council = await runVerifyCouncil({
+            cwd,
+            sessionModelId,
+            depth,
+            evidence: input.evidence?.trim(),
+            diff,
+            runPerspectiveFn: runTask ? verifyRunPerspectiveFn(runTask, sessionModelId) : undefined,
+            runDebate: opts.runDebate,
+          });
+          if (!council.skipped && council.verdict !== "pass") {
+            effectivePassed = false;
+            councilConcerns = council.concerns;
+          }
+        } catch (err) {
+          // Fail OPEN — a council wiring failure must not block a genuinely-passing verify;
+          // honor the deterministic floor's verdict. Log per No-Silent-Catch.
+          console.error(`[gsd] verify-council wiring failed, honoring deterministic floor: ${(err as Error).message}`);
+        }
       }
+
+      const verdictLine = effectivePassed ? "verdict: pass" : "verdict: fail";
+      const concernBlock = councilConcerns.length
+        ? `\n\n## Council concerns\n${councilConcerns.map((c) => `- ${c}`).join("\n")}`
+        : "";
+      if (input.evidence?.trim() || councilConcerns.length) {
+        writeFileSync(
+          planningArtifact(cwd, "VERIFY.md"),
+          `${verdictLine}\n\n${input.evidence?.trim() ?? ""}${concernBlock}\n`,
+          "utf8",
+        );
+      }
+
       const host = getGsdLoopHost();
       const ctx = loopHostContext(cwd, sessionModelId, depth, {
         sessionId,
-        verifyPassed: passed,
+        verifyPassed: effectivePassed,
         verifyEvidence: {
           evidence: input.evidence?.trim(),
           evidenceChars: input.evidence?.length ?? 0,
-          passed,
+          passed: effectivePassed,
         },
       });
       const verifyResult = await host.onVerifyComplete(ctx);
-      return json({ ok: true, phase: passed ? "review" : "debug", passed, loop: verifyResult });
+      return json({
+        ok: true,
+        phase: effectivePassed ? "review" : "debug",
+        passed: effectivePassed,
+        councilConcerns,
+        loop: verifyResult,
+      });
     },
   });
 
