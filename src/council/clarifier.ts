@@ -184,6 +184,62 @@ export function buildClarifyOptions(suggestions: string[] | undefined, recommend
   return { options, defaultIndex };
 }
 
+/**
+ * Model-designed option object: a choice the user picks between, carrying its
+ * own explanation. `recommended:true` marks the pre-selected default. This is
+ * the richer shape the clarifier prompt now asks for so every choice shows a
+ * per-option "why" (not just the question-level `why`).
+ */
+export interface ClarifyOptionSpec {
+  label: string;
+  description?: string;
+  recommended?: boolean;
+}
+
+/**
+ * Build council options from the model's richer `{label, description,
+ * recommended}` objects, preserving each choice's explanation as `description`
+ * and pointing `defaultIndex` at the option the model flagged `recommended`
+ * (falling back to the first when none is flagged). The same "Type something" /
+ * "Chat about this" escape-hatches are appended as in `buildClarifyOptions`.
+ * Pure + exported for unit testing.
+ */
+export function buildClarifyOptionsRich(specs: ClarifyOptionSpec[] | undefined): ClarifyOptionsResult {
+  const cleaned = (specs ?? []).filter(
+    (s): s is ClarifyOptionSpec => !!s && typeof s.label === "string" && s.label.trim().length > 0,
+  );
+  const choices: CouncilQuestionOption[] = cleaned.map((s) => ({
+    label: s.label.trim(),
+    value: s.label.trim(),
+    kind: "choice" as const,
+    ...(typeof s.description === "string" && s.description.trim().length > 0
+      ? { description: s.description.trim() }
+      : {}),
+  }));
+
+  const options: CouncilQuestionOption[] = [
+    ...choices,
+    {
+      label: "Type something",
+      description: "Nhập câu trả lời tự do",
+      value: "",
+      kind: "freetext" as const,
+    },
+    {
+      label: "Chat about this",
+      description: "Thảo luận thêm trước khi trả lời",
+      value: "",
+      kind: "chat" as const,
+    },
+  ];
+
+  let defaultIndex: number | undefined;
+  const recIdx = cleaned.findIndex((s) => s.recommended === true);
+  if (recIdx !== -1) defaultIndex = recIdx;
+
+  return { options, defaultIndex };
+}
+
 export async function* runClarification(
   topic: string,
   leaderModelId: string,
@@ -247,6 +303,7 @@ export async function* runClarification(
       why: string;
       suggestions?: string[];
       recommended?: string;
+      options?: ClarifyOptionSpec[];
       isRequired: boolean;
     }>;
 
@@ -361,7 +418,18 @@ export async function* runClarification(
       }
 
       const questionId = crypto.randomUUID();
-      const { options, defaultIndex } = buildClarifyOptions(q.suggestions, q.recommended);
+      // Prefer the model's richer {label, description, recommended} options so
+      // every choice shows its own explanation + the recommended default is
+      // pre-selected. Fall back to the legacy string `suggestions` shape (PIL
+      // gray-area seeds and any model still emitting the old format).
+      const { options, defaultIndex } =
+        q.options && q.options.length > 0
+          ? buildClarifyOptionsRich(q.options)
+          : buildClarifyOptions(q.suggestions, q.recommended);
+      // Keep the deprecated `suggestions` mirror populated for consumers that
+      // still read it (audit/replay), deriving labels from rich options.
+      const suggestionLabels =
+        q.suggestions ?? (q.options ? q.options.map((o) => o.label).filter((l) => typeof l === "string") : undefined);
 
       yield {
         type: "council_question" as StreamChunk["type"],
@@ -371,7 +439,7 @@ export async function* runClarification(
           phase: "clarify",
           question: q.question,
           context: q.why,
-          suggestions: q.suggestions,
+          suggestions: suggestionLabels,
           options,
           isRequired: q.isRequired,
           defaultIndex,

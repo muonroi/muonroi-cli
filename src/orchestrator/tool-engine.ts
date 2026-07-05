@@ -148,6 +148,7 @@ import {
   getTopLevelCompactKeepLast,
   getTopLevelCompactThresholdChars,
   getTopLevelToolBudgetChars,
+  isAutoCouncilClarifyEnabled,
   isAutoCouncilEnabled,
   isProviderDisabled,
   loadMcpServers,
@@ -697,7 +698,19 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       ? `complexity=heavy${pilCtx.taskType ? ` task=${pilCtx.taskType}` : ""}`
       : `${pilCtx.taskType} task detected with ${(pilCtx.confidence * 100).toFixed(0)}% confidence`;
     yield { type: "content", content: `\n[Auto-council triggered: ${reason}]\n` };
-    yield* deps.runCouncilV2(userMessage, { skipClarification: true, observer, userModelMessage });
+    // Pre-debate interview: unless disabled, run the model-designed clarification
+    // askcards BEFORE the debate so a broadly-scoped "debate mode" request is
+    // chốt-ed first (each card's options carry a recommended default + per-option
+    // why — see runClarification/buildClarifyOptions). The clarifier is ROI-gated
+    // and yields 0 cards on already-detailed topics, so this stays quiet when the
+    // prompt is already specific. Skip only when the user turned it off. The
+    // clarifier reuses PIL gray-areas as seed questions (no hardcoded questions),
+    // and its models come from pickCouncilTaskModel (no hardcoded model/provider).
+    yield* deps.runCouncilV2(userMessage, {
+      skipClarification: !isAutoCouncilClarifyEnabled(),
+      observer,
+      userModelMessage,
+    });
     const synthesis = deps.councilManager.lastSynthesis;
     deps.councilManager.setLastSynthesis(null);
     if (synthesis) {

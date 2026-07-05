@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildClarifyOptions } from "../clarifier.js";
+import { buildClarifyOptions, buildClarifyOptionsRich } from "../clarifier.js";
 
 describe("buildClarifyOptions", () => {
   it("converts non-empty suggestions into choice options", () => {
@@ -59,5 +59,51 @@ describe("buildClarifyOptions", () => {
   it("matches recommended case-insensitively", () => {
     const { defaultIndex } = buildClarifyOptions(["Postgres", "MySQL"], "postgres");
     expect(defaultIndex).toBe(0);
+  });
+});
+
+describe("buildClarifyOptionsRich", () => {
+  it("carries each choice's per-option description onto the card", () => {
+    const { options } = buildClarifyOptionsRich([
+      { label: "Refactor in place", description: "Lower risk, keeps history" },
+      { label: "Rewrite module", description: "Higher risk, cleaner result" },
+    ]);
+    const choices = options.filter((o) => o.kind === "choice");
+    expect(choices.map((o) => o.label)).toEqual(["Refactor in place", "Rewrite module"]);
+    expect(choices.map((o) => o.description)).toEqual(["Lower risk, keeps history", "Higher risk, cleaner result"]);
+  });
+
+  it("appends the same Type something + Chat about this escape hatches", () => {
+    const { options } = buildClarifyOptionsRich([{ label: "Only" }]);
+    expect(options.map((o) => o.kind)).toEqual(["choice", "freetext", "chat"]);
+  });
+
+  it("points defaultIndex at the option flagged recommended", () => {
+    const { defaultIndex } = buildClarifyOptionsRich([
+      { label: "A" },
+      { label: "B", recommended: true },
+      { label: "C" },
+    ]);
+    expect(defaultIndex).toBe(1);
+  });
+
+  it("omits defaultIndex when no option is flagged recommended", () => {
+    const { defaultIndex } = buildClarifyOptionsRich([{ label: "A" }, { label: "B" }]);
+    expect(defaultIndex).toBeUndefined();
+  });
+
+  it("drops blank/invalid labels and omits empty descriptions", () => {
+    const { options } = buildClarifyOptionsRich([
+      { label: "  ", description: "ignored" },
+      { label: "keep", description: "  " },
+    ]);
+    const choices = options.filter((o) => o.kind === "choice");
+    expect(choices.map((o) => o.label)).toEqual(["keep"]);
+    expect(choices[0]?.description).toBeUndefined();
+  });
+
+  it("returns only escape hatches for undefined/empty specs", () => {
+    const { options } = buildClarifyOptionsRich(undefined);
+    expect(options.map((o) => o.kind)).toEqual(["freetext", "chat"]);
   });
 });

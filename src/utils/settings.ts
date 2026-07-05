@@ -238,6 +238,17 @@ export interface UserSettings {
    * preserving legacy behavior).
    */
   autoCouncilMinRoles?: number;
+  /**
+   * Whether an auto-triggered council/debate runs the pre-debate clarification
+   * interview (model-designed askcards) before debating, instead of jumping
+   * straight into the debate on the bare prompt. Default true — a broad request
+   * like "dùng debate mode thảo luận lên plan" is exactly the kind of ambiguous
+   * scope the interview is meant to chốt first (prevents the debate drifting /
+   * "lan man"). The clarifier is ROI-gated and returns 0 cards on already-detailed
+   * topics, so enabling it is safe. Set false (or env MUONROI_AUTOCOUNCIL_CLARIFY=0)
+   * to restore the old skip-clarification behaviour.
+   */
+  autoCouncilClarify?: boolean;
   councilPreferMultiProvider?: boolean;
   /** EE involvement level in council debates. Default: advisory. CQ-19. */
   councilExperienceMode?: CouncilExperienceMode;
@@ -1173,6 +1184,19 @@ export function normalizeAutoCouncilMinRoles(val: unknown): number {
 
 export function getAutoCouncilConfidence(): number {
   return normalizeAutoCouncilConfidence(loadUserSettings().autoCouncilConfidence);
+}
+
+/**
+ * Whether the auto-council path runs the pre-debate clarification interview
+ * (model-designed askcards) before debating. Default true so a broadly-scoped
+ * "debate mode" request is clarified first. Env override wins over the user
+ * setting for quick dev toggling; env "0"/"false" disables, "1"/"true" enables.
+ */
+export function isAutoCouncilClarifyEnabled(): boolean {
+  const env = process.env.MUONROI_AUTOCOUNCIL_CLARIFY?.trim().toLowerCase();
+  if (env === "0" || env === "false") return false;
+  if (env === "1" || env === "true") return true;
+  return loadUserSettings().autoCouncilClarify ?? true;
 }
 
 export function getAutoCouncilMinRoles(): number {

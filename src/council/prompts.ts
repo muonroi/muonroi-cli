@@ -49,16 +49,19 @@ export function buildClarificationPrompt(
       `- Only ask about project identity when the topic mentions multiple distinct projects or external products.\n` +
       `- Use the project's package.json name and description as implicit context for follow-up questions.\n\n` +
       `## Language Rule (mandatory)\n` +
-      `Write the "question", "why", and every "suggestions"/"recommended" option in the SAME ` +
+      `Write the "question", "why", and every option "label"/"description" in the SAME ` +
       `language the user used in the Topic below — detect it; if the user wrote Vietnamese, write ` +
       `Vietnamese; if English, English. The user reads and answers these on a card, so they must ` +
       `NOT default to English. Keep code identifiers, file paths, tech/product names, and JSON keys in English.\n\n` +
       `Output ONLY a JSON array (no markdown, no preamble):\n` +
-      `[{"question": "...", "why": "why this matters for a focused discussion", "suggestions": ["option A", "option B"], "recommended": "option A", "isRequired": true}]\n\n` +
-      `Rules for "recommended" (be decisive — the user should never face an unranked list):\n` +
-      `- ALWAYS include "recommended" — the single option you would choose if the user said "you decide", given the topic + project context.\n` +
-      `- Its value MUST be exactly equal to one of the entries in "suggestions".\n` +
-      `- Omit it ONLY in a genuine 50/50 tie where recommending either option would be misleading. A missing recommendation must be the rare exception, not the default.\n` +
+      `[{"question": "...", "why": "why this matters for a focused discussion", "options": [` +
+      `{"label": "option A", "description": "what picking this means and its trade-off — one line", "recommended": true}, ` +
+      `{"label": "option B", "description": "what picking this means and its trade-off — one line"}], "isRequired": true}]\n\n` +
+      `Rules for "options" (each option is a real, distinct fork the user picks between):\n` +
+      `- Every option MUST carry a "label" (the short button text) AND a "description" (one line explaining what choosing it means / its trade-off) so the user can decide without guessing. Never emit a bare label with no description.\n` +
+      `- Mark EXACTLY ONE option with "recommended": true — the option you would choose if the user said "you decide", given the topic + project context. Be decisive; the user should never face an unranked list.\n` +
+      `- Omit "recommended" on every option ONLY in a genuine 50/50 tie where recommending either would be misleading. A missing recommendation must be the rare exception, not the default.\n` +
+      `- Provide 2-4 options per question. Do NOT add "type your own" / "let's discuss" options yourself — those escape hatches are appended automatically.\n` +
       `Return [] if no clarification is needed.`,
     prompt:
       `## Topic\n${topic}\n\n` +
