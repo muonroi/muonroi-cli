@@ -3,18 +3,26 @@
 # Skip everything with: git push --no-verify
 
 # ---------------------------------------------------------------------------
+# Compute the pushed change set ONCE and share it across gates.
+# NOTE: husky runs this hook with `sh -e`. `git rev-parse @{upstream}` exits 128
+# when the branch has no upstream (e.g. the first `git push -u`), which would
+# abort the whole hook under set -e — so swallow the failure with `|| true`.
+# ---------------------------------------------------------------------------
+RANGE=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+if [ -n "$RANGE" ]; then
+  CHANGED=$(git diff --name-only "$RANGE"...HEAD)
+else
+  CHANGED=""
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 1 — Semantic-instrumentation lint (fast, ~1-2s; runs first, fail-fast).
 # Blocks a push that leaves a UI surface uninstrumented: a component whose root
 # JSX isn't wrapped in <Semantic>/a primitive, or an interactive element that
 # references no semantic wrapper at all. Only fires when the push touches a UI /
 # harness surface. Suppress a known exception via scripts/.semantic-wrap-allow.txt.
 # ---------------------------------------------------------------------------
-# NOTE: husky runs this hook with `sh -e`. `git rev-parse @{upstream}` exits 128
-# when the branch has no upstream (e.g. the first `git push -u`), which would
-# abort the whole hook under set -e — so swallow the failure with `|| true`.
-RANGE=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
 if [ -n "$RANGE" ]; then
-  CHANGED=$(git diff --name-only "$RANGE"...HEAD)
   SEMANTIC_MATCH=$(printf '%s\n' "$CHANGED" | grep -E '^src/ui/|^packages/agent-harness-(react|angular|opentui)/' || true)
 else
   # No upstream (new branch) — run the check unconditionally; it's cheap.
@@ -33,3 +41,35 @@ fi
 # src/self-qa/, or src/agent-harness/ — surfaces unit tests can't fully cover.
 # ---------------------------------------------------------------------------
 node scripts/self-verify-pre-push.cjs
+
+# ---------------------------------------------------------------------------
+# Gate 3 — Binary compile smoke (~2s). `bun build --compile` resolves imports
+# statically from the entry through every reachable module, catching stale /
+# dangling imports that BOTH local gates miss:
+#   - `tsc --noEmit` skips files marked `// @ts-nocheck` (e.g. src/ui/app.tsx),
+#   - `vitest` never imports the TUI entry, so its import graph is never walked.
+# This is the exact class of failure that reddened the whole ci-matrix
+# build-smoke matrix (all 3 OS targets) while the local unit suite stayed green
+# — a moved module left `app.tsx` importing a path that no longer existed.
+# Resolution errors are target-independent, so a host-target compile suffices.
+# ---------------------------------------------------------------------------
+if [ -n "$RANGE" ]; then
+  BUILD_MATCH=$(printf '%s\n' "$CHANGED" | grep -E '^src/|^packages/' || true)
+else
+  BUILD_MATCH="run-anyway"
+fi
+if [ -n "$BUILD_MATCH" ]; then
+  echo "[pre-push] source changed → binary compile smoke (bun build --compile)"
+  OUT="${TMPDIR:-/tmp}/muonroi-prepush-build-$$"
+  LOG="${TMPDIR:-/tmp}/muonroi-prepush-build-$$.log"
+  if bun build --compile ./src/index.ts --outfile "$OUT" >"$LOG" 2>&1; then
+    rm -f "$OUT" "$OUT.exe" "$LOG"
+  else
+    echo "[pre-push] binary build FAILED — a static import does not resolve."
+    echo "[pre-push] This breaks ci-matrix build-smoke even when tsc + vitest are green:"
+    cat "$LOG"
+    rm -f "$OUT" "$OUT.exe" "$LOG"
+    echo "[pre-push] fix the import path, or skip with: git push --no-verify"
+    exit 1
+  fi
+fi
