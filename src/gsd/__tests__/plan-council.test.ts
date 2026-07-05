@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { loadCatalog } from "../../models/registry.js";
 import { ensurePlanningWorkspace } from "../config-bridge.js";
 import { planningArtifact } from "../paths.js";
@@ -20,9 +20,29 @@ const SESSION_MODEL = "deepseek-v4-flash";
 
 describe("plan-council", () => {
   let tmp: string;
+  let priorDeepseekKey: string | undefined;
 
   beforeAll(async () => {
     await loadCatalog();
+    // resolvePlanCouncilLeader gates leader promotion on the session provider
+    // being *reachable* (getConfiguredProviders → key/OAuth present). Without a
+    // deepseek credential it returns the session model unchanged (flash) instead
+    // of the catalog leader (deepseek-v4-pro). On a dev box with a stored key the
+    // promotion fires; on clean CI it does not — the exact "works on my machine"
+    // split that made this file's standard-depth assertion fail only on CI.
+    // Force a deterministic, hermetic reachability via env so the leader resolves
+    // to deepseek-v4-pro on every host. This never triggers a network call: the
+    // default perspective path is the offline heuristicReview.
+    priorDeepseekKey = process.env.DEEPSEEK_API_KEY;
+    // A non-secret, obviously-synthetic value that only needs to clear the
+    // length>=20 reachability threshold in getConfiguredProviders. Built from a
+    // repeated char (zero entropy) so the secret scanner does not flag it.
+    process.env.DEEPSEEK_API_KEY = `deepseek-test-reachability-${"x".repeat(20)}`;
+  });
+
+  afterAll(() => {
+    if (priorDeepseekKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = priorDeepseekKey;
   });
 
   afterEach(() => {
