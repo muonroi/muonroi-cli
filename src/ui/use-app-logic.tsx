@@ -1264,6 +1264,10 @@ export function useAppLogic(props: AppLogicProps) {
   const newSinceLockRef = useRef(0);
   const [newSinceLock, setNewSinceLock] = useState(0);
   const [scrollLockedAway, setScrollLockedAway] = useState(false);
+  // Context rail (MUONROI_CONTEXT_RAIL): user can hide/show the right metadata
+  // panel with Ctrl+B. Defaults visible; the rail also auto-hides below 100 cols
+  // (decided in app.tsx where terminal width is known).
+  const [railVisible, setRailVisible] = useState(true);
   // True when the user is pinned to (or near) the bottom. Mirrors OpenTUI's
   // private `_hasManualScroll`: once the user scrolls up, sticky-bottom stops
   // and this returns false, so our explicit scrolls back off. Falls back to a
@@ -4994,6 +4998,14 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
 
+      // Ctrl+B — toggle the right context rail (MUONROI_CONTEXT_RAIL). No-op
+      // visually when the rail flag is off or the terminal is too narrow; the
+      // toggle only flips intent, app.tsx gates actual rendering on width.
+      if (key.name === "b" && key.ctrl && !key.meta) {
+        setRailVisible((v) => !v);
+        return;
+      }
+
       // Scroll-lock navigation (MUONROI_SCROLL_LOCK). Composer-aware: only act
       // when the prompt input is empty, so End/PageUp/PageDown still edit text
       // while composing. End re-pins to the live tail; PageUp/PageDown page the
@@ -7062,6 +7074,7 @@ export function useAppLogic(props: AppLogicProps) {
     scrollToBottomForced,
     newSinceLock,
     scrollLockedAway,
+    railVisible,
     sessionId,
     sessionPickerIndex,
     sessionPickerList,

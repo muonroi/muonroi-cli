@@ -42,7 +42,43 @@ const NAMED: Record<string, { name: string; sequence: string; raw: string }> = {
   PageDown: { name: "pagedown", sequence: "\x1b[6~", raw: "\x1b[6~" },
 };
 
-function makeKey(partial: { name: string; sequence: string; raw: string }): KeyEvent {
+type KeyMods = { ctrl?: boolean; meta?: boolean; shift?: boolean };
+
+/**
+ * Strip modifier prefixes (`C-` ctrl, `M-` meta/alt, `S-` shift) off a harness
+ * key string so combos like `C-b` or `C-o` can be driven. Prefixes may stack in
+ * any order (`C-S-tab`). The remainder is the base key (named or single char).
+ */
+function parseModifiers(key: string): { mods: KeyMods; base: string } {
+  const mods: KeyMods = {};
+  let base = key;
+  // Only consume a prefix when a base remains after it, so a literal "C" or a
+  // hyphen key is not mis-parsed.
+  for (;;) {
+    if (base.length > 2 && base[1] === "-") {
+      const p = base[0];
+      if (p === "C" || p === "c") {
+        mods.ctrl = true;
+        base = base.slice(2);
+        continue;
+      }
+      if (p === "M" || p === "m") {
+        mods.meta = true;
+        base = base.slice(2);
+        continue;
+      }
+      if (p === "S") {
+        mods.shift = true;
+        base = base.slice(2);
+        continue;
+      }
+    }
+    break;
+  }
+  return { mods, base };
+}
+
+function makeKey(partial: { name: string; sequence: string; raw: string }, mods: KeyMods = {}): KeyEvent {
   // Some app key-handlers conditionally call key.preventDefault()/stopPropagation()
   // (typed `?.()` so they tolerate undefined). When the host's keypress arrives
   // through a terminal, OpenTUI attaches these methods; in agent-mode we
@@ -55,9 +91,9 @@ function makeKey(partial: { name: string; sequence: string; raw: string }): KeyE
   let _propagationStopped = false;
   const ev = {
     name: partial.name,
-    ctrl: false,
-    meta: false,
-    shift: false,
+    ctrl: mods.ctrl ?? false,
+    meta: mods.meta ?? false,
+    shift: mods.shift ?? false,
     option: false,
     sequence: partial.sequence,
     number: false,
@@ -80,18 +116,19 @@ function makeKey(partial: { name: string; sequence: string; raw: string }): KeyE
   return ev as unknown as KeyEvent;
 }
 
-function keyForChar(ch: string): KeyEvent {
-  return makeKey({ name: ch, sequence: ch, raw: ch });
+function keyForChar(ch: string, mods: KeyMods = {}): KeyEvent {
+  return makeKey({ name: ch, sequence: ch, raw: ch }, mods);
 }
 
 function keyForNamed(key: string): KeyEvent | null {
-  const m = NAMED[key];
+  const { mods, base } = parseModifiers(key);
+  const m = NAMED[base];
   if (!m) {
     // Unknown named key — fall back to treating it as a literal character if it's 1 char.
-    if (key.length === 1) return keyForChar(key);
+    if (base.length === 1) return keyForChar(base, mods);
     return null;
   }
-  return makeKey(m);
+  return makeKey(m, mods);
 }
 
 /**

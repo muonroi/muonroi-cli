@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clearLastSurfacedMatches, getDefaultEEClient, getLastSurfacedMatches } from "../ee/intercept.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import { writeScaffoldCheckpoint } from "../flow/scaffold-checkpoint.js";
+import { isContextRailEnabled } from "../gsd/flags.js";
 import { appendCrashLog, setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
@@ -91,6 +92,7 @@ import {
 import { ProductStatusCard } from "./cards/product-status-card.js";
 import { BtwOverlay, type BtwState } from "./components/btw-overlay.js";
 import { makePairKey, usePairSideMap } from "./components/bubble-layout.js";
+import { ContextRail, type ContextRailRow } from "./components/context-rail.js";
 import { CopyFlashBanner } from "./components/copy-flash-banner.js";
 import { CouncilDebatePill } from "./components/council-debate-pill.js";
 import { CouncilInfoCardView } from "./components/council-info-card.js";
@@ -671,6 +673,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     scrollRef,
     newSinceLock,
     scrollLockedAway,
+    railVisible,
     sessionId,
     sessionPickerIndex,
     sessionPickerList,
@@ -719,6 +722,17 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     width,
   } = useAppLogic({ agent, startupConfig, initialMessage, onExit, onRelaunch });
 
+  // Context rail (MUONROI_CONTEXT_RAIL): only render when enabled, the user
+  // hasn't hidden it (Ctrl+B), and the terminal is wide enough that a fixed
+  // side panel doesn't starve the transcript. Below 100 cols it stays inline.
+  const railActive = isContextRailEnabled() && railVisible && width >= 100;
+  const railWidth = Math.min(40, Math.max(28, Math.floor(width * 0.28)));
+  const railRows: ContextRailRow[] = [
+    { label: "Session", value: sessionId ? sessionId.slice(0, 12) : "—" },
+    { label: "Mode", value: modeInfo?.label ?? "—" },
+    { label: "Model", value: model ?? "—" },
+  ];
+
   return (
     <SemanticProvider
       registry={
@@ -746,139 +760,165 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               sessionId={sessionId}
               onCopySessionId={showCopyBanner}
             />
-            <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
-              {/* Scrollable messages */}
-              <Semantic
-                id="log"
-                role="log"
-                props={{ scrollTop: scrollRef.current?.scrollTop ?? 0, locked: scrollLockedAway, newSinceLock }}
-              >
-                {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
-                <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
-                  {(() => {
-                    const mcpRuns = computeMcpRunInfo(messages);
-                    // Phase 5 F7 ΓÇö index of the last assistant message so
-                    // MessageView can skip auto-collapse on it (final answer
-                    // should always be fully visible, not hidden behind
-                    // "ctrl+e expand").
-                    let _lastAssistantIdx = -1;
-                    for (let _i = messages.length - 1; _i >= 0; _i--) {
-                      if (messages[_i]?.type === "assistant") {
-                        _lastAssistantIdx = _i;
-                        break;
+            <box
+              flexGrow={1}
+              paddingBottom={1}
+              paddingTop={1}
+              paddingLeft={2}
+              paddingRight={2}
+              gap={1}
+              flexDirection="row"
+            >
+              {/* Main transcript column — splits with the context rail (P1). */}
+              <box flexDirection="column" flexGrow={1} gap={1}>
+                {/* Scrollable messages */}
+                <Semantic
+                  id="log"
+                  role="log"
+                  props={{ scrollTop: scrollRef.current?.scrollTop ?? 0, locked: scrollLockedAway, newSinceLock }}
+                >
+                  {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
+                  <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
+                    {(() => {
+                      const mcpRuns = computeMcpRunInfo(messages);
+                      // Phase 5 F7 ΓÇö index of the last assistant message so
+                      // MessageView can skip auto-collapse on it (final answer
+                      // should always be fully visible, not hidden behind
+                      // "ctrl+e expand").
+                      let _lastAssistantIdx = -1;
+                      for (let _i = messages.length - 1; _i >= 0; _i--) {
+                        if (messages[_i]?.type === "assistant") {
+                          _lastAssistantIdx = _i;
+                          break;
+                        }
                       }
-                    }
-                    return messages.map((msg, i) => (
-                      // biome-ignore lint/suspicious/noArrayIndexKey: append-only message log; index is part of the stable semantic id
-                      <Semantic
-                        key={`sem-${msg.timestamp?.getTime?.() ?? i}-${i}`}
-                        id={`msg-${i}`}
-                        role="listitem"
-                        name={`${msg.type ?? "msg"}:${String(msg.content ?? "").slice(0, 40)}`}
-                      >
-                        <MessageView
-                          key={`${msg.timestamp?.getTime?.() ?? i}-${msg.type}-${msg.remoteKey ?? ""}-${String(msg.content ?? "").slice(0, 24)}`}
-                          entry={msg}
-                          index={i}
-                          t={t}
-                          modeColor={modeInfo.color}
-                          expandedMessages={expandedMessages}
-                          mcpRun={mcpRuns[i]}
-                          isFinalAssistant={i === _lastAssistantIdx}
-                        />
-                      </Semantic>
-                    ));
-                  })()}
-                  {/* taskListSnapshot moved below scrollbox ΓÇö renders as a
+                      return messages.map((msg, i) => (
+                        // biome-ignore lint/suspicious/noArrayIndexKey: append-only message log; index is part of the stable semantic id
+                        <Semantic
+                          key={`sem-${msg.timestamp?.getTime?.() ?? i}-${i}`}
+                          id={`msg-${i}`}
+                          role="listitem"
+                          name={`${msg.type ?? "msg"}:${String(msg.content ?? "").slice(0, 40)}`}
+                        >
+                          <MessageView
+                            key={`${msg.timestamp?.getTime?.() ?? i}-${msg.type}-${msg.remoteKey ?? ""}-${String(msg.content ?? "").slice(0, 24)}`}
+                            entry={msg}
+                            index={i}
+                            t={t}
+                            modeColor={modeInfo.color}
+                            expandedMessages={expandedMessages}
+                            mcpRun={mcpRuns[i]}
+                            isFinalAssistant={i === _lastAssistantIdx}
+                          />
+                        </Semantic>
+                      ));
+                    })()}
+                    {/* taskListSnapshot moved below scrollbox ΓÇö renders as a
                       fixed-bottom panel so agent text can never push it up. */}
-                  {liveTurnSourceLabel && (activeToolCalls.length > 0 || streamContent || isProcessing) && (
-                    <box paddingLeft={3} marginTop={1} flexShrink={0}>
-                      <text fg={t.textMuted}>{liveTurnSourceLabel}</text>
-                    </box>
-                  )}
-                  {/* Active tool calls ΓÇö pending inline */}
-                  {activeToolCalls.map((tc) =>
-                    tc.function.name === "task" ? (
-                      <SubagentTaskLine
-                        key={tc.id}
-                        t={t}
-                        agent={tryParseArg(tc, "agent") || "sub-agent"}
-                        label={toolArgs(tc) || "Working"}
-                        pending
-                      />
-                    ) : tc.function.name === "delegate" ? (
-                      <DelegationTaskLine
-                        key={tc.id}
-                        t={t}
-                        label={toolArgs(tc) || "Background research"}
-                        pending
-                        id={undefined}
-                      />
-                    ) : (
-                      <InlineTool key={tc.id} t={t} pending>
-                        {toolLabel(tc)}
-                      </InlineTool>
-                    ),
-                  )}
-                  {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
-                  {councilPhases.length > 0 && (
-                    <Semantic id="council-phases" role="listbox" name="Council Phases">
-                      <CouncilPhaseTimeline phases={councilPhases} theme={t} expanded={councilTranscriptExpanded} />
-                    </Semantic>
-                  )}
-                  {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
-                  {/* Halt/init-new/point-to-existing/council-progress cards moved
+                    {liveTurnSourceLabel && (activeToolCalls.length > 0 || streamContent || isProcessing) && (
+                      <box paddingLeft={3} marginTop={1} flexShrink={0}>
+                        <text fg={t.textMuted}>{liveTurnSourceLabel}</text>
+                      </box>
+                    )}
+                    {/* Active tool calls ΓÇö pending inline */}
+                    {activeToolCalls.map((tc) =>
+                      tc.function.name === "task" ? (
+                        <SubagentTaskLine
+                          key={tc.id}
+                          t={t}
+                          agent={tryParseArg(tc, "agent") || "sub-agent"}
+                          label={toolArgs(tc) || "Working"}
+                          pending
+                        />
+                      ) : tc.function.name === "delegate" ? (
+                        <DelegationTaskLine
+                          key={tc.id}
+                          t={t}
+                          label={toolArgs(tc) || "Background research"}
+                          pending
+                          id={undefined}
+                        />
+                      ) : (
+                        <InlineTool key={tc.id} t={t} pending>
+                          {toolLabel(tc)}
+                        </InlineTool>
+                      ),
+                    )}
+                    {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
+                    {councilPhases.length > 0 && (
+                      <Semantic id="council-phases" role="listbox" name="Council Phases">
+                        <CouncilPhaseTimeline phases={councilPhases} theme={t} expanded={councilTranscriptExpanded} />
+                      </Semantic>
+                    )}
+                    {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
+                    {/* Halt/init-new/point-to-existing/council-progress cards moved
                       to render AFTER councilMessages below so the scrollbox's
                       sticky-bottom auto-scroll reveals them ΓÇö when council
                       debate produces many tall bubbles they used to render
                       above the viewport. */}
-                  {councilStatuses.length > 0 && (
-                    <Semantic id="council-status" role="listbox" name="Council Status">
-                      <CouncilStatusList statuses={councilStatuses} theme={t} />
-                    </Semantic>
-                  )}
-                  {councilInfoCards.map((card, idx) => (
-                    <Semantic
-                      key={`sem-info-${idx}-${card.title}`}
-                      id={`council-card-${idx}`}
-                      role="listitem"
-                      name={card.title || `Council card ${idx}`}
-                    >
-                      <CouncilInfoCardView
-                        key={`info-card-${idx}-${card.title}`}
-                        card={card}
-                        terminalCols={width}
-                        theme={t}
-                      />
-                    </Semantic>
-                  ))}
-                  {(() => {
-                    // Fold the debate back-and-forth (leader + debate + research
-                    // turns) into a collapsible pill; render synthesis inline
-                    // below so the deliverable stays visible. Preserve each
-                    // turn's ORIGINAL index for stable Semantic ids (the harness
-                    // queries `council-msg-N`).
-                    type Turn = { cm: (typeof councilMessages)[number]; idx: number };
-                    const turns: Turn[] = councilMessages.map((cm, idx) => ({ cm, idx }));
-                    const debateTurns = turns.filter(({ cm }) => cm.kind !== "synthesis");
-                    const synthesisTurns = turns.filter(({ cm }) => cm.kind === "synthesis");
-                    const debateActive = isProcessing && synthesisTurns.length === 0;
-                    const lastDebate = debateTurns.length > 0 ? debateTurns[debateTurns.length - 1]!.cm : null;
-                    const tailText = lastDebate
-                      ? lastDebate.text
-                          .split("\n")
-                          .filter((l) => l.trim().length > 0)
-                          .slice(-3)
-                          .join(" · ")
-                      : "";
+                    {councilStatuses.length > 0 && (
+                      <Semantic id="council-status" role="listbox" name="Council Status">
+                        <CouncilStatusList statuses={councilStatuses} theme={t} />
+                      </Semantic>
+                    )}
+                    {councilInfoCards.map((card, idx) => (
+                      <Semantic
+                        key={`sem-info-${idx}-${card.title}`}
+                        id={`council-card-${idx}`}
+                        role="listitem"
+                        name={card.title || `Council card ${idx}`}
+                      >
+                        <CouncilInfoCardView
+                          key={`info-card-${idx}-${card.title}`}
+                          card={card}
+                          terminalCols={width}
+                          theme={t}
+                        />
+                      </Semantic>
+                    ))}
+                    {(() => {
+                      // Fold the debate back-and-forth (leader + debate + research
+                      // turns) into a collapsible pill; render synthesis inline
+                      // below so the deliverable stays visible. Preserve each
+                      // turn's ORIGINAL index for stable Semantic ids (the harness
+                      // queries `council-msg-N`).
+                      type Turn = { cm: (typeof councilMessages)[number]; idx: number };
+                      const turns: Turn[] = councilMessages.map((cm, idx) => ({ cm, idx }));
+                      const debateTurns = turns.filter(({ cm }) => cm.kind !== "synthesis");
+                      const synthesisTurns = turns.filter(({ cm }) => cm.kind === "synthesis");
+                      const debateActive = isProcessing && synthesisTurns.length === 0;
+                      const lastDebate = debateTurns.length > 0 ? debateTurns[debateTurns.length - 1]!.cm : null;
+                      const tailText = lastDebate
+                        ? lastDebate.text
+                            .split("\n")
+                            .filter((l) => l.trim().length > 0)
+                            .slice(-3)
+                            .join(" · ")
+                        : "";
 
-                    const renderTurn = ({ cm, idx }: Turn) => {
-                      const side: "left" | "right" =
-                        cm.kind === "debate" && cm.partner
-                          ? getSide(makePairKey(cm.speaker.role, cm.partner.role), cm.speaker.role)
-                          : "left";
-                      const semName = `${cm.kind}:${cm.speaker?.role ?? "?"}`;
-                      if (cm.kind === "leader") {
+                      const renderTurn = ({ cm, idx }: Turn) => {
+                        const side: "left" | "right" =
+                          cm.kind === "debate" && cm.partner
+                            ? getSide(makePairKey(cm.speaker.role, cm.partner.role), cm.speaker.role)
+                            : "left";
+                        const semName = `${cm.kind}:${cm.speaker?.role ?? "?"}`;
+                        if (cm.kind === "leader") {
+                          return (
+                            <Semantic
+                              key={`sem-cm-${idx}`}
+                              id={`council-msg-${idx}`}
+                              role="listitem"
+                              name={semName}
+                              value={cm.text}
+                            >
+                              <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} />
+                            </Semantic>
+                          );
+                        }
+                        const pairKey = cm.partner
+                          ? makePairKey(cm.speaker.role, cm.partner.role)
+                          : `solo::${cm.speaker.role}`;
+                        const partnerLastText = cm.partner ? getPartnerLast(pairKey, cm.partner.role) : undefined;
                         return (
                           <Semantic
                             key={`sem-cm-${idx}`}
@@ -887,86 +927,70 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                             name={semName}
                             value={cm.text}
                           >
-                            <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} />
+                            <CouncilMessageBubble
+                              key={idx}
+                              msg={cm}
+                              terminalCols={width}
+                              side={side}
+                              resolveStyle={resolveStyle}
+                              partnerLastText={partnerLastText}
+                              partnerRole={cm.partner?.role}
+                              theme={t}
+                            />
                           </Semantic>
                         );
-                      }
-                      const pairKey = cm.partner
-                        ? makePairKey(cm.speaker.role, cm.partner.role)
-                        : `solo::${cm.speaker.role}`;
-                      const partnerLastText = cm.partner ? getPartnerLast(pairKey, cm.partner.role) : undefined;
-                      return (
-                        <Semantic
-                          key={`sem-cm-${idx}`}
-                          id={`council-msg-${idx}`}
-                          role="listitem"
-                          name={semName}
-                          value={cm.text}
-                        >
-                          <CouncilMessageBubble
-                            key={idx}
-                            msg={cm}
-                            terminalCols={width}
-                            side={side}
-                            resolveStyle={resolveStyle}
-                            partnerLastText={partnerLastText}
-                            partnerRole={cm.partner?.role}
-                            theme={t}
-                          />
-                        </Semantic>
-                      );
-                    };
+                      };
 
-                    return (
-                      <>
-                        {debateTurns.length > 0 && (
-                          <Semantic
-                            id="council-debate-pill"
-                            role="log"
-                            name="Council debate transcript"
-                            props={{
-                              expanded: councilTranscriptExpanded,
-                              active: debateActive,
-                              count: debateTurns.length,
-                            }}
-                          >
-                            <CouncilDebatePill
-                              count={debateTurns.length}
-                              active={debateActive}
-                              expanded={councilTranscriptExpanded}
-                              tailText={tailText}
-                              theme={t}
+                      return (
+                        <>
+                          {debateTurns.length > 0 && (
+                            <Semantic
+                              id="council-debate-pill"
+                              role="log"
+                              name="Council debate transcript"
+                              props={{
+                                expanded: councilTranscriptExpanded,
+                                active: debateActive,
+                                count: debateTurns.length,
+                              }}
                             >
-                              {councilTranscriptExpanded ? debateTurns.map(renderTurn) : null}
-                            </CouncilDebatePill>
-                          </Semantic>
-                        )}
-                        {synthesisTurns.map(({ cm, idx }) => (
-                          <Semantic
-                            key={`sem-cm-${idx}`}
-                            id={`council-msg-${idx}`}
-                            role="listitem"
-                            name={`${cm.kind}:${cm.speaker?.role ?? "?"}`}
-                            value={cm.text}
-                          >
-                            <CouncilSynthesisBanner key={idx} msg={cm} />
-                          </Semantic>
-                        ))}
-                      </>
-                    );
-                  })()}
-                  {Array.from(councilPlaceholders.entries()).map(([id, p]) => (
-                    <CouncilPlaceholderBubble
-                      key={id}
-                      role={p.role}
-                      side={p.side}
-                      terminalCols={width}
-                      color={p.color}
-                      theme={t}
-                      variant={p.variant}
-                    />
-                  ))}
-                  {/* Council question / preflight askcards render at the END of
+                              <CouncilDebatePill
+                                count={debateTurns.length}
+                                active={debateActive}
+                                expanded={councilTranscriptExpanded}
+                                tailText={tailText}
+                                theme={t}
+                              >
+                                {councilTranscriptExpanded ? debateTurns.map(renderTurn) : null}
+                              </CouncilDebatePill>
+                            </Semantic>
+                          )}
+                          {synthesisTurns.map(({ cm, idx }) => (
+                            <Semantic
+                              key={`sem-cm-${idx}`}
+                              id={`council-msg-${idx}`}
+                              role="listitem"
+                              name={`${cm.kind}:${cm.speaker?.role ?? "?"}`}
+                              value={cm.text}
+                            >
+                              <CouncilSynthesisBanner key={idx} msg={cm} />
+                            </Semantic>
+                          ))}
+                        </>
+                      );
+                    })()}
+                    {Array.from(councilPlaceholders.entries()).map(([id, p]) => (
+                      <CouncilPlaceholderBubble
+                        key={id}
+                        role={p.role}
+                        side={p.side}
+                        terminalCols={width}
+                        color={p.color}
+                        theme={t}
+                        variant={p.variant}
+                      />
+                    ))}
+                    {/* Council question / preflight askcards render at the END of
                       the scrollbox (see below) so the bottom-sticky scroll
                       always anchors to the active question. Rendered here they
                       sat ABOVE trailing live content (streamContent,
@@ -974,156 +998,159 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       anchor during the council debate phase ΓÇö leaving the card
                       scrolled above the fold so the user had to scroll UP to
                       find it. See fix/tui-askcard-anchor. */}
-                  {/* Reasoning pill ΓÇö Claude-style "💭 ThinkingΓÇª" while a
+                    {/* Reasoning pill ΓÇö Claude-style "💭 ThinkingΓÇª" while a
                       reasoning streak is active, then "💭 Thought for Ns"
                       once the model emits text or a tool call. CoT body is
                       discarded so we never re-render heavy markdown for it. */}
-                  {(reasoningActive || lastReasoningElapsedMs > 0) && (
-                    <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
-                      <text fg={t.textMuted}>
-                        {reasoningActive
-                          ? "[Thought] Thinking..."
-                          : `[Thought] Thought for ${(lastReasoningElapsedMs / 1000).toFixed(1)}s`}
-                      </text>
-                      {streamReasoning ? (
-                        <box
-                          border={["left"]}
-                          borderColor={t.textMuted}
-                          paddingLeft={2}
-                          marginTop={1}
-                          flexDirection="column"
-                        >
-                          {reasoningActive ? (
-                            // While actively streaming, render only the last 3
-                            // non-empty lines as plain text to avoid Markdown
-                            // re-parse overhead every 150ms.
-                            <text fg={t.textMuted}>
-                              {streamReasoning
-                                .split("\n")
-                                .filter((l) => l.trim().length > 0)
-                                .slice(-3)
-                                .join(" ┬╖ ")}
-                            </text>
-                          ) : (
-                            <Markdown content={streamReasoning} t={t} />
-                          )}
-                        </box>
-                      ) : null}
-                    </box>
-                  )}
-                  {/* Streaming assistant content */}
-                  {streamContent && (
-                    <box paddingLeft={3} marginTop={1} flexShrink={0}>
-                      <Markdown content={streamContent} t={t} />
-                    </box>
-                  )}
-                  {/* Waiting indicator */}
-                  {isProcessing && !streamContent && activeToolCalls.length === 0 && (
-                    <ShimmerText t={t} text="Planning next moves" />
-                  )}
-                  {/* Plan questions panel ΓÇö inline, OpenCode-style */}
-                  {showPlanPanel && <PlanQuestionsPanel t={t} questions={planQuestions} state={pqs} />}
-                  {pendingPaymentApproval && <PaymentApprovalPanel t={t} payment={pendingPaymentApproval} />}
-                  {/* Modals/wizards anchored to the bottom so sticky-bottom
+                    {(reasoningActive || lastReasoningElapsedMs > 0) && (
+                      <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
+                        <text fg={t.textMuted}>
+                          {reasoningActive
+                            ? "[Thought] Thinking..."
+                            : `[Thought] Thought for ${(lastReasoningElapsedMs / 1000).toFixed(1)}s`}
+                        </text>
+                        {streamReasoning ? (
+                          <box
+                            border={["left"]}
+                            borderColor={t.textMuted}
+                            paddingLeft={2}
+                            marginTop={1}
+                            flexDirection="column"
+                          >
+                            {reasoningActive ? (
+                              // While actively streaming, render only the last 3
+                              // non-empty lines as plain text to avoid Markdown
+                              // re-parse overhead every 150ms.
+                              <text fg={t.textMuted}>
+                                {streamReasoning
+                                  .split("\n")
+                                  .filter((l) => l.trim().length > 0)
+                                  .slice(-3)
+                                  .join(" ┬╖ ")}
+                              </text>
+                            ) : (
+                              <Markdown content={streamReasoning} t={t} />
+                            )}
+                          </box>
+                        ) : null}
+                      </box>
+                    )}
+                    {/* Streaming assistant content */}
+                    {streamContent && (
+                      <box paddingLeft={3} marginTop={1} flexShrink={0}>
+                        <Markdown content={streamContent} t={t} />
+                      </box>
+                    )}
+                    {/* Waiting indicator */}
+                    {isProcessing && !streamContent && activeToolCalls.length === 0 && (
+                      <ShimmerText t={t} text="Planning next moves" />
+                    )}
+                    {/* Plan questions panel ΓÇö inline, OpenCode-style */}
+                    {showPlanPanel && <PlanQuestionsPanel t={t} questions={planQuestions} state={pqs} />}
+                    {pendingPaymentApproval && <PaymentApprovalPanel t={t} payment={pendingPaymentApproval} />}
+                    {/* Modals/wizards anchored to the bottom so sticky-bottom
                       auto-scroll keeps them in view even when councilMessages
                       fill the scrollbox. */}
-                  {activeHaltCard && (
-                    <HaltRecoveryCard
-                      halt={activeHaltCard}
-                      selectedIndex={haltSelectedIndex}
-                      terminalCols={width}
-                      theme={t}
-                    />
-                  )}
-                  {initNewForm && <InitNewFormCard state={initNewForm} terminalCols={width} theme={t} />}
-                  {pointToExistingForm && (
-                    <PointToExistingFormCard state={pointToExistingForm} terminalCols={width} theme={t} />
-                  )}
-                  {councilProgress && (
-                    <Semantic id="continue-as-council-progress" role="log" name="Council brainstorm">
-                      <box
-                        flexDirection="column"
-                        borderStyle="single"
-                        borderColor={councilProgress.status === "error" ? t.initFormError : t.text}
-                        padding={1}
-                        marginTop={1}
-                      >
-                        <text fg={t.text}>
-                          {councilProgress.status === "running" && "Council brainstorming ΓÇö writing spec.md..."}
-                          {councilProgress.status === "done" &&
-                            `Council brainstorm complete: ${councilProgress.specPath}${councilProgress.hasContent ? "" : " (no content ΓÇö production council wiring deferred)"}`}
-                          {councilProgress.status === "error" && `Council brainstorm failed: ${councilProgress.error}`}
-                        </text>
-                      </box>
-                    </Semantic>
-                  )}
-                  {/* Active council askcards LAST so the bottom-sticky scroll
+                    {activeHaltCard && (
+                      <HaltRecoveryCard
+                        halt={activeHaltCard}
+                        selectedIndex={haltSelectedIndex}
+                        terminalCols={width}
+                        theme={t}
+                      />
+                    )}
+                    {initNewForm && <InitNewFormCard state={initNewForm} terminalCols={width} theme={t} />}
+                    {pointToExistingForm && (
+                      <PointToExistingFormCard state={pointToExistingForm} terminalCols={width} theme={t} />
+                    )}
+                    {councilProgress && (
+                      <Semantic id="continue-as-council-progress" role="log" name="Council brainstorm">
+                        <box
+                          flexDirection="column"
+                          borderStyle="single"
+                          borderColor={councilProgress.status === "error" ? t.initFormError : t.text}
+                          padding={1}
+                          marginTop={1}
+                        >
+                          <text fg={t.text}>
+                            {councilProgress.status === "running" && "Council brainstorming ΓÇö writing spec.md..."}
+                            {councilProgress.status === "done" &&
+                              `Council brainstorm complete: ${councilProgress.specPath}${councilProgress.hasContent ? "" : " (no content ΓÇö production council wiring deferred)"}`}
+                            {councilProgress.status === "error" &&
+                              `Council brainstorm failed: ${councilProgress.error}`}
+                          </text>
+                        </box>
+                      </Semantic>
+                    )}
+                    {/* Active council askcards LAST so the bottom-sticky scroll
                       anchors to the pending question (moved here from above
                       streamContent/councilProgress ΓÇö see fix/tui-askcard-anchor). */}
-                  {pendingCouncilQuestion && councilCardState && (
-                    <CouncilQuestionCard question={pendingCouncilQuestion} theme={t} state={councilCardState} />
-                  )}
-                  {pendingCouncilPreflight && preflightCardState && (
-                    <CouncilQuestionCard
-                      question={buildPreflightQuestion(pendingCouncilPreflight)}
+                    {pendingCouncilQuestion && councilCardState && (
+                      <CouncilQuestionCard question={pendingCouncilQuestion} theme={t} state={councilCardState} />
+                    )}
+                    {pendingCouncilPreflight && preflightCardState && (
+                      <CouncilQuestionCard
+                        question={buildPreflightQuestion(pendingCouncilPreflight)}
+                        theme={t}
+                        state={preflightCardState}
+                      />
+                    )}
+                  </scrollbox>
+                </Semantic>
+                {scrollLockedAway && (
+                  <box flexShrink={0} alignItems="center" marginTop={0}>
+                    <JumpToLatestPill newSinceLock={newSinceLock} />
+                  </box>
+                )}
+                {btwState && <BtwOverlay state={btwState} theme={t} />}
+                {/* TodoCard ΓÇö fixed bottom so agent text cannot push it up */}
+                {taskListSnapshot && (
+                  <box flexShrink={0} paddingLeft={2} paddingRight={2} marginBottom={1}>
+                    <TaskListPanel snapshot={taskListSnapshot} t={t} expanded={false} />
+                  </box>
+                )}
+                {activeToast ? (
+                  <box flexShrink={0} marginBottom={1}>
+                    <Toast
+                      key={activeToast.id}
+                      level={activeToast.level}
+                      text={activeToast.text}
                       theme={t}
-                      state={preflightCardState}
+                      onDismiss={dismissToast}
                     />
-                  )}
-                </scrollbox>
-              </Semantic>
-              {scrollLockedAway && (
-                <box flexShrink={0} alignItems="center" marginTop={0}>
-                  <JumpToLatestPill newSinceLock={newSinceLock} />
-                </box>
-              )}
-              {btwState && <BtwOverlay state={btwState} theme={t} />}
-              {/* TodoCard ΓÇö fixed bottom so agent text cannot push it up */}
-              {taskListSnapshot && (
-                <box flexShrink={0} paddingLeft={2} paddingRight={2} marginBottom={1}>
-                  <TaskListPanel snapshot={taskListSnapshot} t={t} expanded={false} />
-                </box>
-              )}
-              {activeToast ? (
-                <box flexShrink={0} marginBottom={1}>
-                  <Toast
-                    key={activeToast.id}
-                    level={activeToast.level}
-                    text={activeToast.text}
-                    theme={t}
-                    onDismiss={dismissToast}
+                  </box>
+                ) : null}
+                {/* Prompt */}
+                <box flexShrink={0}>
+                  <PromptBox
+                    t={t}
+                    inputRef={inputRef}
+                    isProcessing={isProcessing}
+                    showModelPicker={showModelPicker}
+                    showSandboxPicker={showSandboxPicker}
+                    showWalletPicker={showWalletPicker}
+                    showSlashMenu={showSlashMenu}
+                    showPlanQuestions={showPlanPanel}
+                    showApiKeyModal={showApiKeyModal}
+                    blockPrompt={blockPrompt}
+                    onSubmit={handleSubmit}
+                    onPaste={handlePaste}
+                    pasteBlocks={pasteBlocks}
+                    modeInfo={modeInfo}
+                    model={model}
+                    modelInfo={modelInfo}
+                    contextStats={contextStats}
+                    queuedCount={queuedMessages.length}
+                    queuedMessages={queuedMessages}
+                    typeahead={typeahead}
+                    slashItems={filteredSlashItems}
+                    slashSelectedIndex={slashMenuIndex}
+                    slashInputIsMatched={slashInputIsMatched}
+                    composerValue={showSlashMenu ? `/${slashSearchQuery}` : undefined}
                   />
                 </box>
-              ) : null}
-              {/* Prompt */}
-              <box flexShrink={0}>
-                <PromptBox
-                  t={t}
-                  inputRef={inputRef}
-                  isProcessing={isProcessing}
-                  showModelPicker={showModelPicker}
-                  showSandboxPicker={showSandboxPicker}
-                  showWalletPicker={showWalletPicker}
-                  showSlashMenu={showSlashMenu}
-                  showPlanQuestions={showPlanPanel}
-                  showApiKeyModal={showApiKeyModal}
-                  blockPrompt={blockPrompt}
-                  onSubmit={handleSubmit}
-                  onPaste={handlePaste}
-                  pasteBlocks={pasteBlocks}
-                  modeInfo={modeInfo}
-                  model={model}
-                  modelInfo={modelInfo}
-                  contextStats={contextStats}
-                  queuedCount={queuedMessages.length}
-                  queuedMessages={queuedMessages}
-                  typeahead={typeahead}
-                  slashItems={filteredSlashItems}
-                  slashSelectedIndex={slashMenuIndex}
-                  slashInputIsMatched={slashInputIsMatched}
-                  composerValue={showSlashMenu ? `/${slashSearchQuery}` : undefined}
-                />
               </box>
+              {railActive && <ContextRail width={railWidth} rows={railRows} />}
             </box>
             <box paddingLeft={2} paddingRight={2} flexShrink={0}>
               <StatusBar />
