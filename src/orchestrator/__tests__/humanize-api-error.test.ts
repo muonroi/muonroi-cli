@@ -57,6 +57,45 @@ describe("humanizeApiError — routing context (P0 #2)", () => {
     expect(msg).not.toContain("deepseek-v4-flash");
   });
 
+  it("does NOT mislabel a Console Go 400 invalid_request as rate-limiting (session af0cda674185)", () => {
+    // Regression: opencode Console Go re-routed a deepseek request to a kimi
+    // coding backend and rejected the long tool-loop payload with a bare 400
+    // invalid_request. The old `else` branch dropped this into "the provider is
+    // rate-limiting you" + "wait and retry" — useless advice for a
+    // non-retryable 400.
+    const err = new APICallError({
+      message: "Error from provider (Console Go): Upstream request failed",
+      url: "https://opencode.ai/v1/chat/completions",
+      requestBodyValues: { model: "opencode/deepseek-v4-flash" },
+      statusCode: 400,
+      responseBody:
+        '{"error":{"message":"Error from provider (Console Go): Upstream request failed","type":"invalid_request_error","code":"invalid_request_error"}}',
+      isRetryable: false,
+    });
+    const msg = humanizeApiError(err, {
+      modelId: "opencode/kimi-k2.7-code",
+      providerId: "opencode-go",
+    });
+    expect(msg).toContain("opencode/kimi-k2.7-code");
+    expect(msg).not.toMatch(/rate.?limit/i);
+    expect(msg).not.toMatch(/wait a moment and retry/i);
+    expect(msg).toMatch(/-m /); // still points at the real lever
+    expect(msg).toMatch(/invalid|shorten|simplify|switch/i);
+  });
+
+  it("still calls a real Console Go 429 a rate limit (burst-limit hint)", () => {
+    const err = new APICallError({
+      message: "Error from provider (Console Go): rate limit exceeded",
+      url: "https://opencode.ai/v1/chat/completions",
+      requestBodyValues: { model: "opencode/deepseek-v4-flash" },
+      statusCode: 429,
+      responseBody: '{"error":{"message":"Console Go: too many requests"}}',
+      isRetryable: true,
+    });
+    const msg = humanizeApiError(err, { modelId: "opencode/deepseek-v4-flash", providerId: "opencode-go" });
+    expect(msg).toMatch(/burst rate limit|rate limit/i);
+  });
+
   it("is unchanged when no context is supplied (backward compatible)", () => {
     const err = apiErr(402, '{"error":{"message":"Insufficient Balance"}}');
     const withoutCtx = humanizeApiError(err);

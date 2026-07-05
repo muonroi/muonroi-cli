@@ -71,6 +71,13 @@ function routingSuffix(error: unknown, ctx: ApiErrorContext | undefined): string
 
   const where = `routed to model "${ctx.modelId}"${ctx.providerId ? ` via provider "${ctx.providerId}"` : ""}`;
 
+  // A generic "invalid request" rejection — NOT a rate limit. Console Go can
+  // silently re-route (e.g. deepseek-v4-flash → a kimi coding backend) and then
+  // reject a long tool-loop payload with a bare 400 invalid_request. Retrying
+  // as-is never helps (isRetryable:false), so the hint must NOT say "wait and
+  // retry" — it must point at the real levers (switch model / shorten payload).
+  const isInvalidRequest = status === 400 || status === 422;
+
   let hint: string;
   if (isConsoleGo && (isRateLimitMsg || status === 429)) {
     hint =
@@ -81,8 +88,14 @@ function routingSuffix(error: unknown, ctx: ApiErrorContext | undefined): string
   } else if (status === 401 || status === 403) {
     hint =
       "you're not authenticated for this provider. Run `keys login <provider>` (or set its API key), or switch to another model with `-m <model>`.";
-  } else {
+  } else if (isInvalidRequest) {
+    hint =
+      "the provider rejected this request as invalid — often a param or backend model it doesn't support, or a tool-loop payload the routed model can't accept (some gateways re-route to a different backend than the one you picked). Switch models with `-m <model>` or shorten/simplify the request; retrying it unchanged won't help.";
+  } else if (isRateLimitMsg || status === 429) {
     hint = "the provider is rate-limiting you. Wait a moment and retry, or switch to another model with `-m <model>`.";
+  } else {
+    hint =
+      "the routed model or provider couldn't complete this request. Switch to another model with `-m <model>`, or try again.";
   }
   return ` [${where}] — ${hint}`;
 }
