@@ -567,12 +567,14 @@ ${prompt}`;
 
 // AppStartupConfig, AppProps, ActiveTurnState extracted to ./types.ts
 
-// Splash UX: only DeepSeek + SiliconFlow are surfaced. Other providers
-// (openai/anthropic/google/xai/ollama) keep working programmatically when
-// the router picks them, but the user-facing picker hides them so the
-// user cannot enable a provider we are not actively maintaining UX for.
+// Splash UX: the curated primary providers surfaced in the picker. Other
+// providers (openai/anthropic/ollama) keep working programmatically when the
+// router picks them, but the user-facing picker hides them so the user cannot
+// enable a provider we are not actively maintaining UX for. NOTE: keep this in
+// sync with SPLASH_PROVIDERS in app.tsx — siliconflow/google were removed from
+// ProviderId, so they MUST NOT appear here (they render as dead "no key" chips).
 // Hoisted to module-level so React useEffect deps stay stable across renders.
-const SPLASH_PROVIDERS: readonly ProviderId[] = ["deepseek", "siliconflow", "zai", "opencode-go"];
+const SPLASH_PROVIDERS: readonly ProviderId[] = ["deepseek", "zai", "opencode-go", "xai"];
 
 export interface AppLogicProps {
   agent: any;
@@ -5584,15 +5586,22 @@ export function useAppLogic(props: AppLogicProps) {
             setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
             agent.respondToCouncilQuestion(qid, ans.text, pendingQuestion.question);
-            setMessages((prev) => [
-              ...prev,
-              buildUserEntry(
-                formatAnswerForLog(ans, {
-                  selectedOptionLabel,
-                  questionId: pendingQuestion.question?.match(/^Question:\s*(\w+)/)?.[1],
-                }),
-              ),
-            ]);
+            // Suppress the transcript echo for no-op "Skip — leave as-is" choices:
+            // they contribute nothing, and a post-debate refine over N sections
+            // produces N blank "· Skip" user rows (transcript garbage — see the
+            // 2217600e1f27 export). Every real answer / non-skip choice still echoes.
+            const isNoopSkip = ans.kind === "choice" && !ans.text.trim() && /^skip\b/i.test(selectedOptionLabel ?? "");
+            if (!isNoopSkip) {
+              setMessages((prev) => [
+                ...prev,
+                buildUserEntry(
+                  formatAnswerForLog(ans, {
+                    selectedOptionLabel,
+                    questionId: pendingQuestion.question?.match(/^Question:\s*(\w+)/)?.[1],
+                  }),
+                ),
+              ]);
+            }
             // E2 ΓÇö start a heartbeat while we wait for the NEXT chunk from
             // /ideal (next AskCard, council phase tick, or sprint stage event).
             // chunk loop clears it on first arrival.

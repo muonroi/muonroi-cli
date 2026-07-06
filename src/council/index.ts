@@ -981,7 +981,13 @@ export async function* runCouncil(
           } as StreamChunk;
           const ans = await respondToQuestion(sqId);
           refinedAnswers.push({ section: label, answer: ans });
-          yield { type: "content", content: `\n  ↳ ${ans}\n` };
+          // Only echo sections the user actually filled. "Skip — leave as-is"
+          // returns an empty value; echoing it emits a blank "↳ " bubble per
+          // section (6 skips = 6 empty rows of transcript garbage). Prefix the
+          // section label so a real answer reads as "↳ <section>: <answer>".
+          if (ans.trim().length > 0) {
+            yield { type: "content", content: `\n  ↳ ${label}: ${ans}\n` };
+          }
         }
         // Build refineContext string from user answers
         const refineCtx = refinedAnswers
