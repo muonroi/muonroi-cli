@@ -98,3 +98,53 @@ A (independent, ship + verify) → B1+B2 (pin + show) → B3 (grade against pinn
 B5 (conductor loop visibility) → B4 (remedy/escalate). B3 must land before B4
 (remedy needs real per-criterion status). Verify each stage on a live `/council`
 via the harness before the next.
+
+## Verification log (2026-07-06, deepseek-only, session c1e4ee4ff34f)
+
+Shipped + live-verified: **A** (f3bc8093), **B2+B3** (93de3fd9), plus a
+stale-criteriaMet reset fix surfaced during testing (c0da1805).
+
+**A — live debate preview:** during round 2 of the extreme-vague council the
+main console showed `Discussion round 2 · composing…` with both speaker lenses
+(`↳ Terminal UX Designer — …`, `↳ Performance-Conscious Terminal Engineer — …`).
+The "chán"/empty-console problem is gone.
+
+**B2 — pin criteria:** rail rendered the exact `successCriteria` per council
+(3 for crash-proofing, 4 for UI/UX) under an `Outcome: N/M criteria met` header.
+
+**B3 — grade against pinned:** rail flipped `○→✓` from per-round eval, index-
+aligned. Confirmed 0/4 → 4/4 progression on the UI/UX council.
+
+**Graduated vague-topic interview test (simple → extreme):**
+
+| Topic | Vagueness | Interview | Criteria derived | Round grading |
+|---|---|---|---|---|
+| "improve error handling" | simple | 1 Q → 4 aspects | 3 (crash-proofing) | R1 3/3 → stop ✅ |
+| "make it better" | extreme | 1 Q → 4 project domains; resolved bare "it"→muonroi-cli | 4 (incl. measurable "80% pilot users rate clarity") | R1 0/4 → **continue**, R2 4/4 → stop ✅✅ |
+
+Interview findings: the leader asks **one** question regardless of vagueness —
+it widens the question's *scope* (sub-aspects → whole-project domains), not its
+count. Even maximal vagueness produced concrete, sometimes-measurable criteria.
+
+**Leader per-round finding (refines B4/B5):** the leader's criteria-driven stop
+logic already works well — it **continues** when criteria are unmet (R1 0/4 →
+continue) and **stops** only when all are met (R2 4/4 → stop). The real gap is
+the **round-budget-exhaustion boundary**: the earlier harness-review council hit
+`R3 3/5 → stop` because round budget (3/3) ran out with 2 criteria still unmet,
+then synthesized *as if done* — no unmet-flag, no round-extension/re-team, no
+escalation. **B4/B5 should fire specifically here**, not on the normal
+all-met-early stop. Also: there is zero visible pre-round leader directive
+(the "mờ nhạt" complaint) — B5's conductor visibility remains unbuilt.
+
+**Bugs found:**
+- *(fixed c0da1805)* stale `criteriaMet` leaked across same-session councils
+  after an Esc-interrupt (upsert-merge kept the prior array → wrong "3/4" with
+  stale ✓ at the approve card). Fixed via count-matched all-false reset in
+  `index.ts` + length-guard in the rail render.
+- *(open)* the rail **Progress** row (`Round 3/3 · 3/5 met · converged`) is a
+  separate stale-leak — it never updated for councils #1/#3 (showed the first
+  council's value throughout). Same root as the criteriaMet leak (no reset on
+  Esc-interrupt) but a different `councilMeta` field; fix by resetting all
+  council `councilMeta`/round state at council *start*, not only turn-*end*.
+- *(minor)* the A composing placeholder ("Planning next moves") lingers after
+  turn-end instead of clearing when idle.
