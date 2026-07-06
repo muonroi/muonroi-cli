@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { buildLeaderDirective, buildLeaderVerdict, leaderConductorEnabled, shortCriterion } from "../debate.js";
+import {
+  autoRemedyWantsExtend,
+  buildLeaderDirective,
+  buildLeaderVerdict,
+  diagnoseUnmetRemedy,
+  leaderAutoRemedyEnabled,
+  leaderConductorEnabled,
+  shortCriterion,
+} from "../debate.js";
 
 describe("leaderConductorEnabled (B5 flag)", () => {
   it("defaults ON when the env var is unset", () => {
@@ -67,5 +75,88 @@ describe("buildLeaderVerdict (B5 post-round grading)", () => {
     const out = buildLeaderVerdict(criteria, [true, true], "done", "irrelevant");
     expect(out).toContain("2/2 criteria met");
     expect(out).not.toContain("→ Next:");
+  });
+});
+
+describe("leaderAutoRemedyEnabled (B4 flag)", () => {
+  it("defaults ON when both env vars are unset", () => {
+    const prevC = process.env.MUONROI_LEADER_CONDUCTOR;
+    const prevR = process.env.MUONROI_COUNCIL_AUTO_REMEDY;
+    delete process.env.MUONROI_LEADER_CONDUCTOR;
+    delete process.env.MUONROI_COUNCIL_AUTO_REMEDY;
+    expect(leaderAutoRemedyEnabled()).toBe(true);
+    if (prevC !== undefined) process.env.MUONROI_LEADER_CONDUCTOR = prevC;
+    if (prevR !== undefined) process.env.MUONROI_COUNCIL_AUTO_REMEDY = prevR;
+  });
+
+  it("is off when the conductor is off (auto-remedy is a conductor sub-feature)", () => {
+    const prevC = process.env.MUONROI_LEADER_CONDUCTOR;
+    const prevR = process.env.MUONROI_COUNCIL_AUTO_REMEDY;
+    process.env.MUONROI_LEADER_CONDUCTOR = "0";
+    delete process.env.MUONROI_COUNCIL_AUTO_REMEDY;
+    expect(leaderAutoRemedyEnabled()).toBe(false);
+    if (prevC === undefined) delete process.env.MUONROI_LEADER_CONDUCTOR;
+    else process.env.MUONROI_LEADER_CONDUCTOR = prevC;
+    if (prevR !== undefined) process.env.MUONROI_COUNCIL_AUTO_REMEDY = prevR;
+  });
+
+  it("opts out on exactly '0' with the conductor on", () => {
+    const prevC = process.env.MUONROI_LEADER_CONDUCTOR;
+    const prevR = process.env.MUONROI_COUNCIL_AUTO_REMEDY;
+    process.env.MUONROI_LEADER_CONDUCTOR = "1";
+    process.env.MUONROI_COUNCIL_AUTO_REMEDY = "0";
+    expect(leaderAutoRemedyEnabled()).toBe(false);
+    if (prevC === undefined) delete process.env.MUONROI_LEADER_CONDUCTOR;
+    else process.env.MUONROI_LEADER_CONDUCTOR = prevC;
+    if (prevR === undefined) delete process.env.MUONROI_COUNCIL_AUTO_REMEDY;
+    else process.env.MUONROI_COUNCIL_AUTO_REMEDY = prevR;
+  });
+});
+
+describe("autoRemedyWantsExtend (B4 trigger)", () => {
+  it("extends while criteria are unmet and progress is recent", () => {
+    expect(autoRemedyWantsExtend(2, 0)).toBe(true);
+    expect(autoRemedyWantsExtend(1, 1)).toBe(true);
+  });
+
+  it("does not extend once everything is met", () => {
+    expect(autoRemedyWantsExtend(0, 0)).toBe(false);
+  });
+
+  it("stops burning the ceiling on a stuck criterion (no progress for 2 rounds)", () => {
+    expect(autoRemedyWantsExtend(3, 2)).toBe(false);
+    expect(autoRemedyWantsExtend(3, 5)).toBe(false);
+  });
+});
+
+describe("diagnoseUnmetRemedy (B4 closing escalation)", () => {
+  it("flags a stuck criterion as needing evidence / rescope, not more debate", () => {
+    const out = diagnoseUnmetRemedy({ stuck: true, atCeiling: true, effectiveCeiling: 5, roundsSinceProgress: 3 });
+    expect(out).toContain("made no progress across the last 3 rounds");
+    expect(out).toContain("external evidence");
+  });
+
+  it("prioritises the stuck diagnosis over the ceiling one", () => {
+    const stuckAndCeiling = diagnoseUnmetRemedy({
+      stuck: true,
+      atCeiling: true,
+      effectiveCeiling: 3,
+      roundsSinceProgress: 2,
+    });
+    expect(stuckAndCeiling).toContain("made no progress");
+    expect(stuckAndCeiling).not.toContain("ceiling");
+  });
+
+  it("tells the user to raise the budget when the ceiling was the blocker", () => {
+    const out = diagnoseUnmetRemedy({ stuck: false, atCeiling: true, effectiveCeiling: 3, roundsSinceProgress: 1 });
+    expect(out).toContain("hit its 3-round ceiling");
+    expect(out).toContain("higher round budget");
+  });
+
+  it("falls back to a generic remedy for an ordinary early stop", () => {
+    const out = diagnoseUnmetRemedy({ stuck: false, atCeiling: false, effectiveCeiling: 5, roundsSinceProgress: 0 });
+    expect(out).toContain("extended round budget");
+    expect(out).not.toContain("ceiling");
+    expect(out).not.toContain("no progress");
   });
 });

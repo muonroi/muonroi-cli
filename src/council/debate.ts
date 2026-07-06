@@ -699,6 +699,13 @@ export async function* runDebate(
   // and the post-debate unmet-flag know what is still open. Empty before round 1
   // → the round-1 directive treats every criterion as unmet.
   let lastCriteriaMet: boolean[] = [];
+  // B4 — leader auto-remedy progress tracking. `bestCriteriaMetCount` is the
+  // high-water mark of pinned criteria met; `roundsSinceProgress` counts
+  // consecutive evaluated rounds that produced no NEW met criterion. Auto-extend
+  // fires only while progress is being made; a stuck criterion (no progress for
+  // 2 rounds) stops the budget burn and drops to a diagnostic closing verdict.
+  let bestCriteriaMetCount = 0;
+  let roundsSinceProgress = 0;
 
   for (let round = 1; round <= maxRounds; round++) {
     // User cancelled mid-debate — stop before spending another round of
@@ -1179,6 +1186,16 @@ export async function* runDebate(
           councilMeta: { criteriaMet: aligned },
         };
         lastCriteriaMet = aligned; // B5: feed next round's directive + final unmet-flag
+        // B4: track progress against the PINNED criteria. A round that meets a new
+        // criterion resets the stuck counter; a round that meets nothing new
+        // increments it. Auto-remedy reads these to decide extend-vs-give-up.
+        const pinnedMetNow = aligned.filter(Boolean).length;
+        if (pinnedMetNow > bestCriteriaMetCount) {
+          bestCriteriaMetCount = pinnedMetNow;
+          roundsSinceProgress = 0;
+        } else {
+          roundsSinceProgress++;
+        }
       }
       yield phaseDone({
         phaseId: evalPhaseId,
@@ -1322,24 +1339,39 @@ export async function* runDebate(
         break;
       }
 
-      // Leader asked for more rounds and we still have ceiling headroom.
-      // Both the absolute ceiling AND the kind-specific cap apply — leader
-      // can't override an implementation_plan cap of 3 by asking for 4.
-      if (
-        round === maxRounds &&
-        typeof evaluation.extendRounds === "number" &&
-        evaluation.extendRounds > 0 &&
-        maxRounds < effectiveCeiling
-      ) {
-        const requested = Math.max(1, Math.floor(evaluation.extendRounds));
+      // Budget-exhaustion remedy (B4). At the last planned round with ceiling
+      // headroom, two triggers extend the debate:
+      //   1. the leader explicitly asked (extendRounds > 0), OR
+      //   2. auto-remedy — pinned criteria are still unmet AND progress is being
+      //      made (a new criterion was met within the last 2 rounds).
+      // "Done = all pinned criteria met"; the ceiling is a leader-managed budget,
+      // not a give-up at the initial plan. A stuck criterion (no progress for 2
+      // rounds) fails the guard so we don't burn the ceiling chasing it — the
+      // closing verdict below then escalates it as stuck. Both the absolute
+      // ceiling AND the kind cap still apply (leader can't push an
+      // implementation_plan cap of 3 to 4).
+      const leaderAskedExtend = typeof evaluation.extendRounds === "number" && evaluation.extendRounds > 0;
+      const pinnedUnmet = hasPinned ? aligned.filter((m) => !m).length : 0;
+      const autoRemedy = leaderAutoRemedyEnabled() && autoRemedyWantsExtend(pinnedUnmet, roundsSinceProgress);
+      if (round === maxRounds && maxRounds < effectiveCeiling && (leaderAskedExtend || autoRemedy)) {
+        const requested = leaderAskedExtend ? Math.max(1, Math.floor(evaluation.extendRounds as number)) : 1;
         const newMax = Math.min(effectiveCeiling, maxRounds + requested);
         const grantedExtra = newMax - maxRounds;
         if (grantedExtra > 0) {
+          const why = leaderAskedExtend
+            ? "unresolved points remain"
+            : `${pinnedUnmet} pinned criteri${pinnedUnmet === 1 ? "on" : "a"} still unmet`;
           yield {
             type: "content",
-            content: `\n> Leader extending debate by ${grantedExtra} round${grantedExtra === 1 ? "" : "s"} (now ${newMax}/${ABSOLUTE_MAX_ROUNDS}) — unresolved points remain.\n`,
+            content: `\n> Leader extending debate by ${grantedExtra} round${grantedExtra === 1 ? "" : "s"} (now ${newMax}/${ABSOLUTE_MAX_ROUNDS}) — ${why}.\n`,
           };
           maxRounds = newMax;
+          // Steer the extra round at the open criteria when auto-remedy fired and
+          // the leader set no focus of its own.
+          if (autoRemedy && !leaderAskedExtend && !nextTopic) {
+            const openList = spec.successCriteria.filter((_, i) => !aligned[i]).map((c) => shortCriterion(c, 48));
+            nextTopic = `Close the unmet criteria: ${openList.join("; ")}`;
+          }
         }
       }
     } else {
@@ -1408,15 +1440,21 @@ export async function* runDebate(
     }
   }
 
-  // B4-lite (leader remedy, minimal): the debate has ended — via leader stop,
-  // convergence, or round-budget exhaustion. If pinned criteria remain unmet at
-  // this point, surface it as a visible leader verdict instead of letting
+  // B4 leader remedy: the debate has ended — via leader stop, convergence, or
+  // budget exhaustion (after auto-remedy exhausted the ceiling). If pinned
+  // criteria remain unmet, the leader emits a visible closing verdict that
+  // DIAGNOSES why it stopped and gives an actionable remedy, instead of letting
   // synthesis proceed as if the outcome were fully achieved (the "3/5 → stop,
-  // synthesize as if done" gap). Full remedy (re-team / auto-extend / user
-  // escalation) is a later increment; this at least never hides an unmet outcome.
+  // synthesize as if done" gap). Interactive user escalation (a mid-debate
+  // askcard) needs the respondToQuestion channel threaded into runDebate and is
+  // a separate increment; this at least never hides an unmet outcome and tells
+  // the user the specific next move.
   if (leaderConductorEnabled() && spec.successCriteria.length > 0) {
     const unmet = spec.successCriteria.filter((_, i) => !lastCriteriaMet[i]);
     if (unmet.length > 0) {
+      const atCeiling = maxRounds >= effectiveCeiling;
+      const stuck = roundsSinceProgress >= 2;
+      const remedy = diagnoseUnmetRemedy({ stuck, atCeiling, effectiveCeiling, roundsSinceProgress });
       yield {
         type: "council_message" as const,
         councilMessage: {
@@ -1426,7 +1464,7 @@ export async function* runDebate(
           text:
             `Debate ended with ${unmet.length} of ${spec.successCriteria.length} criteri` +
             `${unmet.length === 1 ? "on" : "a"} still unmet: ${unmet.map((c) => shortCriterion(c, 56)).join("; ")}. ` +
-            `Synthesis notes these as open — re-run with an extended round budget or a narrower scope to close them.`,
+            `Synthesis notes these as open — ${remedy}`,
         },
       };
     }
@@ -1608,6 +1646,54 @@ export function alignCriteriaMet(pinned: string[], status: Array<{ criterion?: s
  */
 export function leaderConductorEnabled(): boolean {
   return process.env.MUONROI_LEADER_CONDUCTOR !== "0";
+}
+
+/**
+ * B4 leader auto-remedy. When pinned criteria remain unmet at the round budget's
+ * end, the leader auto-extends toward them (up to the hard ceiling) instead of
+ * stopping at the initial plan — "done = all criteria met", ceiling is a managed
+ * budget. Default ON under the conductor; opt out with
+ * MUONROI_COUNCIL_AUTO_REMEDY=0 (fallback = only leader-requested extensions).
+ */
+export function leaderAutoRemedyEnabled(): boolean {
+  return leaderConductorEnabled() && process.env.MUONROI_COUNCIL_AUTO_REMEDY !== "0";
+}
+
+/**
+ * B4: does auto-remedy want to extend the budget this round? True while pinned
+ * criteria remain unmet AND progress is still being made (a new criterion was
+ * met within the last 2 rounds). A stuck debate (roundsSinceProgress ≥ 2) returns
+ * false so the ceiling isn't burned chasing a criterion that isn't moving.
+ */
+export function autoRemedyWantsExtend(pinnedUnmet: number, roundsSinceProgress: number): boolean {
+  return pinnedUnmet > 0 && roundsSinceProgress < 2;
+}
+
+/**
+ * B4: the diagnostic closing-remedy line for a debate that ended with unmet
+ * pinned criteria — distinguishes a stuck criterion (needs evidence/rescope)
+ * from a genuine ceiling hit (needs a higher budget) from an ordinary early
+ * stop, so the leader's final word is an actionable next move, not a shrug.
+ */
+export function diagnoseUnmetRemedy(opts: {
+  stuck: boolean;
+  atCeiling: boolean;
+  effectiveCeiling: number;
+  roundsSinceProgress: number;
+}): string {
+  if (opts.stuck) {
+    return (
+      `these made no progress across the last ${opts.roundsSinceProgress} rounds — ` +
+      `they likely need external evidence (research) or a narrower scope, not more debate.`
+    );
+  }
+  if (opts.atCeiling) {
+    return (
+      `the debate hit its ${opts.effectiveCeiling}-round ceiling with these open — ` +
+      `re-run with a higher round budget or split the scope.`
+    );
+  }
+  return `re-run with an extended round budget or a narrower scope to close them.`;
 }
 
 /** One-line criterion label for directive/verdict bodies. */
