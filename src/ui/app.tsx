@@ -977,7 +977,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                               name={semName}
                               value={cm.text}
                             >
-                              <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} />
+                              <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} theme={t} />
                             </Semantic>
                           );
                         }
@@ -1073,7 +1073,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                               name={`${cm.kind}:${cm.speaker?.role ?? "?"}`}
                               value={cm.text}
                             >
-                              <CouncilSynthesisBanner key={idx} msg={cm} />
+                              <CouncilSynthesisBanner key={idx} msg={cm} theme={t} />
                             </Semantic>
                           ))}
                         </>

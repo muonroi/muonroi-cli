@@ -1,9 +1,10 @@
 import type { CouncilMessage } from "../../types/index.js";
-import { dark } from "../theme.js";
+import type { Theme } from "../theme.js";
 
 export interface CouncilLeaderBubbleProps {
   msg: CouncilMessage;
   terminalCols: number;
+  theme: Theme;
 }
 
 export function buildLeaderHeader(round: number | undefined): string {
@@ -15,21 +16,15 @@ export function buildLeaderHeader(round: number | undefined): string {
  * speakers) instead of a centered narrow bubble — a muted gray left bar marks
  * it as the moderator's turn while keeping the single downward reading flow.
  */
-export function CouncilLeaderBubble({ msg }: CouncilLeaderBubbleProps) {
+export function CouncilLeaderBubble({ msg, theme: t }: CouncilLeaderBubbleProps) {
   const header = buildLeaderHeader(msg.round);
 
   return (
-    <box
-      flexDirection="column"
-      marginBottom={1}
-      border={["left"]}
-      borderColor={dark.councilLeaderBorder}
-      paddingLeft={2}
-    >
-      <text fg={dark.textMuted} attributes={1}>
+    <box flexDirection="column" marginBottom={1} border={["left"]} borderColor={t.councilLeaderBorder} paddingLeft={2}>
+      <text fg={t.textMuted} attributes={1}>
         {header}
       </text>
-      <text fg={dark.textMuted}>{msg.text.trim()}</text>
+      <text fg={t.textMuted}>{msg.text.trim()}</text>
     </box>
   );
 }

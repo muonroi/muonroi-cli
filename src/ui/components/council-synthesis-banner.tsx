@@ -1,11 +1,11 @@
 import type { CouncilMessage } from "../../types/index.js";
-import { dark, type Theme } from "../theme.js";
+import type { Theme } from "../theme.js";
 import { truncateCodeBlocks } from "./code-block-truncate.js";
 import { CouncilConclusionCard, parseConclusion } from "./council-conclusion-card.js";
 
 export interface CouncilSynthesisBannerProps {
   msg: CouncilMessage;
-  theme?: Theme;
+  theme: Theme;
 }
 
 export function buildSynthesisTitle(round: number | undefined): string {
@@ -18,7 +18,7 @@ export function buildSynthesisTitle(round: number | undefined): string {
  * verdict from the debate turns while staying in the same downward stream (no
  * centered/full-width banner that broke the chat flow).
  */
-export function CouncilSynthesisBanner({ msg, theme: t = dark }: CouncilSynthesisBannerProps) {
+export function CouncilSynthesisBanner({ msg, theme: t }: CouncilSynthesisBannerProps) {
   // When the synthesis is a structured evaluation/decision JSON, render it as a
   // scannable conclusion card instead of dumping raw JSON as freetext. Prose
   // syntheses (no parseable JSON object) fall through to the plain-text path.

@@ -1,4 +1,4 @@
-import { dark, type Theme } from "../theme.js";
+import type { Theme } from "../theme.js";
 
 /**
  * Structured post-debate conclusion, parsed from the leader synthesis JSON.
@@ -274,10 +274,10 @@ export interface CouncilConclusionCardProps {
   conclusion: ParsedConclusion;
   /** Round number for a per-round synthesis; undefined = final synthesis. */
   round?: number;
-  theme?: Theme;
+  theme: Theme;
 }
 
-export function CouncilConclusionCard({ conclusion, round, theme: t = dark }: CouncilConclusionCardProps) {
+export function CouncilConclusionCard({ conclusion, round, theme: t }: CouncilConclusionCardProps) {
   const title = round === undefined ? "Final Conclusion" : `Round ${round} Conclusion`;
   return (
     <box
