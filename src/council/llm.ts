@@ -22,6 +22,7 @@ import { logger } from "../utils/logger.js";
 import { loadMcpServers } from "../utils/settings.js";
 import { withVisibleRetry } from "../utils/visible-retry.js";
 import { buildResearchSystemPrompt } from "./prompts.js";
+import { stripThinkBlocks } from "./strip-think.js";
 import type { CouncilLLM, CouncilStats, ToolTraceEmitter, UsageCallback } from "./types.js";
 
 /**
@@ -357,7 +358,7 @@ export function createCouncilLLM(
       if (mock) {
         stats.calls++;
         const result = await mock.complete({ prompt });
-        return result.text;
+        return stripThinkBlocks(result.text);
       }
       const providerId = detectProviderForModel(modelId);
       const factory = await resolveCouncilFactory(providerId);
@@ -432,7 +433,7 @@ export function createCouncilLLM(
           finishReason: (result as { finishReason?: string }).finishReason,
           usage: (result as { usage?: unknown }).usage,
         });
-        return result.text;
+        return stripThinkBlocks(result.text);
       } catch (err) {
         cleanupTimeout();
         writeDebugRecord({
@@ -467,7 +468,7 @@ export function createCouncilLLM(
       if (mock) {
         stats.calls++;
         const result = await mock.complete({ prompt });
-        return { text: result.text, toolCalls: [] };
+        return { text: stripThinkBlocks(result.text), toolCalls: [] };
       }
       const providerId = detectProviderForModel(modelId);
       const factory = await resolveCouncilFactory(providerId);
@@ -609,7 +610,7 @@ export function createCouncilLLM(
           usage: (result as { usage?: unknown }).usage,
         });
         return {
-          text: result.text,
+          text: stripThinkBlocks(result.text),
           toolCalls: toolCalls as Array<{ toolName: string; result?: unknown }>,
         };
       } catch (err: unknown) {
@@ -649,7 +650,7 @@ export function createCouncilLLM(
       if (mock) {
         stats.calls++;
         const result = await mock.complete({ prompt: topic });
-        return result.text;
+        return stripThinkBlocks(result.text);
       }
       const providerId = detectProviderForModel(modelId);
       const factory = await resolveCouncilFactory(providerId);
@@ -797,7 +798,7 @@ export function createCouncilLLM(
         }
 
         stats.calls++;
-        return result.text + internetGapWarning;
+        return stripThinkBlocks(result.text) + internetGapWarning;
       } catch (err: unknown) {
         cleanupTimeout();
         const errMsg = err instanceof Error ? err.message : String(err);
