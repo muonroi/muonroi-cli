@@ -563,6 +563,13 @@ export interface ModelInfo {
   multiAgent?: boolean;
   supportsClientTools?: boolean;
   supportsMaxOutputTokens?: boolean;
+  /**
+   * When set, the provider rejects any temperature other than this exact value
+   * (e.g. Moonshot/Kimi: "only 1 is allowed for this model"). Callers must send
+   * this value verbatim rather than their preferred temperature — see
+   * `resolveTemperature` in src/providers/capabilities.ts.
+   */
+  fixedTemperature?: number;
   defaultReasoningEffort?: ReasoningEffort;
   supportsReasoningEffort?: boolean;
   thinkingType?: "enabled" | "adaptive";

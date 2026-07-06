@@ -6,7 +6,7 @@ import { emitMatches } from "../ee/render.js";
 import type { McpToolBundle } from "../mcp/runtime.js";
 import { buildMcpToolSet } from "../mcp/runtime.js";
 import { getModelInfo } from "../models/registry.js";
-import { getProviderCapabilities } from "../providers/capabilities.js";
+import { getProviderCapabilities, resolveTemperature } from "../providers/capabilities.js";
 import { loadKeyForProvider, ProviderKeyMissingError } from "../providers/keychain.js";
 import { createProviderFactoryAsync, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
@@ -378,7 +378,14 @@ export function createCouncilLLM(
                   system,
                   prompt,
                   maxOutputTokens: maxTokens,
-                  temperature: 0.7,
+                  // Never hardcode temperature: some upstreams (Moonshot/Kimi via
+                  // opencode-go) reject any value but their pinned one, which
+                  // failed every clarify/spec call on a Kimi session. resolveTemperature
+                  // omits the field or clamps to the model's fixed value.
+                  ...(() => {
+                    const t = resolveTemperature(providerId, runtime.modelInfo, 0.7);
+                    return t === undefined ? {} : { temperature: t };
+                  })(),
                   // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent
                   // exponential backoff (2,4,8,16,32s). When SiliconFlow rate-limits
                   // with 429, user now sees "[retry] rate-limited (429) — waiting Xs
@@ -536,7 +543,11 @@ export function createCouncilLLM(
                   // prompts. 6144 leaves ~4000 tokens for text after typical reasoning
                   // overhead and avoids cuts mid-thought.
                   maxOutputTokens: 6144,
-                  temperature: 0.7,
+                  // See generate(): capability-aware temperature (omit / clamp).
+                  ...(() => {
+                    const t = resolveTemperature(providerId, runtime.modelInfo, 0.7);
+                    return t === undefined ? {} : { temperature: t };
+                  })(),
                   // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent
                   // exponential backoff (2,4,8,16,32s). When SiliconFlow rate-limits
                   // with 429, user now sees "[retry] rate-limited (429) — waiting Xs
@@ -703,7 +714,11 @@ export function createCouncilLLM(
                     return stripped === messages ? {} : { messages: stripped };
                   },
                   maxOutputTokens: 4096,
-                  temperature: 0.3,
+                  // See generate(): capability-aware temperature (omit / clamp).
+                  ...(() => {
+                    const t = resolveTemperature(providerId, runtime.modelInfo, 0.3);
+                    return t === undefined ? {} : { temperature: t };
+                  })(),
                   // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent
                   // exponential backoff (2,4,8,16,32s). When SiliconFlow rate-limits
                   // with 429, user now sees "[retry] rate-limited (429) — waiting Xs

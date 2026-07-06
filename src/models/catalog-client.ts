@@ -116,6 +116,8 @@ export interface CatalogModel {
   reasoning: boolean;
   thinking_type?: string | null;
   supports_effort?: boolean;
+  /** Provider pins temperature to this exact value (e.g. Moonshot/Kimi = 1). */
+  fixed_temperature?: number | null;
   description: string;
   aliases?: string[];
   default_reasoning_effort?: string | null;
@@ -143,6 +145,7 @@ const CatalogModelSchema = z
     reasoning: z.boolean(),
     thinking_type: z.string().nullable().optional(),
     supports_effort: z.boolean().optional(),
+    fixed_temperature: z.number().nullable().optional(),
     description: z.string(),
     aliases: z.array(z.string()).optional(),
     default_reasoning_effort: z.string().nullable().optional(),
@@ -364,6 +367,7 @@ export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
     provider: m.provider,
     aliases: m.aliases,
     supportsReasoningEffort: m.supports_effort ?? false,
+    fixedTemperature: m.fixed_temperature ?? undefined,
     defaultReasoningEffort: (m.default_reasoning_effort as ReasoningEffort) ?? undefined,
     thinkingType: m.thinking_type as ModelInfo["thinkingType"],
     supportsVision: m.supports_vision ?? true,
