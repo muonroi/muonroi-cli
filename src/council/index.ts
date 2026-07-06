@@ -152,6 +152,35 @@ export function pickPostDebateRecommendation(input: {
   return { value: "save_exit", reason: "Outcome looks solid — save and move on." };
 }
 
+/**
+ * Decide whether — and with what prompt — the agent session should keep working
+ * after the post-debate askcard, given the action the user chose.
+ *
+ * Single source of truth for BOTH continuation callers (the `/council` slash path
+ * in orchestrator.runCouncilV2 and the auto-council path in tool-engine), which
+ * previously diverged: the slash path only continued on `continue_session`, while
+ * auto-council continued UNCONDITIONALLY with a fixed "Proceed with the recommended
+ * action items" prompt — meaningless for an evaluation/decision debate that has no
+ * action items, so the chosen action was effectively ignored.
+ *
+ * Returns the re-entry prompt to feed back into processMessage, or `null` to stop
+ * at the composer (the synthesis IS the deliverable).
+ *   - continue_session → carry the conclusion forward on the ORIGINAL task.
+ *   - generate_plan / implement → execute the recommended action items.
+ *   - save_exit / refine / retry_synthesis / follow-up / undefined → stop (those
+ *     either already re-synthesized inside runCouncil or are terminal by intent).
+ */
+export function postDebateContinuation(action: string | undefined, synthesis: string): string | null {
+  if (!synthesis || !action) return null;
+  if (action === "generate_plan" || action === "implement") {
+    return `Council debate completed. Synthesis:\n\n${synthesis}\n\nProceed with the recommended action items.`;
+  }
+  if (action === "continue_session") {
+    return `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`;
+  }
+  return null;
+}
+
 export async function* runCouncil(
   topic: string,
   sessionModelId: string,

@@ -712,15 +712,21 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       userModelMessage,
     });
     const synthesis = deps.councilManager.lastSynthesis;
+    const chosenAction = deps.councilManager.lastPostDebateAction;
     deps.councilManager.setLastSynthesis(null);
-    if (synthesis) {
+    deps.councilManager.setLastPostDebateAction(null);
+    // Honor the user's post-debate choice instead of always continuing: an
+    // evaluation/decision debate whose deliverable is the conclusion (default
+    // save_exit) now returns to the composer rather than being force-fed a
+    // meaningless "proceed with the action items" turn. postDebateContinuation
+    // is shared with the /council slash path (orchestrator.runCouncilV2).
+    const { postDebateContinuation } = await import("../council/index.js");
+    const continuationPrompt = synthesis ? postDebateContinuation(chosenAction ?? undefined, synthesis) : null;
+    if (continuationPrompt) {
       yield { type: "content", content: "\n[Auto-continuing with council recommendations...]\n" };
       deps.councilManager.setContinuation(true);
       try {
-        yield* deps.processMessage(
-          `Council debate completed. Synthesis:\n\n${synthesis}\n\nProceed with the recommended action items.`,
-          observer,
-        );
+        yield* deps.processMessage(continuationPrompt, observer);
       } finally {
         deps.councilManager.setContinuation(false);
       }

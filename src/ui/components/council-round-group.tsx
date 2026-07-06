@@ -27,11 +27,35 @@ export interface CouncilRoundGroupProps {
  * of a bare "done". No click-to-open accordion (the feed has no selection
  * cursor); the summary is always visible.
  */
+/** Color the leader's decision by whether the round landed well. */
+function decisionColor(decision: NonNullable<CouncilRoundRecord["leaderDecision"]>, theme: Theme): string {
+  switch (decision) {
+    case "stop":
+      return theme.diffAddedFg; // sufficient — a clean landing
+    case "aborted":
+    case "circuit-break":
+    case "eval-unavailable":
+      return theme.diffRemovedFg; // ended abnormally
+    default:
+      return theme.accent; // continue / extend — still in progress
+  }
+}
+
 export function CouncilRoundGroup({ record, children, theme }: CouncilRoundGroupProps) {
   const running = record.state === "running";
   const headParts = [`Round ${record.round}`];
   if (record.topic) headParts.push(record.topic);
   if (record.emergent) headParts.push("(emergent)");
+
+  // Outcome verdict: how many acceptance criteria the round met. Colored + marked
+  // so a scan of the transcript shows at a glance which rounds landed cleanly.
+  const total = record.criteriaTotal ?? -1;
+  const met = record.criteriaMet ?? 0;
+  const hasCriteria = total > 0;
+  const allMet = hasCriteria && met >= total;
+  const noneMet = hasCriteria && met === 0;
+  const outcomeColor = allMet ? theme.diffAddedFg : noneMet ? theme.diffRemovedFg : theme.mdItalic;
+  const outcomeMark = allMet ? "✓" : noneMet ? "✗" : "◐";
 
   return (
     <Semantic
@@ -66,15 +90,17 @@ export function CouncilRoundGroup({ record, children, theme }: CouncilRoundGroup
             {children}
           </box>
         ) : (
-          // Done round: outcome + leader decision summary.
+          // Done round: outcome verdict + leader decision summary.
           <box flexDirection="column">
-            {typeof record.criteriaTotal === "number" && record.criteriaTotal >= 0 && (
-              <text fg={theme.textMuted}>
-                {`Outcome: ${record.criteriaMet ?? 0}/${record.criteriaTotal} criteria met`}
+            {hasCriteria && (
+              <text fg={outcomeColor} attributes={1}>
+                {`${outcomeMark} Outcome: ${met}/${total} criteria met`}
               </text>
             )}
             {record.leaderDecision && (
-              <text fg={theme.textMuted}>{`Leader: ${DECISION_LABEL[record.leaderDecision]}`}</text>
+              <text fg={decisionColor(record.leaderDecision, theme)} attributes={1}>
+                {`Decision: ${DECISION_LABEL[record.leaderDecision]}`}
+              </text>
             )}
             {record.leaderReason && <text fg={theme.textMuted}>{record.leaderReason}</text>}
             {record.nextRoundFocus && <text fg={theme.textMuted}>{`Next focus: ${record.nextRoundFocus}`}</text>}

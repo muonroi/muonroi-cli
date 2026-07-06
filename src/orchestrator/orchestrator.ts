@@ -1943,7 +1943,7 @@ export class Agent {
       userModelMessage?: ModelMessage;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
-    const { runCouncil } = await import("../council/index.js");
+    const { runCouncil, postDebateContinuation } = await import("../council/index.js");
     const { createCouncilLLM } = await import("../council/llm.js");
     const councilStats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
     const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, councilStats);
@@ -2012,6 +2012,9 @@ export class Agent {
           runDir, // B1 — persist decisions.lock.md for the /council slash path
           onPostDebateAction: (action) => {
             chosenAction = action;
+            // Relay to the auto-council caller (tool-engine) so nested runs honor
+            // the user's choice instead of always continuing.
+            this.councilManager.setLastPostDebateAction(action);
           },
         },
       );
@@ -2043,25 +2046,25 @@ export class Agent {
         this.appendCompletedTurn(options.userModelMessage, [{ role: "assistant", content: synthesis }]);
       }
 
-      // "continue_session": keep working in THIS session with the debate result.
-      // Re-enter processMessage with the synthesis as context so the agent
-      // continues the original task — this also writes real message rows, which
-      // is what makes the session resumable (the /council slash path otherwise
-      // leaves no messages and is filtered from the resume picker). Guarded by
-      // ownsController so it fires ONLY on the top-level slash path, never when
-      // nested inside processMessage (auto-council) or drained by the runDebate
-      // tool — those callers manage their own continuation.
-      if (ownsController && chosenAction === "continue_session" && synthesis) {
+      // Keep working in THIS session when the chosen action calls for it
+      // (continue_session → carry the conclusion; generate_plan/implement →
+      // execute action items). postDebateContinuation is the single source of
+      // truth shared with the auto-council caller (tool-engine). Re-entering
+      // processMessage also writes real message rows, which is what makes the
+      // session resumable (the /council slash path otherwise leaves no messages
+      // and is filtered from the resume picker). Guarded by ownsController so it
+      // fires ONLY on the top-level slash path, never when nested inside
+      // processMessage (auto-council) or drained by the runDebate tool — those
+      // callers manage their own continuation.
+      const continuationPrompt = ownsController && synthesis ? postDebateContinuation(chosenAction, synthesis) : null;
+      if (continuationPrompt) {
         yield { type: "content", content: "\n[Continuing with the debate conclusion…]\n" };
         this.councilManager.setContinuation(true);
         try {
           // processMessage emits its own terminal `done`, which becomes the
           // consumer's break boundary — so the UI stops AFTER the continuation
           // turn, not before it.
-          yield* this.processMessage(
-            `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`,
-            options?.observer,
-          );
+          yield* this.processMessage(continuationPrompt, options?.observer);
         } finally {
           this.councilManager.setContinuation(false);
         }
