@@ -16,6 +16,7 @@ import type {
   CouncilConfig,
   CouncilLLM,
   CouncilParticipant,
+  DebateStance,
   DebateState,
   LeaderEvaluation,
 } from "./types.js";
@@ -583,7 +584,10 @@ export async function* runDebate(
   const openings = yield* tracedAsync(() => Promise.all(openingPromises), {
     phase: "opening",
     label: `Generating opening statements (${participants.length} participants in parallel)`,
-    detail: participants.map((p) => p.stance?.name ?? p.model).join(", "),
+    // Newline-joined "Name — lens" roster so the composing placeholder shows WHAT
+    // each speaker is tasked to argue (A: live debate preview) instead of a bare
+    // spinner during the atomic generateText window.
+    detail: formatSpeakerRoster(participants),
   });
 
   yield { type: "content", content: "\n── Opening Analysis ──\n" };
@@ -934,7 +938,9 @@ export async function* runDebate(
       {
         phase: "exchange",
         label: `Discussion round ${round} (${pairs.length} pair${pairs.length === 1 ? "" : "s"})`,
-        detail: pairs.map((p) => `${p.a.stance?.name ?? p.a.model}↔${p.b.stance?.name ?? p.b.model}`).join(", "),
+        // Distinct speakers with their lens (A: live debate preview) — dedup by
+        // formatted line so a speaker appearing in two pairs shows once.
+        detail: formatSpeakerRoster(pairs.flatMap((p) => [p.a, p.b])),
       },
     );
 
@@ -1489,6 +1495,24 @@ async function* evaluateDebate(
     // Continue debate if evaluation fails
   }
   return null;
+}
+
+/**
+ * Format a speaker list as newline-joined "Name — lens" rows for the composing
+ * placeholder (A: live debate preview). Prefers the concrete `focus`, falls back
+ * to the one-sentence `lens`, then to bare name. Dedups identical rows so a
+ * speaker in multiple pairs renders once. Returns undefined when nothing useful
+ * is available so the UI falls back to label-only.
+ */
+export function formatSpeakerRoster(list: Array<{ stance?: DebateStance; model: string }>): string | undefined {
+  const rows: string[] = [];
+  for (const s of list) {
+    const name = s.stance?.name ?? s.model;
+    const angle = s.stance?.focus?.trim() || s.stance?.lens?.trim();
+    const row = angle ? `${name} — ${angle}` : name;
+    if (row && !rows.includes(row)) rows.push(row);
+  }
+  return rows.length > 0 ? rows.join("\n") : undefined;
 }
 
 function countCitations(text: string): number {

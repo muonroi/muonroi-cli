@@ -1108,7 +1108,10 @@ export function useAppLogic(props: AppLogicProps) {
     });
   }, []);
   const [councilPlaceholders, setCouncilPlaceholders] = useState<
-    Map<string, { role: string; side: "left" | "right"; color: string; variant: "participant" | "leader" }>
+    Map<
+      string,
+      { role: string; side: "left" | "right"; color: string; variant: "participant" | "leader"; detail?: string }
+    >
   >(new Map());
 
   const resolveStyle = useRolePalette();
@@ -3431,6 +3434,7 @@ export function useAppLogic(props: AppLogicProps) {
                         side,
                         color: styleForRole?.color ?? t.councilLeaderBorder,
                         variant: isLeader ? "leader" : "participant",
+                        detail: cs.detail,
                       });
                       return next;
                     });
@@ -4249,6 +4253,7 @@ export function useAppLogic(props: AppLogicProps) {
                           side,
                           color: styleForRole?.color ?? t.councilLeaderBorder,
                           variant: isLeader ? "leader" : "participant",
+                          detail: cs.detail,
                         });
                         return next;
                       });
@@ -4510,6 +4515,7 @@ export function useAppLogic(props: AppLogicProps) {
                           side,
                           color: styleForRole?.color ?? t.councilLeaderBorder,
                           variant: isLeader ? "leader" : "participant",
+                          detail: cs.detail,
                         });
                         return next;
                       });

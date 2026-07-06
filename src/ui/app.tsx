@@ -1088,6 +1088,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         color={p.color}
                         theme={t}
                         variant={p.variant}
+                        detail={p.detail}
                       />
                     ))}
                     {/* Council question / preflight askcards render at the END of
