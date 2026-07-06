@@ -22,7 +22,11 @@ describe("scroll-lock E2E", () => {
   beforeAll(async () => {
     ctx = await spawnHarness({ env: { MUONROI_SCROLL_LOCK: "1" } });
     await ctx.driver.wait_for({ idle: true, timeoutMs: 15_000 });
-  }, 20_000);
+    // Mount guard: idle can fire before React mounts (seq=0 empty frame race);
+    // typing then drops the keys and `id=log` never appears. Same guard as
+    // cost-leak-tui-smoke / error-states.
+    await ctx.driver.wait_for({ selector: "role=textbox", timeoutMs: 10_000 });
+  }, 30_000);
 
   afterAll(() => ctx?.cleanup());
 
