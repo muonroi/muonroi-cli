@@ -36,6 +36,7 @@ import {
   detectProviderForModel,
   requireRuntimeProvider,
   resolveModelRuntime as resolveRuntime,
+  resolveTemperatureParam,
 } from "../providers/runtime.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
 import { statusBarStore } from "../state/status-bar-store.js";
@@ -233,7 +234,7 @@ async function genTitle(
       model: runtime.model,
       system: TITLE_SYSTEM_PROMPT,
       prompt: `User's first message:\n\n${snippet}\n\nTitle:`,
-      temperature: 0.3,
+      ...resolveTemperatureParam(runtime, 0.3),
       ...(runtime.modelInfo?.supportsMaxOutputTokens === false ? {} : { maxOutputTokens: 64 }),
       ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     });
@@ -1293,7 +1294,7 @@ export class Agent {
                 modelId: childRuntime.modelId,
                 system: childSystem,
                 messages: [...childMessages, ...turnMessages],
-                temperature: request.agent === "explore" ? 0.2 : 0.5,
+                temperature: childRuntime.modelInfo?.fixedTemperature ?? (request.agent === "explore" ? 0.2 : 0.5),
                 maxOutputTokens: !childCaps.acceptsParam("maxOutputTokens", childRuntime.modelInfo)
                   ? undefined
                   : Math.min(this.maxTokens, 8_192),
@@ -3245,7 +3246,7 @@ export class Agent {
           model: runtime.model,
           system: systemPrompt,
           prompt: `Child Sub-session is stuck. Question:\n${question}`,
-          temperature: 0.2,
+          ...resolveTemperatureParam(runtime, 0.2),
           ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
         });
 

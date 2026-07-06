@@ -8,7 +8,11 @@
 
 import { generateText, type ModelMessage } from "ai";
 import { serializeConversation } from "../../orchestrator/compaction.js";
-import { type ProviderFactory as LegacyProvider, resolveModelRuntime } from "../../providers/runtime.js";
+import {
+  type ProviderFactory as LegacyProvider,
+  resolveModelRuntime,
+  resolveTemperatureParam,
+} from "../../providers/runtime.js";
 import { extractPreservedBlocks } from "./preserve.js";
 
 export interface ExtractedDecisions {
@@ -69,7 +73,7 @@ export async function extractDecisions(
         system:
           'You are an AI context compaction agent. Extract all core decisions, technical facts, and project constraints from this conversation. Return strict JSON with { "decisions": string[], "facts": string[], "constraints": string[] }.',
         prompt: `Current conversation messages:\n\n${serialized}\n\nExtract decisions, facts, and constraints.${extraPrompt} Return strict JSON ONLY.`,
-        temperature: 0.1,
+        ...resolveTemperatureParam(runtime, 0.1),
       });
 
       const match = result.text.match(/\{[\s\S]*\}/);

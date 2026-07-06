@@ -18,6 +18,7 @@ import {
   createProviderFactory,
   detectProviderForModel,
   resolveModelRuntime,
+  resolveTemperatureParam,
   shouldDropParam,
 } from "../providers/runtime.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
@@ -201,7 +202,7 @@ export class CouncilManager {
       system,
       prompt,
       ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: maxTokens }),
-      ...(shouldDropParam(runtime, "temperature") ? {} : { temperature: 0.7 }),
+      ...resolveTemperatureParam(runtime, 0.7),
       ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     });
     this.stats.calls++;
@@ -255,7 +256,7 @@ export class CouncilManager {
         tools: researchTools,
         stopWhen: stepCountIs(10),
         ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 4096 }),
-        ...(shouldDropParam(runtime, "temperature") ? {} : { temperature: 0.3 }),
+        ...resolveTemperatureParam(runtime, 0.3),
         ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
         ...(signal ? { abortSignal: signal } : {}),
       });

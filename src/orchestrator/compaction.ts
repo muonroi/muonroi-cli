@@ -2,7 +2,7 @@ import { generateText, type ModelMessage } from "ai";
 import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { ProviderFactory as LegacyProvider } from "../providers/runtime.js";
-import { requireRuntimeProvider, resolveModelRuntime } from "../providers/runtime.js";
+import { requireRuntimeProvider, resolveModelRuntime, resolveTemperatureParam } from "../providers/runtime.js";
 import { logger } from "../utils/logger.js";
 import { COMPACT_PROPOSER_SYSTEM_PROMPT } from "./compaction-proposer-prompt.js";
 import { containsEncryptedReasoning } from "./reasoning";
@@ -48,7 +48,7 @@ export async function proposeCompaction(
       prompt: `Current conversation messages:\n\n${serialized}\n\nDecide if compaction is needed and what to keep/drop/summarize. Return strict JSON.`,
       abortSignal: signal,
       maxRetries: 1,
-      temperature: 0.1,
+      ...resolveTemperatureParam(runtime, 0.1),
       ...(!compactCaps.acceptsParam("maxOutputTokens", runtime.modelInfo) ? {} : { maxOutputTokens: 2048 }),
       ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     });
@@ -655,7 +655,7 @@ async function summarizeConversation(
     prompt: promptParts.filter(Boolean).join("\n\n"),
     abortSignal: signal,
     maxRetries: 0,
-    temperature: 0.2,
+    ...resolveTemperatureParam(runtime, 0.2),
     ...(!compactCaps.acceptsParam("maxOutputTokens", runtime.modelInfo) ? {} : { maxOutputTokens: effectiveMax }),
     ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
   });

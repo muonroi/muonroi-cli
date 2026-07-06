@@ -348,6 +348,26 @@ export function shouldDropParam(
   return runtime.unsupportedParams?.includes(param) ?? false;
 }
 
+/**
+ * Resolve the `temperature` spread for a streamText/generateText call.
+ *
+ * Returns `{}` (omit the param) when the model does not accept temperature
+ * (reasoning models, OAuth `unsupportedParams`), `{ temperature: <fixed> }`
+ * when the catalog pins a `fixed_temperature` (e.g. Moonshot/Kimi via
+ * opencode-go reject any value but `1` with "invalid temperature: only 1 is
+ * allowed for this model"), otherwise `{ temperature: <desired> }`.
+ *
+ * Every orchestrator call site that sets a temperature MUST go through this
+ * helper — inlining `temperature: 0.7` is what made every Kimi tool-loop turn
+ * fail wholesale (mirrors `resolveTemperature` used in src/council/llm.ts).
+ */
+export function resolveTemperatureParam(runtime: ResolvedModelRuntime, desired: number): { temperature?: number } {
+  if (shouldDropParam(runtime, "temperature")) return {};
+  const fixed = runtime.modelInfo?.fixedTemperature;
+  if (typeof fixed === "number") return { temperature: fixed };
+  return { temperature: desired };
+}
+
 export function detectProviderForModel(modelId: string): ProviderId {
   const info = getModelInfo(modelId);
   if (info?.provider) {

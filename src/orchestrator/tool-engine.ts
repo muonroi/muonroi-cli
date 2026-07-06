@@ -111,6 +111,7 @@ import {
   type ResolvedModelRuntime,
   requireRuntimeProvider,
   type resolveModelRuntime,
+  resolveTemperatureParam,
   shouldDropParam,
 } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
@@ -1982,7 +1983,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             }
             return withSteers({ messages: coalesced });
           },
-          ...(dropParam("temperature") ? {} : { temperature: 0.7 }),
+          ...resolveTemperatureParam(runtime, 0.7),
           ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
           ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
           experimental_onStepStart: (event: unknown) => {
