@@ -695,6 +695,10 @@ export async function* runDebate(
   // P5 — topic carried from the prior round's leader nextRoundFocus, shown as the
   // next round's heading in the round-grouped transcript.
   let nextTopic: string | undefined;
+  // B5 — prior round's aligned criteriaMet, so each round's directive/verdict
+  // and the post-debate unmet-flag know what is still open. Empty before round 1
+  // → the round-1 directive treats every criterion as unmet.
+  let lastCriteriaMet: boolean[] = [];
 
   for (let round = 1; round <= maxRounds; round++) {
     // User cancelled mid-debate — stop before spending another round of
@@ -765,6 +769,23 @@ export async function* runDebate(
       },
     });
     yield roundRec("running");
+
+    // B5 — pre-round leader DIRECTIVE. Before the exchanges run, the leader
+    // states this round's goal and which pinned criteria are still unmet, so it
+    // visibly conducts each round instead of only grading afterwards. Gated on
+    // pinned criteria (nothing to steer toward otherwise) + the conductor flag.
+    if (leaderConductorEnabled() && spec.successCriteria.length > 0) {
+      yield {
+        type: "council_message" as const,
+        councilMessage: {
+          kind: "leader" as const,
+          phase: "directive" as const,
+          speaker: { role: "Leader", model: leaderModelId },
+          round,
+          text: buildLeaderDirective(round, spec.successCriteria, lastCriteriaMet, roundTopic),
+        },
+      };
+    }
 
     const pairResults = yield* tracedAsync(
       () =>
@@ -1141,11 +1162,14 @@ export async function* runDebate(
       // (index-aligned, best-effort text match as a fallback) and push it to the
       // rail so the user sees live ✓/○ against the exact outcome they saw — not
       // an opaque "N/M". Only when the spec has real pinned criteria.
-      if (spec.successCriteria.length > 0) {
+      const hasPinned = spec.successCriteria.length > 0;
+      const aligned = hasPinned ? alignCriteriaMet(spec.successCriteria, evaluation.criteriaStatus) : [];
+      if (hasPinned) {
         yield {
           type: "council_meta" as const,
-          councilMeta: { criteriaMet: alignCriteriaMet(spec.successCriteria, evaluation.criteriaStatus) },
+          councilMeta: { criteriaMet: aligned },
         };
+        lastCriteriaMet = aligned; // B5: feed next round's directive + final unmet-flag
       }
       yield phaseDone({
         phaseId: evalPhaseId,
@@ -1154,13 +1178,21 @@ export async function* runDebate(
         startedAt: evalStart,
         detail: `${metCount}/${total} criteria met · ${evaluation.reason.slice(0, 80)}`,
       });
+      // B5: post-round VERDICT. With pinned criteria + conductor on, list each
+      // criterion's ✓/○ and the focus handed to the next round; otherwise fall
+      // back to the plain one-line eval (pre-B5 behavior).
+      const verdictText =
+        leaderConductorEnabled() && hasPinned
+          ? buildLeaderVerdict(spec.successCriteria, aligned, evaluation.reason, evaluation.nextRoundFocus)
+          : `${metCount}/${total} criteria met — ${evaluation.reason}`;
       yield {
         type: "council_message" as const,
         councilMessage: {
           kind: "leader" as const,
+          phase: leaderConductorEnabled() && hasPinned ? ("verdict" as const) : undefined,
           speaker: { role: "Leader", model: leaderModelId },
           round,
-          text: `${metCount}/${total} criteria met — ${evaluation.reason}`,
+          text: verdictText,
         },
       };
 
@@ -1366,6 +1398,30 @@ export async function* runDebate(
     }
   }
 
+  // B4-lite (leader remedy, minimal): the debate has ended — via leader stop,
+  // convergence, or round-budget exhaustion. If pinned criteria remain unmet at
+  // this point, surface it as a visible leader verdict instead of letting
+  // synthesis proceed as if the outcome were fully achieved (the "3/5 → stop,
+  // synthesize as if done" gap). Full remedy (re-team / auto-extend / user
+  // escalation) is a later increment; this at least never hides an unmet outcome.
+  if (leaderConductorEnabled() && spec.successCriteria.length > 0) {
+    const unmet = spec.successCriteria.filter((_, i) => !lastCriteriaMet[i]);
+    if (unmet.length > 0) {
+      yield {
+        type: "council_message" as const,
+        councilMessage: {
+          kind: "leader" as const,
+          phase: "verdict" as const,
+          speaker: { role: "Leader", model: leaderModelId },
+          text:
+            `Debate ended with ${unmet.length} of ${spec.successCriteria.length} criteri` +
+            `${unmet.length === 1 ? "on" : "a"} still unmet: ${unmet.map((c) => shortCriterion(c, 56)).join("; ")}. ` +
+            `Synthesis notes these as open — re-run with an extended round budget or a narrower scope to close them.`,
+        },
+      };
+    }
+  }
+
   // Compute cumulative evidence density across the WHOLE debate, not just
   // the leader's last per-round evaluation. Citations are concentrated in
   // early rounds (when partners have fresh fact-claims to verify) while
@@ -1533,6 +1589,60 @@ export function alignCriteriaMet(pinned: string[], status: Array<{ criterion?: s
     });
     return hit?.met === true;
   });
+}
+
+/**
+ * B5 leader-conductor visibility. Default ON; opt out with
+ * MUONROI_LEADER_CONDUCTOR=0 (fallback = pre-B5 behavior, no directive/verdict
+ * messages — keeps headless/legacy transcripts unchanged).
+ */
+export function leaderConductorEnabled(): boolean {
+  return process.env.MUONROI_LEADER_CONDUCTOR !== "0";
+}
+
+/** One-line criterion label for directive/verdict bodies. */
+export function shortCriterion(c: string, max = 64): string {
+  const t = c.trim().replace(/\s+/g, " ");
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+/**
+ * B5: build the leader's pre-round DIRECTIVE body — the round goal plus the
+ * criteria still unmet going into this round. `metSoFar` is the prior round's
+ * aligned criteriaMet (empty before round 1 → everything is unmet).
+ */
+export function buildLeaderDirective(round: number, criteria: string[], metSoFar: boolean[], focus?: string): string {
+  const pending = criteria.filter((_, i) => !metSoFar[i]);
+  const lines: string[] = [];
+  const trimmedFocus = focus?.trim();
+  lines.push(
+    trimmedFocus
+      ? `Focus: ${trimmedFocus}`
+      : round === 1
+        ? "Establish concrete evidence for every outcome criterion."
+        : "Drive the remaining criteria to done.",
+  );
+  lines.push(
+    pending.length > 0
+      ? `Unmet (${pending.length}/${criteria.length}): ${pending.map((c) => shortCriterion(c, 56)).join("; ")}`
+      : "All criteria met so far — pressure-test the weakest before closing.",
+  );
+  return lines.join("\n");
+}
+
+/**
+ * B5: build the leader's post-round VERDICT body — per-criterion ✓/○ against the
+ * pinned outcome, the leader's reason, and the focus it hands to the next round.
+ */
+export function buildLeaderVerdict(criteria: string[], met: boolean[], reason: string, nextFocus?: string): string {
+  const metCount = met.filter(Boolean).length;
+  const lines: string[] = [`${metCount}/${criteria.length} criteria met — ${reason.trim()}`];
+  criteria.forEach((c, i) => {
+    lines.push(`${met[i] ? "✓" : "○"} ${shortCriterion(c, 56)}`);
+  });
+  const nf = nextFocus?.trim();
+  if (nf && metCount < criteria.length) lines.push(`→ Next: ${nf}`);
+  return lines.join("\n");
 }
 
 export function formatSpeakerRoster(list: Array<{ stance?: DebateStance; model: string }>): string | undefined {

@@ -477,6 +477,10 @@ export interface CouncilMessage {
   speaker: { role: string; model: string };
   partner?: { role: string }; // debate turns only
   round?: number; // debate / leader only
+  // Leader-only (B5 conductor). "directive" = pre-round steering the leader
+  // issues BEFORE the exchanges (round goal + which criteria are still unmet);
+  // "verdict" = post-round grading AFTER the eval. Absent → a plain leader eval.
+  phase?: "directive" | "verdict";
   text: string; // raw markdown body
   toolCalls?: { name: string }[];
   attempts?: number; // >1 → "recovered on retry" badge
