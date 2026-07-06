@@ -3060,6 +3060,16 @@ export function useAppLogic(props: AppLogicProps) {
         key?.stopPropagation();
         return true;
       }
+      // A pending council/preflight askcard owns the Escape key: the card's
+      // own handler cancels it (routed as an empty answer → save-and-exit
+      // semantics). Without this guard the renderer-internal Escape listener
+      // (below) also fired Stage 2 — clearLiveTurnUi() + abort() — wiping the
+      // whole debate transcript the instant the user dismissed the card
+      // (live-verified 2026-07-06). Mirrors the pendingCouncilQuestionRef
+      // guard the typing-jump listener already has.
+      if (pendingCouncilQuestionRef.current || preflightCardStateRef.current) {
+        return false;
+      }
       if (!isProcessingRef.current) return false;
       key?.preventDefault();
       key?.stopPropagation();
@@ -3084,6 +3094,9 @@ export function useAppLogic(props: AppLogicProps) {
 
   useEffect(() => {
     const onInternalKey = (key: KeyEvent) => {
+      // Skip keys another handler already consumed (e.g. the council askcard
+      // Esc-cancel path calls preventDefault before nulling its refs).
+      if ((key as { defaultPrevented?: boolean }).defaultPrevented) return;
       if (isEscapeKey(key)) {
         interruptActiveRun(key);
       }
@@ -5485,6 +5498,15 @@ export function useAppLogic(props: AppLogicProps) {
       if (pendingQuestion && councilCardStateRef.current) {
         const cardKey = mapCouncilCardKey(key);
         if (cardKey) {
+          // Mark the key consumed BEFORE mutating card state: the renderer's
+          // internal Escape listener (onInternalKey → interruptActiveRun) runs
+          // AFTER this handler in the same dispatch, and by then the cancel
+          // branch below has already nulled pendingCouncilQuestionRef — so the
+          // ref guard alone can't tell "card just handled this Esc" from "no
+          // card at all", and Stage 2 wiped the whole debate transcript
+          // (live-verified stack trace 2026-07-06).
+          key.preventDefault?.();
+          key.stopPropagation?.();
           const result = reduceCardKey(pendingQuestion, councilCardStateRef.current, cardKey);
           setCouncilCardStateSync(result.state);
           if (result.emit?.type === "answer") {
