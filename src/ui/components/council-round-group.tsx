@@ -74,6 +74,7 @@ export function CouncilRoundGroup({ record, children, selected = false, theme }:
         criteriaMet: record.criteriaMet ?? -1,
         criteriaTotal: record.criteriaTotal ?? -1,
         decision: record.leaderDecision ?? "",
+        directive: record.directive ?? "",
       }}
     >
       <box
@@ -104,6 +105,16 @@ export function CouncilRoundGroup({ record, children, selected = false, theme }:
                 {children}
               </box>
             ) : null}
+            {/* B5 — the leader's pre-round directive, persisted on the record so
+                the conductor's opening steer survives into this collapsed summary
+                (not just the ephemeral live bubble). Accent + ▶ so the leader
+                visibly opens the round. */}
+            {record.directive &&
+              record.directive.split("\n").map((line, i) => (
+                <text key={`dir-${i}`} fg={theme.accent} attributes={i === 0 ? 1 : 0}>
+                  {i === 0 ? `▶ ${line}` : `  ${line}`}
+                </text>
+              ))}
             {hasCriteria && (
               <text fg={outcomeColor} attributes={1}>
                 {`${outcomeMark} Outcome: ${met}/${total} criteria met`}

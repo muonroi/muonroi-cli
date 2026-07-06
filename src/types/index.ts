@@ -433,6 +433,14 @@ export interface CouncilRoundRecord {
   leaderDecision?: "continue" | "stop" | "extend" | "aborted" | "circuit-break" | "eval-unavailable";
   /** Topic the leader set for the NEXT round (drives the overview). */
   nextRoundFocus?: string;
+  /**
+   * B5 — the leader's pre-round DIRECTIVE for this round (goal + criteria still
+   * unmet going in). Captured on the round record so it survives into the
+   * post-debate conclusion card, not only the ephemeral live directive bubble —
+   * otherwise a user who looks away during the debate never sees the leader
+   * conduct the round. Present only when the conductor is on + criteria pinned.
+   */
+  directive?: string;
 }
 
 /**

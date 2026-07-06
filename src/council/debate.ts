@@ -774,7 +774,12 @@ export async function* runDebate(
     // states this round's goal and which pinned criteria are still unmet, so it
     // visibly conducts each round instead of only grading afterwards. Gated on
     // pinned criteria (nothing to steer toward otherwise) + the conductor flag.
+    // Captured in `roundDirective` so it also lands on the round record's
+    // `directive` field below — durable in the conclusion card, not only the
+    // ephemeral live bubble a user misses if they look away mid-debate.
+    let roundDirective: string | undefined;
     if (leaderConductorEnabled() && spec.successCriteria.length > 0) {
+      roundDirective = buildLeaderDirective(round, spec.successCriteria, lastCriteriaMet, roundTopic);
       yield {
         type: "council_message" as const,
         councilMessage: {
@@ -782,7 +787,7 @@ export async function* runDebate(
           phase: "directive" as const,
           speaker: { role: "Leader", model: leaderModelId },
           round,
-          text: buildLeaderDirective(round, spec.successCriteria, lastCriteriaMet, roundTopic),
+          text: roundDirective,
         },
       };
     }
@@ -1102,7 +1107,11 @@ export async function* runDebate(
           type: "content",
           content: `\n> Circuit breaker: aborting debate after ${consecutiveRoundFailures} consecutive failure-heavy rounds — proceeding to synthesis with what we have.\n`,
         };
-        yield roundRec("done", { leaderDecision: "circuit-break", leaderReason: "provider stress — circuit breaker" });
+        yield roundRec("done", {
+          leaderDecision: "circuit-break",
+          leaderReason: "provider stress — circuit breaker",
+          directive: roundDirective,
+        });
         break;
       }
     } else {
@@ -1213,6 +1222,7 @@ export async function* runDebate(
         leaderReason: evaluation.reason,
         leaderDecision,
         nextRoundFocus: evaluation.nextRoundFocus,
+        directive: roundDirective,
       });
       nextTopic = evaluation.nextRoundFocus;
 
@@ -1345,7 +1355,7 @@ export async function* runDebate(
       // leaderReason here — the "eval-unavailable" DECISION_LABEL already conveys
       // it, and a redundant reason line rendered the message twice on the card
       // (observed session dd34c59c63e9).
-      yield roundRec("done", { leaderDecision: "eval-unavailable" });
+      yield roundRec("done", { leaderDecision: "eval-unavailable", directive: roundDirective });
       nextTopic = undefined;
     }
 
