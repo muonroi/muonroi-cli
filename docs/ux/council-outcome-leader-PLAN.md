@@ -180,3 +180,45 @@ unit-verified; re-run a live council when the leader provider is healthy.
 
 Still open: full B4 remedy loop (auto-extend / re-team / escalate); placeholder
 lingering after turn-end; the `debate.ts` silent catch.
+
+## B5 directive durability + live render verification (2026-07-06, third pass)
+
+The earlier live runs could confirm the **verdict** render but never the
+pre-round **directive** bubble: the whole 2-round debate finished during the
+async monitor's sleep window, and by the time a render fired the live debate had
+collapsed into the conclusion card — which cleared the ephemeral directive
+`council_message`. Root cause (not a flake): the verdict lives on
+`CouncilRoundRecord` (so it survives into the collapsed card), but the directive
+was emitted **only** as a standalone live bubble. A user who looked away during
+the rounds therefore never saw the leader's opening steer — barely less "mờ
+nhạt" than pre-B5.
+
+Fix (57070f37): capture the directive text on `CouncilRoundRecord.directive` at
+round start and carry it into every `roundRec("done")` exit (eval /
+circuit-break / eval-unavailable). `CouncilRoundGroup` renders it at the top of
+the collapsed round summary — accent colour + ▶ marker — so the leader visibly
+opens each round in the durable conclusion card, not only the live stream. Also
+exposed as `props.directive` on the `council-round-{n}` semantic node for harness
+assertions.
+
+Live-verified (deepseek-only, fresh-source greenfield session c676f04c0f7f, a
+2-round in-memory-LRU-cache council). The **persisted** directive renders after
+`debate_complete` — no timing fragility:
+- Round 1 card: `▶ Establish concrete evidence for every outcome criterion.` +
+  `Unmet (4/4): Cache correctly evicts…; When the cache reaches…; All cache
+  operations…; Unit tests demonstrate…` → `✗ Outcome: 0/4 · Decision: continue ·
+  Next focus: LRU strictness and concurrency model`.
+- Round 2 card: `▶ Focus: LRU strictness and concurrency model` + `Unmet (4/4):
+  …` → `✓ Outcome: 4/4 · Decision: sufficient — stop`.
+- Rail `Outcome: 4/4` all ✓; Progress `Round 2/3 · 4/4 met · converged — stopped
+  early`. No cross-council stale bleed.
+
+So B5 is now fully live-verified (directive + verdict), both durable. Leader
+per-round logic remains textbook (R1 0/4 → continue, R2 4/4 → stop). tsc clean;
+300 council + UI tests green.
+
+**Harness lesson:** the council DB (`interaction_logs`) logs only
+`debate_complete` + `synthesis` at debate end — NO per-round rows — so a DB
+monitor cannot wake on round transitions. Any live-render verification of an
+intra-debate UI element must either persist that element onto a durable record
+(preferred) or poll renders on a short time cadence before the debate collapses.
