@@ -148,3 +148,35 @@ all-met-early stop. Also: there is zero visible pre-round leader directive
   council `councilMeta`/round state at council *start*, not only turn-*end*.
 - *(minor)* the A composing placeholder ("Planning next moves") lingers after
   turn-end instead of clearing when idle.
+
+## B5 + follow-up fixes (2026-07-06, second pass)
+
+Shipped: **B5 leader conductor** (f49d5eb5) + **B4-lite** budget-exhaustion flag
+(same commit) + **Progress-row stale fix** (56be385c).
+
+- B5: pre-round ▶ DIRECTIVE (round goal + still-unmet criteria) and post-round
+  VERDICT (per-criterion ✓/○ + next focus) as `kind:leader` messages tagged with
+  a new `CouncilMessage.phase` ("directive"|"verdict"); directive renders in the
+  accent colour so the leader visibly leads each round. Flag
+  `MUONROI_LEADER_CONDUCTOR` (default ON, `=0` = pre-B5 behaviour). Gated on
+  pinned criteria.
+- B4-lite: on debate end (leader stop / convergence / budget exhaustion) with
+  criteria unmet, the leader emits a closing verdict naming the open criteria
+  instead of letting synthesis proceed as if done. Full remedy (auto-extend /
+  re-team / user escalation) still TODO.
+- Progress fix: `applyCouncilMetaPatch` detects a new council by topic change
+  (ref-tracked) and flushes `councilRounds` + replaces `councilMeta`, so a prior
+  council's round-3 record no longer survives as the Progress row's `last`.
+
+Verification: tsc clean; 15 new unit tests (helpers + header phase) + 308
+council/UI suite green. Live (fresh-source greenfield deepseek session
+23cfe41c50a3): criteria pinned **0/5 then 0/4 all ○** across two councils — the
+stale-criteriaMet + Progress reset confirmed with NO cross-council bleed; Esc
+cancel cleared the rail. The in-round ▶ directive/verdict RENDER could NOT be
+live-confirmed: deepseek-v4-pro (leader tier) stalled at the opening/debate-plan
+phase on both attempts ("Not enough successful openings"), so rounds never ran —
+a provider-degradation flake unrelated to B5. Directive/verdict remain
+unit-verified; re-run a live council when the leader provider is healthy.
+
+Still open: full B4 remedy loop (auto-extend / re-team / escalate); placeholder
+lingering after turn-end; the `debate.ts` silent catch.
