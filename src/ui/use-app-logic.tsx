@@ -1079,9 +1079,11 @@ export function useAppLogic(props: AppLogicProps) {
   // P3 — council metadata for the context rail (leader/panel/budget/research/
   // cost), upsert-merged from incremental council_meta patches.
   const [councilMeta, setCouncilMeta] = useState<CouncilMetaPatch>({});
-  const applyCouncilMetaPatch = useCallback((patch: CouncilMetaPatch) => {
-    setCouncilMeta((prev) => ({ ...prev, ...patch }));
-  }, []);
+  // Tracks the current council's topic so a NEW council (topic change) can flush
+  // the prior council's residue even when clearLiveTurnUi (turn-end) was skipped
+  // — e.g. an Esc-interrupt before a fresh /council. applyCouncilMetaPatch is
+  // defined below, after councilRounds, so it can reset that state too.
+  const councilTopicRef = useRef<string | undefined>(undefined);
   // P5/P6 — per-round lifecycle records, upsert-merged by round number so a
   // `running` record is overwritten by its `done` record in place.
   const [councilRounds, setCouncilRounds] = useState<CouncilRoundRecord[]>([]);
@@ -1097,6 +1099,22 @@ export function useAppLogic(props: AppLogicProps) {
       setSelectedRound(null);
     }
   }, [councilRounds, selectedRound]);
+  const applyCouncilMetaPatch = useCallback((patch: CouncilMetaPatch) => {
+    const newTopic = patch.topic;
+    // A topic that differs from the one we're tracking means a new council began.
+    // Only treat it as new when we already had a topic (first council of a turn
+    // sets it without a reset). Flush prior round records + replace meta so a
+    // previous council's Progress row / criteriaMet / leader / panel don't bleed
+    // into the new one. selectedRound follows via the councilRounds effect above.
+    const isNewCouncil = !!newTopic && !!councilTopicRef.current && newTopic !== councilTopicRef.current;
+    if (newTopic) councilTopicRef.current = newTopic;
+    if (isNewCouncil) {
+      setCouncilRounds([]);
+      setCouncilMeta({ ...patch });
+      return;
+    }
+    setCouncilMeta((prev) => ({ ...prev, ...patch }));
+  }, []);
   const applyCouncilRound = useCallback((rec: CouncilRoundRecord) => {
     setCouncilRounds((prev) => {
       const idx = prev.findIndex((r) => r.round === rec.round);
@@ -2181,6 +2199,7 @@ export function useAppLogic(props: AppLogicProps) {
     setCouncilRounds([]);
     setSelectedRound(null);
     setCouncilPlaceholders(new Map());
+    councilTopicRef.current = undefined;
   }, []);
 
   const finishTurnProcessing = useCallback(() => {
