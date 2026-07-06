@@ -1170,10 +1170,15 @@ program
     // so each request doesn't re-probe.
     const { detectEEClientMode, describeMode } = await import("./ee/client-mode.js");
     detectEEClientMode()
-      .then((info) => {
+      .then(async (info) => {
         if (process.env.MUONROI_EE_DEBUG === "1") {
           console.error(`[muonroi-cli] ${describeMode(info)}`);
         }
+        // WhoAmI thin-client fallback: once the mode is cached, derive the working-style
+        // profile from the behavioral brain and prime the sync cache so the PIL picks it
+        // up from the next turn. Fire-and-forget, fail-open — never blocks boot.
+        const { warmWhoAmIFromBrain } = await import("./ee/bridge.js");
+        await warmWhoAmIFromBrain();
       })
       .catch(() => {});
 

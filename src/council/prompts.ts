@@ -432,6 +432,7 @@ export function buildLeaderEvaluationPrompt(ctx: { spec: ClarifiedSpec; exchange
       outOfStackCheck +
       `Output ONLY a JSON object (no markdown):\n` +
       `{\n` +
+      `  "nextRoundFocus": "one short phrase naming the single most important point the NEXT round should resolve (empty string if you are stopping)",\n` +
       `  "allCriteriaMet": true/false,\n` +
       `  "criteriaStatus": [{"criterion": "...", "met": true/false, "evidence": "..."}],\n` +
       `  "unresolvedPoints": ["point 1"],\n` +

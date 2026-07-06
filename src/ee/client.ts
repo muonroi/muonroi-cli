@@ -706,6 +706,7 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
           if (options.model) body.model = options.model;
           if (options.maxTokens != null) body.maxTokens = options.maxTokens;
           if (options.provider) body.provider = options.provider;
+          if (options.useExtractModel) body.useExtractModel = true;
         }
         const resp = await f(`${baseUrl}/api/brain`, {
           method: "POST",

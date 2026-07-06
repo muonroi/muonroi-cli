@@ -3,6 +3,7 @@ import type { CouncilExperienceResult } from "../ee/council-bridge.js";
 import { queryExperience } from "../ee/council-bridge.js";
 import { judgeCouncilOutcome } from "../ee/judge.js";
 import { recordCouncilOutcome } from "../ee/phase-outcome.js";
+import { isTaskAwarePanelEnabled } from "../gsd/flags.js";
 import { runPipeline } from "../pil/pipeline.js";
 import type { PipelineContext } from "../pil/types.js";
 import { appendSystemMessage, logInteraction } from "../storage/index.js";
@@ -15,7 +16,8 @@ import { evaluateResearchNeed, runDebate } from "./debate.js";
 import { planDebate } from "./debate-planner.js";
 import { detectOutOfStackProposals, writeDecisionsLock } from "./decisions-lock.js";
 import { runExecution } from "./executor.js";
-import { resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
+import { buildCouncilCandidatePool, resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
+import { selectTaskAwarePanel } from "./panel-select.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
 import { runPlanning } from "./planner.js";
 import { runPreflight } from "./preflight.js";
@@ -90,6 +92,16 @@ export interface RunCouncilOptions {
    * "continue_session" instead of ending at the composer. Called at most once.
    */
   onPostDebateAction?: (action: string) => void;
+  /**
+   * When true, the leader-auto-promote note and the `Leader: … · Panel: …`
+   * summary are NOT emitted as inline `content` chunks — the same data still
+   * rides the structured `council_meta` patch, which the TUI Context Rail
+   * renders as ambient sidebar rows. Set by the TUI when the rail is active
+   * (`isContextRailEnabled()`) so the roster is not duplicated (rail + inline)
+   * and does not read as a decision announced before any task assessment.
+   * Railless sinks (headless, telegram) leave it unset → inline is preserved.
+   */
+  suppressInlineMeta?: boolean;
 }
 
 export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis";
@@ -170,7 +182,20 @@ export async function* runCouncil(
   // ── Resolve models ──────────────────────────────────────────────────────────
   const leaderResolution = await resolveLeaderModelDetailed(sessionModelId);
   const leaderModelId = leaderResolution.modelId;
-  const participants = await resolveParticipants(sessionModelId, isCouncilMultiProviderPreferred());
+  let participants = await resolveParticipants(sessionModelId, isCouncilMultiProviderPreferred());
+
+  // U3 — task-aware panel: let the leader read the task and pick which reachable
+  // models should debate it, instead of the prompt-blind capability roster.
+  // Fails open to the default roster on any provider/parse failure.
+  if (participants.length >= 2 && isTaskAwarePanelEnabled()) {
+    try {
+      const pool = await buildCouncilCandidatePool(participants);
+      const taskAware = yield* selectTaskAwarePanel({ topic, pool, leaderModelId, llm });
+      if (taskAware && taskAware.length >= 2) participants = taskAware;
+    } catch {
+      /* fail-open — keep the default roster */
+    }
+  }
 
   if (participants.length < 2) {
     yield {
@@ -181,23 +206,42 @@ export async function* runCouncil(
     return null;
   }
 
-  if (leaderResolution.promotedFrom) {
+  // When the TUI Context Rail is active it renders the leader/panel/cost data as
+  // ambient sidebar rows from the council_meta patch below, so emitting the same
+  // data inline would both duplicate it AND read as a roster "decided" before any
+  // task assessment. Railless sinks (headless, telegram) keep the inline summary.
+  const suppressInlineMeta = options?.suppressInlineMeta === true;
+  if (!suppressInlineMeta) {
+    if (leaderResolution.promotedFrom) {
+      yield {
+        type: "content",
+        content:
+          `\n> Leader auto-promoted within session provider: \`${leaderResolution.promotedFrom.modelId}\`` +
+          `${leaderResolution.promotedFrom.tier ? ` (${leaderResolution.promotedFrom.tier})` : ""}` +
+          ` → \`${leaderModelId}\`. Synthesis benefits from the highest tier available on the same provider. ` +
+          `Set \`roleModels.leader\` to override.\n`,
+      };
+    }
     yield {
       type: "content",
-      content:
-        `\n> Leader auto-promoted within session provider: \`${leaderResolution.promotedFrom.modelId}\`` +
-        `${leaderResolution.promotedFrom.tier ? ` (${leaderResolution.promotedFrom.tier})` : ""}` +
-        ` → \`${leaderModelId}\`. Synthesis benefits from the highest tier available on the same provider. ` +
-        `Set \`roleModels.leader\` to override.\n`,
+      // Show models only — the `implement/verify/research` roles are internal
+      // cost-tier routing slots, NOT debate personas (those are task-adaptive and
+      // shown in the Debate Plan card once assigned). Printing the slot names here
+      // misleadingly implied implementation intent on analysis/decision topics.
+      content: `\n> Leader: \`${leaderModelId}\` · Panel: ${participants.map((p) => `\`${p.model}\``).join(", ")}${costAware ? " · Cost-aware sub-tasks: ON" : ""}\n`,
     };
   }
+  // P3 — mirror the leader/panel/cost metadata as a structured council_meta patch
+  // so the context rail can show it as rows instead of transcript spam. The round
+  // budget/ceiling arrive later from inside runDebate (locals unavailable here).
   yield {
-    type: "content",
-    // Show models only — the `implement/verify/research` roles are internal
-    // cost-tier routing slots, NOT debate personas (those are task-adaptive and
-    // shown in the Debate Plan card once assigned). Printing the slot names here
-    // misleadingly implied implementation intent on analysis/decision topics.
-    content: `\n> Leader: \`${leaderModelId}\` · Panel: ${participants.map((p) => `\`${p.model}\``).join(", ")}${costAware ? " · Cost-aware sub-tasks: ON" : ""}\n`,
+    type: "council_meta",
+    councilMeta: {
+      topic,
+      leader: leaderModelId,
+      panel: participants.map((p) => p.model),
+      costAware,
+    },
   };
 
   const baseContext = buildCouncilContext(messages);
@@ -255,6 +299,7 @@ export async function* runCouncil(
         options?.clarifyMaxRounds ?? EXPLICIT_COUNCIL_CLARIFY_ROUNDS,
         undefined,
         costAware,
+        participants.map((p) => p.model),
       );
       let clarifyResult: IteratorResult<StreamChunk, ClarifiedSpec>;
       do {
@@ -324,6 +369,9 @@ export async function* runCouncil(
       if (!needStep.done && needStep.value) yield needStep.value;
     } while (!needStep.done);
     leaderNeedsResearch = needStep.value;
+    if (leaderNeedsResearch !== undefined) {
+      yield { type: "council_meta", councilMeta: { researchMode: leaderNeedsResearch } };
+    }
 
     // ROI: the leader already decided research is needed and the card's default
     // was always "run research" — asking the user to confirm is a rubber-stamp

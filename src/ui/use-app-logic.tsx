@@ -39,9 +39,11 @@ import type {
   ChatEntry,
   CouncilInfoCard,
   CouncilMessage,
+  CouncilMetaPatch,
   CouncilPhaseEvent,
   CouncilQuestionData,
   CouncilQuestionOption,
+  CouncilRoundRecord,
   CouncilStatusData,
   Plan,
   PlanQuestion,
@@ -199,6 +201,7 @@ import type {
 
 export type { AppStartupConfig } from "./types.js";
 
+import { isScrollLockEnabled } from "../gsd/flags.js";
 import {
   getEffectiveReasoningEffort,
   getModelByTier,
@@ -1070,6 +1073,25 @@ export function useAppLogic(props: AppLogicProps) {
   // back-and-forth. Synthesis renders outside the pill so it stays visible.
   const [councilTranscriptExpanded, setCouncilTranscriptExpanded] = useState(false);
   const [councilInfoCards, setCouncilInfoCards] = useState<CouncilInfoCard[]>([]);
+  // P3 — council metadata for the context rail (leader/panel/budget/research/
+  // cost), upsert-merged from incremental council_meta patches.
+  const [councilMeta, setCouncilMeta] = useState<CouncilMetaPatch>({});
+  const applyCouncilMetaPatch = useCallback((patch: CouncilMetaPatch) => {
+    setCouncilMeta((prev) => ({ ...prev, ...patch }));
+  }, []);
+  // P5/P6 — per-round lifecycle records, upsert-merged by round number so a
+  // `running` record is overwritten by its `done` record in place.
+  const [councilRounds, setCouncilRounds] = useState<CouncilRoundRecord[]>([]);
+  const applyCouncilRound = useCallback((rec: CouncilRoundRecord) => {
+    setCouncilRounds((prev) => {
+      const idx = prev.findIndex((r) => r.round === rec.round);
+      if (idx < 0) return [...prev, rec];
+      const next = prev.slice();
+      // Preserve fields from the running record the done record may omit.
+      next[idx] = { ...next[idx], ...rec };
+      return next;
+    });
+  }, []);
   const [councilPlaceholders, setCouncilPlaceholders] = useState<
     Map<string, { role: string; side: "left" | "right"; color: string; variant: "participant" | "leader" }>
   >(new Map());
@@ -1257,6 +1279,68 @@ export function useAppLogic(props: AppLogicProps) {
   const historyIndexRef = useRef<number>(-1);
   const historyDraftRef = useRef<string>("");
   const scrollRef = useRef<ScrollBoxRenderable>(null);
+  // Scroll-lock (MUONROI_SCROLL_LOCK): while the user has scrolled up to read,
+  // suppress forced `scrollToBottom()` yanks and surface a jump-to-latest pill.
+  // Count of new appends suppressed since the user left the bottom.
+  const newSinceLockRef = useRef(0);
+  const [newSinceLock, setNewSinceLock] = useState(0);
+  const [scrollLockedAway, setScrollLockedAway] = useState(false);
+  // Context rail (MUONROI_CONTEXT_RAIL): user can hide/show the right metadata
+  // panel with Ctrl+B. Defaults visible; the rail also auto-hides below 100 cols
+  // (decided in app.tsx where terminal width is known).
+  const [railVisible, setRailVisible] = useState(true);
+  // True when the user is pinned to (or near) the bottom. Mirrors OpenTUI's
+  // private `_hasManualScroll`: once the user scrolls up, sticky-bottom stops
+  // and this returns false, so our explicit scrolls back off. Falls back to a
+  // geometric at-bottom check if the private field is ever absent.
+  const isPinnedToBottom = useCallback((): boolean => {
+    const sb = scrollRef.current;
+    if (!sb) return true;
+    const manual = (sb as unknown as { _hasManualScroll?: boolean })._hasManualScroll;
+    if (typeof manual === "boolean") return !manual;
+    const vpH = (sb.viewport as unknown as { height?: number }).height ?? 0;
+    return sb.scrollTop + vpH >= sb.scrollHeight - 2;
+  }, []);
+  // Soft scroll: respects scroll-lock. New content that arrives while the user
+  // reads history does NOT move the viewport; it just increments the pill count.
+  const scrollToBottom = useCallback(() => {
+    if (isScrollLockEnabled() && !isPinnedToBottom()) {
+      newSinceLockRef.current += 1;
+      setNewSinceLock(newSinceLockRef.current);
+      setScrollLockedAway(true);
+      return;
+    }
+    // Pinned (or lock off): scroll, and if the user had manually scrolled back
+    // to the bottom on their own, retire the jump-to-latest pill.
+    if (newSinceLockRef.current !== 0) {
+      newSinceLockRef.current = 0;
+      setNewSinceLock(0);
+      setScrollLockedAway(false);
+    }
+    try {
+      scrollRef.current?.scrollTo(scrollRef.current?.scrollHeight ?? 99999);
+    } catch {
+      /* */
+    }
+  }, [isPinnedToBottom]);
+  // Hard scroll: re-arms native sticky and jumps to the latest line regardless
+  // of manual-scroll state. Used by explicit user actions (new prompt submit,
+  // jump-to-latest pill) that intend to return to the live tail.
+  const scrollToBottomForced = useCallback(() => {
+    const sb = scrollRef.current;
+    if (sb) {
+      try {
+        (sb as unknown as { _hasManualScroll?: boolean })._hasManualScroll = false;
+        sb.stickyScroll = true;
+        sb.scrollTo(sb.scrollHeight ?? 99999);
+      } catch {
+        /* */
+      }
+    }
+    newSinceLockRef.current = 0;
+    setNewSinceLock(0);
+    setScrollLockedAway(false);
+  }, []);
   const { width, height } = useTerminalDimensions();
   const processedInitial = useRef(false);
   const contentAccRef = useRef("");
@@ -1780,20 +1864,14 @@ export function useAppLogic(props: AppLogicProps) {
           setMessages((prev) => [...prev, buildAssistantEntry(formatScheduleDetails(schedule, status))]);
           setShowScheduleModal(false);
           setScheduleSearchQuery("");
-          setTimeout(() => {
-            try {
-              scrollRef.current?.scrollTo(scrollRef.current?.scrollHeight ?? 99999);
-            } catch {
-              /* */
-            }
-          }, 10);
+          setTimeout(scrollToBottomForced, 10);
         })
         .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
           setMessages((prev) => [...prev, buildAssistantEntry(`Failed to load schedule details: ${message}`)]);
         });
     },
-    [agent],
+    [agent, scrollToBottomForced],
   );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: setSchedules is stable useState setter from useAgentEditor hook
@@ -1806,20 +1884,14 @@ export function useAppLogic(props: AppLogicProps) {
           setSchedules(latest);
           setScheduleModalIndex((index) => Math.max(0, Math.min(index, Math.max(0, latest.length - 1))));
           setMessages((prev) => [...prev, buildAssistantEntry(message)]);
-          setTimeout(() => {
-            try {
-              scrollRef.current?.scrollTo(scrollRef.current?.scrollHeight ?? 99999);
-            } catch {
-              /* */
-            }
-          }, 10);
+          setTimeout(scrollToBottomForced, 10);
         })
         .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
           setMessages((prev) => [...prev, buildAssistantEntry(`Failed to remove schedule: ${message}`)]);
         });
     },
-    [agent],
+    [agent, scrollToBottomForced],
   );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: all setters are stable useState setters from useAgentEditor hook
@@ -2067,14 +2139,6 @@ export function useAppLogic(props: AppLogicProps) {
     setScheduleModalIndex((idx) => Math.max(0, Math.min(idx, Math.max(0, scheduleRows.length - 1))));
   }, [scheduleRows.length]);
 
-  const scrollToBottom = useCallback(() => {
-    try {
-      scrollRef.current?.scrollTo(scrollRef.current?.scrollHeight ?? 99999);
-    } catch {
-      /* */
-    }
-  }, []);
-
   const clearLiveTurnUi = useCallback(() => {
     setStreamContent("");
     setReasoningActive(false);
@@ -2095,6 +2159,8 @@ export function useAppLogic(props: AppLogicProps) {
     // so clearing here loses nothing. Covers auto-council + slash paths.
     setCouncilMessages([]);
     setCouncilInfoCards([]);
+    setCouncilMeta({});
+    setCouncilRounds([]);
     setCouncilPlaceholders(new Map());
   }, []);
 
@@ -3308,6 +3374,12 @@ export function useAppLogic(props: AppLogicProps) {
                   setCouncilInfoCards((prev) => [...prev, card]);
                 }
                 break;
+              case "council_meta":
+                if (chunk.councilMeta) applyCouncilMetaPatch(chunk.councilMeta);
+                break;
+              case "council_round":
+                if (chunk.councilRound) applyCouncilRound(chunk.councilRound);
+                break;
               case "council_status":
                 if (chunk.councilStatus) {
                   const cs = chunk.councilStatus;
@@ -4109,6 +4181,12 @@ export function useAppLogic(props: AppLogicProps) {
                     setPendingCouncilPreflight(chunk.councilPreflight);
                     setPreflightCardStateSync(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
                   }
+                  if (chunk.type === "council_meta" && chunk.councilMeta) {
+                    applyCouncilMetaPatch(chunk.councilMeta);
+                  }
+                  if (chunk.type === "council_round" && chunk.councilRound) {
+                    applyCouncilRound(chunk.councilRound);
+                  }
                   if (chunk.type === "council_message" && chunk.councilMessage) {
                     const cm = chunk.councilMessage;
                     setCouncilMessages((prev) => [...prev, cm]);
@@ -4363,6 +4441,12 @@ export function useAppLogic(props: AppLogicProps) {
                     });
                     setPendingCouncilPreflight(chunk.councilPreflight);
                     setPreflightCardStateSync(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
+                  }
+                  if (chunk.type === "council_meta" && chunk.councilMeta) {
+                    applyCouncilMetaPatch(chunk.councilMeta);
+                  }
+                  if (chunk.type === "council_round" && chunk.councilRound) {
+                    applyCouncilRound(chunk.councilRound);
                   }
                   if (chunk.type === "council_message" && chunk.councilMessage) {
                     const cm = chunk.councilMessage;
@@ -4953,6 +5037,45 @@ export function useAppLogic(props: AppLogicProps) {
       if (key.name === "o" && key.ctrl && !key.meta) {
         setCouncilTranscriptExpanded((v) => !v);
         return;
+      }
+
+      // Ctrl+B — toggle the right context rail (MUONROI_CONTEXT_RAIL). No-op
+      // visually when the rail flag is off or the terminal is too narrow; the
+      // toggle only flips intent, app.tsx gates actual rendering on width.
+      if (key.name === "b" && key.ctrl && !key.meta) {
+        setRailVisible((v) => !v);
+        return;
+      }
+
+      // Scroll-lock navigation (MUONROI_SCROLL_LOCK). Composer-aware: only act
+      // when the prompt input is empty, so End/PageUp/PageDown still edit text
+      // while composing. End re-pins to the live tail; PageUp/PageDown page the
+      // transcript by one viewport without disturbing the composer.
+      if (isScrollLockEnabled() && !key.ctrl && !key.meta) {
+        const composerEmpty = !(inputRef.current?.plainText ?? "").trim();
+        if (composerEmpty && (key.name === "pageup" || key.name === "pagedown" || key.name === "end")) {
+          const sb = scrollRef.current;
+          if (key.name === "end") {
+            scrollToBottomForced();
+            return;
+          }
+          if (sb) {
+            const vpH = (sb.viewport as unknown as { height?: number }).height ?? 10;
+            const page = Math.max(1, vpH - 1);
+            try {
+              sb.scrollBy(key.name === "pageup" ? -page : page);
+            } catch {
+              /* */
+            }
+            // Paging up leaves the tail; paging back to bottom clears the pill.
+            if (key.name === "pagedown" && isPinnedToBottom()) {
+              newSinceLockRef.current = 0;
+              setNewSinceLock(0);
+              setScrollLockedAway(false);
+            }
+          }
+          return;
+        }
       }
 
       // Point-to-existing form intercepts all input while open.
@@ -6678,6 +6801,8 @@ export function useAppLogic(props: AppLogicProps) {
       sessionPickerIndex,
       setShowSessionPicker,
       setSessionPickerIndex,
+      scrollToBottomForced,
+      isPinnedToBottom,
     ],
   );
   useKeyboard(handleKey);
@@ -6846,6 +6971,9 @@ export function useAppLogic(props: AppLogicProps) {
     if (displayedModel && displayedModel !== agent.getModel()) {
       agent.setModel(displayedModel);
     }
+    // Submitting a fresh prompt is an explicit "engage the live tail" action —
+    // re-pin even if the user had scrolled up to read history (scroll-lock).
+    scrollToBottomForced();
     processMessage(enhancedMessage, displayText, images.length > 0 ? images : undefined);
   }, [
     agent,
@@ -6855,6 +6983,7 @@ export function useAppLogic(props: AppLogicProps) {
     processMessage,
     replacePasteBlocks,
     scrollToBottom,
+    scrollToBottomForced,
     pendingCouncilQuestion?.questionId,
     pendingCouncilQuestion,
     setShowSlashMenuSync,
@@ -6908,6 +7037,8 @@ export function useAppLogic(props: AppLogicProps) {
     copyFlashId,
     councilCardState,
     councilInfoCards,
+    councilMeta,
+    councilRounds,
     councilMessages,
     councilTranscriptExpanded,
     councilPhases,
@@ -6983,6 +7114,10 @@ export function useAppLogic(props: AppLogicProps) {
     scheduleRows,
     scheduleSearchQuery,
     scrollRef,
+    scrollToBottomForced,
+    newSinceLock,
+    scrollLockedAway,
+    railVisible,
     sessionId,
     sessionPickerIndex,
     sessionPickerList,

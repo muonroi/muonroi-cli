@@ -583,7 +583,7 @@ export async function* runDebate(
   const openings = yield* tracedAsync(() => Promise.all(openingPromises), {
     phase: "opening",
     label: `Generating opening statements (${participants.length} participants in parallel)`,
-    detail: participants.map((p) => p.role).join(", "),
+    detail: participants.map((p) => p.stance?.name ?? p.model).join(", "),
   });
 
   yield { type: "content", content: "\n── Opening Analysis ──\n" };
@@ -669,6 +669,16 @@ export async function* runDebate(
     type: "content",
     content: `\n> Leader-proposed debate budget: ${maxRounds} round${maxRounds === 1 ? "" : "s"}${ceilingNote}.\n`,
   };
+  // P3 — structured budget/ceiling for the context rail. These are locals here,
+  // invisible to the council entrypoint, so they ride a separate council_meta
+  // patch that the UI upsert-merges with the leader/panel patch.
+  yield {
+    type: "council_meta",
+    councilMeta: {
+      roundBudget: maxRounds,
+      roundCeiling: kindCapped ? effectiveCeiling : ABSOLUTE_MAX_ROUNDS,
+    },
+  };
 
   // Pairs that fail twice in a row are dropped from subsequent rounds so the
   // remaining participants don't keep retrying a broken model and inflating
@@ -678,6 +688,9 @@ export async function* runDebate(
   // Stop debate entirely after two consecutive rounds where ≥50% of pairs fail
   // — the LLM is clearly under provider stress and more rounds won't help.
   let consecutiveRoundFailures = 0;
+  // P5 — topic carried from the prior round's leader nextRoundFocus, shown as the
+  // next round's heading in the round-grouped transcript.
+  let nextTopic: string | undefined;
 
   for (let round = 1; round <= maxRounds; round++) {
     // User cancelled mid-debate — stop before spending another round of
@@ -721,6 +734,33 @@ export async function* runDebate(
       roundCount = round - 1;
       break;
     }
+
+    // P5 — round lifecycle for the grouped transcript. `roundRec` closes over
+    // this round's participants/pairCount/emergent/topic; a running record now,
+    // a guaranteed done record on every exit below.
+    // Surface the task-adaptive persona (or model id), never the internal
+    // implement/verify/research cost-tier slot — that slot is a routing detail
+    // that misleads on analysis/decision topics (observed session dd34c59c63e9:
+    // an "evaluation" debate showed a bogus "implement" member).
+    const roundParticipants = active.map((p) => p.stance?.name ?? p.model);
+    const roundEmergent = round > plannedMaxRounds;
+    const roundTopic = nextTopic;
+    const roundRec = (
+      state: "running" | "done",
+      patch: Partial<import("../types/index.js").CouncilRoundRecord> = {},
+    ): StreamChunk => ({
+      type: "council_round" as const,
+      councilRound: {
+        round,
+        state,
+        topic: roundTopic,
+        participants: roundParticipants,
+        pairCount: pairs.length,
+        emergent: roundEmergent,
+        ...patch,
+      },
+    });
+    yield roundRec("running");
 
     const pairResults = yield* tracedAsync(
       () =>
@@ -894,7 +934,7 @@ export async function* runDebate(
       {
         phase: "exchange",
         label: `Discussion round ${round} (${pairs.length} pair${pairs.length === 1 ? "" : "s"})`,
-        detail: pairs.map((p) => `${p.a.role}↔${p.b.role}`).join(", "),
+        detail: pairs.map((p) => `${p.a.stance?.name ?? p.a.model}↔${p.b.stance?.name ?? p.b.model}`).join(", "),
       },
     );
 
@@ -1035,6 +1075,7 @@ export async function* runDebate(
           type: "content",
           content: `\n> Circuit breaker: aborting debate after ${consecutiveRoundFailures} consecutive failure-heavy rounds — proceeding to synthesis with what we have.\n`,
         };
+        yield roundRec("done", { leaderDecision: "circuit-break", leaderReason: "provider stress — circuit breaker" });
         break;
       }
     } else {
@@ -1050,7 +1091,39 @@ export async function* runDebate(
       label: `Leader evaluation (round ${round})`,
     });
     const allExchangeText = [...exchangeLogs.values()].flat().slice(-8).join("\n\n");
-    const evaluation = yield* evaluateDebate(spec, allExchangeText, round, leaderModelId, llm, costAware);
+    let evaluation = yield* evaluateDebate(spec, allExchangeText, round, leaderModelId, llm, costAware);
+    // Eval robustness: the leader's cost-tier eval model can be on a flaky proxy
+    // (Console Go glm/kimi → "Upstream request failed") while panel models on
+    // other providers stay healthy. Rather than surface "evaluation unavailable"
+    // and lose the round outcome, retry the eval on each healthy model in the
+    // fallback pool before giving up. Bounded (pool is small) and only runs on the
+    // failure path, so successful evals pay nothing.
+    if (!evaluation) {
+      // Which model the primary eval already tried (skip re-hitting it). Defensive
+      // against a partially-mocked leader module in tests — if we can't resolve
+      // it, skip the fallback loop rather than throw.
+      let firstTried: string | null = null;
+      try {
+        firstTried = pickCouncilTaskModel("evaluate_round", leaderModelId, costAware);
+      } catch {
+        firstTried = null;
+      }
+      if (firstTried) {
+        for (const fallbackModel of fallbackPool) {
+          if (fallbackModel === firstTried) continue;
+          evaluation = yield* evaluateDebate(
+            spec,
+            allExchangeText,
+            round,
+            leaderModelId,
+            llm,
+            costAware,
+            fallbackModel,
+          );
+          if (evaluation) break;
+        }
+      }
+    }
 
     if (evaluation) {
       if (typeof evaluation.evidenceDensity === "number") {
@@ -1074,6 +1147,26 @@ export async function* runDebate(
           text: `${metCount}/${total} criteria met — ${evaluation.reason}`,
         },
       };
+
+      // P5 — guaranteed done record for this round. Decision reflects the
+      // LEADER's intent (extend / continue / stop); a later code-side convergence
+      // override that stops the loop is a separate mechanism and doesn't rewrite
+      // the leader's stated call. Carry the leader's nextRoundFocus to the next
+      // round's topic.
+      const leaderDecision =
+        typeof evaluation.extendRounds === "number" && evaluation.extendRounds > 0
+          ? ("extend" as const)
+          : evaluation.shouldContinue
+            ? ("continue" as const)
+            : ("stop" as const);
+      yield roundRec("done", {
+        criteriaMet: metCount,
+        criteriaTotal: total,
+        leaderReason: evaluation.reason,
+        leaderDecision,
+        nextRoundFocus: evaluation.nextRoundFocus,
+      });
+      nextTopic = evaluation.nextRoundFocus;
 
       if (evaluation.needsResearch && evaluation.researchQuery) {
         const midPhaseId = `phase:mid-research-${round}`;
@@ -1199,6 +1292,13 @@ export async function* runDebate(
         startedAt: evalStart,
         detail: "evaluation unavailable — continuing",
       });
+      // P5 — eval parse failed: still close the round with a done record so the
+      // grouped transcript never shows a round stuck "running". Do NOT set
+      // leaderReason here — the "eval-unavailable" DECISION_LABEL already conveys
+      // it, and a redundant reason line rendered the message twice on the card
+      // (observed session dd34c59c63e9).
+      yield roundRec("done", { leaderDecision: "eval-unavailable" });
+      nextTopic = undefined;
     }
 
     // Generate inter-round summary
@@ -1321,17 +1421,28 @@ async function* evaluateDebate(
   leaderModelId: string,
   llm: CouncilLLM,
   costAware = false,
+  // When set, evaluate with this exact model instead of the cost-tier pick — used
+  // by the call-site fallback loop to re-run a round eval on a healthy panel model
+  // after the leader's provider rejected the eval payload (Console Go "Upstream
+  // request failed" on glm/kimi; observed session dd34c59c63e9).
+  modelOverride?: string,
 ): AsyncGenerator<StreamChunk, LeaderEvaluation | null, unknown> {
   try {
     const { system, prompt } = buildLeaderEvaluationPrompt({ spec, exchangeLogs: exchangeText, round });
-    const modelId = pickCouncilTaskModel("evaluate_round", leaderModelId, costAware);
+    const modelId = modelOverride ?? pickCouncilTaskModel("evaluate_round", leaderModelId, costAware);
     const raw = yield* tracedGenerate(llm, {
       phase: "evaluate",
-      label: `Leader evaluating round ${round}`,
+      label: modelOverride
+        ? `Leader evaluating round ${round} (fallback: ${modelOverride})`
+        : `Leader evaluating round ${round}`,
       modelId,
       system,
       prompt,
-      maxTokens: 1024,
+      // Raised from 1024: nextRoundFocus is now the FIRST schema field, and the
+      // whole eval is parsed by a single JSON.parse that returns null on any
+      // truncation — a tight budget could clip the JSON and null the round's
+      // outcome. 1536 keeps the focus line + criteria array intact.
+      maxTokens: 1536,
     });
     const match = raw.match(/\{[\s\S]*\}/);
     if (match) {
@@ -1367,6 +1478,11 @@ async function* evaluateDebate(
         evidenceDensity,
         disagreementResolved,
         extendRounds,
+        nextRoundFocus:
+          typeof (parsed as { nextRoundFocus?: unknown }).nextRoundFocus === "string" &&
+          (parsed as { nextRoundFocus: string }).nextRoundFocus.trim()
+            ? (parsed as { nextRoundFocus: string }).nextRoundFocus.trim()
+            : undefined,
       };
     }
   } catch {

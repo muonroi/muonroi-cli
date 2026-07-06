@@ -28,6 +28,7 @@ import { runCouncil } from "../council/index.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
 import type { CouncilLLM } from "../council/types.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import { isContextRailEnabled } from "../gsd/flags.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { logUIInteraction } from "../storage/index.js";
 import type { StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
@@ -278,7 +279,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     ctx.respondToQuestion,
     ctx.respondToPreflight,
     ctx.processMessageFn ?? noopProcess,
-    { skipClarification: true, cwd, runDir },
+    { skipClarification: true, cwd, runDir, suppressInlineMeta: isContextRailEnabled() },
   );
 
   let planSynthesis = "";

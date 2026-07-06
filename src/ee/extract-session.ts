@@ -65,7 +65,36 @@ export async function extractSession(
     getDefaultEEClient()
       .evolve("post-extract")
       .catch(() => {});
+
+    // WRITE arm of the who-am-i loop — fire-and-forget. Mine the user's working style from
+    // this transcript and persist it to experience-behavioral, which who-am-i-brain reads
+    // back next session (READ arm). Deliberately NOT awaited: the classify is a ~9s brain
+    // call and must not block cli-exit (same rationale as the async extract). It completes on
+    // cli-clear (process stays alive) and is best-effort on cli-exit — style converges over
+    // sessions, so a missed teardown is harmless. Fail-open, gated behind its own flag.
+    void writeStyleSignalsFireAndForget(transcript);
   } catch {
     // D-05: swallow all errors silently
+  }
+}
+
+/**
+ * Fire-and-forget bridge from extractSession into the style WRITE arm. Kept separate so the
+ * bridge/search imports stay lazy (only paid when a real session ends) and so every failure
+ * mode — flag off, EE unreachable, classifier null, write error — degrades to a no-op.
+ */
+async function writeStyleSignalsFireAndForget(transcript: string): Promise<void> {
+  try {
+    const { isStyleExtractEnabled, writeStyleSignals } = await import("./extract-style.js");
+    if (!isStyleExtractEnabled()) return;
+    const { classifyViaBrain } = await import("./bridge.js");
+    const { writeExperienceEE } = await import("./search.js");
+    // No projectSlug: working style is a cross-repo property of the user, so style rules are
+    // written GLOBAL (unscoped) — who-am-i-brain searches experience-behavioral broadly and a
+    // repo-scoped style rule would be needlessly narrow. (Contrast the technical-lesson extract,
+    // which IS repo-scoped because a bug fix is repo-specific.)
+    await writeStyleSignals({ classifyViaBrain, writeExperience: writeExperienceEE }, transcript);
+  } catch {
+    // swallow — style extraction is strictly best-effort
   }
 }

@@ -12,6 +12,7 @@ import { getTenantId } from "../ee/tenant.js";
 import { emitTranscriptToDisk } from "../ee/transcript-emit.js";
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
 import { ensureFlowDir } from "../flow/scaffold.js";
+import { isContextRailEnabled } from "../gsd/flags.js";
 import { executeEventHooks } from "../hooks/index";
 import type {
   NotificationHookInput,
@@ -2005,6 +2006,9 @@ export class Agent {
           cwd: this.bash.getCwd(),
           councilStats, // NEW — share orchestrator's stats object with runCouncil (Phase 14 CQ-01)
           signal,
+          // When the Context Rail is active it carries leader/panel/cost as
+          // ambient sidebar rows, so suppress the duplicate inline summary.
+          suppressInlineMeta: isContextRailEnabled(),
           runDir, // B1 — persist decisions.lock.md for the /council slash path
           onPostDebateAction: (action) => {
             chosenAction = action;
