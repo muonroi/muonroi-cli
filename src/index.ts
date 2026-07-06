@@ -492,6 +492,16 @@ async function startInteractive(
     },
   });
 
+  // Agent-mode: hand the renderer to the harness so it can snapshot the ACTUAL
+  // rendered cell grid (colors + attributes) via VisualFrame, not just the
+  // semantic tree. No-op outside agent-mode (runtime undefined).
+  {
+    const agentRt = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { attachRenderer?: (r: unknown) => void }
+      | undefined;
+    agentRt?.attachRenderer?.(renderer);
+  }
+
   // The TUI now owns the terminal — route fatal-handler behaviour away from
   // process.exit(1) (see the unhandledRejection handler above). Cleared in
   // restoreTerminalSync() the moment we begin tearing the terminal back down.

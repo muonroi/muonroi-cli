@@ -19,7 +19,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { createDriver, type Driver } from "./driver.js";
-import type { LiveEvent, LiveFrame } from "./protocol.js";
+import type { LiveEvent, LiveFrame, VisualFrame } from "./protocol.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -166,7 +166,20 @@ export function validateMockLlmPath(value: string): boolean {
   return real === root || real.startsWith(root + sep);
 }
 
-const FEATURES = ["capabilities", "snapshot", "press", "type", "wait_for", "query", "expect", "render_text"] as const;
+const FEATURES = [
+  "capabilities",
+  "snapshot",
+  "press",
+  "type",
+  "wait_for",
+  "query",
+  "expect",
+  "render_text",
+  "render_visual",
+  "snapshot_visual",
+  "cell",
+  "visual_quality",
+] as const;
 
 export function buildCapabilitiesPayload(): { protocol: string; features: readonly string[] } {
   return {
@@ -255,6 +268,62 @@ export function registerReadTools(server: McpServer, getDriver: () => Driver | n
       const d = getDriver();
       if (!d) return noDriver();
       return { content: [{ type: "text" as const, text: d.render_text() }] };
+    },
+  );
+
+  server.registerTool(
+    "tui.render_visual",
+    {
+      description:
+        "Render the ACTUAL rendered cell grid as plain text — the characters a human reads on screen. Unlike tui.render_text (semantic tree), this reflects the real render. Requires agent-mode with the renderer attached.",
+      inputSchema: {},
+    },
+    async () => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      return { content: [{ type: "text" as const, text: d.render_visual() }] };
+    },
+  );
+
+  server.registerTool(
+    "tui.snapshot_visual",
+    {
+      description:
+        "Return the latest VisualFrame — the real rendered cell grid with per-cell char + fg/bg hex + attribute bits. null until the renderer emits one.",
+      inputSchema: {},
+    },
+    async () => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      return { content: [{ type: "text" as const, text: JSON.stringify(d.snapshot_visual()) }] };
+    },
+  );
+
+  server.registerTool(
+    "tui.cell",
+    {
+      description:
+        "Decode the rendered cell at (row, col): char + fg/bg hex + attribute bits, from the latest VisualFrame. Use to assert the colors/formatting a human actually sees.",
+      inputSchema: { row: z.number().int().min(0), col: z.number().int().min(0) },
+    },
+    async ({ row, col }) => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      return { content: [{ type: "text" as const, text: JSON.stringify(d.visual_cell(row, col)) }] };
+    },
+  );
+
+  server.registerTool(
+    "tui.visual_quality",
+    {
+      description:
+        "Heuristic visual-quality report over the rendered grid: near-empty-row ratio, blank-row runs, whitespace density, mojibake, a 0-100 score and issues[]. Catches 'messy render' the semantic tree cannot see.",
+      inputSchema: {},
+    },
+    async () => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      return { content: [{ type: "text" as const, text: JSON.stringify(d.visual_quality()) }] };
     },
   );
 }
@@ -573,6 +642,7 @@ export function createMcpHarnessServer({ spawn }: { spawn: HarnessSpawn }): McpS
         try {
           const msg = JSON.parse(line) as Record<string, unknown>;
           if (msg.mode === "live") driver._ingest({ kind: "frame", frame: msg as unknown as LiveFrame });
+          else if (msg.mode === "visual") driver._ingest({ kind: "visual", frame: msg as unknown as VisualFrame });
           else if (msg.t === "idle") driver._ingest({ kind: "idle" });
           else if (msg.t === "event") driver._ingest({ kind: "event", event: msg as unknown as LiveEvent });
         } catch {

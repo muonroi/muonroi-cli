@@ -1,6 +1,15 @@
 import { evaluatePredicate, type Predicate, predicateSchema } from "./predicate.js";
-import type { LiveEvent, LiveFrame, UINode } from "./protocol.js";
+import type { LiveEvent, LiveFrame, UINode, VisualFrame } from "./protocol.js";
 import { matchSelector } from "./selector.js";
+import { computeVisualQuality, type VisualQualityReport } from "./visual-quality.js";
+
+/** A single decoded cell from the rendered grid (returned by `visual_cell`). */
+export type VisualCell = {
+  char: string;
+  fg: string;
+  bg: string;
+  attrs: number;
+};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -29,7 +38,11 @@ type DriverDeps = {
   sendType: (text: string) => void;
 };
 
-type Ingested = { kind: "frame"; frame: LiveFrame } | { kind: "idle" } | { kind: "event"; event: LiveEvent };
+type Ingested =
+  | { kind: "frame"; frame: LiveFrame }
+  | { kind: "visual"; frame: VisualFrame }
+  | { kind: "idle" }
+  | { kind: "event"; event: LiveEvent };
 
 export type Driver = {
   snapshot: () => LiveFrame | null;
@@ -61,6 +74,21 @@ export type Driver = {
    */
   events: (filter?: EventFilter) => AsyncIterable<LiveEvent>;
   render_text: () => string;
+  /** Latest VisualFrame — the ACTUAL rendered cell grid (colors + attributes),
+   *  or null if the TUI has not emitted one (renderer not attached). */
+  snapshot_visual: () => VisualFrame | null;
+  /** Render the visual grid as plain text (what a human reads on screen) —
+   *  faithful to the rendered characters, unlike render_text (semantic tree). */
+  render_visual: () => string;
+  /** Decode the cell at (row, col) — char + fg/bg hex + attribute bits — from
+   *  the latest VisualFrame, accounting for wide (2-col) glyphs. Null if out of
+   *  range or no visual frame yet. */
+  visual_cell: (row: number, col: number) => VisualCell | null;
+  /** Programmatic visual-quality heuristics over the latest VisualFrame:
+   *  near-empty-row ratio, blank-row runs, whitespace density, and mojibake —
+   *  the exact "messy render" signals the semantic tree is blind to. Null if no
+   *  visual frame yet. */
+  visual_quality: () => VisualQualityReport | null;
   _ingest: (m: Ingested) => void;
   /** Called when the TUI exits. Cleanly terminates all active `events()` iterables. */
   _closeAllSubscribers: () => void;
@@ -94,6 +122,7 @@ type Subscriber = {
 
 export function createDriver(deps: DriverDeps): Driver {
   let latestFrame: LiveFrame | null = null;
+  let latestVisualFrame: VisualFrame | null = null;
   let lastIdleAt: number = -1;
   const eventBuffer: LiveEvent[] = [];
   const waiters: Set<Waiter> = new Set();
@@ -387,9 +416,55 @@ export function createDriver(deps: DriverDeps): Driver {
       return latestFrame.nodes.map((n) => renderNode(n, 0)).join("\n");
     },
 
+    snapshot_visual(): VisualFrame | null {
+      return latestVisualFrame;
+    },
+
+    render_visual(): string {
+      if (!latestVisualFrame) return "(no visual frame)";
+      return latestVisualFrame.lines
+        .map((ln) =>
+          ln.spans
+            .map((s) => s.text)
+            .join("")
+            .replace(/\s+$/, ""),
+        )
+        .join("\n");
+    },
+
+    visual_cell(row: number, col: number): VisualCell | null {
+      const frame = latestVisualFrame;
+      if (!frame) return null;
+      const line = frame.lines[row];
+      if (!line) return null;
+      // Walk spans accumulating display columns; a wide glyph spans 2 columns
+      // but its span.width already reflects that, so index within the run by
+      // string position while tracking the column cursor.
+      let colCursor = 0;
+      for (const span of line.spans) {
+        const chars = [...span.text];
+        for (const ch of chars) {
+          // A char occupies span.width / chars.length columns on average; for
+          // the common width===text-length case this is 1. Round to stay integral.
+          const chCols = Math.max(1, Math.round(span.width / Math.max(1, chars.length)));
+          if (col >= colCursor && col < colCursor + chCols) {
+            return { char: ch, fg: span.fg, bg: span.bg, attrs: span.attrs };
+          }
+          colCursor += chCols;
+        }
+      }
+      return null;
+    },
+
+    visual_quality(): VisualQualityReport | null {
+      return latestVisualFrame ? computeVisualQuality(latestVisualFrame) : null;
+    },
+
     _ingest(m: Ingested): void {
       if (m.kind === "frame") {
         latestFrame = m.frame;
+      } else if (m.kind === "visual") {
+        latestVisualFrame = m.frame;
       } else if (m.kind === "idle") {
         lastIdleAt = Date.now();
       } else if (m.kind === "event") {

@@ -51,6 +51,10 @@ function makeStubDriver(calls: Calls, opts: { focusThrows?: boolean } = {}): Dri
       [Symbol.asyncIterator]: () => ({ next: async () => ({ value: undefined as any, done: true as const }) }),
     }),
     render_text: () => "",
+    snapshot_visual: () => null,
+    render_visual: () => "",
+    visual_cell: () => null,
+    visual_quality: () => null,
     _ingest: () => {},
     _closeAllSubscribers: () => {},
   };
