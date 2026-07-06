@@ -750,7 +750,12 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // aligned to `successCriteria` (may be shorter/absent before the first eval).
   if (councilMeta?.successCriteria?.length) {
     const crits = councilMeta.successCriteria;
-    const met = councilMeta.criteriaMet ?? [];
+    // Defense-in-depth: only trust criteriaMet when it is index-aligned to the
+    // current criteria (same length). A count mismatch means it is stale from a
+    // prior council (upsert-merge leak) — treat as all-not-met rather than paint
+    // wrong ✓ marks. index.ts also emits a count-matched all-false reset.
+    const rawMet = councilMeta.criteriaMet ?? [];
+    const met = rawMet.length === crits.length ? rawMet : [];
     const metCount = met.filter(Boolean).length;
     railRows.push({ label: "Outcome", value: `${metCount}/${crits.length} criteria met` });
     crits.forEach((c, i) => {

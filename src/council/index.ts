@@ -358,7 +358,19 @@ export async function* runCouncil(
     // patches from debate.ts. Only emit when there is something meaningful (skip
     // the single "Address the topic" auto-fallback).
     if (spec.successCriteria.length > 0) {
-      yield { type: "council_meta", councilMeta: { successCriteria: spec.successCriteria } };
+      // Emit a count-matched all-false criteriaMet ALONGSIDE successCriteria so
+      // the rail's Outcome block starts at 0/N. councilMeta is upsert-merged
+      // ({...prev, ...patch}); without this reset a previous council's
+      // criteriaMet array bleeds through (e.g. after an Esc-interrupt that
+      // skipped clearLiveTurnUi) and paints stale ✓ / a wrong "N/N met" counter
+      // before this debate has graded anything. debate.ts overwrites it post-eval.
+      yield {
+        type: "council_meta",
+        councilMeta: {
+          successCriteria: spec.successCriteria,
+          criteriaMet: spec.successCriteria.map(() => false),
+        },
+      };
     }
 
     // Cancelled during clarification — don't pop the preflight approval card.
