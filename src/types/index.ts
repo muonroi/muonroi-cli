@@ -306,6 +306,8 @@ export interface CouncilStatusData {
   detail?: string;
   role?: string;
   elapsedMs?: number;
+  /** Client-side first-seen stamp (upsertStatus), back-dated by the emitted elapsedMs. Drives live-ticking elapsed. */
+  startedAt?: number;
   tokensIn?: number;
   tokensOut?: number;
   errorMessage?: string;
