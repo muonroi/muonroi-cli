@@ -744,6 +744,21 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     const t = councilMeta.topic.trim();
     railRows.push({ label: "Topic", value: t.length > 90 ? `${t.slice(0, 89)}…` : t });
   }
+  // B2: the pinned OUTCOME — the exact criteria the debate is graded against,
+  // with live ✓ (met) / ○ (pending) per criterion. Pinned beside Topic so the
+  // user always sees WHAT "criteria met" refers to. `criteriaMet` is index-
+  // aligned to `successCriteria` (may be shorter/absent before the first eval).
+  if (councilMeta?.successCriteria?.length) {
+    const crits = councilMeta.successCriteria;
+    const met = councilMeta.criteriaMet ?? [];
+    const metCount = met.filter(Boolean).length;
+    railRows.push({ label: "Outcome", value: `${metCount}/${crits.length} criteria met` });
+    crits.forEach((c, i) => {
+      const mark = met[i] ? "✓" : "○";
+      const text = c.trim();
+      railRows.push({ label: "", value: `  ${mark} ${text.length > 64 ? `${text.slice(0, 63)}…` : text}` });
+    });
+  }
   if (councilMeta?.leader) railRows.push({ label: "Leader", value: councilMeta.leader });
   if (councilMeta?.panel?.length) {
     railRows.push({ label: "Panel", value: `${councilMeta.panel.length}: ${councilMeta.panel.join(", ")}` });

@@ -457,6 +457,19 @@ export interface CouncilMetaPatch {
   researchMode?: boolean;
   /** Cost-aware budgeting active. */
   costAware?: boolean;
+  /**
+   * The pinned outcome criteria the debate is graded against (the user-owned
+   * `ClarifiedSpec.successCriteria`). Emitted once after clarify so the rail can
+   * show the OUTCOME the debate is chasing — fixes "criteria met là gì tôi không
+   * biết". Stable for the whole debate.
+   */
+  successCriteria?: string[];
+  /**
+   * Per-criterion met status, index-aligned to `successCriteria`. Upsert-merged
+   * and refreshed after each round's leader evaluation so the rail shows live
+   * ✓/○ against the pinned criteria. Length matches `successCriteria`.
+   */
+  criteriaMet?: boolean[];
 }
 
 export interface CouncilMessage {

@@ -434,7 +434,7 @@ export function buildLeaderEvaluationPrompt(ctx: { spec: ClarifiedSpec; exchange
       `{\n` +
       `  "nextRoundFocus": "one short phrase naming the single most important point the NEXT round should resolve (empty string if you are stopping)",\n` +
       `  "allCriteriaMet": true/false,\n` +
-      `  "criteriaStatus": [{"criterion": "...", "met": true/false, "evidence": "..."}],\n` +
+      `  "criteriaStatus": [{"criterion": "...", "met": true/false, "evidence": "..."}],  // EXACTLY one entry per Success Criterion above, IN THE SAME ORDER. Do not merge, split, reorder, or invent criteria — the user pins these and watches each one.\n` +
       `  "unresolvedPoints": ["point 1"],\n` +
       `  "needsResearch": false,\n` +
       `  "researchQuery": null,\n` +

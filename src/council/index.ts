@@ -352,6 +352,15 @@ export async function* runCouncil(
       spec.parentContext = conversationContext?.trim() || undefined;
     }
 
+    // B2: pin the outcome criteria into the Context Rail so the user SEES what
+    // the debate is graded against (not a leader-improvised per-round criterion).
+    // Emitted once here; per-round met/pending arrives via later council_meta
+    // patches from debate.ts. Only emit when there is something meaningful (skip
+    // the single "Address the topic" auto-fallback).
+    if (spec.successCriteria.length > 0) {
+      yield { type: "council_meta", councilMeta: { successCriteria: spec.successCriteria } };
+    }
+
     // Cancelled during clarification — don't pop the preflight approval card.
     if (userAborted()) break;
 

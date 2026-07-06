@@ -1137,6 +1137,16 @@ export async function* runDebate(
       }
       const metCount = evaluation.criteriaStatus.filter((c) => c.met).length;
       const total = evaluation.criteriaStatus.length;
+      // B2/B3: project this round's evaluation onto the PINNED spec criteria
+      // (index-aligned, best-effort text match as a fallback) and push it to the
+      // rail so the user sees live ✓/○ against the exact outcome they saw — not
+      // an opaque "N/M". Only when the spec has real pinned criteria.
+      if (spec.successCriteria.length > 0) {
+        yield {
+          type: "council_meta" as const,
+          councilMeta: { criteriaMet: alignCriteriaMet(spec.successCriteria, evaluation.criteriaStatus) },
+        };
+      }
       yield phaseDone({
         phaseId: evalPhaseId,
         kind: "evaluation",
@@ -1504,6 +1514,27 @@ async function* evaluateDebate(
  * speaker in multiple pairs renders once. Returns undefined when nothing useful
  * is available so the UI falls back to label-only.
  */
+/**
+ * Project a leader evaluation's `criteriaStatus` onto the PINNED spec criteria,
+ * returning a boolean[] index-aligned to `pinned` (B2/B3). The eval prompt asks
+ * for one entry per criterion in order, so index alignment is the primary path;
+ * when the model drifts (wrong count/order) we fall back to a case-insensitive
+ * substring match either direction, defaulting unmatched criteria to not-met so
+ * a hallucinated "all met" never silently marks an untouched criterion done.
+ */
+export function alignCriteriaMet(pinned: string[], status: Array<{ criterion?: string; met?: boolean }>): boolean[] {
+  const aligned = status.length === pinned.length;
+  return pinned.map((crit, i) => {
+    if (aligned) return status[i]?.met === true;
+    const norm = crit.trim().toLowerCase();
+    const hit = status.find((s) => {
+      const sc = (s.criterion ?? "").trim().toLowerCase();
+      return sc.length > 0 && (sc.includes(norm) || norm.includes(sc));
+    });
+    return hit?.met === true;
+  });
+}
+
 export function formatSpeakerRoster(list: Array<{ stance?: DebateStance; model: string }>): string | undefined {
   const rows: string[] = [];
   for (const s of list) {

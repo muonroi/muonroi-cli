@@ -57,9 +57,12 @@ export function ContextRail({ width, rows, children }: ContextRailProps) {
         </text>
         {rows.length > 0 && (
           <box flexDirection="column" flexShrink={0}>
-            {rows.map((r) => (
-              <box key={r.label} flexDirection="row">
-                <text fg={dark.textMuted}>{`${r.label}: `}</text>
+            {rows.map((r, idx) => (
+              // Index key: list-style rows (e.g. per-criterion outcome lines) may
+              // share an empty or duplicate label, which would collide on a
+              // label-keyed map. An empty label renders value-only (no "· : ").
+              <box key={idx} flexDirection="row">
+                {r.label ? <text fg={dark.textMuted}>{`${r.label}: `}</text> : null}
                 <text>{r.value}</text>
               </box>
             ))}
