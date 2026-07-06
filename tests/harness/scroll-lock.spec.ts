@@ -43,10 +43,13 @@ describe("scroll-lock E2E", () => {
 
   it("locks on scroll-up and re-pins on End", async () => {
     // Fill the transcript so there is history to scroll away from.
+    // 30s per round-trip: under full-suite serial contention a single mock
+    // turn has been observed to exceed the old 10s budget (suite-run failure
+    // 2026-07-06); in isolation each turn is ~1s, so this is pure headroom.
     for (let i = 0; i < 8; i++) {
       ctx.driver.type(`fill message ${i} line one line two line three line four`);
       ctx.driver.press("Enter");
-      await ctx.driver.wait_for({ idle: true, timeoutMs: 10_000 });
+      await ctx.driver.wait_for({ idle: true, timeoutMs: 30_000 });
     }
 
     // Scroll up: composer is empty, so PageUp drives the transcript. The
@@ -62,5 +65,5 @@ describe("scroll-lock E2E", () => {
     await ctx.driver.wait_for({ idle: true, timeoutMs: 5_000 });
     expect(ctx.driver.query("id=jump-to-latest")).toBeNull();
     expect(ctx.driver.query("id=log")?.props?.locked).toBe(false);
-  }, 90_000);
+  }, 300_000);
 });
