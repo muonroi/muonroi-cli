@@ -106,6 +106,7 @@ import {
   initialCardState,
   reduceCardKey,
 } from "./components/council-question-card.js";
+import { CouncilRailRounds } from "./components/council-rail-rounds.js";
 import { CouncilRoundGroup, CouncilRoundsOverview } from "./components/council-round-group.js";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
 import { CouncilSynthesisBanner } from "./components/council-synthesis-banner.js";
@@ -599,6 +600,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     councilInfoCards,
     councilMeta,
     councilRounds,
+    selectedRound,
+    setSelectedRound,
     councilMessages,
     councilTranscriptExpanded,
     councilPhases,
@@ -808,6 +811,15 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
           <CouncilInfoCardView key={`info-card-${idx}-${card.title}`} card={card} terminalCols={cols} theme={t} />
         </Semantic>
       ))}
+      {isRoundGroupsEnabled() && councilRounds.length > 0 && (
+        <CouncilRailRounds
+          rounds={councilRounds}
+          selected={selectedRound}
+          onSelect={setSelectedRound}
+          width={cols}
+          theme={t}
+        />
+      )}
     </>
   );
 
@@ -1005,13 +1017,29 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                           {roundGroupsActive ? (
                             <>
                               <CouncilRoundsOverview rounds={councilRounds} theme={t} />
-                              {councilRounds.map((rec) => (
-                                <CouncilRoundGroup key={`round-${rec.round}`} record={rec} theme={t}>
-                                  {rec.state === "running"
-                                    ? debateTurns.filter(({ cm }) => cm.round === rec.round).map(renderTurn)
-                                    : null}
-                                </CouncilRoundGroup>
-                              ))}
+                              {councilRounds
+                                // When a round is selected in the rail, scope the
+                                // main pane to just that round (its debate turns
+                                // expanded); otherwise show every round group.
+                                .filter((rec) => selectedRound === null || rec.round === selectedRound)
+                                .map((rec) => {
+                                  const isSelected = selectedRound === rec.round;
+                                  // Render turns while running (live) OR when this
+                                  // round is the selected one (inspect its debate).
+                                  const showTurns = rec.state === "running" || isSelected;
+                                  return (
+                                    <CouncilRoundGroup
+                                      key={`round-${rec.round}`}
+                                      record={rec}
+                                      selected={isSelected}
+                                      theme={t}
+                                    >
+                                      {showTurns
+                                        ? debateTurns.filter(({ cm }) => cm.round === rec.round).map(renderTurn)
+                                        : null}
+                                    </CouncilRoundGroup>
+                                  );
+                                })}
                             </>
                           ) : (
                             debateTurns.length > 0 && (

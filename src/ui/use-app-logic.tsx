@@ -112,6 +112,7 @@ import {
   initialCardState,
   reduceCardKey,
 } from "./components/council-question-card.js";
+import { cycleRoundSelection } from "./components/council-rail-rounds.js";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
 import { CouncilSynthesisBanner } from "./components/council-synthesis-banner.js";
 import { HaltRecoveryCard } from "./components/halt-recovery-card.js";
@@ -1082,6 +1083,18 @@ export function useAppLogic(props: AppLogicProps) {
   // P5/P6 — per-round lifecycle records, upsert-merged by round number so a
   // `running` record is overwritten by its `done` record in place.
   const [councilRounds, setCouncilRounds] = useState<CouncilRoundRecord[]>([]);
+  // P2/D — round selected in the rail to scope the MAIN transcript pane. null =
+  // global (all/live rounds). Mirrored into a ref so the global key handler can
+  // read the current round list without re-subscribing on every round update.
+  const [selectedRound, setSelectedRound] = useState<number | null>(null);
+  const councilRoundsRef = useRef<CouncilRoundRecord[]>([]);
+  useEffect(() => {
+    councilRoundsRef.current = councilRounds;
+    // Drop a stale selection if that round is gone (new debate / cleared).
+    if (selectedRound !== null && !councilRounds.some((r) => r.round === selectedRound)) {
+      setSelectedRound(null);
+    }
+  }, [councilRounds, selectedRound]);
   const applyCouncilRound = useCallback((rec: CouncilRoundRecord) => {
     setCouncilRounds((prev) => {
       const idx = prev.findIndex((r) => r.round === rec.round);
@@ -2161,6 +2174,7 @@ export function useAppLogic(props: AppLogicProps) {
     setCouncilInfoCards([]);
     setCouncilMeta({});
     setCouncilRounds([]);
+    setSelectedRound(null);
     setCouncilPlaceholders(new Map());
   }, []);
 
@@ -5047,6 +5061,22 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
 
+      // P2/D — Ctrl+←/→ scope the main transcript to a single debate round (and
+      // back to the global view). Composer-aware: only when the prompt is empty,
+      // so Ctrl+arrows still do word-nav while composing. No-op when no rounds
+      // exist. Mirrors the rail's clickable round list (council-rail-rounds).
+      if (key.ctrl && !key.meta && (key.name === "left" || key.name === "right")) {
+        const rounds = councilRoundsRef.current;
+        if (rounds.length > 0) {
+          const composerEmpty = !(inputRef.current?.plainText ?? "").trim();
+          if (composerEmpty) {
+            const nums = rounds.map((r) => r.round);
+            setSelectedRound((cur) => cycleRoundSelection(nums, cur, key.name === "right" ? 1 : -1));
+            return;
+          }
+        }
+      }
+
       // Scroll-lock navigation (MUONROI_SCROLL_LOCK). Composer-aware: only act
       // when the prompt input is empty, so End/PageUp/PageDown still edit text
       // while composing. End re-pins to the live tail; PageUp/PageDown page the
@@ -7039,6 +7069,8 @@ export function useAppLogic(props: AppLogicProps) {
     councilInfoCards,
     councilMeta,
     councilRounds,
+    selectedRound,
+    setSelectedRound,
     councilMessages,
     councilTranscriptExpanded,
     councilPhases,
