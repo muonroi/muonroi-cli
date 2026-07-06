@@ -222,3 +222,43 @@ per-round logic remains textbook (R1 0/4 → continue, R2 4/4 → stop). tsc cle
 monitor cannot wake on round transitions. Any live-render verification of an
 intra-debate UI element must either persist that element onto a durable record
 (preferred) or poll renders on a short time cadence before the debate collapses.
+
+## B4 — leader auto-remedy toward unmet criteria (2026-07-07)
+
+Shipped: **B4** (fc5cc8b3), promoting B4-lite (post-hoc flag only) into an active
+remedy. "Done = all pinned criteria met" now drives the round budget.
+
+- **Auto-remedy extend:** at the last planned round with ceiling headroom, if
+  pinned criteria are still unmet AND progress is being made (a new criterion met
+  within the last 2 rounds), the leader auto-extends by 1 — even without an
+  explicit `extendRounds` — and steers the extra round at the open criteria
+  (`nextTopic = "Close the unmet criteria: …"`). Both the absolute ceiling and the
+  kind cap still bind: an `implementation_plan` cap of 3 with an initial budget of
+  3 has no headroom, so its remedy is the diagnostic verdict, not an extension
+  (auto-extend helps kinds whose ceiling exceeds the initial plan, and
+  implementation plans where the leader initially proposed < cap).
+- **Stuck guard:** a high-water mark of pinned-criteria-met + a
+  `roundsSinceProgress` counter; no new criterion for 2 rounds fails the trigger
+  so the ceiling isn't burned on a criterion that isn't moving.
+- **Diagnostic closing verdict:** when the debate still ends with unmet criteria,
+  the leader's closing message distinguishes stuck (needs evidence / rescope, not
+  more debate) from a genuine ceiling hit (raise the budget) from an ordinary
+  early stop — an actionable next move, not a generic shrug.
+
+Pure decisions (`autoRemedyWantsExtend`, `diagnoseUnmetRemedy`,
+`leaderAutoRemedyEnabled`) extracted + unit-tested (13 new; 236 council green).
+Flag `MUONROI_COUNCIL_AUTO_REMEDY` (default ON under the conductor; `=0` restores
+leader-requested-only extensions).
+
+**Verification note:** B4's observable behavior only fires when a debate *ends
+with unmet criteria*; every deepseek council this session converged to 4/4 in 2
+rounds, so reliably forcing an unmet-ending debate to snapshot the auto-extend
+line / diagnostic verdict live is non-deterministic. The pure decisions are
+unit-verified and the integration reuses the already-live-verified extend path
+(the "Leader extending…" content line) + the B5 verdict-message render path.
+
+**Still deferred (separate increment):** interactive mid-debate user-escalation
+askcard — needs the `respondToQuestion` channel threaded into `runDebate` (today
+only `clarifier`/`index` have it) — plus re-team via `selectTaskAwarePanel`. Also
+still open: the composing placeholder lingering after turn-end; the `debate.ts`
+silent catch.
