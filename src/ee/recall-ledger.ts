@@ -27,6 +27,15 @@ export interface RecallLedger {
   clear(id: string): boolean;
   /** Check if an id was ever cleared (fed back) in this session. Used by PIL Layer 3 to suppress re-injection. */
   wasCleared(id: string): boolean;
+  /**
+   * Check if an id is currently PENDING (recorded as unrated debt, not yet fed
+   * back). PIL Layer 3 uses this to suppress re-injecting the FULL content of a
+   * hint it already surfaced earlier this session — the hit is already in the
+   * conversation history and still listed in the feedback nudge, so repeating
+   * its body every turn is pure token waste (the "hint lặp" repetition). First
+   * sighting is injected + recorded; subsequent turns skip the body.
+   */
+  isPending(id: string): boolean;
   /** Oldest-first list of still-unrated recalls. */
   pending(): PendingRecall[];
   pendingCount(): number;
@@ -64,6 +73,9 @@ export function createRecallLedger(): RecallLedger {
     },
     wasCleared(id) {
       return cleared.has(String(id ?? "").trim());
+    },
+    isPending(id) {
+      return map.has(String(id ?? "").trim());
     },
     pending() {
       return [...map.values()].sort((a, b) => a.ts - b.ts);
