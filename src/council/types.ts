@@ -107,6 +107,14 @@ export interface DebateState {
   finalTaggedClaims?: number;
   /** Role-indexed per-round positions for follow-up citations. */
   archive?: DebateArchiveEntry[];
+  /**
+   * B4 interactive escalation outcome. Set only when the user was prompted at a
+   * stop-with-unmet boundary and chose an action: `extend` granted extra rounds
+   * past the ceiling, `accept` proceeded with criteria open, `rescope` asked to
+   * narrow the scope. Undefined when no escalation fired (auto-resolved, headless,
+   * or all criteria met). Lets synthesis/caller react to a user-driven partial stop.
+   */
+  escalation?: { action: "extend" | "accept" | "rescope"; grantedRounds?: number };
 }
 
 /**
@@ -284,6 +292,15 @@ export interface CouncilConfig {
    * stable literal); has no effect on debate behaviour.
    */
   runId?: string;
+  /**
+   * B4 interactive escalation channel. When wired, a debate about to STOP with
+   * pinned criteria still unmet (leader gave up or hit the ceiling) hands the
+   * decision to the user via a council_question askcard instead of silently
+   * synthesizing a partial outcome. Optional: headless/direct callers omit it and
+   * the debate falls through to the diagnostic closing verdict unchanged. Same
+   * responder the clarifier + post-debate askcards use.
+   */
+  respondToQuestion?: QuestionResponder;
 }
 
 // ── Persisted Council Memory ─────────────────────────────────────────────────

@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
-import type { StreamChunk } from "../types/index.js";
+import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
 import { pickCouncilTaskModel } from "./leader.js";
 import { tracedAsync, tracedGenerate } from "./llm.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
@@ -19,6 +20,7 @@ import type {
   DebateStance,
   DebateState,
   LeaderEvaluation,
+  QuestionResponder,
 } from "./types.js";
 
 /**
@@ -706,6 +708,39 @@ export async function* runDebate(
   // 2 rounds) stops the budget burn and drops to a diagnostic closing verdict.
   let bestCriteriaMetCount = 0;
   let roundsSinceProgress = 0;
+  // B4 interactive escalation — fires at most once per debate. `escalation`
+  // records the user's choice at a stop-with-unmet boundary for the DebateState.
+  let escalated = false;
+  let escalation: DebateState["escalation"] | undefined;
+
+  // Shared applier for the two stop-with-unmet boundaries (leader voluntarily
+  // stopped, or the budget exhausted while stuck/at ceiling). Reassigns the
+  // loop's round budget via closure; returns whether the debate should keep
+  // going. Caller must have already checked the gate (responder wired, flag on,
+  // not yet escalated, criteria unmet).
+  async function* escalateStop(
+    stuck: boolean,
+    pinnedUnmet: number,
+    openList: string[],
+  ): AsyncGenerator<StreamChunk, "extend" | "stop", unknown> {
+    escalated = true;
+    const dec = yield* runEscalationPrompt({
+      respondToQuestion: config.respondToQuestion!,
+      openCriteria: openList,
+      pinnedUnmet,
+      stuck,
+      atAbsoluteMax: maxRounds >= ABSOLUTE_MAX_ROUNDS,
+      currentMax: maxRounds,
+    });
+    escalation = { action: dec.action, grantedRounds: dec.grantedRounds || undefined };
+    if (dec.action === "extend" && dec.grantedRounds > 0) {
+      maxRounds += dec.grantedRounds;
+      roundsSinceProgress = 0;
+      if (!nextTopic) nextTopic = `Close the unmet criteria: ${openList.join("; ")}`;
+      return "extend";
+    }
+    return "stop";
+  }
 
   for (let round = 1; round <= maxRounds; round++) {
     // User cancelled mid-debate — stop before spending another round of
@@ -716,6 +751,10 @@ export async function* runDebate(
       break;
     }
     roundCount = round;
+    // Set when the user extends the debate at this round's stop boundary (B4
+    // escalation). Guards the convergence-exit below so a user "extend" isn't
+    // immediately overridden by a lock-phrase convergence break.
+    let userExtendedThisRound = false;
     const p2Start = Date.now();
     const roundPhaseId = `phase:round-${round}`;
     yield phaseStart({
@@ -1180,6 +1219,9 @@ export async function* runDebate(
       // an opaque "N/M". Only when the spec has real pinned criteria.
       const hasPinned = spec.successCriteria.length > 0;
       const aligned = hasPinned ? alignCriteriaMet(spec.successCriteria, evaluation.criteriaStatus) : [];
+      // Count of pinned criteria still open this round — used by both auto-remedy
+      // and the interactive escalation boundaries below.
+      const pinnedUnmet = hasPinned ? aligned.filter((m) => !m).length : 0;
       if (hasPinned) {
         yield {
           type: "council_meta" as const,
@@ -1306,11 +1348,40 @@ export async function* runDebate(
       }
 
       if (!evaluation.shouldContinue) {
-        yield {
-          type: "content",
-          content: `\n> Leader decided: debate sufficient at round ${round}.\n`,
-        };
-        break;
+        // B4 escalation site 1 — the leader is declaring the debate done. If
+        // pinned criteria are still unmet and we have an interactive channel,
+        // ask the user before accepting a partial outcome (the "3/5 → stop,
+        // synthesize as if done" gap). An "extend" cancels the stop and runs
+        // more rounds; accept/rescope confirm it.
+        if (
+          config.respondToQuestion &&
+          leaderEscalationEnabled() &&
+          !escalated &&
+          hasPinned &&
+          pinnedUnmet > 0 &&
+          // Respect the leader's own verdict: if it declared every criterion met,
+          // don't second-guess it with the fuzzy per-criterion alignment (which
+          // can miss a match and show a false unmet). Escalate only on a genuine
+          // stop-with-unmet the leader itself signalled.
+          !evaluation.allCriteriaMet
+        ) {
+          const openList = spec.successCriteria.filter((_, i) => !aligned[i]).map((c) => shortCriterion(c, 56));
+          const outcome = yield* escalateStop(roundsSinceProgress >= 2, pinnedUnmet, openList);
+          if (outcome === "extend") {
+            userExtendedThisRound = true;
+            // Fall through — the loop runs the user-granted rounds. Skip the
+            // convergence + auto-remedy stop-logic below (both assume a natural
+            // stop); the inter-round summary still runs.
+          } else {
+            break;
+          }
+        } else {
+          yield {
+            type: "content",
+            content: `\n> Leader decided: debate sufficient at round ${round}.\n`,
+          };
+          break;
+        }
       }
 
       // Code-side convergence override. When the latest round had ≥80% of
@@ -1327,7 +1398,9 @@ export async function* runDebate(
       const lockRatio = convergenceRatio(lastRoundTurns);
       const skepticClean = Array.isArray(evaluation.unresolvedPoints) && evaluation.unresolvedPoints.length === 0;
       const canExitEarly = (round >= 2 && lockRatio >= 0.8) || (round === 1 && lockRatio >= 0.8 && skepticClean);
-      if (canExitEarly) {
+      // A user "extend" at this round's stop boundary overrides a convergence
+      // break — the user explicitly asked for more rounds to close open criteria.
+      if (canExitEarly && !userExtendedThisRound) {
         const reason =
           round === 1
             ? `round 1 converged early (lock=${Math.round(lockRatio * 100)}%, no unresolved points)`
@@ -1351,7 +1424,6 @@ export async function* runDebate(
       // ceiling AND the kind cap still apply (leader can't push an
       // implementation_plan cap of 3 to 4).
       const leaderAskedExtend = typeof evaluation.extendRounds === "number" && evaluation.extendRounds > 0;
-      const pinnedUnmet = hasPinned ? aligned.filter((m) => !m).length : 0;
       const autoRemedy = leaderAutoRemedyEnabled() && autoRemedyWantsExtend(pinnedUnmet, roundsSinceProgress);
       if (round === maxRounds && maxRounds < effectiveCeiling && (leaderAskedExtend || autoRemedy)) {
         const requested = leaderAskedExtend ? Math.max(1, Math.floor(evaluation.extendRounds as number)) : 1;
@@ -1373,6 +1445,29 @@ export async function* runDebate(
             nextTopic = `Close the unmet criteria: ${openList.join("; ")}`;
           }
         }
+      }
+
+      // B4 escalation site 2 — the leader wanted to keep going but we're at the
+      // last round and auto-remedy couldn't extend (stuck, or the ceiling is
+      // reached). Rather than let the loop exit into a diagnostic-only synthesis,
+      // ask the user. An "extend" bumps maxRounds so the loop continues; accept/
+      // rescope let it exit naturally. `!escalated` already prevents a double-ask
+      // if site 1 fired this round.
+      if (
+        round === maxRounds &&
+        config.respondToQuestion &&
+        leaderEscalationEnabled() &&
+        !escalated &&
+        hasPinned &&
+        !evaluation.allCriteriaMet &&
+        escalationWanted({
+          pinnedUnmet,
+          stuck: roundsSinceProgress >= 2,
+          atCeiling: maxRounds >= effectiveCeiling,
+        })
+      ) {
+        const openList = spec.successCriteria.filter((_, i) => !aligned[i]).map((c) => shortCriterion(c, 56));
+        yield* escalateStop(roundsSinceProgress >= 2, pinnedUnmet, openList);
       }
     } else {
       yield phaseDone({
@@ -1443,18 +1538,22 @@ export async function* runDebate(
   // B4 leader remedy: the debate has ended — via leader stop, convergence, or
   // budget exhaustion (after auto-remedy exhausted the ceiling). If pinned
   // criteria remain unmet, the leader emits a visible closing verdict that
-  // DIAGNOSES why it stopped and gives an actionable remedy, instead of letting
-  // synthesis proceed as if the outcome were fully achieved (the "3/5 → stop,
-  // synthesize as if done" gap). Interactive user escalation (a mid-debate
-  // askcard) needs the respondToQuestion channel threaded into runDebate and is
-  // a separate increment; this at least never hides an unmet outcome and tells
-  // the user the specific next move.
+  // DIAGNOSES why it stopped and gives an actionable next move, instead of
+  // letting synthesis proceed as if the outcome were fully achieved (the "3/5 →
+  // stop, synthesize as if done" gap). When the user was consulted (B4
+  // escalation) and chose to accept/rescope, the remedy reflects that decision
+  // instead of a generic "re-run" shrug.
   if (leaderConductorEnabled() && spec.successCriteria.length > 0) {
     const unmet = spec.successCriteria.filter((_, i) => !lastCriteriaMet[i]);
     if (unmet.length > 0) {
       const atCeiling = maxRounds >= effectiveCeiling;
       const stuck = roundsSinceProgress >= 2;
-      const remedy = diagnoseUnmetRemedy({ stuck, atCeiling, effectiveCeiling, roundsSinceProgress });
+      const remedy =
+        escalation?.action === "accept"
+          ? "you accepted these as open — synthesis proceeds with them noted as unresolved."
+          : escalation?.action === "rescope"
+            ? "you asked to narrow the scope — re-run the council on just these criteria with a tighter problem statement."
+            : diagnoseUnmetRemedy({ stuck, atCeiling, effectiveCeiling, roundsSinceProgress });
       yield {
         type: "council_message" as const,
         councilMessage: {
@@ -1499,6 +1598,7 @@ export async function* runDebate(
     archive,
     finalEvidenceDensity,
     finalTaggedClaims,
+    escalation,
   };
 }
 
@@ -1694,6 +1794,143 @@ export function diagnoseUnmetRemedy(opts: {
     );
   }
   return `re-run with an extended round budget or a narrower scope to close them.`;
+}
+
+/** Extra rounds a user "extend" grants — can push past effectiveCeiling, never past ABSOLUTE_MAX_ROUNDS. */
+const ESCALATION_EXTEND_ROUNDS = 2;
+
+/**
+ * B4 interactive escalation. When the debate is about to stop with pinned
+ * criteria unmet AND auto-remedy can't help (stuck / at ceiling), hand the
+ * decision to the user instead of silently synthesizing a partial outcome.
+ * Default ON under the conductor; opt out with MUONROI_COUNCIL_ESCALATE=0
+ * (fallback = diagnostic closing verdict only, no askcard).
+ */
+export function leaderEscalationEnabled(): boolean {
+  return leaderConductorEnabled() && process.env.MUONROI_COUNCIL_ESCALATE !== "0";
+}
+
+/**
+ * B4: should we interrupt to ask the user at this stop boundary? True only when
+ * pinned criteria remain unmet AND the leader can no longer self-remedy — it is
+ * stuck (no progress for ≥2 rounds) or has hit the round ceiling. While progress
+ * is still being made under the ceiling, auto-remedy handles it silently and we
+ * don't nag the user.
+ */
+export function escalationWanted(opts: { pinnedUnmet: number; stuck: boolean; atCeiling: boolean }): boolean {
+  return opts.pinnedUnmet > 0 && (opts.stuck || opts.atCeiling);
+}
+
+/**
+ * B4: the three escalation choices. When the debate is already at the absolute
+ * safety ceiling, the "extend" option degrades to a disabled-looking accept
+ * (label says so) — we never let the user push past ABSOLUTE_MAX_ROUNDS.
+ */
+export function buildEscalationOptions(unmetCount: number, atAbsoluteMax: boolean): CouncilQuestionOption[] {
+  const noun = `${unmetCount} unmet criteri${unmetCount === 1 ? "on" : "a"}`;
+  return [
+    atAbsoluteMax
+      ? {
+          label: "Extend (unavailable — at hard ceiling)",
+          description: `The debate already reached the ${ABSOLUTE_MAX_ROUNDS}-round safety ceiling; more rounds aren't allowed. Picking this accepts the outcome as-is.`,
+          value: "escalate_accept",
+          kind: "choice" as const,
+        }
+      : {
+          label: `Extend ${ESCALATION_EXTEND_ROUNDS} more rounds`,
+          description: `Push past the round budget to keep working the ${noun}.`,
+          value: "escalate_extend",
+          kind: "choice" as const,
+        },
+    {
+      label: "Accept as-is",
+      description: `Proceed to synthesis with the ${noun} noted as open.`,
+      value: "escalate_accept",
+      kind: "choice" as const,
+    },
+    {
+      label: "Narrow the scope",
+      description: "Stop and re-scope — synthesis notes the open criteria for a narrower follow-up.",
+      value: "escalate_rescope",
+      kind: "choice" as const,
+    },
+  ];
+}
+
+/**
+ * B4: emit the escalation askcard and resolve the user's choice. Yields the
+ * council_question chunk (rendered by the same consumer as clarifier/post-debate
+ * askcards), awaits the responder, echoes the choice, and returns the decision.
+ * `grantedRounds` is pre-computed here (bounded by ABSOLUTE_MAX_ROUNDS) so the
+ * caller only mutates loop state. Any unmatched / empty answer is treated as
+ * "accept" — never a silent hang.
+ */
+export async function* runEscalationPrompt(opts: {
+  respondToQuestion: QuestionResponder;
+  openCriteria: string[];
+  pinnedUnmet: number;
+  stuck: boolean;
+  atAbsoluteMax: boolean;
+  currentMax: number;
+}): AsyncGenerator<StreamChunk, { action: "extend" | "accept" | "rescope"; grantedRounds: number }, unknown> {
+  const { respondToQuestion, openCriteria, pinnedUnmet, stuck, atAbsoluteMax, currentMax } = opts;
+  const noun = `${pinnedUnmet} criteri${pinnedUnmet === 1 ? "on" : "a"}`;
+  const openList = openCriteria.join("; ");
+  const questionId = randomUUID();
+  yield {
+    type: "council_question" as const,
+    content: `**Debate stalled with ${noun} still unmet.**\n> Open: ${openList}`,
+    councilQuestion: {
+      questionId,
+      // Reuse the existing post-debate phase — same askcard renderer, no new UI.
+      phase: "post-debate" as const,
+      question:
+        `The debate reached its ${stuck ? "progress limit" : "round ceiling"} with ${noun} still unmet. ` +
+        `How do you want to proceed?`,
+      context: `Open criteria: ${openList}`,
+      isRequired: false,
+      options: buildEscalationOptions(pinnedUnmet, atAbsoluteMax),
+      defaultIndex: 0,
+    },
+  } as StreamChunk;
+
+  let answer = "";
+  try {
+    answer = (await respondToQuestion(questionId))?.trim() ?? "";
+  } catch (err) {
+    // A failed responder must not hang or crash the debate — treat as accept and
+    // log so a broken UI channel is diagnosable (No-Silent-Catch).
+    console.error(`[council] escalation responder failed — accepting outcome as-is: ${(err as Error)?.message}`, {
+      questionId,
+      stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+    });
+    answer = "";
+  }
+
+  if (answer === "escalate_extend" && !atAbsoluteMax) {
+    const newMax = Math.min(ABSOLUTE_MAX_ROUNDS, currentMax + ESCALATION_EXTEND_ROUNDS);
+    const grantedRounds = Math.max(0, newMax - currentMax);
+    if (grantedRounds > 0) {
+      yield {
+        type: "content",
+        content: `\n> User extended debate by ${grantedRounds} round${grantedRounds === 1 ? "" : "s"} (now ${newMax}/${ABSOLUTE_MAX_ROUNDS}) — pushing past the budget to close the open criteria.\n`,
+      };
+      return { action: "extend", grantedRounds };
+    }
+    // No headroom left even though the option showed — fall through to accept.
+  }
+  if (answer === "escalate_rescope") {
+    yield {
+      type: "content",
+      content: `\n  ↳ Narrow the scope — ending the debate; synthesis will note the open criteria for a re-scoped follow-up.\n`,
+    };
+    return { action: "rescope", grantedRounds: 0 };
+  }
+  yield {
+    type: "content",
+    content: `\n  ↳ Accepted the current outcome with ${noun} open.\n`,
+  };
+  return { action: "accept", grantedRounds: 0 };
 }
 
 /** One-line criterion label for directive/verdict bodies. */

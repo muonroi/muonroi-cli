@@ -257,8 +257,47 @@ line / diagnostic verdict live is non-deterministic. The pure decisions are
 unit-verified and the integration reuses the already-live-verified extend path
 (the "Leader extending…" content line) + the B5 verdict-message render path.
 
-**Still deferred (separate increment):** interactive mid-debate user-escalation
-askcard — needs the `respondToQuestion` channel threaded into `runDebate` (today
-only `clarifier`/`index` have it) — plus re-team via `selectTaskAwarePanel`. Also
-still open: the composing placeholder lingering after turn-end; the `debate.ts`
-silent catch.
+## B4 — interactive user-escalation askcard (2026-07-07)
+
+Shipped: closes the last deferred B4 piece. When a debate is about to **stop with
+pinned criteria unmet** and the leader can no longer self-remedy, the decision is
+handed to the user instead of silently synthesizing a partial outcome.
+
+- **Channel threaded:** `CouncilConfig.respondToQuestion?` (the same responder
+  the clarifier + post-debate askcards use) now flows into `runDebate`;
+  `runCouncil` passes its existing `respondToQuestion` through. Optional →
+  headless/direct callers omit it and the debate falls through to the diagnostic
+  closing verdict unchanged.
+- **Two fire points, one applier (`escalateStop`):**
+  - *Site 1 — leader-stop-with-unmet:* the leader declares the debate done while
+    pinned criteria are still open (the "3/N → stop, synthesize as if done" gap).
+    Gated on `!evaluation.allCriteriaMet` so a leader that genuinely met everything
+    is never second-guessed by the fuzzy per-criterion alignment.
+  - *Site 2 — exhaustion:* the leader wanted to continue but we're at the last
+    round and auto-remedy couldn't extend (stuck ≥2 rounds, or at the ceiling).
+- **Choices:** *Extend +2 rounds* (pushes past `effectiveCeiling`, still bounded
+  by `ABSOLUTE_MAX_ROUNDS=8`; degrades to accept at the hard ceiling) / *Accept
+  as-is* / *Narrow the scope*. Extend cancels the stop and re-enters the loop
+  (overrides a same-round convergence break); accept/rescope confirm the stop.
+- **Fires at most once per debate** (`escalated` guard). The closing diagnostic
+  verdict is now choice-aware: `accept` → "you accepted these as open", `rescope`
+  → "you asked to narrow the scope", else the original stuck/ceiling diagnosis.
+- **No-Silent-Catch:** a throwing responder is logged with context and treated as
+  accept — never a hang or crash.
+
+Pure decisions (`leaderEscalationEnabled`, `escalationWanted`,
+`buildEscalationOptions`) + the `runEscalationPrompt` generator are unit-tested,
+and three **real-`runDebate` integration tests** prove the loop wiring: ask-once +
+extra round runs on extend, stop-at-plan + choice-aware verdict on accept, and no
+askcard on the headless (no-responder) path. `MUONROI_COUNCIL_ESCALATE` (default
+ON under the conductor; `=0` disables). 273 council tests green, tsc clean.
+
+**Verification note:** as with the rest of B4, the *live* trigger is
+non-deterministic (deepseek councils converge to all-met in 2 rounds), so the gate
+is unit + integration coverage over the real `runDebate` loop rather than a fresh
+live snapshot.
+
+**Still deferred (separate increment):** re-team via `selectTaskAwarePanel` on a
+stuck criterion (rescope currently stops honestly with a marker rather than
+re-running). Also still open: the composing placeholder lingering after turn-end;
+the `debate.ts` silent catch (`evaluateDebate` / inter-round summary).

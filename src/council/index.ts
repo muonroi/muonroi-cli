@@ -536,6 +536,11 @@ export async function* runCouncil(
       internetFirst,
       costAware,
       runId: sessionId,
+      // B4 interactive escalation — same responder the clarifier + post-debate
+      // askcards use. When the debate is about to stop with pinned criteria
+      // unmet, runDebate asks the user (extend / accept / rescope) instead of
+      // silently synthesizing a partial outcome.
+      respondToQuestion,
     },
     llm,
   );
