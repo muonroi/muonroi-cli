@@ -58,6 +58,70 @@ import { parseVerifyResult } from "./verify-result.js";
 // without touching DriverContext / IterationState shapes.
 const _cb2RetryUsed = new Map<string, boolean>();
 
+/** Watchdog ceiling for the verify stage (ms). Override with MUONROI_SPRINT_VERIFY_TIMEOUT_MS. */
+function getVerifyWatchdogTimeoutMs(): number {
+  const raw = process.env.MUONROI_SPRINT_VERIFY_TIMEOUT_MS;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(n) && n > 0) return n;
+  return 10 * 60 * 1000; // 10 min default
+}
+
+/**
+ * Bound the verify stage with a watchdog timeout.
+ *
+ * `runVerifyOrchestration` can hang indefinitely with no visible signal:
+ * `prepareVerifyRun` → `ensureVerifyCheckpoint` spawns the `shuru` sandbox
+ * (`spawnWithProgress("shuru", …)`) which stalls on hosts where shuru is
+ * unavailable/misconfigured (e.g. Windows), and the verify sub-agent itself has
+ * no TTFB timeout. Because sprint-runner previously called it as a bare
+ * `await runVerifyOrchestration(agent)` with NO abortSignal and NO timeout, a
+ * single hung verify BRICKED the whole /ideal run silently — no error, no
+ * recovery card — observed live as a 30+ min dead stall right after
+ * "Committed: N sprints planned" (the impl turn finished, verify never returned).
+ *
+ * On timeout we abort the sub-agent, log with context (No-Silent-Catch), and
+ * return an ERROR ToolResult so the sprint loop treats it as a failed verify
+ * (Step 5 → verifyVerdict FAIL/ERROR → feedback-routing) instead of hanging
+ * forever. The hung sandbox op may leak in the background, but the run recovers
+ * and the failure is surfaced + resumable. `onProgress` is forwarded to console
+ * so a future hang is diagnosable (e.g. "Creating checkpoint: <name>").
+ */
+async function runVerifyWithWatchdog(
+  verifyAgent: VerifyAgentLike,
+  runId: string,
+  sprintN: number,
+): Promise<ToolResult> {
+  const timeoutMs = getVerifyWatchdogTimeoutMs();
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const onProgress = (detail: string) => {
+    if (process.env.MUONROI_DEBUG_VERIFY === "1") console.error(`[verify:sprint-${sprintN}] ${detail}`);
+  };
+  const timeout = new Promise<ToolResult>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      const msg =
+        `verify stage exceeded ${Math.round(timeoutMs / 1000)}s watchdog and was aborted ` +
+        `(sprint ${sprintN}, run ${runId}) — likely a hung sandbox checkpoint (shuru) or a ` +
+        `verify sub-agent LLM call with no TTFB timeout`;
+      console.error(`[sprint-runner] ${msg}`);
+      resolve({ success: false, output: "", error: `verify-timeout: ${msg}` });
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      runVerifyOrchestration(verifyAgent, { abortSignal: controller.signal, onProgress }),
+      timeout,
+    ]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[sprint-runner] verify stage threw (sprint ${sprintN}, run ${runId}): ${message}`);
+    return { success: false, output: "", error: `verify-error: ${message}` };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** @internal Test-only: reset CB-2 retry state for a given runId. */
 export function _resetCb2RetryUsed(runId: string): void {
   _cb2RetryUsed.delete(runId);
@@ -417,7 +481,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     subtype: "sprint_stage",
     data: { sprintIndex: sprintN, stage: "verification", runId: ctx.runId },
   });
-  const verifyResult: ToolResult = await runVerifyOrchestration(verifyAgent);
+  const verifyResult: ToolResult = await runVerifyWithWatchdog(verifyAgent, ctx.runId, sprintN);
   yield phaseDone({
     phaseId: verifyPhaseId,
     kind: "sprint_stage",
