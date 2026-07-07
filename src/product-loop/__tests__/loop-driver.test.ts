@@ -1,6 +1,9 @@
+import { promises as nodeFs } from "node:fs";
 import * as os from "node:os";
+import * as nodePath from "node:path";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getTestModels } from "../../__test-helpers__/catalog-fixtures.js";
+import { buildDebateCheckpoint, writeDebateCheckpoint, writeDebateInputs } from "../../council/debate-checkpoint.js";
 import { loadCatalog } from "../../models/registry.js";
 import { runLoopDriver } from "../loop-driver.js";
 import type { DriverContext } from "../types.js";
@@ -249,5 +252,180 @@ describe("runLoopDriver", () => {
     expect(result.success).toBe(false);
     expect(result.stage).toBe("halted");
     expect(result.reason).toBe("user_rejected_spec");
+  });
+
+  // C — in-process resume-from-checkpoint retry when the debate throws mid-round.
+  it("resumes the debate from a checkpoint when the first attempt throws mid-round", async () => {
+    const flowDir = await nodeFs.mkdtemp(nodePath.join(os.tmpdir(), "loop-cp-"));
+    const runId = "resume-run";
+    ctx.flowDir = flowDir;
+    ctx.runId = runId;
+    const runDir = nodePath.join(flowDir, "runs", runId);
+
+    const mockClarifiedSpec = {
+      problemStatement: "Test Idea",
+      constraints: [],
+      successCriteria: [],
+      scope: "",
+      rawQA: [{ id: "persona", question: "q1", answer: "a1" }],
+      resolved: {
+        persona: "answered",
+        "core-features": "answered",
+        "non-functional": "answered",
+        "tech-constraints": "answered",
+        "success-metric": "answered",
+        "cost-tolerance": "answered",
+      },
+    };
+    (runGatherPhase as any).mockResolvedValue({
+      version: 1,
+      schemaName: "project-context",
+      generatedAt: "",
+      idea: "Test Idea",
+      detection: {},
+      context: {},
+      recommendations: { byField: {}, constraints: { fePolicy: "headless-ui-only", feEnforced: false } },
+      userOverrides: [],
+    });
+    (clarifiedSpecFromContext as any).mockReturnValue(mockClarifiedSpec);
+    (runPreflight as any).mockImplementation(async function* () {
+      return true;
+    });
+
+    // First runDebate attempt writes a real checkpoint (1 round done) then throws;
+    // the loop-driver retry wrapper must read it back and re-invoke runDebate.
+    let attempt = 0;
+    (runDebate as any).mockImplementation(async function* () {
+      attempt++;
+      if (attempt === 1) {
+        await writeDebateCheckpoint(
+          runDir,
+          buildDebateCheckpoint({
+            problemStatement: "Test Idea",
+            roundCount: 1,
+            maxRounds: 3,
+            exchangeLogs: new Map([["a<>b", ["turn"]]]),
+            runningSummary: "partial",
+            researchFindings: "found",
+            active: [{ role: "architect" as any, model: "m1", position: "p", stance: { name: "a", lens: "l" } }],
+            archive: [],
+            lastCriteriaMet: [],
+            bestCriteriaMetCount: 0,
+            roundsSinceProgress: 0,
+            savedAt: "2026-07-07T00:00:00.000Z",
+          }),
+        );
+        throw new Error("provider 5xx mid-round");
+      }
+      return {
+        spec: mockClarifiedSpec,
+        exchangeLogs: new Map(),
+        runningSummary: "Debate summary",
+        roundCount: 3,
+        researchFindings: "Some findings",
+      };
+    });
+
+    const gen = runLoopDriver(ctx);
+    const chunks: any[] = [];
+    let result: any;
+    while (true) {
+      const { value, done } = await gen.next();
+      if (done) {
+        result = value;
+        break;
+      }
+      chunks.push(value);
+    }
+
+    // The debate was retried (2 invocations) and the run reached approval.
+    expect(attempt).toBe(2);
+    expect(result.success).toBe(true);
+    expect(result.stage).toBe("approved");
+    // The second runDebate call received the checkpoint as resumeCheckpoint.
+    const secondCallConfig = (runDebate as any).mock.calls[1][1];
+    expect(secondCallConfig.resumeCheckpoint?.roundCount).toBe(1);
+    expect(secondCallConfig.checkpointDir).toBe(runDir);
+    // A resume notice was surfaced to the user.
+    const text = chunks.map((c) => c?.content ?? "").join("");
+    expect(text).toContain("resuming from round 2");
+
+    await nodeFs.rm(flowDir, { recursive: true, force: true });
+  });
+
+  // C-v2 — cross-session resume entry: a checkpoint + inputs on disk make the
+  // FSM skip discovery + the interview and jump straight to the debate.
+  it("skips discovery + gather and jumps to research when a debate checkpoint + inputs exist", async () => {
+    const flowDir = await nodeFs.mkdtemp(nodePath.join(os.tmpdir(), "loop-cv2-"));
+    const runId = "cv2-entry";
+    ctx.flowDir = flowDir;
+    ctx.runId = runId;
+    const runDir = nodePath.join(flowDir, "runs", runId);
+
+    const restoredSpec = {
+      problemStatement: "Restored Idea",
+      constraints: [],
+      successCriteria: [],
+      scope: "",
+      rawQA: [{ id: "persona", question: "q", answer: "a" }],
+      resolved: { persona: "answered" },
+    };
+    await writeDebateInputs(runDir, {
+      version: 1,
+      problemStatement: "Restored Idea",
+      clarifiedSpec: restoredSpec as any,
+      conversationContext: "restored context",
+      savedAt: "2026-07-07T00:00:00.000Z",
+    });
+    await writeDebateCheckpoint(
+      runDir,
+      buildDebateCheckpoint({
+        problemStatement: "Restored Idea",
+        roundCount: 1,
+        maxRounds: 3,
+        exchangeLogs: new Map([["a<>b", ["turn"]]]),
+        runningSummary: "partial",
+        active: [{ role: "architect" as any, model: "m1", position: "p", stance: { name: "a", lens: "l" } }],
+        archive: [],
+        lastCriteriaMet: [],
+        bestCriteriaMetCount: 0,
+        roundsSinceProgress: 0,
+        savedAt: "2026-07-07T00:00:00.000Z",
+      }),
+    );
+
+    (runDebate as any).mockImplementation(async function* () {
+      return {
+        spec: restoredSpec,
+        exchangeLogs: new Map(),
+        runningSummary: "Debate summary",
+        roundCount: 3,
+        researchFindings: "Some findings",
+      };
+    });
+    (runPreflight as any).mockImplementation(async function* () {
+      return true;
+    });
+
+    const gen = runLoopDriver(ctx);
+    const chunks: any[] = [];
+    let result: any;
+    while (true) {
+      const { value, done } = await gen.next();
+      if (done) {
+        result = value;
+        break;
+      }
+      chunks.push(value);
+    }
+
+    // Gather (the interactive interview) was SKIPPED; the debate ran.
+    expect(runGatherPhase).not.toHaveBeenCalled();
+    expect(runDebate).toHaveBeenCalled();
+    expect(result.stage).toBe("approved");
+    const text = chunks.map((c) => c?.content ?? "").join("");
+    expect(text).toContain("Resuming an interrupted council debate");
+
+    await nodeFs.rm(flowDir, { recursive: true, force: true });
   });
 });

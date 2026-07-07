@@ -102,6 +102,23 @@ export interface RunCouncilOptions {
    * Railless sinks (headless, telegram) leave it unset → inline is preserved.
    */
   suppressInlineMeta?: boolean;
+  /**
+   * When true, the preflight "approve discussion plan" card is auto-approved
+   * (no user gate). Set by the sprint-planning call site (`runSprint`): the
+   * overall product plan + spec were already approved at the `/ideal` preflight,
+   * so re-gating each sprint's internal plan is a redundant rubber-stamp that
+   * strands the loop BEFORE implementation is ever reached. The meaningful gate
+   * — the post-sprint customer verdict — still fires, so the user reviews each
+   * sprint's OUTPUT, not its plan.
+   */
+  autoApprovePreflight?: boolean;
+  /**
+   * When true, skip the (redundant) research phase inside the debate. Set by the
+   * sprint-planning call site: CB-1 already researched the product at the
+   * product level; the per-sprint plan reuses that grounding (the ProductSpec is
+   * embedded in the council topic) instead of paying for a second research pass.
+   */
+  skipResearch?: boolean;
 }
 
 export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis";
@@ -417,7 +434,7 @@ export async function* runCouncil(
     const preflightGen = runPreflight(spec, participants, researchNeeded, respondToPreflight, {
       repoEmpty: internetFirst,
       researchOverridable: true,
-      autoApprove: spec.ready === true,
+      autoApprove: spec.ready === true || options?.autoApprovePreflight === true,
     });
     let preflightResult: IteratorResult<StreamChunk, boolean>;
     do {
@@ -441,37 +458,45 @@ export async function* runCouncil(
   // Leader-LLM decides if research is required. If yes, give the user a chance
   // to skip — research is the slowest part of council and trivial questions
   // (e.g. "what did we just decide?") should not pay that cost.
-  const researchSkipOverride = false;
+  // When the caller (sprint-planning) already has product-level research from
+  // CB-1, skip the second research pass entirely: force researchSkipOverride so
+  // runDebate does not re-run it, and short-circuit leaderNeedsResearch to false.
+  const researchSkipOverride = options?.skipResearch === true;
   // Hoisted so the leader's research decision can be reused by runDebate instead
   // of re-running the classifier LLM call (see CouncilConfig.leaderNeedsResearch).
   // Stays undefined if the classifier throws — fail-open: runDebate re-evaluates.
   let leaderNeedsResearch: boolean | undefined;
-  try {
-    const needGen = evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware);
-    let needStep: IteratorResult<StreamChunk, boolean>;
-    do {
-      needStep = await needGen.next();
-      if (!needStep.done && needStep.value) yield needStep.value;
-    } while (!needStep.done);
-    leaderNeedsResearch = needStep.value;
-    if (leaderNeedsResearch !== undefined) {
-      yield { type: "council_meta", councilMeta: { researchMode: leaderNeedsResearch } };
-    }
+  if (options?.skipResearch) {
+    leaderNeedsResearch = false;
+    yield { type: "council_meta", councilMeta: { researchMode: false } };
+  } else {
+    try {
+      const needGen = evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware);
+      let needStep: IteratorResult<StreamChunk, boolean>;
+      do {
+        needStep = await needGen.next();
+        if (!needStep.done && needStep.value) yield needStep.value;
+      } while (!needStep.done);
+      leaderNeedsResearch = needStep.value;
+      if (leaderNeedsResearch !== undefined) {
+        yield { type: "council_meta", councilMeta: { researchMode: leaderNeedsResearch } };
+      }
 
-    // ROI: the leader already decided research is needed and the card's default
-    // was always "run research" — asking the user to confirm is a rubber-stamp
-    // (measured 0 information at real cost). Auto-proceed with research; the
-    // leaderNeedsResearch signal still flows to runDebate. researchSkipOverride
-    // stays false. (Deliberately no card — see council-UX ROI pass.)
-    if (leaderNeedsResearch) {
-      yield {
-        type: "content",
-        content: `\n  ↳ Leader recommends research${internetFirst ? " (internet-first — empty workspace)" : " (codebase-first)"} — running it.\n`,
-      };
+      // ROI: the leader already decided research is needed and the card's default
+      // was always "run research" — asking the user to confirm is a rubber-stamp
+      // (measured 0 information at real cost). Auto-proceed with research; the
+      // leaderNeedsResearch signal still flows to runDebate. researchSkipOverride
+      // stays false. (Deliberately no card — see council-UX ROI pass.)
+      if (leaderNeedsResearch) {
+        yield {
+          type: "content",
+          content: `\n  ↳ Leader recommends research${internetFirst ? " (internet-first — empty workspace)" : " (codebase-first)"} — running it.\n`,
+        };
+      }
+    } catch (err) {
+      // fail-open — leaderNeedsResearch stays undefined so runDebate re-evaluates.
+      console.error(`[council] research-need pre-check failed (fail-open): ${(err as Error)?.message}`);
     }
-  } catch (err) {
-    // fail-open — leaderNeedsResearch stays undefined so runDebate re-evaluates.
-    console.error(`[council] research-need pre-check failed (fail-open): ${(err as Error)?.message}`);
   }
 
   // Await EE pre-fetch (started in parallel with clarifier — latency already hidden)

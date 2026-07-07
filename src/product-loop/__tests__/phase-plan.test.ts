@@ -25,6 +25,31 @@ describe("phase-plan schema/parse/validate (subsystem E)", () => {
     expect(out.version).toBe(1);
   });
 
+  it("parsePhasePlanJson normalizes numeric id + dependsOn to phase-N strings", () => {
+    // Regression: deepseek emits `"id": 1, "dependsOn": [1]` (numbers) instead of
+    // `"phase-1"` strings. buildRoadmapFromPhasePlan then crashed with
+    // `dep.match is not a function`, aborting the /ideal run post-commit before
+    // any implementation. parse must coerce to the declared string contract.
+    const raw = JSON.stringify({
+      version: 1,
+      generatedAt: "2026-05-13T00:00:00Z",
+      phases: [
+        { id: 1, name: "a", goal: "g", successCriteria: [], scope: "s", dependsOn: [], maxSprints: 1 },
+        { id: 2, name: "b", goal: "g", successCriteria: [], scope: "s", dependsOn: [1], maxSprints: 1 },
+        { id: "phase-3", name: "c", goal: "g", successCriteria: [], scope: "s", dependsOn: ["2"], maxSprints: 1 },
+      ],
+    });
+    const out = parsePhasePlanJson(raw);
+    expect(out.phases.map((p) => p.id)).toEqual(["phase-1", "phase-2", "phase-3"]);
+    expect(out.phases[1].dependsOn).toEqual(["phase-1"]);
+    expect(out.phases[2].dependsOn).toEqual(["phase-2"]);
+    // every id + dep is a string now
+    for (const p of out.phases) {
+      expect(typeof p.id).toBe("string");
+      for (const d of p.dependsOn) expect(typeof d).toBe("string");
+    }
+  });
+
   it("validatePhasePlan throws when phases.length === 0", () => {
     expect(() => validatePhasePlan({ version: 1, generatedAt: "x", phases: [] }, spec)).toThrow(/phases.length/);
   });

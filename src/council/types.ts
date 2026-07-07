@@ -310,6 +310,21 @@ export interface CouncilConfig {
    * responder the clarifier + post-debate askcards use.
    */
   respondToQuestion?: QuestionResponder;
+  /**
+   * C (mid-debate checkpoint) — directory to persist the per-round debate
+   * checkpoint (`debate-checkpoint.json`), normally the run dir
+   * `.muonroi-flow/runs/<runId>`. When set, runDebate snapshots its state after
+   * each completed round and deletes it on normal completion. Unset → no
+   * checkpointing (direct callers/tests).
+   */
+  checkpointDir?: string;
+  /**
+   * C — a prior checkpoint to resume from. When present AND it matches this
+   * debate (same problem statement + panel), runDebate skips the research +
+   * opening phases and the already-completed rounds, restoring the accumulated
+   * transcript, and continues from the last completed round. Ignored on mismatch.
+   */
+  resumeCheckpoint?: import("./debate-checkpoint.js").DebateCheckpoint;
 }
 
 // ── Persisted Council Memory ─────────────────────────────────────────────────

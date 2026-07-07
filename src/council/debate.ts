@@ -2,6 +2,13 @@ import { randomUUID } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
+import {
+  buildDebateCheckpoint,
+  checkpointMatches,
+  deleteDebateCheckpoint,
+  restoreExchangeLogs,
+  writeDebateCheckpoint,
+} from "./debate-checkpoint.js";
 import { pickCouncilTaskModel } from "./leader.js";
 import { tracedAsync, tracedGenerate } from "./llm.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
@@ -455,6 +462,21 @@ export async function* runDebate(
   llm: CouncilLLM,
 ): AsyncGenerator<StreamChunk, DebateState, unknown> {
   const { leaderModelId, participants, conversationContext, signal, debatePlan } = config;
+  // C — resume from a prior per-round checkpoint when it matches this debate
+  // (same problem statement + panel). On a match we skip research + openings and
+  // the already-completed rounds, restoring the accumulated transcript. On any
+  // mismatch (spec changed, panel re-resolved) we run fresh and let the stale
+  // checkpoint be overwritten by the first new round.
+  const resumeCp =
+    config.resumeCheckpoint &&
+    checkpointMatches(
+      config.resumeCheckpoint,
+      spec.problemStatement,
+      participants.map((p) => p.model),
+    )
+      ? config.resumeCheckpoint
+      : undefined;
+  const resumed = resumeCp !== undefined;
   // Cross-provider fallback pool for debateWithRetry: leader + every
   // participant model, deduped. When a speaker's model fails both same-model
   // attempts, debateWithRetry retries once on the first pooled model whose
@@ -483,13 +505,30 @@ export async function* runDebate(
   // emit the same "circuit breaker tripped" message every round.
   const announcedDisabled = new Set<string>();
 
+  // C — restore accumulated state before any phase runs when resuming.
+  if (resumeCp) {
+    for (const p of resumeCp.active) active.push(p);
+    for (const [k, v] of restoreExchangeLogs(resumeCp)) exchangeLogs.set(k, v);
+    for (const a of resumeCp.archive) archive.push(a);
+    runningSummary = resumeCp.runningSummary;
+    researchFindings = resumeCp.researchFindings;
+    yield {
+      type: "content",
+      content: `\n> Resuming debate from round ${resumeCp.roundCount + 1} — restored ${resumeCp.roundCount} completed round(s), ${active.length} participant(s), skipping research + opening statements.\n`,
+    };
+  }
+
   // ── Leader decides: research needed? (skipped if user overrode upstream) ──
   // Reuse the leader's upstream research decision (computed once in runCouncil)
   // when available; only run the classifier here for direct callers that did not
   // pre-compute it. Avoids a duplicate leader-tier LLM call per council run.
-  const needsResearch = researchSkipOverride
+  // On resume the research phase already ran — never re-run it.
+  const needsResearch = resumed
     ? false
-    : (leaderNeedsResearch ?? (yield* evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware)));
+    : researchSkipOverride
+      ? false
+      : (leaderNeedsResearch ??
+        (yield* evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware)));
 
   if (researchSkipOverride) {
     yield {
@@ -554,95 +593,99 @@ export async function* runDebate(
     : conversationContext;
 
   // ── Phase 1: Parallel opening statements ───────────────────────────────────
-  const p1Start = Date.now();
-  yield phaseStart({
-    phaseId: "phase:opening",
-    kind: "opening",
-    label: "Opening analysis",
-    detail: `${participants.length} participants in parallel`,
-  });
-
-  const openingPromises = participants.map((self) => {
-    const partner = participants.find((c) => c.role !== self.role) ?? participants[0];
-    const { system, prompt } = buildOpeningPrompt({
-      speakerRole: self.role,
-      partnerRole: partner.role,
-      speakerStance: self.stance,
-      partnerStance: partner.stance,
-      spec,
-      outputShape: debatePlan?.outputShape,
-      conversationContext: enrichedContext,
+  // Skipped entirely on resume — `active` was restored from the checkpoint so
+  // re-running openings would both waste tokens and reset the debated positions.
+  if (!resumed) {
+    const p1Start = Date.now();
+    yield phaseStart({
+      phaseId: "phase:opening",
+      kind: "opening",
+      label: "Opening analysis",
+      detail: `${participants.length} participants in parallel`,
     });
-    return openingWithRetry(llm, self.model, system, prompt).then((r) => ({
-      role: self.role,
-      model: self.model,
-      stance: self.stance,
-      position: r.text,
-      error: r.text ? null : (r.error ?? "empty completion after retries"),
-      attempts: r.attempts,
-    }));
-  });
 
-  const openings = yield* tracedAsync(() => Promise.all(openingPromises), {
-    phase: "opening",
-    label: `Generating opening statements (${participants.length} participants in parallel)`,
-    // Newline-joined "Name — lens" roster so the composing placeholder shows WHAT
-    // each speaker is tasked to argue (A: live debate preview) instead of a bare
-    // spinner during the atomic generateText window.
-    detail: formatSpeakerRoster(participants),
-  });
-
-  yield { type: "content", content: "\n── Opening Analysis ──\n" };
-  for (const o of openings) {
-    const speakerRole = o.stance?.name ?? o.role;
-    if (o.error) {
-      yield {
-        type: "council_message",
-        councilMessage: {
-          kind: "debate",
-          speaker: { role: speakerRole, model: o.model },
-          round: 0,
-          text: `[Error: ${o.error}]`,
-          attempts: o.attempts,
-          failureReason: o.error,
-        },
-      };
-    } else {
-      active.push({ role: o.role as any, model: o.model, position: o.position, stance: o.stance });
-      archive.push({
-        round: 0,
-        role: o.role as any,
-        model: o.model,
-        stanceName: o.stance?.name,
-        ...makeExcerpt(o.position),
+    const openingPromises = participants.map((self) => {
+      const partner = participants.find((c) => c.role !== self.role) ?? participants[0];
+      const { system, prompt } = buildOpeningPrompt({
+        speakerRole: self.role,
+        partnerRole: partner.role,
+        speakerStance: self.stance,
+        partnerStance: partner.stance,
+        spec,
+        outputShape: debatePlan?.outputShape,
+        conversationContext: enrichedContext,
       });
-      yield {
-        type: "council_message",
-        councilMessage: {
-          kind: "debate",
-          speaker: { role: speakerRole, model: o.model },
+      return openingWithRetry(llm, self.model, system, prompt).then((r) => ({
+        role: self.role,
+        model: self.model,
+        stance: self.stance,
+        position: r.text,
+        error: r.text ? null : (r.error ?? "empty completion after retries"),
+        attempts: r.attempts,
+      }));
+    });
+
+    const openings = yield* tracedAsync(() => Promise.all(openingPromises), {
+      phase: "opening",
+      label: `Generating opening statements (${participants.length} participants in parallel)`,
+      // Newline-joined "Name — lens" roster so the composing placeholder shows WHAT
+      // each speaker is tasked to argue (A: live debate preview) instead of a bare
+      // spinner during the atomic generateText window.
+      detail: formatSpeakerRoster(participants),
+    });
+
+    yield { type: "content", content: "\n── Opening Analysis ──\n" };
+    for (const o of openings) {
+      const speakerRole = o.stance?.name ?? o.role;
+      if (o.error) {
+        yield {
+          type: "council_message",
+          councilMessage: {
+            kind: "debate",
+            speaker: { role: speakerRole, model: o.model },
+            round: 0,
+            text: `[Error: ${o.error}]`,
+            attempts: o.attempts,
+            failureReason: o.error,
+          },
+        };
+      } else {
+        active.push({ role: o.role as any, model: o.model, position: o.position, stance: o.stance });
+        archive.push({
+          round: 0,
+          role: o.role as any,
+          model: o.model,
+          stanceName: o.stance?.name,
+          ...makeExcerpt(o.position),
+        });
+        yield {
+          type: "council_message",
+          councilMessage: {
+            kind: "debate",
+            speaker: { role: speakerRole, model: o.model },
+            round: 0,
+            text: o.position,
+            attempts: o.attempts,
+          },
+        };
+        emitCouncilTurnLength({
+          role: speakerRole,
           round: 0,
           text: o.position,
-          attempts: o.attempts,
-        },
-      };
-      emitCouncilTurnLength({
-        role: speakerRole,
-        round: 0,
-        text: o.position,
-        model: o.model,
-        correlationId: turnCorrelationId,
-      });
+          model: o.model,
+          correlationId: turnCorrelationId,
+        });
+      }
     }
-  }
 
-  yield phaseDone({
-    phaseId: "phase:opening",
-    kind: "opening",
-    label: "Opening analysis",
-    startedAt: p1Start,
-    detail: `${active.length}/${participants.length} participants succeeded`,
-  });
+    yield phaseDone({
+      phaseId: "phase:opening",
+      kind: "opening",
+      label: "Opening analysis",
+      startedAt: p1Start,
+      detail: `${active.length}/${participants.length} participants succeeded`,
+    });
+  }
 
   if (active.length < 2) {
     yield { type: "content", content: "\nNot enough successful openings for discussion.\n" };
@@ -713,6 +756,21 @@ export async function* runDebate(
   let escalated = false;
   let escalation: DebateState["escalation"] | undefined;
 
+  // C — restore round-loop continuity from the checkpoint. `maxRounds` takes the
+  // checkpointed budget (which may have been extended past the plan). The within-
+  // run heuristics that reset safely (droppedPairKeys, consecutiveRoundFailures,
+  // consecutivePairFailures, escalated) are intentionally NOT restored — a fresh
+  // start for them at most re-tries a previously-dropped pair, never corrupts
+  // state. The loop start is derived below from `roundCount`.
+  if (resumeCp) {
+    roundCount = resumeCp.roundCount;
+    maxRounds = Math.max(maxRounds, resumeCp.maxRounds);
+    lastCriteriaMet = [...resumeCp.lastCriteriaMet];
+    bestCriteriaMetCount = resumeCp.bestCriteriaMetCount;
+    roundsSinceProgress = resumeCp.roundsSinceProgress;
+    nextTopic = resumeCp.nextTopic;
+  }
+
   // Shared applier for the two stop-with-unmet boundaries (leader voluntarily
   // stopped, or the budget exhausted while stuck/at ceiling). Reassigns the
   // loop's round budget via closure; returns whether the debate should keep
@@ -742,7 +800,9 @@ export async function* runDebate(
     return "stop";
   }
 
-  for (let round = 1; round <= maxRounds; round++) {
+  // C — on resume, `roundCount` was seeded to the last completed round so the
+  // loop continues at roundCount+1; a fresh run starts at 1 (roundCount=0).
+  for (let round = roundCount + 1; round <= maxRounds; round++) {
     // User cancelled mid-debate — stop before spending another round of
     // parallel pair LLM calls. The caller (runCouncil) re-checks the signal at
     // its next phase boundary and skips synthesis too.
@@ -1556,6 +1616,30 @@ export async function* runDebate(
         });
       }
     }
+
+    // C — snapshot the fully-completed round (transcript + summary persisted) so
+    // a break before synthesis resumes from round+1 instead of round 1. roundCount
+    // was set to `round` at the top of this iteration. Non-fatal on write failure.
+    if (config.checkpointDir) {
+      await writeDebateCheckpoint(
+        config.checkpointDir,
+        buildDebateCheckpoint({
+          problemStatement: spec.problemStatement,
+          roundCount,
+          maxRounds,
+          exchangeLogs,
+          runningSummary,
+          researchFindings,
+          active,
+          archive,
+          lastCriteriaMet,
+          bestCriteriaMetCount,
+          roundsSinceProgress,
+          nextTopic,
+          savedAt: new Date().toISOString(),
+        }),
+      );
+    }
   }
 
   // B4 leader remedy: the debate has ended — via leader stop, convergence, or
@@ -1610,6 +1694,13 @@ export async function* runDebate(
   // "measured 0% grounding" apart from "no tags emitted → not measurable"
   // (session de4bafe5ecb7: substantive debate, zero tags → misleading 0%).
   const finalTaggedClaims = countCitations(fullExchangeText) + countUnverified(fullExchangeText);
+
+  // C — the debate reached synthesis (normal completion or user-cancel fall-
+  // through), so the checkpoint is obsolete. A mid-round THROW never reaches
+  // here, leaving the checkpoint for the loop-driver retry / resume path.
+  if (config.checkpointDir) {
+    await deleteDebateCheckpoint(config.checkpointDir);
+  }
 
   return {
     spec,

@@ -115,8 +115,24 @@ describe("/ideal slash handler dispatch", () => {
     expect(payload.runId).toBeUndefined();
   });
 
-  it("refuses resume without runId", async () => {
+  it("allows resume without runId (auto-detects newest incomplete run — B)", async () => {
     const out = await handleIdealSlash(["resume"], NOOP_CTX);
+    expect(out).toContain("__PRODUCT_LOOP__");
+    const payload = JSON.parse(out.split("__PRODUCT_LOOP__\n")[1]!);
+    expect(payload.subcommand).toBe("resume");
+    expect(payload.runId).toBeUndefined();
+  });
+
+  it("allows abort without runId (auto-detects newest incomplete run — A/B)", async () => {
+    const out = await handleIdealSlash(["abort"], NOOP_CTX);
+    expect(out).toContain("__PRODUCT_LOOP__");
+    const payload = JSON.parse(out.split("__PRODUCT_LOOP__\n")[1]!);
+    expect(payload.subcommand).toBe("abort");
+    expect(payload.runId).toBeUndefined();
+  });
+
+  it("still refuses ship without runId", async () => {
+    const out = await handleIdealSlash(["ship"], NOOP_CTX);
     expect(out.toLowerCase()).toContain("requires a runid");
   });
 

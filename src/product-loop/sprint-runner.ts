@@ -51,7 +51,7 @@ import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snap
 import { appendRoleMemory } from "./role-memory.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
 import { loadVerifyFailureSignatures, recordVerifyFailureAndMaybePush } from "./verify-failure-tracking.js";
-import { parseVerifyResult } from "./verify-result.js";
+import { parseVerifyResult, VERIFY_PASS_MARKER } from "./verify-result.js";
 
 // P3.7: track one-shot CB-2 retry bonus per run (keyed by runId).
 // The Map is module-scoped so multiple sprints within the same run share state
@@ -343,7 +343,20 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     ctx.respondToQuestion,
     ctx.respondToPreflight,
     ctx.processMessageFn ?? noopProcess,
-    { skipClarification: true, cwd, runDir, suppressInlineMeta: isContextRailEnabled() },
+    {
+      skipClarification: true,
+      cwd,
+      runDir,
+      suppressInlineMeta: isContextRailEnabled(),
+      // The product plan + spec were already debated (CB-1) and approved at the
+      // `/ideal` preflight. Re-gating and re-researching each sprint's internal
+      // plan strands the loop before implementation is ever reached (the exact
+      // "debate great, never implements" symptom). Auto-approve the per-sprint
+      // plan and reuse CB-1 research; the post-sprint customer verdict still lets
+      // the user review each sprint's OUTPUT.
+      autoApprovePreflight: true,
+      skipResearch: true,
+    },
   );
 
   let planSynthesis = "";
@@ -481,7 +494,31 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     subtype: "sprint_stage",
     data: { sprintIndex: sprintN, stage: "verification", runId: ctx.runId },
   });
-  const verifyResult: ToolResult = await runVerifyWithWatchdog(verifyAgent, ctx.runId, sprintN);
+  // A — "Skip verify" recovery option: the user chose to bypass a broken verify
+  // stage (e.g. shuru sandbox unavailable on Windows that hangs the watchdog
+  // every sprint). Treat verify as a PASS with an explicit synthetic output so
+  // the done-gate is not blocked, and log loudly so the bypass is auditable.
+  // The env var is set by the recovery-card handler and reset on the next fresh
+  // `/ideal "<idea>"` start, so a new run re-enables verification.
+  const skipVerify = process.env.MUONROI_SPRINT_SKIP_VERIFY === "1";
+  let verifyResult: ToolResult;
+  if (skipVerify) {
+    console.error(
+      `[sprint-runner] MUONROI_SPRINT_SKIP_VERIFY=1 — verify stage bypassed (sprint ${sprintN}, run ${ctx.runId})`,
+    );
+    verifyResult = {
+      success: true,
+      // Include the canonical PASS marker so parseVerifyResult → PASS (the user
+      // explicitly opted to treat verify as satisfied for this recovery).
+      output: `${VERIFY_PASS_MARKER}\nverify skipped by user recovery choice (MUONROI_SPRINT_SKIP_VERIFY=1)`,
+    };
+    yield {
+      type: "content",
+      content: `\n> [skip-verify] Verify stage bypassed for sprint ${sprintN} (user recovery choice).\n`,
+    };
+  } else {
+    verifyResult = await runVerifyWithWatchdog(verifyAgent, ctx.runId, sprintN);
+  }
   yield phaseDone({
     phaseId: verifyPhaseId,
     kind: "sprint_stage",

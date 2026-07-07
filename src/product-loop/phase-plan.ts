@@ -14,12 +14,47 @@ export const PHASE_PLANNER_SYSTEM =
   "Each phase covers a subset of successCriteria verbatim from the input spec. " +
   "Union of all phases.successCriteria MUST equal the input successCriteria array (no drift, no omission).";
 
+/**
+ * Coerce a phase id / dependsOn element to the canonical `phase-N` string form.
+ *
+ * The phase-planner prompt does not pin `id` to a string, so the LLM frequently
+ * emits bare numbers — e.g. `"id": 1, "dependsOn": [1]` instead of
+ * `"id": "phase-1", "dependsOn": ["phase-1"]`. Downstream consumers assume the
+ * declared `Phase.id: string` / `dependsOn: string[]` contract; the roadmap
+ * renderer (`buildRoadmapFromPhasePlan`) calls `dep.match(...)` and crashed with
+ * `dep.match is not a function` on a numeric id, aborting the whole /ideal run
+ * right after the sprint plan committed — before any implementation ran.
+ * Normalising here (the single parse choke-point) restores the contract for
+ * every consumer.
+ */
+function normalizePhaseRef(ref: unknown): string {
+  if (typeof ref === "number" && Number.isFinite(ref)) return `phase-${ref}`;
+  const s = String(ref).trim();
+  const bareNumber = s.match(/^(\d+)$/);
+  if (bareNumber) return `phase-${bareNumber[1]}`;
+  return s;
+}
+
+/**
+ * Normalise `id` + `dependsOn` on every phase to the canonical string form.
+ * Mutates and returns the same plan object. Safe on already-normalised plans.
+ */
+export function normalizePhasePlan(plan: PhasePlanArtifact): PhasePlanArtifact {
+  if (Array.isArray(plan?.phases)) {
+    for (const phase of plan.phases) {
+      phase.id = normalizePhaseRef(phase.id);
+      phase.dependsOn = Array.isArray(phase.dependsOn) ? phase.dependsOn.map(normalizePhaseRef) : [];
+    }
+  }
+  return plan;
+}
+
 export function parsePhasePlanJson(raw: string): PhasePlanArtifact {
   const stripped = raw
     .replace(/^```(?:json)?\s*/, "")
     .replace(/\s*```$/, "")
     .trim();
-  return JSON.parse(stripped) as PhasePlanArtifact;
+  return normalizePhasePlan(JSON.parse(stripped) as PhasePlanArtifact);
 }
 
 export function validatePhasePlan(plan: PhasePlanArtifact, spec: ClarifiedSpec): void {
@@ -127,7 +162,9 @@ export async function readPhasePlan(flowDir: string, runId: string): Promise<Pha
   const raw = map?.sections.get("Plan");
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as PhasePlanArtifact;
+    // Normalise on read too: runs persisted before the parse-time normalisation
+    // landed (or hand-edited phases.md) can still carry numeric ids.
+    return normalizePhasePlan(JSON.parse(raw) as PhasePlanArtifact);
   } catch {
     return null;
   }

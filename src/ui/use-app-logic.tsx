@@ -19,7 +19,7 @@ import { Agent } from "../orchestrator/orchestrator";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "../orchestrator/safety-askcard.js";
 import { planSafetyAskcard } from "../orchestrator/safety-askcard.js";
 
-import type { HaltChunk, ProductStatusCardData } from "../product-loop/types.js";
+import type { HaltChunk, ProductStatusCardData, RecoveryOption } from "../product-loop/types.js";
 import { getConfiguredProviders, setKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
 import { buildIdealContinuationPrompt } from "../scaffold/continuation-prompt.js";
@@ -227,6 +227,24 @@ import {
 import { isEscapeKey } from "./utils/modal.js";
 import { sanitizeContent } from "./utils/text.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
+
+/**
+ * A — recovery options shown when an /ideal run breaks mid-sprint. Resume /
+ * Retry / Abort all auto-detect the newest incomplete run (see runResume /
+ * runAbort auto-detect), so the user never has to know the runId; Skip verify
+ * sets MUONROI_SPRINT_SKIP_VERIFY=1 before resuming so a broken verify sandbox
+ * (e.g. shuru unavailable on Windows) does not re-hang every sprint.
+ */
+const SPRINT_FAILED_RECOVERY_OPTIONS: readonly RecoveryOption[] = [
+  { id: "resume", label: "Resume", description: "Continue the run from where it broke (restarts the failed sprint)." },
+  { id: "retry", label: "Retry sprint", description: "Re-run the sprint that just failed from a clean slate." },
+  {
+    id: "skip_verify",
+    label: "Skip verify & resume",
+    description: "Bypass the verify stage (use when the sandbox/verify is what hangs), then continue.",
+  },
+  { id: "abort", label: "Abort run", description: "Hard-kill this run. It can no longer be resumed." },
+];
 
 /**
  * Render the EE "experience injected" chunk for the TUI: the count line PLUS a
@@ -1138,6 +1156,9 @@ export function useAppLogic(props: AppLogicProps) {
   const [productStatus, setProductStatus] = useState<ProductStatusCardData | null>(null);
   const [activeHaltCard, setActiveHaltCard] = useState<HaltChunk | null>(null);
   const [haltSelectedIndex, setHaltSelectedIndex] = useState(0);
+  // A — most recent sprint number seen on a product_status_card, used to title
+  // the recovery card ("Sprint N failed") when an /ideal run throws mid-run.
+  const lastProductSprintNRef = useRef<number | null>(null);
   const [initNewForm, setInitNewForm] = useState<InitNewFormState | null>(null);
   const lastInitNewStepRef = useRef<string | null>(null);
 
@@ -1232,6 +1253,19 @@ export function useAppLogic(props: AppLogicProps) {
     });
     setHaltSelectedIndex(0);
   }, [startupConfig.injectHalt]);
+  // TEST SEAM (A) — inject a synthetic sprint-failed recovery card on boot when
+  // --inject-halt-sprint is set, so E2E specs can verify the break-recovery card.
+  useEffect(() => {
+    if (!startupConfig.injectHaltSprint) return;
+    setActiveHaltCard({
+      type: "halt",
+      reason: "sprint_failed",
+      sprintN: 3,
+      detail: "Injected by --inject-halt-sprint for E2E testing.",
+      recovery_options: [...SPRINT_FAILED_RECOVERY_OPTIONS],
+    });
+    setHaltSelectedIndex(0);
+  }, [startupConfig.injectHaltSprint]);
   // Reap completed status rows after their hold window so the row clears.
   useEffect(() => {
     if (councilStatuses.length === 0) return;
@@ -4121,6 +4155,10 @@ export function useAppLogic(props: AppLogicProps) {
               if (payload.subcommand === "start" && typeof payload.idea === "string") {
                 lastIdealIdeaRef.current = payload.idea;
                 originalIdealPromptRef.current = payload.idea;
+                // A — a brand-new run re-enables verification even if a prior
+                // recovery chose "Skip verify", and clears the last sprint marker.
+                delete process.env.MUONROI_SPRINT_SKIP_VERIFY;
+                lastProductSprintNRef.current = null;
               }
               const heading =
                 payload.subcommand === "start"
@@ -4319,6 +4357,9 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   if (chunk.type === "product_status_card" && chunk.productStatusCard) {
                     const d = chunk.productStatusCard;
+                    // A — remember the live sprint number so a subsequent break
+                    // can title the recovery card with the sprint that failed.
+                    if (typeof d.sprintN === "number") lastProductSprintNRef.current = d.sprintN;
                     setProductStatus((prev) => {
                       // Accumulate per-sprint history client-side so loop-driver
                       // doesn't have to ship the full history every chunk.
@@ -4397,7 +4438,29 @@ export function useAppLogic(props: AppLogicProps) {
                 if (process.env.MUONROI_DEBUG_LEADER === "1") {
                   process.stderr.write(`[ideal-loop-error] ${String(e)}\n`);
                 }
-                setMessages((prev) => [...prev, buildAssistantEntry(`Product loop error: ${e}`)]);
+                // A — a break mid-run (thrown implement/verify error, cap breach,
+                // provider outage) used to surface only an opaque one-line
+                // "Product loop error" with no way forward. Instead render the
+                // actionable recovery card: Resume / Retry / Skip verify / Abort.
+                // Resume/Retry/Abort auto-detect the newest incomplete run (A/B)
+                // so the user never has to know the runId.
+                const errMsg = e instanceof Error ? e.message : String(e);
+                const brokenSprintN =
+                  payload.subcommand === "resume" ? undefined : (lastProductSprintNRef.current ?? undefined);
+                setMessages((prev) => [...prev, buildAssistantEntry(`Product loop error: ${errMsg}`)]);
+                setActiveHaltCard({
+                  type: "halt",
+                  reason: "sprint_failed",
+                  sprintN: brokenSprintN,
+                  runId: typeof payload.runId === "string" ? payload.runId : undefined,
+                  detail: `The run broke: ${errMsg}`,
+                  recovery_options: SPRINT_FAILED_RECOVERY_OPTIONS,
+                });
+                setHaltSelectedIndex(0);
+                logUIInteraction(agent.getSessionId() ?? undefined, {
+                  subtype: "halt_card_open",
+                  data: { reason: "sprint_failed", trigger: "loop_throw", sprintN: brokenSprintN ?? null },
+                });
               } finally {
                 if (!firstChunkSeen) clearHeartbeat();
                 setCouncilPhases([]);
@@ -5500,6 +5563,30 @@ export function useAppLogic(props: AppLogicProps) {
                   setCouncilProgress({ status: "error", specPath: "", hasContent: false, error: msg });
                 });
               setCouncilProgress({ status: "running", specPath: "", hasContent: false });
+              return;
+            }
+            // A — sprint-break recovery. Resume/Retry/Abort re-dispatch through
+            // the existing `/ideal` slash pipeline; the runId is optional because
+            // runResume/runAbort auto-detect the newest incomplete run (A/B).
+            if (
+              chosen.id === "resume" ||
+              chosen.id === "retry" ||
+              chosen.id === "skip_verify" ||
+              chosen.id === "abort"
+            ) {
+              interruptActiveRun();
+              const rid = activeHaltCard.runId ? ` ${activeHaltCard.runId}` : "";
+              setActiveHaltCard(null);
+              setHaltSelectedIndex(0);
+              if (chosen.id === "abort") {
+                handleCommand(`/ideal abort${rid}`);
+              } else {
+                if (chosen.id === "skip_verify") {
+                  // Consumed by sprint-runner Step 5; reset on the next fresh start.
+                  process.env.MUONROI_SPRINT_SKIP_VERIFY = "1";
+                }
+                handleCommand(`/ideal resume${rid}`);
+              }
               return;
             }
             console.log("halt recovery: unknown option id:", chosen.id);
@@ -6867,6 +6954,7 @@ export function useAppLogic(props: AppLogicProps) {
       slashSearchQuery.slice,
       activeHaltCard,
       haltSelectedIndex,
+      handleCommand,
       initNewForm,
       toggleModelDisabled,
       pointToExistingForm,

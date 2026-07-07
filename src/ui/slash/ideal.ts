@@ -7,7 +7,7 @@
  *   /ideal "<idea>"          start a new product run (default)
  *   /ideal status            list active runs
  *   /ideal status <runId>    detail of one run
- *   /ideal resume <runId>    resume halted/crashed run
+ *   /ideal resume [runId]    resume halted/crashed run (no id = newest incomplete)
  *   /ideal abort  <runId>    hard kill
  *   /ideal ship   <runId>    force user-approval gate (skip if Cond #1-#4 pass)
  *
@@ -74,8 +74,8 @@ const HELP_TEXT = [
   "Subcommands:",
   '  /ideal "<idea>"           Start a new product run',
   "  /ideal status [runId]    List active runs (or detail one)",
-  "  /ideal resume <runId>    Resume a halted / crashed run",
-  "  /ideal abort  <runId>    Hard-kill a run",
+  "  /ideal resume [runId]    Resume a run (no id = newest incomplete run)",
+  "  /ideal abort  [runId]    Hard-kill a run (no id = newest incomplete run)",
   "  /ideal ship   <runId>    Force user-approval gate (skip Cond #1-#4 if passing)",
   "",
   "Flags (start only):",
@@ -269,8 +269,16 @@ export const handleIdealSlash: SlashHandler = async (args) => {
     return `${HELP_TEXT}${warnings}`;
   }
 
-  // Status/abort/resume/ship without a runId: status is allowed (lists), the rest are not.
-  if (result.subcommand !== "start" && result.subcommand !== "status" && !result.runId) {
+  // Status/resume/abort without a runId are allowed: status lists all runs,
+  // resume + abort auto-detect the newest incomplete run (A/B). ship still
+  // requires an explicit runId.
+  if (
+    result.subcommand !== "start" &&
+    result.subcommand !== "status" &&
+    result.subcommand !== "resume" &&
+    result.subcommand !== "abort" &&
+    !result.runId
+  ) {
     return `error: /ideal ${result.subcommand} requires a runId\n\n${HELP_TEXT}`;
   }
 

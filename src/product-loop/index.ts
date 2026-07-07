@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { readDebateCheckpoint } from "../council/debate-checkpoint.js";
 import { resolveLeaderModel } from "../council/leader.js";
 import type { CouncilLLM, PreflightResponder, QuestionResponder } from "../council/types.js";
 import type { EERouteResult } from "../ee/bridge.js";
@@ -1655,20 +1656,27 @@ async function* runStatus(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
 }
 
 async function* runAbort(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
-  if (!opts.runId) {
-    yield { type: "content", content: "error: abort requires a runId\n" } as StreamChunk;
-    return { runId: "", stage: "error", success: false, reason: "missing_runId" };
+  // A/B — bare `/ideal abort` (no runId, e.g. the recovery card's Abort option):
+  // auto-detect the newest incomplete run, mirroring resume.
+  let resolvedRunId = opts.runId;
+  if (!resolvedRunId) {
+    const latest = await findLatestIncompleteRun(opts.flowDir);
+    if (!latest) {
+      yield { type: "content", content: "No incomplete run to abort.\n" } as StreamChunk;
+      return { runId: "", stage: "error", success: false, reason: "no_incomplete_run" };
+    }
+    resolvedRunId = latest.id;
   }
-  const m = await readManifest(opts.flowDir, opts.runId);
+  const m = await readManifest(opts.flowDir, resolvedRunId);
   if (!m) {
-    yield { type: "content", content: `Run not found: ${opts.runId}\n` } as StreamChunk;
-    return { runId: opts.runId, stage: "error", success: false, reason: "not_found" };
+    yield { type: "content", content: `Run not found: ${resolvedRunId}\n` } as StreamChunk;
+    return { runId: resolvedRunId, stage: "error", success: false, reason: "not_found" };
   }
-  await writeManifest(opts.flowDir, opts.runId, { ...m, aborted: true, doneAt: new Date() });
+  await writeManifest(opts.flowDir, resolvedRunId, { ...m, aborted: true, doneAt: new Date() });
   // Fire-and-forget EE phase-outcome=aborted (extension landed in 13-05).
   try {
     fireAndForgetPhaseOutcome({
-      sessionId: opts.runId,
+      sessionId: resolvedRunId,
       phaseName: "product-loop",
       outcome: "aborted" as any,
     });
@@ -1681,9 +1689,9 @@ async function* runAbort(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
   // EE client is non-fatal (offline queue absorbs transport failures).
   // P1.6: log telemetry for the extract outcome.
   {
-    const eeResult = await extractRunToEE(opts.flowDir, opts.runId, opts.cwd ?? process.cwd());
+    const eeResult = await extractRunToEE(opts.flowDir, resolvedRunId, opts.cwd ?? process.cwd());
     try {
-      logInteraction(opts.sessionId ?? opts.runId ?? "abort", "ee_injection", {
+      logInteraction(opts.sessionId ?? resolvedRunId ?? "abort", "ee_injection", {
         eventSubtype: "extract",
         durationMs: Math.round(eeResult.durationMs),
         data: {
@@ -1696,28 +1704,80 @@ async function* runAbort(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
       // DB errors must not break /ideal
     }
   }
-  yield { type: "content", content: `Aborted run ${opts.runId}.\n` } as StreamChunk;
-  return { runId: opts.runId, stage: "halted", success: false, reason: "aborted" };
+  yield { type: "content", content: `Aborted run ${resolvedRunId}.\n` } as StreamChunk;
+  return { runId: resolvedRunId, stage: "halted", success: false, reason: "aborted" };
+}
+
+/**
+ * B — Auto-detect the newest resumable run.
+ *
+ * "Resumable" = a run that has a manifest (early pre-manifest crashes are not
+ * replayable) AND is neither aborted nor terminal (`doneAt` is set on done-gate
+ * pass / ship / abort). Sorted by manifest `createdAt` descending so a bare
+ * `/ideal resume` continues the most recent incomplete run without the user
+ * having to remember (or type) the runId.
+ */
+async function findLatestIncompleteRun(flowDir: string): Promise<{ id: string; idea: string } | null> {
+  const runsRoot = path.join(flowDir, "runs");
+  let entries: string[];
+  try {
+    entries = await fs.readdir(runsRoot);
+  } catch (err) {
+    // No runs directory yet → nothing to resume. Not an error worth surfacing.
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      console.error(`[product-loop] findLatestIncompleteRun: readdir failed: ${(err as Error)?.message}`);
+    }
+    return null;
+  }
+  const candidates: Array<{ id: string; idea: string; createdAt: number }> = [];
+  for (const id of entries) {
+    const m = await readManifest(flowDir, id).catch((e) => {
+      console.error(`[product-loop] findLatestIncompleteRun: manifest read failed for ${id}: ${e?.message}`);
+      return null;
+    });
+    if (!m) continue; // no manifest → not resumable
+    if (m.aborted) continue; // hard-killed
+    if (m.doneAt) continue; // terminal (done / shipped)
+    const createdAt = m.createdAt instanceof Date && !Number.isNaN(m.createdAt.getTime()) ? m.createdAt.getTime() : 0;
+    candidates.push({ id, idea: m.idea, createdAt });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.createdAt - a.createdAt);
+  const top = candidates[0]!;
+  return { id: top.id, idea: top.idea };
 }
 
 async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
-  if (!opts.runId) {
-    yield { type: "content", content: "error: resume requires a runId\n" } as StreamChunk;
-    return { runId: "", stage: "error", success: false, reason: "missing_runId" };
+  // B — bare `/ideal resume` (no runId): auto-detect the newest incomplete run.
+  let resolvedRunId = opts.runId;
+  if (!resolvedRunId) {
+    const latest = await findLatestIncompleteRun(opts.flowDir);
+    if (!latest) {
+      yield {
+        type: "content",
+        content: 'No incomplete run to resume. Start one with /ideal "<idea>".\n',
+      } as StreamChunk;
+      return { runId: "", stage: "error", success: false, reason: "no_incomplete_run" };
+    }
+    resolvedRunId = latest.id;
+    yield {
+      type: "content",
+      content: `Resuming latest incomplete run ${resolvedRunId}: ${latest.idea.slice(0, 60)}\n`,
+    } as StreamChunk;
   }
-  const run = await loadRun(opts.flowDir, opts.runId);
+  const run = await loadRun(opts.flowDir, resolvedRunId);
   if (!run) {
-    yield { type: "content", content: `Run not found: ${opts.runId}\n` } as StreamChunk;
-    return { runId: opts.runId, stage: "error", success: false, reason: "not_found" };
+    yield { type: "content", content: `Run not found: ${resolvedRunId}\n` } as StreamChunk;
+    return { runId: resolvedRunId, stage: "error", success: false, reason: "not_found" };
   }
-  const manifest = await readManifest(opts.flowDir, opts.runId);
+  const manifest = await readManifest(opts.flowDir, resolvedRunId);
   if (!manifest) {
-    yield { type: "content", content: `Manifest missing for ${opts.runId}\n` } as StreamChunk;
-    return { runId: opts.runId, stage: "error", success: false, reason: "manifest_missing" };
+    yield { type: "content", content: `Manifest missing for ${resolvedRunId}\n` } as StreamChunk;
+    return { runId: resolvedRunId, stage: "error", success: false, reason: "manifest_missing" };
   }
   if (manifest.aborted) {
-    yield { type: "content", content: `Run ${opts.runId} was aborted; cannot resume.\n` } as StreamChunk;
-    return { runId: opts.runId, stage: "halted", success: false, reason: "aborted" };
+    yield { type: "content", content: `Run ${resolvedRunId} was aborted; cannot resume.\n` } as StreamChunk;
+    return { runId: resolvedRunId, stage: "halted", success: false, reason: "aborted" };
   }
 
   // Detect crashed in-flight sprint: an iterations.md entry without a closing
@@ -1725,12 +1785,12 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
   // before returning, so an iteration is "in-flight" iff the file has a Sprint
   // heading but no matching Verify field. readIterations skips malformed
   // entries — so we mark the highest sprint number as crashed regardless.
-  const iters = await readIterations(opts.flowDir, opts.runId);
+  const iters = await readIterations(opts.flowDir, resolvedRunId);
   let nextSprint = iters.length + 1;
   if (iters.length > 0) {
     const last = iters[iters.length - 1]!;
     if (!last.lastVerifyResult || last.lastVerifyResult === "UNKNOWN") {
-      await markIterationCrashed(opts.flowDir, opts.runId, last.sprintN);
+      await markIterationCrashed(opts.flowDir, resolvedRunId, last.sprintN);
       nextSprint = last.sprintN; // retry with retryOf metadata
       yield {
         type: "content",
@@ -1742,7 +1802,7 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
   // Fire EE phase-outcome=resumed (extension landed in 13-05).
   try {
     fireAndForgetPhaseOutcome({
-      sessionId: opts.runId,
+      sessionId: resolvedRunId,
       phaseName: `sprint-${Math.max(1, nextSprint - 1)}`,
       outcome: "resumed" as any,
     });
@@ -1751,9 +1811,8 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
   }
 
   // Resume into sprint loop with reconstructed history + manifest flags.
-  const productSpec = await loadProductSpec(opts.flowDir, opts.runId, manifest.idea, manifest.stack);
   const ctx: DriverContext = {
-    runId: opts.runId,
+    runId: resolvedRunId,
     flowDir: opts.flowDir,
     idea: manifest.idea,
     sessionModelId: opts.sessionModelId,
@@ -1766,6 +1825,58 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
     processMessageFn: opts.processMessageFn,
     detectVerifyRecipe: opts.detectVerifyRecipe,
   };
+
+  // C-v2 cross-session debate resume — a persisted debate checkpoint means the
+  // council debate was interrupted before it ever produced a spec, so the run
+  // cannot go straight to sprints (loadProductSpec would return an empty stub).
+  // Re-run the council FSM: loop-driver's resume entry skips discovery + the
+  // interview and restores the debate from its checkpoint, then scoping writes
+  // the spec. This mirrors runStart's phase-1 → phase-2 handoff.
+  const runDir = path.join(opts.flowDir, "runs", resolvedRunId);
+  const interruptedDebate = await readDebateCheckpoint(runDir);
+  if (interruptedDebate) {
+    yield {
+      type: "content",
+      content: `\n> Detected an interrupted council debate (round ${interruptedDebate.roundCount + 1}); resuming it before sprints.\n`,
+    } as StreamChunk;
+    const driverGen = runLoopDriver(ctx);
+    let driverResult: DriverResult | undefined;
+    try {
+      while (true) {
+        const { value, done } = await driverGen.next();
+        if (done) {
+          driverResult = value as DriverResult;
+          break;
+        }
+        yield value as StreamChunk;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      yield { type: "error", error: true, content: msg } as unknown as StreamChunk;
+      return { runId: resolvedRunId, stage: "error", success: false, reason: msg };
+    }
+    if (!driverResult?.success || driverResult.stage !== "approved") {
+      return { ...driverResult!, runId: resolvedRunId };
+    }
+    // Build the sprint plan now that the spec exists (idempotent — skips when
+    // backlog.json / sprint-plan.json already exist).
+    const resumedSpec = await loadProductSpec(opts.flowDir, resolvedRunId, manifest.idea, manifest.stack);
+    const { sprintCount } = await buildBacklogAndSprintPlan({
+      flowDir: opts.flowDir,
+      runId: resolvedRunId,
+      productSpec: resumedSpec,
+      ctx,
+      sessionModelId: opts.sessionModelId,
+      maxSprints: opts.flags.maxSprints,
+      onChunk: (chunk) => void chunk,
+    });
+    yield {
+      type: "content",
+      content: `\n> Committed: ${sprintCount} sprint${sprintCount === 1 ? "" : "s"} planned. Sprint 1 active.\n`,
+    } as StreamChunk;
+  }
+
+  const productSpec = await loadProductSpec(opts.flowDir, resolvedRunId, manifest.idea, manifest.stack);
   const roleAssignments = opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
 
   // Subsystem E: phase-orchestrated path (default ON; set MUONROI_PHASE_MODE=0 for legacy).
