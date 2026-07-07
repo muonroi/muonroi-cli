@@ -80,6 +80,16 @@ export interface ProductLoopOptions {
    */
   complexity?: "low" | "medium" | "high";
   /**
+   * LLM-decided clarity signal (PIL Layer 1 `needsClarification`). When true the
+   * request is UNDERSPECIFIED — the model judged it lacks information it would
+   * need to proceed without guessing. It earns the interview/Council path even
+   * on an existing repo where a well-specified `standard` task would hot-path.
+   * Agent-first replacement for the regex sufficiency scorer: only `quick`
+   * (complexity=low) tasks still hot-path when underspecified — a trivial ask is
+   * not worth an interview no matter how terse.
+   */
+  needsClarification?: boolean;
+  /**
    * Sufficiency gaps from PIL Layer 1. When non-empty, the dispatcher forces
    * the Council path regardless of complexity — vague prompts MUST go through
    * AskCard discovery before any scaffolding. Each entry seeds a discovery
@@ -167,10 +177,20 @@ export async function* runProductLoop(
         };
         return yield* runStart(forcedOpts);
       }
-      // Existing repo + complexity≠high → hot-path. The leader can grep
-      // the source instead of interviewing the user. Only architectural
-      // changes (complexity=high) still warrant the full Council debate.
-      if (existingRepoBypass && opts.complexity !== "high" && !opts.flags.forceCouncil) {
+      // Existing repo + complexity≠high + well-specified → hot-path. The leader
+      // can grep the source instead of interviewing the user. Two things still
+      // warrant the full Council/interview path: an architectural change
+      // (complexity=high / heavy), OR a request the model flagged as
+      // UNDERSPECIFIED (needsClarification) — a standard task missing a target
+      // or design decision must be clarified before code. A `quick`
+      // (complexity=low) task always hot-paths (handled below) even when
+      // underspecified: a trivial ask never earns an interview.
+      if (
+        existingRepoBypass &&
+        opts.complexity !== "high" &&
+        !(opts.needsClarification && opts.complexity !== "low") &&
+        !opts.flags.forceCouncil
+      ) {
         return yield* runHotPath(opts);
       }
       if (opts.complexity === "low" && !opts.flags.forceCouncil) {
@@ -263,6 +283,7 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
       kind: "route-decision",
       path: "hot-path",
       complexity: opts.complexity ?? "low",
+      underspecified: !!opts.needsClarification,
       forceCouncil: false,
       runId,
     });
@@ -723,6 +744,7 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
       kind: "route-decision",
       path: "council",
       complexity: opts.complexity ?? "unknown",
+      underspecified: !!opts.needsClarification,
       forceCouncil: !!opts.flags.forceCouncil,
       sufficiencyMissing: opts.sufficiencyMissing ?? [],
       runId,

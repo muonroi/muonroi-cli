@@ -186,7 +186,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     expect(result?.outputStyle).toBe("concise");
   });
 
-  it("keeps a tiny output budget for non-reasoning models (48 — seven comma words)", async () => {
+  it("keeps a tiny output budget for non-reasoning models (56 — eight comma words)", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("generate,concise") } });
     cleanup = handle.uninstall;
 
@@ -195,7 +195,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     await classify("add a new endpoint");
 
     const call = handle.calls[0] as { maxOutputTokens?: number };
-    expect(call.maxOutputTokens).toBe(48);
+    expect(call.maxOutputTokens).toBe(56);
   });
 
   it("parses the sixth + seventh words as agent-first scope and reply-language", async () => {
@@ -248,6 +248,37 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     cleanup = noDepth.uninstall;
     const noDepthClassify = createLlmClassifier((() => noDepth.model) as never, "deepseek-v4-flash");
     expect((await noDepthClassify("fix the bug"))?.depthTier).toBeNull();
+  });
+
+  it("parses the clarity signal (needsClarification) position-independently, null when absent", async () => {
+    // 'underspecified' → needsClarification true (earns the interview/Council path).
+    const vague = installMockModel({
+      fixture: { stream: textOnlyStream("generate,concise,task,code,standard,local,english,underspecified") },
+    });
+    cleanup = vague.uninstall;
+    const vagueClassify = createLlmClassifier((() => vague.model) as never, "deepseek-v4-flash");
+    expect((await vagueClassify("add auth"))?.needsClarification).toBe(true);
+    vague.uninstall();
+
+    // 'clear' → false. A fully-specified migration is clear even though heavy.
+    const clear = installMockModel({
+      fixture: { stream: textOnlyStream("refactor,concise,task,code,heavy,local,english,clear") },
+    });
+    cleanup = clear.uninstall;
+    const clearClassify = createLlmClassifier((() => clear.model) as never, "deepseek-v4-flash");
+    const cr = await clearClassify("vendor the gsd subset natively and rename to workflow, keep tests green");
+    expect(cr?.needsClarification).toBe(false);
+    expect(cr?.depthTier).toBe("heavy");
+    clear.uninstall();
+
+    // Absent 8th word → null (don't-over-ask safe direction). "clear"/"underspecified"
+    // must NOT be mistaken for the open-vocabulary language word.
+    const noClarity = installMockModel({ fixture: { stream: textOnlyStream("debug,concise,task,code,standard") } });
+    cleanup = noClarity.uninstall;
+    const noClarityClassify = createLlmClassifier((() => noClarity.model) as never, "deepseek-v4-flash");
+    const nr = await noClarityClassify("fix the bug");
+    expect(nr?.needsClarification).toBeNull();
+    expect(nr?.replyLanguage).toBeNull();
   });
 
   it("recovers the deliverable position-independently and defaults to null when absent", async () => {

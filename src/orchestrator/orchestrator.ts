@@ -2121,24 +2121,51 @@ export class Agent {
     const processMessageFn = (m: string) => this.processMessage(m, options?.observer);
     const flowDir = nodePath.join(this.bash.getCwd(), ".muonroi-flow");
 
-    // P2.7: compute complexity from the idea using PIL Layer 1 heuristics (cheap,
-    // no LLM calls). Only meaningful for "start"; other subcommands ignore it.
+    // P2.7 (LLM-first — no-regex routing): the work-depth tier that decides
+    // /ideal's route is judged by the MODEL (the same depthTier the PIL Layer-1
+    // classifier emits for chat turns), NOT by a keyword scorer. The old regex
+    // `scoreComplexity` mis-tiered plainly-phrased heavy work — a "merge / vendor
+    // / rename" refactor scored LOW because it lacked the FORCE_HIGH keywords —
+    // which hot-pathed genuinely heavy tasks with zero interview/council. Only
+    // meaningful for "start"; other subcommands ignore it.
     let complexity: "low" | "medium" | "high" | undefined;
+    let needsClarification: boolean | undefined;
     let sufficiencyMissing: readonly import("../pil/layer1-intent.js").SufficiencyMissing[] | undefined;
     if (payload.subcommand === "start" && payload.idea) {
-      const { scoreComplexity, scoreSufficiency } = await import("../pil/layer1-intent.js");
-      const result = scoreComplexity({
-        rawText: payload.idea,
-        taskType: null,
-        t0HitCount: 0,
-        hasMaxSprintsOne: payload.flags.maxSprints === 1,
-      });
-      complexity = result.complexity;
-      // Sufficiency gate — vague briefs ("todo app") force Council so the
-      // discovery AskCard can fill in persona/MVP/architecture/verify before
-      // any code is scaffolded.
-      const suff = scoreSufficiency({ rawText: payload.idea });
-      sufficiencyMissing = suff.sufficient ? undefined : suff.missing;
+      let depth: import("../pil/llm-classify.js").DepthTier = "standard";
+      try {
+        const { createLlmClassifier } = await import("../pil/llm-classify.js");
+        const classify = createLlmClassifier(this.requireProvider(), this.modelId);
+        const res = await classify(payload.idea);
+        if (res?.depthTier) {
+          depth = res.depthTier;
+        } else {
+          // Same convention as PIL Layer 1: a null/garbled depth defaults to the
+          // safe middle. Logged so a persistently-null classifier is diagnosable.
+          console.error(
+            `[ideal/route] model depth classify returned no depthTier — defaulting to "standard". idea=${JSON.stringify(payload.idea.slice(0, 80))}`,
+          );
+        }
+        // LLM-first clarity signal — the agent-first replacement for the regex
+        // `scoreSufficiency`. An underspecified `standard` task earns the
+        // interview/Council path even inside an existing repo (see
+        // runProductLoop gate); null/absent → not-underspecified (don't over-ask).
+        if (res?.needsClarification === true) needsClarification = true;
+      } catch (err) {
+        // Fail-open to the safe middle (standard → hot-path single sprint); never
+        // block /ideal on a classify hiccup. Logged for diagnosis (No-Silent-Catch).
+        console.error(`[ideal/route] depth classify failed, defaulting to "standard": ${(err as Error)?.message}`);
+      }
+      // heavy → full Council pipeline (never hot-path); standard/quick → hot-path.
+      // Maps onto runProductLoop's low|medium|high gate: "high" is the ONLY tier
+      // that both fails the existing-repo bypass (`!== "high"`) and the `=== "low"`
+      // hot-path check, so ONLY heavy reaches runStart/Council — a large task can
+      // no longer skip the interview just because it was phrased plainly.
+      complexity = depth === "heavy" ? "high" : depth === "quick" ? "low" : "medium";
+      // Sufficiency is no longer a separate regex gate (`scoreSufficiency` is
+      // gone from the routing path): a vague / ambiguous brief is exactly what the
+      // model tiers as "heavy" → Council, so depthTier already subsumes it.
+      sufficiencyMissing = undefined;
     }
 
     const gen = runProductLoop({
@@ -2164,6 +2191,7 @@ export class Agent {
       detectVerifyRecipe: () => this.detectVerifyRecipe(),
       skipPriorContext: payload.flags.noPriorContext === true,
       complexity,
+      needsClarification,
       sufficiencyMissing,
       // Mode C explicit override + gh pr create opt-in (see .planning/MAINTAIN-MODE.md).
       mode: payload.flags.mode,

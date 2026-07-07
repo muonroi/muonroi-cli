@@ -250,6 +250,40 @@ describe("C1 existing-repo bypass — Sprint C", () => {
     expect(runLoopDriver).not.toHaveBeenCalled();
   });
 
+  it("existing repo + complexity=medium + needsClarification → full Council (underspecified earns interview)", async () => {
+    const flowDir = await tmpFlowDir();
+    const cwd = await tmpExistingCwd();
+
+    // biome-ignore lint/correctness/useYield: intentional mock generator
+    (runSprint as any).mockImplementationOnce(async function* () {
+      return shippedIter();
+    });
+
+    const { result } = await drain(
+      runProductLoop(makeOpts({ flowDir, cwd, complexity: "medium", needsClarification: true })),
+    );
+
+    expect(result.success).toBe(true);
+    expect(runLoopDriver).toHaveBeenCalled();
+  });
+
+  it("existing repo + complexity=low + needsClarification → hot-path (a quick task never earns an interview)", async () => {
+    const flowDir = await tmpFlowDir();
+    const cwd = await tmpExistingCwd();
+
+    // biome-ignore lint/correctness/useYield: intentional mock generator
+    (runSprint as any).mockImplementationOnce(async function* () {
+      return shippedIter();
+    });
+
+    const { result } = await drain(
+      runProductLoop(makeOpts({ flowDir, cwd, complexity: "low", needsClarification: true })),
+    );
+
+    expect(result.success).toBe(true);
+    expect(runLoopDriver).not.toHaveBeenCalled();
+  });
+
   it("existing repo + complexity=high → still full Council (architectural change)", async () => {
     const flowDir = await tmpFlowDir();
     const cwd = await tmpExistingCwd();

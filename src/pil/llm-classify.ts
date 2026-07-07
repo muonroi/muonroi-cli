@@ -72,6 +72,18 @@ export interface LlmClassifyResult {
    */
   depthTier: DepthTier | null;
   /**
+   * Model-decided clarity: true when the request is UNDERSPECIFIED — missing
+   * information the agent would need to proceed without guessing (an unstated
+   * target/scope, a vague "make it better", competing interpretations, or an
+   * unresolved design choice). Drives the interview gate: a `standard`-depth
+   * task that is underspecified earns a clarify/council pass instead of hot-
+   * pathing straight to implementation. `false` = well-specified enough to plan
+   * directly. null when the model omitted the word → treated as not-
+   * underspecified (the don't-over-ask safe direction). Agent-first replacement
+   * for the regex `scoreSufficiency` scorer.
+   */
+  needsClarification: boolean | null;
+  /**
    * Model-decided scope: true when the turn is about the Muonroi PLATFORM /
    * ecosystem (BB/.NET packages, building-block, open-core, rule engine,
    * platform setup) — where the muonroi-docs MCP is the authoritative source —
@@ -116,10 +128,10 @@ const LLM_CLASSIFY_TIMEOUT_MS = 2500;
 // The ceiling is a cap, not padding: the model still stops after two words, so a
 // generous headroom costs nothing when reasoning is short.
 const REASONING_CLASSIFY_TIMEOUT_MS = 8000;
-// Seven comma-separated words now (added <scope>,<lang>) — ~18-26 tokens worst
-// case ("documentation,balanced,task,report,standard,ecosystem,vietnamese").
-// 48 keeps headroom without padding (the model still stops after seven words).
-const NONREASONING_MAX_OUTPUT_TOKENS = 48;
+// Eight comma-separated words now (added <clarity>) — ~20-30 tokens worst case
+// ("documentation,balanced,task,report,standard,ecosystem,vietnamese,underspecified").
+// 56 keeps headroom without padding (the model still stops after eight words).
+const NONREASONING_MAX_OUTPUT_TOKENS = 56;
 const REASONING_MAX_OUTPUT_TOKENS = 2048;
 
 /**
@@ -181,10 +193,12 @@ const KNOWN_CLASSIFY_WORDS = new Set<string>([
   "heavy",
   "ecosystem",
   "local",
+  "clear",
+  "underspecified",
 ]);
 
 const SYSTEM_PROMPT =
-  "You classify user prompts for a coding assistant. Reply with ONE line of SEVEN lowercase words separated by commas: <taskType>,<style>,<intent>,<deliverable>,<depth>,<scope>,<lang>\n\n" +
+  "You classify user prompts for a coding assistant. Reply with ONE line of EIGHT lowercase words separated by commas: <taskType>,<style>,<intent>,<deliverable>,<depth>,<scope>,<lang>,<clarity>\n\n" +
   "The message may be preceded by a '[RECENT CONVERSATION]' block. Use it ONLY to resolve what a terse follow-up refers to (e.g. 'từ các phần đó', 'làm tiếp', 'debate mode đi', 'this one'); then classify the NEW message. Crucially, if the new message points back at heavy prior work, its depth is the depth of THAT work — a short sentence like 'ok debate these parts and plan improvements' is NOT quick just because it is short. Never classify the conversation block itself.\n\n" +
   "taskType ∈ { refactor | debug | plan | analyze | documentation | generate | general }\n" +
   "style ∈ { concise | balanced | detailed }\n" +
@@ -198,8 +212,12 @@ const SYSTEM_PROMPT =
   "- quick — a trivial single-shot change or a small direct answer: typo, rename one symbol, one-line edit, a quick lookup, 'what does X do'. No plan needed.\n" +
   "- standard — ordinary feature or bugfix touching a handful of files/functions; needs a short plan + a verify step, but no upfront research or user discussion.\n" +
   "- heavy — architectural, cross-cutting, multi-file/multi-module, a migration, 'redo/rebuild', a vague 'make it better', or a request with real unresolved design choices. Needs discussion + research + a checked plan before any code.\n" +
+  "  BREADTH decides heavy, NOT how clearly the steps are spelled out. A migration, vendoring an external dependency's code in-tree, or a rename/restructure that spans MANY files or modules is ALWAYS heavy — even when the plan is fully specified and it 'just' has to keep tests green. Do not downgrade a wide change to standard because it sounds mechanical.\n" +
   "  For a pure question/answer (deliverable=answer), depth reflects how much investigation the answer needs: 'quick' for a simple fact, 'standard' for a normal explanation, 'heavy' for a deep architectural review.\n" +
   "  When unsure between quick and standard, choose standard. When the task is genuinely wide or ambiguous, choose heavy.\n" +
+  "clarity ∈ { clear | underspecified } — whether the request gives enough to proceed WITHOUT guessing:\n" +
+  "- underspecified — missing information the agent would need: an unstated target/scope ('add auth' — which flow?), a vague 'make it better' with no direction, competing interpretations, or an unresolved design choice. Such a task should be clarified with the user before code.\n" +
+  "- clear — well-specified enough to plan and execute directly, even if large. A fully-spelled-out migration is 'clear'. When unsure, choose 'clear' (do NOT over-ask on ordinary work).\n" +
   "scope ∈ { ecosystem | local }:\n" +
   "- ecosystem — the turn is about the Muonroi PLATFORM as a whole: the building-block / .NET packages, open-core boundary, the rule engine / decision tables, NuGet packages, or platform setup/install. These are documented in an authoritative docs source.\n" +
   "- local — EVERYTHING else, including questions about this CLI's own internals (even when they mention the word 'muonroi'). When unsure, choose local.\n" +
@@ -228,21 +246,24 @@ const SYSTEM_PROMPT =
   "- documentation → balanced (examples + explanation)\n" +
   "- general → concise\n" +
   "Only output 'detailed' if the user prompt LITERALLY contains words like 'explain in detail', 'thorough analysis', 'walk me through', 'giải thích chi tiết', 'phân tích kỹ'.\n\n" +
-  "Full examples (taskType,style,intent,deliverable,depth,scope,lang):\n" +
-  "- 'hi' → general,concise,chat,answer,quick,local,english\n" +
-  "- 'cảm ơn bạn nhé' → general,concise,chat,answer,quick,local,vietnamese\n" +
-  "- 'bạn xong chưa' → general,concise,task,answer,quick,local,vietnamese (a question — NOT chat)\n" +
-  "- 'fix the typo in the README title' → generate,concise,task,code,quick,local,english\n" +
-  "- 'fix CI failing on Windows' → debug,concise,task,code,standard,local,english\n" +
-  "- 'rename function shouldInject to needsReminder' → refactor,concise,task,code,quick,local,english\n" +
-  "- 'thêm caching cho provider layer và update tests' → generate,concise,task,code,standard,local,vietnamese\n" +
-  "- 'tại sao bash_output_get trả empty' → analyze,concise,task,answer,standard,local,vietnamese\n" +
-  "- 'liệt kê tất cả env var CLI đọc' → analyze,concise,task,report,standard,local,vietnamese\n" +
-  "- 'refactor the entire auth system to use OAuth' → refactor,concise,task,code,heavy,local,english\n" +
-  "- 'how does the building-block rule engine work' → analyze,concise,task,answer,standard,ecosystem,english\n" +
-  "- 'hệ sinh thái muonroi gồm những gì' → analyze,balanced,task,answer,standard,ecosystem,vietnamese\n" +
-  "- 'plan the migration to hooks' → plan,balanced,task,report,heavy,local,english\n\n" +
-  "Prompts may be Vietnamese, English, or mixed. Reply with exactly seven words separated by commas. No other text.";
+  "Full examples (taskType,style,intent,deliverable,depth,scope,lang,clarity):\n" +
+  "- 'hi' → general,concise,chat,answer,quick,local,english,clear\n" +
+  "- 'cảm ơn bạn nhé' → general,concise,chat,answer,quick,local,vietnamese,clear\n" +
+  "- 'bạn xong chưa' → general,concise,task,answer,quick,local,vietnamese,clear (a question — NOT chat)\n" +
+  "- 'fix the typo in the README title' → generate,concise,task,code,quick,local,english,clear\n" +
+  "- 'fix CI failing on Windows' → debug,concise,task,code,standard,local,english,clear\n" +
+  "- 'rename function shouldInject to needsReminder' → refactor,concise,task,code,quick,local,english,clear\n" +
+  "- 'thêm caching cho provider layer và update tests' → generate,concise,task,code,standard,local,vietnamese,clear\n" +
+  "- 'tại sao bash_output_get trả empty' → analyze,concise,task,answer,standard,local,vietnamese,clear\n" +
+  "- 'liệt kê tất cả env var CLI đọc' → analyze,concise,task,report,standard,local,vietnamese,clear\n" +
+  "- 'refactor the entire auth system to use OAuth' → refactor,concise,task,code,heavy,local,english,clear\n" +
+  "- 'vendor the used subset of the gsd package natively into src and rename gsd to workflow, keep tests green' → refactor,concise,task,code,heavy,local,english,clear (a migration spanning many files — heavy even though fully specified)\n" +
+  "- 'add auth' → generate,concise,task,code,standard,local,english,underspecified (which flow/provider? unstated)\n" +
+  "- 'làm cho CLI tốt hơn' → generate,concise,task,code,heavy,local,vietnamese,underspecified (vague 'make it better', no target)\n" +
+  "- 'how does the building-block rule engine work' → analyze,concise,task,answer,standard,ecosystem,english,clear\n" +
+  "- 'hệ sinh thái muonroi gồm những gì' → analyze,balanced,task,answer,standard,ecosystem,vietnamese,clear\n" +
+  "- 'plan the migration to hooks' → plan,balanced,task,report,heavy,local,english,clear\n\n" +
+  "Prompts may be Vietnamese, English, or mixed. Reply with exactly eight words separated by commas. No other text.";
 
 function parseResponse(raw: string): LlmClassifyResult | null {
   const cleaned = raw.trim().toLowerCase().replace(/[`*"]/g, "");
@@ -275,6 +296,12 @@ function parseResponse(raw: string): LlmClassifyResult | null {
   // anything else (incl. absent) → not ecosystem. Position-independent.
   const scopeWord = parts.find((p) => p === "ecosystem" || p === "local");
   const ecosystemScope: boolean | null = scopeWord ? scopeWord === "ecosystem" : null;
+  // Eighth word is the clarity signal. "underspecified" → the request is missing
+  // information the agent needs → earn a clarify/council pass. Anything else
+  // (incl. absent) → not underspecified (don't-over-ask safe direction).
+  // Position-independent so a reordered/garbled reply still recovers it.
+  const clarityWord = parts.find((p) => p === "clear" || p === "underspecified");
+  const needsClarification: boolean | null = clarityWord ? clarityWord === "underspecified" : null;
   // Seventh word is the user's language. It is the one alphabetic token that is
   // NOT a known enum value (open vocabulary). null when English / absent so
   // Layer 4 skips the language re-anchor for English turns.
@@ -290,6 +317,7 @@ function parseResponse(raw: string): LlmClassifyResult | null {
     intentKind,
     deliverableKind,
     depthTier,
+    needsClarification,
     ecosystemScope,
     replyLanguage,
   };
