@@ -78,3 +78,36 @@ Constraints:
 - Don't ask "do you want me to continue?" — proceed end-to-end.
 - If you hit a blocker that genuinely needs the user, state EXACTLY which decision is blocking and stop.`;
 }
+
+export interface AdoptExistingPromptInput {
+  originalPrompt: string;
+  projectDir: string;
+}
+
+/**
+ * Build the continuation prompt fed to the LLM after the user adopts an EXISTING
+ * project via the CB-3 "Point to existing" recovery option. Unlike the init_new
+ * variant this makes no template/BB assumptions — the target is an arbitrary
+ * repo the user already has, with a verify recipe already detected there.
+ */
+export function buildAdoptExistingContinuationPrompt(input: AdoptExistingPromptInput): string {
+  const { originalPrompt, projectDir } = input;
+
+  return `You are continuing a /ideal product loop in an EXISTING project the user pointed to at ${projectDir}. A verify recipe was detected there, so the project already has a runnable test/build setup — adopt it, do NOT re-scaffold.
+
+User's original request:
+"${originalPrompt}"
+
+Implement this now against the existing codebase. Do NOT ask the user to restate the request.
+
+1. Discover structure (1-2 tool calls max): list the project directory, then read the manifest that exists (package.json / pyproject.toml / go.mod / Cargo.toml / *.csproj) and any README/AGENTS.md to learn the stack, entry point, and conventions. Do NOT assume files — skip whatever is absent.
+2. Design briefly (5-10 lines): the entities/modules/endpoints to add, matching the conventions you observed (naming, error-handling, DI, folder layout).
+3. Implement: create/edit files in the EXISTING layout; mirror the surrounding patterns. Never hardcode secrets or URLs — read config from the project's existing mechanism.
+4. Verify: run the project's OWN detected test/build command; it must pass. Report the exact command + an output excerpt as evidence.
+5. Summarize in 3-5 bullets: what was added, where, and how to run/test it.
+
+Constraints:
+- Your working directory is already ${projectDir}; do NOT cd into it and do NOT re-scaffold.
+- Don't ask "do you want me to continue?" — proceed end-to-end.
+- If a genuine blocker needs the user (missing API key, ambiguous requirement), state EXACTLY which decision is blocking and stop.`;
+}

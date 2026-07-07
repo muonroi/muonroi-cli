@@ -22,10 +22,10 @@ import { planSafetyAskcard } from "../orchestrator/safety-askcard.js";
 import type { HaltChunk, ProductStatusCardData, RecoveryOption } from "../product-loop/types.js";
 import { getConfiguredProviders, setKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
-import { buildIdealContinuationPrompt } from "../scaffold/continuation-prompt.js";
+import { buildAdoptExistingContinuationPrompt, buildIdealContinuationPrompt } from "../scaffold/continuation-prompt.js";
 import { continueAsCouncil } from "../scaffold/continue-as-council.js";
 import { initNewProject } from "../scaffold/init-new.js";
-import { pointToExisting } from "../scaffold/point-to-existing.js";
+import { detectExistingProjectRecipe, pointToExisting } from "../scaffold/point-to-existing.js";
 import { statusBarStore, wireStatusBar } from "../state/status-bar-store.js";
 import {
   appendCompaction,
@@ -5228,20 +5228,52 @@ export function useAppLogic(props: AppLogicProps) {
             pointToExisting({
               path: rawPath,
               detectVerifyRecipe: async (cwd) => {
-                // Sprint re-entry via detectVerifyRecipe is DEFERRED — the orchestrator
-                // instance is not accessible from app.tsx without a shared context seam.
-                // See Task 5.4 report. Returns null so the user sees the error state until
-                // the seam is built in a follow-up task.
-                // TODO: inject via AppStartupConfig or React context.
-                void cwd;
-                return null;
+                // Filesystem recipe detection for the pointed-to project. The
+                // orchestrator's LLM verify-detect runs against the SESSION cwd (via
+                // this.bash.getCwd()), not this arbitrary path, so a pure-fs inference
+                // is the correct detector here (see detectExistingProjectRecipe).
+                // Previously stubbed to `return null` while the seam was deferred,
+                // which left this recovery option permanently inert.
+                try {
+                  return detectExistingProjectRecipe(cwd);
+                } catch (err) {
+                  console.error(`[point-to-existing] recipe detection failed for ${cwd}: ${(err as Error)?.message}`);
+                  return null;
+                }
               },
             })
               .then((result) => {
                 if (result.ok) {
+                  const adoptedDir = result.absolutePath;
                   setPointToExistingForm((s) =>
-                    s ? { ...s, step: "done", resultPath: result.absolutePath, errorMessage: null } : s,
+                    s ? { ...s, step: "done", resultPath: adoptedDir, errorMessage: null } : s,
                   );
+                  // Re-enter the /ideal loop in the adopted project so the halted
+                  // run actually continues (mirrors the init_new resume seam:
+                  // switch the agent cwd, then re-dispatch the original request as a
+                  // fresh turn). Without this the card only reported "done" and the
+                  // run stayed halted. Deferred to setTimeout so the "done" frame
+                  // paints before the continuation turn takes over input.
+                  const originalPrompt = originalIdealPromptRef.current;
+                  if (originalPrompt) {
+                    setTimeout(() => {
+                      try {
+                        agent.setCwd(adoptedDir);
+                      } catch (err) {
+                        console.error(`[point-to-existing] setCwd(${adoptedDir}) failed: ${(err as Error)?.message}`);
+                      }
+                      logUIInteraction(sessionId, {
+                        subtype: "point_to_existing_resume",
+                        data: { projectDir: adoptedDir, originalPrompt },
+                      });
+                      originalIdealPromptRef.current = null;
+                      setPointToExistingForm(null);
+                      void processMessageRef.current(
+                        buildAdoptExistingContinuationPrompt({ originalPrompt, projectDir: adoptedDir }),
+                        "(resuming /ideal in existing project)",
+                      );
+                    }, 500);
+                  }
                 } else if (result.reason === "not_a_dir") {
                   setPointToExistingForm((s) =>
                     s ? { ...s, step: "input", errorMessage: "Path does not exist or is not a directory." } : s,

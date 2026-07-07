@@ -9,7 +9,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { pointToExisting } from "../point-to-existing.js";
+import { buildAdoptExistingContinuationPrompt } from "../continuation-prompt.js";
+import { detectExistingProjectRecipe, pointToExisting } from "../point-to-existing.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -110,5 +111,52 @@ describe("pointToExisting — no recipe", () => {
     expect(result.absolutePath).toBeTruthy();
     // detectVerifyRecipe was called (path was valid)
     expect(detectVerifyRecipe).toHaveBeenCalledOnce();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectExistingProjectRecipe — the real filesystem detector that replaced the
+// deferred `return null` stub in the point-to-existing recovery handler.
+// ---------------------------------------------------------------------------
+
+describe("detectExistingProjectRecipe", () => {
+  it("returns a runnable recipe for a node project with a test script", () => {
+    writeFileSync(
+      path.join(tmpRoot, "package.json"),
+      JSON.stringify({ name: "todo", scripts: { test: "node --test", lint: "echo ok" } }),
+    );
+    const recipe = detectExistingProjectRecipe(tmpRoot);
+    expect(recipe).not.toBeNull();
+    expect(recipe?.ecosystem).toBe("node");
+    expect(recipe?.testCommands.length).toBeGreaterThan(0);
+  });
+
+  it("returns null for a directory with no recognizable project files", () => {
+    // Bare dir → inferVerifyProjectProfile emits the "unknown" fallback with empty
+    // commands; the runnable-gate must reject it so point-to-existing reports
+    // no_recipe rather than falsely adopting an empty directory.
+    writeFileSync(path.join(tmpRoot, "notes.txt"), "hello");
+    expect(detectExistingProjectRecipe(tmpRoot)).toBeNull();
+  });
+
+  it("returns a recipe for a project whose only script is build (no test)", () => {
+    writeFileSync(path.join(tmpRoot, "package.json"), JSON.stringify({ name: "buildonly", scripts: { build: "tsc" } }));
+    const recipe = detectExistingProjectRecipe(tmpRoot);
+    expect(recipe).not.toBeNull();
+    expect(recipe?.buildCommands.length).toBeGreaterThan(0);
+  });
+});
+
+describe("buildAdoptExistingContinuationPrompt", () => {
+  it("embeds the original request + project dir and forbids re-scaffolding", () => {
+    const prompt = buildAdoptExistingContinuationPrompt({
+      originalPrompt: "add a delete-todo endpoint",
+      projectDir: "/tmp/my-existing-app",
+    });
+    expect(prompt).toContain("add a delete-todo endpoint");
+    expect(prompt).toContain("/tmp/my-existing-app");
+    expect(prompt).toContain("do NOT re-scaffold");
+    // Must NOT carry the init_new template assumptions.
+    expect(prompt).not.toContain("BB template");
   });
 });
