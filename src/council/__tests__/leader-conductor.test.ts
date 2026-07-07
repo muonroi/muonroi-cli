@@ -7,6 +7,7 @@ import {
   buildLeaderVerdict,
   diagnoseUnmetRemedy,
   escalationWanted,
+  extractEvalJson,
   leaderAutoRemedyEnabled,
   leaderConductorEnabled,
   leaderEscalationEnabled,
@@ -458,6 +459,118 @@ describe("runDebate escalation wiring (B4 integration)", () => {
         (c) => c.type === "content" && typeof c.content === "string" && c.content.includes("debate sufficient"),
       );
       expect(sufficient).toBeTruthy();
+    });
+  });
+});
+
+// ── F3b: robust leader-eval JSON extraction ───────────────────────────────────
+
+describe("extractEvalJson (F3b)", () => {
+  it("returns a plain JSON object unchanged", () => {
+    expect(extractEvalJson('{"allCriteriaMet":true}')).toBe('{"allCriteriaMet":true}');
+  });
+
+  it("strips ```json code fences", () => {
+    const out = extractEvalJson('```json\n{"shouldContinue":false}\n```');
+    expect(out).toBe('{"shouldContinue":false}');
+    expect(JSON.parse(out as string)).toEqual({ shouldContinue: false });
+  });
+
+  it("skips leading chain-of-thought prose and returns the trailing object", () => {
+    const raw = 'Let me think about {this} carefully.\nFinal answer:\n{"reason":"done","allCriteriaMet":false}';
+    expect(JSON.parse(extractEvalJson(raw) as string)).toEqual({ reason: "done", allCriteriaMet: false });
+  });
+
+  it("returns the LAST balanced object when several are present", () => {
+    expect(extractEvalJson('{"a":1} then {"b":2}')).toBe('{"b":2}');
+  });
+
+  it("handles a nested object as one balanced span", () => {
+    const raw = '{"criteriaStatus":[{"met":true}],"allCriteriaMet":true}';
+    expect(extractEvalJson(raw)).toBe(raw);
+  });
+
+  it("returns null when there is no balanced object (garbage / truncated)", () => {
+    expect(extractEvalJson("no json here")).toBeNull();
+    expect(extractEvalJson('{"unterminated": true')).toBeNull();
+    expect(extractEvalJson("")).toBeNull();
+  });
+});
+
+// ── F2: escalation when the final-round eval is unavailable ────────────────────
+
+// A leader whose round evaluation NEVER parses (returns prose, no JSON) — the
+// eval-unavailable path that used to silently drop an unmet outcome.
+function makeEvalFailLLM(): CouncilLLM {
+  return {
+    generate: async (_model: string, system: string) =>
+      system.includes("evaluating whether")
+        ? "I can't produce structured output right now; the debate should continue."
+        : "A debate contribution.",
+    debate: async () => ({ text: "A debate turn.", toolCalls: [] }),
+    research: async () => "findings",
+  } as unknown as CouncilLLM;
+}
+
+describe("runDebate eval-unavailable escalation (F2 integration)", () => {
+  const withEscalationEnv = async (fn: () => Promise<void>) => {
+    const prevC = process.env.MUONROI_LEADER_CONDUCTOR;
+    const prevE = process.env.MUONROI_COUNCIL_ESCALATE;
+    delete process.env.MUONROI_LEADER_CONDUCTOR;
+    delete process.env.MUONROI_COUNCIL_ESCALATE;
+    try {
+      await fn();
+    } finally {
+      if (prevC === undefined) delete process.env.MUONROI_LEADER_CONDUCTOR;
+      else process.env.MUONROI_LEADER_CONDUCTOR = prevC;
+      if (prevE === undefined) delete process.env.MUONROI_COUNCIL_ESCALATE;
+      else process.env.MUONROI_COUNCIL_ESCALATE = prevE;
+    }
+  };
+
+  it("consults the user at the final round even when the eval never parses", async () => {
+    await withEscalationEnv(async () => {
+      let answered = false;
+      const config = makeEscConfig(async () => {
+        if (!answered) {
+          answered = true;
+          return "escalate_extend";
+        }
+        return "escalate_accept";
+      });
+
+      const { chunks, state } = await drainDebate(runDebate(makeEscSpec(), config, makeEvalFailLLM()));
+
+      // The escalation askcard fired despite there being no parseable evaluation —
+      // the unmet criteria fall back to the (empty) history → all treated unmet.
+      const askcards = chunks.filter(
+        (c) => c.type === "council_question" && c.councilQuestion?.options?.[0]?.value?.startsWith("escalate_"),
+      );
+      expect(askcards).toHaveLength(1);
+      // The user's extend pushed past the 1-round plan.
+      expect(state.escalation).toEqual({ action: "extend", grantedRounds: 2 });
+      expect(state.roundCount).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("stays silent on the eval-unavailable path when headless (no responder)", async () => {
+    await withEscalationEnv(async () => {
+      const config = makeEscConfig(async () => "escalate_extend");
+      (config as { respondToQuestion?: unknown }).respondToQuestion = undefined;
+      const { chunks, state } = await drainDebate(runDebate(makeEscSpec(), config, makeEvalFailLLM()));
+
+      expect(chunks.some((c) => c.type === "council_question")).toBe(false);
+      expect(state.escalation).toBeUndefined();
+      expect(state.roundCount).toBe(1);
+      // The closing diagnostic verdict still names the unmet criterion as open.
+      const verdict = chunks.find(
+        (c) =>
+          c.type === "council_message" &&
+          c.councilMessage?.phase === "verdict" &&
+          typeof c.councilMessage?.text === "string" &&
+          c.councilMessage.text.includes("still unmet"),
+      );
+      expect(verdict).toBeTruthy();
     });
   });
 });

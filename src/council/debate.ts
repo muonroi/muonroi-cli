@@ -1484,6 +1484,29 @@ export async function* runDebate(
       // (observed session dd34c59c63e9).
       yield roundRec("done", { leaderDecision: "eval-unavailable", directive: roundDirective });
       nextTopic = undefined;
+
+      // F2 — final-round eval-unavailable must not silently drop an unmet
+      // outcome. The eval failed to parse even after the cross-provider fallback
+      // loop, so there is no fresh criteria status; fall back to the last
+      // successful round's alignment (lastCriteriaMet), treating an empty history
+      // as all-unmet. If this is the last round and we have an interactive
+      // channel with criteria still open, consult the user (same B4 escalation)
+      // instead of proceeding straight to synthesis. stuck=true: a broken eval
+      // gives no progress signal, so the diagnostic frames the criteria as
+      // needing evidence/rescope rather than "more debate".
+      if (
+        round === maxRounds &&
+        config.respondToQuestion &&
+        leaderEscalationEnabled() &&
+        !escalated &&
+        spec.successCriteria.length > 0
+      ) {
+        const unmetIdx = spec.successCriteria.map((_, i) => i).filter((i) => lastCriteriaMet[i] !== true);
+        if (unmetIdx.length > 0) {
+          const openList = unmetIdx.map((i) => shortCriterion(spec.successCriteria[i], 56));
+          yield* escalateStop(true, unmetIdx.length, openList);
+        }
+      }
     }
 
     // Generate inter-round summary
@@ -1664,9 +1687,9 @@ async function* evaluateDebate(
       // outcome. 1536 keeps the focus line + criteria array intact.
       maxTokens: 1536,
     });
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (match) {
-      const parsed = JSON.parse(match[0]) as Partial<LeaderEvaluation>;
+    const jsonStr = extractEvalJson(raw);
+    if (jsonStr) {
+      const parsed = JSON.parse(jsonStr) as Partial<LeaderEvaluation>;
 
       const citationCount = countCitations(exchangeText);
       const evidenceDensity = computeEvidenceDensity(exchangeText);
@@ -1705,10 +1728,56 @@ async function* evaluateDebate(
             : undefined,
       };
     }
-  } catch {
-    // Continue debate if evaluation fails
+    // F3a — no JSON object found in the model output. Log a diagnosable snippet
+    // (No-Silent-Catch) before falling through to null so eval-unavailable is
+    // never a black box — earlier this returned null silently and the only signal
+    // was the "evaluation unavailable" round label.
+    console.warn(
+      `[council] round-${round} eval: no JSON object in output from ${modelOverride ?? leaderModelId} ` +
+        `(${raw.length} chars): ${raw.slice(0, 160).replace(/\s+/g, " ")}`,
+    );
+  } catch (err) {
+    // F3a — parse or generate failure. Log with context instead of swallowing:
+    // which model, which round, the message. The debate still continues (returns
+    // null → eval-unavailable), but the failure is now diagnosable remotely.
+    console.error(
+      `[council] round-${round} eval failed on ${modelOverride ?? leaderModelId}: ${(err as Error)?.message}`,
+      { round, stack: (err as Error)?.stack?.split("\n").slice(0, 3) },
+    );
   }
   return null;
+}
+
+/**
+ * F3b — robustly extract the leader-evaluation JSON object from a model's raw
+ * output. Replaces a greedy `/\{[\s\S]*\}/` match that could swallow prose,
+ * multiple objects, or a trailing partial object into an unparseable span.
+ *
+ * Strategy: strip code fences, then brace-scan and return the LAST fully
+ * balanced top-level `{…}` object (the eval schema is emitted last, after any
+ * chain-of-thought prose). Returns null only when no balanced object exists.
+ * Deterministic, no LLM call. Braces inside string values are rare in the
+ * machine-emitted eval payload; a real tokenizer would be overkill here.
+ */
+export function extractEvalJson(raw: string): string | null {
+  if (!raw) return null;
+  const unfenced = raw.replace(/```(?:json)?/gi, "").replace(/```/g, "");
+  let best: string | null = null;
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < unfenced.length; i++) {
+    const ch = unfenced[i];
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}") {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && start >= 0) best = unfenced.slice(start, i + 1);
+      }
+    }
+  }
+  return best;
 }
 
 /**

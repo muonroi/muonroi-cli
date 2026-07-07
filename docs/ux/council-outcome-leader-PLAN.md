@@ -297,7 +297,44 @@ non-deterministic (deepseek councils converge to all-met in 2 rounds), so the ga
 is unit + integration coverage over the real `runDebate` loop rather than a fresh
 live snapshot.
 
-**Still deferred (separate increment):** re-team via `selectTaskAwarePanel` on a
-stuck criterion (rescope currently stops honestly with a marker rather than
-re-running). Also still open: the composing placeholder lingering after turn-end;
-the `debate.ts` silent catch (`evaluateDebate` / inter-round summary).
+## F2 + F3 — honest handling when the leader eval fails (2026-07-07)
+
+Found by **driving the real TUI** (session 6ce154b6c864, `/council` on
+optimistic-vs-pessimistic locking): a genuinely divided debate ran all 3 rounds
+at 0/4 criteria met, then the **round-3 leader eval parse-failed** →
+`Decision: evaluation unavailable`. Because the B4 escalation lived inside the
+`if (evaluation)` branch, the debate ended 0/4 with **no user escalation** and a
+confident-looking synthesis — the exact gap escalation was meant to close, hit
+through the eval-failure back door.
+
+- **F3a (No-Silent-Catch):** `evaluateDebate`'s `catch {}` (and the no-JSON-found
+  path) now log with context — round, model, message, a raw snippet — so
+  eval-unavailable is diagnosable instead of a black box. The debate still
+  continues on failure; only the silence is removed.
+- **F3b (robust extraction):** new `extractEvalJson` replaces the greedy
+  `/\{[\s\S]*\}/` match — strips code fences and brace-scans for the LAST balanced
+  `{…}` object (the schema is emitted after any chain-of-thought prose), so prose,
+  multiple objects, or a trailing partial no longer corrupt the parse. Deterministic,
+  no extra LLM call; complements the existing cross-provider eval-fallback loop.
+- **F2 (escalate on final-round eval-unavailable):** in the eval-unavailable
+  branch, if this is the last round with an interactive channel and pinned
+  criteria are still open (falling back to `lastCriteriaMet`; empty history →
+  all unmet), consult the user via the same `escalateStop` (stuck=true — a broken
+  eval gives no progress signal). Extend re-enters the loop; accept/rescope end.
+  Headless (no responder) is unchanged: the closing diagnostic verdict still names
+  the open criteria.
+
+`extractEvalJson` is unit-tested (plain / fenced / prose+braces / multi-object /
+nested / garbage) and two real-`runDebate` integration tests cover the
+eval-never-parses path (askcard fires + extra round on extend; no askcard +
+closing verdict when headless). 281 council tests green, tsc clean. Flags
+unchanged (`MUONROI_COUNCIL_ESCALATE`).
+
+**Still deferred (separate increment):** the whole-council **outcome/deliverable
+mismatch** (F1 — a 0/N, low-confidence debate still produces a confident decision
+brief + a post-debate card that recommends "hand back the decision"; needs the
+conclusion/post-debate options to reflect the unmet/low-confidence state);
+re-team via `selectTaskAwarePanel` on a stuck criterion (rescope currently stops
+honestly with a marker rather than re-running); the composing placeholder
+lingering after turn-end; localization leak in the clarify askcard (VI option
+descriptions in an English card); `/council <args>` "No commands match".
