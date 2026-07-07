@@ -358,6 +358,11 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       // the user review each sprint's OUTPUT.
       autoApprovePreflight: true,
       skipResearch: true,
+      // Automated per-sprint planning: suppress the interactive post-debate menu
+      // (it stranded the sprint before implementation — blocker 4/5) and skip the
+      // session-scoped persistence that FK-fails on the product-run id. The plan
+      // is auto-locked and control returns here for the Implementation stage.
+      sprintPlanningMode: true,
     },
   );
 

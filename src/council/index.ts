@@ -120,6 +120,26 @@ export interface RunCouncilOptions {
    * embedded in the council topic) instead of paying for a second research pass.
    */
   skipResearch?: boolean;
+  /**
+   * When true, this council runs INSIDE an automated per-sprint planning pass
+   * (`runSprint`) — there is no interactive user turn and no real `sessions` row
+   * (the caller passes the product-RUN id as sessionId). Two consequences:
+   *
+   *  1. The post-debate continuation menu is SUPPRESSED. Presenting "Refine /
+   *     Save & Exit / Lock plan" here strands the sprint before implementation —
+   *     the observed blocker: picking "Save & Exit" ended the run with NO Sprint
+   *     Implementation, and "Refine" (the default) looped back into more debate.
+   *     Instead the synthesized plan is auto-locked (equivalent to "Lock plan and
+   *     execute Sprint 1") and control returns to the sprint runner.
+   *  2. Session-scoped persistence (appendSystemMessage / logInteraction /
+   *     SessionStore.setStatus) is SKIPPED. Those tables FK-reference
+   *     `sessions(id)`; the product-run id has no session row, so the FIRST write
+   *     throws `FOREIGN KEY constraint failed` — which previously aborted the
+   *     entire persist block (silently, under a bare catch), taking
+   *     `writeDecisionsLock` down with it. Skipping them lets the file-based
+   *     decisions.lock artifact actually get written for sprint-runner injection.
+   */
+  sprintPlanningMode?: boolean;
 }
 
 export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis";
@@ -932,31 +952,48 @@ export async function* runCouncil(
       const recommendLine = `**Recommended:** ${baseOptions[defaultIndex]?.label ?? recommendation.value} — ${recommendReason}`;
       const headerBlock = `${heading}\n\n> ${confidenceBadge}\n>\n> **Why:** ${confidenceReason}${outcomeLine}\n\n${recommendLine}\n\nLeader: \`${leaderModelId}\`. What would you like to do next?`;
 
-      yield {
-        type: "council_question",
-        content: headerBlock,
-        councilQuestion: {
-          questionId,
-          phase: "post-debate",
-          question: synthesisFailed
-            ? "Synthesis did not produce a structured outcome. How do you want to recover?"
-            : inconclusive
-              ? `${critOutcome.metCount}/${critOutcome.total} success criteria met — the outcome is provisional. Keep working the unmet criteria, or save it as-is?`
-              : hasEmptySections
-                ? `The debate left ${refinementTopics.length} area(s) unresolved. Refine them or save the current outcome?`
-                : "What would you like to do next?",
-          context:
-            `${confidenceBadge}\n${confidenceReason}` +
-            (inconclusive ? `\nUnmet criteria: ${critOutcome.unmetLabels.join("; ")}` : "") +
-            (hasEmptySections ? `\nUnresolved areas: ${refinementTopics.join(", ")}` : "") +
-            `\n→ ${recommendation.reason}`,
-          isRequired: false,
-          options: baseOptions,
-          defaultIndex,
-        },
-      } as StreamChunk;
-
-      const answer = await respondToQuestion(questionId);
+      let answer: string;
+      if (options?.sprintPlanningMode) {
+        // Blocker 4/5 fix: no interactive post-debate menu inside automated
+        // per-sprint planning. Presenting it stranded the sprint before
+        // implementation — picking "Save & Exit" ended the run with no Sprint
+        // Implementation, and "Refine" (the default) looped back into more
+        // debate. Auto-lock the synthesized plan (== "Lock plan and execute
+        // Sprint 1") and hand control back to the sprint runner.
+        answer = "generate_plan";
+        idealTrace("council.postDebate.autoLock", { sessionId });
+        yield {
+          type: "content",
+          content:
+            "\n> Sprint plan synthesized — auto-locked and handed to the sprint runner " +
+            "(the product plan was already approved at the /ideal preflight).\n",
+        };
+      } else {
+        yield {
+          type: "council_question",
+          content: headerBlock,
+          councilQuestion: {
+            questionId,
+            phase: "post-debate",
+            question: synthesisFailed
+              ? "Synthesis did not produce a structured outcome. How do you want to recover?"
+              : inconclusive
+                ? `${critOutcome.metCount}/${critOutcome.total} success criteria met — the outcome is provisional. Keep working the unmet criteria, or save it as-is?`
+                : hasEmptySections
+                  ? `The debate left ${refinementTopics.length} area(s) unresolved. Refine them or save the current outcome?`
+                  : "What would you like to do next?",
+            context:
+              `${confidenceBadge}\n${confidenceReason}` +
+              (inconclusive ? `\nUnmet criteria: ${critOutcome.unmetLabels.join("; ")}` : "") +
+              (hasEmptySections ? `\nUnresolved areas: ${refinementTopics.join(", ")}` : "") +
+              `\n→ ${recommendation.reason}`,
+            isRequired: false,
+            options: baseOptions,
+            defaultIndex,
+          },
+        } as StreamChunk;
+        answer = await respondToQuestion(questionId);
+      }
       postDebateAction = answer;
       idealTrace("council.postDebate.answer", { sessionId, answer });
       options?.onPostDebateAction?.(answer);
@@ -965,7 +1002,11 @@ export async function* runCouncil(
       // token users should never see. Free-text follow-ups (no matching option)
       // echo verbatim.
       const answeredLabel = baseOptions.find((o) => o.value === answer)?.label ?? answer;
-      yield { type: "content", content: `\n  ↳ ${answeredLabel}\n` };
+      // No "↳ choice" echo in sprint-planning mode — there was no user choice to
+      // echo (the plan was auto-locked above with its own status line).
+      if (!options?.sprintPlanningMode) {
+        yield { type: "content", content: `\n  ↳ ${answeredLabel}\n` };
+      }
 
       // Treat any non-empty answer that doesn't match a known choice value as a follow-up question.
       const knownValues = new Set([
@@ -1177,63 +1218,71 @@ export async function* runCouncil(
   // ── Persist outcome ─────────────────────────────────────────────────────────
   if (sessionId) {
     try {
-      if (outcome) {
-        const agreedLine = outcome.agreed?.length ? `\nAgreed: ${outcome.agreed.join("; ")}` : "";
-        const recLine = outcome.recommendation ? `\nRecommendation: ${outcome.recommendation}` : "";
-        appendSystemMessage(
-          sessionId,
-          `[Council Decision]\nTopic: ${topic}\n${outcome.summary}${agreedLine}${recLine}`,
-        );
-        appendSystemMessage(sessionId, `[Council Outcome]\n${JSON.stringify(outcome)}`);
-      }
-      const evidenceDensityPersist = debateState.finalEvidenceDensity ?? 0;
-      const confidenceLevelPersist: "high" | "medium" | "low" =
-        evidenceDensityPersist >= 0.6 ? "high" : evidenceDensityPersist >= 0.3 ? "medium" : "low";
-      const councilRecord: import("./types.js").CouncilMemoryRecord = {
-        topic,
-        spec,
-        debatePlan,
-        leaderModel: leaderModelId,
-        participants: debateState.active.map((a) => ({ role: a.role, model: a.model, stance: a.stance })),
-        finalPositions: debateState.active.map((a) => ({ role: a.role, position: a.position })),
-        archive: debateState.archive ?? [],
-        synthesis: synthesisText,
-        confidence: {
-          level: confidenceLevelPersist,
-          evidenceDensity: evidenceDensityPersist,
-          rounds: debateState.roundCount,
-        },
-        stats: { calls: stats.calls, durationMs: Date.now() - stats.startMs, phases: stats.phases },
-        timestamp: new Date().toISOString(),
-      };
-      appendSystemMessage(sessionId, `[Council Memory] ${JSON.stringify(councilRecord)}`);
-
-      // Forensics-friendly summary row in interaction_logs. The full
-      // [Council Memory] system message above is great for context replay but
-      // can't be queried — `usage forensics` reads interaction_logs only.
-      // Excerpts are capped to keep metadata_json small (~2-4KB per run).
-      const stancesForLog = debateState.active.slice(0, 8).map((a) => ({
-        role: a.role,
-        model: a.model,
-        stanceName: a.stance?.name,
-        finalPositionExcerpt: (a.position ?? "").slice(0, 400),
-      }));
-      logInteraction(sessionId, "council", {
-        eventSubtype: "council_summary",
-        model: leaderModelId,
-        durationMs: Date.now() - stats.startMs,
-        data: {
+      // Skip session-scoped persistence in sprintPlanningMode: messages /
+      // interaction_logs FK-reference sessions(id), but the sprint-planning caller
+      // passes the product-RUN id (no session row) → "FOREIGN KEY constraint
+      // failed" on the FIRST write, which under the catch below previously aborted
+      // the whole block — silently taking writeDecisionsLock down with it. The
+      // file-based decisions.lock still writes below (outside this guard).
+      if (!options?.sprintPlanningMode) {
+        if (outcome) {
+          const agreedLine = outcome.agreed?.length ? `\nAgreed: ${outcome.agreed.join("; ")}` : "";
+          const recLine = outcome.recommendation ? `\nRecommendation: ${outcome.recommendation}` : "";
+          appendSystemMessage(
+            sessionId,
+            `[Council Decision]\nTopic: ${topic}\n${outcome.summary}${agreedLine}${recLine}`,
+          );
+          appendSystemMessage(sessionId, `[Council Outcome]\n${JSON.stringify(outcome)}`);
+        }
+        const evidenceDensityPersist = debateState.finalEvidenceDensity ?? 0;
+        const confidenceLevelPersist: "high" | "medium" | "low" =
+          evidenceDensityPersist >= 0.6 ? "high" : evidenceDensityPersist >= 0.3 ? "medium" : "low";
+        const councilRecord: import("./types.js").CouncilMemoryRecord = {
           topic,
-          roundCount: debateState.roundCount,
-          participantCount: debateState.active.length,
-          stances: stancesForLog,
-          synthesisExcerpt: synthesisText.slice(0, 1500),
-          evidenceDensity: evidenceDensityPersist,
-          confidenceLevel: confidenceLevelPersist,
-          recommendation: outcome?.recommendation?.slice(0, 400) ?? null,
-          agreedCount: outcome?.agreed?.length ?? 0,
-        },
-      });
+          spec,
+          debatePlan,
+          leaderModel: leaderModelId,
+          participants: debateState.active.map((a) => ({ role: a.role, model: a.model, stance: a.stance })),
+          finalPositions: debateState.active.map((a) => ({ role: a.role, position: a.position })),
+          archive: debateState.archive ?? [],
+          synthesis: synthesisText,
+          confidence: {
+            level: confidenceLevelPersist,
+            evidenceDensity: evidenceDensityPersist,
+            rounds: debateState.roundCount,
+          },
+          stats: { calls: stats.calls, durationMs: Date.now() - stats.startMs, phases: stats.phases },
+          timestamp: new Date().toISOString(),
+        };
+        appendSystemMessage(sessionId, `[Council Memory] ${JSON.stringify(councilRecord)}`);
+
+        // Forensics-friendly summary row in interaction_logs. The full
+        // [Council Memory] system message above is great for context replay but
+        // can't be queried — `usage forensics` reads interaction_logs only.
+        // Excerpts are capped to keep metadata_json small (~2-4KB per run).
+        const stancesForLog = debateState.active.slice(0, 8).map((a) => ({
+          role: a.role,
+          model: a.model,
+          stanceName: a.stance?.name,
+          finalPositionExcerpt: (a.position ?? "").slice(0, 400),
+        }));
+        logInteraction(sessionId, "council", {
+          eventSubtype: "council_summary",
+          model: leaderModelId,
+          durationMs: Date.now() - stats.startMs,
+          data: {
+            topic,
+            roundCount: debateState.roundCount,
+            participantCount: debateState.active.length,
+            stances: stancesForLog,
+            synthesisExcerpt: synthesisText.slice(0, 1500),
+            evidenceDensity: evidenceDensityPersist,
+            confidenceLevel: confidenceLevelPersist,
+            recommendation: outcome?.recommendation?.slice(0, 400) ?? null,
+            agreedCount: outcome?.agreed?.length ?? 0,
+          },
+        });
+      }
 
       // C2: Persist decisions.lock.md to the run directory so sprint-runner
       // can inject locked decisions into the implementation prompt.
@@ -1315,16 +1364,26 @@ export async function* runCouncil(
   // ── Stats ───────────────────────────────────────────────────────────────────
   idealTrace("council.stats", { sessionId });
   const totalMs = Date.now() - stats.startMs;
-  yield {
-    type: "content",
-    content:
-      `\n---\n` +
-      `> Council stats: ${stats.calls} API calls, ${(totalMs / 1000).toFixed(1)}s total, ` +
-      `${active.length} participants, ${debateState.roundCount} rounds\n` +
-      `> Phases: ${stats.phases.map((p) => `${p.name}=${(p.durationMs / 1000).toFixed(1)}s`).join(", ")}\n`,
-  };
+  // Blocker-5 root cause: in sprintPlanningMode this runCouncil is a SUB-STEP of
+  // runSprint, not a standalone turn. The terminal `{type:"done"}` chunk (and the
+  // stats banner) are turn-terminal signals — forwarded verbatim by sprint-runner
+  // they made the app's stream consumer STOP pulling right here, so the generator
+  // suspended at these yields and never returned. sprint-runner's `planGen.next()`
+  // therefore never saw `done`, and the Sprint Implementation stage never ran
+  // (idle at the composer, no error). A sub-step must not emit them: skip both so
+  // the generator returns cleanly and the sprint runner proceeds to implementation.
+  if (!options?.sprintPlanningMode) {
+    yield {
+      type: "content",
+      content:
+        `\n---\n` +
+        `> Council stats: ${stats.calls} API calls, ${(totalMs / 1000).toFixed(1)}s total, ` +
+        `${active.length} participants, ${debateState.roundCount} rounds\n` +
+        `> Phases: ${stats.phases.map((p) => `${p.name}=${(p.durationMs / 1000).toFixed(1)}s`).join(", ")}\n`,
+    };
 
-  yield { type: "done" };
+    yield { type: "done" };
+  }
   idealTrace("council.return", { sessionId, synthesisLen: (synthesisText || "").length });
   return synthesisText || null;
 }
