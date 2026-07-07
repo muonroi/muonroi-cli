@@ -21,12 +21,23 @@ describe("scroll-lock E2E", () => {
 
   beforeAll(async () => {
     ctx = await spawnHarness({ env: { MUONROI_SCROLL_LOCK: "1" } });
-    await ctx.driver.wait_for({ idle: true, timeoutMs: 15_000 });
+    await ctx.driver.wait_for({ idle: true, timeoutMs: 30_000 });
     // Mount guard: idle can fire before React mounts (seq=0 empty frame race);
     // typing then drops the keys and `id=log` never appears. Same guard as
     // cost-leak-tui-smoke / error-states.
     await ctx.driver.wait_for({ selector: "role=textbox", timeoutMs: 10_000 });
-  }, 30_000);
+    // Warm-up turn — front-load the one-time cold cost. The FIRST real
+    // processMessage lazily dynamic-imports the orchestrator / PIL / tool-engine
+    // modules; on a cold machine under full-suite serial contention that cold
+    // disk read has been measured to spike a single mock turn past 90s
+    // (flake 2026-07-06, root-caused 2026-07-07: warm turns idle in <1s, the PIL
+    // classifier never fires — pure spawn/import latency, not routing). Paying
+    // it here in setup with a generous budget keeps every test-body turn warm
+    // and deterministic; a genuine hang still fails the boot/test timeout.
+    ctx.driver.type("warmup");
+    ctx.driver.press("Enter");
+    await ctx.driver.wait_for({ idle: true, timeoutMs: 150_000 });
+  }, 210_000);
 
   afterAll(() => ctx?.cleanup());
 
@@ -42,10 +53,10 @@ describe("scroll-lock E2E", () => {
   }, 15_000);
 
   it("locks on scroll-up and re-pins on End", async () => {
-    // Fill the transcript so there is history to scroll away from.
-    // 30s per round-trip: under full-suite serial contention a single mock
-    // turn has been observed to exceed the old 10s budget (suite-run failure
-    // 2026-07-06); in isolation each turn is ~1s, so this is pure headroom.
+    // Fill the transcript so there is history to scroll away from. The cold
+    // import spike is already paid by the beforeAll warm-up turn, so each of
+    // these turns runs warm (<1s in isolation); 30s is pure headroom for
+    // ordinary full-suite serial contention.
     for (let i = 0; i < 8; i++) {
       ctx.driver.type(`fill message ${i} line one line two line three line four`);
       ctx.driver.press("Enter");
