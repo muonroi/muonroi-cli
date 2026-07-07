@@ -705,14 +705,15 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
         // request must never be chitchat — chitchat drops the whole toolset and
         // breaks the turn. Only ever upgrades chitchat → task.
         if (intentKind === "chitchat" && hasActionableToolIntent(ctx.raw)) intentKind = "task";
-        const outputStyle = llmRes.outputStyle ?? detectStyleFromText(ctx.raw);
+        // Style + complexity come from the MODEL, never a keyword regex. Style
+        // is the model's word or null (layer4/6 handle null without regex).
+        // Complexity is derived from the model's depthTier purely for the
+        // telemetry trace — routing reads depthTier directly, not this.
+        const outputStyle = llmRes.outputStyle;
         const domain = extractDomain("", ctx.raw);
-        const { complexity, score: complexityScore } = scoreComplexity({
-          rawText: ctx.raw,
-          taskType: llmRes.taskType,
-          t0HitCount: 0,
-          hasMaxSprintsOne: false,
-        });
+        const complexity: "low" | "medium" | "high" =
+          llmRes.depthTier === "heavy" ? "high" : llmRes.depthTier === "quick" ? "low" : "medium";
+        const complexityScore = 0;
         const intentTrace: IntentDetectionTrace = {
           pass1Reason: "llm-first",
           pass1Confidence: llmRes.confidence,
@@ -729,7 +730,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
           pass3LegacyStyleSucceeded: false,
           pass4LlmAttempted: true,
           pass4LlmSucceeded: true,
-          styleSource: llmRes.outputStyle ? "brain-unified" : outputStyle ? "explicit-regex" : "none",
+          styleSource: llmRes.outputStyle ? "brain-unified" : "none",
           finalTaskType: llmRes.taskType,
           finalConfidence: llmRes.confidence,
           complexity,
@@ -829,12 +830,10 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
           `reason=${classifyError ?? "null/unparseable model response"} ` +
           `model-classifier=wired rawPreview=${JSON.stringify(ctx.raw.slice(0, 120))}`,
       );
-      const { complexity: failComplexity, score: failComplexityScore } = scoreComplexity({
-        rawText: ctx.raw,
-        taskType: null,
-        t0HitCount: 0,
-        hasMaxSprintsOne: false,
-      });
+      // No regex on the failure path either — UNKNOWN classification carries a
+      // neutral "medium" complexity for the telemetry trace, decided by nothing.
+      const failComplexity: "low" | "medium" | "high" = "medium";
+      const failComplexityScore = 0;
       return {
         ...ctx,
         taskType: null,
