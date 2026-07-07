@@ -265,6 +265,13 @@ const SYSTEM_PROMPT =
   "- 'plan the migration to hooks' → plan,balanced,task,report,heavy,local,english,clear\n\n" +
   "Prompts may be Vietnamese, English, or mixed. Reply with exactly eight words separated by commas. No other text.";
 
+// Appended to SYSTEM_PROMPT on the self-repair retry (see createLlmClassifier).
+// The first attempt produced an unparseable reply; this reminder + the full
+// (untrimmed) prompt is the agent-first recovery the design mandates INSTEAD of
+// a keyword-regex fallback.
+const CLASSIFY_REPAIR_INSTRUCTION =
+  "REPAIR MODE: your previous reply could NOT be parsed. Output NOTHING except the single line of eight lowercase words separated by commas — no prose, no explanation, no code fences, no quotes. If you are unsure of a field, pick the safe default (task, standard, clear, local).";
+
 function parseResponse(raw: string): LlmClassifyResult | null {
   const cleaned = raw.trim().toLowerCase().replace(/[`*"]/g, "");
   const firstLine = cleaned.split(/\r?\n/)[0] ?? "";
@@ -402,7 +409,57 @@ export function createLlmClassifier(factory: ProviderFactory, modelId: string): 
       // Reasoning models occasionally route the entire answer into reasoning
       // parts (no committed text). Fall back to the reasoning channel so the
       // 2-word verdict is still recoverable.
-      return parseResponse(text) ?? (reasoningText ? parseResponse(reasoningText) : null);
+      const primary = parseResponse(text) ?? (reasoningText ? parseResponse(reasoningText) : null);
+      if (primary) return primary;
+
+      // Self-repair (agent-first recovery — NOT a regex fallback): the model's
+      // first reply did not parse into the eight-word contract. Call the model
+      // ONCE more with the FULL prompt + recent context (no 600-char trim) and
+      // an explicit format-repair instruction on a doubled budget. Only if this
+      // ALSO fails do we return null — and the caller then surfaces an honest
+      // UNKNOWN classification, never a keyword-regex guess.
+      if (timer) clearTimeout(timer);
+      const repairController = new AbortController();
+      const repairTimer = setTimeout(
+        () => repairController.abort(),
+        isReasoning ? REASONING_CLASSIFY_TIMEOUT_MS : LLM_CLASSIFY_TIMEOUT_MS,
+      );
+      const repairSignal = signal
+        ? (AbortSignal.any?.([signal, repairController.signal]) ?? repairController.signal)
+        : repairController.signal;
+      try {
+        const fullRecent = recentTurns?.trim();
+        const repairPrompt =
+          (fullRecent
+            ? `[RECENT CONVERSATION — reference only, do NOT classify this]\n${fullRecent.slice(0, 1500)}\n\n`
+            : "") + `[NEW USER MESSAGE — classify THIS]\n${prompt.slice(0, 1500)}`;
+        const repairRun = streamText({
+          model: runtime.model,
+          abortSignal: repairSignal,
+          system: `${SYSTEM_PROMPT}\n\n${CLASSIFY_REPAIR_INSTRUCTION}`,
+          prompt: repairPrompt,
+          ...(dropMaxTokens ? {} : { maxOutputTokens: maxOut * 2 }),
+          ...(providerOptions ? { providerOptions } : {}),
+        });
+        let rt = "";
+        let rr = "";
+        for await (const part of repairRun.fullStream) {
+          if (part.type === "text-delta") rt += (part as any).textDelta ?? (part as any).text ?? "";
+          else if (part.type === "reasoning-delta") rr += (part as any).textDelta ?? (part as any).text ?? "";
+        }
+        const repaired = parseResponse(rt) ?? (rr ? parseResponse(rr) : null);
+        if (repaired) {
+          console.error(`[pil.llm-classify] self-repair recovered classification (${modelId})`);
+        } else {
+          console.error(
+            `[pil.llm-classify] self-repair FAILED (${modelId}) — surfacing UNKNOWN, NO regex fallback. ` +
+              `rawPreview=${JSON.stringify(prompt.slice(0, 120))}`,
+          );
+        }
+        return repaired;
+      } finally {
+        clearTimeout(repairTimer);
+      }
     } catch (err) {
       console.error(`[pil.llm-classify] classify failed: ${(err as Error)?.message}`, {
         modelId,
@@ -421,113 +478,6 @@ export interface SubSessionRouteResult {
   action: SubSessionAction;
   confidence: number;
   reason: string;
-}
-
-export function classifySubSessionActionHeuristic(prompt: string): SubSessionRouteResult | null {
-  const trimmed = prompt.trim().toLowerCase();
-  if (!trimmed) return null;
-
-  // Strip trailing punctuation for list-based matching so "hello!" and "cảm ơn!"
-  // still hit the static lists instead of falling through to the LLM classifier.
-  const stripped = trimmed.replace(/[!?.…,;:]+$/g, "").trim();
-
-  // 1. Simple math equations (exact matches like "2+2", "1 + 1")
-  if (/^\d+\s*[+\-*/]\s*\d+$/.test(trimmed)) {
-    return {
-      action: "DIRECT_ANSWER",
-      confidence: 0.99,
-      reason: "Obvious input classified via heuristic (simple math)",
-    };
-  }
-
-  // 2. Greetings (exact matches only, trailing punctuation stripped)
-  const greetings = [
-    "hi",
-    "hello",
-    "hey",
-    "chào",
-    "xin chào",
-    "hi there",
-    "hello there",
-    "chào bạn",
-    "halo",
-    "hola",
-    "bạn ơi",
-  ];
-  if (greetings.includes(stripped)) {
-    return {
-      action: "DIRECT_ANSWER",
-      confidence: 0.99,
-      reason: "Obvious input classified via heuristic (greeting)",
-    };
-  }
-
-  // 3. Thanks (exact matches only, trailing punctuation stripped)
-  const thanks = [
-    "thanks",
-    "thank you",
-    "cảm ơn",
-    "cám ơn",
-    "thank",
-    "thx",
-    "ty",
-    "cảm ơn bạn",
-    "cám ơn bạn",
-    "cảm ơn nhé",
-    "cám ơn nhé",
-  ];
-  if (thanks.includes(stripped)) {
-    return {
-      action: "DIRECT_ANSWER",
-      confidence: 0.99,
-      reason: "Obvious input classified via heuristic (thanks)",
-    };
-  }
-
-  // 4. Help (exact matches only, trailing punctuation stripped)
-  const help = ["help", "hướng dẫn", "cứu", "help me"];
-  if (help.includes(stripped)) {
-    return {
-      action: "DIRECT_ANSWER",
-      confidence: 0.99,
-      reason: "Obvious input classified via heuristic (help)",
-    };
-  }
-
-  // 5. Short conversational words / acknowledgements (exact matches only, trailing punctuation stripped)
-  const conversation = [
-    "ok",
-    "okay",
-    "yes",
-    "no",
-    "vâng",
-    "dạ",
-    "ừ",
-    "chắc thế",
-    "ừm",
-    "umm",
-    "cool",
-    "nice",
-    "perfect",
-    "done",
-    "xong",
-    "yep",
-    "yup",
-    "nah",
-    "fine",
-    "tốt",
-    "được",
-    "okie",
-  ];
-  if (conversation.includes(stripped)) {
-    return {
-      action: "DIRECT_ANSWER",
-      confidence: 0.99,
-      reason: "Obvious input classified via heuristic (acknowledgement)",
-    };
-  }
-
-  return null;
 }
 
 const ROUTER_SYSTEM_PROMPT =
@@ -563,11 +513,12 @@ export async function classifySubSessionAction(
   },
   signal?: AbortSignal,
 ): Promise<SubSessionRouteResult | null> {
-  if (process.env.MUONROI_DISABLE_HEURISTIC_ROUTING !== "1") {
-    const heuristic = classifySubSessionActionHeuristic(prompt);
-    if (heuristic) return heuristic;
-  }
-
+  // No regex pre-filter: the model decides the route for EVERY prompt, including
+  // greetings/acks (which it routes to DIRECT_ANSWER). The old keyword/list
+  // heuristic was removed (2026-07-07, no-regex rule) — a hardcoded whitelist
+  // mis-handles the long tail of natural-language inputs the whole design moved
+  // off of. On a null/failed model result the caller keeps the conservative
+  // DIRECT_ANSWER default (a semantic default, not a regex guess).
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
