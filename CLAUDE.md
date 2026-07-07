@@ -404,6 +404,30 @@ Controls which event kinds are emitted on the sidechannel.
 opt in with `MUONROI_HARNESS_EVENTS=llm-token` only when you need token-level
 correlation.
 
+### `MUONROI_HARNESS_EVENT_LOG` — event JSONL sink (wake-at-milestone)
+
+Set on the **MCP server process** to a file path and the harness appends every
+`LiveEvent` as one JSONL line (`{ts, kind, event}`). Ephemeral kinds
+(`toast`, `disconnect`, `stream-retry`, `ee-timeout`, `ee-error`,
+`grounding-flag`) additionally carry a `visualText` snapshot captured at emit
+time, so flash events aren't lost before an agent wakes. Unset → zero behavior
+change. Wiring: `event-tee.ts` + `makeLineHandler` in `mcp-server.ts`.
+
+Pair it with the generic milestone watcher so an agent driving the TUI never
+blocks on a long synchronous wait (and never rewrites a bespoke monitor):
+
+```bash
+# Wakes on ANY of the requested kinds — including modal pauses (askcard-open)
+# that never write a DB row, which a DB-poll monitor is blind to.
+bun scripts/harness-watch.mjs "$MUONROI_HARNESS_EVENT_LOG" \
+    --kinds askcard-open,council-step,sprint-halt --max-polls 30 --poll-ms 10000
+```
+
+Run it via a background task; on a MILESTONE match it prints the event (and the
+`visualText` for ephemeral kinds), on timeout a HEARTBEAT. Persistent states
+(askcard, post-debate card) stay put — render them fresh on demand; only
+ephemeral flashes need the embedded snapshot.
+
 ### All LiveEvent kinds (protocol version 0.4.0)
 
 See authoritative schema in `docs/agent-harness/PROTOCOL.md` and https://docs.muonroi.com (covers 18+ kinds + `usage`, idle sentinel etc).

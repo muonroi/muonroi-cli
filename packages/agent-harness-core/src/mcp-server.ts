@@ -19,6 +19,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { createDriver, type Driver } from "./driver.js";
+import { createEventTee } from "./event-tee.js";
 import type { LiveEvent, LiveFrame, VisualFrame } from "./protocol.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 
@@ -636,19 +637,14 @@ export function createMcpHarnessServer({ spawn }: { spawn: HarnessSpawn }): McpS
         sendType: (t: string) => sendLine(JSON.stringify({ op: "type", text: t })),
       });
 
+      // Optional JSONL event sink for external milestone watchers (null unless
+      // MUONROI_HARNESS_EVENT_LOG is set). Ephemeral kinds carry an at-emit
+      // visual snapshot so flash events aren't lost before an agent wakes.
+      const eventTee = createEventTee(() => driver.render_visual(), process.env["MUONROI_HARNESS_EVENT_LOG"]);
+
       // onLine already delivers complete newline-stripped lines — no extra
       // splitting required.
-      const unsub = onLine((line: string) => {
-        try {
-          const msg = JSON.parse(line) as Record<string, unknown>;
-          if (msg.mode === "live") driver._ingest({ kind: "frame", frame: msg as unknown as LiveFrame });
-          else if (msg.mode === "visual") driver._ingest({ kind: "visual", frame: msg as unknown as VisualFrame });
-          else if (msg.t === "idle") driver._ingest({ kind: "idle" });
-          else if (msg.t === "event") driver._ingest({ kind: "event", event: msg as unknown as LiveEvent });
-        } catch {
-          // ignore malformed lines
-        }
-      });
+      const unsub = onLine(makeLineHandler(driver, eventTee));
       spawnResult.exited.then(() => {
         unsub();
         if (currentPid === proc.pid) {
@@ -668,6 +664,37 @@ export function createMcpHarnessServer({ spawn }: { spawn: HarnessSpawn }): McpS
   registerAsyncTools(server, () => currentDriver, { onStop });
 
   return server;
+}
+
+/**
+ * Build the onLine sidechannel handler: parse each JSON line, ingest frames /
+ * visuals / idle / events into the driver, and tee events to the optional JSONL
+ * sink. Extracted (and exported) so the frame/event/tee wiring is unit-testable
+ * without a live TUI or an MCP protocol handshake.
+ *
+ * @param driver   the driver to ingest into (only _ingest is used).
+ * @param eventTee optional sink from createEventTee (null → no tee).
+ */
+export function makeLineHandler(
+  driver: Pick<Driver, "_ingest">,
+  eventTee: ((event: LiveEvent) => void) | null,
+): (line: string) => void {
+  return (line: string) => {
+    try {
+      const msg = JSON.parse(line) as Record<string, unknown>;
+      if (msg.mode === "live") driver._ingest({ kind: "frame", frame: msg as unknown as LiveFrame });
+      else if (msg.mode === "visual") driver._ingest({ kind: "visual", frame: msg as unknown as VisualFrame });
+      else if (msg.t === "idle") driver._ingest({ kind: "idle" });
+      else if (msg.t === "event") {
+        const event = msg as unknown as LiveEvent;
+        driver._ingest({ kind: "event", event });
+        // Tee AFTER ingest so render_visual reflects the frame at this event.
+        eventTee?.(event);
+      }
+    } catch {
+      // ignore malformed lines
+    }
+  };
 }
 
 /**
