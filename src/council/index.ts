@@ -118,6 +118,26 @@ export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_f
  * generate_plan OPTION is still offered downstream; it's just no longer the
  * pre-selected default for non-build topics.
  */
+/**
+ * F1 — summarize how the debate did against its PINNED success criteria, so the
+ * post-debate card can distinguish "the criteria were actually met" from "the
+ * synthesis reads confidently" (evidence density). `metFlags` is index-aligned
+ * to `pinned` (from DebateState.finalCriteriaMet); a missing/short array treats
+ * the unmapped criteria as not-met. `inconclusive` is true when the spec had
+ * pinned criteria and at least one is still open — the caller ANDs this with
+ * `!synthesisFailed` before reframing the card.
+ */
+export function summarizeCriteriaOutcome(
+  pinned: string[],
+  metFlags: boolean[] | undefined,
+): { total: number; metCount: number; unmetLabels: string[]; inconclusive: boolean } {
+  const flags = metFlags ?? [];
+  const total = pinned.length;
+  const metCount = pinned.filter((_, i) => flags[i] === true).length;
+  const unmetLabels = pinned.filter((_, i) => flags[i] !== true);
+  return { total, metCount, unmetLabels, inconclusive: total > 0 && unmetLabels.length > 0 };
+}
+
 export function pickPostDebateRecommendation(input: {
   synthesisFailed: boolean;
   hasEmptySections: boolean;
@@ -125,11 +145,26 @@ export function pickPostDebateRecommendation(input: {
   confidenceLevel: "high" | "medium" | "low";
   hasPlan: boolean;
   outputKind: string;
+  /**
+   * F1 — count of pinned success criteria still unmet at debate end. When > 0 on
+   * a successful synthesis, the criteria bar the user actually set was NOT met, so
+   * we must not recommend committing (implement/plan/save) as if it were done —
+   * pressing the council to close the gap dominates the evidence-density and
+   * output-kind heuristics below.
+   */
+  criteriaUnmet?: number;
 }): { value: PostDebateAction; reason: string } {
   if (input.synthesisFailed) {
     return {
       value: "retry_synthesis",
       reason: "Re-run synthesis with a compact prompt — usually clears provider-timeout failures.",
+    };
+  }
+  if (input.criteriaUnmet && input.criteriaUnmet > 0) {
+    const n = input.criteriaUnmet;
+    return {
+      value: "ask_followup",
+      reason: `${n} success criteri${n === 1 ? "on" : "a"} still unmet — press the council to close ${n === 1 ? "it" : "them"} before treating this as settled.`,
     };
   }
   if (input.hasEmptySections) {
@@ -697,6 +732,14 @@ export async function* runCouncil(
               ? `⚠ Medium confidence (evidence density ${evidenceDensity.toFixed(2)})`
               : `⚠ Low confidence (evidence density ${evidenceDensity.toFixed(2)})`;
 
+      // F1 — did the debate actually satisfy its PINNED success criteria? This is
+      // distinct from evidence density (a confidently-worded synthesis can still
+      // leave every criterion open). When criteria remain unmet on a successful
+      // synthesis the outcome is provisional, and the card must not recommend
+      // committing (implement/plan/save) as if it were settled.
+      const critOutcome = summarizeCriteriaOutcome(spec.successCriteria ?? [], debateState.finalCriteriaMet);
+      const inconclusive = !synthesisFailed && critOutcome.inconclusive;
+
       // Recommendation surfaced to the user as the default action. The
       // implementation_plan-vs-decision/evaluation split lives in
       // pickPostDebateRecommendation (issue #3 — see its doc comment).
@@ -707,6 +750,7 @@ export async function* runCouncil(
         confidenceLevel,
         hasPlan: !!hasPlan,
         outputKind: debatePlan.outputShape.kind,
+        criteriaUnmet: inconclusive ? critOutcome.unmetLabels.length : 0,
       });
 
       const baseOptions: Array<{ label: string; description: string; value: string; kind: "choice" | "freetext" }> = [];
@@ -810,21 +854,57 @@ export async function* runCouncil(
         }
       }
 
-      // Model orders actions best-first (index 0 = recommended default); the
-      // fallback set uses the deterministic recommendation.
-      const defaultIndex = modelActions
-        ? 0
-        : Math.max(
-            0,
-            baseOptions.findIndex((o) => o.value === recommendation.value),
-          );
-      const recommendReason = modelActions
-        ? (baseOptions[0]?.description ?? recommendation.reason)
-        : recommendation.reason;
+      // F1 — when the pinned criteria were not met, the model's best-first action
+      // (or the deterministic default) may be a commit/hand-back-the-decision step
+      // that treats the outcome as settled. Pin a criteria-aware "keep working"
+      // option at the front and make it the default so the recommended next move
+      // is honest about the unmet bar. Reuses ask_followup routing (freetext,
+      // re-runs on this debate's context) — no new downstream action. Deduped so
+      // the list never shows two ask_followup rows.
+      if (inconclusive) {
+        const openList = critOutcome.unmetLabels.join("; ");
+        const n = critOutcome.unmetLabels.length;
+        for (let i = baseOptions.length - 1; i >= 0; i--) {
+          if (baseOptions[i].value === "ask_followup") baseOptions.splice(i, 1);
+        }
+        baseOptions.unshift({
+          label: `Keep working the ${n} unmet criteri${n === 1 ? "on" : "a"}`,
+          description: `Still open: ${openList}. Pose a targeted follow-up to close ${n === 1 ? "it" : "them"} before committing.`,
+          value: "ask_followup",
+          kind: "freetext",
+        });
+      }
 
-      const heading = synthesisFailed ? "## Debate Synthesis Failed" : "## Debate Synthesis Complete";
+      // Model orders actions best-first (index 0 = recommended default); the
+      // fallback set uses the deterministic recommendation. When inconclusive,
+      // the pinned criteria option at index 0 is the honest default regardless of
+      // path.
+      const defaultIndex = inconclusive
+        ? 0
+        : modelActions
+          ? 0
+          : Math.max(
+              0,
+              baseOptions.findIndex((o) => o.value === recommendation.value),
+            );
+      const recommendReason = inconclusive
+        ? (baseOptions[0]?.description ?? recommendation.reason)
+        : modelActions
+          ? (baseOptions[0]?.description ?? recommendation.reason)
+          : recommendation.reason;
+
+      const heading = synthesisFailed
+        ? "## Debate Synthesis Failed"
+        : inconclusive
+          ? `## Debate Synthesis — Inconclusive (${critOutcome.metCount}/${critOutcome.total} criteria met)`
+          : "## Debate Synthesis Complete";
+      // F1 — an explicit provisional-outcome line so the user sees the unmet bar
+      // even if they skim past the recommendation.
+      const outcomeLine = inconclusive
+        ? `\n\n⚠ Outcome: ${critOutcome.metCount}/${critOutcome.total} criteria met. Unmet: ${critOutcome.unmetLabels.join("; ")}. Treat the synthesis as provisional — not a settled decision.`
+        : "";
       const recommendLine = `**Recommended:** ${baseOptions[defaultIndex]?.label ?? recommendation.value} — ${recommendReason}`;
-      const headerBlock = `${heading}\n\n> ${confidenceBadge}\n>\n> **Why:** ${confidenceReason}\n\n${recommendLine}\n\nLeader: \`${leaderModelId}\`. What would you like to do next?`;
+      const headerBlock = `${heading}\n\n> ${confidenceBadge}\n>\n> **Why:** ${confidenceReason}${outcomeLine}\n\n${recommendLine}\n\nLeader: \`${leaderModelId}\`. What would you like to do next?`;
 
       yield {
         type: "council_question",
@@ -834,11 +914,14 @@ export async function* runCouncil(
           phase: "post-debate",
           question: synthesisFailed
             ? "Synthesis did not produce a structured outcome. How do you want to recover?"
-            : hasEmptySections
-              ? `The debate left ${refinementTopics.length} area(s) unresolved. Refine them or save the current outcome?`
-              : "What would you like to do next?",
+            : inconclusive
+              ? `${critOutcome.metCount}/${critOutcome.total} success criteria met — the outcome is provisional. Keep working the unmet criteria, or save it as-is?`
+              : hasEmptySections
+                ? `The debate left ${refinementTopics.length} area(s) unresolved. Refine them or save the current outcome?`
+                : "What would you like to do next?",
           context:
             `${confidenceBadge}\n${confidenceReason}` +
+            (inconclusive ? `\nUnmet criteria: ${critOutcome.unmetLabels.join("; ")}` : "") +
             (hasEmptySections ? `\nUnresolved areas: ${refinementTopics.join(", ")}` : "") +
             `\n→ ${recommendation.reason}`,
           isRequired: false,

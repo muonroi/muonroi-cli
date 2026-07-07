@@ -108,6 +108,15 @@ export interface DebateState {
   /** Role-indexed per-round positions for follow-up citations. */
   archive?: DebateArchiveEntry[];
   /**
+   * F1 — the last successful round's per-criterion met flags, index-aligned to
+   * `spec.successCriteria`. Lets the post-debate card tell whether the debate
+   * actually satisfied the pinned success criteria (distinct from evidence
+   * density) so an unmet outcome is framed as provisional, not a settled
+   * decision. Undefined when the spec had no pinned criteria or no round eval
+   * ever produced a criteria status (treated as all-unmet by the card).
+   */
+  finalCriteriaMet?: boolean[];
+  /**
    * B4 interactive escalation outcome. Set only when the user was prompted at a
    * stop-with-unmet boundary and chose an action: `extend` granted extra rounds
    * past the ceiling, `accept` proceeded with criteria open, `rescope` asked to

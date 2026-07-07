@@ -1622,6 +1622,10 @@ export async function* runDebate(
     finalEvidenceDensity,
     finalTaggedClaims,
     escalation,
+    // F1 — expose the last successful round's criteria alignment so the
+    // post-debate card can frame an unmet outcome as provisional. Undefined when
+    // no round eval ever produced a criteria status (card treats as all-unmet).
+    finalCriteriaMet: lastCriteriaMet.length > 0 ? lastCriteriaMet : undefined,
   };
 }
 

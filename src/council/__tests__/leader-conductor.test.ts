@@ -432,6 +432,9 @@ describe("runDebate escalation wiring (B4 integration)", () => {
       expect(state.escalation).toEqual({ action: "accept", grantedRounds: undefined });
       // Accept ends at the planned round — no extra round ran.
       expect(state.roundCount).toBe(1);
+      // F1 — the final criteria alignment is exposed so the post-debate card can
+      // frame the unmet outcome as provisional (here the single criterion is unmet).
+      expect(state.finalCriteriaMet).toEqual([false]);
       // The closing verdict reflects the user's accept, not a generic re-run shrug.
       const verdict = chunks.find(
         (c) =>

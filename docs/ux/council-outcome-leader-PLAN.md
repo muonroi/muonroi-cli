@@ -330,11 +330,39 @@ eval-never-parses path (askcard fires + extra round on extend; no askcard +
 closing verdict when headless). 281 council tests green, tsc clean. Flags
 unchanged (`MUONROI_COUNCIL_ESCALATE`).
 
-**Still deferred (separate increment):** the whole-council **outcome/deliverable
-mismatch** (F1 — a 0/N, low-confidence debate still produces a confident decision
-brief + a post-debate card that recommends "hand back the decision"; needs the
-conclusion/post-debate options to reflect the unmet/low-confidence state);
-re-team via `selectTaskAwarePanel` on a stuck criterion (rescope currently stops
-honestly with a marker rather than re-running); the composing placeholder
-lingering after turn-end; localization leak in the clarify askcard (VI option
-descriptions in an English card); `/council <args>` "No commands match".
+## F1 — honest post-debate card when pinned criteria are unmet (2026-07-07)
+
+Live evidence: the divided locking debate ended 0/4 criteria met + `⚠ Low
+confidence` yet the post-debate card recommended "Hand back the decision" as
+settled. Root cause: the card's confidence badge reflects only **evidence
+density**, never whether the **pinned success criteria** were actually met — so a
+0/N debate with some citations reads as done.
+
+- **Criteria exposed:** `DebateState.finalCriteriaMet` (the last successful
+  round's alignment) is returned from `runDebate`; the card derives met/unmet from
+  it via the pure `summarizeCriteriaOutcome`.
+- **Recommendation is criteria-first:** `pickPostDebateRecommendation` takes
+  `criteriaUnmet`; when > 0 on a successful synthesis it returns `ask_followup`
+  ("press the council to close them before treating this as settled"), dominating
+  the evidence-density / output-kind / plan heuristics — you never get a
+  commit/save default while the user's own success bar is unmet.
+- **Card reframed when inconclusive** (`!synthesisFailed && unmet > 0`): heading
+  → "Debate Synthesis — Inconclusive (met/total criteria met)"; an explicit
+  "⚠ Outcome: met/total met. Unmet: … — provisional, not a settled decision"
+  line; a criteria-aware "Keep working the N unmet criteria" option pinned at
+  index 0 as the default (reuses `ask_followup` routing, deduped) across BOTH the
+  model-actions and fallback option paths.
+
+`summarizeCriteriaOutcome` + the `criteriaUnmet` branch are unit-tested (met/unmet
+alignment, missing-flags → all-unmet, singular/plural, synthesis-failure still
+wins, no-criteria never inconclusive); `runDebate` exposing `finalCriteriaMet` is
+covered by the existing integration test. 327 council/headless tests green, tsc
+clean. Met-in-full and synthesis-failed paths unchanged.
+
+**Still deferred (separate increment):** re-team via `selectTaskAwarePanel` on a
+stuck criterion (rescope currently stops honestly with a marker rather than
+re-running); the composing placeholder lingering after turn-end; localization leak
+in the clarify askcard (VI option descriptions in an English card); `/council
+<args>` "No commands match"; the two pre-debate gates (clarify → pre-flight
+rubber-stamp). Not yet **live-verified** — the F1 card only renders when a debate
+ends unmet (non-deterministic); logic is unit + full-suite covered.
