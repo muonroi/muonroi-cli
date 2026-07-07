@@ -138,14 +138,21 @@ export async function* runProductLoop(
       return yield* runShip(opts);
     default: {
       // Mode C dispatch — see .planning/MAINTAIN-MODE.md "Trigger mechanism".
-      //   1. Explicit --maintain   → Mode C
-      //   2. Explicit --new        → Mode A (current behavior, skip detection)
-      //   3. Auto-detect: verify recipe present in cwd → Mode C
-      //   4. Otherwise             → Mode A
+      //   1. Explicit --maintain     → Mode C (strongest signal; wins over --force-council)
+      //   2. Explicit --new          → Mode A (skip recipe detection)
+      //   3. --force-council         → Mode A (user explicitly wants the full Council/loop)
+      //   4. Auto-detect: verify recipe present in cwd → Mode C
+      //   5. Otherwise               → Mode A
       if (opts.mode === "maintain") {
         return yield* runMaintain(opts);
       }
-      if (opts.mode !== "new" && opts.detectVerifyRecipe) {
+      // `--force-council` must bypass the recipe auto-detect. Without this,
+      // ANY recipe-bearing repo (package.json/*.csproj/…) routes to runMaintain
+      // here — BEFORE the forceCouncil checks below (:189 / :197) are ever
+      // reached — so `/ideal --force-council` in an existing project was silently
+      // downgraded to maint-edit (observed: route-decision forceCouncil:false,
+      // path:maintain). Explicit --maintain above still wins over --force-council.
+      if (opts.mode !== "new" && !opts.flags.forceCouncil && opts.detectVerifyRecipe) {
         try {
           const recipe = await opts.detectVerifyRecipe();
           if (recipe) {
