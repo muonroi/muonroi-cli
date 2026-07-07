@@ -46,6 +46,7 @@ import { readProjectContext } from "./discovery-persistence.js";
 import { evaluateDoneGate } from "./done-gate.js";
 import type { ContinueFeedback } from "./feedback-routing.js";
 import { buildContinueFeedback } from "./feedback-routing.js";
+import { idealTrace } from "./ideal-trace.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
 import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snapshot.js";
 import { appendRoleMemory } from "./role-memory.js";
@@ -334,6 +335,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     /* no host orchestrator wired during planning */
   };
 
+  idealTrace("sprint.planCouncil.before", { runId: ctx.runId, sprintN });
   const planGen = runCouncil(
     councilTopic,
     sessionModelId,
@@ -368,6 +370,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     }
     yield step.value as StreamChunk;
   }
+  idealTrace("sprint.planCouncil.after", { runId: ctx.runId, sprintN, planSynthesisLen: planSynthesis.length });
 
   // P4-C: close the planning phase row before opening implementation.
   yield phaseDone({
@@ -378,6 +381,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   });
 
   // ── Step 4: Implement stage — pipe plan through host process loop ─────────
+  idealTrace("sprint.implementation.enter", { runId: ctx.runId, sprintN, planSynthesisLen: planSynthesis.length });
   yield { type: "content", content: `\n## Sprint ${sprintN} — Implementation\n` };
   const implPhaseId = `sprint-${sprintN}-implementation`;
   const implStartedAt = Date.now();

@@ -6,6 +6,7 @@ import { recordCouncilOutcome } from "../ee/phase-outcome.js";
 import { isTaskAwarePanelEnabled } from "../gsd/flags.js";
 import { runPipeline } from "../pil/pipeline.js";
 import type { PipelineContext } from "../pil/types.js";
+import { idealTrace } from "../product-loop/ideal-trace.js";
 import { appendSystemMessage, logInteraction } from "../storage/index.js";
 import { SessionStore } from "../storage/sessions.js";
 import type { StreamChunk } from "../types/index.js";
@@ -957,6 +958,7 @@ export async function* runCouncil(
 
       const answer = await respondToQuestion(questionId);
       postDebateAction = answer;
+      idealTrace("council.postDebate.answer", { sessionId, answer });
       options?.onPostDebateAction?.(answer);
       // Echo the human-readable option label, never the raw action id
       // (`continue_session`, `save_exit`, …) — the id is an internal routing
@@ -1054,6 +1056,10 @@ export async function* runCouncil(
           synthesisText =
             `Sprint plan locked (${existingActionItems.length} steps):\n` +
             synthesizedPlan.steps.map((s) => `- [${s.priority}] ${s.description}`).join("\n");
+          idealTrace("council.generatePlan.locked.fast", {
+            sessionId,
+            actionItems: existingActionItems.length,
+          });
         } else {
           yield { type: "content", content: "\n> Synthesizing sprint plan...\n" };
           const refineGen = runPlanning(
@@ -1082,6 +1088,10 @@ export async function* runCouncil(
             content:
               "\n> Plan locked — sprint runner will execute planning → implementation → verification → judgment.\n",
           };
+          idealTrace("council.generatePlan.locked.synth", {
+            sessionId,
+            synthesisLen: synthesisText?.length ?? 0,
+          });
         }
         // Do NOT call runExecution here. Return synthesisText to the sprint-runner
         // caller so it drives the full sprint lifecycle (Step 4–8 in sprint-runner.ts).
@@ -1152,11 +1162,18 @@ export async function* runCouncil(
         synthesisText = refineResult.value.synthesisText;
       }
       // "save_exit" and "implement" fall through to normal persistence
-    } catch {
-      /* non-critical */
+    } catch (err) {
+      // Post-debate interaction (menu, follow-up re-synthesis, refine) is
+      // non-critical to the persisted outcome, so we swallow — but NEVER
+      // silently: a throw here previously vanished, hiding a "generate_plan
+      // stalled" root cause. Log it and breadcrumb it so blocker-5 forensics
+      // can see whether the tail was reached via an exception.
+      console.error(`[council] post-debate interaction failed: ${(err as Error)?.message}`);
+      idealTrace("council.postDebate.threw", { sessionId, err: (err as Error)?.message });
     }
   }
 
+  idealTrace("council.persist.start", { sessionId, hasOutcome: !!outcome, postDebateAction });
   // ── Persist outcome ─────────────────────────────────────────────────────────
   if (sessionId) {
     try {
@@ -1222,6 +1239,7 @@ export async function* runCouncil(
       // can inject locked decisions into the implementation prompt.
       if (options?.runDir) {
         const rejectedProposals = detectOutOfStackProposals(synthesisText, spec);
+        idealTrace("council.persist.writeDecisionsLock.before", { sessionId, runDir: options.runDir });
         await writeDecisionsLock({
           runId: sessionId,
           runDir: options.runDir,
@@ -1239,11 +1257,17 @@ export async function* runCouncil(
           // only fires on an unexpected throw — log it (No-Silent-Catch), never break council.
           console.error(`[council] decisions.lock write guard caught: ${(err as Error)?.message}`);
         });
+        idealTrace("council.persist.writeDecisionsLock.after", { sessionId });
       }
-    } catch {
-      /* non-critical */
+    } catch (err) {
+      // Persistence is best-effort (session-message / interaction-log writes),
+      // but log so a storage fault is not mistaken for a hang in blocker-5
+      // forensics.
+      console.error(`[council] outcome persistence failed: ${(err as Error)?.message}`);
+      idealTrace("council.persist.threw", { sessionId, err: (err as Error)?.message });
     }
   }
+  idealTrace("council.persist.done", { sessionId });
 
   // Update session status to completed — EXCEPT when the user chose
   // "continue_session", where the agent keeps working in this session; marking
@@ -1289,6 +1313,7 @@ export async function* runCouncil(
   }
 
   // ── Stats ───────────────────────────────────────────────────────────────────
+  idealTrace("council.stats", { sessionId });
   const totalMs = Date.now() - stats.startMs;
   yield {
     type: "content",
@@ -1300,6 +1325,7 @@ export async function* runCouncil(
   };
 
   yield { type: "done" };
+  idealTrace("council.return", { sessionId, synthesisLen: (synthesisText || "").length });
   return synthesisText || null;
 }
 
