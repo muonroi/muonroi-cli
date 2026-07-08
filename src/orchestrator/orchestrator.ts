@@ -204,9 +204,15 @@ Rules:
 - No surrounding quotes, no trailing punctuation, no emoji, no markdown.
 - Output ONLY the title text — nothing else.`;
 
-/** Deterministic fallback title: truncated first user message. */
-function fallbackTitle(userMessage: string): string {
-  return userMessage.slice(0, 60).trim() || "New session";
+/** Deterministic fallback title: truncated first user message, or "" when the
+ *  message is empty or a JSON-ish payload (so the caller leaves title = NULL
+ *  and the picker renders a clean "(untitled)" instead of a literal "{}"). */
+export function fallbackTitle(userMessage: string): string {
+  const trimmed = userMessage.trim();
+  if (!trimmed) return "";
+  // JSON object/array payloads (programmatic first messages) make useless titles.
+  if (/^[{[]/.test(trimmed) && /[}\]]$/.test(trimmed)) return "";
+  return trimmed.slice(0, 60).trim();
 }
 
 /** Strip quotes/backticks, collapse whitespace, drop trailing punctuation, cap at ~60 chars. */
@@ -2913,7 +2919,7 @@ export class Agent {
 
         const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
         const db = getDatabase();
-        db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(parentSessionId, newSession.id);
+        this.sessionStore.linkChild(newSession.id, parentSessionId, "rotation");
 
         const summaryMessage = createCompactionSummaryMessage(cr.summary);
         const nextSeq = getNextMessageSequence(newSession.id);
@@ -2993,7 +2999,7 @@ export class Agent {
         } else {
           const latest = loadLatestCompaction(parentSessionId);
           const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
-          db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(parentSessionId, newSession.id);
+          this.sessionStore.linkChild(newSession.id, parentSessionId, "subagent");
           subSessionId = newSession.id;
 
           // Seed the child with the parent's CURRENT working set — after a

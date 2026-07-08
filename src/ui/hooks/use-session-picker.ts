@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { SessionInfo } from "../../types/index.js";
+import type { ResumeEntry } from "../../types/index.js";
 
 /**
  * State for the /sessions picker modal. Sessions are loaded lazily when the
@@ -9,7 +9,7 @@ import type { SessionInfo } from "../../types/index.js";
 export function useSessionPicker() {
   const [showSessionPicker, setShowSessionPicker] = useState(false);
   const [sessionPickerIndex, setSessionPickerIndex] = useState(0);
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [sessions, setSessions] = useState<ResumeEntry[]>([]);
   return {
     showSessionPicker,
     setShowSessionPicker,

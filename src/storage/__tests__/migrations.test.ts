@@ -407,4 +407,13 @@ describe("DB migrations", () => {
     expect(table!.has("tool_args")).toBe(true);
     expect(table!.has("tool_output")).toBe(true);
   });
+
+  it("Test 7: v10 adds kind + root_session_id columns to sessions", () => {
+    const { db, raw } = makeDb();
+    applyMigrations(db);
+
+    const table = raw.tables.get("sessions")!;
+    expect(table.has("kind")).toBe(true);
+    expect(table.has("root_session_id")).toBe(true);
+  });
 });

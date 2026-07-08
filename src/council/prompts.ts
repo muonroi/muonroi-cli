@@ -172,6 +172,89 @@ const ENGLISH_ONLY_RULE =
   `the user's native language is used; the debate is engineering-internal.\n`;
 
 /**
+ * Feature B — the debate language rule, parameterized. The user's chosen
+ * language IS the debate language (no separate translate-back pass), so the
+ * prompts that used to hard-force English now select their rule from the
+ * resolved `councilLanguage` setting.
+ *
+ * Regardless of language, machine-readable tokens stay verbatim English so the
+ * original stability guarantee (citation tags, JSON, cross-turn citations) is
+ * preserved: `[CONFIRMED via …]` / `[REFUTED via …]` / `[UNVERIFIED: …]` tags,
+ * JSON keys and the `type` field, code identifiers, tool output, and STACK LOCK
+ * technology names.
+ *
+ * Modes (`lang` is already normalized by `normalizeCouncilLanguage`):
+ *   - undefined / "english" → the historical English-only rule, byte-identical
+ *     so existing prompt-string tests and machine-stability are unaffected.
+ *   - "auto" → write in the SAME language as the user's brief/topic (detected
+ *     from the brief that every debate prompt already embeds).
+ *   - any other value → write in that named language.
+ */
+const NON_ENGLISH_TOKENS_RULE =
+  `Keep these verbatim in English no matter what: code identifiers, tool output, ` +
+  `JSON keys and the \`type\` field, citation tags (\`[CONFIRMED via …]\`, ` +
+  `\`[REFUTED via …]\`, \`[UNVERIFIED: …]\`), and any STACK LOCK technology names. ` +
+  `Only your prose/analysis text switches language.\n`;
+
+export function buildLanguageRule(lang?: string): string {
+  if (!lang || lang === "english") return ENGLISH_ONLY_RULE;
+  if (lang === "auto") {
+    return (
+      `\n## Language Rule (mandatory)\n` +
+      `Write your ENTIRE response in the SAME language the user used in the ` +
+      `Discussion Brief / topic below. If the brief is in Vietnamese, write in ` +
+      `Vietnamese; if Japanese, Japanese; if English, English. ` +
+      NON_ENGLISH_TOKENS_RULE
+    );
+  }
+  return (
+    `\n## Language Rule (mandatory)\n` +
+    `Write your ENTIRE response in ${lang}. Do not switch to English for the ` +
+    `prose even if the brief or your partner's message is in another language. ` +
+    NON_ENGLISH_TOKENS_RULE
+  );
+}
+
+/**
+ * Feature B — synthesis-specific language rule. The synthesis prompt already
+ * localizes its user-facing output to the user's language; this only adjusts (a)
+ * the now-possibly-inaccurate "debate above is entirely in English" preamble and
+ * (b) the language-selection instruction when the user PINNED a specific locale.
+ *
+ * undefined / "english" → the historical block, byte-identical (debate was
+ *   English-only, output detected from the Problem Statement).
+ * "auto" → same "detect from the Problem Statement" output behavior, but the
+ *   preamble no longer falsely claims the debate ran in English.
+ * pinned locale → force all prose into that language instead of detecting it.
+ */
+export function buildSynthesisLanguageRule(lang?: string): string {
+  const pinned = lang && lang !== "english" && lang !== "auto" ? lang : undefined;
+  const debatePreamble =
+    !lang || lang === "english"
+      ? `The debate above is entirely in English (debate language is forced). `
+      : `The debate above was conducted in the same language as the Problem Statement. `;
+  const selectLine = pinned
+    ? `- Write ALL prose (JSON free-text values AND Part-2 markdown body) in ${pinned}. ` +
+      `Do not translate code, identifiers, or quoted citation tags ` +
+      `(\`[REFUTED via ...]\`, \`[CONFIRMED via ...]\`).\n\n`
+    : `- Detect the user's language from the Problem Statement. If it's Vietnamese, write in ` +
+      `Vietnamese. If Japanese, Japanese. If English, English. Do not translate code, identifiers, ` +
+      `or quoted citation tags (\`[REFUTED via ...]\`, \`[CONFIRMED via ...]\`).\n\n`;
+  return (
+    `## Language Rule (mandatory)\n` +
+    `${debatePreamble}The user wrote the ` +
+    `Problem Statement above in their own native language. You must:\n` +
+    `- **Part 1 (JSON)**: keys, the \`type\` field, and citation/tag strings stay in ENGLISH. ` +
+    `Free-text values inside JSON fields (\`summary\`, list items, prose sections) MUST use ` +
+    `the SAME language the user used in the Problem Statement.\n` +
+    `- **Part 2 (Markdown)**: write entirely in the user's native language. Markdown headings ` +
+    `that we control (the ones listed below) stay in English as printed, but body text under ` +
+    `each heading is in the user's language.\n` +
+    selectLine
+  );
+}
+
+/**
  * Evidence rule injected into stance prompts. Verification tools may be
  * absent (fast-tier participants skip them) — the rule covers both cases.
  *
@@ -279,6 +362,8 @@ export function buildOpeningPrompt(ctx: {
   spec: ClarifiedSpec;
   outputShape?: OutputShape;
   conversationContext?: string;
+  /** Feature B — resolved council debate language (undefined → English). */
+  language?: string;
 }): { system: string; prompt: string } {
   const me = personaOf(ctx.speakerRole, ctx.speakerStance);
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
@@ -294,7 +379,7 @@ export function buildOpeningPrompt(ctx: {
       `You are entering a discussion with the "${them.label}" (${them.lens}). ` +
       `They are sharp and they will push back; a claim you cannot defend is a claim you should not open with.\n` +
       focusLine +
-      ENGLISH_ONLY_RULE +
+      buildLanguageRule(ctx.language) +
       EVIDENCE_RULE_OPENING +
       concisenessRule(220) +
       (stackLock ? `\n${stackLock}\n` : "") +
@@ -320,6 +405,8 @@ export function buildResponsePrompt(ctx: {
   speakerPosition: string;
   partnerPosition: string;
   spec: ClarifiedSpec;
+  /** Feature B — resolved council debate language (undefined → English). */
+  language?: string;
 }): { system: string; prompt: string } {
   const me = personaOf(ctx.speakerRole, ctx.speakerStance);
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
@@ -328,7 +415,7 @@ export function buildResponsePrompt(ctx: {
     system:
       `You are the "${me.label}" (lens: ${me.lens}) responding to the "${them.label}" (lens: ${them.lens}). ` +
       `This is a working session between peers — candid, specific, zero diplomacy theater.\n` +
-      ENGLISH_ONLY_RULE +
+      buildLanguageRule(ctx.language) +
       EVIDENCE_RULE_RESPONSE +
       concisenessRule(160) +
       (stackLock ? `\n${stackLock}\n` : "") +
@@ -361,6 +448,8 @@ export function buildFollowupPrompt(ctx: {
   round: number;
   runningSummary?: string;
   spec: ClarifiedSpec;
+  /** Feature B — resolved council debate language (undefined → English). */
+  language?: string;
 }): { system: string; prompt: string } {
   const me = personaOf(ctx.speakerRole, ctx.speakerStance);
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
@@ -369,7 +458,7 @@ export function buildFollowupPrompt(ctx: {
     system:
       `You are the "${me.label}" (lens: ${me.lens}) continuing a discussion (round ${ctx.round}) with the "${them.label}" (lens: ${them.lens}). ` +
       `The easy points are settled; what remains is the hard residue — spend your words only there.\n` +
-      ENGLISH_ONLY_RULE +
+      buildLanguageRule(ctx.language) +
       EVIDENCE_RULE_FOLLOWUP +
       concisenessRule(140) +
       (stackLock ? `\n${stackLock}\n` : "") +
@@ -398,7 +487,13 @@ export function buildFollowupPrompt(ctx: {
 
 // ── Leader evaluation prompt (replaces convergence-check) ────────────────────
 
-export function buildLeaderEvaluationPrompt(ctx: { spec: ClarifiedSpec; exchangeLogs: string; round: number }): {
+export function buildLeaderEvaluationPrompt(ctx: {
+  spec: ClarifiedSpec;
+  exchangeLogs: string;
+  round: number;
+  /** Feature B — resolved council debate language (undefined → English). */
+  language?: string;
+}): {
   system: string;
   prompt: string;
 } {
@@ -413,7 +508,7 @@ export function buildLeaderEvaluationPrompt(ctx: { spec: ClarifiedSpec; exchange
   return {
     system:
       `You are the discussion moderator evaluating whether a multi-expert debate has produced sufficient results.\n` +
-      ENGLISH_ONLY_RULE +
+      buildLanguageRule(ctx.language) +
       (stackLock ? `\n${stackLock}\n` : "") +
       `\n## Success Criteria to Evaluate\n` +
       ctx.spec.successCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n") +
@@ -456,6 +551,8 @@ export function buildRoundSummaryPrompt(
   allExchanges: string,
   topic: string,
   round: number,
+  /** Feature B — resolved council debate language (undefined → English). */
+  language?: string,
 ): {
   system: string;
   prompt: string;
@@ -463,7 +560,7 @@ export function buildRoundSummaryPrompt(
   return {
     system:
       `Summarize this discussion in 3-5 bullet points.` +
-      ENGLISH_ONLY_RULE +
+      buildLanguageRule(language) +
       `\nYou are the debate's working memory — later turns see ONLY your bullets, so anything you drop is lost. Capture:\n` +
       `1. AGREED — points both sides now share\n` +
       `2. DISPUTED — live disagreements, with each side's strongest single argument (not their weakest)\n` +
@@ -625,6 +722,8 @@ export function buildSynthesisPrompt(ctx: {
   outputStyle?: string | null; // CQ-18: from PIL Layer 6 ctx.outputStyle
   refineContext?: string; // User answers from post-debate refinement askcard
   planEmphasis?: boolean; // If true, instruct LLM to produce a concrete action plan
+  /** Feature B — resolved council debate language (undefined → English). */
+  language?: string;
 }): { system: string; prompt: string } {
   const shape = ctx.debatePlan?.outputShape;
 
@@ -687,18 +786,7 @@ export function buildSynthesisPrompt(ctx: {
     `unless the output shape explicitly asks for actionItems/plan. ` +
     `Stay grounded in what was actually said in the debate: you may sharpen and arbitrate, but never invent facts ` +
     `the specialists did not raise, and mark unverified claims explicitly.\n\n` +
-    `## Language Rule (mandatory)\n` +
-    `The debate above is entirely in English (debate language is forced). The user wrote the ` +
-    `Problem Statement above in their own native language. You must:\n` +
-    `- **Part 1 (JSON)**: keys, the \`type\` field, and citation/tag strings stay in ENGLISH. ` +
-    `Free-text values inside JSON fields (\`summary\`, list items, prose sections) MUST use ` +
-    `the SAME language the user used in the Problem Statement.\n` +
-    `- **Part 2 (Markdown)**: write entirely in the user's native language. Markdown headings ` +
-    `that we control (the ones listed below) stay in English as printed, but body text under ` +
-    `each heading is in the user's language.\n` +
-    `- Detect the user's language from the Problem Statement. If it's Vietnamese, write in ` +
-    `Vietnamese. If Japanese, Japanese. If English, English. Do not translate code, identifiers, ` +
-    `or quoted citation tags (\`[REFUTED via ...]\`, \`[CONFIRMED via ...]\`).\n\n` +
+    buildSynthesisLanguageRule(ctx.language) +
     `Output TWO parts separated by the exact line \`---READABLE---\`:\n\n` +
     `**Part 1: JSON** — a single JSON object:\n` +
     `{\n` +

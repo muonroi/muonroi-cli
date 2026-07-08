@@ -608,6 +608,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     councilPlaceholders,
     councilProgress,
     councilStatuses,
+    councilTodoExpanded,
     defaultProvider,
     disabledModels,
     disabledProviders,
@@ -1227,7 +1228,12 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                 {/* TodoCard — fixed bottom so agent text cannot push it up */}
                 {taskListSnapshot && (
                   <box flexShrink={0} paddingLeft={2} paddingRight={2} marginBottom={1}>
-                    <TaskListPanel snapshot={taskListSnapshot} t={t} expanded={false} />
+                    <TaskListPanel
+                      snapshot={taskListSnapshot}
+                      t={t}
+                      expanded={false}
+                      collapsed={councilStatuses.length > 0 && !councilTodoExpanded}
+                    />
                   </box>
                 )}
                 {activeToast ? (

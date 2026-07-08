@@ -68,6 +68,8 @@ export function CouncilRailRounds({ rounds, selected, onSelect, width, theme }: 
         <text fg={theme.textMuted} attributes={1}>
           Rounds
         </text>
+        {/* Discoverability: the round-scoping keybinding is otherwise invisible. */}
+        <text fg={theme.textDim}>ctrl+←/→ scope</text>
         {rows.map((row) => {
           const isSel = row.round === selected || (row.round === null && selected === null);
           return (

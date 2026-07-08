@@ -174,6 +174,7 @@ vi.mock("../../src/utils/settings.js", () => ({
   loadUserSettings: () => ({}),
   getCouncilExperienceMode: () => "advisory",
   isCouncilCostAware: () => false,
+  getCouncilLanguage: () => "auto",
 }));
 
 vi.mock("../../src/pil/pipeline.js", () => ({
