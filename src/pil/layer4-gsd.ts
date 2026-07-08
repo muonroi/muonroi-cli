@@ -169,11 +169,25 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
   const ecosystem = ctx.ecosystemScope === true;
   const replyLanguage = ctx.replyLanguage ?? undefined;
   const native = isGsdNativeEnabled();
+  const sprintExecution = isSprintPlanExecution(ctx.raw);
   let trimmed: string;
   let blocking = false;
   let appliedTier = tier;
 
-  if (native && !informational) {
+  if (sprintExecution) {
+    // Sprint plan execution: the plan has already been debated and reviewed by
+    // the council. The impl turn must APPLY it, not re-enter gsd_plan_review.
+    // Override any depth-tier hint that would tell the model to plan first.
+    const execDirective = [
+      "[sprint-execution] The attached text is an APPROVED sprint plan.",
+      "EXECUTE it directly with edit_file/write_file/bash tools.",
+      "Do NOT call gsd_discuss, gsd_plan, or gsd_plan_review — the plan is already reviewed.",
+      "After edits, run gsd_verify if verification steps are listed, otherwise finish.",
+    ].join(" ");
+    trimmed = truncateToBudget(execDirective, 200);
+    blocking = false;
+    appliedTier = "standard";
+  } else if (native && !informational) {
     const cwd = process.cwd();
     const wf = readState(cwd);
     // Heavy is now a hard MANDATORY sequence (Task 8 wires the runtime mutation

@@ -340,3 +340,29 @@ describe("layer4Gsd (playbook)", () => {
     expect(routeTask).not.toHaveBeenCalled();
   });
 });
+
+describe("layer4Gsd — sprint-plan execution", () => {
+  it("emits an execute-directly directive and skips the plan-review gate", async () => {
+    const prev = process.env.MUONROI_GSD_NATIVE;
+    delete process.env.MUONROI_GSD_NATIVE;
+    try {
+      // An approved sprint plan is piped through processMessageFn; the impl turn
+      // must APPLY it, not re-enter gsd_plan_review — even though the long plan
+      // text would otherwise classify as heavy.
+      const result = await layer4Gsd(
+        makeCtx({
+          raw: "--- SPRINT PLAN TO IMPLEMENT ---\nStep 1: edit theme.ts\nStep 2: run tests",
+          modelDepthTier: "heavy",
+        }),
+      );
+      expect(result.enriched).toContain("[sprint-execution]");
+      expect(result.enriched).toContain("EXECUTE");
+      expect(result.enriched).toContain("Do NOT call gsd_discuss");
+      // The heavy MANDATORY plan-review gate must NOT fire for an approved plan.
+      expect(result.enriched).not.toContain("BLOCKED");
+    } finally {
+      if (prev === undefined) delete process.env.MUONROI_GSD_NATIVE;
+      else process.env.MUONROI_GSD_NATIVE = prev;
+    }
+  });
+});
