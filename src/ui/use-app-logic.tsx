@@ -4872,7 +4872,7 @@ export function useAppLogic(props: AppLogicProps) {
                     agent.getMessages(),
                     "",
                     4096,
-                    agent.getProviderId(),
+                    agent.getProvider(),
                     model,
                     instructions,
                   );
