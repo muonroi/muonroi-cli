@@ -12,6 +12,24 @@ import type { Theme } from "../theme.js";
  * null and the caller falls back to plain-text rendering.
  */
 
+export interface DimensionScore {
+  dimension: string;
+  score: number;
+  justification: string;
+}
+
+export interface OperationalRisk {
+  risk: string;
+  severity: string;
+  trigger: string;
+}
+
+export interface NextAction {
+  action: string;
+  label: string;
+  reason?: string;
+}
+
 export interface ParsedConclusion {
   summary?: string;
   recommendation?: string;
@@ -19,6 +37,10 @@ export interface ParsedConclusion {
   weaknesses: string[];
   risks: string[];
   tradeoffs: string[];
+  dimensionScores: DimensionScore[];
+  operationalRisks: OperationalRisk[];
+  priorityFixes: string[];
+  nextActions: NextAction[];
   /** Generic rows: each row is a list of its string cell values, best-effort. */
   coverage: string[][];
   /** Leftover top-level keys (implementation_plan etc.) as generic titled sections. */
@@ -64,6 +86,77 @@ function coverageRows(obj: Record<string, unknown>): string[][] {
     if (rows.length > 0) return rows;
   }
   return [];
+}
+
+function parseDimensionScores(obj: Record<string, unknown>): DimensionScore[] {
+  const raw = obj.dimension_scores ?? obj.dimensionScores ?? obj.scores;
+  if (!Array.isArray(raw)) return [];
+  const out: DimensionScore[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const dimension = String(row.dimension ?? row.name ?? row.criteria ?? "").trim();
+    const scoreRaw = row.score ?? row.rating ?? row.value;
+    const score = typeof scoreRaw === "number" ? scoreRaw : Number.parseInt(String(scoreRaw), 10);
+    const justification = String(row.justification ?? row.reason ?? row.note ?? "").trim();
+    if (dimension && Number.isFinite(score)) {
+      out.push({ dimension, score, justification: justification || "(no justification)" });
+    }
+  }
+  return out;
+}
+
+function parseOperationalRisks(obj: Record<string, unknown>): OperationalRisk[] {
+  const raw = obj.operational_risks ?? obj.operationalRisks ?? obj.risks;
+  if (!Array.isArray(raw)) return [];
+  const out: OperationalRisk[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const risk = String(row.risk ?? row.name ?? row.title ?? "").trim();
+    const severity = String(row.severity ?? row.level ?? row.impact ?? "").trim();
+    const trigger = String(row.trigger ?? row.when ?? row.condition ?? "").trim();
+    if (risk) {
+      out.push({ risk, severity: severity || "Unknown", trigger: trigger || "(not specified)" });
+    }
+  }
+  return out;
+}
+
+function parsePriorityFixes(obj: Record<string, unknown>): string[] {
+  const raw = obj.priority_fixes ?? obj.priorityFixes ?? obj.fixes ?? obj.action_items;
+  if (Array.isArray(raw)) {
+    const strings = asStringArray(raw);
+    if (strings.length > 0) return strings;
+    const flat: string[] = [];
+    for (const item of raw) {
+      if (item && typeof item === "object") {
+        const cells = Object.entries(item as Record<string, unknown>)
+          .filter(([, cv]) => cv !== null && cv !== undefined && typeof cv !== "object")
+          .map(([ck, cv]) => `${ck}: ${String(cv)}`);
+        if (cells.length > 0) flat.push(cells.join(" · "));
+      }
+    }
+    if (flat.length > 0) return flat;
+  }
+  return [];
+}
+
+function parseNextActions(obj: Record<string, unknown>): NextAction[] {
+  const raw = obj.nextActions ?? obj.next_actions ?? obj.actions;
+  if (!Array.isArray(raw)) return [];
+  const out: NextAction[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const action = String(row.action ?? row.id ?? row.key ?? "").trim();
+    const label = String(row.label ?? row.title ?? row.summary ?? action).trim();
+    const reason = String(row.reason ?? row.why ?? row.explanation ?? "").trim();
+    if (label) {
+      out.push({ action: action || label, label, reason: reason || undefined });
+    }
+  }
+  return out;
 }
 
 /**
@@ -153,7 +246,45 @@ function titleCase(key: string): string {
 }
 
 /** Keys never worth a generic section: routing/meta fields. */
-const NOISE_KEYS = new Set(["type", "nextActions", "sections", "kind"]);
+const NOISE_KEYS = new Set([
+  "type",
+  "nextActions",
+  "next_actions",
+  "sections",
+  "kind",
+  "dimension_scores",
+  "dimensionScores",
+  "dimensions",
+  "operational_risks",
+  "operationalRisks",
+  "risk_matrix",
+  "priority_fixes",
+  "priorityFixes",
+  "fixes",
+  "action_items",
+]);
+
+/** Color a numeric score (1-5) by quality tier. */
+function scoreColor(score: number, theme: Theme): string {
+  if (score <= 2) return theme.diffRemovedFg;
+  if (score === 3) return theme.mdItalic;
+  return theme.diffAddedFg;
+}
+
+function severityColor(severity: string, theme: Theme): string {
+  const s = severity.toLowerCase();
+  if (s.includes("critical") || s.includes("high")) return theme.diffRemovedFg;
+  if (s.includes("medium") || s.includes("moderate")) return theme.mdItalic;
+  return theme.diffAddedFg;
+}
+
+/** Compact ASCII bar for a 1-5 score: e.g. "[###  ]". */
+function scoreBar(score: number): string {
+  const clamped = Math.max(1, Math.min(5, Math.round(score)));
+  const filled = "#".repeat(clamped);
+  const empty = " ".repeat(5 - clamped);
+  return `[${filled}${empty}]`;
+}
 
 /** Flatten one unknown top-level value into displayable bullet items. */
 function flattenValue(v: unknown): string[] {
@@ -204,6 +335,10 @@ export function parseConclusion(text: string): ParsedConclusion | null {
   const risks = firstArray(parsed, ["risks", "concerns"]);
   const tradeoffs = firstArray(parsed, ["tradeoffs", "trade_offs", "trade-offs"]);
   const coverage = coverageRows(parsed);
+  const dimensionScores = parseDimensionScores(parsed);
+  const operationalRisks = parseOperationalRisks(parsed);
+  const priorityFixes = parsePriorityFixes(parsed);
+  const nextActions = parseNextActions(parsed);
 
   // Track which keys the named extractions actually consumed (a key only
   // counts as consumed when it produced content — object-shaped `risks`
@@ -224,6 +359,17 @@ export function parseConclusion(text: string): ParsedConclusion | null {
   if (coverage.length > 0)
     for (const k of ["coverage_matrix", "coverage", "criteria", "coverageMatrix"])
       if (Array.isArray(parsed[k])) consumed.add(k);
+  if (dimensionScores.length > 0)
+    for (const k of ["dimension_scores", "dimensionScores", "dimensions", "scores"])
+      if (Array.isArray(parsed[k])) consumed.add(k);
+  if (operationalRisks.length > 0)
+    for (const k of ["operational_risks", "operationalRisks", "risk_matrix"])
+      if (Array.isArray(parsed[k])) consumed.add(k);
+  if (priorityFixes.length > 0)
+    for (const k of ["priority_fixes", "priorityFixes", "fixes", "action_items"])
+      if (Array.isArray(parsed[k])) consumed.add(k);
+  if (nextActions.length > 0)
+    for (const k of ["nextActions", "next_actions"]) if (Array.isArray(parsed[k])) consumed.add(k);
 
   const sections: Array<{ title: string; items: string[] }> = [];
   for (const [key, value] of Object.entries(parsed)) {
@@ -240,10 +386,27 @@ export function parseConclusion(text: string): ParsedConclusion | null {
     risks.length > 0 ||
     tradeoffs.length > 0 ||
     coverage.length > 0 ||
+    dimensionScores.length > 0 ||
+    operationalRisks.length > 0 ||
+    priorityFixes.length > 0 ||
+    nextActions.length > 0 ||
     sections.length > 0;
   if (!hasContent) return null;
 
-  return { summary, recommendation, strengths, weaknesses, risks, tradeoffs, coverage, sections };
+  return {
+    summary,
+    recommendation,
+    strengths,
+    weaknesses,
+    risks,
+    tradeoffs,
+    coverage,
+    dimensionScores,
+    operationalRisks,
+    priorityFixes,
+    nextActions,
+    sections,
+  };
 }
 
 interface BulletSectionProps {
@@ -251,9 +414,10 @@ interface BulletSectionProps {
   items: string[];
   color: string;
   theme: Theme;
+  marker?: string;
 }
 
-function BulletSection({ title, items, color, theme: t }: BulletSectionProps) {
+function BulletSection({ title, items, color, theme: t, marker = "•" }: BulletSectionProps) {
   if (items.length === 0) return null;
   return (
     <box flexDirection="column" marginTop={1}>
@@ -262,8 +426,93 @@ function BulletSection({ title, items, color, theme: t }: BulletSectionProps) {
       </text>
       {items.map((it, i) => (
         <box key={`${title}-${i}`} flexDirection="row">
-          <text fg={t.textMuted}>{"  • "}</text>
+          <text fg={t.textMuted}>{`  ${marker} `}</text>
           <text fg={t.text}>{it}</text>
+        </box>
+      ))}
+    </box>
+  );
+}
+
+function DimensionScoreTable({ scores, theme: t }: { scores: DimensionScore[]; theme: Theme }) {
+  if (scores.length === 0) return null;
+  return (
+    <box flexDirection="column" marginTop={1}>
+      <text fg={t.accent} attributes={1}>
+        Dimension Scores
+      </text>
+      {scores.map((s, i) => (
+        <box key={`dim-${i}`} flexDirection="column" marginTop={1}>
+          <box flexDirection="row">
+            <text fg={t.text}>{s.dimension}</text>
+            <box flexGrow={1} />
+            <text fg={scoreColor(s.score, t)} attributes={1}>
+              {`${s.score}/5 ${scoreBar(s.score)}`}
+            </text>
+          </box>
+          <text fg={t.textMuted}>{`    ${s.justification}`}</text>
+        </box>
+      ))}
+    </box>
+  );
+}
+
+function RiskTable({ risks, theme: t }: { risks: OperationalRisk[]; theme: Theme }) {
+  if (risks.length === 0) return null;
+  return (
+    <box flexDirection="column" marginTop={1}>
+      <text fg={t.diffRemovedFg} attributes={1}>
+        Operational Risks
+      </text>
+      {risks.map((r, i) => (
+        <box key={`risk-${i}`} flexDirection="column" marginTop={1}>
+          <box flexDirection="row">
+            <text fg={t.text} attributes={1}>
+              {r.risk}
+            </text>
+            <box flexGrow={1} />
+            <text fg={severityColor(r.severity, t)}>{r.severity}</text>
+          </box>
+          <text fg={t.textMuted}>{`    Trigger: ${r.trigger}`}</text>
+        </box>
+      ))}
+    </box>
+  );
+}
+
+function PriorityFixList({ fixes, theme: t }: { fixes: string[]; theme: Theme }) {
+  if (fixes.length === 0) return null;
+  return (
+    <box flexDirection="column" marginTop={1}>
+      <text fg={t.mdItalic} attributes={1}>
+        Priority Fixes
+      </text>
+      {fixes.map((fix, i) => (
+        <box key={`fix-${i}`} flexDirection="row">
+          <text fg={t.textMuted}>{`  ${i + 1}. `}</text>
+          <text fg={t.text}>{fix}</text>
+        </box>
+      ))}
+    </box>
+  );
+}
+
+function NextActionList({ actions, theme: t }: { actions: NextAction[]; theme: Theme }) {
+  if (actions.length === 0) return null;
+  return (
+    <box flexDirection="column" marginTop={1}>
+      <text fg={t.planStepNum} attributes={1}>
+        Next Actions
+      </text>
+      {actions.map((a, i) => (
+        <box key={`act-${i}`} flexDirection="column" marginTop={1}>
+          <box flexDirection="row">
+            <text fg={t.textMuted}>{`  ${i + 1}. `}</text>
+            <text fg={t.text} attributes={1}>
+              {a.label}
+            </text>
+          </box>
+          {a.reason && <text fg={t.textMuted}>{`     ${a.reason}`}</text>}
         </box>
       ))}
     </box>
@@ -303,10 +552,14 @@ export function CouncilConclusionCard({ conclusion, round, theme: t }: CouncilCo
           <text fg={t.text}>{conclusion.recommendation}</text>
         </box>
       )}
+      <DimensionScoreTable scores={conclusion.dimensionScores} theme={t} />
       <BulletSection title="Strengths" items={conclusion.strengths} color={t.diffAddedFg} theme={t} />
       <BulletSection title="Weaknesses" items={conclusion.weaknesses} color={t.diffRemovedFg} theme={t} />
+      <RiskTable risks={conclusion.operationalRisks} theme={t} />
       <BulletSection title="Risks" items={conclusion.risks} color={t.diffRemovedFg} theme={t} />
       <BulletSection title="Trade-offs" items={conclusion.tradeoffs} color={t.mdItalic} theme={t} />
+      <PriorityFixList fixes={conclusion.priorityFixes} theme={t} />
+      <NextActionList actions={conclusion.nextActions} theme={t} />
       {conclusion.coverage.length > 0 && (
         <box flexDirection="column" marginTop={1}>
           <text fg={t.textMuted} attributes={1}>

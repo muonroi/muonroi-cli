@@ -48,14 +48,21 @@ function formatTokens(s: CouncilStatusData): string {
 export interface CouncilStatusListProps {
   statuses: CouncilStatusData[];
   theme: Theme;
+  /** Optional session id rendered as a pinned header so the user can correlate a council run with its session. */
+  sessionId?: string;
 }
 
-export function CouncilStatusList({ statuses, theme: t }: CouncilStatusListProps) {
+export function CouncilStatusList({ statuses, theme: t, sessionId }: CouncilStatusListProps) {
   // Hook must run unconditionally — before the empty-list early return.
   const now = useHeartbeat(1000);
-  if (statuses.length === 0) return null;
+  if (statuses.length === 0 && !sessionId) return null;
   return (
     <box flexDirection="column" paddingLeft={2} paddingTop={0} flexShrink={0}>
+      {sessionId && (
+        <box marginBottom={1}>
+          <text fg={t.textDim}>{`session ${sessionId}`}</text>
+        </box>
+      )}
       {statuses.map((s) => {
         const isError = s.state === "error";
         const isDone = s.state === "done";
@@ -74,12 +81,12 @@ export function CouncilStatusList({ statuses, theme: t }: CouncilStatusListProps
             </box>
             {s.detail && (
               <box paddingLeft={2}>
-                <text fg={t.textMuted}>{`└ ${truncate(s.detail, 90)}`}</text>
+                <text fg={t.textMuted}>{`└ ${truncate(s.detail, 140)}`}</text>
               </box>
             )}
             {s.errorMessage && (
               <box paddingLeft={2}>
-                <text fg={t.diffRemovedFg}>{`└ ${truncate(s.errorMessage, 90)}`}</text>
+                <text fg={t.diffRemovedFg}>{`└ ${truncate(s.errorMessage, 140)}`}</text>
               </box>
             )}
           </box>

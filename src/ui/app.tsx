@@ -819,7 +819,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
       {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
       {councilStatuses.length > 0 && (
         <Semantic id="council-status" role="listbox" name="Council Status">
-          <CouncilStatusList statuses={councilStatuses} theme={t} />
+          <CouncilStatusList statuses={councilStatuses} theme={t} sessionId={sessionId ?? undefined} />
         </Semantic>
       )}
       {councilInfoCards.map((card, idx) => (
@@ -1037,7 +1037,11 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         <>
                           {roundGroupsActive ? (
                             <>
-                              <CouncilRoundsOverview rounds={councilRounds} theme={t} />
+                              <CouncilRoundsOverview
+                                rounds={councilRounds}
+                                theme={t}
+                                sessionId={sessionId ?? undefined}
+                              />
                               {councilRounds
                                 // When a round is selected in the rail, scope the
                                 // main pane to just that round (its debate turns

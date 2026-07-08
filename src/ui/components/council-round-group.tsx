@@ -137,18 +137,23 @@ export function CouncilRoundGroup({ record, children, selected = false, theme }:
 export interface CouncilRoundsOverviewProps {
   rounds: CouncilRoundRecord[];
   theme: Theme;
+  /** Optional session id appended to the overview so it stays visible above the debate transcript. */
+  sessionId?: string;
 }
 
-/** One-line overview above the round groups: totals + emergent count. */
-export function CouncilRoundsOverview({ rounds, theme }: CouncilRoundsOverviewProps) {
+/** One-line overview above the round groups: totals + emergent count + session id. */
+export function CouncilRoundsOverview({ rounds, theme, sessionId }: CouncilRoundsOverviewProps) {
   const total = rounds.length;
   const emergent = rounds.filter((r) => r.emergent).length;
   const members = new Set<string>();
   for (const r of rounds) for (const p of r.participants) members.add(p);
+  const parts = [`Debate: ${total} round${total === 1 ? "" : "s"}`, `${members.size} members`];
+  if (emergent > 0) parts.push(`${emergent} emergent`);
+  if (sessionId) parts.push(`session ${sessionId}`);
   return (
-    <Semantic id="council-rounds-overview" role="region" props={{ total, emergent, members: members.size }}>
+    <Semantic id="council-rounds-overview" role="region" props={{ total, emergent, members: members.size, sessionId }}>
       <text fg={theme.textMuted} attributes={1}>
-        {`Debate: ${total} round${total === 1 ? "" : "s"}${emergent ? ` (${emergent} emergent)` : ""} · ${members.size} members`}
+        {parts.join(" · ")}
       </text>
     </Semantic>
   );
