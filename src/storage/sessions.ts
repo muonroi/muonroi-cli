@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
-import type { AgentMode, SessionInfo, SessionKind, SessionStatus, WorkspaceInfo } from "../types/index";
-import { getDatabase } from "./db";
+import type { AgentMode, ResumeEntry, SessionInfo, SessionKind, SessionStatus, WorkspaceInfo } from "../types/index";
+import { getDatabase, type SQLiteDatabase } from "./db";
 import { sweepStalePendingRows } from "./transcript";
 import { ensureWorkspace } from "./workspaces";
 
@@ -109,28 +109,8 @@ export class SessionStore {
     ).run(parentId, kind, root, new Date().toISOString(), childId);
   }
 
-  /**
-   * List recent sessions in this workspace (most recently updated first).
-   * Used by the `/sessions` slash command for resume picking.
-   *
-   * Only sessions that actually have a persisted message are returned. Every
-   * CLI launch WITHOUT `--session` opens a fresh empty session, and test /
-   * harness runs leave behind title-only stubs — without this filter the picker
-   * fills with empty rows that resume to a blank screen, so a user picking one
-   * thinks resume is broken.
-   */
-  listRecentSessions(limit = 20): SessionInfo[] {
-    const rows = getDatabase()
-      .prepare(`
-      SELECT s.id, s.workspace_id, s.title, s.model, s.mode, s.cwd_at_start, s.cwd_last, s.status, s.created_at, s.updated_at
-      FROM sessions s
-      WHERE s.workspace_id = ?
-        AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)
-      ORDER BY s.updated_at DESC
-      LIMIT ?
-    `)
-      .all(this.workspace.id, limit) as SessionRow[];
-    return rows.map(toSessionInfo);
+  listRecentSessions(limit = 20): ResumeEntry[] {
+    return queryResumeList(getDatabase(), this.workspace.id, limit);
   }
 
   getLatestSession(): SessionInfo | null {
@@ -239,6 +219,67 @@ function toSessionInfo(row: SessionRow): SessionInfo {
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
   };
+}
+
+interface ResumeRow extends SessionRow {
+  resume_id: string;
+}
+
+/**
+ * One row per conversation tree for the `/sessions` resume picker.
+ *
+ * - Groups by `root_session_id`; sub-agent sessions (`kind='subagent'`) are
+ *   internal side-conversations and are excluded entirely.
+ * - Only trees with at least one persisted message surface (hides empty stub
+ *   rows every keyless CLI launch creates).
+ * - The row's `title`/`created_at` come from the tree ROOT; `resume_id`,
+ *   `model`, `updated_at`, `status` come from the LATEST leaf (the active tail
+ *   of a rotation chain), so Enter resumes into the live session, not the
+ *   compacted root. Ordered by tree activity, newest first.
+ */
+export function queryResumeList(db: SQLiteDatabase, workspaceId: string, limit: number): ResumeEntry[] {
+  const rows = db
+    .prepare(`
+      WITH candidates AS (
+        SELECT s.id, s.workspace_id, s.title, s.model, s.mode, s.cwd_at_start,
+               s.cwd_last, s.status, s.created_at, s.updated_at, s.root_session_id
+        FROM sessions s
+        WHERE s.workspace_id = ?
+          AND s.kind != 'subagent'
+          AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)
+      ),
+      ranked AS (
+        SELECT c.*,
+               ROW_NUMBER() OVER (
+                 PARTITION BY c.root_session_id
+                 ORDER BY c.updated_at DESC, c.id DESC
+               ) AS rn
+        FROM candidates c
+      )
+      SELECT
+        r.root_session_id                          AS id,
+        r.id                                       AS resume_id,
+        COALESCE(root.title, r.title)              AS title,
+        r.model                                    AS model,
+        r.mode                                     AS mode,
+        COALESCE(root.cwd_at_start, r.cwd_at_start) AS cwd_at_start,
+        r.cwd_last                                 AS cwd_last,
+        r.status                                   AS status,
+        COALESCE(root.created_at, r.created_at)    AS created_at,
+        r.updated_at                               AS updated_at,
+        r.workspace_id                             AS workspace_id
+      FROM ranked r
+      LEFT JOIN sessions root ON root.id = r.root_session_id
+      WHERE r.rn = 1
+      ORDER BY r.updated_at DESC
+      LIMIT ?
+    `)
+    .all(workspaceId, limit) as ResumeRow[];
+  return rows.map(toResumeEntry);
+}
+
+function toResumeEntry(row: ResumeRow): ResumeEntry {
+  return { ...toSessionInfo(row), resumeId: row.resume_id };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -635,6 +635,15 @@ export interface SessionInfo {
   updatedAt: Date;
 }
 
+/**
+ * One row in the `/sessions` resume picker: a whole conversation tree collapsed
+ * to a single entry. `id`/`title`/`createdAt` describe the tree root; `resumeId`
+ * is the latest leaf to relaunch; `model`/`updatedAt`/`status` describe that leaf.
+ */
+export interface ResumeEntry extends SessionInfo {
+  resumeId: string;
+}
+
 export interface UsageEvent {
   id: number;
   sessionId: string;
