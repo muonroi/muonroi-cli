@@ -1,6 +1,6 @@
 import type { SQLiteDatabase } from "./db";
 
-const LATEST_DB_VERSION = 9;
+const LATEST_DB_VERSION = 10;
 
 export function applyMigrations(db: SQLiteDatabase): void {
   const version = Number(db.pragma("user_version", { simple: true })) || 0;
@@ -119,9 +119,63 @@ export function applyMigrations(db: SQLiteDatabase): void {
       `);
       db.pragma("user_version = 9");
     }
+    if (version < 10) {
+      // Thread-aware resume. The resume picker groups sessions by conversation
+      // tree; `kind` distinguishes the two kinds of child (both previously only
+      // set parent_session_id, indistinguishable) and `root_session_id`
+      // denormalizes the tree root so the picker groups without a recursive CTE.
+      const cols = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+      const colNames = new Set(cols.map((c) => c.name));
+      if (!colNames.has("kind")) {
+        db.exec("ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'conversation'");
+      }
+      if (!colNames.has("root_session_id")) {
+        db.exec("ALTER TABLE sessions ADD COLUMN root_session_id TEXT");
+      }
+      db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_root ON sessions(workspace_id, root_session_id)");
+
+      backfillSessionTrees(db);
+
+      db.pragma("user_version = 10");
+    }
   });
 
   migrate();
+}
+
+/**
+ * Backfill kind + root_session_id for pre-v10 rows.
+ *
+ * - Rows with no parent become their own root (kind 'conversation').
+ * - Rows WITH a parent are marked 'rotation' — historical data cannot tell
+ *   rotation apart from sub-agent spawns, and marking them 'rotation' collapses
+ *   them under their root rather than risking hiding a real conversation.
+ * - root_session_id propagates down the parent chain via a bounded fixpoint
+ *   loop (chains are shallow; the bound also guards against FK cycles).
+ */
+function backfillSessionTrees(db: SQLiteDatabase): void {
+  // Roots: own id, keep default kind 'conversation'.
+  db.exec("UPDATE sessions SET root_session_id = id WHERE parent_session_id IS NULL AND root_session_id IS NULL");
+  // Children of a real parent → rotation (default kind was 'conversation').
+  db.exec("UPDATE sessions SET kind = 'rotation' WHERE parent_session_id IS NOT NULL");
+
+  // Propagate root down the chain until no row changes (bounded to 100 passes).
+  for (let i = 0; i < 100; i++) {
+    db.exec(`
+      UPDATE sessions
+      SET root_session_id = (SELECT p.root_session_id FROM sessions p WHERE p.id = sessions.parent_session_id)
+      WHERE root_session_id IS NULL
+        AND parent_session_id IS NOT NULL
+        AND (SELECT p.root_session_id FROM sessions p WHERE p.id = sessions.parent_session_id) IS NOT NULL
+    `);
+    const remaining = db
+      .prepare("SELECT COUNT(*) AS c FROM sessions WHERE root_session_id IS NULL AND parent_session_id IS NOT NULL")
+      .get() as { c: number } | undefined;
+    if (!remaining || remaining.c === 0) break;
+  }
+
+  // Any leftover (orphaned/cyclic parent chains) → treat as its own root.
+  db.exec("UPDATE sessions SET root_session_id = id WHERE root_session_id IS NULL");
 }
 
 function createInitialSchema(db: SQLiteDatabase): void {
