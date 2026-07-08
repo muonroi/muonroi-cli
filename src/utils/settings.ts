@@ -263,6 +263,20 @@ export interface UserSettings {
    * decide structure and quality, not throughput.
    */
   councilCostAware?: boolean;
+  /**
+   * Language the council debate is conducted in (Feature B). The chosen language
+   * IS the debate language — no separate translate-back pass, so no extra LLM
+   * rounds. Values:
+   *   - "auto" (default) — debate + conclusion follow the language of the user's
+   *     prompt/brief (they type Vietnamese → the debate runs in Vietnamese).
+   *   - "english" — force the historical English-only debate (citation tags,
+   *     JSON, cross-turn citations stay maximally machine-stable).
+   *   - any other free-text locale label (e.g. "vietnamese", "日本語") — pin the
+   *     debate to that language regardless of the prompt's language.
+   * Citation tags, JSON keys, the `type` field, code identifiers, and STACK LOCK
+   * technology names always stay verbatim English regardless of this setting.
+   */
+  councilLanguage?: string;
   /** Set true after the user has been prompted (or skipped) the web-research onboarding. */
   webResearchPrompted?: boolean;
   /** Set true after the user has been prompted (or skipped) the first-run Experience Engine setup. */
@@ -1230,6 +1244,25 @@ export function getPeakHourPolicy(): PeakHourPolicy {
 
 export function isCouncilCostAware(): boolean {
   return loadUserSettings().councilCostAware ?? true;
+}
+
+/**
+ * Normalize a raw councilLanguage value (Feature B). Trims + lowercases the two
+ * reserved modes ("auto", "english"); any other non-empty string is preserved
+ * as-is (trimmed) so locale labels keep the user's exact casing (e.g. "日本語").
+ * Empty / non-string → "auto".
+ */
+export function normalizeCouncilLanguage(raw: unknown): string {
+  if (typeof raw !== "string") return "auto";
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return "auto";
+  const lower = trimmed.toLowerCase();
+  if (lower === "auto" || lower === "english") return lower;
+  return trimmed;
+}
+
+export function getCouncilLanguage(): string {
+  return normalizeCouncilLanguage(loadUserSettings().councilLanguage);
 }
 
 /**

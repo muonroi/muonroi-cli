@@ -295,6 +295,13 @@ export interface CouncilConfig {
   /** When true, leader sub-tasks downshift to cheaper tier models on the same provider. */
   costAware?: boolean;
   /**
+   * Feature B — council debate language override. When set, runDebate uses this
+   * instead of reading `getCouncilLanguage()` from settings. Values: "auto"
+   * (follow the brief's language), "english" (historical English-only debate),
+   * or any locale label. Undefined → resolved from the user setting.
+   */
+  debateLanguage?: string;
+  /**
    * Enclosing council run id (= sessionId). Used only as the correlationId on the
    * observe-only `council-turn-length` harness event so per-turn length samples can
    * be grouped by run. Optional: direct callers/tests may omit it (falls back to a

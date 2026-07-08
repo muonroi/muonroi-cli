@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
+import { getCouncilLanguage } from "../utils/settings.js";
 import {
   buildDebateCheckpoint,
   checkpointMatches,
@@ -491,6 +492,12 @@ export async function* runDebate(
   const leaderNeedsResearch = config.leaderNeedsResearch;
   const internetFirst = config.internetFirst === true;
   const costAware = config.costAware === true;
+  // Feature B — resolved council debate language. The chosen language IS the
+  // debate language (no translate-back pass). "auto" (default) follows the
+  // user's brief; "english" is the historical behavior; any other value pins
+  // the debate prose to that locale. Threaded into every debate/eval/summary
+  // prompt below. config.debateLanguage lets a caller/test override the setting.
+  const debateLanguage = config.debateLanguage ?? getCouncilLanguage();
   const active: CouncilParticipant[] = [];
   const exchangeLogs: Map<string, string[]> = new Map();
   const archive: import("./types.js").DebateArchiveEntry[] = [];
@@ -614,6 +621,7 @@ export async function* runDebate(
         spec,
         outputShape: debatePlan?.outputShape,
         conversationContext: enrichedContext,
+        language: debateLanguage,
       });
       return openingWithRetry(llm, self.model, system, prompt).then((r) => ({
         role: self.role,
@@ -929,6 +937,7 @@ export async function* runDebate(
                   speakerPosition: a.position,
                   partnerPosition: b.position,
                   spec,
+                  language: debateLanguage,
                 });
                 const aTraces: string[] = [];
                 const aResult = await debateWithRetry(
@@ -961,6 +970,7 @@ export async function* runDebate(
                   speakerPosition: b.position,
                   partnerPosition: aResponse,
                   spec,
+                  language: debateLanguage,
                 });
                 const bTraces: string[] = [];
                 const bResult = await debateWithRetry(
@@ -999,6 +1009,7 @@ export async function* runDebate(
                   round,
                   runningSummary,
                   spec,
+                  language: debateLanguage,
                 });
                 const aTraces: string[] = [];
                 const aResult = await debateWithRetry(
@@ -1033,6 +1044,7 @@ export async function* runDebate(
                   round,
                   runningSummary,
                   spec,
+                  language: debateLanguage,
                 });
                 const bTraces: string[] = [];
                 const bResult = await debateWithRetry(
@@ -1233,7 +1245,16 @@ export async function* runDebate(
       label: `Leader evaluation (round ${round})`,
     });
     const allExchangeText = [...exchangeLogs.values()].flat().slice(-8).join("\n\n");
-    let evaluation = yield* evaluateDebate(spec, allExchangeText, round, leaderModelId, llm, costAware);
+    let evaluation = yield* evaluateDebate(
+      spec,
+      allExchangeText,
+      round,
+      leaderModelId,
+      llm,
+      costAware,
+      undefined,
+      debateLanguage,
+    );
     // Eval robustness: the leader's cost-tier eval model can be on a flaky proxy
     // (Console Go glm/kimi → "Upstream request failed") while panel models on
     // other providers stay healthy. Rather than surface "evaluation unavailable"
@@ -1261,6 +1282,7 @@ export async function* runDebate(
             llm,
             costAware,
             fallbackModel,
+            debateLanguage,
           );
           if (evaluation) break;
         }
@@ -1580,7 +1602,7 @@ export async function* runDebate(
       });
       try {
         const allEx = [...exchangeLogs.values()].flat().slice(-6).join("\n\n");
-        const { system, prompt } = buildRoundSummaryPrompt(allEx, spec.problemStatement, round);
+        const { system, prompt } = buildRoundSummaryPrompt(allEx, spec.problemStatement, round, debateLanguage);
         // Round summary is mechanical condensation — drop to "fast" tier on the leader's
         // provider when cost-aware. Fall back to the first participant's model otherwise
         // (matches the pre-cost-aware behavior).
@@ -1764,9 +1786,16 @@ async function* evaluateDebate(
   // after the leader's provider rejected the eval payload (Console Go "Upstream
   // request failed" on glm/kimi; observed session dd34c59c63e9).
   modelOverride?: string,
+  /** Feature B — resolved council debate language (undefined → English). */
+  debateLanguage?: string,
 ): AsyncGenerator<StreamChunk, LeaderEvaluation | null, unknown> {
   try {
-    const { system, prompt } = buildLeaderEvaluationPrompt({ spec, exchangeLogs: exchangeText, round });
+    const { system, prompt } = buildLeaderEvaluationPrompt({
+      spec,
+      exchangeLogs: exchangeText,
+      round,
+      language: debateLanguage,
+    });
     const modelId = modelOverride ?? pickCouncilTaskModel("evaluate_round", leaderModelId, costAware);
     const raw = yield* tracedGenerate(llm, {
       phase: "evaluate",
