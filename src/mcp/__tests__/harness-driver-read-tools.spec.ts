@@ -46,6 +46,10 @@ function makeStubDriver(frame: LiveFrame, nodes: UINode[]): Driver {
       [Symbol.asyncIterator]: () => ({ next: async () => ({ value: undefined as any, done: true as const }) }),
     }),
     render_text: () => "[rendered]",
+    snapshot_visual: () => null,
+    render_visual: () => "[visual]",
+    visual_cell: () => null,
+    visual_quality: () => null,
     _ingest: () => {},
     _closeAllSubscribers: () => {},
   };
@@ -60,16 +64,20 @@ const sampleFrame: LiveFrame = {
 };
 
 describe("registerReadTools", () => {
-  it("registers all 6 read tools", () => {
+  it("registers all read tools", () => {
     const fake = makeFakeServer();
     registerReadTools(fake.server, () => makeStubDriver(sampleFrame, sampleFrame.nodes));
     expect(fake.names().sort()).toEqual([
+      "tui.cell",
       "tui.changes_since",
       "tui.count",
       "tui.query",
       "tui.query_all",
       "tui.render_text",
+      "tui.render_visual",
       "tui.snapshot",
+      "tui.snapshot_visual",
+      "tui.visual_quality",
     ]);
   });
 

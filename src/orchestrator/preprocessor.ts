@@ -1,9 +1,9 @@
 import type { DiscoveryInteractionHandler } from "../pil/discovery-types.js";
 import { runPipeline } from "../pil/pipeline.js";
 import type { StreamChunk } from "../types/index.js";
+import { logger } from "../utils/logger.js";
 import type { MessageProcessorDeps } from "./message-processor.js";
 import { type ComplexitySize, getSessionLastTask, recordSessionLastTask, resolveCeiling } from "./scope-ceiling.js";
-import { logger } from "../utils/logger.js";
 
 export interface PreprocessorResult {
   pilCtx: Awaited<ReturnType<typeof runPipeline>>;

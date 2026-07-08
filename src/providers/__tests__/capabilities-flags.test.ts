@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ModelInfo } from "../../types/index.js";
-import { getProviderCapabilities } from "../capabilities.js";
+import { getProviderCapabilities, resolveTemperature } from "../capabilities.js";
 
 /**
  * G1 flag-method coverage — verifies the three capability methods added in
@@ -131,6 +131,35 @@ describe("ProviderCapabilities — G1 flag methods", () => {
       const caps = getProviderCapabilities("anthropic");
       expect(caps.acceptsParam("temperature", undefined)).toBe(true);
       expect(caps.acceptsParam("topP", undefined)).toBe(true);
+    });
+  });
+
+  describe("resolveTemperature", () => {
+    it("returns the desired value for a plain non-reasoning model", () => {
+      const model = baseModel({ provider: "openai", reasoning: false });
+      expect(resolveTemperature("openai", model, 0.7)).toBe(0.7);
+    });
+
+    it("omits temperature (undefined) for reasoning models", () => {
+      const model = baseModel({ id: "gpt-5", provider: "openai", reasoning: true });
+      expect(resolveTemperature("openai", model, 0.7)).toBeUndefined();
+    });
+
+    it("clamps to the model's fixed temperature (Moonshot/Kimi = 1)", () => {
+      // Regression: council hardcoded temperature 0.7, which Moonshot rejects
+      // with "only 1 is allowed for this model" — killing every clarify/spec call.
+      const model = baseModel({
+        id: "opencode/kimi-k2.7-code",
+        provider: "opencode-go",
+        reasoning: false,
+        fixedTemperature: 1,
+      });
+      expect(resolveTemperature("opencode-go", model, 0.7)).toBe(1);
+      expect(resolveTemperature("opencode-go", model, 0.3)).toBe(1);
+    });
+
+    it("passes the desired value through when modelInfo is undefined", () => {
+      expect(resolveTemperature("anthropic", undefined, 0.7)).toBe(0.7);
     });
   });
 

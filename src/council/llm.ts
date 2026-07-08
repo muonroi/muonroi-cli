@@ -6,7 +6,7 @@ import { emitMatches } from "../ee/render.js";
 import type { McpToolBundle } from "../mcp/runtime.js";
 import { buildMcpToolSet } from "../mcp/runtime.js";
 import { getModelInfo } from "../models/registry.js";
-import { getProviderCapabilities } from "../providers/capabilities.js";
+import { getProviderCapabilities, resolveTemperature } from "../providers/capabilities.js";
 import { loadKeyForProvider, ProviderKeyMissingError } from "../providers/keychain.js";
 import { createProviderFactoryAsync, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
@@ -22,6 +22,7 @@ import { logger } from "../utils/logger.js";
 import { loadMcpServers } from "../utils/settings.js";
 import { withVisibleRetry } from "../utils/visible-retry.js";
 import { buildResearchSystemPrompt } from "./prompts.js";
+import { stripThinkBlocks } from "./strip-think.js";
 import type { CouncilLLM, CouncilStats, ToolTraceEmitter, UsageCallback } from "./types.js";
 
 /**
@@ -357,7 +358,7 @@ export function createCouncilLLM(
       if (mock) {
         stats.calls++;
         const result = await mock.complete({ prompt });
-        return result.text;
+        return stripThinkBlocks(result.text);
       }
       const providerId = detectProviderForModel(modelId);
       const factory = await resolveCouncilFactory(providerId);
@@ -378,7 +379,14 @@ export function createCouncilLLM(
                   system,
                   prompt,
                   maxOutputTokens: maxTokens,
-                  temperature: 0.7,
+                  // Never hardcode temperature: some upstreams (Moonshot/Kimi via
+                  // opencode-go) reject any value but their pinned one, which
+                  // failed every clarify/spec call on a Kimi session. resolveTemperature
+                  // omits the field or clamps to the model's fixed value.
+                  ...(() => {
+                    const t = resolveTemperature(providerId, runtime.modelInfo, 0.7);
+                    return t === undefined ? {} : { temperature: t };
+                  })(),
                   // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent
                   // exponential backoff (2,4,8,16,32s). When SiliconFlow rate-limits
                   // with 429, user now sees "[retry] rate-limited (429) — waiting Xs
@@ -425,7 +433,7 @@ export function createCouncilLLM(
           finishReason: (result as { finishReason?: string }).finishReason,
           usage: (result as { usage?: unknown }).usage,
         });
-        return result.text;
+        return stripThinkBlocks(result.text);
       } catch (err) {
         cleanupTimeout();
         writeDebugRecord({
@@ -460,7 +468,7 @@ export function createCouncilLLM(
       if (mock) {
         stats.calls++;
         const result = await mock.complete({ prompt });
-        return { text: result.text, toolCalls: [] };
+        return { text: stripThinkBlocks(result.text), toolCalls: [] };
       }
       const providerId = detectProviderForModel(modelId);
       const factory = await resolveCouncilFactory(providerId);
@@ -536,7 +544,11 @@ export function createCouncilLLM(
                   // prompts. 6144 leaves ~4000 tokens for text after typical reasoning
                   // overhead and avoids cuts mid-thought.
                   maxOutputTokens: 6144,
-                  temperature: 0.7,
+                  // See generate(): capability-aware temperature (omit / clamp).
+                  ...(() => {
+                    const t = resolveTemperature(providerId, runtime.modelInfo, 0.7);
+                    return t === undefined ? {} : { temperature: t };
+                  })(),
                   // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent
                   // exponential backoff (2,4,8,16,32s). When SiliconFlow rate-limits
                   // with 429, user now sees "[retry] rate-limited (429) — waiting Xs
@@ -598,7 +610,7 @@ export function createCouncilLLM(
           usage: (result as { usage?: unknown }).usage,
         });
         return {
-          text: result.text,
+          text: stripThinkBlocks(result.text),
           toolCalls: toolCalls as Array<{ toolName: string; result?: unknown }>,
         };
       } catch (err: unknown) {
@@ -638,7 +650,7 @@ export function createCouncilLLM(
       if (mock) {
         stats.calls++;
         const result = await mock.complete({ prompt: topic });
-        return result.text;
+        return stripThinkBlocks(result.text);
       }
       const providerId = detectProviderForModel(modelId);
       const factory = await resolveCouncilFactory(providerId);
@@ -703,7 +715,11 @@ export function createCouncilLLM(
                     return stripped === messages ? {} : { messages: stripped };
                   },
                   maxOutputTokens: 4096,
-                  temperature: 0.3,
+                  // See generate(): capability-aware temperature (omit / clamp).
+                  ...(() => {
+                    const t = resolveTemperature(providerId, runtime.modelInfo, 0.3);
+                    return t === undefined ? {} : { temperature: t };
+                  })(),
                   // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent
                   // exponential backoff (2,4,8,16,32s). When SiliconFlow rate-limits
                   // with 429, user now sees "[retry] rate-limited (429) — waiting Xs
@@ -782,7 +798,7 @@ export function createCouncilLLM(
         }
 
         stats.calls++;
-        return result.text + internetGapWarning;
+        return stripThinkBlocks(result.text) + internetGapWarning;
       } catch (err: unknown) {
         cleanupTimeout();
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -927,6 +943,35 @@ export async function* tracedGenerate(
   };
 
   return resultText;
+}
+
+/**
+ * Run {@link tracedGenerate} across a list of models, returning the first
+ * non-empty completion. A model that throws (e.g. a flaky proxy returning
+ * "Upstream request failed") or yields only whitespace advances to the next
+ * candidate; fallback attempts are labelled so the timeline shows the retry.
+ * Returns null when every candidate fails — the caller decides the degraded
+ * fallback (e.g. a single-criterion spec). Dedupes the model list in order.
+ */
+export async function* tracedGenerateWithFallback(
+  llm: CouncilLLM,
+  args: Omit<TracedGenerateArgs, "modelId"> & { models: string[] },
+): AsyncGenerator<StreamChunk, string | null, unknown> {
+  const seen = new Set<string>();
+  const models = args.models.filter((m) => m && !seen.has(m) && (seen.add(m), true));
+  for (let i = 0; i < models.length; i++) {
+    try {
+      const raw = yield* tracedGenerate(llm, {
+        ...args,
+        modelId: models[i],
+        label: i > 0 ? `${args.label} (fallback: ${models[i]})` : args.label,
+      });
+      if (raw?.trim()) return raw;
+    } catch {
+      /* try the next candidate */
+    }
+  }
+  return null;
 }
 
 interface TracedAsyncArgs {

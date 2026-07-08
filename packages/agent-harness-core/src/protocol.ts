@@ -69,6 +69,60 @@ export type LiveFrame = {
   nodes: UINode[];
 };
 
+/**
+ * Text-attribute bit flags in {@link VisualSpan.attrs}. Mirrors the low byte of
+ * OpenTUI's `TextAttributes` (`ATTRIBUTE_BASE_MASK = 255`), so a consumer can
+ * decode `attrs & VisualAttr.BOLD` etc. without importing the renderer.
+ */
+export const VisualAttr = {
+  BOLD: 1,
+  DIM: 2,
+  ITALIC: 4,
+  UNDERLINE: 8,
+  BLINK: 16,
+  INVERSE: 32,
+  HIDDEN: 64,
+  STRIKETHROUGH: 128,
+} as const;
+
+/** One coalesced run of identically-styled cells on a visual line. */
+export type VisualSpan = {
+  /** The run's text (wide-char continuation cells omitted; `width` reflects columns). */
+  text: string;
+  /** Foreground color as "#rrggbb" (or "#rrggbbaa" when alpha < 255). */
+  fg: string;
+  /** Background color as "#rrggbb" (or "#rrggbbaa"). */
+  bg: string;
+  /** Text-attribute bitmask — decode with {@link VisualAttr}. */
+  attrs: number;
+  /** Display columns this run occupies (accounts for wide CJK/emoji). */
+  width: number;
+};
+
+/** One row of the rendered grid, as style-coalesced spans. */
+export type VisualLine = { spans: VisualSpan[] };
+
+/**
+ * Ground-truth snapshot of the ACTUAL rendered terminal cell grid — the real
+ * characters, colors, and attributes OpenTUI painted, read directly from
+ * `CliRenderer.currentRenderBuffer.getSpanLines()`. Unlike {@link LiveFrame}
+ * (semantic structure), this is what a human SEES on screen. No OCR — the cell
+ * buffer is authoritative. Emitted on the same sidechannel as LiveFrame,
+ * deduped by content hash, and (to bound `getSpanLines` allocation) only
+ * captured when a semantic frame also changes.
+ */
+export type VisualFrame = {
+  mode: "visual";
+  version: typeof PROTOCOL_VERSION;
+  seq: number;
+  ts: number;
+  cols: number;
+  rows: number;
+  /** Cursor [col, row], or null when hidden/unknown. */
+  cursor: [number, number] | null;
+  lines: VisualLine[];
+};
+
 export type LiveEvent =
   | { t: "event"; kind: "stream.delta"; target: string; text: string }
   | { t: "event"; kind: "toast"; level: "info" | "warn" | "error"; text: string; ttlMs?: number }
@@ -296,4 +350,4 @@ export type DesignSpec = {
   }>;
 };
 
-export type HarnessMessage = LiveFrame | LiveEvent;
+export type HarnessMessage = LiveFrame | VisualFrame | LiveEvent;

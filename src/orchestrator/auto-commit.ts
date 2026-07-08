@@ -21,10 +21,10 @@
  * cannot inject shell commands.
  */
 import { execFile } from "node:child_process";
-import { logger } from "../utils/logger.js";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import type { LspDiagnostic, LspDiagnosticFile } from "../lsp/types.js";
+import { logger } from "../utils/logger.js";
 
 const pexecFile = promisify(execFile);
 
@@ -334,7 +334,10 @@ export async function maybeAutoCommitTurn(opts: {
     ...newPaths,
   ]);
   if (!commit.ok) {
-    logger.error("orchestrator", `[auto-commit] git commit failed in ${cwd} (a pre-commit/commit-msg hook may have rejected it)`);
+    logger.error(
+      "orchestrator",
+      `[auto-commit] git commit failed in ${cwd} (a pre-commit/commit-msg hook may have rejected it)`,
+    );
     return { committed: false, reason: "commit-failed" };
   }
 
@@ -380,7 +383,10 @@ export async function commitSpecificPaths(cwd: string, paths: string[], message:
     : ["-m", subject, "-m", AUTO_COMMIT_ATTRIBUTION];
   const commit = await git(cwd, ["commit", ...mArgs, "--", ...safe]);
   if (!commit.ok) {
-    logger.error("orchestrator", `[git_commit] git commit failed in ${cwd} (a pre-commit/commit-msg hook may have rejected it)`);
+    logger.error(
+      "orchestrator",
+      `[git_commit] git commit failed in ${cwd} (a pre-commit/commit-msg hook may have rejected it)`,
+    );
     return { committed: false, reason: "commit-failed" };
   }
   const head = await git(cwd, ["rev-parse", "--short", "HEAD"]);

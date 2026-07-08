@@ -72,6 +72,18 @@ export interface LlmClassifyResult {
    */
   depthTier: DepthTier | null;
   /**
+   * Model-decided clarity: true when the request is UNDERSPECIFIED — missing
+   * information the agent would need to proceed without guessing (an unstated
+   * target/scope, a vague "make it better", competing interpretations, or an
+   * unresolved design choice). Drives the interview gate: a `standard`-depth
+   * task that is underspecified earns a clarify/council pass instead of hot-
+   * pathing straight to implementation. `false` = well-specified enough to plan
+   * directly. null when the model omitted the word → treated as not-
+   * underspecified (the don't-over-ask safe direction). Agent-first replacement
+   * for the regex `scoreSufficiency` scorer.
+   */
+  needsClarification: boolean | null;
+  /**
    * Model-decided scope: true when the turn is about the Muonroi PLATFORM /
    * ecosystem (BB/.NET packages, building-block, open-core, rule engine,
    * platform setup) — where the muonroi-docs MCP is the authoritative source —
@@ -90,7 +102,20 @@ export interface LlmClassifyResult {
   replyLanguage: string | null;
 }
 
-export type LlmClassifyFn = (prompt: string, signal?: AbortSignal) => Promise<LlmClassifyResult | null>;
+/**
+ * Options for a classify call. `recentTurns` is a compact digest of the last
+ * few conversation turns; when present the classifier uses it ONLY to resolve
+ * back-references in the new message (e.g. "từ các phần đó", "làm tiếp", "this")
+ * so a terse follow-up that points at heavy prior work is not mis-scored as a
+ * trivial one-liner. Without it the classifier sees the bare prompt and is blind
+ * to context — the documented "chấm điểm chỉ dựa only prompt" failure.
+ */
+export interface LlmClassifyOptions {
+  recentTurns?: string | null;
+  signal?: AbortSignal;
+}
+
+export type LlmClassifyFn = (prompt: string, opts?: LlmClassifyOptions) => Promise<LlmClassifyResult | null>;
 
 const LLM_CLASSIFY_TIMEOUT_MS = 2500;
 
@@ -103,10 +128,10 @@ const LLM_CLASSIFY_TIMEOUT_MS = 2500;
 // The ceiling is a cap, not padding: the model still stops after two words, so a
 // generous headroom costs nothing when reasoning is short.
 const REASONING_CLASSIFY_TIMEOUT_MS = 8000;
-// Seven comma-separated words now (added <scope>,<lang>) — ~18-26 tokens worst
-// case ("documentation,balanced,task,report,standard,ecosystem,vietnamese").
-// 48 keeps headroom without padding (the model still stops after seven words).
-const NONREASONING_MAX_OUTPUT_TOKENS = 48;
+// Eight comma-separated words now (added <clarity>) — ~20-30 tokens worst case
+// ("documentation,balanced,task,report,standard,ecosystem,vietnamese,underspecified").
+// 56 keeps headroom without padding (the model still stops after eight words).
+const NONREASONING_MAX_OUTPUT_TOKENS = 56;
 const REASONING_MAX_OUTPUT_TOKENS = 2048;
 
 /**
@@ -168,10 +193,13 @@ const KNOWN_CLASSIFY_WORDS = new Set<string>([
   "heavy",
   "ecosystem",
   "local",
+  "clear",
+  "underspecified",
 ]);
 
 const SYSTEM_PROMPT =
-  "You classify user prompts for a coding assistant. Reply with ONE line of SEVEN lowercase words separated by commas: <taskType>,<style>,<intent>,<deliverable>,<depth>,<scope>,<lang>\n\n" +
+  "You classify user prompts for a coding assistant. Reply with ONE line of EIGHT lowercase words separated by commas: <taskType>,<style>,<intent>,<deliverable>,<depth>,<scope>,<lang>,<clarity>\n\n" +
+  "The message may be preceded by a '[RECENT CONVERSATION]' block. Use it ONLY to resolve what a terse follow-up refers to (e.g. 'từ các phần đó', 'làm tiếp', 'debate mode đi', 'this one'); then classify the NEW message. Crucially, if the new message points back at heavy prior work, its depth is the depth of THAT work — a short sentence like 'ok debate these parts and plan improvements' is NOT quick just because it is short. Never classify the conversation block itself.\n\n" +
   "taskType ∈ { refactor | debug | plan | analyze | documentation | generate | general }\n" +
   "style ∈ { concise | balanced | detailed }\n" +
   "intent ∈ { task | chat } — 'chat' ONLY for a pure greeting, thanks, or acknowledgement with NO work request (e.g. 'hi', 'cảm ơn nhé', 'ok great'). EVERYTHING else is 'task', including questions about code or the CLI, 'are you done?', and requests to call a tool. When unsure, choose 'task'.\n" +
@@ -184,8 +212,12 @@ const SYSTEM_PROMPT =
   "- quick — a trivial single-shot change or a small direct answer: typo, rename one symbol, one-line edit, a quick lookup, 'what does X do'. No plan needed.\n" +
   "- standard — ordinary feature or bugfix touching a handful of files/functions; needs a short plan + a verify step, but no upfront research or user discussion.\n" +
   "- heavy — architectural, cross-cutting, multi-file/multi-module, a migration, 'redo/rebuild', a vague 'make it better', or a request with real unresolved design choices. Needs discussion + research + a checked plan before any code.\n" +
+  "  BREADTH decides heavy, NOT how clearly the steps are spelled out. A migration, vendoring an external dependency's code in-tree, or a rename/restructure that spans MANY files or modules is ALWAYS heavy — even when the plan is fully specified and it 'just' has to keep tests green. Do not downgrade a wide change to standard because it sounds mechanical.\n" +
   "  For a pure question/answer (deliverable=answer), depth reflects how much investigation the answer needs: 'quick' for a simple fact, 'standard' for a normal explanation, 'heavy' for a deep architectural review.\n" +
   "  When unsure between quick and standard, choose standard. When the task is genuinely wide or ambiguous, choose heavy.\n" +
+  "clarity ∈ { clear | underspecified } — whether the request gives enough to proceed WITHOUT guessing:\n" +
+  "- underspecified — missing information the agent would need: an unstated target/scope ('add auth' — which flow?), a vague 'make it better' with no direction, competing interpretations, or an unresolved design choice. Such a task should be clarified with the user before code.\n" +
+  "- clear — well-specified enough to plan and execute directly, even if large. A fully-spelled-out migration is 'clear'. When unsure, choose 'clear' (do NOT over-ask on ordinary work).\n" +
   "scope ∈ { ecosystem | local }:\n" +
   "- ecosystem — the turn is about the Muonroi PLATFORM as a whole: the building-block / .NET packages, open-core boundary, the rule engine / decision tables, NuGet packages, or platform setup/install. These are documented in an authoritative docs source.\n" +
   "- local — EVERYTHING else, including questions about this CLI's own internals (even when they mention the word 'muonroi'). When unsure, choose local.\n" +
@@ -214,21 +246,31 @@ const SYSTEM_PROMPT =
   "- documentation → balanced (examples + explanation)\n" +
   "- general → concise\n" +
   "Only output 'detailed' if the user prompt LITERALLY contains words like 'explain in detail', 'thorough analysis', 'walk me through', 'giải thích chi tiết', 'phân tích kỹ'.\n\n" +
-  "Full examples (taskType,style,intent,deliverable,depth,scope,lang):\n" +
-  "- 'hi' → general,concise,chat,answer,quick,local,english\n" +
-  "- 'cảm ơn bạn nhé' → general,concise,chat,answer,quick,local,vietnamese\n" +
-  "- 'bạn xong chưa' → general,concise,task,answer,quick,local,vietnamese (a question — NOT chat)\n" +
-  "- 'fix the typo in the README title' → generate,concise,task,code,quick,local,english\n" +
-  "- 'fix CI failing on Windows' → debug,concise,task,code,standard,local,english\n" +
-  "- 'rename function shouldInject to needsReminder' → refactor,concise,task,code,quick,local,english\n" +
-  "- 'thêm caching cho provider layer và update tests' → generate,concise,task,code,standard,local,vietnamese\n" +
-  "- 'tại sao bash_output_get trả empty' → analyze,concise,task,answer,standard,local,vietnamese\n" +
-  "- 'liệt kê tất cả env var CLI đọc' → analyze,concise,task,report,standard,local,vietnamese\n" +
-  "- 'refactor the entire auth system to use OAuth' → refactor,concise,task,code,heavy,local,english\n" +
-  "- 'how does the building-block rule engine work' → analyze,concise,task,answer,standard,ecosystem,english\n" +
-  "- 'hệ sinh thái muonroi gồm những gì' → analyze,balanced,task,answer,standard,ecosystem,vietnamese\n" +
-  "- 'plan the migration to hooks' → plan,balanced,task,report,heavy,local,english\n\n" +
-  "Prompts may be Vietnamese, English, or mixed. Reply with exactly seven words separated by commas. No other text.";
+  "Full examples (taskType,style,intent,deliverable,depth,scope,lang,clarity):\n" +
+  "- 'hi' → general,concise,chat,answer,quick,local,english,clear\n" +
+  "- 'cảm ơn bạn nhé' → general,concise,chat,answer,quick,local,vietnamese,clear\n" +
+  "- 'bạn xong chưa' → general,concise,task,answer,quick,local,vietnamese,clear (a question — NOT chat)\n" +
+  "- 'fix the typo in the README title' → generate,concise,task,code,quick,local,english,clear\n" +
+  "- 'fix CI failing on Windows' → debug,concise,task,code,standard,local,english,clear\n" +
+  "- 'rename function shouldInject to needsReminder' → refactor,concise,task,code,quick,local,english,clear\n" +
+  "- 'thêm caching cho provider layer và update tests' → generate,concise,task,code,standard,local,vietnamese,clear\n" +
+  "- 'tại sao bash_output_get trả empty' → analyze,concise,task,answer,standard,local,vietnamese,clear\n" +
+  "- 'liệt kê tất cả env var CLI đọc' → analyze,concise,task,report,standard,local,vietnamese,clear\n" +
+  "- 'refactor the entire auth system to use OAuth' → refactor,concise,task,code,heavy,local,english,clear\n" +
+  "- 'vendor the used subset of the gsd package natively into src and rename gsd to workflow, keep tests green' → refactor,concise,task,code,heavy,local,english,clear (a migration spanning many files — heavy even though fully specified)\n" +
+  "- 'add auth' → generate,concise,task,code,standard,local,english,underspecified (which flow/provider? unstated)\n" +
+  "- 'làm cho CLI tốt hơn' → generate,concise,task,code,heavy,local,vietnamese,underspecified (vague 'make it better', no target)\n" +
+  "- 'how does the building-block rule engine work' → analyze,concise,task,answer,standard,ecosystem,english,clear\n" +
+  "- 'hệ sinh thái muonroi gồm những gì' → analyze,balanced,task,answer,standard,ecosystem,vietnamese,clear\n" +
+  "- 'plan the migration to hooks' → plan,balanced,task,report,heavy,local,english,clear\n\n" +
+  "Prompts may be Vietnamese, English, or mixed. Reply with exactly eight words separated by commas. No other text.";
+
+// Appended to SYSTEM_PROMPT on the self-repair retry (see createLlmClassifier).
+// The first attempt produced an unparseable reply; this reminder + the full
+// (untrimmed) prompt is the agent-first recovery the design mandates INSTEAD of
+// a keyword-regex fallback.
+const CLASSIFY_REPAIR_INSTRUCTION =
+  "REPAIR MODE: your previous reply could NOT be parsed. Output NOTHING except the single line of eight lowercase words separated by commas — no prose, no explanation, no code fences, no quotes. If you are unsure of a field, pick the safe default (task, standard, clear, local).";
 
 function parseResponse(raw: string): LlmClassifyResult | null {
   const cleaned = raw.trim().toLowerCase().replace(/[`*"]/g, "");
@@ -261,6 +303,12 @@ function parseResponse(raw: string): LlmClassifyResult | null {
   // anything else (incl. absent) → not ecosystem. Position-independent.
   const scopeWord = parts.find((p) => p === "ecosystem" || p === "local");
   const ecosystemScope: boolean | null = scopeWord ? scopeWord === "ecosystem" : null;
+  // Eighth word is the clarity signal. "underspecified" → the request is missing
+  // information the agent needs → earn a clarify/council pass. Anything else
+  // (incl. absent) → not underspecified (don't-over-ask safe direction).
+  // Position-independent so a reordered/garbled reply still recovers it.
+  const clarityWord = parts.find((p) => p === "clear" || p === "underspecified");
+  const needsClarification: boolean | null = clarityWord ? clarityWord === "underspecified" : null;
   // Seventh word is the user's language. It is the one alphabetic token that is
   // NOT a known enum value (open vocabulary). null when English / absent so
   // Layer 4 skips the language re-anchor for English turns.
@@ -276,6 +324,7 @@ function parseResponse(raw: string): LlmClassifyResult | null {
     intentKind,
     deliverableKind,
     depthTier,
+    needsClarification,
     ecosystemScope,
     replyLanguage,
   };
@@ -289,7 +338,9 @@ function parseResponse(raw: string): LlmClassifyResult | null {
  * fail-open (keep prior taskType, do not block the turn).
  */
 export function createLlmClassifier(factory: ProviderFactory, modelId: string): LlmClassifyFn {
-  return async function classify(prompt: string, signal?: AbortSignal): Promise<LlmClassifyResult | null> {
+  return async function classify(prompt: string, opts?: LlmClassifyOptions): Promise<LlmClassifyResult | null> {
+    const signal = opts?.signal;
+    const recentTurns = opts?.recentTurns;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -322,11 +373,21 @@ export function createLlmClassifier(factory: ProviderFactory, modelId: string): 
         });
         providerOptions = mergeProviderOptions(runtime.providerOptions, lowEffort);
       }
+      // Prepend a bounded recent-conversation block so the classifier can
+      // resolve back-references in a terse follow-up ("từ các phần đó",
+      // "làm tiếp", "this") instead of scoring the isolated sentence. The
+      // framing makes clear the depth still reflects the NEW message's actual
+      // work — including work it points back at — not the whole transcript.
+      const trimmedRecent = recentTurns?.trim();
+      const promptWithContext = trimmedRecent
+        ? `[RECENT CONVERSATION — reference only, do NOT classify this]\n${trimmedRecent.slice(0, 800)}\n\n` +
+          `[NEW USER MESSAGE — classify THIS; if it refers back to the conversation above, judge the depth of the work it actually entails]\n${prompt.slice(0, 600)}`
+        : prompt.slice(0, 600);
       const result = streamText({
         model: runtime.model,
         abortSignal: combinedSignal,
         system: SYSTEM_PROMPT,
-        prompt: prompt.slice(0, 600),
+        prompt: promptWithContext,
         ...(dropMaxTokens ? {} : { maxOutputTokens: maxOut }),
         ...(providerOptions ? { providerOptions } : {}),
       });
@@ -348,7 +409,57 @@ export function createLlmClassifier(factory: ProviderFactory, modelId: string): 
       // Reasoning models occasionally route the entire answer into reasoning
       // parts (no committed text). Fall back to the reasoning channel so the
       // 2-word verdict is still recoverable.
-      return parseResponse(text) ?? (reasoningText ? parseResponse(reasoningText) : null);
+      const primary = parseResponse(text) ?? (reasoningText ? parseResponse(reasoningText) : null);
+      if (primary) return primary;
+
+      // Self-repair (agent-first recovery — NOT a regex fallback): the model's
+      // first reply did not parse into the eight-word contract. Call the model
+      // ONCE more with the FULL prompt + recent context (no 600-char trim) and
+      // an explicit format-repair instruction on a doubled budget. Only if this
+      // ALSO fails do we return null — and the caller then surfaces an honest
+      // UNKNOWN classification, never a keyword-regex guess.
+      if (timer) clearTimeout(timer);
+      const repairController = new AbortController();
+      const repairTimer = setTimeout(
+        () => repairController.abort(),
+        isReasoning ? REASONING_CLASSIFY_TIMEOUT_MS : LLM_CLASSIFY_TIMEOUT_MS,
+      );
+      const repairSignal = signal
+        ? (AbortSignal.any?.([signal, repairController.signal]) ?? repairController.signal)
+        : repairController.signal;
+      try {
+        const fullRecent = recentTurns?.trim();
+        const repairPrompt =
+          (fullRecent
+            ? `[RECENT CONVERSATION — reference only, do NOT classify this]\n${fullRecent.slice(0, 1500)}\n\n`
+            : "") + `[NEW USER MESSAGE — classify THIS]\n${prompt.slice(0, 1500)}`;
+        const repairRun = streamText({
+          model: runtime.model,
+          abortSignal: repairSignal,
+          system: `${SYSTEM_PROMPT}\n\n${CLASSIFY_REPAIR_INSTRUCTION}`,
+          prompt: repairPrompt,
+          ...(dropMaxTokens ? {} : { maxOutputTokens: maxOut * 2 }),
+          ...(providerOptions ? { providerOptions } : {}),
+        });
+        let rt = "";
+        let rr = "";
+        for await (const part of repairRun.fullStream) {
+          if (part.type === "text-delta") rt += (part as any).textDelta ?? (part as any).text ?? "";
+          else if (part.type === "reasoning-delta") rr += (part as any).textDelta ?? (part as any).text ?? "";
+        }
+        const repaired = parseResponse(rt) ?? (rr ? parseResponse(rr) : null);
+        if (repaired) {
+          console.error(`[pil.llm-classify] self-repair recovered classification (${modelId})`);
+        } else {
+          console.error(
+            `[pil.llm-classify] self-repair FAILED (${modelId}) — surfacing UNKNOWN, NO regex fallback. ` +
+              `rawPreview=${JSON.stringify(prompt.slice(0, 120))}`,
+          );
+        }
+        return repaired;
+      } finally {
+        clearTimeout(repairTimer);
+      }
     } catch (err) {
       console.error(`[pil.llm-classify] classify failed: ${(err as Error)?.message}`, {
         modelId,
@@ -367,113 +478,6 @@ export interface SubSessionRouteResult {
   action: SubSessionAction;
   confidence: number;
   reason: string;
-}
-
-export function classifySubSessionActionHeuristic(prompt: string): SubSessionRouteResult | null {
-  const trimmed = prompt.trim().toLowerCase();
-  if (!trimmed) return null;
-
-  // Strip trailing punctuation for list-based matching so "hello!" and "cảm ơn!"
-  // still hit the static lists instead of falling through to the LLM classifier.
-  const stripped = trimmed.replace(/[!?.…,;:]+$/g, "").trim();
-
-  // 1. Simple math equations (exact matches like "2+2", "1 + 1")
-  if (/^\d+\s*[+\-*/]\s*\d+$/.test(trimmed)) {
-    return {
-      action: "DIRECT_ANSWER",
-      confidence: 0.99,
-      reason: "Obvious input classified via heuristic (simple math)",
-    };
-  }
-
-  // 2. Greetings (exact matches only, trailing punctuation stripped)
-  const greetings = [
-    "hi",
-    "hello",
-    "hey",
-    "chào",
-    "xin chào",
-    "hi there",
-    "hello there",
-    "chào bạn",
-    "halo",
-    "hola",
-    "bạn ơi",
-  ];
-  if (greetings.includes(stripped)) {
-    return {
-      action: "DIRECT_ANSWER",
-      confidence: 0.99,
-      reason: "Obvious input classified via heuristic (greeting)",
-    };
-  }
-
-  // 3. Thanks (exact matches only, trailing punctuation stripped)
-  const thanks = [
-    "thanks",
-    "thank you",
-    "cảm ơn",
-    "cám ơn",
-    "thank",
-    "thx",
-    "ty",
-    "cảm ơn bạn",
-    "cám ơn bạn",
-    "cảm ơn nhé",
-    "cám ơn nhé",
-  ];
-  if (thanks.includes(stripped)) {
-    return {
-      action: "DIRECT_ANSWER",
-      confidence: 0.99,
-      reason: "Obvious input classified via heuristic (thanks)",
-    };
-  }
-
-  // 4. Help (exact matches only, trailing punctuation stripped)
-  const help = ["help", "hướng dẫn", "cứu", "help me"];
-  if (help.includes(stripped)) {
-    return {
-      action: "DIRECT_ANSWER",
-      confidence: 0.99,
-      reason: "Obvious input classified via heuristic (help)",
-    };
-  }
-
-  // 5. Short conversational words / acknowledgements (exact matches only, trailing punctuation stripped)
-  const conversation = [
-    "ok",
-    "okay",
-    "yes",
-    "no",
-    "vâng",
-    "dạ",
-    "ừ",
-    "chắc thế",
-    "ừm",
-    "umm",
-    "cool",
-    "nice",
-    "perfect",
-    "done",
-    "xong",
-    "yep",
-    "yup",
-    "nah",
-    "fine",
-    "tốt",
-    "được",
-    "okie",
-  ];
-  if (conversation.includes(stripped)) {
-    return {
-      action: "DIRECT_ANSWER",
-      confidence: 0.99,
-      reason: "Obvious input classified via heuristic (acknowledgement)",
-    };
-  }
-
-  return null;
 }
 
 const ROUTER_SYSTEM_PROMPT =
@@ -498,14 +502,23 @@ export async function classifySubSessionAction(
   contextInfo?: {
     currentChars: number;
     threshold: number;
+    /**
+     * Compact digest of recent conversation turns. The router's system prompt
+     * says it decides "based on the conversation history" — without this the
+     * history was never actually supplied and the router judged the prompt in
+     * isolation, so a follow-up like "ok làm phần đó đi" could not be told apart
+     * from a fresh unrelated task. Supplying it makes the claim true.
+     */
+    recentTurns?: string | null;
   },
   signal?: AbortSignal,
 ): Promise<SubSessionRouteResult | null> {
-  if (process.env.MUONROI_DISABLE_HEURISTIC_ROUTING !== "1") {
-    const heuristic = classifySubSessionActionHeuristic(prompt);
-    if (heuristic) return heuristic;
-  }
-
+  // No regex pre-filter: the model decides the route for EVERY prompt, including
+  // greetings/acks (which it routes to DIRECT_ANSWER). The old keyword/list
+  // heuristic was removed (2026-07-07, no-regex rule) — a hardcoded whitelist
+  // mis-handles the long tail of natural-language inputs the whole design moved
+  // off of. On a null/failed model result the caller keeps the conservative
+  // DIRECT_ANSWER default (a semantic default, not a regex guess).
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -538,10 +551,15 @@ export async function classifySubSessionAction(
 
     let promptWithContext = prompt.slice(0, 1000);
     if (contextInfo) {
+      const recent = contextInfo.recentTurns?.trim();
+      const historyBlock = recent
+        ? `[CONVERSATION HISTORY — for context; the prompt may continue or reference it]\n${recent.slice(0, 800)}\n\n`
+        : "";
       promptWithContext =
         `[SESSION METADATA]\n` +
         `Current session size: ${contextInfo.currentChars} characters.\n` +
         `Rotation threshold: ${contextInfo.threshold} characters.\n\n` +
+        `${historyBlock}` +
         `[USER PROMPT]\n${promptWithContext}`;
     }
 

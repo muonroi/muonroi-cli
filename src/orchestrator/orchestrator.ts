@@ -12,6 +12,7 @@ import { getTenantId } from "../ee/tenant.js";
 import { emitTranscriptToDisk } from "../ee/transcript-emit.js";
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
 import { ensureFlowDir } from "../flow/scaffold.js";
+import { isContextRailEnabled } from "../gsd/flags.js";
 import { executeEventHooks } from "../hooks/index";
 import type {
   NotificationHookInput,
@@ -35,6 +36,7 @@ import {
   detectProviderForModel,
   requireRuntimeProvider,
   resolveModelRuntime as resolveRuntime,
+  resolveTemperatureParam,
 } from "../providers/runtime.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
 import { statusBarStore } from "../state/status-bar-store.js";
@@ -97,7 +99,12 @@ import {
   type SandboxSettings,
 } from "../utils/settings";
 import { runSideQuestion, type SideQuestionResult } from "../utils/side-question";
-import { buildVerifyDetectPrompt, normalizeVerifyRecipe } from "../verify/entrypoint";
+import {
+  buildVerifyDetectPrompt,
+  inferVerifyProjectProfile,
+  normalizeVerifyRecipe,
+  shouldTrustDeterministicRecipe,
+} from "../verify/entrypoint";
 import { runVerifyOrchestration } from "../verify/orchestrator";
 import {
   type AgentOptions,
@@ -141,6 +148,7 @@ import {
   estimateConversationTokens,
   extractUserContent,
   generateCompactionSummary,
+  isCompactionSummaryMessage,
   isCompactionThrash,
   POST_TURN_MIN_TOKENS,
   prepareCompaction,
@@ -196,9 +204,15 @@ Rules:
 - No surrounding quotes, no trailing punctuation, no emoji, no markdown.
 - Output ONLY the title text — nothing else.`;
 
-/** Deterministic fallback title: truncated first user message. */
-function fallbackTitle(userMessage: string): string {
-  return userMessage.slice(0, 60).trim() || "New session";
+/** Deterministic fallback title: truncated first user message, or "" when the
+ *  message is empty or a JSON-ish payload (so the caller leaves title = NULL
+ *  and the picker renders a clean "(untitled)" instead of a literal "{}"). */
+export function fallbackTitle(userMessage: string): string {
+  const trimmed = userMessage.trim();
+  if (!trimmed) return "";
+  // JSON object/array payloads (programmatic first messages) make useless titles.
+  if (/^[{[]/.test(trimmed) && /[}\]]$/.test(trimmed)) return "";
+  return trimmed.slice(0, 60).trim();
 }
 
 /** Strip quotes/backticks, collapse whitespace, drop trailing punctuation, cap at ~60 chars. */
@@ -231,7 +245,7 @@ async function genTitle(
       model: runtime.model,
       system: TITLE_SYSTEM_PROMPT,
       prompt: `User's first message:\n\n${snippet}\n\nTitle:`,
-      temperature: 0.3,
+      ...resolveTemperatureParam(runtime, 0.3),
       ...(runtime.modelInfo?.supportsMaxOutputTokens === false ? {} : { maxOutputTokens: 64 }),
       ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     });
@@ -1291,7 +1305,7 @@ export class Agent {
                 modelId: childRuntime.modelId,
                 system: childSystem,
                 messages: [...childMessages, ...turnMessages],
-                temperature: request.agent === "explore" ? 0.2 : 0.5,
+                temperature: childRuntime.modelInfo?.fixedTemperature ?? (request.agent === "explore" ? 0.2 : 0.5),
                 maxOutputTokens: !childCaps.acceptsParam("maxOutputTokens", childRuntime.modelInfo)
                   ? undefined
                   : Math.min(this.maxTokens, 8_192),
@@ -1941,7 +1955,7 @@ export class Agent {
       userModelMessage?: ModelMessage;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
-    const { runCouncil } = await import("../council/index.js");
+    const { runCouncil, postDebateContinuation } = await import("../council/index.js");
     const { createCouncilLLM } = await import("../council/llm.js");
     const councilStats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
     const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, councilStats);
@@ -2004,9 +2018,15 @@ export class Agent {
           cwd: this.bash.getCwd(),
           councilStats, // NEW — share orchestrator's stats object with runCouncil (Phase 14 CQ-01)
           signal,
+          // When the Context Rail is active it carries leader/panel/cost as
+          // ambient sidebar rows, so suppress the duplicate inline summary.
+          suppressInlineMeta: isContextRailEnabled(),
           runDir, // B1 — persist decisions.lock.md for the /council slash path
           onPostDebateAction: (action) => {
             chosenAction = action;
+            // Relay to the auto-council caller (tool-engine) so nested runs honor
+            // the user's choice instead of always continuing.
+            this.councilManager.setLastPostDebateAction(action);
           },
         },
       );
@@ -2038,25 +2058,49 @@ export class Agent {
         this.appendCompletedTurn(options.userModelMessage, [{ role: "assistant", content: synthesis }]);
       }
 
-      // "continue_session": keep working in THIS session with the debate result.
-      // Re-enter processMessage with the synthesis as context so the agent
-      // continues the original task — this also writes real message rows, which
-      // is what makes the session resumable (the /council slash path otherwise
-      // leaves no messages and is filtered from the resume picker). Guarded by
-      // ownsController so it fires ONLY on the top-level slash path, never when
-      // nested inside processMessage (auto-council) or drained by the runDebate
-      // tool — those callers manage their own continuation.
-      if (ownsController && chosenAction === "continue_session" && synthesis) {
+      // Keep working in THIS session when the chosen action calls for it
+      // (continue_session → carry the conclusion; generate_plan/implement →
+      // execute action items). postDebateContinuation is the single source of
+      // truth shared with the auto-council caller (tool-engine). Re-entering
+      // processMessage also writes real message rows, which is what makes the
+      // session resumable (the /council slash path otherwise leaves no messages
+      // and is filtered from the resume picker). Guarded by ownsController so it
+      // fires ONLY on the top-level slash path, never when nested inside
+      // processMessage (auto-council) or drained by the runDebate tool — those
+      // callers manage their own continuation.
+      const continuationPrompt = ownsController && synthesis ? postDebateContinuation(chosenAction, synthesis) : null;
+      if (continuationPrompt) {
         yield { type: "content", content: "\n[Continuing with the debate conclusion…]\n" };
         this.councilManager.setContinuation(true);
         try {
           // processMessage emits its own terminal `done`, which becomes the
           // consumer's break boundary — so the UI stops AFTER the continuation
           // turn, not before it.
-          yield* this.processMessage(
-            `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`,
-            options?.observer,
-          );
+          //
+          // Guard the continuation with an idle+total watchdog: the per-chunk
+          // stall watchdog only covers streamText byte flow, NOT a turn that
+          // wedges inside a tool call (a `task` sub-agent or long `bash`).
+          // Session 578b2eae7099 hung exactly there — the UI froze at "Council
+          // working… elapsed 0s" with no rescue. On fire we abort the turn and
+          // surface a toast instead of hanging forever.
+          const { withTurnWatchdog, TurnStallError } = await import("./turn-watchdog.js");
+          const idleMs = Number(process.env.MUONROI_COUNCIL_CONTINUATION_IDLE_MS ?? 120_000);
+          const totalMs = Number(process.env.MUONROI_COUNCIL_CONTINUATION_TOTAL_MS ?? 600_000);
+          try {
+            yield* withTurnWatchdog(this.processMessage(continuationPrompt, options?.observer), {
+              idleMs,
+              totalMs,
+              label: "council continuation turn",
+            });
+          } catch (err) {
+            if (err instanceof TurnStallError) {
+              this.abortController?.abort(new DOMException(err.message, "TimeoutError"));
+              yield { type: "error", content: `Council continuation stalled — ${err.message}` };
+              yield { type: "done" };
+            } else {
+              throw err;
+            }
+          }
         } finally {
           this.councilManager.setContinuation(false);
         }
@@ -2112,24 +2156,51 @@ export class Agent {
     const processMessageFn = (m: string) => this.processMessage(m, options?.observer);
     const flowDir = nodePath.join(this.bash.getCwd(), ".muonroi-flow");
 
-    // P2.7: compute complexity from the idea using PIL Layer 1 heuristics (cheap,
-    // no LLM calls). Only meaningful for "start"; other subcommands ignore it.
+    // P2.7 (LLM-first — no-regex routing): the work-depth tier that decides
+    // /ideal's route is judged by the MODEL (the same depthTier the PIL Layer-1
+    // classifier emits for chat turns), NOT by a keyword scorer. The old regex
+    // `scoreComplexity` mis-tiered plainly-phrased heavy work — a "merge / vendor
+    // / rename" refactor scored LOW because it lacked the FORCE_HIGH keywords —
+    // which hot-pathed genuinely heavy tasks with zero interview/council. Only
+    // meaningful for "start"; other subcommands ignore it.
     let complexity: "low" | "medium" | "high" | undefined;
+    let needsClarification: boolean | undefined;
     let sufficiencyMissing: readonly import("../pil/layer1-intent.js").SufficiencyMissing[] | undefined;
     if (payload.subcommand === "start" && payload.idea) {
-      const { scoreComplexity, scoreSufficiency } = await import("../pil/layer1-intent.js");
-      const result = scoreComplexity({
-        rawText: payload.idea,
-        taskType: null,
-        t0HitCount: 0,
-        hasMaxSprintsOne: payload.flags.maxSprints === 1,
-      });
-      complexity = result.complexity;
-      // Sufficiency gate — vague briefs ("todo app") force Council so the
-      // discovery AskCard can fill in persona/MVP/architecture/verify before
-      // any code is scaffolded.
-      const suff = scoreSufficiency({ rawText: payload.idea });
-      sufficiencyMissing = suff.sufficient ? undefined : suff.missing;
+      let depth: import("../pil/llm-classify.js").DepthTier = "standard";
+      try {
+        const { createLlmClassifier } = await import("../pil/llm-classify.js");
+        const classify = createLlmClassifier(this.requireProvider(), this.modelId);
+        const res = await classify(payload.idea);
+        if (res?.depthTier) {
+          depth = res.depthTier;
+        } else {
+          // Same convention as PIL Layer 1: a null/garbled depth defaults to the
+          // safe middle. Logged so a persistently-null classifier is diagnosable.
+          console.error(
+            `[ideal/route] model depth classify returned no depthTier — defaulting to "standard". idea=${JSON.stringify(payload.idea.slice(0, 80))}`,
+          );
+        }
+        // LLM-first clarity signal — the agent-first replacement for the regex
+        // `scoreSufficiency`. An underspecified `standard` task earns the
+        // interview/Council path even inside an existing repo (see
+        // runProductLoop gate); null/absent → not-underspecified (don't over-ask).
+        if (res?.needsClarification === true) needsClarification = true;
+      } catch (err) {
+        // Fail-open to the safe middle (standard → hot-path single sprint); never
+        // block /ideal on a classify hiccup. Logged for diagnosis (No-Silent-Catch).
+        console.error(`[ideal/route] depth classify failed, defaulting to "standard": ${(err as Error)?.message}`);
+      }
+      // heavy → full Council pipeline (never hot-path); standard/quick → hot-path.
+      // Maps onto runProductLoop's low|medium|high gate: "high" is the ONLY tier
+      // that both fails the existing-repo bypass (`!== "high"`) and the `=== "low"`
+      // hot-path check, so ONLY heavy reaches runStart/Council — a large task can
+      // no longer skip the interview just because it was phrased plainly.
+      complexity = depth === "heavy" ? "high" : depth === "quick" ? "low" : "medium";
+      // Sufficiency is no longer a separate regex gate (`scoreSufficiency` is
+      // gone from the routing path): a vague / ambiguous brief is exactly what the
+      // model tiers as "heavy" → Council, so depthTier already subsumes it.
+      sufficiencyMissing = undefined;
     }
 
     const gen = runProductLoop({
@@ -2155,6 +2226,7 @@ export class Agent {
       detectVerifyRecipe: () => this.detectVerifyRecipe(),
       skipPriorContext: payload.flags.noPriorContext === true,
       complexity,
+      needsClarification,
       sufficiencyMissing,
       // Mode C explicit override + gh pr create opt-in (see .planning/MAINTAIN-MODE.md).
       mode: payload.flags.mode,
@@ -2804,7 +2876,16 @@ export class Agent {
     } else {
       try {
         const { classifySubSessionAction } = await import("../pil/llm-classify.js");
-        const routeResult = await classifySubSessionAction(this.requireProvider(), this.modelId, userMessage);
+        // Feed the recent-conversation digest so the router can actually honour
+        // its "decide based on the conversation history" contract — otherwise a
+        // continuation ("ok làm phần đó đi") is judged in isolation and can be
+        // mis-routed as a fresh/unrelated task. Passing contextInfo also turns
+        // on the session-size metadata block the ROTATE_SESSION rule relies on.
+        const routeResult = await classifySubSessionAction(this.requireProvider(), this.modelId, userMessage, {
+          currentChars,
+          threshold,
+          recentTurns: this._buildRecentTurnsSummary(),
+        });
         if (routeResult) {
           routeAction = routeResult.action;
           logger.info("orchestrator", "Routing action selected for user message", {
@@ -2838,7 +2919,7 @@ export class Agent {
 
         const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
         const db = getDatabase();
-        db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(parentSessionId, newSession.id);
+        this.sessionStore.linkChild(newSession.id, parentSessionId, "rotation");
 
         const summaryMessage = createCompactionSummaryMessage(cr.summary);
         const nextSeq = getNextMessageSequence(newSession.id);
@@ -2918,20 +2999,26 @@ export class Agent {
         } else {
           const latest = loadLatestCompaction(parentSessionId);
           const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
-          db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(parentSessionId, newSession.id);
+          this.sessionStore.linkChild(newSession.id, parentSessionId, "subagent");
           subSessionId = newSession.id;
 
-          let seedMessages: ModelMessage[] = [];
-          let seedSeqs: Array<number | null> = [];
+          // Seed the child with the parent's CURRENT working set — after a
+          // compaction that is already [summary, ...kept raw tail] (see the
+          // compactForContext assignment). Previously the compaction branch
+          // reseeded ONLY [summary], discarding the kept raw tail — so a forked
+          // council/debate saw a bare generic summary instead of the actual
+          // recent discussion the user pointed at ("debate THESE parts"), and
+          // drifted off-topic. Keep the tail; just guarantee the summary is
+          // present and persist the compaction row for the child's continuity.
+          const seedMessages: ModelMessage[] = [...this.messages];
+          const seedSeqs: Array<number | null> = [...this.messageSeqs];
           if (latest?.summary) {
-            const summaryMsg = createCompactionSummaryMessage(latest.summary);
-            seedMessages = [summaryMsg];
-            seedSeqs = [null];
+            if (!isCompactionSummaryMessage(seedMessages[0])) {
+              seedMessages.unshift(createCompactionSummaryMessage(latest.summary));
+              seedSeqs.unshift(null);
+            }
             const nextSeq = getNextMessageSequence(subSessionId);
             appendCompaction(subSessionId, nextSeq, latest.summary, latest.tokensBefore);
-          } else {
-            seedMessages = [...this.messages];
-            seedSeqs = [...this.messageSeqs];
           }
 
           // Add sub-session overlay system message
@@ -3222,7 +3309,7 @@ export class Agent {
           model: runtime.model,
           system: systemPrompt,
           prompt: `Child Sub-session is stuck. Question:\n${question}`,
-          temperature: 0.2,
+          ...resolveTemperatureParam(runtime, 0.2),
           ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
         });
 
@@ -3457,23 +3544,48 @@ export class Agent {
   }
 
   async detectVerifyRecipe(settings?: SandboxSettings, abortSignal?: AbortSignal): Promise<VerifyRecipe | null> {
+    const cwd = this.bash.getCwd();
+    const effectiveSettings = settings ?? this.bash.getSandboxSettings();
+
+    // Primary: LLM verify-detect turn — a codebase-aware, richer recipe.
+    let llmRecipe: VerifyRecipe | null = null;
     try {
       const result = await this.runTaskRequest(
         {
           agent: "verify-detect",
           description: "Detect verification recipe",
-          prompt: buildVerifyDetectPrompt(this.bash.getCwd(), settings ?? this.bash.getSandboxSettings()),
+          prompt: buildVerifyDetectPrompt(cwd, effectiveSettings),
         },
         undefined,
         abortSignal,
       );
-      if (!result.success || !result.output) return null;
-      const maybeJson = extractJsonObject(result.output);
-      if (!maybeJson) return null;
-      return normalizeVerifyRecipe(JSON.parse(maybeJson));
-    } catch {
-      return null;
+      if (result.success && result.output) {
+        const maybeJson = extractJsonObject(result.output);
+        if (maybeJson) llmRecipe = normalizeVerifyRecipe(JSON.parse(maybeJson));
+      }
+    } catch (err) {
+      console.error(`[orchestrator] verify-detect turn failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+    if (llmRecipe) return llmRecipe;
+
+    // Deterministic fallback: an existing repo with a recognizable manifest
+    // (package.json test script, *.sln, pyproject, …) yields a reliable recipe
+    // WITHOUT an LLM. This stops CB-3 from false-halting an in-place /ideal
+    // migration with the "Recovery options" card purely because the flaky
+    // verify-detect model returned no parseable JSON (root cause of the
+    // existing-repo implementation-reachability halt). Only trusted when the
+    // profiler recognizes the ecosystem AND found real test commands.
+    try {
+      const profile = inferVerifyProjectProfile(cwd, effectiveSettings);
+      if (shouldTrustDeterministicRecipe(profile.recipe)) {
+        return profile.recipe;
+      }
+    } catch (err) {
+      console.error(
+        `[orchestrator] deterministic verify-recipe fallback failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return null;
   }
 
   async runVerify(onProgress?: (detail: string) => void, abortSignal?: AbortSignal): Promise<ToolResult> {

@@ -1,6 +1,15 @@
+import { randomUUID } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
-import type { StreamChunk } from "../types/index.js";
+import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
+import { getCouncilLanguage } from "../utils/settings.js";
+import {
+  buildDebateCheckpoint,
+  checkpointMatches,
+  deleteDebateCheckpoint,
+  restoreExchangeLogs,
+  writeDebateCheckpoint,
+} from "./debate-checkpoint.js";
 import { pickCouncilTaskModel } from "./leader.js";
 import { tracedAsync, tracedGenerate } from "./llm.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
@@ -16,8 +25,10 @@ import type {
   CouncilConfig,
   CouncilLLM,
   CouncilParticipant,
+  DebateStance,
   DebateState,
   LeaderEvaluation,
+  QuestionResponder,
 } from "./types.js";
 
 /**
@@ -452,6 +463,21 @@ export async function* runDebate(
   llm: CouncilLLM,
 ): AsyncGenerator<StreamChunk, DebateState, unknown> {
   const { leaderModelId, participants, conversationContext, signal, debatePlan } = config;
+  // C — resume from a prior per-round checkpoint when it matches this debate
+  // (same problem statement + panel). On a match we skip research + openings and
+  // the already-completed rounds, restoring the accumulated transcript. On any
+  // mismatch (spec changed, panel re-resolved) we run fresh and let the stale
+  // checkpoint be overwritten by the first new round.
+  const resumeCp =
+    config.resumeCheckpoint &&
+    checkpointMatches(
+      config.resumeCheckpoint,
+      spec.problemStatement,
+      participants.map((p) => p.model),
+    )
+      ? config.resumeCheckpoint
+      : undefined;
+  const resumed = resumeCp !== undefined;
   // Cross-provider fallback pool for debateWithRetry: leader + every
   // participant model, deduped. When a speaker's model fails both same-model
   // attempts, debateWithRetry retries once on the first pooled model whose
@@ -466,6 +492,12 @@ export async function* runDebate(
   const leaderNeedsResearch = config.leaderNeedsResearch;
   const internetFirst = config.internetFirst === true;
   const costAware = config.costAware === true;
+  // Feature B — resolved council debate language. The chosen language IS the
+  // debate language (no translate-back pass). "auto" (default) follows the
+  // user's brief; "english" is the historical behavior; any other value pins
+  // the debate prose to that locale. Threaded into every debate/eval/summary
+  // prompt below. config.debateLanguage lets a caller/test override the setting.
+  const debateLanguage = config.debateLanguage ?? getCouncilLanguage();
   const active: CouncilParticipant[] = [];
   const exchangeLogs: Map<string, string[]> = new Map();
   const archive: import("./types.js").DebateArchiveEntry[] = [];
@@ -480,13 +512,30 @@ export async function* runDebate(
   // emit the same "circuit breaker tripped" message every round.
   const announcedDisabled = new Set<string>();
 
+  // C — restore accumulated state before any phase runs when resuming.
+  if (resumeCp) {
+    for (const p of resumeCp.active) active.push(p);
+    for (const [k, v] of restoreExchangeLogs(resumeCp)) exchangeLogs.set(k, v);
+    for (const a of resumeCp.archive) archive.push(a);
+    runningSummary = resumeCp.runningSummary;
+    researchFindings = resumeCp.researchFindings;
+    yield {
+      type: "content",
+      content: `\n> Resuming debate from round ${resumeCp.roundCount + 1} — restored ${resumeCp.roundCount} completed round(s), ${active.length} participant(s), skipping research + opening statements.\n`,
+    };
+  }
+
   // ── Leader decides: research needed? (skipped if user overrode upstream) ──
   // Reuse the leader's upstream research decision (computed once in runCouncil)
   // when available; only run the classifier here for direct callers that did not
   // pre-compute it. Avoids a duplicate leader-tier LLM call per council run.
-  const needsResearch = researchSkipOverride
+  // On resume the research phase already ran — never re-run it.
+  const needsResearch = resumed
     ? false
-    : (leaderNeedsResearch ?? (yield* evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware)));
+    : researchSkipOverride
+      ? false
+      : (leaderNeedsResearch ??
+        (yield* evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware)));
 
   if (researchSkipOverride) {
     yield {
@@ -551,92 +600,100 @@ export async function* runDebate(
     : conversationContext;
 
   // ── Phase 1: Parallel opening statements ───────────────────────────────────
-  const p1Start = Date.now();
-  yield phaseStart({
-    phaseId: "phase:opening",
-    kind: "opening",
-    label: "Opening analysis",
-    detail: `${participants.length} participants in parallel`,
-  });
-
-  const openingPromises = participants.map((self) => {
-    const partner = participants.find((c) => c.role !== self.role) ?? participants[0];
-    const { system, prompt } = buildOpeningPrompt({
-      speakerRole: self.role,
-      partnerRole: partner.role,
-      speakerStance: self.stance,
-      partnerStance: partner.stance,
-      spec,
-      outputShape: debatePlan?.outputShape,
-      conversationContext: enrichedContext,
+  // Skipped entirely on resume — `active` was restored from the checkpoint so
+  // re-running openings would both waste tokens and reset the debated positions.
+  if (!resumed) {
+    const p1Start = Date.now();
+    yield phaseStart({
+      phaseId: "phase:opening",
+      kind: "opening",
+      label: "Opening analysis",
+      detail: `${participants.length} participants in parallel`,
     });
-    return openingWithRetry(llm, self.model, system, prompt).then((r) => ({
-      role: self.role,
-      model: self.model,
-      stance: self.stance,
-      position: r.text,
-      error: r.text ? null : (r.error ?? "empty completion after retries"),
-      attempts: r.attempts,
-    }));
-  });
 
-  const openings = yield* tracedAsync(() => Promise.all(openingPromises), {
-    phase: "opening",
-    label: `Generating opening statements (${participants.length} participants in parallel)`,
-    detail: participants.map((p) => p.role).join(", "),
-  });
-
-  yield { type: "content", content: "\n── Opening Analysis ──\n" };
-  for (const o of openings) {
-    const speakerRole = o.stance?.name ?? o.role;
-    if (o.error) {
-      yield {
-        type: "council_message",
-        councilMessage: {
-          kind: "debate",
-          speaker: { role: speakerRole, model: o.model },
-          round: 0,
-          text: `[Error: ${o.error}]`,
-          attempts: o.attempts,
-          failureReason: o.error,
-        },
-      };
-    } else {
-      active.push({ role: o.role as any, model: o.model, position: o.position, stance: o.stance });
-      archive.push({
-        round: 0,
-        role: o.role as any,
-        model: o.model,
-        stanceName: o.stance?.name,
-        ...makeExcerpt(o.position),
+    const openingPromises = participants.map((self) => {
+      const partner = participants.find((c) => c.role !== self.role) ?? participants[0];
+      const { system, prompt } = buildOpeningPrompt({
+        speakerRole: self.role,
+        partnerRole: partner.role,
+        speakerStance: self.stance,
+        partnerStance: partner.stance,
+        spec,
+        outputShape: debatePlan?.outputShape,
+        conversationContext: enrichedContext,
+        language: debateLanguage,
       });
-      yield {
-        type: "council_message",
-        councilMessage: {
-          kind: "debate",
-          speaker: { role: speakerRole, model: o.model },
+      return openingWithRetry(llm, self.model, system, prompt).then((r) => ({
+        role: self.role,
+        model: self.model,
+        stance: self.stance,
+        position: r.text,
+        error: r.text ? null : (r.error ?? "empty completion after retries"),
+        attempts: r.attempts,
+      }));
+    });
+
+    const openings = yield* tracedAsync(() => Promise.all(openingPromises), {
+      phase: "opening",
+      label: `Generating opening statements (${participants.length} participants in parallel)`,
+      // Newline-joined "Name — lens" roster so the composing placeholder shows WHAT
+      // each speaker is tasked to argue (A: live debate preview) instead of a bare
+      // spinner during the atomic generateText window.
+      detail: formatSpeakerRoster(participants),
+    });
+
+    yield { type: "content", content: "\n── Opening Analysis ──\n" };
+    for (const o of openings) {
+      const speakerRole = o.stance?.name ?? o.role;
+      if (o.error) {
+        yield {
+          type: "council_message",
+          councilMessage: {
+            kind: "debate",
+            speaker: { role: speakerRole, model: o.model },
+            round: 0,
+            text: `[Error: ${o.error}]`,
+            attempts: o.attempts,
+            failureReason: o.error,
+          },
+        };
+      } else {
+        active.push({ role: o.role as any, model: o.model, position: o.position, stance: o.stance });
+        archive.push({
+          round: 0,
+          role: o.role as any,
+          model: o.model,
+          stanceName: o.stance?.name,
+          ...makeExcerpt(o.position),
+        });
+        yield {
+          type: "council_message",
+          councilMessage: {
+            kind: "debate",
+            speaker: { role: speakerRole, model: o.model },
+            round: 0,
+            text: o.position,
+            attempts: o.attempts,
+          },
+        };
+        emitCouncilTurnLength({
+          role: speakerRole,
           round: 0,
           text: o.position,
-          attempts: o.attempts,
-        },
-      };
-      emitCouncilTurnLength({
-        role: speakerRole,
-        round: 0,
-        text: o.position,
-        model: o.model,
-        correlationId: turnCorrelationId,
-      });
+          model: o.model,
+          correlationId: turnCorrelationId,
+        });
+      }
     }
-  }
 
-  yield phaseDone({
-    phaseId: "phase:opening",
-    kind: "opening",
-    label: "Opening analysis",
-    startedAt: p1Start,
-    detail: `${active.length}/${participants.length} participants succeeded`,
-  });
+    yield phaseDone({
+      phaseId: "phase:opening",
+      kind: "opening",
+      label: "Opening analysis",
+      startedAt: p1Start,
+      detail: `${active.length}/${participants.length} participants succeeded`,
+    });
+  }
 
   if (active.length < 2) {
     yield { type: "content", content: "\nNot enough successful openings for discussion.\n" };
@@ -669,6 +726,16 @@ export async function* runDebate(
     type: "content",
     content: `\n> Leader-proposed debate budget: ${maxRounds} round${maxRounds === 1 ? "" : "s"}${ceilingNote}.\n`,
   };
+  // P3 — structured budget/ceiling for the context rail. These are locals here,
+  // invisible to the council entrypoint, so they ride a separate council_meta
+  // patch that the UI upsert-merges with the leader/panel patch.
+  yield {
+    type: "council_meta",
+    councilMeta: {
+      roundBudget: maxRounds,
+      roundCeiling: kindCapped ? effectiveCeiling : ABSOLUTE_MAX_ROUNDS,
+    },
+  };
 
   // Pairs that fail twice in a row are dropped from subsequent rounds so the
   // remaining participants don't keep retrying a broken model and inflating
@@ -678,8 +745,72 @@ export async function* runDebate(
   // Stop debate entirely after two consecutive rounds where ≥50% of pairs fail
   // — the LLM is clearly under provider stress and more rounds won't help.
   let consecutiveRoundFailures = 0;
+  // P5 — topic carried from the prior round's leader nextRoundFocus, shown as the
+  // next round's heading in the round-grouped transcript.
+  let nextTopic: string | undefined;
+  // B5 — prior round's aligned criteriaMet, so each round's directive/verdict
+  // and the post-debate unmet-flag know what is still open. Empty before round 1
+  // → the round-1 directive treats every criterion as unmet.
+  let lastCriteriaMet: boolean[] = [];
+  // B4 — leader auto-remedy progress tracking. `bestCriteriaMetCount` is the
+  // high-water mark of pinned criteria met; `roundsSinceProgress` counts
+  // consecutive evaluated rounds that produced no NEW met criterion. Auto-extend
+  // fires only while progress is being made; a stuck criterion (no progress for
+  // 2 rounds) stops the budget burn and drops to a diagnostic closing verdict.
+  let bestCriteriaMetCount = 0;
+  let roundsSinceProgress = 0;
+  // B4 interactive escalation — fires at most once per debate. `escalation`
+  // records the user's choice at a stop-with-unmet boundary for the DebateState.
+  let escalated = false;
+  let escalation: DebateState["escalation"] | undefined;
 
-  for (let round = 1; round <= maxRounds; round++) {
+  // C — restore round-loop continuity from the checkpoint. `maxRounds` takes the
+  // checkpointed budget (which may have been extended past the plan). The within-
+  // run heuristics that reset safely (droppedPairKeys, consecutiveRoundFailures,
+  // consecutivePairFailures, escalated) are intentionally NOT restored — a fresh
+  // start for them at most re-tries a previously-dropped pair, never corrupts
+  // state. The loop start is derived below from `roundCount`.
+  if (resumeCp) {
+    roundCount = resumeCp.roundCount;
+    maxRounds = Math.max(maxRounds, resumeCp.maxRounds);
+    lastCriteriaMet = [...resumeCp.lastCriteriaMet];
+    bestCriteriaMetCount = resumeCp.bestCriteriaMetCount;
+    roundsSinceProgress = resumeCp.roundsSinceProgress;
+    nextTopic = resumeCp.nextTopic;
+  }
+
+  // Shared applier for the two stop-with-unmet boundaries (leader voluntarily
+  // stopped, or the budget exhausted while stuck/at ceiling). Reassigns the
+  // loop's round budget via closure; returns whether the debate should keep
+  // going. Caller must have already checked the gate (responder wired, flag on,
+  // not yet escalated, criteria unmet).
+  async function* escalateStop(
+    stuck: boolean,
+    pinnedUnmet: number,
+    openList: string[],
+  ): AsyncGenerator<StreamChunk, "extend" | "stop", unknown> {
+    escalated = true;
+    const dec = yield* runEscalationPrompt({
+      respondToQuestion: config.respondToQuestion!,
+      openCriteria: openList,
+      pinnedUnmet,
+      stuck,
+      atAbsoluteMax: maxRounds >= ABSOLUTE_MAX_ROUNDS,
+      currentMax: maxRounds,
+    });
+    escalation = { action: dec.action, grantedRounds: dec.grantedRounds || undefined };
+    if (dec.action === "extend" && dec.grantedRounds > 0) {
+      maxRounds += dec.grantedRounds;
+      roundsSinceProgress = 0;
+      if (!nextTopic) nextTopic = `Close the unmet criteria: ${openList.join("; ")}`;
+      return "extend";
+    }
+    return "stop";
+  }
+
+  // C — on resume, `roundCount` was seeded to the last completed round so the
+  // loop continues at roundCount+1; a fresh run starts at 1 (roundCount=0).
+  for (let round = roundCount + 1; round <= maxRounds; round++) {
     // User cancelled mid-debate — stop before spending another round of
     // parallel pair LLM calls. The caller (runCouncil) re-checks the signal at
     // its next phase boundary and skips synthesis too.
@@ -688,6 +819,10 @@ export async function* runDebate(
       break;
     }
     roundCount = round;
+    // Set when the user extends the debate at this round's stop boundary (B4
+    // escalation). Guards the convergence-exit below so a user "extend" isn't
+    // immediately overridden by a lock-phrase convergence break.
+    let userExtendedThisRound = false;
     const p2Start = Date.now();
     const roundPhaseId = `phase:round-${round}`;
     yield phaseStart({
@@ -722,6 +857,55 @@ export async function* runDebate(
       break;
     }
 
+    // P5 — round lifecycle for the grouped transcript. `roundRec` closes over
+    // this round's participants/pairCount/emergent/topic; a running record now,
+    // a guaranteed done record on every exit below.
+    // Surface the task-adaptive persona (or model id), never the internal
+    // implement/verify/research cost-tier slot — that slot is a routing detail
+    // that misleads on analysis/decision topics (observed session dd34c59c63e9:
+    // an "evaluation" debate showed a bogus "implement" member).
+    const roundParticipants = active.map((p) => p.stance?.name ?? p.model);
+    const roundEmergent = round > plannedMaxRounds;
+    const roundTopic = nextTopic;
+    const roundRec = (
+      state: "running" | "done",
+      patch: Partial<import("../types/index.js").CouncilRoundRecord> = {},
+    ): StreamChunk => ({
+      type: "council_round" as const,
+      councilRound: {
+        round,
+        state,
+        topic: roundTopic,
+        participants: roundParticipants,
+        pairCount: pairs.length,
+        emergent: roundEmergent,
+        ...patch,
+      },
+    });
+    yield roundRec("running");
+
+    // B5 — pre-round leader DIRECTIVE. Before the exchanges run, the leader
+    // states this round's goal and which pinned criteria are still unmet, so it
+    // visibly conducts each round instead of only grading afterwards. Gated on
+    // pinned criteria (nothing to steer toward otherwise) + the conductor flag.
+    // Captured in `roundDirective` so it also lands on the round record's
+    // `directive` field below — durable in the conclusion card, not only the
+    // ephemeral live bubble a user misses if they look away mid-debate.
+    let roundDirective: string | undefined;
+    if (leaderConductorEnabled() && spec.successCriteria.length > 0) {
+      roundDirective = buildLeaderDirective(round, spec.successCriteria, lastCriteriaMet, roundTopic);
+      yield {
+        type: "council_message" as const,
+        councilMessage: {
+          kind: "leader" as const,
+          phase: "directive" as const,
+          speaker: { role: "Leader", model: leaderModelId },
+          round,
+          text: roundDirective,
+        },
+      };
+    }
+
     const pairResults = yield* tracedAsync(
       () =>
         Promise.all(
@@ -753,6 +937,7 @@ export async function* runDebate(
                   speakerPosition: a.position,
                   partnerPosition: b.position,
                   spec,
+                  language: debateLanguage,
                 });
                 const aTraces: string[] = [];
                 const aResult = await debateWithRetry(
@@ -785,6 +970,7 @@ export async function* runDebate(
                   speakerPosition: b.position,
                   partnerPosition: aResponse,
                   spec,
+                  language: debateLanguage,
                 });
                 const bTraces: string[] = [];
                 const bResult = await debateWithRetry(
@@ -823,6 +1009,7 @@ export async function* runDebate(
                   round,
                   runningSummary,
                   spec,
+                  language: debateLanguage,
                 });
                 const aTraces: string[] = [];
                 const aResult = await debateWithRetry(
@@ -857,6 +1044,7 @@ export async function* runDebate(
                   round,
                   runningSummary,
                   spec,
+                  language: debateLanguage,
                 });
                 const bTraces: string[] = [];
                 const bResult = await debateWithRetry(
@@ -894,7 +1082,9 @@ export async function* runDebate(
       {
         phase: "exchange",
         label: `Discussion round ${round} (${pairs.length} pair${pairs.length === 1 ? "" : "s"})`,
-        detail: pairs.map((p) => `${p.a.role}↔${p.b.role}`).join(", "),
+        // Distinct speakers with their lens (A: live debate preview) — dedup by
+        // formatted line so a speaker appearing in two pairs shows once.
+        detail: formatSpeakerRoster(pairs.flatMap((p) => [p.a, p.b])),
       },
     );
 
@@ -1035,6 +1225,11 @@ export async function* runDebate(
           type: "content",
           content: `\n> Circuit breaker: aborting debate after ${consecutiveRoundFailures} consecutive failure-heavy rounds — proceeding to synthesis with what we have.\n`,
         };
+        yield roundRec("done", {
+          leaderDecision: "circuit-break",
+          leaderReason: "provider stress — circuit breaker",
+          directive: roundDirective,
+        });
         break;
       }
     } else {
@@ -1050,7 +1245,49 @@ export async function* runDebate(
       label: `Leader evaluation (round ${round})`,
     });
     const allExchangeText = [...exchangeLogs.values()].flat().slice(-8).join("\n\n");
-    const evaluation = yield* evaluateDebate(spec, allExchangeText, round, leaderModelId, llm, costAware);
+    let evaluation = yield* evaluateDebate(
+      spec,
+      allExchangeText,
+      round,
+      leaderModelId,
+      llm,
+      costAware,
+      undefined,
+      debateLanguage,
+    );
+    // Eval robustness: the leader's cost-tier eval model can be on a flaky proxy
+    // (Console Go glm/kimi → "Upstream request failed") while panel models on
+    // other providers stay healthy. Rather than surface "evaluation unavailable"
+    // and lose the round outcome, retry the eval on each healthy model in the
+    // fallback pool before giving up. Bounded (pool is small) and only runs on the
+    // failure path, so successful evals pay nothing.
+    if (!evaluation) {
+      // Which model the primary eval already tried (skip re-hitting it). Defensive
+      // against a partially-mocked leader module in tests — if we can't resolve
+      // it, skip the fallback loop rather than throw.
+      let firstTried: string | null = null;
+      try {
+        firstTried = pickCouncilTaskModel("evaluate_round", leaderModelId, costAware);
+      } catch {
+        firstTried = null;
+      }
+      if (firstTried) {
+        for (const fallbackModel of fallbackPool) {
+          if (fallbackModel === firstTried) continue;
+          evaluation = yield* evaluateDebate(
+            spec,
+            allExchangeText,
+            round,
+            leaderModelId,
+            llm,
+            costAware,
+            fallbackModel,
+            debateLanguage,
+          );
+          if (evaluation) break;
+        }
+      }
+    }
 
     if (evaluation) {
       if (typeof evaluation.evidenceDensity === "number") {
@@ -1058,6 +1295,32 @@ export async function* runDebate(
       }
       const metCount = evaluation.criteriaStatus.filter((c) => c.met).length;
       const total = evaluation.criteriaStatus.length;
+      // B2/B3: project this round's evaluation onto the PINNED spec criteria
+      // (index-aligned, best-effort text match as a fallback) and push it to the
+      // rail so the user sees live ✓/○ against the exact outcome they saw — not
+      // an opaque "N/M". Only when the spec has real pinned criteria.
+      const hasPinned = spec.successCriteria.length > 0;
+      const aligned = hasPinned ? alignCriteriaMet(spec.successCriteria, evaluation.criteriaStatus) : [];
+      // Count of pinned criteria still open this round — used by both auto-remedy
+      // and the interactive escalation boundaries below.
+      const pinnedUnmet = hasPinned ? aligned.filter((m) => !m).length : 0;
+      if (hasPinned) {
+        yield {
+          type: "council_meta" as const,
+          councilMeta: { criteriaMet: aligned },
+        };
+        lastCriteriaMet = aligned; // B5: feed next round's directive + final unmet-flag
+        // B4: track progress against the PINNED criteria. A round that meets a new
+        // criterion resets the stuck counter; a round that meets nothing new
+        // increments it. Auto-remedy reads these to decide extend-vs-give-up.
+        const pinnedMetNow = aligned.filter(Boolean).length;
+        if (pinnedMetNow > bestCriteriaMetCount) {
+          bestCriteriaMetCount = pinnedMetNow;
+          roundsSinceProgress = 0;
+        } else {
+          roundsSinceProgress++;
+        }
+      }
       yield phaseDone({
         phaseId: evalPhaseId,
         kind: "evaluation",
@@ -1065,15 +1328,44 @@ export async function* runDebate(
         startedAt: evalStart,
         detail: `${metCount}/${total} criteria met · ${evaluation.reason.slice(0, 80)}`,
       });
+      // B5: post-round VERDICT. With pinned criteria + conductor on, list each
+      // criterion's ✓/○ and the focus handed to the next round; otherwise fall
+      // back to the plain one-line eval (pre-B5 behavior).
+      const verdictText =
+        leaderConductorEnabled() && hasPinned
+          ? buildLeaderVerdict(spec.successCriteria, aligned, evaluation.reason, evaluation.nextRoundFocus)
+          : `${metCount}/${total} criteria met — ${evaluation.reason}`;
       yield {
         type: "council_message" as const,
         councilMessage: {
           kind: "leader" as const,
+          phase: leaderConductorEnabled() && hasPinned ? ("verdict" as const) : undefined,
           speaker: { role: "Leader", model: leaderModelId },
           round,
-          text: `${metCount}/${total} criteria met — ${evaluation.reason}`,
+          text: verdictText,
         },
       };
+
+      // P5 — guaranteed done record for this round. Decision reflects the
+      // LEADER's intent (extend / continue / stop); a later code-side convergence
+      // override that stops the loop is a separate mechanism and doesn't rewrite
+      // the leader's stated call. Carry the leader's nextRoundFocus to the next
+      // round's topic.
+      const leaderDecision =
+        typeof evaluation.extendRounds === "number" && evaluation.extendRounds > 0
+          ? ("extend" as const)
+          : evaluation.shouldContinue
+            ? ("continue" as const)
+            : ("stop" as const);
+      yield roundRec("done", {
+        criteriaMet: metCount,
+        criteriaTotal: total,
+        leaderReason: evaluation.reason,
+        leaderDecision,
+        nextRoundFocus: evaluation.nextRoundFocus,
+        directive: roundDirective,
+      });
+      nextTopic = evaluation.nextRoundFocus;
 
       if (evaluation.needsResearch && evaluation.researchQuery) {
         const midPhaseId = `phase:mid-research-${round}`;
@@ -1138,11 +1430,40 @@ export async function* runDebate(
       }
 
       if (!evaluation.shouldContinue) {
-        yield {
-          type: "content",
-          content: `\n> Leader decided: debate sufficient at round ${round}.\n`,
-        };
-        break;
+        // B4 escalation site 1 — the leader is declaring the debate done. If
+        // pinned criteria are still unmet and we have an interactive channel,
+        // ask the user before accepting a partial outcome (the "3/5 → stop,
+        // synthesize as if done" gap). An "extend" cancels the stop and runs
+        // more rounds; accept/rescope confirm it.
+        if (
+          config.respondToQuestion &&
+          leaderEscalationEnabled() &&
+          !escalated &&
+          hasPinned &&
+          pinnedUnmet > 0 &&
+          // Respect the leader's own verdict: if it declared every criterion met,
+          // don't second-guess it with the fuzzy per-criterion alignment (which
+          // can miss a match and show a false unmet). Escalate only on a genuine
+          // stop-with-unmet the leader itself signalled.
+          !evaluation.allCriteriaMet
+        ) {
+          const openList = spec.successCriteria.filter((_, i) => !aligned[i]).map((c) => shortCriterion(c, 56));
+          const outcome = yield* escalateStop(roundsSinceProgress >= 2, pinnedUnmet, openList);
+          if (outcome === "extend") {
+            userExtendedThisRound = true;
+            // Fall through — the loop runs the user-granted rounds. Skip the
+            // convergence + auto-remedy stop-logic below (both assume a natural
+            // stop); the inter-round summary still runs.
+          } else {
+            break;
+          }
+        } else {
+          yield {
+            type: "content",
+            content: `\n> Leader decided: debate sufficient at round ${round}.\n`,
+          };
+          break;
+        }
       }
 
       // Code-side convergence override. When the latest round had ≥80% of
@@ -1159,7 +1480,9 @@ export async function* runDebate(
       const lockRatio = convergenceRatio(lastRoundTurns);
       const skepticClean = Array.isArray(evaluation.unresolvedPoints) && evaluation.unresolvedPoints.length === 0;
       const canExitEarly = (round >= 2 && lockRatio >= 0.8) || (round === 1 && lockRatio >= 0.8 && skepticClean);
-      if (canExitEarly) {
+      // A user "extend" at this round's stop boundary overrides a convergence
+      // break — the user explicitly asked for more rounds to close open criteria.
+      if (canExitEarly && !userExtendedThisRound) {
         const reason =
           round === 1
             ? `round 1 converged early (lock=${Math.round(lockRatio * 100)}%, no unresolved points)`
@@ -1171,25 +1494,62 @@ export async function* runDebate(
         break;
       }
 
-      // Leader asked for more rounds and we still have ceiling headroom.
-      // Both the absolute ceiling AND the kind-specific cap apply — leader
-      // can't override an implementation_plan cap of 3 by asking for 4.
-      if (
-        round === maxRounds &&
-        typeof evaluation.extendRounds === "number" &&
-        evaluation.extendRounds > 0 &&
-        maxRounds < effectiveCeiling
-      ) {
-        const requested = Math.max(1, Math.floor(evaluation.extendRounds));
+      // Budget-exhaustion remedy (B4). At the last planned round with ceiling
+      // headroom, two triggers extend the debate:
+      //   1. the leader explicitly asked (extendRounds > 0), OR
+      //   2. auto-remedy — pinned criteria are still unmet AND progress is being
+      //      made (a new criterion was met within the last 2 rounds).
+      // "Done = all pinned criteria met"; the ceiling is a leader-managed budget,
+      // not a give-up at the initial plan. A stuck criterion (no progress for 2
+      // rounds) fails the guard so we don't burn the ceiling chasing it — the
+      // closing verdict below then escalates it as stuck. Both the absolute
+      // ceiling AND the kind cap still apply (leader can't push an
+      // implementation_plan cap of 3 to 4).
+      const leaderAskedExtend = typeof evaluation.extendRounds === "number" && evaluation.extendRounds > 0;
+      const autoRemedy = leaderAutoRemedyEnabled() && autoRemedyWantsExtend(pinnedUnmet, roundsSinceProgress);
+      if (round === maxRounds && maxRounds < effectiveCeiling && (leaderAskedExtend || autoRemedy)) {
+        const requested = leaderAskedExtend ? Math.max(1, Math.floor(evaluation.extendRounds as number)) : 1;
         const newMax = Math.min(effectiveCeiling, maxRounds + requested);
         const grantedExtra = newMax - maxRounds;
         if (grantedExtra > 0) {
+          const why = leaderAskedExtend
+            ? "unresolved points remain"
+            : `${pinnedUnmet} pinned criteri${pinnedUnmet === 1 ? "on" : "a"} still unmet`;
           yield {
             type: "content",
-            content: `\n> Leader extending debate by ${grantedExtra} round${grantedExtra === 1 ? "" : "s"} (now ${newMax}/${ABSOLUTE_MAX_ROUNDS}) — unresolved points remain.\n`,
+            content: `\n> Leader extending debate by ${grantedExtra} round${grantedExtra === 1 ? "" : "s"} (now ${newMax}/${ABSOLUTE_MAX_ROUNDS}) — ${why}.\n`,
           };
           maxRounds = newMax;
+          // Steer the extra round at the open criteria when auto-remedy fired and
+          // the leader set no focus of its own.
+          if (autoRemedy && !leaderAskedExtend && !nextTopic) {
+            const openList = spec.successCriteria.filter((_, i) => !aligned[i]).map((c) => shortCriterion(c, 48));
+            nextTopic = `Close the unmet criteria: ${openList.join("; ")}`;
+          }
         }
+      }
+
+      // B4 escalation site 2 — the leader wanted to keep going but we're at the
+      // last round and auto-remedy couldn't extend (stuck, or the ceiling is
+      // reached). Rather than let the loop exit into a diagnostic-only synthesis,
+      // ask the user. An "extend" bumps maxRounds so the loop continues; accept/
+      // rescope let it exit naturally. `!escalated` already prevents a double-ask
+      // if site 1 fired this round.
+      if (
+        round === maxRounds &&
+        config.respondToQuestion &&
+        leaderEscalationEnabled() &&
+        !escalated &&
+        hasPinned &&
+        !evaluation.allCriteriaMet &&
+        escalationWanted({
+          pinnedUnmet,
+          stuck: roundsSinceProgress >= 2,
+          atCeiling: maxRounds >= effectiveCeiling,
+        })
+      ) {
+        const openList = spec.successCriteria.filter((_, i) => !aligned[i]).map((c) => shortCriterion(c, 56));
+        yield* escalateStop(roundsSinceProgress >= 2, pinnedUnmet, openList);
       }
     } else {
       yield phaseDone({
@@ -1199,6 +1559,36 @@ export async function* runDebate(
         startedAt: evalStart,
         detail: "evaluation unavailable — continuing",
       });
+      // P5 — eval parse failed: still close the round with a done record so the
+      // grouped transcript never shows a round stuck "running". Do NOT set
+      // leaderReason here — the "eval-unavailable" DECISION_LABEL already conveys
+      // it, and a redundant reason line rendered the message twice on the card
+      // (observed session dd34c59c63e9).
+      yield roundRec("done", { leaderDecision: "eval-unavailable", directive: roundDirective });
+      nextTopic = undefined;
+
+      // F2 — final-round eval-unavailable must not silently drop an unmet
+      // outcome. The eval failed to parse even after the cross-provider fallback
+      // loop, so there is no fresh criteria status; fall back to the last
+      // successful round's alignment (lastCriteriaMet), treating an empty history
+      // as all-unmet. If this is the last round and we have an interactive
+      // channel with criteria still open, consult the user (same B4 escalation)
+      // instead of proceeding straight to synthesis. stuck=true: a broken eval
+      // gives no progress signal, so the diagnostic frames the criteria as
+      // needing evidence/rescope rather than "more debate".
+      if (
+        round === maxRounds &&
+        config.respondToQuestion &&
+        leaderEscalationEnabled() &&
+        !escalated &&
+        spec.successCriteria.length > 0
+      ) {
+        const unmetIdx = spec.successCriteria.map((_, i) => i).filter((i) => lastCriteriaMet[i] !== true);
+        if (unmetIdx.length > 0) {
+          const openList = unmetIdx.map((i) => shortCriterion(spec.successCriteria[i], 56));
+          yield* escalateStop(true, unmetIdx.length, openList);
+        }
+      }
     }
 
     // Generate inter-round summary
@@ -1212,7 +1602,7 @@ export async function* runDebate(
       });
       try {
         const allEx = [...exchangeLogs.values()].flat().slice(-6).join("\n\n");
-        const { system, prompt } = buildRoundSummaryPrompt(allEx, spec.problemStatement, round);
+        const { system, prompt } = buildRoundSummaryPrompt(allEx, spec.problemStatement, round, debateLanguage);
         // Round summary is mechanical condensation — drop to "fast" tier on the leader's
         // provider when cost-aware. Fall back to the first participant's model otherwise
         // (matches the pre-cost-aware behavior).
@@ -1248,6 +1638,64 @@ export async function* runDebate(
         });
       }
     }
+
+    // C — snapshot the fully-completed round (transcript + summary persisted) so
+    // a break before synthesis resumes from round+1 instead of round 1. roundCount
+    // was set to `round` at the top of this iteration. Non-fatal on write failure.
+    if (config.checkpointDir) {
+      await writeDebateCheckpoint(
+        config.checkpointDir,
+        buildDebateCheckpoint({
+          problemStatement: spec.problemStatement,
+          roundCount,
+          maxRounds,
+          exchangeLogs,
+          runningSummary,
+          researchFindings,
+          active,
+          archive,
+          lastCriteriaMet,
+          bestCriteriaMetCount,
+          roundsSinceProgress,
+          nextTopic,
+          savedAt: new Date().toISOString(),
+        }),
+      );
+    }
+  }
+
+  // B4 leader remedy: the debate has ended — via leader stop, convergence, or
+  // budget exhaustion (after auto-remedy exhausted the ceiling). If pinned
+  // criteria remain unmet, the leader emits a visible closing verdict that
+  // DIAGNOSES why it stopped and gives an actionable next move, instead of
+  // letting synthesis proceed as if the outcome were fully achieved (the "3/5 →
+  // stop, synthesize as if done" gap). When the user was consulted (B4
+  // escalation) and chose to accept/rescope, the remedy reflects that decision
+  // instead of a generic "re-run" shrug.
+  if (leaderConductorEnabled() && spec.successCriteria.length > 0) {
+    const unmet = spec.successCriteria.filter((_, i) => !lastCriteriaMet[i]);
+    if (unmet.length > 0) {
+      const atCeiling = maxRounds >= effectiveCeiling;
+      const stuck = roundsSinceProgress >= 2;
+      const remedy =
+        escalation?.action === "accept"
+          ? "you accepted these as open — synthesis proceeds with them noted as unresolved."
+          : escalation?.action === "rescope"
+            ? "you asked to narrow the scope — re-run the council on just these criteria with a tighter problem statement."
+            : diagnoseUnmetRemedy({ stuck, atCeiling, effectiveCeiling, roundsSinceProgress });
+      yield {
+        type: "council_message" as const,
+        councilMessage: {
+          kind: "leader" as const,
+          phase: "verdict" as const,
+          speaker: { role: "Leader", model: leaderModelId },
+          text:
+            `Debate ended with ${unmet.length} of ${spec.successCriteria.length} criteri` +
+            `${unmet.length === 1 ? "on" : "a"} still unmet: ${unmet.map((c) => shortCriterion(c, 56)).join("; ")}. ` +
+            `Synthesis notes these as open — ${remedy}`,
+        },
+      };
+    }
   }
 
   // Compute cumulative evidence density across the WHOLE debate, not just
@@ -1269,6 +1717,13 @@ export async function* runDebate(
   // (session de4bafe5ecb7: substantive debate, zero tags → misleading 0%).
   const finalTaggedClaims = countCitations(fullExchangeText) + countUnverified(fullExchangeText);
 
+  // C — the debate reached synthesis (normal completion or user-cancel fall-
+  // through), so the checkpoint is obsolete. A mid-round THROW never reaches
+  // here, leaving the checkpoint for the loop-driver retry / resume path.
+  if (config.checkpointDir) {
+    await deleteDebateCheckpoint(config.checkpointDir);
+  }
+
   return {
     spec,
     exchangeLogs,
@@ -1279,6 +1734,11 @@ export async function* runDebate(
     archive,
     finalEvidenceDensity,
     finalTaggedClaims,
+    escalation,
+    // F1 — expose the last successful round's criteria alignment so the
+    // post-debate card can frame an unmet outcome as provisional. Undefined when
+    // no round eval ever produced a criteria status (card treats as all-unmet).
+    finalCriteriaMet: lastCriteriaMet.length > 0 ? lastCriteriaMet : undefined,
   };
 }
 
@@ -1321,21 +1781,39 @@ async function* evaluateDebate(
   leaderModelId: string,
   llm: CouncilLLM,
   costAware = false,
+  // When set, evaluate with this exact model instead of the cost-tier pick — used
+  // by the call-site fallback loop to re-run a round eval on a healthy panel model
+  // after the leader's provider rejected the eval payload (Console Go "Upstream
+  // request failed" on glm/kimi; observed session dd34c59c63e9).
+  modelOverride?: string,
+  /** Feature B — resolved council debate language (undefined → English). */
+  debateLanguage?: string,
 ): AsyncGenerator<StreamChunk, LeaderEvaluation | null, unknown> {
   try {
-    const { system, prompt } = buildLeaderEvaluationPrompt({ spec, exchangeLogs: exchangeText, round });
-    const modelId = pickCouncilTaskModel("evaluate_round", leaderModelId, costAware);
+    const { system, prompt } = buildLeaderEvaluationPrompt({
+      spec,
+      exchangeLogs: exchangeText,
+      round,
+      language: debateLanguage,
+    });
+    const modelId = modelOverride ?? pickCouncilTaskModel("evaluate_round", leaderModelId, costAware);
     const raw = yield* tracedGenerate(llm, {
       phase: "evaluate",
-      label: `Leader evaluating round ${round}`,
+      label: modelOverride
+        ? `Leader evaluating round ${round} (fallback: ${modelOverride})`
+        : `Leader evaluating round ${round}`,
       modelId,
       system,
       prompt,
-      maxTokens: 1024,
+      // Raised from 1024: nextRoundFocus is now the FIRST schema field, and the
+      // whole eval is parsed by a single JSON.parse that returns null on any
+      // truncation — a tight budget could clip the JSON and null the round's
+      // outcome. 1536 keeps the focus line + criteria array intact.
+      maxTokens: 1536,
     });
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (match) {
-      const parsed = JSON.parse(match[0]) as Partial<LeaderEvaluation>;
+    const jsonStr = extractEvalJson(raw);
+    if (jsonStr) {
+      const parsed = JSON.parse(jsonStr) as Partial<LeaderEvaluation>;
 
       const citationCount = countCitations(exchangeText);
       const evidenceDensity = computeEvidenceDensity(exchangeText);
@@ -1367,12 +1845,341 @@ async function* evaluateDebate(
         evidenceDensity,
         disagreementResolved,
         extendRounds,
+        nextRoundFocus:
+          typeof (parsed as { nextRoundFocus?: unknown }).nextRoundFocus === "string" &&
+          (parsed as { nextRoundFocus: string }).nextRoundFocus.trim()
+            ? (parsed as { nextRoundFocus: string }).nextRoundFocus.trim()
+            : undefined,
       };
     }
-  } catch {
-    // Continue debate if evaluation fails
+    // F3a — no JSON object found in the model output. Log a diagnosable snippet
+    // (No-Silent-Catch) before falling through to null so eval-unavailable is
+    // never a black box — earlier this returned null silently and the only signal
+    // was the "evaluation unavailable" round label.
+    console.warn(
+      `[council] round-${round} eval: no JSON object in output from ${modelOverride ?? leaderModelId} ` +
+        `(${raw.length} chars): ${raw.slice(0, 160).replace(/\s+/g, " ")}`,
+    );
+  } catch (err) {
+    // F3a — parse or generate failure. Log with context instead of swallowing:
+    // which model, which round, the message. The debate still continues (returns
+    // null → eval-unavailable), but the failure is now diagnosable remotely.
+    console.error(
+      `[council] round-${round} eval failed on ${modelOverride ?? leaderModelId}: ${(err as Error)?.message}`,
+      { round, stack: (err as Error)?.stack?.split("\n").slice(0, 3) },
+    );
   }
   return null;
+}
+
+/**
+ * F3b — robustly extract the leader-evaluation JSON object from a model's raw
+ * output. Replaces a greedy `/\{[\s\S]*\}/` match that could swallow prose,
+ * multiple objects, or a trailing partial object into an unparseable span.
+ *
+ * Strategy: strip code fences, then brace-scan and return the LAST fully
+ * balanced top-level `{…}` object (the eval schema is emitted last, after any
+ * chain-of-thought prose). Returns null only when no balanced object exists.
+ * Deterministic, no LLM call. Braces inside string values are rare in the
+ * machine-emitted eval payload; a real tokenizer would be overkill here.
+ */
+export function extractEvalJson(raw: string): string | null {
+  if (!raw) return null;
+  const unfenced = raw.replace(/```(?:json)?/gi, "").replace(/```/g, "");
+  let best: string | null = null;
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < unfenced.length; i++) {
+    const ch = unfenced[i];
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}") {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && start >= 0) best = unfenced.slice(start, i + 1);
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Format a speaker list as newline-joined "Name — lens" rows for the composing
+ * placeholder (A: live debate preview). Prefers the concrete `focus`, falls back
+ * to the one-sentence `lens`, then to bare name. Dedups identical rows so a
+ * speaker in multiple pairs renders once. Returns undefined when nothing useful
+ * is available so the UI falls back to label-only.
+ */
+/**
+ * Project a leader evaluation's `criteriaStatus` onto the PINNED spec criteria,
+ * returning a boolean[] index-aligned to `pinned` (B2/B3). The eval prompt asks
+ * for one entry per criterion in order, so index alignment is the primary path;
+ * when the model drifts (wrong count/order) we fall back to a case-insensitive
+ * substring match either direction, defaulting unmatched criteria to not-met so
+ * a hallucinated "all met" never silently marks an untouched criterion done.
+ */
+export function alignCriteriaMet(pinned: string[], status: Array<{ criterion?: string; met?: boolean }>): boolean[] {
+  const aligned = status.length === pinned.length;
+  return pinned.map((crit, i) => {
+    if (aligned) return status[i]?.met === true;
+    const norm = crit.trim().toLowerCase();
+    const hit = status.find((s) => {
+      const sc = (s.criterion ?? "").trim().toLowerCase();
+      return sc.length > 0 && (sc.includes(norm) || norm.includes(sc));
+    });
+    return hit?.met === true;
+  });
+}
+
+/**
+ * B5 leader-conductor visibility. Default ON; opt out with
+ * MUONROI_LEADER_CONDUCTOR=0 (fallback = pre-B5 behavior, no directive/verdict
+ * messages — keeps headless/legacy transcripts unchanged).
+ */
+export function leaderConductorEnabled(): boolean {
+  return process.env.MUONROI_LEADER_CONDUCTOR !== "0";
+}
+
+/**
+ * B4 leader auto-remedy. When pinned criteria remain unmet at the round budget's
+ * end, the leader auto-extends toward them (up to the hard ceiling) instead of
+ * stopping at the initial plan — "done = all criteria met", ceiling is a managed
+ * budget. Default ON under the conductor; opt out with
+ * MUONROI_COUNCIL_AUTO_REMEDY=0 (fallback = only leader-requested extensions).
+ */
+export function leaderAutoRemedyEnabled(): boolean {
+  return leaderConductorEnabled() && process.env.MUONROI_COUNCIL_AUTO_REMEDY !== "0";
+}
+
+/**
+ * B4: does auto-remedy want to extend the budget this round? True while pinned
+ * criteria remain unmet AND progress is still being made (a new criterion was
+ * met within the last 2 rounds). A stuck debate (roundsSinceProgress ≥ 2) returns
+ * false so the ceiling isn't burned chasing a criterion that isn't moving.
+ */
+export function autoRemedyWantsExtend(pinnedUnmet: number, roundsSinceProgress: number): boolean {
+  return pinnedUnmet > 0 && roundsSinceProgress < 2;
+}
+
+/**
+ * B4: the diagnostic closing-remedy line for a debate that ended with unmet
+ * pinned criteria — distinguishes a stuck criterion (needs evidence/rescope)
+ * from a genuine ceiling hit (needs a higher budget) from an ordinary early
+ * stop, so the leader's final word is an actionable next move, not a shrug.
+ */
+export function diagnoseUnmetRemedy(opts: {
+  stuck: boolean;
+  atCeiling: boolean;
+  effectiveCeiling: number;
+  roundsSinceProgress: number;
+}): string {
+  if (opts.stuck) {
+    return (
+      `these made no progress across the last ${opts.roundsSinceProgress} rounds — ` +
+      `they likely need external evidence (research) or a narrower scope, not more debate.`
+    );
+  }
+  if (opts.atCeiling) {
+    return (
+      `the debate hit its ${opts.effectiveCeiling}-round ceiling with these open — ` +
+      `re-run with a higher round budget or split the scope.`
+    );
+  }
+  return `re-run with an extended round budget or a narrower scope to close them.`;
+}
+
+/** Extra rounds a user "extend" grants — can push past effectiveCeiling, never past ABSOLUTE_MAX_ROUNDS. */
+const ESCALATION_EXTEND_ROUNDS = 2;
+
+/**
+ * B4 interactive escalation. When the debate is about to stop with pinned
+ * criteria unmet AND auto-remedy can't help (stuck / at ceiling), hand the
+ * decision to the user instead of silently synthesizing a partial outcome.
+ * Default ON under the conductor; opt out with MUONROI_COUNCIL_ESCALATE=0
+ * (fallback = diagnostic closing verdict only, no askcard).
+ */
+export function leaderEscalationEnabled(): boolean {
+  return leaderConductorEnabled() && process.env.MUONROI_COUNCIL_ESCALATE !== "0";
+}
+
+/**
+ * B4: should we interrupt to ask the user at this stop boundary? True only when
+ * pinned criteria remain unmet AND the leader can no longer self-remedy — it is
+ * stuck (no progress for ≥2 rounds) or has hit the round ceiling. While progress
+ * is still being made under the ceiling, auto-remedy handles it silently and we
+ * don't nag the user.
+ */
+export function escalationWanted(opts: { pinnedUnmet: number; stuck: boolean; atCeiling: boolean }): boolean {
+  return opts.pinnedUnmet > 0 && (opts.stuck || opts.atCeiling);
+}
+
+/**
+ * B4: the three escalation choices. When the debate is already at the absolute
+ * safety ceiling, the "extend" option degrades to a disabled-looking accept
+ * (label says so) — we never let the user push past ABSOLUTE_MAX_ROUNDS.
+ */
+export function buildEscalationOptions(unmetCount: number, atAbsoluteMax: boolean): CouncilQuestionOption[] {
+  const noun = `${unmetCount} unmet criteri${unmetCount === 1 ? "on" : "a"}`;
+  return [
+    atAbsoluteMax
+      ? {
+          label: "Extend (unavailable — at hard ceiling)",
+          description: `The debate already reached the ${ABSOLUTE_MAX_ROUNDS}-round safety ceiling; more rounds aren't allowed. Picking this accepts the outcome as-is.`,
+          value: "escalate_accept",
+          kind: "choice" as const,
+        }
+      : {
+          label: `Extend ${ESCALATION_EXTEND_ROUNDS} more rounds`,
+          description: `Push past the round budget to keep working the ${noun}.`,
+          value: "escalate_extend",
+          kind: "choice" as const,
+        },
+    {
+      label: "Accept as-is",
+      description: `Proceed to synthesis with the ${noun} noted as open.`,
+      value: "escalate_accept",
+      kind: "choice" as const,
+    },
+    {
+      label: "Narrow the scope",
+      description: "Stop and re-scope — synthesis notes the open criteria for a narrower follow-up.",
+      value: "escalate_rescope",
+      kind: "choice" as const,
+    },
+  ];
+}
+
+/**
+ * B4: emit the escalation askcard and resolve the user's choice. Yields the
+ * council_question chunk (rendered by the same consumer as clarifier/post-debate
+ * askcards), awaits the responder, echoes the choice, and returns the decision.
+ * `grantedRounds` is pre-computed here (bounded by ABSOLUTE_MAX_ROUNDS) so the
+ * caller only mutates loop state. Any unmatched / empty answer is treated as
+ * "accept" — never a silent hang.
+ */
+export async function* runEscalationPrompt(opts: {
+  respondToQuestion: QuestionResponder;
+  openCriteria: string[];
+  pinnedUnmet: number;
+  stuck: boolean;
+  atAbsoluteMax: boolean;
+  currentMax: number;
+}): AsyncGenerator<StreamChunk, { action: "extend" | "accept" | "rescope"; grantedRounds: number }, unknown> {
+  const { respondToQuestion, openCriteria, pinnedUnmet, stuck, atAbsoluteMax, currentMax } = opts;
+  const noun = `${pinnedUnmet} criteri${pinnedUnmet === 1 ? "on" : "a"}`;
+  const openList = openCriteria.join("; ");
+  const questionId = randomUUID();
+  yield {
+    type: "council_question" as const,
+    content: `**Debate stalled with ${noun} still unmet.**\n> Open: ${openList}`,
+    councilQuestion: {
+      questionId,
+      // Reuse the existing post-debate phase — same askcard renderer, no new UI.
+      phase: "post-debate" as const,
+      question:
+        `The debate reached its ${stuck ? "progress limit" : "round ceiling"} with ${noun} still unmet. ` +
+        `How do you want to proceed?`,
+      context: `Open criteria: ${openList}`,
+      isRequired: false,
+      options: buildEscalationOptions(pinnedUnmet, atAbsoluteMax),
+      defaultIndex: 0,
+    },
+  } as StreamChunk;
+
+  let answer = "";
+  try {
+    answer = (await respondToQuestion(questionId))?.trim() ?? "";
+  } catch (err) {
+    // A failed responder must not hang or crash the debate — treat as accept and
+    // log so a broken UI channel is diagnosable (No-Silent-Catch).
+    console.error(`[council] escalation responder failed — accepting outcome as-is: ${(err as Error)?.message}`, {
+      questionId,
+      stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+    });
+    answer = "";
+  }
+
+  if (answer === "escalate_extend" && !atAbsoluteMax) {
+    const newMax = Math.min(ABSOLUTE_MAX_ROUNDS, currentMax + ESCALATION_EXTEND_ROUNDS);
+    const grantedRounds = Math.max(0, newMax - currentMax);
+    if (grantedRounds > 0) {
+      yield {
+        type: "content",
+        content: `\n> User extended debate by ${grantedRounds} round${grantedRounds === 1 ? "" : "s"} (now ${newMax}/${ABSOLUTE_MAX_ROUNDS}) — pushing past the budget to close the open criteria.\n`,
+      };
+      return { action: "extend", grantedRounds };
+    }
+    // No headroom left even though the option showed — fall through to accept.
+  }
+  if (answer === "escalate_rescope") {
+    yield {
+      type: "content",
+      content: `\n  ↳ Narrow the scope — ending the debate; synthesis will note the open criteria for a re-scoped follow-up.\n`,
+    };
+    return { action: "rescope", grantedRounds: 0 };
+  }
+  yield {
+    type: "content",
+    content: `\n  ↳ Accepted the current outcome with ${noun} open.\n`,
+  };
+  return { action: "accept", grantedRounds: 0 };
+}
+
+/** One-line criterion label for directive/verdict bodies. */
+export function shortCriterion(c: string, max = 64): string {
+  const t = c.trim().replace(/\s+/g, " ");
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+/**
+ * B5: build the leader's pre-round DIRECTIVE body — the round goal plus the
+ * criteria still unmet going into this round. `metSoFar` is the prior round's
+ * aligned criteriaMet (empty before round 1 → everything is unmet).
+ */
+export function buildLeaderDirective(round: number, criteria: string[], metSoFar: boolean[], focus?: string): string {
+  const pending = criteria.filter((_, i) => !metSoFar[i]);
+  const lines: string[] = [];
+  const trimmedFocus = focus?.trim();
+  lines.push(
+    trimmedFocus
+      ? `Focus: ${trimmedFocus}`
+      : round === 1
+        ? "Establish concrete evidence for every outcome criterion."
+        : "Drive the remaining criteria to done.",
+  );
+  lines.push(
+    pending.length > 0
+      ? `Unmet (${pending.length}/${criteria.length}): ${pending.map((c) => shortCriterion(c, 56)).join("; ")}`
+      : "All criteria met so far — pressure-test the weakest before closing.",
+  );
+  return lines.join("\n");
+}
+
+/**
+ * B5: build the leader's post-round VERDICT body — per-criterion ✓/○ against the
+ * pinned outcome, the leader's reason, and the focus it hands to the next round.
+ */
+export function buildLeaderVerdict(criteria: string[], met: boolean[], reason: string, nextFocus?: string): string {
+  const metCount = met.filter(Boolean).length;
+  const lines: string[] = [`${metCount}/${criteria.length} criteria met — ${reason.trim()}`];
+  criteria.forEach((c, i) => {
+    lines.push(`${met[i] ? "✓" : "○"} ${shortCriterion(c, 56)}`);
+  });
+  const nf = nextFocus?.trim();
+  if (nf && metCount < criteria.length) lines.push(`→ Next: ${nf}`);
+  return lines.join("\n");
+}
+
+export function formatSpeakerRoster(list: Array<{ stance?: DebateStance; model: string }>): string | undefined {
+  const rows: string[] = [];
+  for (const s of list) {
+    const name = s.stance?.name ?? s.model;
+    const angle = s.stance?.focus?.trim() || s.stance?.lens?.trim();
+    const row = angle ? `${name} — ${angle}` : name;
+    if (row && !rows.includes(row)) rows.push(row);
+  }
+  return rows.length > 0 ? rows.join("\n") : undefined;
 }
 
 function countCitations(text: string): number {

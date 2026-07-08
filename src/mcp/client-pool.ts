@@ -282,11 +282,11 @@ export async function acquireMcpTools(servers: McpServerConfig[], opts?: McpBuil
  * evicted by getOrConnect so a real turn retries.
  */
 export async function warmMcpClients(servers: McpServerConfig[], syncAndLog = false): Promise<void> {
-  const validServers = servers.filter(s => s.enabled && validateMcpServerConfig(s).ok);
+  const validServers = servers.filter((s) => s.enabled && validateMcpServerConfig(s).ok);
   if (syncAndLog && validServers.length > 0) {
     console.log(`[MCP] Warming up ${validServers.length} server(s)...`);
   }
-  
+
   const promises = validServers.map(async (s) => {
     try {
       await getOrConnect(s);

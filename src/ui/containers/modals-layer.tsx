@@ -1,3 +1,4 @@
+import type { ResumeEntry } from "../../types/index.js";
 import { formatSubagentName } from "../../utils/subagent-display.js";
 import { SubagentEditorModal, SubagentsBrowserModal } from "../agents-modal.js";
 import { CONNECT_CHANNELS } from "../constants.js";
@@ -63,7 +64,7 @@ export interface ModalsLayerProps {
   scheduleRows: any;
   scheduleSearchQuery: any;
   sessionPickerIndex: any;
-  sessionPickerList: any;
+  sessionPickerList: ResumeEntry[];
   showAgentsEditor: any;
   showAgentsModal: any;
   showApiKeyModal: any;

@@ -1,6 +1,12 @@
 import { beforeAll, describe, expect, test } from "vitest";
 import { loadCatalog } from "../../models/registry.js";
-import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../runtime.js";
+import {
+  __resetProviderFactoryRegistry,
+  createProviderFactory,
+  detectProviderForModel,
+  type ProviderFactory,
+  resolveModelRuntime,
+} from "../runtime.js";
 
 // Fake fixture value — kept outside the inline objects so the repo-wide
 // secret scanner doesn't trip on `apiKey: "..."` string literals.
@@ -66,6 +72,50 @@ describe("resolveModelRuntime", () => {
       apiKey: "sk-openai-test-key-long-enough-for-validation",
     });
     expect(() => resolveModelRuntime(pf.factory, "custom-model-xyz")).toThrow("not found in catalog");
+  });
+});
+
+// Layer 2: a sub-task path (e.g. compaction) that reuses the parent session's
+// factory with a model resolved for a DIFFERENT provider must not POST to the
+// wrong endpoint. resolveModelRuntime redirects to the model's own factory when
+// one was built this session, and otherwise falls back without crashing.
+describe("resolveModelRuntime factory/model provider guard", () => {
+  test("redirects to the model's own registered factory instead of the passed foreign one", () => {
+    __resetProviderFactoryRegistry();
+    // The correct gateway factory for opencode-routed models exists this session.
+    createProviderFactory("opencode-go", { apiKey: MOCK_KEY });
+    // A poisoned native factory stamped for deepseek: invoking it is the bug.
+    const poisoned = ((_id: string) => {
+      throw new Error("wrong (foreign) factory was invoked");
+    }) as ProviderFactory;
+    poisoned.providerId = "deepseek";
+
+    // opencode/deepseek-v4-flash belongs to provider opencode-go. The guard must
+    // swap the poisoned deepseek factory for the registered opencode-go one, so
+    // the poisoned factory is never called.
+    const runtime = resolveModelRuntime(poisoned, "opencode/deepseek-v4-flash");
+    expect(runtime.modelInfo?.provider).toBe("opencode-go");
+    expect(runtime.modelId).toBe("opencode/deepseek-v4-flash");
+    expect(runtime.model).toBeDefined();
+  });
+
+  test("falls back to the passed factory (no crash) when no factory for the model's provider exists", () => {
+    __resetProviderFactoryRegistry();
+    // Only a deepseek factory was built; none for opencode-go.
+    const ds = createProviderFactory("deepseek", { apiKey: MOCK_KEY });
+    // Mismatch with no registered substitute → keep the passed factory. Part 3's
+    // wire-id normalization keeps the request valid; the call must not throw.
+    const runtime = resolveModelRuntime(ds.factory, "opencode/deepseek-v4-flash");
+    expect(runtime.modelId).toBe("opencode/deepseek-v4-flash");
+    expect(runtime.model).toBeDefined();
+  });
+
+  test("no redirect when the passed factory already matches the model's provider", () => {
+    __resetProviderFactoryRegistry();
+    const ds = createProviderFactory("deepseek", { apiKey: MOCK_KEY });
+    const runtime = resolveModelRuntime(ds.factory, "deepseek-v4-flash");
+    expect(runtime.modelInfo?.provider).toBe("deepseek");
+    expect(runtime.model).toBeDefined();
   });
 });
 

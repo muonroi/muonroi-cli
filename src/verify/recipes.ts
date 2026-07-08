@@ -590,3 +590,19 @@ export function inferVerifyProjectProfile(
     recipe: recipeWithRuntime,
   };
 }
+
+/**
+ * Decides whether a deterministically-inferred recipe is trustworthy enough to
+ * hand to the sprint-1 verify gate INSTEAD of a null (which trips CB-3's
+ * "Recovery options" halt). It is trusted ONLY when the profiler recognized the
+ * ecosystem (`appKind !== "unknown"`) AND found at least one real test command —
+ * i.e. there is something concrete to verify against.
+ *
+ * This is the exact boundary `Orchestrator.detectVerifyRecipe` applies to its
+ * `inferVerifyProjectProfile(cwd)` fallback. Exported so the gate seam is
+ * covered by one unit test over the REAL predicate rather than a copy that can
+ * silently drift from production.
+ */
+export function shouldTrustDeterministicRecipe(recipe: Pick<VerifyRecipe, "appKind" | "testCommands">): boolean {
+  return recipe.appKind !== "unknown" && recipe.testCommands.length > 0;
+}

@@ -168,6 +168,13 @@ export interface FeedbackResult {
   verdict?: string;
   reason?: string;
   error?: string;
+  /**
+   * True when the brain was unreachable/transient and the verdict was durably
+   * enqueued for later delivery instead of lost. Callers treat this as success
+   * (the agent discharged its rating) and clear their recall ledger so the
+   * mandatory-rating gate cannot loop while the brain is down.
+   */
+  queued?: boolean;
 }
 
 /**
@@ -206,6 +213,13 @@ export async function feedbackEE(
       /* non-JSON error body — fall through to status-based handling */
     }
     if (!res.ok) {
+      // Transient server-side failures (5xx / rate limit / timeout) must not lose
+      // the verdict OR block the agent: queue it for later delivery. Hard client
+      // errors (bad collection, unknown id) are the caller's fault — surface them.
+      const transient = res.status >= 500 || res.status === 429 || res.status === 408;
+      if (transient && (await tryEnqueueFeedback(body))) {
+        return { ok: true, resolvedId: pointId, verdict: wire, reason, queued: true };
+      }
       return { ok: false, error: json?.error || text || `HTTP ${res.status}` };
     }
     const resolvedId = json?.resolvedId || pointId;
@@ -214,7 +228,24 @@ export async function feedbackEE(
   } catch (err) {
     const { logEeFailure, classifyEeError } = await import("../utils/ee-logger.js");
     logEeFailure("search.feedbackEE", classifyEeError(err), err as Error);
+    // Network-level failure (brain down, socket drop) — durably queue so the
+    // verdict survives and the agent's rating gate does not loop. Only report a
+    // hard failure if even the enqueue fails.
+    if (await tryEnqueueFeedback(body)) {
+      return { ok: true, resolvedId: pointId, verdict: wire, reason, queued: true };
+    }
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Enqueue a /api/feedback body to the offline queue; false if enqueue itself fails. */
+async function tryEnqueueFeedback(body: Record<string, unknown>): Promise<boolean> {
+  try {
+    const { enqueue } = await import("./offline-queue.js");
+    await enqueue({ endpoint: "/api/feedback", body, enqueuedAt: Date.now() });
+    return true;
+  } catch {
+    return false;
   }
 }
 

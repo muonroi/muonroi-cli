@@ -34,10 +34,13 @@ import {
   classifyViaBrain,
   getEmbeddingRaw,
   resetBridge,
+  resetWhoAmIBrainWarm,
   routeFeedback,
   routeModel,
   searchCollection,
+  warmWhoAmIFromBrain,
 } from "./bridge.js";
+import { resetWhoAmICache } from "./who-am-i.js";
 
 // ─── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -278,5 +281,34 @@ describe("bridge — config isolation (BRIDGE-03)", () => {
     // Valid signature: (task, context, runtime)
     const _validCall = () => routeModel("task", { key: "value" }, "bun");
     expect(_validCall).toBeDefined();
+  });
+});
+
+describe("bridge — warmWhoAmIFromBrain (thin-client boot contract)", () => {
+  beforeEach(() => {
+    resetWhoAmIBrainWarm();
+    resetWhoAmICache();
+    delete process.env.MUONROI_WHOAMI_BRAIN;
+  });
+  afterEach(() => {
+    resetWhoAmIBrainWarm();
+    resetWhoAmICache();
+    delete process.env.MUONROI_WHOAMI_BRAIN;
+  });
+
+  it("returns null immediately when disabled (MUONROI_WHOAMI_BRAIN=0)", async () => {
+    process.env.MUONROI_WHOAMI_BRAIN = "0";
+    await expect(warmWhoAmIFromBrain()).resolves.toBeNull();
+  });
+
+  it("is idempotent — a second call is a guarded no-op that never throws", async () => {
+    process.env.MUONROI_WHOAMI_BRAIN = "0";
+    await warmWhoAmIFromBrain();
+    await expect(warmWhoAmIFromBrain()).resolves.toBeNull();
+  });
+
+  it("is fail-open on a non-thin box (no server configured) — resolves null, never throws", async () => {
+    // No EE server / thin-client mode in this test env → warm degrades to null.
+    await expect(warmWhoAmIFromBrain()).resolves.toBeNull();
   });
 });

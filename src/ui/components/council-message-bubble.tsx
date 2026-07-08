@@ -1,5 +1,6 @@
 import type { CouncilMessage } from "../../types/index.js";
 import type { Theme } from "../theme.js";
+import { capBubbleBody } from "./bubble-body-guard.js";
 import { truncateCodeBlocks } from "./code-block-truncate.js";
 import type { RoleStyle } from "./role-palette.js";
 
@@ -59,6 +60,7 @@ export function buildQuoteLine(partnerLastText: string, partnerRole: string): st
  */
 export function CouncilMessageBubble({
   msg,
+  terminalCols,
   resolveStyle,
   partnerLastText,
   partnerRole,
@@ -67,7 +69,10 @@ export function CouncilMessageBubble({
   const style = resolveStyle(msg.speaker.role);
   const header = buildHeader(msg, style);
   const footer = buildFooter(msg);
-  const bodyText = truncateCodeBlocks(msg.text.trim());
+  // Guard the terminal wrapper against a pathological body (mega single-line /
+  // 100KB+ blob) that hard-freezes the shared render+loop thread. See
+  // bubble-body-guard.ts for the live root-cause trace.
+  const bodyText = capBubbleBody(truncateCodeBlocks(msg.text.trim()), terminalCols);
   const roundLabel = msg.round !== undefined ? `Round ${msg.round} · ` : "";
 
   return (

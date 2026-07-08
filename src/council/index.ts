@@ -3,8 +3,10 @@ import type { CouncilExperienceResult } from "../ee/council-bridge.js";
 import { queryExperience } from "../ee/council-bridge.js";
 import { judgeCouncilOutcome } from "../ee/judge.js";
 import { recordCouncilOutcome } from "../ee/phase-outcome.js";
+import { isTaskAwarePanelEnabled } from "../gsd/flags.js";
 import { runPipeline } from "../pil/pipeline.js";
 import type { PipelineContext } from "../pil/types.js";
+import { idealTrace } from "../product-loop/ideal-trace.js";
 import { appendSystemMessage, logInteraction } from "../storage/index.js";
 import { SessionStore } from "../storage/sessions.js";
 import type { StreamChunk } from "../types/index.js";
@@ -15,7 +17,8 @@ import { evaluateResearchNeed, runDebate } from "./debate.js";
 import { planDebate } from "./debate-planner.js";
 import { detectOutOfStackProposals, writeDecisionsLock } from "./decisions-lock.js";
 import { runExecution } from "./executor.js";
-import { resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
+import { buildCouncilCandidatePool, resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
+import { selectTaskAwarePanel } from "./panel-select.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
 import { runPlanning } from "./planner.js";
 import { runPreflight } from "./preflight.js";
@@ -90,6 +93,53 @@ export interface RunCouncilOptions {
    * "continue_session" instead of ending at the composer. Called at most once.
    */
   onPostDebateAction?: (action: string) => void;
+  /**
+   * When true, the leader-auto-promote note and the `Leader: … · Panel: …`
+   * summary are NOT emitted as inline `content` chunks — the same data still
+   * rides the structured `council_meta` patch, which the TUI Context Rail
+   * renders as ambient sidebar rows. Set by the TUI when the rail is active
+   * (`isContextRailEnabled()`) so the roster is not duplicated (rail + inline)
+   * and does not read as a decision announced before any task assessment.
+   * Railless sinks (headless, telegram) leave it unset → inline is preserved.
+   */
+  suppressInlineMeta?: boolean;
+  /**
+   * When true, the preflight "approve discussion plan" card is auto-approved
+   * (no user gate). Set by the sprint-planning call site (`runSprint`): the
+   * overall product plan + spec were already approved at the `/ideal` preflight,
+   * so re-gating each sprint's internal plan is a redundant rubber-stamp that
+   * strands the loop BEFORE implementation is ever reached. The meaningful gate
+   * — the post-sprint customer verdict — still fires, so the user reviews each
+   * sprint's OUTPUT, not its plan.
+   */
+  autoApprovePreflight?: boolean;
+  /**
+   * When true, skip the (redundant) research phase inside the debate. Set by the
+   * sprint-planning call site: CB-1 already researched the product at the
+   * product level; the per-sprint plan reuses that grounding (the ProductSpec is
+   * embedded in the council topic) instead of paying for a second research pass.
+   */
+  skipResearch?: boolean;
+  /**
+   * When true, this council runs INSIDE an automated per-sprint planning pass
+   * (`runSprint`) — there is no interactive user turn and no real `sessions` row
+   * (the caller passes the product-RUN id as sessionId). Two consequences:
+   *
+   *  1. The post-debate continuation menu is SUPPRESSED. Presenting "Refine /
+   *     Save & Exit / Lock plan" here strands the sprint before implementation —
+   *     the observed blocker: picking "Save & Exit" ended the run with NO Sprint
+   *     Implementation, and "Refine" (the default) looped back into more debate.
+   *     Instead the synthesized plan is auto-locked (equivalent to "Lock plan and
+   *     execute Sprint 1") and control returns to the sprint runner.
+   *  2. Session-scoped persistence (appendSystemMessage / logInteraction /
+   *     SessionStore.setStatus) is SKIPPED. Those tables FK-reference
+   *     `sessions(id)`; the product-run id has no session row, so the FIRST write
+   *     throws `FOREIGN KEY constraint failed` — which previously aborted the
+   *     entire persist block (silently, under a bare catch), taking
+   *     `writeDecisionsLock` down with it. Skipping them lets the file-based
+   *     decisions.lock artifact actually get written for sprint-runner injection.
+   */
+  sprintPlanningMode?: boolean;
 }
 
 export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis";
@@ -106,6 +156,26 @@ export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_f
  * generate_plan OPTION is still offered downstream; it's just no longer the
  * pre-selected default for non-build topics.
  */
+/**
+ * F1 — summarize how the debate did against its PINNED success criteria, so the
+ * post-debate card can distinguish "the criteria were actually met" from "the
+ * synthesis reads confidently" (evidence density). `metFlags` is index-aligned
+ * to `pinned` (from DebateState.finalCriteriaMet); a missing/short array treats
+ * the unmapped criteria as not-met. `inconclusive` is true when the spec had
+ * pinned criteria and at least one is still open — the caller ANDs this with
+ * `!synthesisFailed` before reframing the card.
+ */
+export function summarizeCriteriaOutcome(
+  pinned: string[],
+  metFlags: boolean[] | undefined,
+): { total: number; metCount: number; unmetLabels: string[]; inconclusive: boolean } {
+  const flags = metFlags ?? [];
+  const total = pinned.length;
+  const metCount = pinned.filter((_, i) => flags[i] === true).length;
+  const unmetLabels = pinned.filter((_, i) => flags[i] !== true);
+  return { total, metCount, unmetLabels, inconclusive: total > 0 && unmetLabels.length > 0 };
+}
+
 export function pickPostDebateRecommendation(input: {
   synthesisFailed: boolean;
   hasEmptySections: boolean;
@@ -113,11 +183,26 @@ export function pickPostDebateRecommendation(input: {
   confidenceLevel: "high" | "medium" | "low";
   hasPlan: boolean;
   outputKind: string;
+  /**
+   * F1 — count of pinned success criteria still unmet at debate end. When > 0 on
+   * a successful synthesis, the criteria bar the user actually set was NOT met, so
+   * we must not recommend committing (implement/plan/save) as if it were done —
+   * pressing the council to close the gap dominates the evidence-density and
+   * output-kind heuristics below.
+   */
+  criteriaUnmet?: number;
 }): { value: PostDebateAction; reason: string } {
   if (input.synthesisFailed) {
     return {
       value: "retry_synthesis",
       reason: "Re-run synthesis with a compact prompt — usually clears provider-timeout failures.",
+    };
+  }
+  if (input.criteriaUnmet && input.criteriaUnmet > 0) {
+    const n = input.criteriaUnmet;
+    return {
+      value: "ask_followup",
+      reason: `${n} success criteri${n === 1 ? "on" : "a"} still unmet — press the council to close ${n === 1 ? "it" : "them"} before treating this as settled.`,
     };
   }
   if (input.hasEmptySections) {
@@ -138,6 +223,65 @@ export function pickPostDebateRecommendation(input: {
         };
   }
   return { value: "save_exit", reason: "Outcome looks solid — save and move on." };
+}
+
+/**
+ * Decide whether — and with what prompt — the agent session should keep working
+ * after the post-debate askcard, given the action the user chose.
+ *
+ * Single source of truth for BOTH continuation callers (the `/council` slash path
+ * in orchestrator.runCouncilV2 and the auto-council path in tool-engine), which
+ * previously diverged: the slash path only continued on `continue_session`, while
+ * auto-council continued UNCONDITIONALLY with a fixed "Proceed with the recommended
+ * action items" prompt — meaningless for an evaluation/decision debate that has no
+ * action items, so the chosen action was effectively ignored.
+ *
+ * Returns the re-entry prompt to feed back into processMessage, or `null` to stop
+ * at the composer (the synthesis IS the deliverable).
+ *   - continue_session → carry the conclusion forward on the ORIGINAL task, but
+ *     ONLY for an implementation-shaped debate. For an analysis/evaluation debate
+ *     the conclusion IS the deliverable, so re-enter WITHOUT an implementation
+ *     mandate (session 578b2eae7099: "Continue the original task using this
+ *     conclusion" on an evaluation made the model invent phantom Phase-1..7 todos
+ *     and start editing files, then the rogue turn wedged the UI).
+ *   - generate_plan / implement → execute the recommended action items.
+ *   - save_exit / refine / retry_synthesis / follow-up / undefined → stop (those
+ *     either already re-synthesized inside runCouncil or are terminal by intent).
+ */
+const IMPLEMENTATION_OUTPUT_KINDS = new Set<string>(["implementation_plan"]);
+
+/** Recover the output-shape kind the synthesis was produced under (```json { "type": … }). */
+function synthesisOutputKind(synthesis: string): string | undefined {
+  const m = synthesis.match(/"type"\s*:\s*"([^"]+)"/);
+  return m?.[1];
+}
+
+export function postDebateContinuation(
+  action: string | undefined,
+  synthesis: string,
+  outputKind?: string,
+): string | null {
+  if (!synthesis || !action) return null;
+  if (action === "generate_plan" || action === "implement") {
+    return `Council debate completed. Synthesis:\n\n${synthesis}\n\nProceed with the recommended action items.`;
+  }
+  if (action === "continue_session") {
+    const kind = outputKind ?? synthesisOutputKind(synthesis);
+    // Only an implementation-shaped debate has an "original task" left to build.
+    if (kind && IMPLEMENTATION_OUTPUT_KINDS.has(kind)) {
+      return `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`;
+    }
+    // Analysis/evaluation/decision/investigation (or unknown → treat as analysis):
+    // the conclusion is the deliverable. Re-enter so the turn is resumable, but
+    // forbid the implementation drift that phantom-todo'd and hung the session.
+    return (
+      `Council debate completed. Conclusion:\n\n${synthesis}\n\n` +
+      `The analysis above IS the deliverable — present it clearly to the user. ` +
+      `Do NOT edit files, create plans or todos, run build/migration commands, or spawn sub-agents ` +
+      `unless the user explicitly asks for that next step. Wait for the user's direction.`
+    );
+  }
+  return null;
 }
 
 export async function* runCouncil(
@@ -170,7 +314,20 @@ export async function* runCouncil(
   // ── Resolve models ──────────────────────────────────────────────────────────
   const leaderResolution = await resolveLeaderModelDetailed(sessionModelId);
   const leaderModelId = leaderResolution.modelId;
-  const participants = await resolveParticipants(sessionModelId, isCouncilMultiProviderPreferred());
+  let participants = await resolveParticipants(sessionModelId, isCouncilMultiProviderPreferred());
+
+  // U3 — task-aware panel: let the leader read the task and pick which reachable
+  // models should debate it, instead of the prompt-blind capability roster.
+  // Fails open to the default roster on any provider/parse failure.
+  if (participants.length >= 2 && isTaskAwarePanelEnabled()) {
+    try {
+      const pool = await buildCouncilCandidatePool(participants);
+      const taskAware = yield* selectTaskAwarePanel({ topic, pool, leaderModelId, llm });
+      if (taskAware && taskAware.length >= 2) participants = taskAware;
+    } catch {
+      /* fail-open — keep the default roster */
+    }
+  }
 
   if (participants.length < 2) {
     yield {
@@ -181,23 +338,42 @@ export async function* runCouncil(
     return null;
   }
 
-  if (leaderResolution.promotedFrom) {
+  // When the TUI Context Rail is active it renders the leader/panel/cost data as
+  // ambient sidebar rows from the council_meta patch below, so emitting the same
+  // data inline would both duplicate it AND read as a roster "decided" before any
+  // task assessment. Railless sinks (headless, telegram) keep the inline summary.
+  const suppressInlineMeta = options?.suppressInlineMeta === true;
+  if (!suppressInlineMeta) {
+    if (leaderResolution.promotedFrom) {
+      yield {
+        type: "content",
+        content:
+          `\n> Leader auto-promoted within session provider: \`${leaderResolution.promotedFrom.modelId}\`` +
+          `${leaderResolution.promotedFrom.tier ? ` (${leaderResolution.promotedFrom.tier})` : ""}` +
+          ` → \`${leaderModelId}\`. Synthesis benefits from the highest tier available on the same provider. ` +
+          `Set \`roleModels.leader\` to override.\n`,
+      };
+    }
     yield {
       type: "content",
-      content:
-        `\n> Leader auto-promoted within session provider: \`${leaderResolution.promotedFrom.modelId}\`` +
-        `${leaderResolution.promotedFrom.tier ? ` (${leaderResolution.promotedFrom.tier})` : ""}` +
-        ` → \`${leaderModelId}\`. Synthesis benefits from the highest tier available on the same provider. ` +
-        `Set \`roleModels.leader\` to override.\n`,
+      // Show models only — the `implement/verify/research` roles are internal
+      // cost-tier routing slots, NOT debate personas (those are task-adaptive and
+      // shown in the Debate Plan card once assigned). Printing the slot names here
+      // misleadingly implied implementation intent on analysis/decision topics.
+      content: `\n> Leader: \`${leaderModelId}\` · Panel: ${participants.map((p) => `\`${p.model}\``).join(", ")}${costAware ? " · Cost-aware sub-tasks: ON" : ""}\n`,
     };
   }
+  // P3 — mirror the leader/panel/cost metadata as a structured council_meta patch
+  // so the context rail can show it as rows instead of transcript spam. The round
+  // budget/ceiling arrive later from inside runDebate (locals unavailable here).
   yield {
-    type: "content",
-    // Show models only — the `implement/verify/research` roles are internal
-    // cost-tier routing slots, NOT debate personas (those are task-adaptive and
-    // shown in the Debate Plan card once assigned). Printing the slot names here
-    // misleadingly implied implementation intent on analysis/decision topics.
-    content: `\n> Leader: \`${leaderModelId}\` · Panel: ${participants.map((p) => `\`${p.model}\``).join(", ")}${costAware ? " · Cost-aware sub-tasks: ON" : ""}\n`,
+    type: "council_meta",
+    councilMeta: {
+      topic,
+      leader: leaderModelId,
+      panel: participants.map((p) => p.model),
+      costAware,
+    },
   };
 
   const baseContext = buildCouncilContext(messages);
@@ -255,6 +431,7 @@ export async function* runCouncil(
         options?.clarifyMaxRounds ?? EXPLICIT_COUNCIL_CLARIFY_ROUNDS,
         undefined,
         costAware,
+        participants.map((p) => p.model),
       );
       let clarifyResult: IteratorResult<StreamChunk, ClarifiedSpec>;
       do {
@@ -278,6 +455,27 @@ export async function* runCouncil(
       spec.parentContext = conversationContext?.trim() || undefined;
     }
 
+    // B2: pin the outcome criteria into the Context Rail so the user SEES what
+    // the debate is graded against (not a leader-improvised per-round criterion).
+    // Emitted once here; per-round met/pending arrives via later council_meta
+    // patches from debate.ts. Only emit when there is something meaningful (skip
+    // the single "Address the topic" auto-fallback).
+    if (spec.successCriteria.length > 0) {
+      // Emit a count-matched all-false criteriaMet ALONGSIDE successCriteria so
+      // the rail's Outcome block starts at 0/N. councilMeta is upsert-merged
+      // ({...prev, ...patch}); without this reset a previous council's
+      // criteriaMet array bleeds through (e.g. after an Esc-interrupt that
+      // skipped clearLiveTurnUi) and paints stale ✓ / a wrong "N/N met" counter
+      // before this debate has graded anything. debate.ts overwrites it post-eval.
+      yield {
+        type: "council_meta",
+        councilMeta: {
+          successCriteria: spec.successCriteria,
+          criteriaMet: spec.successCriteria.map(() => false),
+        },
+      };
+    }
+
     // Cancelled during clarification — don't pop the preflight approval card.
     if (userAborted()) break;
 
@@ -287,7 +485,7 @@ export async function* runCouncil(
     const preflightGen = runPreflight(spec, participants, researchNeeded, respondToPreflight, {
       repoEmpty: internetFirst,
       researchOverridable: true,
-      autoApprove: spec.ready === true,
+      autoApprove: spec.ready === true || options?.autoApprovePreflight === true,
     });
     let preflightResult: IteratorResult<StreamChunk, boolean>;
     do {
@@ -311,34 +509,45 @@ export async function* runCouncil(
   // Leader-LLM decides if research is required. If yes, give the user a chance
   // to skip — research is the slowest part of council and trivial questions
   // (e.g. "what did we just decide?") should not pay that cost.
-  const researchSkipOverride = false;
+  // When the caller (sprint-planning) already has product-level research from
+  // CB-1, skip the second research pass entirely: force researchSkipOverride so
+  // runDebate does not re-run it, and short-circuit leaderNeedsResearch to false.
+  const researchSkipOverride = options?.skipResearch === true;
   // Hoisted so the leader's research decision can be reused by runDebate instead
   // of re-running the classifier LLM call (see CouncilConfig.leaderNeedsResearch).
   // Stays undefined if the classifier throws — fail-open: runDebate re-evaluates.
   let leaderNeedsResearch: boolean | undefined;
-  try {
-    const needGen = evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware);
-    let needStep: IteratorResult<StreamChunk, boolean>;
-    do {
-      needStep = await needGen.next();
-      if (!needStep.done && needStep.value) yield needStep.value;
-    } while (!needStep.done);
-    leaderNeedsResearch = needStep.value;
+  if (options?.skipResearch) {
+    leaderNeedsResearch = false;
+    yield { type: "council_meta", councilMeta: { researchMode: false } };
+  } else {
+    try {
+      const needGen = evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware);
+      let needStep: IteratorResult<StreamChunk, boolean>;
+      do {
+        needStep = await needGen.next();
+        if (!needStep.done && needStep.value) yield needStep.value;
+      } while (!needStep.done);
+      leaderNeedsResearch = needStep.value;
+      if (leaderNeedsResearch !== undefined) {
+        yield { type: "council_meta", councilMeta: { researchMode: leaderNeedsResearch } };
+      }
 
-    // ROI: the leader already decided research is needed and the card's default
-    // was always "run research" — asking the user to confirm is a rubber-stamp
-    // (measured 0 information at real cost). Auto-proceed with research; the
-    // leaderNeedsResearch signal still flows to runDebate. researchSkipOverride
-    // stays false. (Deliberately no card — see council-UX ROI pass.)
-    if (leaderNeedsResearch) {
-      yield {
-        type: "content",
-        content: `\n  ↳ Leader recommends research${internetFirst ? " (internet-first — empty workspace)" : " (codebase-first)"} — running it.\n`,
-      };
+      // ROI: the leader already decided research is needed and the card's default
+      // was always "run research" — asking the user to confirm is a rubber-stamp
+      // (measured 0 information at real cost). Auto-proceed with research; the
+      // leaderNeedsResearch signal still flows to runDebate. researchSkipOverride
+      // stays false. (Deliberately no card — see council-UX ROI pass.)
+      if (leaderNeedsResearch) {
+        yield {
+          type: "content",
+          content: `\n  ↳ Leader recommends research${internetFirst ? " (internet-first — empty workspace)" : " (codebase-first)"} — running it.\n`,
+        };
+      }
+    } catch (err) {
+      // fail-open — leaderNeedsResearch stays undefined so runDebate re-evaluates.
+      console.error(`[council] research-need pre-check failed (fail-open): ${(err as Error)?.message}`);
     }
-  } catch (err) {
-    // fail-open — leaderNeedsResearch stays undefined so runDebate re-evaluates.
-    console.error(`[council] research-need pre-check failed (fail-open): ${(err as Error)?.message}`);
   }
 
   // Await EE pre-fetch (started in parallel with clarifier — latency already hidden)
@@ -438,6 +647,11 @@ export async function* runCouncil(
       internetFirst,
       costAware,
       runId: sessionId,
+      // B4 interactive escalation — same responder the clarifier + post-debate
+      // askcards use. When the debate is about to stop with pinned criteria
+      // unmet, runDebate asks the user (extend / accept / rescope) instead of
+      // silently synthesizing a partial outcome.
+      respondToQuestion,
     },
     llm,
   );
@@ -594,6 +808,14 @@ export async function* runCouncil(
               ? `⚠ Medium confidence (evidence density ${evidenceDensity.toFixed(2)})`
               : `⚠ Low confidence (evidence density ${evidenceDensity.toFixed(2)})`;
 
+      // F1 — did the debate actually satisfy its PINNED success criteria? This is
+      // distinct from evidence density (a confidently-worded synthesis can still
+      // leave every criterion open). When criteria remain unmet on a successful
+      // synthesis the outcome is provisional, and the card must not recommend
+      // committing (implement/plan/save) as if it were settled.
+      const critOutcome = summarizeCriteriaOutcome(spec.successCriteria ?? [], debateState.finalCriteriaMet);
+      const inconclusive = !synthesisFailed && critOutcome.inconclusive;
+
       // Recommendation surfaced to the user as the default action. The
       // implementation_plan-vs-decision/evaluation split lives in
       // pickPostDebateRecommendation (issue #3 — see its doc comment).
@@ -604,6 +826,7 @@ export async function* runCouncil(
         confidenceLevel,
         hasPlan: !!hasPlan,
         outputKind: debatePlan.outputShape.kind,
+        criteriaUnmet: inconclusive ? critOutcome.unmetLabels.length : 0,
       });
 
       const baseOptions: Array<{ label: string; description: string; value: string; kind: "choice" | "freetext" }> = [];
@@ -707,52 +930,113 @@ export async function* runCouncil(
         }
       }
 
+      // F1 — when the pinned criteria were not met, the model's best-first action
+      // (or the deterministic default) may be a commit/hand-back-the-decision step
+      // that treats the outcome as settled. Pin a criteria-aware "keep working"
+      // option at the front and make it the default so the recommended next move
+      // is honest about the unmet bar. Reuses ask_followup routing (freetext,
+      // re-runs on this debate's context) — no new downstream action. Deduped so
+      // the list never shows two ask_followup rows.
+      if (inconclusive) {
+        const openList = critOutcome.unmetLabels.join("; ");
+        const n = critOutcome.unmetLabels.length;
+        for (let i = baseOptions.length - 1; i >= 0; i--) {
+          if (baseOptions[i].value === "ask_followup") baseOptions.splice(i, 1);
+        }
+        baseOptions.unshift({
+          label: `Keep working the ${n} unmet criteri${n === 1 ? "on" : "a"}`,
+          description: `Still open: ${openList}. Pose a targeted follow-up to close ${n === 1 ? "it" : "them"} before committing.`,
+          value: "ask_followup",
+          kind: "freetext",
+        });
+      }
+
       // Model orders actions best-first (index 0 = recommended default); the
-      // fallback set uses the deterministic recommendation.
-      const defaultIndex = modelActions
+      // fallback set uses the deterministic recommendation. When inconclusive,
+      // the pinned criteria option at index 0 is the honest default regardless of
+      // path.
+      const defaultIndex = inconclusive
         ? 0
-        : Math.max(
-            0,
-            baseOptions.findIndex((o) => o.value === recommendation.value),
-          );
-      const recommendReason = modelActions
+        : modelActions
+          ? 0
+          : Math.max(
+              0,
+              baseOptions.findIndex((o) => o.value === recommendation.value),
+            );
+      const recommendReason = inconclusive
         ? (baseOptions[0]?.description ?? recommendation.reason)
-        : recommendation.reason;
+        : modelActions
+          ? (baseOptions[0]?.description ?? recommendation.reason)
+          : recommendation.reason;
 
-      const heading = synthesisFailed ? "## Debate Synthesis Failed" : "## Debate Synthesis Complete";
+      const heading = synthesisFailed
+        ? "## Debate Synthesis Failed"
+        : inconclusive
+          ? `## Debate Synthesis — Inconclusive (${critOutcome.metCount}/${critOutcome.total} criteria met)`
+          : "## Debate Synthesis Complete";
+      // F1 — an explicit provisional-outcome line so the user sees the unmet bar
+      // even if they skim past the recommendation.
+      const outcomeLine = inconclusive
+        ? `\n\n⚠ Outcome: ${critOutcome.metCount}/${critOutcome.total} criteria met. Unmet: ${critOutcome.unmetLabels.join("; ")}. Treat the synthesis as provisional — not a settled decision.`
+        : "";
       const recommendLine = `**Recommended:** ${baseOptions[defaultIndex]?.label ?? recommendation.value} — ${recommendReason}`;
-      const headerBlock = `${heading}\n\n> ${confidenceBadge}\n>\n> **Why:** ${confidenceReason}\n\n${recommendLine}\n\nLeader: \`${leaderModelId}\`. What would you like to do next?`;
+      const headerBlock = `${heading}\n\n> ${confidenceBadge}\n>\n> **Why:** ${confidenceReason}${outcomeLine}\n\n${recommendLine}\n\nLeader: \`${leaderModelId}\`. What would you like to do next?`;
 
-      yield {
-        type: "council_question",
-        content: headerBlock,
-        councilQuestion: {
-          questionId,
-          phase: "post-debate",
-          question: synthesisFailed
-            ? "Synthesis did not produce a structured outcome. How do you want to recover?"
-            : hasEmptySections
-              ? `The debate left ${refinementTopics.length} area(s) unresolved. Refine them or save the current outcome?`
-              : "What would you like to do next?",
-          context:
-            `${confidenceBadge}\n${confidenceReason}` +
-            (hasEmptySections ? `\nUnresolved areas: ${refinementTopics.join(", ")}` : "") +
-            `\n→ ${recommendation.reason}`,
-          isRequired: false,
-          options: baseOptions,
-          defaultIndex,
-        },
-      } as StreamChunk;
-
-      const answer = await respondToQuestion(questionId);
+      let answer: string;
+      if (options?.sprintPlanningMode) {
+        // Blocker 4/5 fix: no interactive post-debate menu inside automated
+        // per-sprint planning. Presenting it stranded the sprint before
+        // implementation — picking "Save & Exit" ended the run with no Sprint
+        // Implementation, and "Refine" (the default) looped back into more
+        // debate. Auto-lock the synthesized plan (== "Lock plan and execute
+        // Sprint 1") and hand control back to the sprint runner.
+        answer = "generate_plan";
+        idealTrace("council.postDebate.autoLock", { sessionId });
+        yield {
+          type: "content",
+          content:
+            "\n> Sprint plan synthesized — auto-locked and handed to the sprint runner " +
+            "(the product plan was already approved at the /ideal preflight).\n",
+        };
+      } else {
+        yield {
+          type: "council_question",
+          content: headerBlock,
+          councilQuestion: {
+            questionId,
+            phase: "post-debate",
+            question: synthesisFailed
+              ? "Synthesis did not produce a structured outcome. How do you want to recover?"
+              : inconclusive
+                ? `${critOutcome.metCount}/${critOutcome.total} success criteria met — the outcome is provisional. Keep working the unmet criteria, or save it as-is?`
+                : hasEmptySections
+                  ? `The debate left ${refinementTopics.length} area(s) unresolved. Refine them or save the current outcome?`
+                  : "What would you like to do next?",
+            context:
+              `${confidenceBadge}\n${confidenceReason}` +
+              (inconclusive ? `\nUnmet criteria: ${critOutcome.unmetLabels.join("; ")}` : "") +
+              (hasEmptySections ? `\nUnresolved areas: ${refinementTopics.join(", ")}` : "") +
+              `\n→ ${recommendation.reason}`,
+            isRequired: false,
+            options: baseOptions,
+            defaultIndex,
+          },
+        } as StreamChunk;
+        answer = await respondToQuestion(questionId);
+      }
       postDebateAction = answer;
+      idealTrace("council.postDebate.answer", { sessionId, answer });
       options?.onPostDebateAction?.(answer);
       // Echo the human-readable option label, never the raw action id
       // (`continue_session`, `save_exit`, …) — the id is an internal routing
       // token users should never see. Free-text follow-ups (no matching option)
       // echo verbatim.
       const answeredLabel = baseOptions.find((o) => o.value === answer)?.label ?? answer;
-      yield { type: "content", content: `\n  ↳ ${answeredLabel}\n` };
+      // No "↳ choice" echo in sprint-planning mode — there was no user choice to
+      // echo (the plan was auto-locked above with its own status line).
+      if (!options?.sprintPlanningMode) {
+        yield { type: "content", content: `\n  ↳ ${answeredLabel}\n` };
+      }
 
       // Treat any non-empty answer that doesn't match a known choice value as a follow-up question.
       const knownValues = new Set([
@@ -843,6 +1127,10 @@ export async function* runCouncil(
           synthesisText =
             `Sprint plan locked (${existingActionItems.length} steps):\n` +
             synthesizedPlan.steps.map((s) => `- [${s.priority}] ${s.description}`).join("\n");
+          idealTrace("council.generatePlan.locked.fast", {
+            sessionId,
+            actionItems: existingActionItems.length,
+          });
         } else {
           yield { type: "content", content: "\n> Synthesizing sprint plan...\n" };
           const refineGen = runPlanning(
@@ -871,6 +1159,10 @@ export async function* runCouncil(
             content:
               "\n> Plan locked — sprint runner will execute planning → implementation → verification → judgment.\n",
           };
+          idealTrace("council.generatePlan.locked.synth", {
+            sessionId,
+            synthesisLen: synthesisText?.length ?? 0,
+          });
         }
         // Do NOT call runExecution here. Return synthesisText to the sprint-runner
         // caller so it drives the full sprint lifecycle (Step 4–8 in sprint-runner.ts).
@@ -904,7 +1196,13 @@ export async function* runCouncil(
           } as StreamChunk;
           const ans = await respondToQuestion(sqId);
           refinedAnswers.push({ section: label, answer: ans });
-          yield { type: "content", content: `\n  ↳ ${ans}\n` };
+          // Only echo sections the user actually filled. "Skip — leave as-is"
+          // returns an empty value; echoing it emits a blank "↳ " bubble per
+          // section (6 skips = 6 empty rows of transcript garbage). Prefix the
+          // section label so a real answer reads as "↳ <section>: <answer>".
+          if (ans.trim().length > 0) {
+            yield { type: "content", content: `\n  ↳ ${label}: ${ans}\n` };
+          }
         }
         // Build refineContext string from user answers
         const refineCtx = refinedAnswers
@@ -935,76 +1233,92 @@ export async function* runCouncil(
         synthesisText = refineResult.value.synthesisText;
       }
       // "save_exit" and "implement" fall through to normal persistence
-    } catch {
-      /* non-critical */
+    } catch (err) {
+      // Post-debate interaction (menu, follow-up re-synthesis, refine) is
+      // non-critical to the persisted outcome, so we swallow — but NEVER
+      // silently: a throw here previously vanished, hiding a "generate_plan
+      // stalled" root cause. Log it and breadcrumb it so blocker-5 forensics
+      // can see whether the tail was reached via an exception.
+      console.error(`[council] post-debate interaction failed: ${(err as Error)?.message}`);
+      idealTrace("council.postDebate.threw", { sessionId, err: (err as Error)?.message });
     }
   }
 
+  idealTrace("council.persist.start", { sessionId, hasOutcome: !!outcome, postDebateAction });
   // ── Persist outcome ─────────────────────────────────────────────────────────
   if (sessionId) {
     try {
-      if (outcome) {
-        const agreedLine = outcome.agreed?.length ? `\nAgreed: ${outcome.agreed.join("; ")}` : "";
-        const recLine = outcome.recommendation ? `\nRecommendation: ${outcome.recommendation}` : "";
-        appendSystemMessage(
-          sessionId,
-          `[Council Decision]\nTopic: ${topic}\n${outcome.summary}${agreedLine}${recLine}`,
-        );
-        appendSystemMessage(sessionId, `[Council Outcome]\n${JSON.stringify(outcome)}`);
-      }
-      const evidenceDensityPersist = debateState.finalEvidenceDensity ?? 0;
-      const confidenceLevelPersist: "high" | "medium" | "low" =
-        evidenceDensityPersist >= 0.6 ? "high" : evidenceDensityPersist >= 0.3 ? "medium" : "low";
-      const councilRecord: import("./types.js").CouncilMemoryRecord = {
-        topic,
-        spec,
-        debatePlan,
-        leaderModel: leaderModelId,
-        participants: debateState.active.map((a) => ({ role: a.role, model: a.model, stance: a.stance })),
-        finalPositions: debateState.active.map((a) => ({ role: a.role, position: a.position })),
-        archive: debateState.archive ?? [],
-        synthesis: synthesisText,
-        confidence: {
-          level: confidenceLevelPersist,
-          evidenceDensity: evidenceDensityPersist,
-          rounds: debateState.roundCount,
-        },
-        stats: { calls: stats.calls, durationMs: Date.now() - stats.startMs, phases: stats.phases },
-        timestamp: new Date().toISOString(),
-      };
-      appendSystemMessage(sessionId, `[Council Memory] ${JSON.stringify(councilRecord)}`);
-
-      // Forensics-friendly summary row in interaction_logs. The full
-      // [Council Memory] system message above is great for context replay but
-      // can't be queried — `usage forensics` reads interaction_logs only.
-      // Excerpts are capped to keep metadata_json small (~2-4KB per run).
-      const stancesForLog = debateState.active.slice(0, 8).map((a) => ({
-        role: a.role,
-        model: a.model,
-        stanceName: a.stance?.name,
-        finalPositionExcerpt: (a.position ?? "").slice(0, 400),
-      }));
-      logInteraction(sessionId, "council", {
-        eventSubtype: "council_summary",
-        model: leaderModelId,
-        durationMs: Date.now() - stats.startMs,
-        data: {
+      // Skip session-scoped persistence in sprintPlanningMode: messages /
+      // interaction_logs FK-reference sessions(id), but the sprint-planning caller
+      // passes the product-RUN id (no session row) → "FOREIGN KEY constraint
+      // failed" on the FIRST write, which under the catch below previously aborted
+      // the whole block — silently taking writeDecisionsLock down with it. The
+      // file-based decisions.lock still writes below (outside this guard).
+      if (!options?.sprintPlanningMode) {
+        if (outcome) {
+          const agreedLine = outcome.agreed?.length ? `\nAgreed: ${outcome.agreed.join("; ")}` : "";
+          const recLine = outcome.recommendation ? `\nRecommendation: ${outcome.recommendation}` : "";
+          appendSystemMessage(
+            sessionId,
+            `[Council Decision]\nTopic: ${topic}\n${outcome.summary}${agreedLine}${recLine}`,
+          );
+          appendSystemMessage(sessionId, `[Council Outcome]\n${JSON.stringify(outcome)}`);
+        }
+        const evidenceDensityPersist = debateState.finalEvidenceDensity ?? 0;
+        const confidenceLevelPersist: "high" | "medium" | "low" =
+          evidenceDensityPersist >= 0.6 ? "high" : evidenceDensityPersist >= 0.3 ? "medium" : "low";
+        const councilRecord: import("./types.js").CouncilMemoryRecord = {
           topic,
-          roundCount: debateState.roundCount,
-          participantCount: debateState.active.length,
-          stances: stancesForLog,
-          synthesisExcerpt: synthesisText.slice(0, 1500),
-          evidenceDensity: evidenceDensityPersist,
-          confidenceLevel: confidenceLevelPersist,
-          recommendation: outcome?.recommendation?.slice(0, 400) ?? null,
-          agreedCount: outcome?.agreed?.length ?? 0,
-        },
-      });
+          spec,
+          debatePlan,
+          leaderModel: leaderModelId,
+          participants: debateState.active.map((a) => ({ role: a.role, model: a.model, stance: a.stance })),
+          finalPositions: debateState.active.map((a) => ({ role: a.role, position: a.position })),
+          archive: debateState.archive ?? [],
+          synthesis: synthesisText,
+          confidence: {
+            level: confidenceLevelPersist,
+            evidenceDensity: evidenceDensityPersist,
+            rounds: debateState.roundCount,
+          },
+          stats: { calls: stats.calls, durationMs: Date.now() - stats.startMs, phases: stats.phases },
+          timestamp: new Date().toISOString(),
+        };
+        appendSystemMessage(sessionId, `[Council Memory] ${JSON.stringify(councilRecord)}`);
+
+        // Forensics-friendly summary row in interaction_logs. The full
+        // [Council Memory] system message above is great for context replay but
+        // can't be queried — `usage forensics` reads interaction_logs only.
+        // Excerpts are capped to keep metadata_json small (~2-4KB per run).
+        const stancesForLog = debateState.active.slice(0, 8).map((a) => ({
+          role: a.role,
+          model: a.model,
+          stanceName: a.stance?.name,
+          finalPositionExcerpt: (a.position ?? "").slice(0, 400),
+        }));
+        logInteraction(sessionId, "council", {
+          eventSubtype: "council_summary",
+          model: leaderModelId,
+          durationMs: Date.now() - stats.startMs,
+          data: {
+            topic,
+            roundCount: debateState.roundCount,
+            participantCount: debateState.active.length,
+            stances: stancesForLog,
+            synthesisExcerpt: synthesisText.slice(0, 1500),
+            evidenceDensity: evidenceDensityPersist,
+            confidenceLevel: confidenceLevelPersist,
+            recommendation: outcome?.recommendation?.slice(0, 400) ?? null,
+            agreedCount: outcome?.agreed?.length ?? 0,
+          },
+        });
+      }
 
       // C2: Persist decisions.lock.md to the run directory so sprint-runner
       // can inject locked decisions into the implementation prompt.
       if (options?.runDir) {
         const rejectedProposals = detectOutOfStackProposals(synthesisText, spec);
+        idealTrace("council.persist.writeDecisionsLock.before", { sessionId, runDir: options.runDir });
         await writeDecisionsLock({
           runId: sessionId,
           runDir: options.runDir,
@@ -1022,11 +1336,17 @@ export async function* runCouncil(
           // only fires on an unexpected throw — log it (No-Silent-Catch), never break council.
           console.error(`[council] decisions.lock write guard caught: ${(err as Error)?.message}`);
         });
+        idealTrace("council.persist.writeDecisionsLock.after", { sessionId });
       }
-    } catch {
-      /* non-critical */
+    } catch (err) {
+      // Persistence is best-effort (session-message / interaction-log writes),
+      // but log so a storage fault is not mistaken for a hang in blocker-5
+      // forensics.
+      console.error(`[council] outcome persistence failed: ${(err as Error)?.message}`);
+      idealTrace("council.persist.threw", { sessionId, err: (err as Error)?.message });
     }
   }
+  idealTrace("council.persist.done", { sessionId });
 
   // Update session status to completed — EXCEPT when the user chose
   // "continue_session", where the agent keeps working in this session; marking
@@ -1072,17 +1392,29 @@ export async function* runCouncil(
   }
 
   // ── Stats ───────────────────────────────────────────────────────────────────
+  idealTrace("council.stats", { sessionId });
   const totalMs = Date.now() - stats.startMs;
-  yield {
-    type: "content",
-    content:
-      `\n---\n` +
-      `> Council stats: ${stats.calls} API calls, ${(totalMs / 1000).toFixed(1)}s total, ` +
-      `${active.length} participants, ${debateState.roundCount} rounds\n` +
-      `> Phases: ${stats.phases.map((p) => `${p.name}=${(p.durationMs / 1000).toFixed(1)}s`).join(", ")}\n`,
-  };
+  // Blocker-5 root cause: in sprintPlanningMode this runCouncil is a SUB-STEP of
+  // runSprint, not a standalone turn. The terminal `{type:"done"}` chunk (and the
+  // stats banner) are turn-terminal signals — forwarded verbatim by sprint-runner
+  // they made the app's stream consumer STOP pulling right here, so the generator
+  // suspended at these yields and never returned. sprint-runner's `planGen.next()`
+  // therefore never saw `done`, and the Sprint Implementation stage never ran
+  // (idle at the composer, no error). A sub-step must not emit them: skip both so
+  // the generator returns cleanly and the sprint runner proceeds to implementation.
+  if (!options?.sprintPlanningMode) {
+    yield {
+      type: "content",
+      content:
+        `\n---\n` +
+        `> Council stats: ${stats.calls} API calls, ${(totalMs / 1000).toFixed(1)}s total, ` +
+        `${active.length} participants, ${debateState.roundCount} rounds\n` +
+        `> Phases: ${stats.phases.map((p) => `${p.name}=${(p.durationMs / 1000).toFixed(1)}s`).join(", ")}\n`,
+    };
 
-  yield { type: "done" };
+    yield { type: "done" };
+  }
+  idealTrace("council.return", { sessionId, synthesisLen: (synthesisText || "").length });
   return synthesisText || null;
 }
 

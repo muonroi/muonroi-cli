@@ -88,4 +88,6 @@ muonroi-cli: an interactive agentic CLI built around the Experience Engine (EE) 
 | Harness E2E template | `tests/harness/bash-output-get-tui.spec.ts` |
 | Depth | standard |
 | Workflow Kind | product |
-| Ideal Run | mr4zuk7h6d34 |
+| Ideal Run | mrbm6se2762f |
+| Phase | plan |
+| Plan Verified | no |

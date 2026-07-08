@@ -121,7 +121,18 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
             // or 1 depending on OS scheduler jitter) — semantically identical
             // across runs, exactly like seq/ts. Leaving it in made the cross-run
             // equality assertion flake under load (observed: scrollTop 0 vs 1).
-            return JSON.stringify(rest, (k, v) => (k === "scrollTop" ? undefined : v));
+            // Also mask the session id in the context-rail `values` prop: the
+            // rail (MUONROI_CONTEXT_RAIL, default-on) exposes the per-process
+            // random session id (12 hex chars) — a per-run identity, not UI
+            // state, exactly like seq/ts. Without the mask every run's final
+            // frame differs by construction.
+            return JSON.stringify(rest, (k, v) => {
+              if (k === "scrollTop") return undefined;
+              if (k === "values" && typeof v === "string") {
+                return v.replace(/\b[0-9a-f]{12}\b/g, "<session>");
+              }
+              return v;
+            });
           })()
         : "";
       resolve([normalized]);
@@ -304,7 +315,9 @@ describe(`determinism: ${N}× identical LiveFrame final state`, () => {
     if (modalCount < threshold) {
       // Genuine scatter — surface every distinct trace so the differing field is
       // visible in CI output instead of vitest's truncated Object.is diff.
-      const distinct = [...counts.entries()].map(([v, c], idx) => `  variant ${idx} (×${c}): ${v.slice(0, 400)}`);
+      // 2000-char window: the 400-char slice used earlier hid the diverging
+      // field entirely (the session-id divergence sat at char ~449).
+      const distinct = [...counts.entries()].map(([v, c], idx) => `  variant ${idx} (×${c}): ${v.slice(0, 2000)}`);
       console.error(
         `[determinism] runs scattered — only ${modalCount}/${N} agree (need ${threshold}). Distinct variants:\n${distinct.join("\n")}`,
       );

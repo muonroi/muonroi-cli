@@ -236,3 +236,25 @@ describe("getSteerInjectionEnabled", () => {
     }
   });
 });
+
+describe("normalizeCouncilLanguage (Feature B)", () => {
+  it("defaults empty/non-string to auto", async () => {
+    const { normalizeCouncilLanguage } = await import("./settings");
+    expect(normalizeCouncilLanguage(undefined)).toBe("auto");
+    expect(normalizeCouncilLanguage("")).toBe("auto");
+    expect(normalizeCouncilLanguage("   ")).toBe("auto");
+    expect(normalizeCouncilLanguage(42)).toBe("auto");
+  });
+
+  it("lowercases the reserved modes auto/english", async () => {
+    const { normalizeCouncilLanguage } = await import("./settings");
+    expect(normalizeCouncilLanguage("AUTO")).toBe("auto");
+    expect(normalizeCouncilLanguage("  English ")).toBe("english");
+  });
+
+  it("preserves a locale label as-is (trimmed, original casing)", async () => {
+    const { normalizeCouncilLanguage } = await import("./settings");
+    expect(normalizeCouncilLanguage("Vietnamese")).toBe("Vietnamese");
+    expect(normalizeCouncilLanguage("  日本語 ")).toBe("日本語");
+  });
+});

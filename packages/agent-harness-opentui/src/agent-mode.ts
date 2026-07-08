@@ -25,6 +25,7 @@ import { createLineSplitter, createSidechannelWriter } from "@muonroi/agent-harn
 import { installOpenTUIHarness, type OpenTUIHarnessTransport } from "./install.js";
 import type { SemanticRegistry } from "./reconciler-hook.js";
 import { createSemanticRegistry } from "./reconciler-hook.js";
+import { createVisualCaptureHook, type RendererLike } from "./visual-capture.js";
 
 // ---------------------------------------------------------------------------
 // Public API types
@@ -51,6 +52,11 @@ export type AgentModeRuntime = {
   onCommand: (h: (cmd: unknown) => void) => void;
   /** Get the current timestamp (real or fake clock). */
   now: () => number;
+  /**
+   * Attach the OpenTUI renderer once it exists (constructed AFTER this runtime
+   * — see src/index.ts). Enables VisualFrame capture of the real cell grid.
+   */
+  attachRenderer: (renderer: RendererLike) => void;
   /** Tear down: close streams, dispose idle detector. */
   dispose: () => void;
 };
@@ -135,6 +141,12 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
   // --- Semantic registry ---------------------------------------------------
   const registry = createSemanticRegistry();
 
+  // --- Visual capture (real rendered cell grid) ----------------------------
+  // The renderer does not exist yet — it is constructed after this runtime and
+  // handed back via attachRenderer(). The hook reads it late-bound.
+  let rendererRef: RendererLike | undefined;
+  const visualHook = createVisualCaptureHook(() => rendererRef);
+
   // --- Idle detector -------------------------------------------------------
   const idle = createIdleDetector({
     quiescenceMs: opts.idleMs,
@@ -163,6 +175,9 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
     // becomes deterministic (seq*16). Without this, ts = Date.now() and the
     // determinism spec sees timestamps differ between runs.
     fakeClock: opts.fakeClock,
+    // Emit a VisualFrame (real rendered cell grid) alongside each semantic
+    // change. No-op until attachRenderer() supplies the renderer.
+    captureVisual: (seq, ts) => visualHook.capture(seq, ts),
   });
 
   // --- Command channel (in stream → handlers) ------------------------------
@@ -218,6 +233,11 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
     commandHandlers.push(h);
   };
 
+  const attachRenderer = (renderer: RendererLike): void => {
+    rendererRef = renderer;
+    visualHook.resetDedup(); // force the first visual frame after attach
+  };
+
   const dispose = (): void => {
     harnessHandle.uninstall(); // stops poll interval; transport.close() ends outStream
     idle.dispose();
@@ -227,5 +247,5 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
     }
   };
 
-  return { registry, capture, emitEvent, onCommand, now, dispose };
+  return { registry, capture, emitEvent, onCommand, now, attachRenderer, dispose };
 }

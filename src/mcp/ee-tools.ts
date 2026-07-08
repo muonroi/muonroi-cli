@@ -186,6 +186,7 @@ export function registerEETools(server: McpServer, deps: EEToolDeps = {}): void 
           id: clearedId,
           verdict: result.verdict,
           ...(result.reason ? { reason: result.reason } : {}),
+          ...(result.queued ? { queued: true } : {}),
           pendingRemaining: ledger.pendingCount(),
         });
       } catch (e) {

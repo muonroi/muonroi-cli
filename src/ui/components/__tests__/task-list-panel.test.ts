@@ -1,11 +1,23 @@
 import { describe, expect, it } from "vitest";
-import type { TaskListItem } from "../../../types/index.js";
+import type { TaskListItem, TaskListSnapshot } from "../../../types/index.js";
 import { __TEST_ONLY__ } from "../task-list-panel.js";
 
-const { sortItems, MAX_VISIBLE } = __TEST_ONLY__;
+const { sortItems, MAX_VISIBLE, buildCollapsedLine } = __TEST_ONLY__;
 
 function item(id: string, status: TaskListItem["status"]): TaskListItem {
   return { id, subject: `Task ${id}`, status };
+}
+
+function snap(completed: number, inProgress: number, pending: number): TaskListSnapshot {
+  return {
+    items: [
+      ...Array.from({ length: completed }, (_, i) => item(`c${i}`, "completed")),
+      ...Array.from({ length: inProgress }, (_, i) => item(`p${i}`, "in_progress")),
+      ...Array.from({ length: pending }, (_, i) => item(`q${i}`, "pending")),
+    ],
+    counts: { completed, inProgress, pending, total: completed + inProgress + pending },
+    ts: 0,
+  };
 }
 
 describe("TaskListPanel sortItems", () => {
@@ -33,5 +45,25 @@ describe("TaskListPanel sortItems", () => {
 describe("TaskListPanel MAX_VISIBLE", () => {
   it("caps inline list to 8 (guard against accidental bump)", () => {
     expect(MAX_VISIBLE).toBe(8);
+  });
+});
+
+describe("TaskListPanel buildCollapsedLine", () => {
+  it("summarizes counts on one line with an expand hint", () => {
+    const line = buildCollapsedLine(snap(4, 1, 2));
+    expect(line).toContain("Todos");
+    expect(line).toContain("4 completed");
+    expect(line).toContain("1 in progress");
+    expect(line).toContain("2 queued");
+    expect(line).toContain("ctrl+e");
+    // Single line — the whole point is to reclaim vertical space.
+    expect(line).not.toContain("\n");
+  });
+
+  it("omits zero buckets", () => {
+    const line = buildCollapsedLine(snap(0, 0, 3));
+    expect(line).toContain("3 queued");
+    expect(line).not.toContain("completed");
+    expect(line).not.toContain("in progress");
   });
 });

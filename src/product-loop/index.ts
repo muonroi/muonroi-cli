@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { readDebateCheckpoint } from "../council/debate-checkpoint.js";
 import { resolveLeaderModel } from "../council/leader.js";
 import type { CouncilLLM, PreflightResponder, QuestionResponder } from "../council/types.js";
 import type { EERouteResult } from "../ee/bridge.js";
@@ -80,6 +81,16 @@ export interface ProductLoopOptions {
    */
   complexity?: "low" | "medium" | "high";
   /**
+   * LLM-decided clarity signal (PIL Layer 1 `needsClarification`). When true the
+   * request is UNDERSPECIFIED — the model judged it lacks information it would
+   * need to proceed without guessing. It earns the interview/Council path even
+   * on an existing repo where a well-specified `standard` task would hot-path.
+   * Agent-first replacement for the regex sufficiency scorer: only `quick`
+   * (complexity=low) tasks still hot-path when underspecified — a trivial ask is
+   * not worth an interview no matter how terse.
+   */
+  needsClarification?: boolean;
+  /**
    * Sufficiency gaps from PIL Layer 1. When non-empty, the dispatcher forces
    * the Council path regardless of complexity — vague prompts MUST go through
    * AskCard discovery before any scaffolding. Each entry seeds a discovery
@@ -127,14 +138,21 @@ export async function* runProductLoop(
       return yield* runShip(opts);
     default: {
       // Mode C dispatch — see .planning/MAINTAIN-MODE.md "Trigger mechanism".
-      //   1. Explicit --maintain   → Mode C
-      //   2. Explicit --new        → Mode A (current behavior, skip detection)
-      //   3. Auto-detect: verify recipe present in cwd → Mode C
-      //   4. Otherwise             → Mode A
+      //   1. Explicit --maintain     → Mode C (strongest signal; wins over --force-council)
+      //   2. Explicit --new          → Mode A (skip recipe detection)
+      //   3. --force-council         → Mode A (user explicitly wants the full Council/loop)
+      //   4. Auto-detect: verify recipe present in cwd → Mode C
+      //   5. Otherwise               → Mode A
       if (opts.mode === "maintain") {
         return yield* runMaintain(opts);
       }
-      if (opts.mode !== "new" && opts.detectVerifyRecipe) {
+      // `--force-council` must bypass the recipe auto-detect. Without this,
+      // ANY recipe-bearing repo (package.json/*.csproj/…) routes to runMaintain
+      // here — BEFORE the forceCouncil checks below (:189 / :197) are ever
+      // reached — so `/ideal --force-council` in an existing project was silently
+      // downgraded to maint-edit (observed: route-decision forceCouncil:false,
+      // path:maintain). Explicit --maintain above still wins over --force-council.
+      if (opts.mode !== "new" && !opts.flags.forceCouncil && opts.detectVerifyRecipe) {
         try {
           const recipe = await opts.detectVerifyRecipe();
           if (recipe) {
@@ -167,10 +185,20 @@ export async function* runProductLoop(
         };
         return yield* runStart(forcedOpts);
       }
-      // Existing repo + complexity≠high → hot-path. The leader can grep
-      // the source instead of interviewing the user. Only architectural
-      // changes (complexity=high) still warrant the full Council debate.
-      if (existingRepoBypass && opts.complexity !== "high" && !opts.flags.forceCouncil) {
+      // Existing repo + complexity≠high + well-specified → hot-path. The leader
+      // can grep the source instead of interviewing the user. Two things still
+      // warrant the full Council/interview path: an architectural change
+      // (complexity=high / heavy), OR a request the model flagged as
+      // UNDERSPECIFIED (needsClarification) — a standard task missing a target
+      // or design decision must be clarified before code. A `quick`
+      // (complexity=low) task always hot-paths (handled below) even when
+      // underspecified: a trivial ask never earns an interview.
+      if (
+        existingRepoBypass &&
+        opts.complexity !== "high" &&
+        !(opts.needsClarification && opts.complexity !== "low") &&
+        !opts.flags.forceCouncil
+      ) {
         return yield* runHotPath(opts);
       }
       if (opts.complexity === "low" && !opts.flags.forceCouncil) {
@@ -263,6 +291,7 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
       kind: "route-decision",
       path: "hot-path",
       complexity: opts.complexity ?? "low",
+      underspecified: !!opts.needsClarification,
       forceCouncil: false,
       runId,
     });
@@ -723,6 +752,7 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
       kind: "route-decision",
       path: "council",
       complexity: opts.complexity ?? "unknown",
+      underspecified: !!opts.needsClarification,
       forceCouncil: !!opts.flags.forceCouncil,
       sufficiencyMissing: opts.sufficiencyMissing ?? [],
       runId,
@@ -1633,20 +1663,27 @@ async function* runStatus(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
 }
 
 async function* runAbort(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
-  if (!opts.runId) {
-    yield { type: "content", content: "error: abort requires a runId\n" } as StreamChunk;
-    return { runId: "", stage: "error", success: false, reason: "missing_runId" };
+  // A/B — bare `/ideal abort` (no runId, e.g. the recovery card's Abort option):
+  // auto-detect the newest incomplete run, mirroring resume.
+  let resolvedRunId = opts.runId;
+  if (!resolvedRunId) {
+    const latest = await findLatestIncompleteRun(opts.flowDir);
+    if (!latest) {
+      yield { type: "content", content: "No incomplete run to abort.\n" } as StreamChunk;
+      return { runId: "", stage: "error", success: false, reason: "no_incomplete_run" };
+    }
+    resolvedRunId = latest.id;
   }
-  const m = await readManifest(opts.flowDir, opts.runId);
+  const m = await readManifest(opts.flowDir, resolvedRunId);
   if (!m) {
-    yield { type: "content", content: `Run not found: ${opts.runId}\n` } as StreamChunk;
-    return { runId: opts.runId, stage: "error", success: false, reason: "not_found" };
+    yield { type: "content", content: `Run not found: ${resolvedRunId}\n` } as StreamChunk;
+    return { runId: resolvedRunId, stage: "error", success: false, reason: "not_found" };
   }
-  await writeManifest(opts.flowDir, opts.runId, { ...m, aborted: true, doneAt: new Date() });
+  await writeManifest(opts.flowDir, resolvedRunId, { ...m, aborted: true, doneAt: new Date() });
   // Fire-and-forget EE phase-outcome=aborted (extension landed in 13-05).
   try {
     fireAndForgetPhaseOutcome({
-      sessionId: opts.runId,
+      sessionId: resolvedRunId,
       phaseName: "product-loop",
       outcome: "aborted" as any,
     });
@@ -1659,9 +1696,9 @@ async function* runAbort(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
   // EE client is non-fatal (offline queue absorbs transport failures).
   // P1.6: log telemetry for the extract outcome.
   {
-    const eeResult = await extractRunToEE(opts.flowDir, opts.runId, opts.cwd ?? process.cwd());
+    const eeResult = await extractRunToEE(opts.flowDir, resolvedRunId, opts.cwd ?? process.cwd());
     try {
-      logInteraction(opts.sessionId ?? opts.runId ?? "abort", "ee_injection", {
+      logInteraction(opts.sessionId ?? resolvedRunId ?? "abort", "ee_injection", {
         eventSubtype: "extract",
         durationMs: Math.round(eeResult.durationMs),
         data: {
@@ -1674,28 +1711,80 @@ async function* runAbort(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
       // DB errors must not break /ideal
     }
   }
-  yield { type: "content", content: `Aborted run ${opts.runId}.\n` } as StreamChunk;
-  return { runId: opts.runId, stage: "halted", success: false, reason: "aborted" };
+  yield { type: "content", content: `Aborted run ${resolvedRunId}.\n` } as StreamChunk;
+  return { runId: resolvedRunId, stage: "halted", success: false, reason: "aborted" };
+}
+
+/**
+ * B — Auto-detect the newest resumable run.
+ *
+ * "Resumable" = a run that has a manifest (early pre-manifest crashes are not
+ * replayable) AND is neither aborted nor terminal (`doneAt` is set on done-gate
+ * pass / ship / abort). Sorted by manifest `createdAt` descending so a bare
+ * `/ideal resume` continues the most recent incomplete run without the user
+ * having to remember (or type) the runId.
+ */
+async function findLatestIncompleteRun(flowDir: string): Promise<{ id: string; idea: string } | null> {
+  const runsRoot = path.join(flowDir, "runs");
+  let entries: string[];
+  try {
+    entries = await fs.readdir(runsRoot);
+  } catch (err) {
+    // No runs directory yet → nothing to resume. Not an error worth surfacing.
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      console.error(`[product-loop] findLatestIncompleteRun: readdir failed: ${(err as Error)?.message}`);
+    }
+    return null;
+  }
+  const candidates: Array<{ id: string; idea: string; createdAt: number }> = [];
+  for (const id of entries) {
+    const m = await readManifest(flowDir, id).catch((e) => {
+      console.error(`[product-loop] findLatestIncompleteRun: manifest read failed for ${id}: ${e?.message}`);
+      return null;
+    });
+    if (!m) continue; // no manifest → not resumable
+    if (m.aborted) continue; // hard-killed
+    if (m.doneAt) continue; // terminal (done / shipped)
+    const createdAt = m.createdAt instanceof Date && !Number.isNaN(m.createdAt.getTime()) ? m.createdAt.getTime() : 0;
+    candidates.push({ id, idea: m.idea, createdAt });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.createdAt - a.createdAt);
+  const top = candidates[0]!;
+  return { id: top.id, idea: top.idea };
 }
 
 async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
-  if (!opts.runId) {
-    yield { type: "content", content: "error: resume requires a runId\n" } as StreamChunk;
-    return { runId: "", stage: "error", success: false, reason: "missing_runId" };
+  // B — bare `/ideal resume` (no runId): auto-detect the newest incomplete run.
+  let resolvedRunId = opts.runId;
+  if (!resolvedRunId) {
+    const latest = await findLatestIncompleteRun(opts.flowDir);
+    if (!latest) {
+      yield {
+        type: "content",
+        content: 'No incomplete run to resume. Start one with /ideal "<idea>".\n',
+      } as StreamChunk;
+      return { runId: "", stage: "error", success: false, reason: "no_incomplete_run" };
+    }
+    resolvedRunId = latest.id;
+    yield {
+      type: "content",
+      content: `Resuming latest incomplete run ${resolvedRunId}: ${latest.idea.slice(0, 60)}\n`,
+    } as StreamChunk;
   }
-  const run = await loadRun(opts.flowDir, opts.runId);
+  const run = await loadRun(opts.flowDir, resolvedRunId);
   if (!run) {
-    yield { type: "content", content: `Run not found: ${opts.runId}\n` } as StreamChunk;
-    return { runId: opts.runId, stage: "error", success: false, reason: "not_found" };
+    yield { type: "content", content: `Run not found: ${resolvedRunId}\n` } as StreamChunk;
+    return { runId: resolvedRunId, stage: "error", success: false, reason: "not_found" };
   }
-  const manifest = await readManifest(opts.flowDir, opts.runId);
+  const manifest = await readManifest(opts.flowDir, resolvedRunId);
   if (!manifest) {
-    yield { type: "content", content: `Manifest missing for ${opts.runId}\n` } as StreamChunk;
-    return { runId: opts.runId, stage: "error", success: false, reason: "manifest_missing" };
+    yield { type: "content", content: `Manifest missing for ${resolvedRunId}\n` } as StreamChunk;
+    return { runId: resolvedRunId, stage: "error", success: false, reason: "manifest_missing" };
   }
   if (manifest.aborted) {
-    yield { type: "content", content: `Run ${opts.runId} was aborted; cannot resume.\n` } as StreamChunk;
-    return { runId: opts.runId, stage: "halted", success: false, reason: "aborted" };
+    yield { type: "content", content: `Run ${resolvedRunId} was aborted; cannot resume.\n` } as StreamChunk;
+    return { runId: resolvedRunId, stage: "halted", success: false, reason: "aborted" };
   }
 
   // Detect crashed in-flight sprint: an iterations.md entry without a closing
@@ -1703,12 +1792,12 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
   // before returning, so an iteration is "in-flight" iff the file has a Sprint
   // heading but no matching Verify field. readIterations skips malformed
   // entries — so we mark the highest sprint number as crashed regardless.
-  const iters = await readIterations(opts.flowDir, opts.runId);
+  const iters = await readIterations(opts.flowDir, resolvedRunId);
   let nextSprint = iters.length + 1;
   if (iters.length > 0) {
     const last = iters[iters.length - 1]!;
     if (!last.lastVerifyResult || last.lastVerifyResult === "UNKNOWN") {
-      await markIterationCrashed(opts.flowDir, opts.runId, last.sprintN);
+      await markIterationCrashed(opts.flowDir, resolvedRunId, last.sprintN);
       nextSprint = last.sprintN; // retry with retryOf metadata
       yield {
         type: "content",
@@ -1720,7 +1809,7 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
   // Fire EE phase-outcome=resumed (extension landed in 13-05).
   try {
     fireAndForgetPhaseOutcome({
-      sessionId: opts.runId,
+      sessionId: resolvedRunId,
       phaseName: `sprint-${Math.max(1, nextSprint - 1)}`,
       outcome: "resumed" as any,
     });
@@ -1729,9 +1818,8 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
   }
 
   // Resume into sprint loop with reconstructed history + manifest flags.
-  const productSpec = await loadProductSpec(opts.flowDir, opts.runId, manifest.idea, manifest.stack);
   const ctx: DriverContext = {
-    runId: opts.runId,
+    runId: resolvedRunId,
     flowDir: opts.flowDir,
     idea: manifest.idea,
     sessionModelId: opts.sessionModelId,
@@ -1744,6 +1832,58 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
     processMessageFn: opts.processMessageFn,
     detectVerifyRecipe: opts.detectVerifyRecipe,
   };
+
+  // C-v2 cross-session debate resume — a persisted debate checkpoint means the
+  // council debate was interrupted before it ever produced a spec, so the run
+  // cannot go straight to sprints (loadProductSpec would return an empty stub).
+  // Re-run the council FSM: loop-driver's resume entry skips discovery + the
+  // interview and restores the debate from its checkpoint, then scoping writes
+  // the spec. This mirrors runStart's phase-1 → phase-2 handoff.
+  const runDir = path.join(opts.flowDir, "runs", resolvedRunId);
+  const interruptedDebate = await readDebateCheckpoint(runDir);
+  if (interruptedDebate) {
+    yield {
+      type: "content",
+      content: `\n> Detected an interrupted council debate (round ${interruptedDebate.roundCount + 1}); resuming it before sprints.\n`,
+    } as StreamChunk;
+    const driverGen = runLoopDriver(ctx);
+    let driverResult: DriverResult | undefined;
+    try {
+      while (true) {
+        const { value, done } = await driverGen.next();
+        if (done) {
+          driverResult = value as DriverResult;
+          break;
+        }
+        yield value as StreamChunk;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      yield { type: "error", error: true, content: msg } as unknown as StreamChunk;
+      return { runId: resolvedRunId, stage: "error", success: false, reason: msg };
+    }
+    if (!driverResult?.success || driverResult.stage !== "approved") {
+      return { ...driverResult!, runId: resolvedRunId };
+    }
+    // Build the sprint plan now that the spec exists (idempotent — skips when
+    // backlog.json / sprint-plan.json already exist).
+    const resumedSpec = await loadProductSpec(opts.flowDir, resolvedRunId, manifest.idea, manifest.stack);
+    const { sprintCount } = await buildBacklogAndSprintPlan({
+      flowDir: opts.flowDir,
+      runId: resolvedRunId,
+      productSpec: resumedSpec,
+      ctx,
+      sessionModelId: opts.sessionModelId,
+      maxSprints: opts.flags.maxSprints,
+      onChunk: (chunk) => void chunk,
+    });
+    yield {
+      type: "content",
+      content: `\n> Committed: ${sprintCount} sprint${sprintCount === 1 ? "" : "s"} planned. Sprint 1 active.\n`,
+    } as StreamChunk;
+  }
+
+  const productSpec = await loadProductSpec(opts.flowDir, resolvedRunId, manifest.idea, manifest.stack);
   const roleAssignments = opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
 
   // Subsystem E: phase-orchestrated path (default ON; set MUONROI_PHASE_MODE=0 for legacy).

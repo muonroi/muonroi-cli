@@ -76,13 +76,13 @@ const WORK_DIMS = new Set<WhoAmIDimName>(TIER_MINIMAL);
 const WORK_MIN_CONFIDENCE = 0.45;
 const MIN_CONFIDENCE = 0.6;
 
-interface RawDim {
+export interface RawDim {
   value: string | null;
   confidence?: number;
   sampleCount?: number;
   samples?: number;
 }
-interface RawProfile {
+export interface RawProfile {
   dimensions?: Record<string, RawDim>;
 }
 
@@ -152,6 +152,18 @@ export function getWhoAmIProfile(): WhoAmIProfile | null {
 /** Clear the cache — test-only / after a known profile change. */
 export function resetWhoAmICache(): void {
   _cache = undefined;
+}
+
+/**
+ * Prime the per-process cache with an externally-derived profile (e.g. the
+ * thin-client brain fallback in who-am-i-brain.ts, wired via the bridge). Only
+ * overwrites when the device-local read produced nothing (`_cache` is null/unset)
+ * so a real on-device profile always wins over a brain-derived one. No-op when a
+ * device-local profile is already loaded.
+ */
+export function primeWhoAmICache(profile: WhoAmIProfile | null): void {
+  if (_cache) return;
+  _cache = profile;
 }
 
 function loadWhoAmIProfile(): WhoAmIProfile | null {

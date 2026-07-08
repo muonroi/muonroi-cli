@@ -864,7 +864,11 @@ async function main() {
     let points: EEPoint[] = [];
     if (lines.length === 1 && raw.trim().startsWith("[")) {
       // JSON array
-      try { points = JSON.parse(raw); } catch { /* fall */ }
+      try {
+        points = JSON.parse(raw);
+      } catch {
+        /* fall */
+      }
     }
     if (points.length === 0) {
       // JSONL
@@ -879,10 +883,14 @@ async function main() {
     let accepted = 0;
     for (const rawP of points) {
       if (!rawP.text || !rawP.collection) continue;
-      const col = (rawP.collection === "ecosystem" || rawP.collection === "external") ? rawP.collection : (COLLECTION_FILTER || "ecosystem");
+      const col =
+        rawP.collection === "ecosystem" || rawP.collection === "external"
+          ? rawP.collection
+          : COLLECTION_FILTER || "ecosystem";
       if (COLLECTION_FILTER && col !== COLLECTION_FILTER) continue;
       const srcForId = (rawP.payload && (rawP.payload.source_id || rawP.payload.url)) || rawP.id || "flowcore-doc";
-      let id = typeof rawP.id === "string" && rawP.id.length >= 16 ? rawP.id : deterministicId(String(srcForId), rawP.text);
+      const id =
+        typeof rawP.id === "string" && rawP.id.length >= 16 ? rawP.id : deterministicId(String(srcForId), rawP.text);
       const point: EEPoint = {
         id,
         text: rawP.text,

@@ -491,5 +491,6 @@ export {
   inferVerifyProjectProfile,
   inferVerifySmokeUrl,
   normalizeVerifyRecipe,
+  shouldTrustDeterministicRecipe,
   type VerifyProjectProfile,
 } from "./recipes";

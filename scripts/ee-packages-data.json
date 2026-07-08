@@ -1,26 +1,141 @@
 [
-{"n":"Muonroi.Rules","t":"OSS","s":"Core rule engine with expression evaluation, rule sets, and decision pipeline.","d":"rule-engine"},
-{"n":"Muonroi.Rules.DecisionTable","t":"OSS","s":"Decision table engine supporting hit policies, priority resolution, multi-condition evaluation.","d":"rule-engine"},
-{"n":"Muonroi.Core","t":"OSS","s":"Foundation library: entity base, repository pattern, unit-of-work, specification pattern.","d":"foundation"},
-{"n":"Muonroi.Mapper","t":"Internal","s":"Object-to-object mapper with convention-based and explicit mapping profiles.","d":"foundation"},
-{"n":"Muonroi.BuildingBlock.Shared","t":"Internal","s":"Shared kernel: common interfaces, enums, value objects.","d":"foundation"},
-{"n":"Muonroi.BuildingBlock.All","t":"Commercial","s":"One-package install for complete Building Block commercial stack: rule engine, governance, tenancy, data, caching, messaging, observability, PDF.","d":"meta"},
-{"n":"Muonroi.Grpc","t":"Commercial","s":"gRPC service with code-first contracts, interceptors, streaming support.","d":"messaging"},
-{"n":"Muonroi.Secrets","t":"OSS","s":"Secret management: HashiCorp Vault, Azure Key Vault, AWS Secrets Manager.","d":"infrastructure"},
-{"n":"Muonroi.Data","t":"Commercial","s":"Data access with multi-tenancy, audit trails, soft-delete, EF Core optimization.","d":"data"},
-{"n":"Muonroi.Caching","t":"Commercial","s":"Distributed caching with Redis, cache invalidation, multi-level L1+L2 cache.","d":"infrastructure"},
-{"n":"Muonroi.Observability","t":"Commercial","s":"OpenTelemetry distributed tracing, metrics, structured logging with Serilog.","d":"infrastructure"},
-{"n":"Muonroi.Tenancy","t":"Commercial","s":"Multi-tenant resolution, isolation strategies, tenant context propagation.","d":"tenancy"},
-{"n":"Muonroi.Governance","t":"Commercial","s":"Policy-as-code: rule-based access control, compliance, audit logging.","d":"governance"},
-{"n":"Muonroi.Messaging","t":"Commercial","s":"Message bus over RabbitMQ/ASB with dead-letter, retry, correlation.","d":"messaging"},
-{"n":"Muonroi.Pdf","t":"Commercial","s":"PDF generation from templates with watermarking and digital signatures.","d":"document"},
-{"n":"Muonroi.Bff","t":"Commercial","s":"Backend-for-Frontend API aggregation, response shaping.","d":"api"},
-{"n":"Muonroi.ServiceDiscovery.Consul","t":"Commercial","s":"Consul-based service discovery with health checks, DNS resolution.","d":"infrastructure"},
-{"n":"Muonroi.RuleEngine.Runtime.Web","t":"Commercial","s":"HTTP API for rule engine with hot-reload and versioning.","d":"rule-engine"},
-{"n":"Muonroi.RuleEngine.DecisionTable.Web","t":"Commercial","s":"HTTP API for decision table execution with Excel import/export.","d":"rule-engine"},
-{"n":"Muonroi.UiEngine.Catalog","t":"Commercial","s":"Dynamic UI catalog: metadata-driven forms, list views, detail pages.","d":"ui"},
-{"n":"Muonroi.Logging","t":"Internal","s":"Structured logging abstractions with Serilog enrichment pipeline.","d":"infrastructure"},
-{"n":"Muonroi.Validation","t":"Internal","s":"FluentValidation integration with domain and cross-entity validation.","d":"foundation"},
-{"n":"Muonroi.Domain","t":"Internal","s":"DDD building blocks: aggregates, entities, value objects, domain events.","d":"foundation"},
-{"n":"Muonroi.EntityFrameworkCore","t":"Internal","s":"EF Core conventions: shadow properties, query filters, interceptors.","d":"data"}
+  {
+    "n": "Muonroi.Rules",
+    "t": "OSS",
+    "s": "Core rule engine with expression evaluation, rule sets, and decision pipeline.",
+    "d": "rule-engine"
+  },
+  {
+    "n": "Muonroi.Rules.DecisionTable",
+    "t": "OSS",
+    "s": "Decision table engine supporting hit policies, priority resolution, multi-condition evaluation.",
+    "d": "rule-engine"
+  },
+  {
+    "n": "Muonroi.Core",
+    "t": "OSS",
+    "s": "Foundation library: entity base, repository pattern, unit-of-work, specification pattern.",
+    "d": "foundation"
+  },
+  {
+    "n": "Muonroi.Mapper",
+    "t": "Internal",
+    "s": "Object-to-object mapper with convention-based and explicit mapping profiles.",
+    "d": "foundation"
+  },
+  {
+    "n": "Muonroi.BuildingBlock.Shared",
+    "t": "Internal",
+    "s": "Shared kernel: common interfaces, enums, value objects.",
+    "d": "foundation"
+  },
+  {
+    "n": "Muonroi.BuildingBlock.All",
+    "t": "Commercial",
+    "s": "One-package install for complete Building Block commercial stack: rule engine, governance, tenancy, data, caching, messaging, observability, PDF.",
+    "d": "meta"
+  },
+  {
+    "n": "Muonroi.Grpc",
+    "t": "Commercial",
+    "s": "gRPC service with code-first contracts, interceptors, streaming support.",
+    "d": "messaging"
+  },
+  {
+    "n": "Muonroi.Secrets",
+    "t": "OSS",
+    "s": "Secret management: HashiCorp Vault, Azure Key Vault, AWS Secrets Manager.",
+    "d": "infrastructure"
+  },
+  {
+    "n": "Muonroi.Data",
+    "t": "Commercial",
+    "s": "Data access with multi-tenancy, audit trails, soft-delete, EF Core optimization.",
+    "d": "data"
+  },
+  {
+    "n": "Muonroi.Caching",
+    "t": "Commercial",
+    "s": "Distributed caching with Redis, cache invalidation, multi-level L1+L2 cache.",
+    "d": "infrastructure"
+  },
+  {
+    "n": "Muonroi.Observability",
+    "t": "Commercial",
+    "s": "OpenTelemetry distributed tracing, metrics, structured logging with Serilog.",
+    "d": "infrastructure"
+  },
+  {
+    "n": "Muonroi.Tenancy",
+    "t": "Commercial",
+    "s": "Multi-tenant resolution, isolation strategies, tenant context propagation.",
+    "d": "tenancy"
+  },
+  {
+    "n": "Muonroi.Governance",
+    "t": "Commercial",
+    "s": "Policy-as-code: rule-based access control, compliance, audit logging.",
+    "d": "governance"
+  },
+  {
+    "n": "Muonroi.Messaging",
+    "t": "Commercial",
+    "s": "Message bus over RabbitMQ/ASB with dead-letter, retry, correlation.",
+    "d": "messaging"
+  },
+  {
+    "n": "Muonroi.Pdf",
+    "t": "Commercial",
+    "s": "PDF generation from templates with watermarking and digital signatures.",
+    "d": "document"
+  },
+  { "n": "Muonroi.Bff", "t": "Commercial", "s": "Backend-for-Frontend API aggregation, response shaping.", "d": "api" },
+  {
+    "n": "Muonroi.ServiceDiscovery.Consul",
+    "t": "Commercial",
+    "s": "Consul-based service discovery with health checks, DNS resolution.",
+    "d": "infrastructure"
+  },
+  {
+    "n": "Muonroi.RuleEngine.Runtime.Web",
+    "t": "Commercial",
+    "s": "HTTP API for rule engine with hot-reload and versioning.",
+    "d": "rule-engine"
+  },
+  {
+    "n": "Muonroi.RuleEngine.DecisionTable.Web",
+    "t": "Commercial",
+    "s": "HTTP API for decision table execution with Excel import/export.",
+    "d": "rule-engine"
+  },
+  {
+    "n": "Muonroi.UiEngine.Catalog",
+    "t": "Commercial",
+    "s": "Dynamic UI catalog: metadata-driven forms, list views, detail pages.",
+    "d": "ui"
+  },
+  {
+    "n": "Muonroi.Logging",
+    "t": "Internal",
+    "s": "Structured logging abstractions with Serilog enrichment pipeline.",
+    "d": "infrastructure"
+  },
+  {
+    "n": "Muonroi.Validation",
+    "t": "Internal",
+    "s": "FluentValidation integration with domain and cross-entity validation.",
+    "d": "foundation"
+  },
+  {
+    "n": "Muonroi.Domain",
+    "t": "Internal",
+    "s": "DDD building blocks: aggregates, entities, value objects, domain events.",
+    "d": "foundation"
+  },
+  {
+    "n": "Muonroi.EntityFrameworkCore",
+    "t": "Internal",
+    "s": "EF Core conventions: shadow properties, query filters, interceptors.",
+    "d": "data"
+  }
 ]

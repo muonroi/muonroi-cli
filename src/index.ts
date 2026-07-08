@@ -385,6 +385,7 @@ async function startInteractive(
   initialMessage?: string,
   permissionMode: PermissionMode = "safe",
   injectHalt = false,
+  injectHaltSprint = false,
 ) {
   // ── Plan 00-07 boot order ──────────────────────────────────────────────────
   // 1. redactor.installGlobalPatches() — already at top of file (line 6).
@@ -473,6 +474,14 @@ async function startInteractive(
 
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
+    // OpenTUI defaults openConsoleOnError:true — its process-level
+    // unhandledRejection/uncaughtException handler then calls console.show(),
+    // which focuses the debug console overlay and captures ALL keypresses.
+    // The overlay's keybindings have no hide/close action, so a stray rejection
+    // (e.g. a provider dropping a streaming socket) traps the user in a console
+    // they cannot dismiss. We surface errors in-band instead — keep it off.
+    // Toggle it deliberately with F12 (wired below).
+    openConsoleOnError: false,
     // We manage SIGINT ourselves (orchestrator abort → agent cleanup → renderer destroy).
     // Prevent OpenTUI from registering its own SIGINT/SIGTERM handler which would
     // call renderer.destroy() prematurely and race with our orderly shutdown.
@@ -484,10 +493,31 @@ async function startInteractive(
     },
   });
 
+  // Agent-mode: hand the renderer to the harness so it can snapshot the ACTUAL
+  // rendered cell grid (colors + attributes) via VisualFrame, not just the
+  // semantic tree. No-op outside agent-mode (runtime undefined).
+  {
+    const agentRt = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { attachRenderer?: (r: unknown) => void }
+      | undefined;
+    agentRt?.attachRenderer?.(renderer);
+  }
+
   // The TUI now owns the terminal — route fatal-handler behaviour away from
   // process.exit(1) (see the unhandledRejection handler above). Cleared in
   // restoreTerminalSync() the moment we begin tearing the terminal back down.
   setTuiActive(true);
+
+  // Deliberate debug-console toggle. With openConsoleOnError:false the overlay
+  // never auto-pops, so F12 is the ONLY way in — and, crucially, back out:
+  // console.toggle() hides it when it is visible+focused, so it can never trap.
+  try {
+    renderer.keyInput?.on("keypress", (key: { name?: string }) => {
+      if (key?.name === "f12") renderer.console.toggle();
+    });
+  } catch {
+    /* keyInput/console are best-effort dev affordances — never block boot */
+  }
 
   /**
    * Restore terminal to main-screen mode before the process exits.
@@ -674,6 +704,7 @@ async function startInteractive(
         maxToolRounds,
         version: packageJson.version,
         injectHalt,
+        injectHaltSprint,
       },
       initialMessage,
       onExit,
@@ -942,6 +973,10 @@ program
   .option("--agent-fake-clock", "Use deterministic frame-counter clock")
   .option("--mock-llm <dir>", "Use fixture-based mock LLM from <dir> instead of real provider (E2E testing)")
   .option("--inject-halt", "TEST SEAM: render a synthetic halt recovery card after boot (harness E2E only)")
+  .option(
+    "--inject-halt-sprint",
+    "TEST SEAM: render a synthetic sprint-failed recovery card after boot (harness E2E only)",
+  )
   .action(async (message: string[], options) => {
     // Agent-mode: start the sidechannel runtime BEFORE any TUI or model work.
     // The runtime is exposed on globalThis so the renderer wiring (Task 1.6c)
@@ -1151,10 +1186,15 @@ program
     // so each request doesn't re-probe.
     const { detectEEClientMode, describeMode } = await import("./ee/client-mode.js");
     detectEEClientMode()
-      .then((info) => {
+      .then(async (info) => {
         if (process.env.MUONROI_EE_DEBUG === "1") {
           console.error(`[muonroi-cli] ${describeMode(info)}`);
         }
+        // WhoAmI thin-client fallback: once the mode is cached, derive the working-style
+        // profile from the behavioral brain and prime the sync cache so the PIL picks it
+        // up from the next turn. Fire-and-forget, fail-open — never blocks boot.
+        const { warmWhoAmIFromBrain } = await import("./ee/bridge.js");
+        await warmWhoAmIFromBrain();
       })
       .catch(() => {});
 
@@ -1282,6 +1322,7 @@ program
       initialMessage,
       options.permission as PermissionMode,
       options.injectHalt === true,
+      options.injectHaltSprint === true,
     );
   });
 

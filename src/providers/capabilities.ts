@@ -347,3 +347,32 @@ const CAPABILITIES: Record<ProviderId, ProviderCapabilities> = {
 export function getProviderCapabilities(providerId: ProviderId | string): ProviderCapabilities {
   return CAPABILITIES[providerId as ProviderId] ?? new ReliableProviderCapabilities();
 }
+
+/**
+ * Resolve the temperature to send for a given (provider, model), or `undefined`
+ * to omit the field entirely.
+ *
+ * Two provider quirks are handled here so no call site has to hardcode a
+ * temperature and silently break on a picky upstream:
+ *   1. Reasoning models — `acceptsParam("temperature")` returns false; they
+ *      ignore (OpenAI Responses) or reject temperature. We omit it.
+ *   2. Fixed-temperature models — some upstreams (e.g. Moonshot/Kimi via
+ *      opencode-go) reject any value other than a single allowed one with
+ *      "invalid temperature: only 1 is allowed for this model". `catalog.json`
+ *      pins `fixed_temperature` for those; we send exactly that value instead
+ *      of the caller's desired temperature.
+ *
+ * Every request that sets a temperature MUST go through this helper — inlining
+ * `temperature: 0.7` is what caused the council clarification/spec calls to
+ * fail wholesale on a Kimi session (see src/council/llm.ts).
+ */
+export function resolveTemperature(
+  providerId: ProviderId | string,
+  model: ModelInfo | undefined,
+  desired: number,
+): number | undefined {
+  const caps = getProviderCapabilities(providerId);
+  if (!caps.acceptsParam("temperature", model)) return undefined;
+  if (typeof model?.fixedTemperature === "number") return model.fixedTemperature;
+  return desired;
+}

@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createDriver, type Driver } from "@muonroi/agent-harness-core/driver";
-import type { LiveEvent, LiveFrame } from "@muonroi/agent-harness-core/protocol";
+import type { LiveEvent, LiveFrame, VisualFrame } from "@muonroi/agent-harness-core/protocol";
 import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidechannel";
 import { type SpawnResult, spawnAgentTui } from "../../src/agent-harness/test-spawn.js";
 
@@ -94,6 +94,8 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
       const msg = JSON.parse(line) as Record<string, unknown>;
       if (msg.mode === "live") {
         driver._ingest({ kind: "frame", frame: msg as unknown as LiveFrame });
+      } else if (msg.mode === "visual") {
+        driver._ingest({ kind: "visual", frame: msg as unknown as VisualFrame });
       } else if (msg.t === "idle") {
         driver._ingest({ kind: "idle" });
       } else if (msg.t === "event") {

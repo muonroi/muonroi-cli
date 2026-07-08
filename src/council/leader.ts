@@ -345,6 +345,54 @@ export async function resolveParticipants(
   return [];
 }
 
+/** A model the leader may pick for a task-aware debate panel (U3). */
+export interface CouncilCandidate {
+  model: string;
+  tier?: string;
+  provider?: string;
+  roles?: string[];
+  description: string;
+}
+
+/**
+ * Build the pool of models the leader may choose from when assembling a
+ * task-aware panel (U3). Seeded with the default roster (guaranteed reachable),
+ * then expanded with other reachable, routable models on the same providers.
+ * Capped so the selection prompt stays bounded. Never throws — a provider probe
+ * failure simply yields a smaller pool, and the caller falls back to the roster.
+ */
+export async function buildCouncilCandidatePool(
+  defaultRoster: Array<{ role: ModelRole; model: string }>,
+): Promise<CouncilCandidate[]> {
+  const byId = new Map<string, CouncilCandidate>();
+  const add = (modelId: string) => {
+    if (!modelId || byId.has(modelId)) return;
+    const info = getModelInfo(modelId);
+    byId.set(modelId, {
+      model: modelId,
+      tier: info?.tier,
+      provider: info?.provider ?? detectProviderForModel(modelId),
+      roles: info?.roles,
+      description: info?.description ?? "",
+    });
+  };
+  for (const r of defaultRoster) add(r.model);
+
+  const providers = new Set<ProviderId>();
+  for (const r of defaultRoster) providers.add(detectProviderForModel(r.model) as ProviderId);
+  for (const provider of providers) {
+    if (byId.size >= 8) break;
+    if (isProviderDisabled(provider)) continue;
+    if (!(await isProviderReachable(provider))) continue;
+    for (const m of getModelsForProvider(provider)) {
+      if (m.tierRouting === false) continue;
+      add(m.id);
+      if (byId.size >= 8) break;
+    }
+  }
+  return [...byId.values()];
+}
+
 async function resolveSameProviderCandidates(
   providerId: ProviderId,
   sessionModelId: string,

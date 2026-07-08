@@ -40,6 +40,17 @@ describe("classifyStreamError", () => {
     expect(result.transient).toBe(true);
   });
 
+  it("classifies a Bun streaming socket drop as transient", () => {
+    // Bun's fetch rejects with this exact phrasing when a provider closes the
+    // streaming connection mid-response. It must retry, not escape as an
+    // unhandledRejection (which pops OpenTUI's un-dismissable console overlay).
+    const err = new Error(
+      "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+    );
+    const result = classifyStreamError(err);
+    expect(result.transient).toBe(true);
+  });
+
   it("classifies HTTP 429 as transient", () => {
     const err = Object.assign(new Error("Too Many Requests"), { statusCode: 429 });
     const result = classifyStreamError(err);

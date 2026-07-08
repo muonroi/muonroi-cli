@@ -158,6 +158,25 @@ describe("sprint-runner", () => {
     expect(chunks.some((c: any) => c.type === "content")).toBe(true);
   });
 
+  it("MUONROI_SPRINT_SKIP_VERIFY=1 bypasses the verify stage (A skip-verify recovery)", async () => {
+    process.env.MUONROI_SPRINT_SKIP_VERIFY = "1";
+    try {
+      const ctx = makeCtx();
+      const { chunks, result } = await drain(
+        runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
+      );
+      // Verify orchestration must NOT run when the bypass flag is set.
+      expect(runVerifyOrchestration).not.toHaveBeenCalled();
+      // Sprint still completes (verify treated as PASS) and emits the bypass note.
+      expect(result).toBeDefined();
+      expect(result!.lastVerifyResult).toBe("PASS");
+      const text = chunks.map((c: any) => c.content ?? "").join("");
+      expect(text).toContain("[skip-verify]");
+    } finally {
+      delete process.env.MUONROI_SPRINT_SKIP_VERIFY;
+    }
+  });
+
   it("CB-3 trips on sprint 1 with missing recipe — yields halt chunk BEFORE planner runs", async () => {
     (CB3_verifyBlank as any).mockReturnValue({ halt: true, reason: "no_recipe" });
     const ctx = makeCtx({ detectVerifyRecipe: vi.fn(async () => null) });

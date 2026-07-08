@@ -65,6 +65,8 @@ export const dark = {
   syntaxRegex: "#d16969",
   syntaxTag: "#569cd6",
   syntaxAttr: "#9cdcfe",
+  // ── Overlay / modal backdrop ─────────────────────────────────────────────
+  overlay: "#000000cc",
   // ── Council bubble tokens ────────────────────────────────────────────────
   councilLeaderBorder: "#666666",
   councilSynthesisBorder: "#5c9cf5",

@@ -8,6 +8,8 @@
 
 import { realpathSync, statSync } from "node:fs";
 import * as path from "node:path";
+import type { VerifyRecipe } from "../types/index.js";
+import { inferVerifyProjectProfile } from "../verify/recipes.js";
 import { detectBBFramework } from "./init-new.js";
 
 // ---------------------------------------------------------------------------
@@ -37,6 +39,31 @@ export interface PointToExistingResult {
 }
 
 export { detectBBFramework };
+
+/**
+ * Deterministic, filesystem-only verify-recipe detection for an existing project
+ * the user pointed to via the CB-3 recovery card.
+ *
+ * WHY NOT the orchestrator's detectVerifyRecipe: that path runs an LLM
+ * verify-detect sub-agent against the orchestrator's OWN (session) cwd via
+ * `this.bash.getCwd()` — it cannot inspect an arbitrary pointed-to directory, so
+ * wiring it here was deferred and the handler stubbed to `null` (point-to-existing
+ * therefore ALWAYS reported "no recipe", making the recovery option inert).
+ * `inferVerifyProjectProfile` reads the target dir's manifest/build files
+ * directly (package.json test/check/lint, Makefile, pyproject, go.mod, cargo,
+ * maven/gradle, *.csproj) — the correct detector for adopting an existing repo.
+ *
+ * Returns the recipe only when it is actually RUNNABLE (has a test/build/start
+ * command). The bare "unknown" fallback that `inferVerifyProjectProfile` emits
+ * for a directory with no recognizable project files carries empty commands →
+ * we return null so point-to-existing correctly reports `no_recipe` instead of
+ * falsely adopting an empty directory.
+ */
+export function detectExistingProjectRecipe(cwd: string): VerifyRecipe | null {
+  const { recipe } = inferVerifyProjectProfile(cwd);
+  const runnable = recipe.testCommands.length > 0 || recipe.buildCommands.length > 0 || Boolean(recipe.startCommand);
+  return runnable ? recipe : null;
+}
 
 // ---------------------------------------------------------------------------
 // Implementation

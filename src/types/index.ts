@@ -287,6 +287,7 @@ export interface CouncilQuestionData {
 
 export type CouncilStatusPhase =
   | "clarify"
+  | "panel_select"
   | "plan_debate"
   | "research"
   | "opening"
@@ -305,6 +306,8 @@ export interface CouncilStatusData {
   detail?: string;
   role?: string;
   elapsedMs?: number;
+  /** Client-side first-seen stamp (upsertStatus), back-dated by the emitted elapsedMs. Drives live-ticking elapsed. */
+  startedAt?: number;
   tokensIn?: number;
   tokensOut?: number;
   errorMessage?: string;
@@ -397,11 +400,95 @@ export interface CouncilInfoCard {
   sections: CouncilInfoCardSection[];
 }
 
+/**
+ * Incremental council metadata for the context rail (P3). Emitted as one or more
+ * `council_meta` chunks — the leader/panel/researchMode/costAware fields come
+ * from the council entrypoint, the round budget/ceiling from inside runDebate
+ * (locals invisible to the entrypoint). The UI upsert-merges each patch into a
+ * single `councilMeta` object, so any subset of fields may be present.
+ */
+/**
+ * One debate round's lifecycle record for the round-grouped transcript (P5/P6).
+ * Emitted as `council_round` chunks: a `running` record at round start, then a
+ * `done` record (guaranteed on every loop exit) carrying the outcome. The UI
+ * upsert-merges by `round` (running → done overwrite).
+ */
+export interface CouncilRoundRecord {
+  round: number;
+  state: "running" | "done";
+  /** This round's focus, carried from the prior round's `nextRoundFocus`. */
+  topic?: string;
+  /** Role labels of the participants active this round. */
+  participants: string[];
+  /** Number of debate pairs exchanged this round. */
+  pairCount: number;
+  /** True when this round is beyond the leader's original planned budget. */
+  emergent: boolean;
+  /** Leader-evaluated criteria met / total (absent until the round is done). */
+  criteriaMet?: number;
+  criteriaTotal?: number;
+  /** Leader's one-sentence decision reason. */
+  leaderReason?: string;
+  /** What the leader / engine decided at the end of this round. */
+  leaderDecision?: "continue" | "stop" | "extend" | "aborted" | "circuit-break" | "eval-unavailable";
+  /** Topic the leader set for the NEXT round (drives the overview). */
+  nextRoundFocus?: string;
+  /**
+   * B5 — the leader's pre-round DIRECTIVE for this round (goal + criteria still
+   * unmet going in). Captured on the round record so it survives into the
+   * post-debate conclusion card, not only the ephemeral live directive bubble —
+   * otherwise a user who looks away during the debate never sees the leader
+   * conduct the round. Present only when the conductor is on + criteria pinned.
+   */
+  directive?: string;
+}
+
+/**
+ * Incremental council metadata for the context rail (P3). Emitted as one or more
+ * `council_meta` chunks — the leader/panel/researchMode/costAware fields come
+ * from the council entrypoint, the round budget/ceiling from inside runDebate
+ * (locals invisible to the entrypoint). The UI upsert-merges each patch into a
+ * single `councilMeta` object, so any subset of fields may be present.
+ */
+export interface CouncilMetaPatch {
+  /** The debate topic / question under discussion (shown at the top of the rail). */
+  topic?: string;
+  /** Leader model id driving the debate. */
+  leader?: string;
+  /** Panel member role labels. */
+  panel?: string[];
+  /** Planned round budget resolved for this debate. */
+  roundBudget?: number;
+  /** Hard ceiling rounds may extend to (emergent rounds). */
+  roundCeiling?: number;
+  /** Research mode enabled for this debate. */
+  researchMode?: boolean;
+  /** Cost-aware budgeting active. */
+  costAware?: boolean;
+  /**
+   * The pinned outcome criteria the debate is graded against (the user-owned
+   * `ClarifiedSpec.successCriteria`). Emitted once after clarify so the rail can
+   * show the OUTCOME the debate is chasing — fixes "criteria met là gì tôi không
+   * biết". Stable for the whole debate.
+   */
+  successCriteria?: string[];
+  /**
+   * Per-criterion met status, index-aligned to `successCriteria`. Upsert-merged
+   * and refreshed after each round's leader evaluation so the rail shows live
+   * ✓/○ against the pinned criteria. Length matches `successCriteria`.
+   */
+  criteriaMet?: boolean[];
+}
+
 export interface CouncilMessage {
   kind: CouncilMessageKind;
   speaker: { role: string; model: string };
   partner?: { role: string }; // debate turns only
   round?: number; // debate / leader only
+  // Leader-only (B5 conductor). "directive" = pre-round steering the leader
+  // issues BEFORE the exchanges (round goal + which criteria are still unmet);
+  // "verdict" = post-round grading AFTER the eval. Absent → a plain leader eval.
+  phase?: "directive" | "verdict";
   text: string; // raw markdown body
   toolCalls?: { name: string }[];
   attempts?: number; // >1 → "recovered on retry" badge
@@ -421,6 +508,8 @@ export interface StreamChunk {
     | "council_phase"
     | "council_message"
     | "council_info_card"
+    | "council_meta"
+    | "council_round"
     | "done"
     | "error"
     | "reasoning"
@@ -445,6 +534,8 @@ export interface StreamChunk {
   councilPhase?: CouncilPhaseEvent;
   councilMessage?: CouncilMessage;
   councilInfoCard?: CouncilInfoCard;
+  councilMeta?: CouncilMetaPatch;
+  councilRound?: CouncilRoundRecord;
   productStatusCard?: import("../product-loop/types.js").ProductStatusCardData;
   /** Populated when type === "halt". Contains structured recovery options. */
   haltChunk?: import("../product-loop/types.js").HaltChunk;
@@ -499,6 +590,13 @@ export interface ModelInfo {
   multiAgent?: boolean;
   supportsClientTools?: boolean;
   supportsMaxOutputTokens?: boolean;
+  /**
+   * When set, the provider rejects any temperature other than this exact value
+   * (e.g. Moonshot/Kimi: "only 1 is allowed for this model"). Callers must send
+   * this value verbatim rather than their preferred temperature — see
+   * `resolveTemperature` in src/providers/capabilities.ts.
+   */
+  fixedTemperature?: number;
   defaultReasoningEffort?: ReasoningEffort;
   supportsReasoningEffort?: boolean;
   thinkingType?: "enabled" | "adaptive";
@@ -512,6 +610,7 @@ export interface ModelInfo {
 
 export type AgentMode = "agent" | "plan" | "ask";
 export type SessionStatus = "active" | "completed" | "archived" | "abandoned";
+export type SessionKind = "conversation" | "rotation" | "subagent";
 export type UsageSource = "message" | "title" | "task" | "delegation" | "council" | "other";
 
 export interface WorkspaceInfo {
@@ -534,6 +633,15 @@ export interface SessionInfo {
   status: SessionStatus;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * One row in the `/sessions` resume picker: a whole conversation tree collapsed
+ * to a single entry. `id`/`title`/`createdAt` describe the tree root; `resumeId`
+ * is the latest leaf to relaunch; `model`/`updatedAt`/`status` describe that leaf.
+ */
+export interface ResumeEntry extends SessionInfo {
+  resumeId: string;
 }
 
 export interface UsageEvent {

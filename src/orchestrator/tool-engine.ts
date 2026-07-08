@@ -111,6 +111,7 @@ import {
   type ResolvedModelRuntime,
   requireRuntimeProvider,
   type resolveModelRuntime,
+  resolveTemperatureParam,
   shouldDropParam,
 } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
@@ -148,6 +149,7 @@ import {
   getTopLevelCompactKeepLast,
   getTopLevelCompactThresholdChars,
   getTopLevelToolBudgetChars,
+  isAutoCouncilClarifyEnabled,
   isAutoCouncilEnabled,
   isProviderDisabled,
   loadMcpServers,
@@ -697,17 +699,35 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       ? `complexity=heavy${pilCtx.taskType ? ` task=${pilCtx.taskType}` : ""}`
       : `${pilCtx.taskType} task detected with ${(pilCtx.confidence * 100).toFixed(0)}% confidence`;
     yield { type: "content", content: `\n[Auto-council triggered: ${reason}]\n` };
-    yield* deps.runCouncilV2(userMessage, { skipClarification: true, observer, userModelMessage });
+    // Pre-debate interview: unless disabled, run the model-designed clarification
+    // askcards BEFORE the debate so a broadly-scoped "debate mode" request is
+    // chốt-ed first (each card's options carry a recommended default + per-option
+    // why — see runClarification/buildClarifyOptions). The clarifier is ROI-gated
+    // and yields 0 cards on already-detailed topics, so this stays quiet when the
+    // prompt is already specific. Skip only when the user turned it off. The
+    // clarifier reuses PIL gray-areas as seed questions (no hardcoded questions),
+    // and its models come from pickCouncilTaskModel (no hardcoded model/provider).
+    yield* deps.runCouncilV2(userMessage, {
+      skipClarification: !isAutoCouncilClarifyEnabled(),
+      observer,
+      userModelMessage,
+    });
     const synthesis = deps.councilManager.lastSynthesis;
+    const chosenAction = deps.councilManager.lastPostDebateAction;
     deps.councilManager.setLastSynthesis(null);
-    if (synthesis) {
+    deps.councilManager.setLastPostDebateAction(null);
+    // Honor the user's post-debate choice instead of always continuing: an
+    // evaluation/decision debate whose deliverable is the conclusion (default
+    // save_exit) now returns to the composer rather than being force-fed a
+    // meaningless "proceed with the action items" turn. postDebateContinuation
+    // is shared with the /council slash path (orchestrator.runCouncilV2).
+    const { postDebateContinuation } = await import("../council/index.js");
+    const continuationPrompt = synthesis ? postDebateContinuation(chosenAction ?? undefined, synthesis) : null;
+    if (continuationPrompt) {
       yield { type: "content", content: "\n[Auto-continuing with council recommendations...]\n" };
       deps.councilManager.setContinuation(true);
       try {
-        yield* deps.processMessage(
-          `Council debate completed. Synthesis:\n\n${synthesis}\n\nProceed with the recommended action items.`,
-          observer,
-        );
+        yield* deps.processMessage(continuationPrompt, observer);
       } finally {
         deps.councilManager.setContinuation(false);
       }
@@ -1963,7 +1983,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             }
             return withSteers({ messages: coalesced });
           },
-          ...(dropParam("temperature") ? {} : { temperature: 0.7 }),
+          ...resolveTemperatureParam(runtime, 0.7),
           ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
           ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
           experimental_onStepStart: (event: unknown) => {

@@ -49,6 +49,14 @@ export interface InstallOpenTUIHarnessOptions {
    * the `--agent-fake-clock` CLI flag.
    */
   fakeClock?: boolean;
+  /**
+   * Optional visual-frame capture. When provided, a VisualFrame (the actual
+   * rendered cell grid — colors + attributes) is captured and sent right after
+   * each SEMANTIC frame change. Piggybacking on semantic changes bounds the
+   * per-frame `getSpanLines()` allocation to real UI updates instead of every
+   * poll tick. Returns null on dedup / unavailable renderer.
+   */
+  captureVisual?: (seq: number, ts: number) => object | null;
 }
 
 export interface OpenTUIHarnessHandle {
@@ -81,6 +89,7 @@ export function installOpenTUIHarness(opts: InstallOpenTUIHarnessOptions): OpenT
   const intervalMs = Math.max(1, Math.round(1000 / fps));
 
   let seq = 0;
+  let vseq = 0;
   const fakeClock = opts.fakeClock ?? false;
   const hook = createReconcilerHook({
     registry: opts.registry,
@@ -96,6 +105,15 @@ export function installOpenTUIHarness(opts: InstallOpenTUIHarnessOptions): OpenT
     try {
       opts.transport.send(`${JSON.stringify(frame)}\n`);
       opts.onFrame?.(frame);
+      // Piggyback the visual (rendered cell-grid) frame on semantic changes so
+      // getSpanLines() only runs when the UI actually changed, not every tick.
+      if (opts.captureVisual) {
+        const vframe = opts.captureVisual(vseq, fakeClock ? vseq * 16 : Date.now());
+        if (vframe !== null) {
+          vseq++;
+          opts.transport.send(`${JSON.stringify(vframe)}\n`);
+        }
+      }
     } catch {
       // Drop frame on transport error — survivor of next tick will retry.
     }

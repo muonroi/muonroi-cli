@@ -67,8 +67,12 @@ export function buildRoadmapFromPhasePlan(idea: string, plan: PhasePlanArtifact)
       phase.dependsOn.length > 0
         ? phase.dependsOn
             .map((dep) => {
-              const match = dep.match(/phase-(\d+)/i);
-              return match ? `Phase ${match[1]}` : dep;
+              // Defensive: dependsOn is declared string[] but an un-normalised
+              // LLM plan can carry bare numbers — String() keeps this crash-proof
+              // regardless of caller (parsePhasePlanJson normalises the common path).
+              const depStr = String(dep);
+              const match = depStr.match(/phase-(\d+)/i) ?? depStr.match(/^(\d+)$/);
+              return match ? `Phase ${match[1]}` : depStr;
             })
             .join(", ")
         : index === 0

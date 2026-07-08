@@ -21,6 +21,56 @@ export type { WhoAmIDim, WhoAmIDimName, WhoAmIProfile } from "./who-am-i.js";
 // of this bridge.
 export { getWhoAmIProfile, outputStyleFromProfile, resetWhoAmICache } from "./who-am-i.js";
 
+import { getWhoAmIProfile, primeWhoAmICache, type WhoAmIProfile } from "./who-am-i.js";
+import { deriveWhoAmIFromBrain, isBrainWhoAmIEnabled } from "./who-am-i-brain.js";
+
+// Thin-client brain-derived Who-Am-I warm. The device-local profile.yaml pipeline is
+// full-brain-only (see who-am-i-brain.ts), so on a thin-client getWhoAmIProfile() is
+// always null and the PIL loses every style signal. warmWhoAmIFromBrain() derives the
+// same profile shape from the reachable `experience-behavioral` brain and primes the
+// per-process cache, so subsequent SYNC getWhoAmIProfile() reads (pipeline.ts:107,
+// layer4/5/6) pick it up. Idempotent + guarded: runs at most once per process, only
+// on a thin-client, only when no device-local profile exists, only when enabled.
+let _brainWhoAmIAttempted = false;
+
+/** Test-only: allow a fresh warm attempt after resetWhoAmICache(). */
+export function resetWhoAmIBrainWarm(): void {
+  _brainWhoAmIAttempted = false;
+}
+
+async function isThinClient(): Promise<boolean> {
+  try {
+    const { getCachedEEClientMode } = await import("./client-mode.js");
+    const modeInfo = getCachedEEClientMode();
+    if (modeInfo) return modeInfo.mode === "thin" || modeInfo.mode === "thin-degraded";
+    return !!(await import("./auth.js")).getCachedServerBaseUrl();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fire-and-forget at session boot. Derives a brain-based Who-Am-I profile on a
+ * thin-client and primes the sync cache. Fail-open + bounded (deriveWhoAmIFromBrain
+ * wraps its own timeouts); never throws, never blocks a real device-local profile.
+ * Returns the primed profile (or null) for callers/tests that want to await it.
+ */
+export async function warmWhoAmIFromBrain(): Promise<WhoAmIProfile | null> {
+  if (_brainWhoAmIAttempted) return getWhoAmIProfile();
+  _brainWhoAmIAttempted = true;
+  try {
+    if (!isBrainWhoAmIEnabled()) return null;
+    if (getWhoAmIProfile()) return getWhoAmIProfile(); // real device-local profile wins
+    if (!(await isThinClient())) return null;
+    const derived = await deriveWhoAmIFromBrain({ searchByText, classifyViaBrain });
+    if (derived) primeWhoAmICache(derived);
+    return derived;
+  } catch (err) {
+    logEeFailure("bridge.warmWhoAmIFromBrain", classifyEeError(err), err);
+    return null;
+  }
+}
+
 /**
  * Phase 21.5 — `routeModel` / `routeTask` budget. EE server unreachability used
  * to hang `/ideal` for the OS-level fetch connect timeout (~5 min on Windows).

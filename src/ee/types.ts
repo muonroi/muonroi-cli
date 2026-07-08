@@ -407,6 +407,14 @@ export interface BrainProxyOptions {
   maxTokens?: number;
   /** Override the brain provider (siliconflow | ollama | openai | ...). */
   provider?: string;
+  /**
+   * Ask the server to use its stronger `brainExtractModel` (structured-extraction
+   * model) instead of the hot-path `brainModel`. Zero-hardcode by design: the client
+   * sends only this flag, the server resolves the model id from its own config + key.
+   * Used by the thin-client WhoAmI brain fallback, where the weak default model
+   * mis-spells the dim vocabulary. Ignored by servers that don't recognise it.
+   */
+  useExtractModel?: boolean;
 }
 
 // ─── Client interface ────────────────────────────────────────────────────────

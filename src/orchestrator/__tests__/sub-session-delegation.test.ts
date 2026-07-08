@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { installMockModel, textOnlyStream } from "../../agent-harness/mock-model.js";
 import { loadCatalog } from "../../models/registry.js";
+import { createCompactionSummaryMessage, isCompactionSummaryMessage } from "../compaction.js";
 import { Agent } from "../orchestrator.js";
 
 // Mock generateText from 'ai'
@@ -117,6 +118,9 @@ vi.mock("../../storage/index.js", () => {
           updatedAt: new Date(),
         };
       }
+      linkChild(childId: any, parentId: any, kind: any) {
+        mockDb.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(parentId, childId);
+      }
       getRequiredSession(id: any) {
         return {
           id,
@@ -156,6 +160,17 @@ vi.mock("../message-processor.js", () => {
       async *run(userMessage: string) {
         if (userMessage === "trigger error") {
           throw new Error("Simulated MessageProcessor crash");
+        }
+        if (userMessage === "capture seed") {
+          // Snapshot the child's seeded working set so the test can assert the
+          // fork carried the kept raw tail, not just the compaction summary.
+          (globalThis as any).__capturedSeed = [...this.deps.messages];
+          this.deps.messages.push(
+            { role: "assistant", content: "Sub-session final structured response" },
+            { role: "tool", content: "Final tool outcome (should be copied)" },
+          );
+          yield { type: "content", content: "captured" };
+          return;
         }
         if (userMessage === "trigger transient error") {
           (globalThis as any).__transientAttempts = ((globalThis as any).__transientAttempts || 0) + 1;
@@ -299,6 +314,44 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
         expect.objectContaining({ role: "tool", content: "Final tool outcome (should be copied)" }),
       ]),
     );
+  });
+
+  it("seeds a forked sub-session with the kept raw tail, not just the compaction summary", async () => {
+    // Regression (Part 5): a parent whose context was compacted holds
+    // [summary, ...kept raw tail] in memory. The fork must carry that tail so a
+    // delegated council/debate sees the ACTUAL recent discussion the user points
+    // at — seeding the summary alone made debates drift off-topic ("lan man").
+    mockClassifySubSessionAction.mockResolvedValue({
+      action: "SPAWN_SUB_SESSION",
+      confidence: 0.98,
+      reason: "requires multi-step tool execution",
+    });
+    mockLoadLatestCompaction.mockReturnValue({ summary: "PARENT SUMMARY", tokensBefore: 100 });
+
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      session: "session-parent",
+    });
+
+    // Post-compaction parent shape: summary followed by the kept raw tail.
+    (agent as any).messages = [
+      createCompactionSummaryMessage("PARENT SUMMARY"),
+      { role: "user", content: "KEPT TAIL: the PIL pipeline analysis to debate" },
+    ];
+    (agent as any).messageSeqs = [null, 42];
+
+    delete (globalThis as any).__capturedSeed;
+    const generator = agent.processMessage("capture seed");
+    for await (const _chunk of generator) {
+      // drain
+    }
+
+    const seed = (globalThis as any).__capturedSeed as Array<{ role: string; content: unknown }>;
+    expect(seed).toBeDefined();
+    // Summary is present exactly once (not duplicated by the guard)...
+    expect(seed.filter((m) => isCompactionSummaryMessage(m as any))).toHaveLength(1);
+    // ...and the kept raw tail survived the fork.
+    expect(seed.some((m) => typeof m.content === "string" && m.content.includes("KEPT TAIL"))).toBe(true);
   });
 
   it("restores parent session if sub-session execution crashes", async () => {

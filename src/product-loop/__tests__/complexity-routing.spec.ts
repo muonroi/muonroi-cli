@@ -250,6 +250,40 @@ describe("C1 existing-repo bypass — Sprint C", () => {
     expect(runLoopDriver).not.toHaveBeenCalled();
   });
 
+  it("existing repo + complexity=medium + needsClarification → full Council (underspecified earns interview)", async () => {
+    const flowDir = await tmpFlowDir();
+    const cwd = await tmpExistingCwd();
+
+    // biome-ignore lint/correctness/useYield: intentional mock generator
+    (runSprint as any).mockImplementationOnce(async function* () {
+      return shippedIter();
+    });
+
+    const { result } = await drain(
+      runProductLoop(makeOpts({ flowDir, cwd, complexity: "medium", needsClarification: true })),
+    );
+
+    expect(result.success).toBe(true);
+    expect(runLoopDriver).toHaveBeenCalled();
+  });
+
+  it("existing repo + complexity=low + needsClarification → hot-path (a quick task never earns an interview)", async () => {
+    const flowDir = await tmpFlowDir();
+    const cwd = await tmpExistingCwd();
+
+    // biome-ignore lint/correctness/useYield: intentional mock generator
+    (runSprint as any).mockImplementationOnce(async function* () {
+      return shippedIter();
+    });
+
+    const { result } = await drain(
+      runProductLoop(makeOpts({ flowDir, cwd, complexity: "low", needsClarification: true })),
+    );
+
+    expect(result.success).toBe(true);
+    expect(runLoopDriver).not.toHaveBeenCalled();
+  });
+
   it("existing repo + complexity=high → still full Council (architectural change)", async () => {
     const flowDir = await tmpFlowDir();
     const cwd = await tmpExistingCwd();
@@ -311,5 +345,94 @@ describe("C1 existing-repo bypass — Sprint C", () => {
 
     expect(result.success).toBe(true);
     expect(runLoopDriver).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mode-C auto-detect vs --force-council. detectVerifyRecipe returning a recipe
+// routes to runMaintain — but this dispatch runs BEFORE the forceCouncil checks
+// below, so --force-council must short-circuit the auto-detect. Regression for
+// the observed bug: `/ideal --force-council` in a recipe-bearing repo was
+// silently downgraded to maint-edit (route-decision forceCouncil:false).
+// runMaintain early-returns `missing_bridges` here (makeOpts has no
+// processMessageFn), which cleanly proves the Mode-C branch was taken.
+// ---------------------------------------------------------------------------
+
+describe("Mode-C auto-detect vs --force-council", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.MUONROI_PHASE_MODE = "0";
+  });
+  afterEach(() => {
+    delete process.env.MUONROI_PHASE_MODE;
+  });
+
+  const recipeDetector = () => vi.fn(async () => ({ ecosystem: "node", testCommands: ["npm test"] }));
+
+  it("recipe present + NO forceCouncil → Mode C (runMaintain), runLoopDriver NOT called", async () => {
+    const flowDir = await tmpFlowDir();
+    const cwd = await tmpExistingCwd();
+    const detectVerifyRecipe = recipeDetector();
+
+    const { result } = await drain(
+      runProductLoop(makeOpts({ flowDir, cwd, complexity: "medium", detectVerifyRecipe })),
+    );
+
+    expect(detectVerifyRecipe).toHaveBeenCalled();
+    // runMaintain was entered (returns missing_bridges — no processMessageFn in test opts).
+    expect((result as any).reason).toBe("missing_bridges");
+    expect(runLoopDriver).not.toHaveBeenCalled();
+  });
+
+  it("recipe present + forceCouncil=true → bypasses Mode C → full path (runLoopDriver called)", async () => {
+    const flowDir = await tmpFlowDir();
+    const cwd = await tmpExistingCwd();
+    const detectVerifyRecipe = recipeDetector();
+
+    // biome-ignore lint/correctness/useYield: intentional mock generator
+    (runSprint as any).mockImplementationOnce(async function* () {
+      return shippedIter();
+    });
+
+    const { result } = await drain(
+      runProductLoop(
+        makeOpts({
+          flowDir,
+          cwd,
+          complexity: "medium",
+          detectVerifyRecipe,
+          flags: { maxCost: 50, maxSprints: 3, doneThreshold: 0.9, forceCouncil: true },
+        }),
+      ),
+    );
+
+    expect(result.success).toBe(true);
+    // forceCouncil short-circuits the auto-detect: detector never consulted,
+    // dispatch reaches runStart → runLoopDriver.
+    expect(detectVerifyRecipe).not.toHaveBeenCalled();
+    expect(runLoopDriver).toHaveBeenCalled();
+  });
+
+  it("explicit --maintain still wins over --force-council", async () => {
+    const flowDir = await tmpFlowDir();
+    const cwd = await tmpExistingCwd();
+    const detectVerifyRecipe = recipeDetector();
+
+    const { result } = await drain(
+      runProductLoop(
+        makeOpts({
+          flowDir,
+          cwd,
+          complexity: "medium",
+          mode: "maintain",
+          detectVerifyRecipe,
+          flags: { maxCost: 50, maxSprints: 3, doneThreshold: 0.9, forceCouncil: true },
+        }),
+      ),
+    );
+
+    // mode:"maintain" returns at the top → runMaintain (missing_bridges), never Council.
+    expect((result as any).reason).toBe("missing_bridges");
+    expect(runLoopDriver).not.toHaveBeenCalled();
   });
 });

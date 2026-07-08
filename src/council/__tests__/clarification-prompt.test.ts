@@ -25,7 +25,8 @@ describe("buildClarificationPrompt — de-robotized askcard", () => {
   });
 
   it("makes a recommendation MANDATORY (decisive), not optional", () => {
-    expect(system).toMatch(/ALWAYS include "recommended"/);
+    // One option must be flagged recommended:true — the decisive default.
+    expect(system).toMatch(/Mark EXACTLY ONE option with "recommended": true/);
     // The old "OMIT the field entirely" default must be gone.
     expect(system).not.toMatch(/OMIT the field entirely/i);
     expect(system).toMatch(/never face an unranked list/i);
@@ -37,9 +38,12 @@ describe("buildClarificationPrompt — de-robotized askcard", () => {
     expect(system).toMatch(/do NOT ask generic greenfield/i);
   });
 
-  it("still emits the structured JSON contract (question/suggestions/recommended)", () => {
-    expect(system).toMatch(/"suggestions"/);
-    expect(system).toMatch(/"recommended"/);
+  it("emits the structured JSON contract with per-option label + description", () => {
+    // Each choice carries its own explanation so the user decides without guessing.
+    expect(system).toMatch(/"options"/);
+    expect(system).toMatch(/"label"/);
+    expect(system).toMatch(/"description"/);
+    expect(system).toMatch(/"recommended": true/);
     expect(system).toMatch(/Output ONLY a JSON array/);
   });
 });

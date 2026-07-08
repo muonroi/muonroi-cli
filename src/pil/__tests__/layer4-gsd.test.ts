@@ -306,6 +306,21 @@ describe("layer4Gsd (playbook)", () => {
     expect(result.gsdGateBlocking).toBeFalsy();
   });
 
+  it("sprint-plan execution bypasses plan-review and emits an execution-only directive", async () => {
+    const raw = "[SPRINT-PLAN-EXECUTION: locked]\n\n--- SPRINT PLAN TO IMPLEMENT ---\n1. Create foo.ts";
+    const result = await layer4Gsd(makeCtx({ raw, enriched: raw, modelDepthTier: "heavy" }));
+    expect(result.enriched).toContain("[sprint-execution]");
+    expect(result.enriched).toContain("APPROVED sprint plan");
+    expect(result.enriched).toContain("EXECUTE it directly");
+    expect(result.enriched).not.toContain("MANDATORY");
+    expect(result.enriched).not.toContain("BLOCKED");
+    expect(result.enriched).not.toContain("recommend gsd_plan_review before gsd_execute");
+    expect(result.gsdGateBlocking).toBeFalsy();
+    const layer = result.layers.find((l) => l.name === "gsd-workflow-structuring");
+    expect(layer!.delta).toContain("tier=standard");
+    expect(layer!.delta).toContain("phase=none");
+  });
+
   it("uses ctx.gsdPhase from L1 (unified path) without calling routeTask", async () => {
     const { routeTask } = await import("../../ee/bridge.js");
     vi.mocked(routeTask).mockClear();
@@ -323,5 +338,31 @@ describe("layer4Gsd (playbook)", () => {
       _brainData: { t0_principles: [], t1_rules: [], t2_patterns: [], retrieval_skipped_reason: null },
     });
     expect(routeTask).not.toHaveBeenCalled();
+  });
+});
+
+describe("layer4Gsd — sprint-plan execution", () => {
+  it("emits an execute-directly directive and skips the plan-review gate", async () => {
+    const prev = process.env.MUONROI_GSD_NATIVE;
+    delete process.env.MUONROI_GSD_NATIVE;
+    try {
+      // An approved sprint plan is piped through processMessageFn; the impl turn
+      // must APPLY it, not re-enter gsd_plan_review — even though the long plan
+      // text would otherwise classify as heavy.
+      const result = await layer4Gsd(
+        makeCtx({
+          raw: "--- SPRINT PLAN TO IMPLEMENT ---\nStep 1: edit theme.ts\nStep 2: run tests",
+          modelDepthTier: "heavy",
+        }),
+      );
+      expect(result.enriched).toContain("[sprint-execution]");
+      expect(result.enriched).toContain("EXECUTE");
+      expect(result.enriched).toContain("Do NOT call gsd_discuss");
+      // The heavy MANDATORY plan-review gate must NOT fire for an approved plan.
+      expect(result.enriched).not.toContain("BLOCKED");
+    } finally {
+      if (prev === undefined) delete process.env.MUONROI_GSD_NATIVE;
+      else process.env.MUONROI_GSD_NATIVE = prev;
+    }
   });
 });

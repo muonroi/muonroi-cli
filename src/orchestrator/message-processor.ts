@@ -1222,12 +1222,13 @@ export class MessageProcessor {
             );
           const more = pending.length > 10 ? `\n  ...and ${pending.length - 10} more` : "";
           const recallContent =
-            `⚠️ MANDATORY: Rate ${pending.length} unrated EE hint(s) before proceeding.\n` +
-            `You MUST call ee_feedback for each hint below BEFORE doing anything else this turn.\n` +
-            `This is not optional — the Experience Engine brain learns from these ratings.\n` +
-            `Verdict: followed (you used the hint) | ignored (not relevant) | noise (wrong/stale).\n` +
+            `↳ ${pending.length} earlier EE hint(s) still unrated. Rate the one(s) you actually ` +
+            `acted on so the brain keeps what helped — this does NOT block the task; batch the ` +
+            `ee_feedback call(s) alongside your work, don't stall the user's request on it.\n` +
+            `Verdict: followed (you used it) | ignored (topical, didn't apply) | noise (wrong — needs reason).\n` +
             `${hintLines.join("\n")}${more}\n` +
-            `First output MUST be the ee_feedback call(s) — then proceed with the task.`;
+            `Rate once and move on — a hint you can't judge yet, leave for later; re-rating the same ` +
+            `id does not help. If the brain is unreachable the verdict is queued, so never retry-loop on it.`;
 
           const sid = deps.session?.id ?? "_anon";
           const { createHash: _recallHash } = await import("node:crypto");

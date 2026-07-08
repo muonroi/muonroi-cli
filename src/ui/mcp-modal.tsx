@@ -88,8 +88,6 @@ export function McpBrowserModal({
   const contentHeight = itemCount + 7;
   const maxHeight = Math.floor(height * 0.68);
   const panelHeight = Math.min(contentHeight, maxHeight);
-  const overlayBg = "#000000cc" as string;
-
   return (
     <Semantic id="mcp-modal" role="dialog" name="MCP Servers" isModal>
       <box
@@ -100,7 +98,7 @@ export function McpBrowserModal({
         height={height}
         alignItems="center"
         paddingTop={bottomAlignedModalTop(height, panelHeight)}
-        backgroundColor={overlayBg}
+        backgroundColor={t.overlay}
       >
         <box
           width={Math.min(96, width - 4)}
@@ -265,7 +263,6 @@ export function McpEditorModal({
   onSubmit: () => void;
 }) {
   const panelHeight = Math.min(30, Math.floor(height * 0.82));
-  const overlayBg = "#000000cc" as string;
   const isRemote = draft.transport === "http" || draft.transport === "sse";
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: syncKey is an intentional cache-bust prop
@@ -289,7 +286,7 @@ export function McpEditorModal({
         height={height}
         alignItems="center"
         paddingTop={bottomAlignedModalTop(height, panelHeight)}
-        backgroundColor={overlayBg}
+        backgroundColor={t.overlay}
       >
         <box
           width={Math.min(86, width - 6)}

@@ -1,4 +1,5 @@
 import type { StreamChunk } from "../types/index.js";
+import { getCouncilLanguage } from "../utils/settings.js";
 import { tracedGenerate } from "./llm.js";
 import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
 import { buildSynthesisPrompt } from "./prompts.js";
@@ -68,6 +69,9 @@ export async function* runPlanning(
       outputStyle: outputStyle ?? undefined,
       refineContext,
       planEmphasis,
+      // Feature B — synthesis output language follows the resolved council
+      // debate language (auto → detect from the brief; pinned → that locale).
+      language: getCouncilLanguage(),
     };
     const first = buildSynthesisPrompt(baseArgs);
     synthesisText = yield* tracedGenerate(llm, {

@@ -1,5 +1,11 @@
 import * as path from "node:path";
 import { runDebate } from "../council/debate.js";
+import {
+  deleteDebateInputs,
+  readDebateCheckpoint,
+  readDebateInputs,
+  writeDebateInputs,
+} from "../council/debate-checkpoint.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
 import { phaseStart } from "../council/phase-events.js";
 import { runPreflight } from "../council/preflight.js";
@@ -150,6 +156,30 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
   const leaderResolution = await resolveLeaderModelDetailed(ctx.sessionModelId);
   const leaderModelId = leaderResolution.modelId;
   const councilParticipants = await resolveParticipants(ctx.sessionModelId, isCouncilMultiProviderPreferred());
+
+  // C-v2 cross-session resume — a persisted debate checkpoint means the council
+  // debate was interrupted in a PRIOR session (the process died mid-round; the
+  // in-process C-v1 retry only covers same-session throws). Skip the already-
+  // completed + persisted discovery + interview and jump straight to the
+  // research/debate stage with the restored gather outputs; the `research` case
+  // reads the checkpoint and resumes the debate from its last completed round.
+  const priorCheckpoint = await readDebateCheckpoint(runDir);
+  if (priorCheckpoint) {
+    const inputs = await readDebateInputs(runDir);
+    if (inputs) {
+      clarifiedSpec = inputs.clarifiedSpec;
+      conversationContext = inputs.conversationContext;
+      state = "research";
+      yield {
+        type: "content",
+        content: `\n> Resuming an interrupted council debate (round ${priorCheckpoint.roundCount + 1}) — skipping discovery + interview.\n`,
+      };
+    } else {
+      console.error(
+        `[loop-driver] debate checkpoint present but debate-inputs.json missing (run ${ctx.runId}); running the council FSM fresh.`,
+      );
+    }
+  }
 
   while (true) {
     switch (state) {
@@ -520,69 +550,116 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           }
         }
 
-        const debateGen = runDebate(
+        // C-v2 — persist the minimal gather outputs so a fresh session can
+        // re-enter the debate (loop-driver resume entry above) without re-running
+        // the interactive discovery + interview. Written once here at debate start,
+        // captures the final conversationContext (after project + BB context).
+        // Deleted after scoping writes the spec. Non-fatal on failure.
+        await writeDebateInputs(runDir, {
+          version: 1,
+          problemStatement: clarifiedSpec.problemStatement,
           clarifiedSpec,
-          {
-            topic: ctx.idea,
-            conversationContext,
-            leaderModelId,
-            participants,
-          },
-          ctx.llm,
-        );
+          conversationContext,
+          savedAt: new Date().toISOString(),
+        });
 
-        // Suppress raw debate content so the user is not confused by inter-role
-        // monologue ("Researcher → Architect ... Question back to you?") which
-        // is NOT addressed to them. We still pass through phase/status events
-        // so the UI keeps a live progress indicator. After the debate completes
-        // we emit a single condensed summary.
-        try {
-          while (true) {
-            const { value, done } = await debateGen.next();
-            if (done) {
-              debateState = value as DebateState;
-              break;
+        // C (mid-debate checkpoint) — runDebate snapshots its per-round state to
+        // `<runDir>/debate-checkpoint.json` after each completed round and deletes
+        // it on normal completion. If a prior attempt (this process, or a crashed
+        // earlier run of the SAME runId) left a checkpoint, seed it so the debate
+        // resumes from the last completed round instead of re-running rounds 1..N.
+        let resumeCheckpoint = (await readDebateCheckpoint(runDir)) ?? undefined;
+        // In-process resilience: a mid-debate throw (provider 5xx after the
+        // fallback budget, transient network) re-runs runDebate ONCE (default)
+        // from the freshly-written checkpoint, so a round-5 break loses one round,
+        // not five. Only retried when a checkpoint exists (≥1 round completed) —
+        // a pre-round-1 failure has nothing to resume and rethrows immediately.
+        const maxDebateRetries = (() => {
+          const raw = process.env.MUONROI_DEBATE_RESUME_RETRIES;
+          const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+          return Number.isFinite(n) && n >= 0 ? n : 1;
+        })();
+
+        for (let attempt = 0; ; attempt++) {
+          const debateGen = runDebate(
+            clarifiedSpec,
+            {
+              topic: ctx.idea,
+              conversationContext,
+              leaderModelId,
+              participants,
+              runId: ctx.sessionId ?? ctx.runId,
+              checkpointDir: runDir,
+              resumeCheckpoint,
+            },
+            ctx.llm,
+          );
+
+          // Suppress raw debate content so the user is not confused by inter-role
+          // monologue ("Researcher → Architect ... Question back to you?") which
+          // is NOT addressed to them. We still pass through phase/status events
+          // so the UI keeps a live progress indicator. After the debate completes
+          // we emit a single condensed summary.
+          try {
+            while (true) {
+              const { value, done } = await debateGen.next();
+              if (done) {
+                debateState = value as DebateState;
+                break;
+              }
+              const chunk = value as StreamChunk;
+              if (chunk.type === "content") continue;
+              // Persist debate speaker turns to interaction_logs so forensics
+              // can replay the debate text without relying on TUI scrollback
+              // (which currently holds the only copy — messages/usage_events
+              // tables stay empty for the debate path).
+              if (chunk.type === "council_message" && chunk.councilMessage) {
+                const cm = chunk.councilMessage;
+                logLoopEvent(ctx, "council_message", {
+                  phase: "research",
+                  kind: cm.kind,
+                  speakerRole: cm.speaker.role,
+                  speakerModel: cm.speaker.model,
+                  partnerRole: cm.partner?.role ?? null,
+                  round: cm.round ?? null,
+                  attempts: cm.attempts ?? 1,
+                  failureReason: cm.failureReason ?? null,
+                  toolCalls: cm.toolCalls?.map((tc) => tc.name) ?? [],
+                  // Cap at 4000 chars so a single row stays well under SQLite
+                  // text limits even for the most verbose speaker turn.
+                  textExcerpt: cm.text.slice(0, 4000),
+                  textLength: cm.text.length,
+                });
+              }
+              yield chunk;
             }
-            const chunk = value as StreamChunk;
-            if (chunk.type === "content") continue;
-            // Persist debate speaker turns to interaction_logs so forensics
-            // can replay the debate text without relying on TUI scrollback
-            // (which currently holds the only copy — messages/usage_events
-            // tables stay empty for the debate path).
-            if (chunk.type === "council_message" && chunk.councilMessage) {
-              const cm = chunk.councilMessage;
-              logLoopEvent(ctx, "council_message", {
-                phase: "research",
-                kind: cm.kind,
-                speakerRole: cm.speaker.role,
-                speakerModel: cm.speaker.model,
-                partnerRole: cm.partner?.role ?? null,
-                round: cm.round ?? null,
-                attempts: cm.attempts ?? 1,
-                failureReason: cm.failureReason ?? null,
-                toolCalls: cm.toolCalls?.map((tc) => tc.name) ?? [],
-                // Cap at 4000 chars so a single row stays well under SQLite
-                // text limits even for the most verbose speaker turn.
-                textExcerpt: cm.text.slice(0, 4000),
-                textLength: cm.text.length,
-              });
+            break; // debate completed — exit the retry loop.
+          } catch (err) {
+            // The debate iterator hit an exception (e.g. provider 5xx after the
+            // retry budget). Persist an audit row so we have a forensics trail —
+            // without it the FSM unwinds silently and the session looks like
+            // "research = 0 word" in the DB.
+            const freshCp = (await readDebateCheckpoint(runDir)) ?? undefined;
+            logLoopEvent(ctx, "council_error", {
+              phase: "research",
+              stage: "debate",
+              error: err instanceof Error ? err.message : String(err),
+              roundCount: debateState?.roundCount ?? freshCp?.roundCount ?? 0,
+              participantCount: participants.length,
+              elapsedMs: Date.now() - researchPhaseStartMs,
+            });
+            // C — resume-from-checkpoint retry: only when a completed round was
+            // checkpointed and retries remain. Otherwise rethrow unchanged.
+            if (attempt < maxDebateRetries && freshCp && freshCp.roundCount >= 1) {
+              resumeCheckpoint = freshCp;
+              yield {
+                type: "content",
+                content: `\n> Debate interrupted (${err instanceof Error ? err.message : String(err)}); resuming from round ${freshCp.roundCount + 1}…\n`,
+              };
+              continue;
             }
-            yield chunk;
+            throw err;
           }
-        } catch (err) {
-          // The debate iterator hit an exception (e.g. provider 5xx after the
-          // retry budget). Persist an audit row before re-throwing so we have
-          // a forensics trail — without it the FSM unwinds silently and the
-          // session looks like "research = 0 word" in the DB.
-          logLoopEvent(ctx, "council_error", {
-            phase: "research",
-            stage: "debate",
-            error: err instanceof Error ? err.message : String(err),
-            roundCount: debateState?.roundCount ?? 0,
-            participantCount: participants.length,
-            elapsedMs: Date.now() - researchPhaseStartMs,
-          });
-          throw err;
         }
 
         // Forensics row mirrors the council/index.ts council_summary record
@@ -793,6 +870,12 @@ interface ProductSpec {
         const roadmapMap = (await readArtifact(runDir, "roadmap.md")) ?? { preamble: "", sections: new Map() };
         roadmapMap.sections.set("Product Specification", JSON.stringify(productSpec, null, 2));
         await writeArtifact(runDir, "roadmap.md", roadmapMap);
+
+        // C-v2 — debate + scoping are done and the spec is persisted, so the
+        // cross-session resume inputs are obsolete (the checkpoint was already
+        // deleted by runDebate on completion). Clean them up so a later
+        // `/ideal resume` of this run does not re-enter the debate FSM.
+        await deleteDebateInputs(runDir);
 
         // P8 - derive tasks.json from the spec (canonical machine-readable
         // surface for downstream /execute consumption). MVP items get

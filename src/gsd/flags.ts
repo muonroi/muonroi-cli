@@ -36,3 +36,51 @@ export function isGsdHardGateEnabled(): boolean {
 export function isPilGateEnrichEnabled(): boolean {
   return isGsdNativeEnabled() && process.env.MUONROI_PIL_GATE_ENRICH !== "0";
 }
+
+/**
+ * Debate/council TUI two-pane redesign — scroll-lock. Default ON (baked). When
+ * ON, forced `scrollToBottom()` calls respect the user's manual scroll position
+ * (OpenTUI `_hasManualScroll`) so streaming renders don't yank the view back to
+ * the latest line while the user is reading history. A jump-to-latest pill
+ * re-pins on demand. Opt out: MUONROI_SCROLL_LOCK=0.
+ */
+export function isScrollLockEnabled(): boolean {
+  const raw = process.env.MUONROI_SCROLL_LOCK;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}
+
+/**
+ * Debate/council TUI two-pane redesign — right Context Rail for metadata-heavy
+ * modes (debate/council, ideal). Default ON (baked). When ON,
+ * session/leader/panel/budget metadata and info-cards move out of the scrolling
+ * transcript into a right-hand panel. Requires ≥100 terminal columns; below
+ * that the rail is hidden and metadata falls back inline. Opt out:
+ * MUONROI_CONTEXT_RAIL=0.
+ */
+export function isContextRailEnabled(): boolean {
+  const raw = process.env.MUONROI_CONTEXT_RAIL;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}
+
+/**
+ * Debate/council TUI two-pane redesign — round-grouped transcript. Default ON
+ * (baked). When ON, debate turns are grouped by round; only the running round
+ * streams live while done rounds render an expanded summary (input, outcome,
+ * leader decision, metrics). Opt out: MUONROI_ROUND_GROUPS=0.
+ */
+export function isRoundGroupsEnabled(): boolean {
+  const raw = process.env.MUONROI_ROUND_GROUPS;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}
+
+/**
+ * U3 — task-aware debate panel. Default ON. When ON, the leader reads the task
+ * and selects which reachable models should debate it (via selectTaskAwarePanel)
+ * instead of the prompt-blind capability roster from resolveParticipants. Always
+ * fails open to the default roster on any provider/parse failure. Opt out:
+ * MUONROI_TASK_AWARE_PANEL=0.
+ */
+export function isTaskAwarePanelEnabled(): boolean {
+  const raw = process.env.MUONROI_TASK_AWARE_PANEL;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}

@@ -58,6 +58,14 @@ export interface UserPromptArgs {
 
 export type UserPromptFn = (args: UserPromptArgs) => Promise<UserPromptResult>;
 
+/**
+ * Under existing-repo collapse, keep ONLY these questions as interactive
+ * per-field cards — they are the fields whose answers actually shape the
+ * technical change. Everything else in DISCOVERY_QUESTIONS is auto-filled and
+ * surfaced together on the compact __user_gate__ confirm card.
+ */
+const KEEP_CARD_FOR_EXISTING = new Set<string>(["backendArchitecture"]);
+
 export interface RecommenderLike {
   leaderRecommend: (input: RecommendInput) => Promise<RecommendOutput>;
   councilRecommend: (input: RecommendInput) => Promise<RecommendOutput>;
@@ -96,7 +104,19 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
   // but optional ones (baStatus, designStatus, deployment, frontendApproach when
   // not web) are deferred unless the user explicitly re-runs with more context.
   const specificity = computePromptSpecificity(opts.idea);
-  const skipOptionalForMinimal = specificity === "minimal";
+  // Existing-codebase work (refactor / migration / feature-add on a repo that
+  // already has source) should NOT re-run the full greenfield product-scoping
+  // questionnaire. productType/audience/targetPlatform/frontend/design/deployment
+  // are derivable from the codebase and inert for the technical change — asking
+  // them per-field is the over-ask users complained about. For any non-greenfield
+  // classification (existing OR ambiguous polyglot) we collapse to the ONE
+  // decision-relevant card (backendArchitecture) plus the compact "assumed from
+  // codebase" confirm gate (the same __user_gate__ path used for minimal/detailed
+  // prompts). This mirrors the repoBrief-build condition below. Escape hatch:
+  // MUONROI_DISCOVERY_EXISTING_COLLAPSE=0 restores the full per-field interview.
+  const collapseForExisting =
+    detection.classification !== "greenfield" && process.env.MUONROI_DISCOVERY_EXISTING_COLLAPSE !== "0";
+  const skipOptionalForMinimal = specificity === "minimal" || collapseForExisting;
 
   // G2-b: for a minimal OR well-specified ("detailed") prompt the recommender's
   // primary is high-confidence — minimal picks smallest-scope defaults, detailed
@@ -108,7 +128,8 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
   // "moderate" prompts keep the per-question cards (genuinely ambiguous). Escape
   // hatch: MUONROI_DISCOVERY_AUTOFILL=0 restores per-question cards everywhere.
   const autoFillRequired =
-    (specificity === "minimal" || specificity === "detailed") && process.env.MUONROI_DISCOVERY_AUTOFILL !== "0";
+    (specificity === "minimal" || specificity === "detailed" || collapseForExisting) &&
+    process.env.MUONROI_DISCOVERY_AUTOFILL !== "0";
   const assumed: Array<{ id: string; value: any }> = [];
   // G1 follow-up: keep the recommendation behind each auto-filled assumption so
   // the user-gate "edit: <field>" path can re-render the SAME per-question card
@@ -178,7 +199,19 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
     // policy) so a malformed recommendation falls back to the normal card flow.
     // The assumed answers are surfaced together on the single user-gate card.
     let autoAccepted = false;
-    if (autoFillRequired && effectivelyRequired && recommendation.primary?.value != null) {
+    // Keep backendArchitecture interactive under existing-repo collapse (the one
+    // field whose answer shapes the technical work), and NEVER silently auto-accept
+    // a weakly-grounded recommendation (synthFailed = the rationale failed the
+    // repo-brief citation check twice) — fall through to a per-question card so the
+    // user can catch a hallucinated value instead of it being assumed.
+    const keepInteractive = collapseForExisting && KEEP_CARD_FOR_EXISTING.has(question.id);
+    if (
+      autoFillRequired &&
+      effectivelyRequired &&
+      recommendation.primary?.value != null &&
+      !recommendation.synthFailed &&
+      !keepInteractive
+    ) {
       const v = recommendation.primary.value;
       const validation = validateAnswer(question.id, v);
       const feLib = question.id === "frontendApproach" ? (v as any)?.library : undefined;

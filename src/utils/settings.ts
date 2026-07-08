@@ -238,6 +238,17 @@ export interface UserSettings {
    * preserving legacy behavior).
    */
   autoCouncilMinRoles?: number;
+  /**
+   * Whether an auto-triggered council/debate runs the pre-debate clarification
+   * interview (model-designed askcards) before debating, instead of jumping
+   * straight into the debate on the bare prompt. Default true — a broad request
+   * like "dùng debate mode thảo luận lên plan" is exactly the kind of ambiguous
+   * scope the interview is meant to chốt first (prevents the debate drifting /
+   * "lan man"). The clarifier is ROI-gated and returns 0 cards on already-detailed
+   * topics, so enabling it is safe. Set false (or env MUONROI_AUTOCOUNCIL_CLARIFY=0)
+   * to restore the old skip-clarification behaviour.
+   */
+  autoCouncilClarify?: boolean;
   councilPreferMultiProvider?: boolean;
   /** EE involvement level in council debates. Default: advisory. CQ-19. */
   councilExperienceMode?: CouncilExperienceMode;
@@ -252,6 +263,20 @@ export interface UserSettings {
    * decide structure and quality, not throughput.
    */
   councilCostAware?: boolean;
+  /**
+   * Language the council debate is conducted in (Feature B). The chosen language
+   * IS the debate language — no separate translate-back pass, so no extra LLM
+   * rounds. Values:
+   *   - "auto" (default) — debate + conclusion follow the language of the user's
+   *     prompt/brief (they type Vietnamese → the debate runs in Vietnamese).
+   *   - "english" — force the historical English-only debate (citation tags,
+   *     JSON, cross-turn citations stay maximally machine-stable).
+   *   - any other free-text locale label (e.g. "vietnamese", "日本語") — pin the
+   *     debate to that language regardless of the prompt's language.
+   * Citation tags, JSON keys, the `type` field, code identifiers, and STACK LOCK
+   * technology names always stay verbatim English regardless of this setting.
+   */
+  councilLanguage?: string;
   /** Set true after the user has been prompted (or skipped) the web-research onboarding. */
   webResearchPrompted?: boolean;
   /** Set true after the user has been prompted (or skipped) the first-run Experience Engine setup. */
@@ -1175,6 +1200,19 @@ export function getAutoCouncilConfidence(): number {
   return normalizeAutoCouncilConfidence(loadUserSettings().autoCouncilConfidence);
 }
 
+/**
+ * Whether the auto-council path runs the pre-debate clarification interview
+ * (model-designed askcards) before debating. Default true so a broadly-scoped
+ * "debate mode" request is clarified first. Env override wins over the user
+ * setting for quick dev toggling; env "0"/"false" disables, "1"/"true" enables.
+ */
+export function isAutoCouncilClarifyEnabled(): boolean {
+  const env = process.env.MUONROI_AUTOCOUNCIL_CLARIFY?.trim().toLowerCase();
+  if (env === "0" || env === "false") return false;
+  if (env === "1" || env === "true") return true;
+  return loadUserSettings().autoCouncilClarify ?? true;
+}
+
 export function getAutoCouncilMinRoles(): number {
   return normalizeAutoCouncilMinRoles(loadUserSettings().autoCouncilMinRoles);
 }
@@ -1206,6 +1244,25 @@ export function getPeakHourPolicy(): PeakHourPolicy {
 
 export function isCouncilCostAware(): boolean {
   return loadUserSettings().councilCostAware ?? true;
+}
+
+/**
+ * Normalize a raw councilLanguage value (Feature B). Trims + lowercases the two
+ * reserved modes ("auto", "english"); any other non-empty string is preserved
+ * as-is (trimmed) so locale labels keep the user's exact casing (e.g. "日本語").
+ * Empty / non-string → "auto".
+ */
+export function normalizeCouncilLanguage(raw: unknown): string {
+  if (typeof raw !== "string") return "auto";
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return "auto";
+  const lower = trimmed.toLowerCase();
+  if (lower === "auto" || lower === "english") return lower;
+  return trimmed;
+}
+
+export function getCouncilLanguage(): string {
+  return normalizeCouncilLanguage(loadUserSettings().councilLanguage);
 }
 
 /**

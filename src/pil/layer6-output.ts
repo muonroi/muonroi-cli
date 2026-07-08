@@ -318,8 +318,14 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
  * implement turn the model mis-classified as a `report`, so a terminal
  * respond_plan ended it on a plan (edits done but uncommitted/unreported).
  */
+export const SPRINT_EXECUTION_MARKER = "[SPRINT-PLAN-EXECUTION: locked]";
+
+export function isSprintPlanExecution(raw: string): boolean {
+  return raw.includes(SPRINT_EXECUTION_MARKER) || raw.includes("--- SPRINT PLAN TO IMPLEMENT ---");
+}
+
 const IMPLEMENTATION_INTENT_RE =
-  /\b(implement|edit|wire(?:\s+up)?|rewrite|rename|scaffold|refactor)\b|\bimprove(?:ment)?\b|\bmake\s+(the\s+)?(change|edit|modification)s?\b|\bapply\s+(the\s+)?(fix|change|patch|edit|diff)\b|(?:^|\s)(triển\s*khai|trien\s*khai|chỉnh\s*sửa|chinh\s*sua|viết\s*lại|viet\s*lai|đổi\s*tên|doi\s*ten|cải\s*thiện|cai\s*thien)\b/i;
+  /\b(implement|edit|wire(?:\s+up)?|rewrite|rename|scaffold|refactor)\b|\bimprove(?:ment)?\b|\bmake\s+(the\s+)?(change|edit|modification)s?\b|\bapply\s+(the\s+)?(fix|change|patch|edit|diff)\b|(?:^|\s)(triển\s*khai|trien\s*khai|chỉnh\s*sửa|chinh\s*sua|viết\s*lại|viet\s*lai|đổi\s*tên|doi\s*ten|cải\s*thiện|cai\s*thien)\b|\[SPRINT-PLAN-EXECUTION:\s*locked\]/i;
 
 export function isImplementationIntent(raw: string): boolean {
   return !!raw && IMPLEMENTATION_INTENT_RE.test(raw);

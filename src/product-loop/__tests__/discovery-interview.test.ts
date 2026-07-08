@@ -407,4 +407,116 @@ describe("discovery-interview", () => {
     // The re-shown gate reflects the edit in its assumption summary.
     expect(gatesSeen[1]?.find((a) => a.id === "productType")?.value).toBe("internal-tool");
   });
+
+  // Existing-repo collapse: for a non-greenfield classification (refactor /
+  // migration / feature-add on a repo with source) the full product-scoping
+  // questionnaire must collapse to the ONE decision-relevant card
+  // (backendArchitecture) + the compact __user_gate__ confirm. This is the fix
+  // for the live over-ask complaint (9 per-field cards for a dependency swap).
+  it("collapses to backendArchitecture card + gate for an existing repo", async () => {
+    delete process.env.MUONROI_DISCOVERY_AUTOFILL; // default (on); collapse forces auto-fill regardless of specificity
+    const existingDetection = { ...FAKE_DETECTION, classification: "existing" as const, srcFileCount: 42 };
+    await initDiscoveryState(flowDir, "collapse-run", {
+      classification: "existing",
+      prefillSource: { fromDetection: [], fromPrompt: [] },
+    });
+    const answers = {
+      productType: "other",
+      targetPlatform: ["cli"],
+      audience: { persona: "devs", scale: "1-100", geography: "Global" },
+      backendArchitecture: "in-process TS engine",
+      backendStack: { language: "TS", framework: "none" },
+      dbStrategy: { mode: "greenfield", engine: "none" },
+    };
+    const rec = makeRecommender(answers);
+    const promptedIds: string[] = [];
+    let gateAssumptions: Array<{ id: string; value: any }> | undefined;
+    const userPrompt: UserPromptFn = async (args) => {
+      promptedIds.push(args.questionId);
+      if (args.questionId === "__user_gate__") {
+        gateAssumptions = args.assumptions;
+        return { action: "proceed" };
+      }
+      return { action: "accept" };
+    };
+    await iterateInterview({
+      flowDir,
+      runId: "collapse-run",
+      idea: "remove the @opengsd/gsd-core dependency and reimplement the workflow engine natively in src/council",
+      capUsd: 50,
+      detection: existingDetection,
+      userPrompt,
+      recommender: rec as any,
+    });
+    // ONLY backendArchitecture surfaced as a per-field card; everything else was
+    // auto-filled and folded into the single gate.
+    expect(promptedIds.filter((id) => id !== "__user_gate__")).toEqual(["backendArchitecture"]);
+    expect(promptedIds).toContain("__user_gate__");
+    // The gate carried the auto-filled product-scoping assumptions for review,
+    // but NOT backendArchitecture (answered interactively, not assumed).
+    expect(gateAssumptions?.map((a) => a.id)).toEqual(
+      expect.arrayContaining(["productType", "targetPlatform", "audience", "backendStack", "dbStrategy"]),
+    );
+    expect(gateAssumptions?.map((a) => a.id)).not.toContain("backendArchitecture");
+    const state = await readDiscoveryState(flowDir, "collapse-run");
+    expect(state?.answers.backendArchitecture).toBe("in-process TS engine");
+    expect(state?.userGatePassed).toBe(true);
+  });
+
+  // Safety guard: under existing-repo collapse the auto-accept path must NOT
+  // silently accept a weakly-grounded recommendation (synthFailed = the rationale
+  // failed the repo-brief citation check twice) — it falls through to a card so
+  // the user can catch a hallucinated value instead of it being assumed.
+  it("does not auto-accept a synthFailed recommendation under collapse (surfaces a card)", async () => {
+    delete process.env.MUONROI_DISCOVERY_AUTOFILL;
+    const existingDetection = { ...FAKE_DETECTION, classification: "existing" as const, srcFileCount: 42 };
+    await initDiscoveryState(flowDir, "synthfail-run", {
+      classification: "existing",
+      prefillSource: { fromDetection: [], fromPrompt: [] },
+    });
+    const answers = {
+      productType: "other",
+      targetPlatform: ["cli"],
+      audience: { persona: "devs", scale: "1-100", geography: "Global" },
+      backendArchitecture: "in-process TS engine",
+      backendStack: { language: "TS", framework: "none" },
+      dbStrategy: { mode: "greenfield", engine: "none" },
+    };
+    // targetPlatform comes back weakly grounded (synthFailed) — must NOT be assumed.
+    const rec = {
+      leaderRecommend: vi.fn(async ({ question }: any) => ({
+        primary: { value: answers[question.id as keyof typeof answers], rationale: "r" },
+        alternatives: [],
+        source: "leader" as const,
+        costUsd: 0.01,
+        synthFailed: question.id === "targetPlatform",
+      })),
+      councilRecommend: vi.fn(async ({ question }: any) => ({
+        primary: { value: answers[question.id as keyof typeof answers], rationale: "r" },
+        alternatives: [],
+        source: "council" as const,
+        costUsd: 0.3,
+      })),
+    };
+    const promptedIds: string[] = [];
+    const userPrompt: UserPromptFn = async (args) => {
+      promptedIds.push(args.questionId);
+      if (args.questionId === "__user_gate__") return { action: "proceed" };
+      return { action: "accept" };
+    };
+    await iterateInterview({
+      flowDir,
+      runId: "synthfail-run",
+      idea: "remove the @opengsd/gsd-core dependency and reimplement natively",
+      capUsd: 50,
+      detection: existingDetection,
+      userPrompt,
+      recommender: rec as any,
+    });
+    // The weakly-grounded targetPlatform surfaced as a card (not silently assumed);
+    // backendArchitecture still surfaces per policy.
+    const cardIds = promptedIds.filter((id) => id !== "__user_gate__");
+    expect(cardIds).toContain("targetPlatform");
+    expect(cardIds).toContain("backendArchitecture");
+  });
 });

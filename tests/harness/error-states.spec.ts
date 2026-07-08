@@ -50,6 +50,13 @@ describe("error states E2E", { retry: 2 }, () => {
     cleanup = ctx.cleanup;
 
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
+    // Mount guard: the idle sentinel can fire on the empty seq=0 frame BEFORE
+    // React mounts (same race smoke/determinism guard against). Typing on that
+    // premature idle sends keys to an app whose keyboard handler isn't wired
+    // yet — they are silently dropped, the turn never starts, and the toast
+    // never fires (the exact 0%-success failure this spec regressed into once
+    // branch boot got heavier). Only type after the composer is really there.
+    await driver.wait_for({ selector: "role=textbox", timeoutMs: 10_000 });
   }, 120_000);
 
   afterAll(() => {
