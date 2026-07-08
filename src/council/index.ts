@@ -238,18 +238,48 @@ export function pickPostDebateRecommendation(input: {
  *
  * Returns the re-entry prompt to feed back into processMessage, or `null` to stop
  * at the composer (the synthesis IS the deliverable).
- *   - continue_session → carry the conclusion forward on the ORIGINAL task.
+ *   - continue_session → carry the conclusion forward on the ORIGINAL task, but
+ *     ONLY for an implementation-shaped debate. For an analysis/evaluation debate
+ *     the conclusion IS the deliverable, so re-enter WITHOUT an implementation
+ *     mandate (session 578b2eae7099: "Continue the original task using this
+ *     conclusion" on an evaluation made the model invent phantom Phase-1..7 todos
+ *     and start editing files, then the rogue turn wedged the UI).
  *   - generate_plan / implement → execute the recommended action items.
  *   - save_exit / refine / retry_synthesis / follow-up / undefined → stop (those
  *     either already re-synthesized inside runCouncil or are terminal by intent).
  */
-export function postDebateContinuation(action: string | undefined, synthesis: string): string | null {
+const IMPLEMENTATION_OUTPUT_KINDS = new Set<string>(["implementation_plan"]);
+
+/** Recover the output-shape kind the synthesis was produced under (```json { "type": … }). */
+function synthesisOutputKind(synthesis: string): string | undefined {
+  const m = synthesis.match(/"type"\s*:\s*"([^"]+)"/);
+  return m?.[1];
+}
+
+export function postDebateContinuation(
+  action: string | undefined,
+  synthesis: string,
+  outputKind?: string,
+): string | null {
   if (!synthesis || !action) return null;
   if (action === "generate_plan" || action === "implement") {
     return `Council debate completed. Synthesis:\n\n${synthesis}\n\nProceed with the recommended action items.`;
   }
   if (action === "continue_session") {
-    return `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`;
+    const kind = outputKind ?? synthesisOutputKind(synthesis);
+    // Only an implementation-shaped debate has an "original task" left to build.
+    if (kind && IMPLEMENTATION_OUTPUT_KINDS.has(kind)) {
+      return `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`;
+    }
+    // Analysis/evaluation/decision/investigation (or unknown → treat as analysis):
+    // the conclusion is the deliverable. Re-enter so the turn is resumable, but
+    // forbid the implementation drift that phantom-todo'd and hung the session.
+    return (
+      `Council debate completed. Conclusion:\n\n${synthesis}\n\n` +
+      `The analysis above IS the deliverable — present it clearly to the user. ` +
+      `Do NOT edit files, create plans or todos, run build/migration commands, or spawn sub-agents ` +
+      `unless the user explicitly asks for that next step. Wait for the user's direction.`
+    );
   }
   return null;
 }

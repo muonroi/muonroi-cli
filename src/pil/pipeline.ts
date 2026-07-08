@@ -28,7 +28,7 @@ import { layer2Personality } from "./layer2-personality.js";
 import { layer3EeInjection, surfaceCompactionArtifacts } from "./layer3-ee-injection.js";
 import { layer4Gsd } from "./layer4-gsd.js";
 import { layer5Context } from "./layer5-context.js";
-import { isMetaAnalysisPrompt, layer6Output } from "./layer6-output.js";
+import { isMetaAnalysisPrompt, isSprintPlanExecution, layer6Output } from "./layer6-output.js";
 import { PipelineContextSchema } from "./schema.js";
 import { injectSessionExperience, isSelfExperiencePrompt } from "./session-experience-injection.js";
 import { bumpSessionTurn } from "./session-state.js";
@@ -142,7 +142,25 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
   // a strong signal that this is a read-only Q&A. 0.7 threshold would miss
   // turns where confidence ∈ [0.5, 0.7) but deliverable is clearly an answer
   // (e.g. single-line Q like "giải thích dòng này" → conf 0.55, right to skip tools).
-  if (ctx.deliverableKind === "answer" && ctx.confidence >= DA_HIGH_CONF && ctx.complexitySize?.size !== "large") {
+  // Sprint-plan execution: the orchestrator deliberately pipes a locked plan
+  // through processMessageFn. It MUST keep write tools and MUST be treated as
+  // a code deliverable regardless of how the classifier tags the long plan text.
+  const sprintPlanExecution = isSprintPlanExecution(ctx.raw);
+  if (sprintPlanExecution) {
+    ctx = {
+      ...ctx,
+      directAnswer: false,
+      deliverableKind: "code",
+      // Ensure we do not silently downgrade to quick; standard keeps the full
+      // toolset and advisory GSD directive, heavy would force a plan-review gate
+      // that conflicts with executing an already-reviewed sprint plan.
+      modelDepthTier: ctx.modelDepthTier ?? "standard",
+    };
+  } else if (
+    ctx.deliverableKind === "answer" &&
+    ctx.confidence >= DA_HIGH_CONF &&
+    ctx.complexitySize?.size !== "large"
+  ) {
     ctx = { ...ctx, directAnswer: true };
   }
 

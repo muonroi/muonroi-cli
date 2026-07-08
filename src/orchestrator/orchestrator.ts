@@ -2070,7 +2070,31 @@ export class Agent {
           // processMessage emits its own terminal `done`, which becomes the
           // consumer's break boundary — so the UI stops AFTER the continuation
           // turn, not before it.
-          yield* this.processMessage(continuationPrompt, options?.observer);
+          //
+          // Guard the continuation with an idle+total watchdog: the per-chunk
+          // stall watchdog only covers streamText byte flow, NOT a turn that
+          // wedges inside a tool call (a `task` sub-agent or long `bash`).
+          // Session 578b2eae7099 hung exactly there — the UI froze at "Council
+          // working… elapsed 0s" with no rescue. On fire we abort the turn and
+          // surface a toast instead of hanging forever.
+          const { withTurnWatchdog, TurnStallError } = await import("./turn-watchdog.js");
+          const idleMs = Number(process.env.MUONROI_COUNCIL_CONTINUATION_IDLE_MS ?? 120_000);
+          const totalMs = Number(process.env.MUONROI_COUNCIL_CONTINUATION_TOTAL_MS ?? 600_000);
+          try {
+            yield* withTurnWatchdog(this.processMessage(continuationPrompt, options?.observer), {
+              idleMs,
+              totalMs,
+              label: "council continuation turn",
+            });
+          } catch (err) {
+            if (err instanceof TurnStallError) {
+              this.abortController?.abort(new DOMException(err.message, "TimeoutError"));
+              yield { type: "error", content: `Council continuation stalled — ${err.message}` };
+              yield { type: "done" };
+            } else {
+              throw err;
+            }
+          }
         } finally {
           this.councilManager.setContinuation(false);
         }

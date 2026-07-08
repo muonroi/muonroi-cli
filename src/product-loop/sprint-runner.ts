@@ -31,6 +31,7 @@ import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
 import type { CouncilLLM } from "../council/types.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import { isContextRailEnabled } from "../gsd/flags.js";
+import { SPRINT_EXECUTION_MARKER } from "../pil/layer6-output.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { logUIInteraction } from "../storage/index.js";
 import type { StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
@@ -165,6 +166,7 @@ export function getImplTotalTimeoutMs(): number {
  * applying edits. Exported for test assertion. @internal
  */
 export const IMPL_EXECUTION_DIRECTIVE =
+  `${SPRINT_EXECUTION_MARKER}\n\n` +
   "You are the sprint IMPLEMENTER. EXECUTE the sprint plan below as an implementation task. Make the " +
   "actual code changes NOW using your file-edit tools — read the target files, then edit/write them to " +
   "apply every action item. Do NOT merely restate, summarize, or re-plan the design; apply the edits to " +
