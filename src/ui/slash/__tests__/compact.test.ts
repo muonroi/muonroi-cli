@@ -27,11 +27,12 @@ describe("handleCompactSlash", () => {
     await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
-  it("returns helpful message with no active run", async () => {
-    // No .muonroi-flow/ directory at all
+  it("returns __COMPACT__ signal even with no active run", async () => {
+    // No .muonroi-flow/ directory at all — compaction should still be allowed.
     const result = await dispatchSlash("compact", [], makeCtx(tmpDir));
     expect(result).toBeTypeOf("string");
-    expect(result!.toLowerCase()).toMatch(/no active run|nothing to compact/i);
+    expect(result).toContain("__COMPACT__");
+    expect(result).toMatch(/no active run|compacting chat history/i);
   });
 
   it("returns signal string __COMPACT__ when preconditions met", async () => {

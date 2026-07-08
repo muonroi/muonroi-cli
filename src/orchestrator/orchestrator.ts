@@ -704,6 +704,9 @@ export class Agent {
   setMessages(messages: ModelMessage[]): void {
     this.messages = messages;
     this.messageSeqs = messages.map(() => null);
+    // Manual compaction (/compact) or /clear replaces the conversation; reset
+    // the per-turn auto-compact latch so future tool loops can compact again.
+    this._compactedThisTurn = false;
   }
 
   async listSchedules(): Promise<StoredSchedule[]> {
