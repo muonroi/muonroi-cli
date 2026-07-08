@@ -306,6 +306,21 @@ describe("layer4Gsd (playbook)", () => {
     expect(result.gsdGateBlocking).toBeFalsy();
   });
 
+  it("sprint-plan execution bypasses plan-review and emits an execution-only directive", async () => {
+    const raw = "[SPRINT-PLAN-EXECUTION: locked]\n\n--- SPRINT PLAN TO IMPLEMENT ---\n1. Create foo.ts";
+    const result = await layer4Gsd(makeCtx({ raw, enriched: raw, modelDepthTier: "heavy" }));
+    expect(result.enriched).toContain("[sprint-execution]");
+    expect(result.enriched).toContain("APPROVED sprint plan");
+    expect(result.enriched).toContain("EXECUTE it directly");
+    expect(result.enriched).not.toContain("MANDATORY");
+    expect(result.enriched).not.toContain("BLOCKED");
+    expect(result.enriched).not.toContain("recommend gsd_plan_review before gsd_execute");
+    expect(result.gsdGateBlocking).toBeFalsy();
+    const layer = result.layers.find((l) => l.name === "gsd-workflow-structuring");
+    expect(layer!.delta).toContain("tier=standard");
+    expect(layer!.delta).toContain("phase=none");
+  });
+
   it("uses ctx.gsdPhase from L1 (unified path) without calling routeTask", async () => {
     const { routeTask } = await import("../../ee/bridge.js");
     vi.mocked(routeTask).mockClear();
