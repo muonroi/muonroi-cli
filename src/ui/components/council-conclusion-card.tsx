@@ -290,7 +290,11 @@ export function CouncilConclusionCard({ conclusion, round, theme: t }: CouncilCo
       <text fg={t.councilSynthesisBorder} attributes={1}>
         {title}
       </text>
-      {conclusion.summary && <text fg={t.text}>{conclusion.summary}</text>}
+      {conclusion.summary && (
+        <box marginTop={1}>
+          <text fg={t.text}>{conclusion.summary}</text>
+        </box>
+      )}
       {conclusion.recommendation && (
         <box flexDirection="column" marginTop={1}>
           <text fg={t.accent} attributes={1}>
