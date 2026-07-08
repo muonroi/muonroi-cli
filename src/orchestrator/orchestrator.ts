@@ -2913,7 +2913,7 @@ export class Agent {
 
         const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
         const db = getDatabase();
-        db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(parentSessionId, newSession.id);
+        this.sessionStore.linkChild(newSession.id, parentSessionId, "rotation");
 
         const summaryMessage = createCompactionSummaryMessage(cr.summary);
         const nextSeq = getNextMessageSequence(newSession.id);
@@ -2993,7 +2993,7 @@ export class Agent {
         } else {
           const latest = loadLatestCompaction(parentSessionId);
           const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
-          db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(parentSessionId, newSession.id);
+          this.sessionStore.linkChild(newSession.id, parentSessionId, "subagent");
           subSessionId = newSession.id;
 
           // Seed the child with the parent's CURRENT working set — after a

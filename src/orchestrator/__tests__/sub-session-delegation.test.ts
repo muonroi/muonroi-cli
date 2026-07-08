@@ -118,6 +118,9 @@ vi.mock("../../storage/index.js", () => {
           updatedAt: new Date(),
         };
       }
+      linkChild(childId: any, parentId: any, kind: any) {
+        mockDb.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(parentId, childId);
+      }
       getRequiredSession(id: any) {
         return {
           id,
