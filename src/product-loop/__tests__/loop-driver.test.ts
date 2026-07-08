@@ -288,6 +288,7 @@ describe("runLoopDriver", () => {
       userOverrides: [],
     });
     (clarifiedSpecFromContext as any).mockReturnValue(mockClarifiedSpec);
+    // biome-ignore lint/correctness/useYield: mock of an async generator that yields nothing before returning.
     (runPreflight as any).mockImplementation(async function* () {
       return true;
     });
@@ -295,6 +296,7 @@ describe("runLoopDriver", () => {
     // First runDebate attempt writes a real checkpoint (1 round done) then throws;
     // the loop-driver retry wrapper must read it back and re-invoke runDebate.
     let attempt = 0;
+    // biome-ignore lint/correctness/useYield: mock of an async generator that throws/returns without yielding.
     (runDebate as any).mockImplementation(async function* () {
       attempt++;
       if (attempt === 1) {
@@ -350,7 +352,9 @@ describe("runLoopDriver", () => {
     const text = chunks.map((c) => c?.content ?? "").join("");
     expect(text).toContain("resuming from round 2");
 
-    await nodeFs.rm(flowDir, { recursive: true, force: true });
+    // Windows can briefly hold a handle on a just-written run dir; retry so
+    // teardown doesn't flake with ENOTEMPTY under full-suite parallelism.
+    await nodeFs.rm(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   // C-v2 — cross-session resume entry: a checkpoint + inputs on disk make the
@@ -394,6 +398,7 @@ describe("runLoopDriver", () => {
       }),
     );
 
+    // biome-ignore lint/correctness/useYield: mock of an async generator that returns without yielding.
     (runDebate as any).mockImplementation(async function* () {
       return {
         spec: restoredSpec,
@@ -403,6 +408,7 @@ describe("runLoopDriver", () => {
         researchFindings: "Some findings",
       };
     });
+    // biome-ignore lint/correctness/useYield: mock of an async generator that yields nothing before returning.
     (runPreflight as any).mockImplementation(async function* () {
       return true;
     });
@@ -426,6 +432,8 @@ describe("runLoopDriver", () => {
     const text = chunks.map((c) => c?.content ?? "").join("");
     expect(text).toContain("Resuming an interrupted council debate");
 
-    await nodeFs.rm(flowDir, { recursive: true, force: true });
+    // Windows can briefly hold a handle on a just-written run dir; retry so
+    // teardown doesn't flake with ENOTEMPTY under full-suite parallelism.
+    await nodeFs.rm(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 });

@@ -1,14 +1,62 @@
 [
-{"t":"Scaffold a new Building Block project","d":"getting-started","s":"Use muonroi-cli /ideal in empty directory. Detects .NET, installs template, wires Program.cs with rule engine + governance + tenancy, runs dotnet restore && build."},
-{"t":"Create a custom rule","d":"rule-engine","s":"Implement IRule<TContext>. Register via AddRule<MyRule>(). Auto-discovered, priority order."},
-{"t":"Define a decision table","d":"rule-engine","s":"Inherit DecisionTable<TInput,TOutput>. Conditions with [Condition], actions with [Action]. Hit policies: Unique, First, Priority, Any."},
-{"t":"Multi-tenant database strategy","d":"tenancy","s":"DatabasePerTenant, SchemaPerTenant, or Shared (tenant-id column). Configure in appsettings under Muonroi:Tenancy:Strategy."},
-{"t":"Setup distributed caching","d":"infrastructure","s":"Add Muonroi.Caching. Configure Redis. IDistributedCache with cache stampede protection, multi-level cache."},
-{"t":"gRPC service with code-first contracts","d":"messaging","s":"C# interfaces with [GrpcService]. Generates .proto at build. Load balancing and retry."},
-{"t":"OpenTelemetry observability setup","d":"infrastructure","s":"Add Muonroi.Observability. builder.AddMuonroiObservability() auto-instruments ASP.NET/EF/HttpClient/gRPC."},
-{"t":"Governance policy-as-code","d":"governance","s":"Implement IGovernancePolicy<TContext>. Per tenant/user/operation. Cached per policy version."},
-{"t":"Backend-for-Frontend API aggregation","d":"api","s":"BffControllerBase + [Aggregate] composes downstream calls. Response caching + circuit breaker."},
-{"t":"Dynamic UI from entity metadata","d":"ui","s":"Annotate entities with [UiCatalog]. Generates list views, detail forms, search filters."},
-{"t":"Seed data with rule-based init","d":"data","s":"Implement ISeedData<T> with rule conditions. Ordered by priority. Idempotent re-runs."},
-{"t":"NuGet boundary OSS vs Commercial","d":"reference","s":"OSS (Rules, Core, Secrets) on NuGet.org MIT. Commercial on private feed. BuildingBlock.All is meta-package."}
+  {
+    "t": "Scaffold a new Building Block project",
+    "d": "getting-started",
+    "s": "Use muonroi-cli /ideal in empty directory. Detects .NET, installs template, wires Program.cs with rule engine + governance + tenancy, runs dotnet restore && build."
+  },
+  {
+    "t": "Create a custom rule",
+    "d": "rule-engine",
+    "s": "Implement IRule<TContext>. Register via AddRule<MyRule>(). Auto-discovered, priority order."
+  },
+  {
+    "t": "Define a decision table",
+    "d": "rule-engine",
+    "s": "Inherit DecisionTable<TInput,TOutput>. Conditions with [Condition], actions with [Action]. Hit policies: Unique, First, Priority, Any."
+  },
+  {
+    "t": "Multi-tenant database strategy",
+    "d": "tenancy",
+    "s": "DatabasePerTenant, SchemaPerTenant, or Shared (tenant-id column). Configure in appsettings under Muonroi:Tenancy:Strategy."
+  },
+  {
+    "t": "Setup distributed caching",
+    "d": "infrastructure",
+    "s": "Add Muonroi.Caching. Configure Redis. IDistributedCache with cache stampede protection, multi-level cache."
+  },
+  {
+    "t": "gRPC service with code-first contracts",
+    "d": "messaging",
+    "s": "C# interfaces with [GrpcService]. Generates .proto at build. Load balancing and retry."
+  },
+  {
+    "t": "OpenTelemetry observability setup",
+    "d": "infrastructure",
+    "s": "Add Muonroi.Observability. builder.AddMuonroiObservability() auto-instruments ASP.NET/EF/HttpClient/gRPC."
+  },
+  {
+    "t": "Governance policy-as-code",
+    "d": "governance",
+    "s": "Implement IGovernancePolicy<TContext>. Per tenant/user/operation. Cached per policy version."
+  },
+  {
+    "t": "Backend-for-Frontend API aggregation",
+    "d": "api",
+    "s": "BffControllerBase + [Aggregate] composes downstream calls. Response caching + circuit breaker."
+  },
+  {
+    "t": "Dynamic UI from entity metadata",
+    "d": "ui",
+    "s": "Annotate entities with [UiCatalog]. Generates list views, detail forms, search filters."
+  },
+  {
+    "t": "Seed data with rule-based init",
+    "d": "data",
+    "s": "Implement ISeedData<T> with rule conditions. Ordered by priority. Idempotent re-runs."
+  },
+  {
+    "t": "NuGet boundary OSS vs Commercial",
+    "d": "reference",
+    "s": "OSS (Rules, Core, Secrets) on NuGet.org MIT. Commercial on private feed. BuildingBlock.All is meta-package."
+  }
 ]

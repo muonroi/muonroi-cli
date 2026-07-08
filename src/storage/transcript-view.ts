@@ -33,7 +33,7 @@ export function buildEffectiveTranscript(
   const firstKeptIndex = seqs.findIndex((seq) => seq >= compaction.firstKeptSeq);
   let keptIndex = firstKeptIndex >= 0 ? firstKeptIndex : messages.length;
 
-  // Anti-mù / Resilience: if firstKeptSeq landed on a `tool` message (e.g. due to seq array 
+  // Anti-mù / Resilience: if firstKeptSeq landed on a `tool` message (e.g. due to seq array
   // misalignment or forced cut), we MUST step back to include its preceding `assistant` message.
   // Otherwise Vercel AI SDK throws: "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"
   if (keptIndex > 0 && messages[keptIndex]?.role === "tool") {

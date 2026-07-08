@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { spawnHarness, type HarnessContext } from "./helpers.js";
+import { type HarnessContext, spawnHarness } from "./helpers.js";
 
 /**
  * GSD native bootstrap E2E — verifies the turn-sync path in
