@@ -6388,9 +6388,9 @@ export function useAppLogic(props: AppLogicProps) {
           setTimeout(() => {
             try {
               if (onRelaunch) {
-                onRelaunch(picked.id);
+                onRelaunch(picked.resumeId);
               } else {
-                relaunchWithSession(picked.id);
+                relaunchWithSession(picked.resumeId);
               }
             } catch (err) {
               console.error(`[session-picker] relaunch failed: ${(err as Error)?.message ?? err}`);

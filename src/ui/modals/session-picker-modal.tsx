@@ -1,5 +1,5 @@
 import { Semantic } from "@muonroi/agent-harness-opentui";
-import type { SessionInfo } from "../../types/index.js";
+import type { ResumeEntry } from "../../types/index.js";
 import type { Theme } from "../theme.js";
 import { bottomAlignedModalTop } from "../utils/modal.js";
 
@@ -16,7 +16,7 @@ export function SessionPickerModal({
   height,
 }: {
   t: Theme;
-  sessions: SessionInfo[];
+  sessions: ResumeEntry[];
   focusIndex: number;
   width: number;
   height: number;
@@ -68,11 +68,9 @@ export function SessionPickerModal({
                 const titleRaw = s.title?.trim() || "(untitled)";
                 const titleMax = Math.max(8, panelWidth - 38);
                 const title = titleRaw.length > titleMax ? `${titleRaw.slice(0, titleMax - 1)}…` : titleRaw;
-                // Show the FULL session id (not slice(-8)). The resumed-session
-                // header displays the full id, so a truncated id here made users
-                // think they had resumed a "different" session when it was the
-                // same one shown in two formats.
-                const idLabel = s.id;
+                // Short 8-char id — the tree's root id, enough to disambiguate
+                // rows without crowding the model column.
+                const idLabel = s.id.slice(0, 8);
                 return (
                   <Semantic
                     key={s.id}
