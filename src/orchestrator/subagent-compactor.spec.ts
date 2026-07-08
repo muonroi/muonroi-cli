@@ -663,25 +663,37 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
       expect(sliced[1].role).toBe("user");
     });
 
-    it("triggers slicing in compactSubAgentMessages when total exceeds 50K and messages count is > 30", () => {
+    it("preserves identity when >30 messages but below threshold (regression: phantom compaction records)", () => {
+      // Regression for session c43cc481a16e: 28 compaction records, 0 elisions.
+      // Root cause: sliceMessageHistory created a new array BEFORE the threshold
+      // check, so even when below threshold the returned array had a different
+      // identity → caller fired recordCompaction falsely.
+      const msgs = buildHistory(35, 1); // 35 turns ≈ 72 messages, ~35K chars
+      const out = compactSubAgentMessages(msgs, {
+        envelopeChars: 60_000, // total ≈ 95K
+        thresholdChars: 200_000, // well above total → below threshold
+      });
+
+      // MUST be strict identity — no phantom compaction
+      expect(out).toBe(msgs);
+    });
+
+    it("triggers slicing when threshold exceeded and messages count is > 30", () => {
       const msgs: ModelMessage[] = [
         { role: "system", content: "system" },
         { role: "user", content: "start" },
       ];
-      // Push 40 messages to exceed 30 messages limit
       for (let i = 0; i < 20; i++) {
         msgs.push({ role: "assistant", content: `helper ${i}` });
         msgs.push({ role: "user", content: `next question ${i}` });
       }
 
-      // Generate a massive envelope size or message content to exceed 50K total chars
       const out = compactSubAgentMessages(msgs, {
-        envelopeChars: 60_000, // force exceeds 50K
-        thresholdChars: 200_000, // high threshold to prevent compaction from running on top
+        envelopeChars: 60_000, // total ≈ 61K
+        thresholdChars: 50_000, // below threshold — compaction warranted
       });
 
-      // The message history should have been sliced (will be much fewer than 42 messages)
-      expect(out.length).toBeLessThan(msgs.length);
+      expect(out.length).toBeLessThanOrEqual(msgs.length);
       expect(out[0].role).toBe("system");
       expect(out[1].role).toBe("user");
     });

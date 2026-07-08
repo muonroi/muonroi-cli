@@ -473,27 +473,29 @@ export function compactSubAgentMessages(
   const resolved = resolveOpts(opts);
   const { outputPreviewChars, label, envelopeChars } = resolved;
 
-  // Step 4: Hard-limit message history sent to the model to prevent token bloating
-  // When input (messages + envelope) exceeds 50K characters and messages array is > 30,
-  // we slice the history to keep at most 30 messages (preserving system and user start).
-  let processedMessages = messages;
   const messagesTotal = cumulativeMessageChars(messages);
   const total = messagesTotal + envelopeChars;
 
-  if (total > 50_000 && messages.length > 30) {
+  const { effectiveThresholdChars, effectiveKeepLastTurns } = computeDynamicParams(total, resolved);
+
+  // No-op: return the input BY REFERENCE (contract above) so `compacted === input`.
+  // Identity contract: callers (tool-engine.ts, stream-runner.ts) use
+  // `compacted !== stripped` to decide whether to fire recordCompaction. A false
+  // identity change (new array with zero elision) produces phantom compaction
+  // records — observed as 28 compactions / 0 elisions in session c43cc481a16e.
+  // Fix: check threshold on the ORIGINAL total before slicing.
+  if (total < effectiveThresholdChars) return messages as ModelMessage[];
+
+  // Step 4: Hard-limit message history sent to the model to prevent token bloating.
+  // Only slice when compaction is actually warranted (threshold exceeded), so the
+  // slice's identity change pairs with real content reduction, not a phantom no-op.
+  let processedMessages = messages;
+  if (messages.length > 30) {
     processedMessages = sliceMessageHistory(messages, 30);
   }
 
-  // Calculate effective thresholds and keep last turns using the processed messages
-  const processedMessagesTotal = cumulativeMessageChars(processedMessages);
-  const processedTotal = processedMessagesTotal + envelopeChars;
-
-  const { effectiveThresholdChars, effectiveKeepLastTurns } = computeDynamicParams(processedTotal, resolved);
-  // No-op: return the input BY REFERENCE (contract above) so `compacted === input`.
-  if (processedTotal < effectiveThresholdChars) return processedMessages as ModelMessage[];
-
   const keepFrom = findKeepFromIndex(processedMessages, effectiveKeepLastTurns);
-  if (keepFrom <= 0) return processedMessages as ModelMessage[];
+  if (keepFrom <= 0) return messages as ModelMessage[];
 
   // Walk older messages; rewrite fresh tool results into stubs, super-shrink
   // already-stubbed results (F1), and strip args off older assistant
