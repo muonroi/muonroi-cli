@@ -22,6 +22,8 @@
  *   - CB-2 (oscillation) is checked AFTER this sprint's score is known.
  */
 
+import { existsSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { prependDecisionsLock, readDecisionsLock } from "../council/decisions-lock.js";
 import { runCouncil } from "../council/index.js";
@@ -280,6 +282,71 @@ export interface RunSprintArgs {
  * Throws on circuit-breaker halt — caller (loop driver) catches and writes
  * the appropriate halt state to manifest/state.
  */
+
+/** Path to the persisted per-sprint plan synthesis (Wave 2). @internal */
+export function sprintPlanPath(runDir: string, sprintN: number): string {
+  return path.join(runDir, `sprint-${sprintN}-plan.md`);
+}
+
+/**
+ * Wave 2: read a persisted sprint plan if present. Returns "" when absent or on
+ * read error (caller then runs the planning council). Never throws.
+ *
+ * The planning council is non-deterministic — re-running it on a resumed/retried
+ * sprint produces a different design AND a different target folder, which is why
+ * the impl turn was observed re-scaffolding in a new location each run. Reusing
+ * the persisted plan makes per-sprint planning idempotent so the same target
+ * files are continued across resume.
+ */
+export async function readPersistedSprintPlan(planPath: string): Promise<string> {
+  try {
+    if (!existsSync(planPath)) return "";
+    return (await readFile(planPath, "utf8")).trim();
+  } catch (err) {
+    console.error(`[sprint-runner] readPersistedSprintPlan failed for ${planPath}: ${(err as Error).message}`);
+    return "";
+  }
+}
+
+/** Wave 2: persist a sprint plan synthesis for idempotent resume. Never throws. */
+export async function persistSprintPlan(planPath: string, synthesis: string): Promise<void> {
+  if (!synthesis.trim()) return;
+  try {
+    await writeFile(planPath, synthesis, "utf8");
+  } catch (err) {
+    console.error(`[sprint-runner] persistSprintPlan failed for ${planPath}: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Wave 3: extract plan-named target file paths that ALREADY EXIST on disk so the
+ * impl turn continues them rather than re-scaffolding in a new location. Scans
+ * planSynthesis for repo-relative path tokens (src/…, packages/…, tests/…),
+ * dedups, resolves against cwd, and returns those that exist (capped). Empty on a
+ * greenfield sprint (files don't exist yet) → no injection. Never throws.
+ */
+export async function detectExistingPlanTargets(planSynthesis: string, cwd: string, cap = 20): Promise<string[]> {
+  try {
+    const tokens = new Set<string>();
+    const re = /\b((?:src|packages|tests|scripts|lib|app|apps)\/[\w./@-]+\.[a-z]{1,5})\b/gi;
+    let m: RegExpExecArray | null = re.exec(planSynthesis);
+    while (m !== null) {
+      tokens.add(m[1]!.replace(/\\/g, "/"));
+      if (tokens.size > cap * 4) break; // bound the scan
+      m = re.exec(planSynthesis);
+    }
+    const existing: string[] = [];
+    for (const t of tokens) {
+      if (existsSync(path.resolve(cwd, t))) existing.push(t);
+      if (existing.length >= cap) break;
+    }
+    return existing;
+  } catch (err) {
+    console.error(`[sprint-runner] detectExistingPlanTargets failed: ${(err as Error).message}`);
+    return [];
+  }
+}
+
 export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChunk, IterationState, unknown> {
   const { sprintN, ctx, productSpec, roleAssignments, history, carryOver, phaseScope } = args;
   const runDir = path.join(ctx.flowDir, "runs", ctx.runId);
@@ -450,47 +517,63 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     /* no host orchestrator wired during planning */
   };
 
-  idealTrace("sprint.planCouncil.before", { runId: ctx.runId, sprintN });
-  const planGen = runCouncil(
-    councilTopic,
-    sessionModelId,
-    [],
-    ctx.runId,
-    productLlm,
-    ctx.respondToQuestion,
-    ctx.respondToPreflight,
-    ctx.processMessageFn ?? noopProcess,
-    {
-      skipClarification: true,
-      cwd,
-      runDir,
-      suppressInlineMeta: isContextRailEnabled(),
-      // The product plan + spec were already debated (CB-1) and approved at the
-      // `/ideal` preflight. Re-gating and re-researching each sprint's internal
-      // plan strands the loop before implementation is ever reached (the exact
-      // "debate great, never implements" symptom). Auto-approve the per-sprint
-      // plan and reuse CB-1 research; the post-sprint customer verdict still lets
-      // the user review each sprint's OUTPUT.
-      autoApprovePreflight: true,
-      skipResearch: true,
-      // Automated per-sprint planning: suppress the interactive post-debate menu
-      // (it stranded the sprint before implementation — blocker 4/5) and skip the
-      // session-scoped persistence that FK-fails on the product-run id. The plan
-      // is auto-locked and control returns here for the Implementation stage.
-      sprintPlanningMode: true,
-    },
-  );
+  // Wave 2 (2026-07-08): reuse a persisted per-sprint plan if one exists, making
+  // per-sprint planning idempotent across resume/retry. Without this the
+  // non-deterministic planning council re-ran on every runSprint call and emitted
+  // a different design → a different target folder each time (run1 src/council/,
+  // run4 src/engine/), so the impl turn re-scaffolded instead of continuing.
+  const planPath = sprintPlanPath(runDir, sprintN);
+  let planSynthesis = await readPersistedSprintPlan(planPath);
+  if (planSynthesis) {
+    idealTrace("sprint.planCouncil.reused", { runId: ctx.runId, sprintN, planSynthesisLen: planSynthesis.length });
+    yield {
+      type: "content",
+      content: `\n> [sprint-plan] Reusing persisted plan for sprint ${sprintN} (${planSynthesis.length} chars) — re-planning skipped so the same target files are continued.\n`,
+    };
+  } else {
+    idealTrace("sprint.planCouncil.before", { runId: ctx.runId, sprintN });
+    const planGen = runCouncil(
+      councilTopic,
+      sessionModelId,
+      [],
+      ctx.runId,
+      productLlm,
+      ctx.respondToQuestion,
+      ctx.respondToPreflight,
+      ctx.processMessageFn ?? noopProcess,
+      {
+        skipClarification: true,
+        cwd,
+        runDir,
+        suppressInlineMeta: isContextRailEnabled(),
+        // The product plan + spec were already debated (CB-1) and approved at the
+        // `/ideal` preflight. Re-gating and re-researching each sprint's internal
+        // plan strands the loop before implementation is ever reached (the exact
+        // "debate great, never implements" symptom). Auto-approve the per-sprint
+        // plan and reuse CB-1 research; the post-sprint customer verdict still lets
+        // the user review each sprint's OUTPUT.
+        autoApprovePreflight: true,
+        skipResearch: true,
+        // Automated per-sprint planning: suppress the interactive post-debate menu
+        // (it stranded the sprint before implementation — blocker 4/5) and skip the
+        // session-scoped persistence that FK-fails on the product-run id. The plan
+        // is auto-locked and control returns here for the Implementation stage.
+        sprintPlanningMode: true,
+      },
+    );
 
-  let planSynthesis = "";
-  while (true) {
-    const step = await planGen.next();
-    if (step.done) {
-      planSynthesis = step.value ?? "";
-      break;
+    while (true) {
+      const step = await planGen.next();
+      if (step.done) {
+        planSynthesis = step.value ?? "";
+        break;
+      }
+      yield step.value as StreamChunk;
     }
-    yield step.value as StreamChunk;
+    idealTrace("sprint.planCouncil.after", { runId: ctx.runId, sprintN, planSynthesisLen: planSynthesis.length });
+    // Persist so a resumed/retried sprint reuses this exact plan (and target folder).
+    await persistSprintPlan(planPath, planSynthesis);
   }
-  idealTrace("sprint.planCouncil.after", { runId: ctx.runId, sprintN, planSynthesisLen: planSynthesis.length });
 
   // P4-C: close the planning phase row before opening implementation.
   yield phaseDone({
@@ -553,6 +636,23 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     }
   } catch {
     /* fail-open — lock read failure must not block implementation */
+  }
+
+  // Wave 3 (2026-07-08): the impl turn was blind to files a prior sprint/run had
+  // already created, so it re-created them from scratch. Tell it which of the
+  // plan's OWN named target files already exist on disk so it reads + continues
+  // them instead of re-scaffolding. Empty on greenfield (nothing exists yet).
+  if (planSynthesis.trim()) {
+    const existingTargets = await detectExistingPlanTargets(planSynthesis, cwd);
+    if (existingTargets.length > 0) {
+      implPrompt = `${implPrompt}\n\n--- FILES ALREADY PRESENT ON DISK (prior-sprint work — READ and CONTINUE these; do NOT recreate them from scratch) ---\n${existingTargets
+        .map((f) => `- ${f}`)
+        .join("\n")}\n`;
+      yield {
+        type: "content",
+        content: `\n> [continuation] ${existingTargets.length} plan target file(s) already exist — instructed to continue, not recreate.\n`,
+      };
+    }
   }
 
   let implError: string | null = null;
