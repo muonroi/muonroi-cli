@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import type { AgentMode, SessionInfo, SessionStatus, WorkspaceInfo } from "../types/index";
+import type { AgentMode, SessionInfo, SessionKind, SessionStatus, WorkspaceInfo } from "../types/index";
 import { getDatabase } from "./db";
 import { sweepStalePendingRows } from "./transcript";
 import { ensureWorkspace } from "./workspaces";
@@ -19,6 +19,8 @@ interface SessionRow {
   status: SessionStatus;
   created_at: string;
   updated_at: string;
+  kind: SessionKind;
+  root_session_id: string | null;
 }
 
 export class SessionStore {
@@ -72,9 +74,9 @@ export class SessionStore {
 
     db.prepare(`
       INSERT INTO sessions (
-        id, workspace_id, title, model, mode, cwd_at_start, cwd_last, status, created_at, updated_at
+        id, workspace_id, title, model, mode, cwd_at_start, cwd_last, status, created_at, updated_at, kind, root_session_id
       ) VALUES (
-        @id, @workspace_id, NULL, @model, @mode, @cwd_at_start, @cwd_last, 'active', @created_at, @updated_at
+        @id, @workspace_id, NULL, @model, @mode, @cwd_at_start, @cwd_last, 'active', @created_at, @updated_at, 'conversation', @id
       )
     `).run({
       id,
@@ -88,6 +90,23 @@ export class SessionStore {
     });
 
     return this.getRequiredSession(id);
+  }
+
+  /**
+   * Link a freshly-created session as a child of `parentId`, tagging its `kind`
+   * and inheriting the parent's `root_session_id` so the whole tree shares one
+   * root. Replaces the ad-hoc `UPDATE sessions SET parent_session_id = ?` the
+   * orchestrator previously hand-wrote (which never set kind/root).
+   */
+  linkChild(childId: string, parentId: string, kind: SessionKind): void {
+    const db = getDatabase();
+    const parent = db.prepare("SELECT root_session_id FROM sessions WHERE id = ?").get(parentId) as
+      | { root_session_id: string | null }
+      | undefined;
+    const root = parent?.root_session_id ?? parentId;
+    db.prepare(
+      "UPDATE sessions SET parent_session_id = ?, kind = ?, root_session_id = ?, updated_at = ? WHERE id = ?",
+    ).run(parentId, kind, root, new Date().toISOString(), childId);
   }
 
   /**
