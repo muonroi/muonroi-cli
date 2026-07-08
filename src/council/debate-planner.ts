@@ -5,6 +5,7 @@ import { loadKeyForProvider } from "../providers/keychain.js";
 import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
 import type { StreamChunk } from "../types/index.js";
 import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
+import { logger } from "../utils/logger.js";
 import { type CouncilExperienceMode, getProviderStallTimeoutMs } from "../utils/settings.js";
 import { tracedGenerate } from "./llm.js";
 import { buildDebatePlanPrompt } from "./prompts.js";
@@ -109,6 +110,41 @@ function injectAuditorStance(
   return { ...plan, stances };
 }
 
+/**
+ * PIL task types whose deliverable is understanding/evaluation of something that
+ * already exists — never a build. The user asked to assess, not to implement.
+ */
+const ANALYSIS_TASK_TYPES = new Set<string>(["analyze"]);
+
+function isAnalysisTaskType(taskType?: string): boolean {
+  return !!taskType && ANALYSIS_TASK_TYPES.has(taskType);
+}
+
+/**
+ * Deterministic backstop for post-debate drift (session c4f78752a316).
+ *
+ * PIL is the authoritative intent classifier. When it says the request is
+ * analysis/evaluation, the leader LLM must not be allowed to silently reshape the
+ * debate into an `implementation_plan` — that shape makes the post-debate AskCard
+ * default to "generate_plan" (build a plan) via pickPostDebateRecommendation,
+ * which is the wrong next step for a request that only wanted an assessment.
+ *
+ * The prompt already asks the leader to honor the intent (soft), but LLMs drift;
+ * this coerces a drifted shape back to "evaluation" so the synthesis stays the
+ * deliverable and the default action becomes save_exit. Non-implementation shapes
+ * are left untouched.
+ */
+function enforceAnalysisIntentShape(plan: DebatePlan, taskType?: string): DebatePlan {
+  if (!isAnalysisTaskType(taskType)) return plan;
+  if (plan.outputShape.kind !== "implementation_plan") return plan;
+  logger.info(
+    "orchestrator",
+    `[debate-planner] PIL taskType=${taskType} (analysis) but leader chose implementation_plan; ` +
+      "coercing outputShape.kind→evaluation to honor analysis intent",
+  );
+  return { ...plan, outputShape: { ...plan.outputShape, kind: "evaluation" } };
+}
+
 export async function* planDebate(
   spec: ClarifiedSpec,
   leaderModelId: string,
@@ -122,6 +158,12 @@ export async function* planDebate(
   const eeSnippets = eeWarnings?.map((w) => w.text).filter(Boolean) ?? [];
   const { system: baseSystem, prompt } = buildDebatePlanPrompt(spec);
 
+  // Every return path funnels through here: auditor + product-stance injection,
+  // plus the deterministic analysis-intent backstop (applied first so a coerced
+  // shape doesn't get a spurious product stance injected for it).
+  const finalizePlan = (plan: DebatePlan): DebatePlan =>
+    ensureProductStance(injectAuditorStance(enforceAnalysisIntentShape(plan, taskType), eeWarnings, experienceMode));
+
   // Build calibration context from PIL metadata
   const pilCalibration: string[] = [];
   if (taskType) pilCalibration.push(`Task type: ${taskType}`);
@@ -130,6 +172,18 @@ export async function* planDebate(
   let system = baseSystem;
   if (pilCalibration.length > 0) {
     system += `\n\n## Task Context (from PIL)\n${pilCalibration.join("\n")}`;
+  }
+  // Hard intent lock (steers stances AND shape). PIL already classified this as
+  // analysis; the deterministic backstop in finalizePlan enforces it regardless,
+  // but steering the leader here keeps the whole roster/synthesis on-intent.
+  if (isAnalysisTaskType(taskType)) {
+    system +=
+      `\n\n## INTENT LOCK (authoritative)\n` +
+      `PIL classified this request as ANALYSIS/EVALUATION (taskType=${taskType}). The user wants to ` +
+      `understand and assess what ALREADY exists — not to build anything. ` +
+      `outputShape.kind MUST be "evaluation" or "investigation" — NEVER "implementation_plan". ` +
+      `Do NOT propose building, implementing, scaffolding, or "I'll spec that in vN". ` +
+      `Stances must be analyst/critic/investigator voices, not implementers.`;
   }
   if (eeSnippets.length > 0) {
     system += `\n\n## Experience Warnings (from brain)\nNote these past mistakes when designing debate stances:\n${eeSnippets.map((s) => `- ${s}`).join("\n")}`;
@@ -189,7 +243,7 @@ export async function* planDebate(
         outputShape,
         plannedRounds,
       };
-      return ensureProductStance(injectAuditorStance(plan, eeWarnings, experienceMode));
+      return finalizePlan(plan);
     }
     // Invalid even with schema — fall through to retry with a sanitize-failure message
     throw new Error("Sanitize check failed: stances.length < 2 or outputShape is null");
@@ -211,7 +265,7 @@ export async function* planDebate(
         maxTokens: 1500,
       });
       const retryParsed = parsePlan(retryRaw);
-      if (retryParsed) return ensureProductStance(injectAuditorStance(retryParsed, eeWarnings, experienceMode));
+      if (retryParsed) return finalizePlan(retryParsed);
     } catch (retryErr) {
       yield {
         type: "content",
@@ -221,7 +275,7 @@ export async function* planDebate(
   }
 
   // All attempts exhausted — return fallback
-  return ensureProductStance(injectAuditorStance(FALLBACK_PLAN, eeWarnings, experienceMode));
+  return finalizePlan(FALLBACK_PLAN);
 }
 
 function parsePlan(raw: string): DebatePlan | null {
