@@ -99,7 +99,7 @@ import {
   type SandboxSettings,
 } from "../utils/settings";
 import { runSideQuestion, type SideQuestionResult } from "../utils/side-question";
-import { buildVerifyDetectPrompt, normalizeVerifyRecipe } from "../verify/entrypoint";
+import { buildVerifyDetectPrompt, inferVerifyProjectProfile, normalizeVerifyRecipe } from "../verify/entrypoint";
 import { runVerifyOrchestration } from "../verify/orchestrator";
 import {
   type AgentOptions,
@@ -3509,23 +3509,50 @@ export class Agent {
   }
 
   async detectVerifyRecipe(settings?: SandboxSettings, abortSignal?: AbortSignal): Promise<VerifyRecipe | null> {
+    const cwd = this.bash.getCwd();
+    const effectiveSettings = settings ?? this.bash.getSandboxSettings();
+
+    // Primary: LLM verify-detect turn — a codebase-aware, richer recipe.
+    let llmRecipe: VerifyRecipe | null = null;
     try {
       const result = await this.runTaskRequest(
         {
           agent: "verify-detect",
           description: "Detect verification recipe",
-          prompt: buildVerifyDetectPrompt(this.bash.getCwd(), settings ?? this.bash.getSandboxSettings()),
+          prompt: buildVerifyDetectPrompt(cwd, effectiveSettings),
         },
         undefined,
         abortSignal,
       );
-      if (!result.success || !result.output) return null;
-      const maybeJson = extractJsonObject(result.output);
-      if (!maybeJson) return null;
-      return normalizeVerifyRecipe(JSON.parse(maybeJson));
-    } catch {
-      return null;
+      if (result.success && result.output) {
+        const maybeJson = extractJsonObject(result.output);
+        if (maybeJson) llmRecipe = normalizeVerifyRecipe(JSON.parse(maybeJson));
+      }
+    } catch (err) {
+      console.error(
+        `[orchestrator] verify-detect turn failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
+    if (llmRecipe) return llmRecipe;
+
+    // Deterministic fallback: an existing repo with a recognizable manifest
+    // (package.json test script, *.sln, pyproject, …) yields a reliable recipe
+    // WITHOUT an LLM. This stops CB-3 from false-halting an in-place /ideal
+    // migration with the "Recovery options" card purely because the flaky
+    // verify-detect model returned no parseable JSON (root cause of the
+    // existing-repo implementation-reachability halt). Only trusted when the
+    // profiler recognizes the ecosystem AND found real test commands.
+    try {
+      const profile = inferVerifyProjectProfile(cwd, effectiveSettings);
+      if (profile.recipe.appKind !== "unknown" && profile.recipe.testCommands.length > 0) {
+        return profile.recipe;
+      }
+    } catch (err) {
+      console.error(
+        `[orchestrator] deterministic verify-recipe fallback failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return null;
   }
 
   async runVerify(onProgress?: (detail: string) => void, abortSignal?: AbortSignal): Promise<ToolResult> {
