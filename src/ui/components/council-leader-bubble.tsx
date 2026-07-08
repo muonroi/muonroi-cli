@@ -1,5 +1,6 @@
 import type { CouncilMessage } from "../../types/index.js";
 import type { Theme } from "../theme.js";
+import { capBubbleBody } from "./bubble-body-guard.js";
 
 export interface CouncilLeaderBubbleProps {
   msg: CouncilMessage;
@@ -23,18 +24,20 @@ export function buildLeaderHeader(round: number | undefined, phase?: CouncilMess
  * B5: a pre-round `directive` steers the debate and is rendered with the accent
  * color so the leader visibly LEADS each round; `verdict`/`eval` stay muted.
  */
-export function CouncilLeaderBubble({ msg, theme: t }: CouncilLeaderBubbleProps) {
+export function CouncilLeaderBubble({ msg, terminalCols, theme: t }: CouncilLeaderBubbleProps) {
   const header = buildLeaderHeader(msg.round, msg.phase);
   const isDirective = msg.phase === "directive";
   const headerColor = isDirective ? t.accent : t.textMuted;
   const borderColor = isDirective ? t.accent : t.councilLeaderBorder;
+  // Same unbounded-<text> guard as the speaker bubble (see bubble-body-guard.ts).
+  const bodyText = capBubbleBody(msg.text.trim(), terminalCols);
 
   return (
     <box flexDirection="column" marginBottom={1} border={["left"]} borderColor={borderColor} paddingLeft={2}>
       <text fg={headerColor} attributes={1}>
         {header}
       </text>
-      <text fg={t.textMuted}>{msg.text.trim()}</text>
+      <text fg={t.textMuted}>{bodyText}</text>
     </box>
   );
 }
