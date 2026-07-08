@@ -143,6 +143,20 @@ export function getImplIdleTimeoutMs(): number {
 }
 
 /**
+ * Hard total-elapsed ceiling for the implementation stage (ms). Override with
+ * MUONROI_SPRINT_IMPL_TOTAL_MS. Unlike the idle budget this is armed once and is
+ * NOT reset by chunks, so it catches a hang that keeps the idle guard alive with
+ * heartbeat/status chunks. Generous by default so a legitimately large sprint is
+ * not cut short; a genuine hang still terminates within this ceiling.
+ */
+export function getImplTotalTimeoutMs(): number {
+  const raw = process.env.MUONROI_SPRINT_IMPL_TOTAL_MS;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(n) && n > 0) return n;
+  return 15 * 60 * 1000; // 15 min hard ceiling on a single impl turn
+}
+
+/**
  * Imperative execution directive prepended to the sprint plan before it is
  * handed to the orchestrator. The raw plan synthesis is a declarative design
  * document; without this prefix the impl turn narrates it back instead of
@@ -169,39 +183,63 @@ export const IMPL_EXECUTION_DIRECTIVE =
  * time-to-next-chunk stall-watchdog does not fire — the hang is on the JS side
  * after the stream terminator.
  *
- * This guard resets a timer on every yielded chunk; if no chunk arrives within
- * `idleMs`, it throws so the caller's existing try/catch converts the silent
- * wedge into a visible phaseError (the sprint then surfaces + can recover),
- * exactly like `runVerifyWithWatchdog` does for the verify stage. The suspended
+ * TWO complementary guards (a single idle guard was observed live to be
+ * defeated: the impl created 2 files then emitted only non-progress heartbeat
+ * chunks for 9+ min, resetting a per-chunk idle timer without ever completing):
+ *   - `idleMs` — resets on every yielded chunk; catches a TOTALLY silent stall
+ *     (the post-finish hang above, zero chunks) quickly.
+ *   - `totalMs` — armed ONCE at entry, NOT reset by chunks; a hard ceiling that
+ *     fires even when heartbeat/status chunks keep the idle guard alive while no
+ *     real progress is made.
+ * Either firing throws so the caller's existing try/catch converts the wedge
+ * into a visible phaseError (the sprint then surfaces + can recover), exactly
+ * like `runVerifyWithWatchdog` does for the verify stage. The suspended
  * orchestrator promise may leak in the background, but the run recovers.
  */
 export async function* withImplIdleWatchdog(
   gen: AsyncGenerator<StreamChunk, void, unknown>,
   idleMs: number,
   sprintN: number,
+  totalMs: number = getImplTotalTimeoutMs(),
 ): AsyncGenerator<StreamChunk, void, unknown> {
   const it = gen[Symbol.asyncIterator]();
-  while (true) {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const idle = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        reject(
-          new Error(
-            `implementation stage produced no output for ${Math.round(idleMs / 1000)}s and was ` +
-              `treated as stalled (sprint ${sprintN}) — the orchestrator turn hung post-finish ` +
-              `(finished its LLM response but the generator never completed)`,
-          ),
-        );
-      }, idleMs);
-    });
-    let res: IteratorResult<StreamChunk, void>;
-    try {
-      res = await Promise.race([it.next(), idle]);
-    } finally {
-      if (timer) clearTimeout(timer);
+  let totalTimer: ReturnType<typeof setTimeout> | undefined;
+  const total = new Promise<never>((_, reject) => {
+    totalTimer = setTimeout(() => {
+      reject(
+        new Error(
+          `implementation stage exceeded ${Math.round(totalMs / 1000)}s total watchdog and was ` +
+            `treated as stalled (sprint ${sprintN}) — the orchestrator turn never completed ` +
+            `(likely hung after its final response while emitting only heartbeat chunks)`,
+        ),
+      );
+    }, totalMs);
+  });
+  try {
+    while (true) {
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      const idle = new Promise<never>((_, reject) => {
+        idleTimer = setTimeout(() => {
+          reject(
+            new Error(
+              `implementation stage produced no output for ${Math.round(idleMs / 1000)}s and was ` +
+                `treated as stalled (sprint ${sprintN}) — the orchestrator turn hung post-finish ` +
+                `(finished its LLM response but the generator never completed)`,
+            ),
+          );
+        }, idleMs);
+      });
+      let res: IteratorResult<StreamChunk, void>;
+      try {
+        res = await Promise.race([it.next(), idle, total]);
+      } finally {
+        if (idleTimer) clearTimeout(idleTimer);
+      }
+      if (res.done) return;
+      yield res.value;
     }
-    if (res.done) return;
-    yield res.value;
+  } finally {
+    if (totalTimer) clearTimeout(totalTimer);
   }
 }
 
