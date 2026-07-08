@@ -25,7 +25,12 @@ import type { ComplexityTier } from "../playbook/complexity.js";
 import { buildDirective } from "../playbook/directives.js";
 import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
 import { truncateToBudget } from "./budget.js";
-import { isImplementationIntent, isMetaAnalysisPrompt, isQuestionLike } from "./layer6-output.js";
+import {
+  isImplementationIntent,
+  isMetaAnalysisPrompt,
+  isQuestionLike,
+  isSprintPlanExecution,
+} from "./layer6-output.js";
 import type { PipelineContext } from "./types.js";
 
 function mapRouteToPhase(route: string): GsdPhase | null {
