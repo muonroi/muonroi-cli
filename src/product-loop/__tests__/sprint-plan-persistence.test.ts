@@ -3,7 +3,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  computeMissingPlanTargets,
   detectExistingPlanTargets,
+  extractPlanTargetPaths,
+  getImplRecheckEnabled,
+  IMPL_EXECUTION_DIRECTIVE,
   persistSprintPlan,
   readPersistedSprintPlan,
   sprintPlanPath,
@@ -93,5 +97,78 @@ describe("detectExistingPlanTargets (Wave 3)", () => {
     await fs.writeFile(path.join(cwd, "node_modules/foo/index.ts"), "//\n", "utf8");
     const plan = "reference node_modules/foo/index.ts";
     expect(await detectExistingPlanTargets(plan, cwd)).toEqual([]);
+  });
+});
+
+describe("computeMissingPlanTargets (4A completeness re-check)", () => {
+  let cwd: string;
+  beforeEach(async () => {
+    cwd = await mktmp();
+  });
+  afterEach(async () => {
+    await fs.rm(cwd, { recursive: true, force: true });
+  });
+
+  it("returns plan targets that do NOT exist on disk (unaddressed items)", async () => {
+    await fs.mkdir(path.join(cwd, "src"), { recursive: true });
+    await fs.writeFile(path.join(cwd, "src/done.ts"), "//\n", "utf8");
+    const plan = "Implement src/done.ts and src/missing.ts and tests/gap.test.ts";
+    const missing = await computeMissingPlanTargets(plan, cwd);
+    expect(missing).toContain("src/missing.ts");
+    expect(missing).toContain("tests/gap.test.ts");
+    expect(missing).not.toContain("src/done.ts");
+  });
+
+  it("returns [] when every named target landed (nothing to re-check)", async () => {
+    await fs.mkdir(path.join(cwd, "src"), { recursive: true });
+    await fs.writeFile(path.join(cwd, "src/a.ts"), "//\n", "utf8");
+    await fs.writeFile(path.join(cwd, "src/b.ts"), "//\n", "utf8");
+    const plan = "create src/a.ts and src/b.ts";
+    expect(await computeMissingPlanTargets(plan, cwd)).toEqual([]);
+  });
+
+  it("is the exact complement of detectExistingPlanTargets over the plan's targets", async () => {
+    await fs.mkdir(path.join(cwd, "src"), { recursive: true });
+    await fs.writeFile(path.join(cwd, "src/here.ts"), "//\n", "utf8");
+    const plan = "src/here.ts and src/gone.ts";
+    const all = extractPlanTargetPaths(plan).sort();
+    const existing = await detectExistingPlanTargets(plan, cwd);
+    const missing = await computeMissingPlanTargets(plan, cwd);
+    expect([...existing, ...missing].sort()).toEqual(all);
+    expect(existing).toEqual(["src/here.ts"]);
+    expect(missing).toEqual(["src/gone.ts"]);
+  });
+});
+
+describe("getImplRecheckEnabled (4A flag)", () => {
+  let prev: string | undefined;
+  beforeEach(() => {
+    prev = process.env.MUONROI_SPRINT_IMPL_RECHECK;
+  });
+  afterEach(() => {
+    if (prev === undefined) delete process.env.MUONROI_SPRINT_IMPL_RECHECK;
+    else process.env.MUONROI_SPRINT_IMPL_RECHECK = prev;
+  });
+
+  it("defaults to ON", () => {
+    delete process.env.MUONROI_SPRINT_IMPL_RECHECK;
+    expect(getImplRecheckEnabled()).toBe(true);
+  });
+
+  it("is disabled only by the explicit '0' opt-out", () => {
+    process.env.MUONROI_SPRINT_IMPL_RECHECK = "0";
+    expect(getImplRecheckEnabled()).toBe(false);
+    process.env.MUONROI_SPRINT_IMPL_RECHECK = "1";
+    expect(getImplRecheckEnabled()).toBe(true);
+  });
+});
+
+describe("IMPL_EXECUTION_DIRECTIVE (4A role + self-verify framing)", () => {
+  it("keeps the imperative execution instruction and adds a reviewer self-verify clause", () => {
+    expect(IMPL_EXECUTION_DIRECTIVE).toMatch(/EXECUTE the sprint plan/);
+    expect(IMPL_EXECUTION_DIRECTIVE.toLowerCase()).toContain("edit");
+    expect(IMPL_EXECUTION_DIRECTIVE).toMatch(/do not merely restate/i);
+    expect(IMPL_EXECUTION_DIRECTIVE.toLowerCase()).toContain("implementer");
+    expect(IMPL_EXECUTION_DIRECTIVE.toLowerCase()).toMatch(/self-verify|every target file named in the plan/);
   });
 });

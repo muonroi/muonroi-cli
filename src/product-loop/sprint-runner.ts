@@ -165,10 +165,13 @@ export function getImplTotalTimeoutMs(): number {
  * applying edits. Exported for test assertion. @internal
  */
 export const IMPL_EXECUTION_DIRECTIVE =
-  "EXECUTE the sprint plan below as an implementation task. Make the actual code changes NOW " +
-  "using your file-edit tools — read the target files, then edit/write them to apply every action " +
-  "item. Do NOT merely restate, summarize, or re-plan the design; apply the edits to the repository. " +
-  "Run the plan's own verification commands where given. Stop when the action items are implemented.\n\n" +
+  "You are the sprint IMPLEMENTER. EXECUTE the sprint plan below as an implementation task. Make the " +
+  "actual code changes NOW using your file-edit tools — read the target files, then edit/write them to " +
+  "apply every action item. Do NOT merely restate, summarize, or re-plan the design; apply the edits to " +
+  "the repository. Run the plan's own verification commands where given. Before you finish, self-verify " +
+  "as a reviewer would: confirm every target file named in the plan actually exists on disk with the " +
+  "intended change — do not stop with action items unaddressed. Stop only when the action items are " +
+  "implemented.\n\n" +
   "--- SPRINT PLAN TO IMPLEMENT ---\n\n";
 
 /**
@@ -319,32 +322,63 @@ export async function persistSprintPlan(planPath: string, synthesis: string): Pr
 }
 
 /**
- * Wave 3: extract plan-named target file paths that ALREADY EXIST on disk so the
- * impl turn continues them rather than re-scaffolding in a new location. Scans
- * planSynthesis for repo-relative path tokens (src/…, packages/…, tests/…),
- * dedups, resolves against cwd, and returns those that exist (capped). Empty on a
- * greenfield sprint (files don't exist yet) → no injection. Never throws.
+ * Extract repo-relative target file paths a sprint plan names (src/…, packages/…,
+ * tests/…). Deduped, capped. Used by Wave 3 (existing targets → continue) and 4A
+ * (missing targets → completeness re-check). Never throws.
  */
-export async function detectExistingPlanTargets(planSynthesis: string, cwd: string, cap = 20): Promise<string[]> {
+export function extractPlanTargetPaths(planSynthesis: string, cap = 40): string[] {
   try {
     const tokens = new Set<string>();
     const re = /\b((?:src|packages|tests|scripts|lib|app|apps)\/[\w./@-]+\.[a-z]{1,5})\b/gi;
     let m: RegExpExecArray | null = re.exec(planSynthesis);
     while (m !== null) {
       tokens.add(m[1]!.replace(/\\/g, "/"));
-      if (tokens.size > cap * 4) break; // bound the scan
+      if (tokens.size >= cap) break;
       m = re.exec(planSynthesis);
     }
-    const existing: string[] = [];
-    for (const t of tokens) {
-      if (existsSync(path.resolve(cwd, t))) existing.push(t);
-      if (existing.length >= cap) break;
-    }
-    return existing;
+    return [...tokens];
   } catch (err) {
-    console.error(`[sprint-runner] detectExistingPlanTargets failed: ${(err as Error).message}`);
+    console.error(`[sprint-runner] extractPlanTargetPaths failed: ${(err as Error).message}`);
     return [];
   }
+}
+
+/**
+ * Wave 3: plan-named target file paths that ALREADY EXIST on disk, so the impl
+ * turn continues them rather than re-scaffolding in a new location. Empty on a
+ * greenfield sprint (files don't exist yet) → no injection.
+ */
+export async function detectExistingPlanTargets(planSynthesis: string, cwd: string, cap = 20): Promise<string[]> {
+  const existing: string[] = [];
+  for (const t of extractPlanTargetPaths(planSynthesis)) {
+    if (existsSync(path.resolve(cwd, t))) existing.push(t);
+    if (existing.length >= cap) break;
+  }
+  return existing;
+}
+
+/**
+ * 4A: plan-named target file paths that STILL DO NOT EXIST after the impl turn —
+ * i.e. action items the implementer left unaddressed. Drives the post-impl
+ * completeness re-check (spend an extra turn ONLY when there is proven-incomplete
+ * work, unlike an unconditional reviewer pass). Empty ⇒ every named target landed.
+ */
+export async function computeMissingPlanTargets(planSynthesis: string, cwd: string, cap = 20): Promise<string[]> {
+  const missing: string[] = [];
+  for (const t of extractPlanTargetPaths(planSynthesis)) {
+    if (!existsSync(path.resolve(cwd, t))) missing.push(t);
+    if (missing.length >= cap) break;
+  }
+  return missing;
+}
+
+/**
+ * 4A completeness re-check toggle. Default ON; disable with
+ * MUONROI_SPRINT_IMPL_RECHECK=0. When on, and the impl turn left plan-named
+ * target files missing, ONE focused follow-up turn is spent to finish them.
+ */
+export function getImplRecheckEnabled(): boolean {
+  return process.env.MUONROI_SPRINT_IMPL_RECHECK !== "0";
 }
 
 export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChunk, IterationState, unknown> {
@@ -705,6 +739,77 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   }
   if (implError) {
     throw new Error(implError);
+  }
+
+  // ── Step 4b: 4A completeness re-check ─────────────────────────────────────
+  // The impl turn can "finish" (finishReason stop) with plan action items
+  // unaddressed — narrated but not applied. Rather than an unconditional
+  // (2-3x cost) reviewer pass, spend ONE focused follow-up turn ONLY when
+  // plan-named target files are provably still missing on disk. No missing
+  // targets ⇒ no extra turn (the resume/migration case where the targets already
+  // exist is a no-op). A re-check failure never fails the sprint — the primary
+  // impl already succeeded and verify/tests are the real gate.
+  if (ctx.processMessageFn && getImplRecheckEnabled() && planSynthesis.trim()) {
+    const missing = await computeMissingPlanTargets(planSynthesis, cwd);
+    if (missing.length > 0) {
+      idealTrace("sprint.implementation.recheck", { runId: ctx.runId, sprintN, missing: missing.length });
+      const recheckPhaseId = `sprint-${sprintN}-impl-recheck`;
+      const recheckStartedAt = Date.now();
+      yield phaseStart({
+        phaseId: recheckPhaseId,
+        kind: "sprint_stage",
+        label: `Sprint ${sprintN} — Completeness re-check`,
+        detail: `${missing.length} plan target(s) still missing — finishing`,
+        startedAt: recheckStartedAt,
+      });
+      const recheckPrompt =
+        "The sprint plan named these target files but they DO NOT exist on disk yet — the sprint is NOT " +
+        "finished. Create/complete each one NOW using your file-edit tools. Do NOT explain or re-plan; " +
+        "make the edits.\n" +
+        missing.map((f) => `- ${f}`).join("\n") +
+        "\n";
+      let recheckErr: string | null = null;
+      try {
+        const recheckGen = ctx.processMessageFn(recheckPrompt);
+        for await (const chunk of withImplIdleWatchdog(recheckGen, getImplIdleTimeoutMs(), sprintN)) {
+          yield chunk as StreamChunk;
+        }
+      } catch (e) {
+        recheckErr = e instanceof Error ? e.message : String(e);
+        console.error(
+          `[sprint-runner] impl completeness re-check failed (sprint ${sprintN}, run ${ctx.runId}): ${recheckErr}`,
+        );
+      } finally {
+        if (recheckErr) {
+          yield phaseError({
+            phaseId: recheckPhaseId,
+            kind: "sprint_stage",
+            label: `Sprint ${sprintN} — Completeness re-check`,
+            startedAt: recheckStartedAt,
+            errorMessage: recheckErr,
+          });
+        } else {
+          yield phaseDone({
+            phaseId: recheckPhaseId,
+            kind: "sprint_stage",
+            label: `Sprint ${sprintN} — Completeness re-check`,
+            startedAt: recheckStartedAt,
+          });
+        }
+      }
+      const stillMissing = await computeMissingPlanTargets(planSynthesis, cwd);
+      idealTrace("sprint.implementation.recheck.after", {
+        runId: ctx.runId,
+        sprintN,
+        stillMissing: stillMissing.length,
+      });
+      if (stillMissing.length > 0) {
+        yield {
+          type: "content",
+          content: `\n> [completeness] ${stillMissing.length} plan target(s) still missing after re-check — deferring to verify.\n`,
+        };
+      }
+    }
   }
 
   // ── Step 5: Verify stage ──────────────────────────────────────────────────
