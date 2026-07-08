@@ -128,6 +128,83 @@ export function _resetCb2RetryUsed(runId: string): void {
   _cb2RetryUsed.delete(runId);
 }
 
+/**
+ * Idle-chunk ceiling for the implementation stage (ms). Override with
+ * MUONROI_SPRINT_IMPL_IDLE_MS. This is a TIME-SINCE-LAST-CHUNK budget, not a
+ * total-turn cap — a legitimately long implementation streams progress the
+ * whole way, so it may run for many minutes, but it must never go completely
+ * silent (no chunk at all) for this long.
+ */
+export function getImplIdleTimeoutMs(): number {
+  const raw = process.env.MUONROI_SPRINT_IMPL_IDLE_MS;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(n) && n > 0) return n;
+  return 4 * 60 * 1000; // 4 min of total silence → treat the impl turn as stalled
+}
+
+/**
+ * Imperative execution directive prepended to the sprint plan before it is
+ * handed to the orchestrator. The raw plan synthesis is a declarative design
+ * document; without this prefix the impl turn narrates it back instead of
+ * applying edits. Exported for test assertion. @internal
+ */
+export const IMPL_EXECUTION_DIRECTIVE =
+  "EXECUTE the sprint plan below as an implementation task. Make the actual code changes NOW " +
+  "using your file-edit tools — read the target files, then edit/write them to apply every action " +
+  "item. Do NOT merely restate, summarize, or re-plan the design; apply the edits to the repository. " +
+  "Run the plan's own verification commands where given. Stop when the action items are implemented.\n\n" +
+  "--- SPRINT PLAN TO IMPLEMENT ---\n\n";
+
+/**
+ * Wrap the implementation `processMessageFn` stream with an idle-chunk watchdog.
+ *
+ * Root cause it addresses (observed live 2026-07-08, /ideal resume of the
+ * gsd-core migration): the implementation stage delegates to the host
+ * orchestrator turn via `ctx.processMessageFn(implPrompt)` and consumes it with
+ * `for await (const chunk of implGen)`. The orchestrator turn finished its final
+ * LLM response cleanly (finishReason "stop", text-only) but the generator then
+ * suspended post-finish and never completed — the `for await` blocked for 17+
+ * minutes with NO chunk, NO phaseDone, NO advance to Verify, NO error. Because
+ * the LLM STREAM had already finished, the orchestrator's mid-stream
+ * time-to-next-chunk stall-watchdog does not fire — the hang is on the JS side
+ * after the stream terminator.
+ *
+ * This guard resets a timer on every yielded chunk; if no chunk arrives within
+ * `idleMs`, it throws so the caller's existing try/catch converts the silent
+ * wedge into a visible phaseError (the sprint then surfaces + can recover),
+ * exactly like `runVerifyWithWatchdog` does for the verify stage. The suspended
+ * orchestrator promise may leak in the background, but the run recovers.
+ */
+export async function* withImplIdleWatchdog(
+  gen: AsyncGenerator<StreamChunk, void, unknown>,
+  idleMs: number,
+  sprintN: number,
+): AsyncGenerator<StreamChunk, void, unknown> {
+  const it = gen[Symbol.asyncIterator]();
+  while (true) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const idle = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(
+          new Error(
+            `implementation stage produced no output for ${Math.round(idleMs / 1000)}s and was ` +
+              `treated as stalled (sprint ${sprintN}) — the orchestrator turn hung post-finish ` +
+              `(finished its LLM response but the generator never completed)`,
+          ),
+        );
+      }, idleMs);
+    });
+    let res: IteratorResult<StreamChunk, void>;
+    try {
+      res = await Promise.race([it.next(), idle]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (res.done) return;
+    yield res.value;
+  }
+}
+
 export {
   computeFailureSignature,
   loadVerifyFailureSignatures,
@@ -416,9 +493,17 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     subtype: "sprint_stage",
     data: { sprintIndex: sprintN, stage: "implementation", runId: ctx.runId },
   });
+  // Defect fix (2026-07-08): the raw plan synthesis is a DECLARATIVE design
+  // document ("## Agreed Architecture / Function Signatures / Acceptance
+  // Criteria"). Passed verbatim as the orchestrator message it reads as
+  // something to discuss, so the impl turn narrated the plan back as markdown
+  // (finishReason "stop", zero edits) instead of applying it — observed live on
+  // the gsd-core migration. Prepend an explicit execution directive (module-level
+  // IMPL_EXECUTION_DIRECTIVE) so the PIL classifier routes it to the
+  // implement/edit path, not the respond path.
   // C2: Pre-impl gate — read decisions.lock.md and prepend to implementation prompt.
   // When lock file is missing (greenfield / no council with runDir), pass-through unchanged.
-  let implPrompt = planSynthesis;
+  let implPrompt = planSynthesis.trim() ? IMPL_EXECUTION_DIRECTIVE + planSynthesis : planSynthesis;
   try {
     const lockContent = await readDecisionsLock(runDir);
     if (lockContent) {
@@ -436,11 +521,16 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   if (ctx.processMessageFn && implPrompt.trim()) {
     try {
       const implGen = ctx.processMessageFn(implPrompt);
-      for await (const chunk of implGen) {
+      // Guard the impl turn with an idle-chunk watchdog so a post-finish
+      // orchestrator hang surfaces as a phaseError instead of a silent wedge.
+      for await (const chunk of withImplIdleWatchdog(implGen, getImplIdleTimeoutMs(), sprintN)) {
         yield chunk as StreamChunk;
       }
     } catch (e) {
       implError = e instanceof Error ? e.message : String(e);
+      // No-Silent-Catch: the finally below surfaces a phaseError chunk, but log
+      // here too so the hang/failure is diagnosable from stderr / MUONROI logs.
+      console.error(`[sprint-runner] implementation stage failed (sprint ${sprintN}, run ${ctx.runId}): ${implError}`);
     } finally {
       // A3 FIX: phaseDone for implementation MUST always fire, even when
       // processMessageFn throws mid-stream (e.g. /gsd executor fails after
