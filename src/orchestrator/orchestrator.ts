@@ -204,9 +204,15 @@ Rules:
 - No surrounding quotes, no trailing punctuation, no emoji, no markdown.
 - Output ONLY the title text — nothing else.`;
 
-/** Deterministic fallback title: truncated first user message. */
-function fallbackTitle(userMessage: string): string {
-  return userMessage.slice(0, 60).trim() || "New session";
+/** Deterministic fallback title: truncated first user message, or "" when the
+ *  message is empty or a JSON-ish payload (so the caller leaves title = NULL
+ *  and the picker renders a clean "(untitled)" instead of a literal "{}"). */
+export function fallbackTitle(userMessage: string): string {
+  const trimmed = userMessage.trim();
+  if (!trimmed) return "";
+  // JSON object/array payloads (programmatic first messages) make useless titles.
+  if (/^[{[]/.test(trimmed) && /[}\]]$/.test(trimmed)) return "";
+  return trimmed.slice(0, 60).trim();
 }
 
 /** Strip quotes/backticks, collapse whitespace, drop trailing punctuation, cap at ~60 chars. */
