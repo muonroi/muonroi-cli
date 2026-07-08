@@ -51,6 +51,7 @@ import {
   type ResolvedModelRuntime,
   requireRuntimeProvider,
   resolveModelRuntime,
+  resolveTemperatureParam,
   shouldDropParam,
 } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
@@ -541,7 +542,6 @@ export class StreamRunner {
     // already strips it via `dropParam`, the sub-agent path was missing
     // the same guard, causing G1: "Task failed: No output generated.").
     const childDropMaxOutput = shouldDropParam(childRuntime, "maxOutputTokens");
-    const childDropTemperature = shouldDropParam(childRuntime, "temperature");
     // Phase B3: compact older tool_results out of the running message history
     // before each AI SDK step. First step (stepNumber === 0) has no history
     // worth compacting; later steps are where cumulative input balloons.
@@ -711,7 +711,7 @@ export class StreamRunner {
         if (compacted === stripped && stripped === messages) return undefined;
         return { messages: finalMessages };
       },
-      ...(childDropTemperature ? {} : { temperature: isExplore ? 0.2 : 0.5 }),
+      ...resolveTemperatureParam(childRuntime, isExplore ? 0.2 : 0.5),
       ...(childDropMaxOutput ? {} : { maxOutputTokens: Math.min(this.deps.getMaxTokens(), 8_192) }),
       ...(childProviderOptions ? { providerOptions: childProviderOptions } : {}),
       onFinish: ({ totalUsage, finishReason }) => {

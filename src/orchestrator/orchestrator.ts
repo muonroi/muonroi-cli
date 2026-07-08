@@ -36,6 +36,7 @@ import {
   detectProviderForModel,
   requireRuntimeProvider,
   resolveModelRuntime as resolveRuntime,
+  resolveTemperatureParam,
 } from "../providers/runtime.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
 import { statusBarStore } from "../state/status-bar-store.js";
@@ -98,7 +99,12 @@ import {
   type SandboxSettings,
 } from "../utils/settings";
 import { runSideQuestion, type SideQuestionResult } from "../utils/side-question";
-import { buildVerifyDetectPrompt, normalizeVerifyRecipe } from "../verify/entrypoint";
+import {
+  buildVerifyDetectPrompt,
+  inferVerifyProjectProfile,
+  normalizeVerifyRecipe,
+  shouldTrustDeterministicRecipe,
+} from "../verify/entrypoint";
 import { runVerifyOrchestration } from "../verify/orchestrator";
 import {
   type AgentOptions,
@@ -233,7 +239,7 @@ async function genTitle(
       model: runtime.model,
       system: TITLE_SYSTEM_PROMPT,
       prompt: `User's first message:\n\n${snippet}\n\nTitle:`,
-      temperature: 0.3,
+      ...resolveTemperatureParam(runtime, 0.3),
       ...(runtime.modelInfo?.supportsMaxOutputTokens === false ? {} : { maxOutputTokens: 64 }),
       ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     });
@@ -1293,7 +1299,7 @@ export class Agent {
                 modelId: childRuntime.modelId,
                 system: childSystem,
                 messages: [...childMessages, ...turnMessages],
-                temperature: request.agent === "explore" ? 0.2 : 0.5,
+                temperature: childRuntime.modelInfo?.fixedTemperature ?? (request.agent === "explore" ? 0.2 : 0.5),
                 maxOutputTokens: !childCaps.acceptsParam("maxOutputTokens", childRuntime.modelInfo)
                   ? undefined
                   : Math.min(this.maxTokens, 8_192),
@@ -1943,7 +1949,7 @@ export class Agent {
       userModelMessage?: ModelMessage;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
-    const { runCouncil } = await import("../council/index.js");
+    const { runCouncil, postDebateContinuation } = await import("../council/index.js");
     const { createCouncilLLM } = await import("../council/llm.js");
     const councilStats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
     const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, councilStats);
@@ -2012,6 +2018,9 @@ export class Agent {
           runDir, // B1 — persist decisions.lock.md for the /council slash path
           onPostDebateAction: (action) => {
             chosenAction = action;
+            // Relay to the auto-council caller (tool-engine) so nested runs honor
+            // the user's choice instead of always continuing.
+            this.councilManager.setLastPostDebateAction(action);
           },
         },
       );
@@ -2043,25 +2052,25 @@ export class Agent {
         this.appendCompletedTurn(options.userModelMessage, [{ role: "assistant", content: synthesis }]);
       }
 
-      // "continue_session": keep working in THIS session with the debate result.
-      // Re-enter processMessage with the synthesis as context so the agent
-      // continues the original task — this also writes real message rows, which
-      // is what makes the session resumable (the /council slash path otherwise
-      // leaves no messages and is filtered from the resume picker). Guarded by
-      // ownsController so it fires ONLY on the top-level slash path, never when
-      // nested inside processMessage (auto-council) or drained by the runDebate
-      // tool — those callers manage their own continuation.
-      if (ownsController && chosenAction === "continue_session" && synthesis) {
+      // Keep working in THIS session when the chosen action calls for it
+      // (continue_session → carry the conclusion; generate_plan/implement →
+      // execute action items). postDebateContinuation is the single source of
+      // truth shared with the auto-council caller (tool-engine). Re-entering
+      // processMessage also writes real message rows, which is what makes the
+      // session resumable (the /council slash path otherwise leaves no messages
+      // and is filtered from the resume picker). Guarded by ownsController so it
+      // fires ONLY on the top-level slash path, never when nested inside
+      // processMessage (auto-council) or drained by the runDebate tool — those
+      // callers manage their own continuation.
+      const continuationPrompt = ownsController && synthesis ? postDebateContinuation(chosenAction, synthesis) : null;
+      if (continuationPrompt) {
         yield { type: "content", content: "\n[Continuing with the debate conclusion…]\n" };
         this.councilManager.setContinuation(true);
         try {
           // processMessage emits its own terminal `done`, which becomes the
           // consumer's break boundary — so the UI stops AFTER the continuation
           // turn, not before it.
-          yield* this.processMessage(
-            `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`,
-            options?.observer,
-          );
+          yield* this.processMessage(continuationPrompt, options?.observer);
         } finally {
           this.councilManager.setContinuation(false);
         }
@@ -2117,24 +2126,51 @@ export class Agent {
     const processMessageFn = (m: string) => this.processMessage(m, options?.observer);
     const flowDir = nodePath.join(this.bash.getCwd(), ".muonroi-flow");
 
-    // P2.7: compute complexity from the idea using PIL Layer 1 heuristics (cheap,
-    // no LLM calls). Only meaningful for "start"; other subcommands ignore it.
+    // P2.7 (LLM-first — no-regex routing): the work-depth tier that decides
+    // /ideal's route is judged by the MODEL (the same depthTier the PIL Layer-1
+    // classifier emits for chat turns), NOT by a keyword scorer. The old regex
+    // `scoreComplexity` mis-tiered plainly-phrased heavy work — a "merge / vendor
+    // / rename" refactor scored LOW because it lacked the FORCE_HIGH keywords —
+    // which hot-pathed genuinely heavy tasks with zero interview/council. Only
+    // meaningful for "start"; other subcommands ignore it.
     let complexity: "low" | "medium" | "high" | undefined;
+    let needsClarification: boolean | undefined;
     let sufficiencyMissing: readonly import("../pil/layer1-intent.js").SufficiencyMissing[] | undefined;
     if (payload.subcommand === "start" && payload.idea) {
-      const { scoreComplexity, scoreSufficiency } = await import("../pil/layer1-intent.js");
-      const result = scoreComplexity({
-        rawText: payload.idea,
-        taskType: null,
-        t0HitCount: 0,
-        hasMaxSprintsOne: payload.flags.maxSprints === 1,
-      });
-      complexity = result.complexity;
-      // Sufficiency gate — vague briefs ("todo app") force Council so the
-      // discovery AskCard can fill in persona/MVP/architecture/verify before
-      // any code is scaffolded.
-      const suff = scoreSufficiency({ rawText: payload.idea });
-      sufficiencyMissing = suff.sufficient ? undefined : suff.missing;
+      let depth: import("../pil/llm-classify.js").DepthTier = "standard";
+      try {
+        const { createLlmClassifier } = await import("../pil/llm-classify.js");
+        const classify = createLlmClassifier(this.requireProvider(), this.modelId);
+        const res = await classify(payload.idea);
+        if (res?.depthTier) {
+          depth = res.depthTier;
+        } else {
+          // Same convention as PIL Layer 1: a null/garbled depth defaults to the
+          // safe middle. Logged so a persistently-null classifier is diagnosable.
+          console.error(
+            `[ideal/route] model depth classify returned no depthTier — defaulting to "standard". idea=${JSON.stringify(payload.idea.slice(0, 80))}`,
+          );
+        }
+        // LLM-first clarity signal — the agent-first replacement for the regex
+        // `scoreSufficiency`. An underspecified `standard` task earns the
+        // interview/Council path even inside an existing repo (see
+        // runProductLoop gate); null/absent → not-underspecified (don't over-ask).
+        if (res?.needsClarification === true) needsClarification = true;
+      } catch (err) {
+        // Fail-open to the safe middle (standard → hot-path single sprint); never
+        // block /ideal on a classify hiccup. Logged for diagnosis (No-Silent-Catch).
+        console.error(`[ideal/route] depth classify failed, defaulting to "standard": ${(err as Error)?.message}`);
+      }
+      // heavy → full Council pipeline (never hot-path); standard/quick → hot-path.
+      // Maps onto runProductLoop's low|medium|high gate: "high" is the ONLY tier
+      // that both fails the existing-repo bypass (`!== "high"`) and the `=== "low"`
+      // hot-path check, so ONLY heavy reaches runStart/Council — a large task can
+      // no longer skip the interview just because it was phrased plainly.
+      complexity = depth === "heavy" ? "high" : depth === "quick" ? "low" : "medium";
+      // Sufficiency is no longer a separate regex gate (`scoreSufficiency` is
+      // gone from the routing path): a vague / ambiguous brief is exactly what the
+      // model tiers as "heavy" → Council, so depthTier already subsumes it.
+      sufficiencyMissing = undefined;
     }
 
     const gen = runProductLoop({
@@ -2160,6 +2196,7 @@ export class Agent {
       detectVerifyRecipe: () => this.detectVerifyRecipe(),
       skipPriorContext: payload.flags.noPriorContext === true,
       complexity,
+      needsClarification,
       sufficiencyMissing,
       // Mode C explicit override + gh pr create opt-in (see .planning/MAINTAIN-MODE.md).
       mode: payload.flags.mode,
@@ -3242,7 +3279,7 @@ export class Agent {
           model: runtime.model,
           system: systemPrompt,
           prompt: `Child Sub-session is stuck. Question:\n${question}`,
-          temperature: 0.2,
+          ...resolveTemperatureParam(runtime, 0.2),
           ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
         });
 
@@ -3477,23 +3514,48 @@ export class Agent {
   }
 
   async detectVerifyRecipe(settings?: SandboxSettings, abortSignal?: AbortSignal): Promise<VerifyRecipe | null> {
+    const cwd = this.bash.getCwd();
+    const effectiveSettings = settings ?? this.bash.getSandboxSettings();
+
+    // Primary: LLM verify-detect turn — a codebase-aware, richer recipe.
+    let llmRecipe: VerifyRecipe | null = null;
     try {
       const result = await this.runTaskRequest(
         {
           agent: "verify-detect",
           description: "Detect verification recipe",
-          prompt: buildVerifyDetectPrompt(this.bash.getCwd(), settings ?? this.bash.getSandboxSettings()),
+          prompt: buildVerifyDetectPrompt(cwd, effectiveSettings),
         },
         undefined,
         abortSignal,
       );
-      if (!result.success || !result.output) return null;
-      const maybeJson = extractJsonObject(result.output);
-      if (!maybeJson) return null;
-      return normalizeVerifyRecipe(JSON.parse(maybeJson));
-    } catch {
-      return null;
+      if (result.success && result.output) {
+        const maybeJson = extractJsonObject(result.output);
+        if (maybeJson) llmRecipe = normalizeVerifyRecipe(JSON.parse(maybeJson));
+      }
+    } catch (err) {
+      console.error(`[orchestrator] verify-detect turn failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+    if (llmRecipe) return llmRecipe;
+
+    // Deterministic fallback: an existing repo with a recognizable manifest
+    // (package.json test script, *.sln, pyproject, …) yields a reliable recipe
+    // WITHOUT an LLM. This stops CB-3 from false-halting an in-place /ideal
+    // migration with the "Recovery options" card purely because the flaky
+    // verify-detect model returned no parseable JSON (root cause of the
+    // existing-repo implementation-reachability halt). Only trusted when the
+    // profiler recognizes the ecosystem AND found real test commands.
+    try {
+      const profile = inferVerifyProjectProfile(cwd, effectiveSettings);
+      if (shouldTrustDeterministicRecipe(profile.recipe)) {
+        return profile.recipe;
+      }
+    } catch (err) {
+      console.error(
+        `[orchestrator] deterministic verify-recipe fallback failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return null;
   }
 
   async runVerify(onProgress?: (detail: string) => void, abortSignal?: AbortSignal): Promise<ToolResult> {

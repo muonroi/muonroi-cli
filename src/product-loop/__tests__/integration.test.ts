@@ -27,9 +27,11 @@ vi.mock("../../ee/phase-outcome.js", () => ({
   fireAndForgetPhaseOutcome: vi.fn(),
 }));
 
+import { buildDebateCheckpoint, writeDebateCheckpoint } from "../../council/debate-checkpoint.js";
 import { fireAndForgetPhaseOutcome } from "../../ee/phase-outcome.js";
-import { readIterations, readManifest } from "../artifact-io.js";
+import { readIterations, readManifest, writeManifest } from "../artifact-io.js";
 import { runProductLoop } from "../index.js";
+import { runLoopDriver } from "../loop-driver.js";
 import { runSprint } from "../sprint-runner.js";
 import type { IterationState } from "../types.js";
 
@@ -346,5 +348,281 @@ describe("runProductLoop integration", () => {
     expect(fireAndForgetPhaseOutcome).toHaveBeenCalledWith(
       expect.objectContaining({ outcome: "resumed", sessionId: runId }),
     );
+  });
+
+  // ── B: auto-detect the newest incomplete run when resume/abort gets no runId ──
+
+  it("resume (no runId): auto-detects the newest incomplete run", async () => {
+    const flowDir = await tmpFlowDir();
+    // Sprint stub that always halts at max-sprints so runs stay incomplete
+    // (no doneAt, not aborted).
+    const haltingSprint = async function* () {
+      const iter: IterationState = {
+        sprintN: 1,
+        stage: "retrospective",
+        scoreBefore: 0,
+        scoreAfter: 0.4,
+        criteriaMet: 0,
+        criteriaPartial: 0,
+        criteriaUnmet: 3,
+        costUsd: 0,
+        lastVerifyResult: "FAIL",
+      };
+      return iter;
+    };
+
+    // Two incomplete runs, older then newer.
+    (runSprint as any).mockImplementationOnce(haltingSprint);
+    const older = await drain(
+      runProductLoop(
+        makeOpts({ flowDir, idea: "older idea", flags: { maxCost: 50, maxSprints: 1, doneThreshold: 0.95 } }),
+      ),
+    );
+    const olderId = (older.result as any).runId;
+    // Ensure a strictly-later createdAt on the newer run (manifest sorts by createdAt).
+    await new Promise((r) => setTimeout(r, 5));
+    (runSprint as any).mockImplementationOnce(haltingSprint);
+    const newer = await drain(
+      runProductLoop(
+        makeOpts({ flowDir, idea: "newer idea", flags: { maxCost: 50, maxSprints: 1, doneThreshold: 0.95 } }),
+      ),
+    );
+    const newerId = (newer.result as any).runId;
+    expect(newerId).not.toBe(olderId);
+
+    // Bare resume (no runId) should pick the newer run.
+    (runSprint as any).mockImplementationOnce(async function* () {
+      const iter: IterationState = {
+        sprintN: 2,
+        stage: "shipped",
+        scoreBefore: 0.4,
+        scoreAfter: 1,
+        criteriaMet: 3,
+        criteriaPartial: 0,
+        criteriaUnmet: 0,
+        costUsd: 0,
+        lastVerifyResult: "PASS",
+      };
+      return iter;
+    });
+    const { chunks, result } = await drain(
+      runProductLoop(
+        makeOpts({ flowDir, subcommand: "resume", flags: { maxCost: 50, maxSprints: 5, doneThreshold: 0.9 } }),
+      ),
+    );
+    const text = chunks.map((c: any) => c.content ?? "").join("");
+    expect(text).toContain(`Resuming latest incomplete run ${newerId}`);
+    expect((result as any).runId).toBe(newerId);
+  });
+
+  it("resume (no runId): reports when there is no incomplete run", async () => {
+    const flowDir = await tmpFlowDir();
+    const { chunks, result } = await drain(runProductLoop(makeOpts({ flowDir, subcommand: "resume" })));
+    const text = chunks.map((c: any) => c.content ?? "").join("");
+    expect(text).toContain("No incomplete run to resume");
+    expect(result.reason).toBe("no_incomplete_run");
+  });
+
+  it("resume (no runId): skips aborted + shipped runs", async () => {
+    const flowDir = await tmpFlowDir();
+    // Run 1 → abort it (terminal). Run 2 → leave incomplete.
+    (runSprint as any).mockImplementationOnce(async function* () {
+      const iter: IterationState = {
+        sprintN: 1,
+        stage: "retrospective",
+        scoreBefore: 0,
+        scoreAfter: 0.4,
+        criteriaMet: 0,
+        criteriaPartial: 0,
+        criteriaUnmet: 3,
+        costUsd: 0,
+        lastVerifyResult: "FAIL",
+      };
+      return iter;
+    });
+    const r1 = await drain(
+      runProductLoop(
+        makeOpts({ flowDir, idea: "will abort", flags: { maxCost: 50, maxSprints: 1, doneThreshold: 0.95 } }),
+      ),
+    );
+    const abortedId = (r1.result as any).runId;
+    await drain(runProductLoop(makeOpts({ flowDir, subcommand: "abort", runId: abortedId })));
+
+    await new Promise((r) => setTimeout(r, 5));
+    (runSprint as any).mockImplementationOnce(async function* () {
+      const iter: IterationState = {
+        sprintN: 1,
+        stage: "retrospective",
+        scoreBefore: 0,
+        scoreAfter: 0.4,
+        criteriaMet: 0,
+        criteriaPartial: 0,
+        criteriaUnmet: 3,
+        costUsd: 0,
+        lastVerifyResult: "FAIL",
+      };
+      return iter;
+    });
+    const r2 = await drain(
+      runProductLoop(
+        makeOpts({ flowDir, idea: "still open", flags: { maxCost: 50, maxSprints: 1, doneThreshold: 0.95 } }),
+      ),
+    );
+    const openId = (r2.result as any).runId;
+
+    (runSprint as any).mockImplementationOnce(async function* () {
+      const iter: IterationState = {
+        sprintN: 2,
+        stage: "shipped",
+        scoreBefore: 0.4,
+        scoreAfter: 1,
+        criteriaMet: 3,
+        criteriaPartial: 0,
+        criteriaUnmet: 0,
+        costUsd: 0,
+        lastVerifyResult: "PASS",
+      };
+      return iter;
+    });
+    const { chunks } = await drain(
+      runProductLoop(
+        makeOpts({ flowDir, subcommand: "resume", flags: { maxCost: 50, maxSprints: 5, doneThreshold: 0.9 } }),
+      ),
+    );
+    const text = chunks.map((c: any) => c.content ?? "").join("");
+    expect(text).toContain(`Resuming latest incomplete run ${openId}`);
+    expect(text).not.toContain(abortedId);
+  });
+
+  // ── C-v2: cross-session resume of an interrupted council debate ──────────────
+
+  it("resume: re-enters the council FSM when a debate checkpoint is present", async () => {
+    const flowDir = await tmpFlowDir();
+    const runId = "cv2-interrupted";
+    const runDir = path.join(flowDir, "runs", runId);
+    await fs.mkdir(runDir, { recursive: true });
+    await writeManifest(flowDir, runId, {
+      idea: "resume the interrupted debate",
+      capUsd: 50,
+      maxSprints: 3,
+      doneThreshold: 0.9,
+      createdAt: new Date(),
+    });
+    // Simulate a debate that was interrupted after 2 of 3 rounds.
+    await writeDebateCheckpoint(
+      runDir,
+      buildDebateCheckpoint({
+        problemStatement: "resume the interrupted debate",
+        roundCount: 2,
+        maxRounds: 3,
+        exchangeLogs: new Map([["a<>b", ["turn-1", "turn-2"]]]),
+        runningSummary: "partial",
+        researchFindings: "found",
+        active: [{ role: "architect" as any, model: "m1", position: "p", stance: { name: "a", lens: "l" } }],
+        archive: [],
+        lastCriteriaMet: [],
+        bestCriteriaMetCount: 0,
+        roundsSinceProgress: 0,
+        savedAt: "2026-07-07T00:00:00.000Z",
+      }),
+    );
+
+    // The mocked runLoopDriver (module factory) returns an approved spec.
+    (runSprint as any).mockImplementationOnce(async function* () {
+      const iter: IterationState = {
+        sprintN: 1,
+        stage: "shipped",
+        scoreBefore: 0,
+        scoreAfter: 1,
+        criteriaMet: 3,
+        criteriaPartial: 0,
+        criteriaUnmet: 0,
+        costUsd: 0,
+        lastVerifyResult: "PASS",
+      };
+      return iter;
+    });
+
+    const { chunks } = await drain(
+      runProductLoop(
+        makeOpts({ flowDir, subcommand: "resume", runId, flags: { maxCost: 50, maxSprints: 3, doneThreshold: 0.9 } }),
+      ),
+    );
+
+    // The C-v2 branch fired: it surfaced the interrupted-debate notice and
+    // re-entered the council FSM (loop-driver) before sprints.
+    const text = chunks.map((c: any) => c.content ?? "").join("");
+    expect(text).toContain("interrupted council debate");
+    expect(runLoopDriver).toHaveBeenCalled();
+  });
+
+  it("resume: does NOT re-enter the FSM when there is no debate checkpoint", async () => {
+    const flowDir = await tmpFlowDir();
+    (runSprint as any).mockImplementationOnce(async function* () {
+      const iter: IterationState = {
+        sprintN: 1,
+        stage: "shipped",
+        scoreBefore: 0,
+        scoreAfter: 1,
+        criteriaMet: 3,
+        criteriaPartial: 0,
+        criteriaUnmet: 0,
+        costUsd: 0,
+        lastVerifyResult: "PASS",
+      };
+      return iter;
+    });
+    const start = await drain(runProductLoop(makeOpts({ flowDir, idea: "no interrupted debate" })));
+    const runId = (start.result as any).runId;
+    (runLoopDriver as any).mockClear();
+
+    (runSprint as any).mockImplementationOnce(async function* () {
+      const iter: IterationState = {
+        sprintN: 2,
+        stage: "shipped",
+        scoreBefore: 1,
+        scoreAfter: 1,
+        criteriaMet: 3,
+        criteriaPartial: 0,
+        criteriaUnmet: 0,
+        costUsd: 0,
+        lastVerifyResult: "PASS",
+      };
+      return iter;
+    });
+    const { chunks } = await drain(runProductLoop(makeOpts({ flowDir, subcommand: "resume", runId })));
+    const text = chunks.map((c: any) => c.content ?? "").join("");
+    expect(text).not.toContain("interrupted council debate");
+    expect(runLoopDriver).not.toHaveBeenCalled();
+  });
+
+  it("abort (no runId): auto-detects and aborts the newest incomplete run", async () => {
+    const flowDir = await tmpFlowDir();
+    (runSprint as any).mockImplementationOnce(async function* () {
+      const iter: IterationState = {
+        sprintN: 1,
+        stage: "retrospective",
+        scoreBefore: 0,
+        scoreAfter: 0.4,
+        criteriaMet: 0,
+        criteriaPartial: 0,
+        criteriaUnmet: 3,
+        costUsd: 0,
+        lastVerifyResult: "FAIL",
+      };
+      return iter;
+    });
+    const start = await drain(
+      runProductLoop(
+        makeOpts({ flowDir, idea: "to auto-abort", flags: { maxCost: 50, maxSprints: 1, doneThreshold: 0.95 } }),
+      ),
+    );
+    const runId = (start.result as any).runId;
+
+    const abortRes = await drain(runProductLoop(makeOpts({ flowDir, subcommand: "abort" })));
+    expect(abortRes.result.reason).toBe("aborted");
+    expect((abortRes.result as any).runId).toBe(runId);
+    const manifest = await readManifest(flowDir, runId);
+    expect(manifest?.aborted).toBe(true);
   });
 });

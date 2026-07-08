@@ -16,6 +16,7 @@
     "moduleResolution": "Bundler",
     "allowSyntheticDefaultImports": true,
     "paths": {
+      "@council/*": ["./src/council/*.ts", "./src/council/*/index.ts"],
       "@muonroi/agent-harness-core": ["./packages/agent-harness-core/src/index.ts"],
       "@muonroi/agent-harness-core/*": [
         "./packages/agent-harness-core/src/*.ts",

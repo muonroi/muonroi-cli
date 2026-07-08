@@ -19,13 +19,13 @@ import { Agent } from "../orchestrator/orchestrator";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "../orchestrator/safety-askcard.js";
 import { planSafetyAskcard } from "../orchestrator/safety-askcard.js";
 
-import type { HaltChunk, ProductStatusCardData } from "../product-loop/types.js";
+import type { HaltChunk, ProductStatusCardData, RecoveryOption } from "../product-loop/types.js";
 import { getConfiguredProviders, setKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
-import { buildIdealContinuationPrompt } from "../scaffold/continuation-prompt.js";
+import { buildAdoptExistingContinuationPrompt, buildIdealContinuationPrompt } from "../scaffold/continuation-prompt.js";
 import { continueAsCouncil } from "../scaffold/continue-as-council.js";
 import { initNewProject } from "../scaffold/init-new.js";
-import { pointToExisting } from "../scaffold/point-to-existing.js";
+import { detectExistingProjectRecipe, pointToExisting } from "../scaffold/point-to-existing.js";
 import { statusBarStore, wireStatusBar } from "../state/status-bar-store.js";
 import {
   appendCompaction,
@@ -112,6 +112,7 @@ import {
   initialCardState,
   reduceCardKey,
 } from "./components/council-question-card.js";
+import { cycleRoundSelection } from "./components/council-rail-rounds.js";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
 import { CouncilSynthesisBanner } from "./components/council-synthesis-banner.js";
 import { HaltRecoveryCard } from "./components/halt-recovery-card.js";
@@ -228,6 +229,24 @@ import { sanitizeContent } from "./utils/text.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
 /**
+ * A — recovery options shown when an /ideal run breaks mid-sprint. Resume /
+ * Retry / Abort all auto-detect the newest incomplete run (see runResume /
+ * runAbort auto-detect), so the user never has to know the runId; Skip verify
+ * sets MUONROI_SPRINT_SKIP_VERIFY=1 before resuming so a broken verify sandbox
+ * (e.g. shuru unavailable on Windows) does not re-hang every sprint.
+ */
+const SPRINT_FAILED_RECOVERY_OPTIONS: readonly RecoveryOption[] = [
+  { id: "resume", label: "Resume", description: "Continue the run from where it broke (restarts the failed sprint)." },
+  { id: "retry", label: "Retry sprint", description: "Re-run the sprint that just failed from a clean slate." },
+  {
+    id: "skip_verify",
+    label: "Skip verify & resume",
+    description: "Bypass the verify stage (use when the sandbox/verify is what hangs), then continue.",
+  },
+  { id: "abort", label: "Abort run", description: "Hard-kill this run. It can no longer be resumed." },
+];
+
+/**
  * Render the EE "experience injected" chunk for the TUI: the count line PLUS a
  * capped per-point list (tier + title + short id) so the user sees WHAT was
  * injected, not just how many. Shared by both render sites to avoid drift.
@@ -237,12 +256,12 @@ function formatExperienceInjectedBlock(d: {
   scoreFloor?: number;
   points?: Array<{ id: string; title: string; tier: string }>;
 }): string {
-  const head = `\n≡ƒÆí [Experience Injected] ${d.pointCount ?? 0} point(s) loaded (score ΓëÑ ${d.scoreFloor ?? 0})`;
+  const head = `\n💡 [Experience Injected] ${d.pointCount ?? 0} point(s) loaded (score ≥ ${d.scoreFloor ?? 0})`;
   const pts = d.points ?? [];
   if (pts.length === 0) return `${head}\n`;
   const MAX = 8;
-  const lines = pts.slice(0, MAX).map((p) => `   ΓÇó [${p.tier}] ${p.title || "(untitled)"} {id:${p.id.slice(0, 8)}}`);
-  if (pts.length > MAX) lines.push(`   ΓÇª +${pts.length - MAX} more`);
+  const lines = pts.slice(0, MAX).map((p) => `   • [${p.tier}] ${p.title || "(untitled)"} {id:${p.id.slice(0, 8)}}`);
+  if (pts.length > MAX) lines.push(`   … +${pts.length - MAX} more`);
   return `${head}\n${lines.join("\n")}\n`;
 }
 
@@ -263,7 +282,7 @@ function stripControlBytes(raw: string): string {
 
 /**
  * Sanitize text destined for a single-line secret field (provider API key).
- * stripControlBytes + removes every whitespace character ΓÇö an API key never
+ * stripControlBytes + removes every whitespace character — an API key never
  * contains whitespace, and terminal paste often arrives wrapped in guards or
  * with a trailing newline. Shared by the keydown and paste handlers so both
  * input routes behave identically.
@@ -275,7 +294,7 @@ function sanitizeSecretInput(raw: string): string {
 const DEFAULT_MODEL = getCurrentModel();
 
 // ---------------------------------------------------------------------------
-// Telegram stubs ΓÇö removed feature, compile-only placeholders
+// Telegram stubs — removed feature, compile-only placeholders
 // ---------------------------------------------------------------------------
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -301,7 +320,7 @@ function _formatStructuredResponse(sr: StructuredResponse): string {
     case "refactor": {
       const r = d as { summary?: string; changes?: Array<{ file: string; diff: string }>; verify_command?: string };
       const parts = [r.summary ?? ""];
-      for (const c of r.changes ?? []) parts.push(`\nΓöÇΓöÇ ${c.file} ΓöÇΓöÇ\n${c.diff}`);
+      for (const c of r.changes ?? []) parts.push(`\n── ${c.file} ──\n${c.diff}`);
       if (r.verify_command) parts.push(`\nverify: ${r.verify_command}`);
       return parts.join("\n");
     }
@@ -313,7 +332,7 @@ function _formatStructuredResponse(sr: StructuredResponse): string {
         verify_command?: string;
       };
       const parts = [`hypothesis: ${r.hypothesis}`, `root cause: ${r.root_cause}`];
-      if (r.fix) parts.push(`\nΓöÇΓöÇ fix: ${r.fix.file} ΓöÇΓöÇ\n${r.fix.diff}`);
+      if (r.fix) parts.push(`\n── fix: ${r.fix.file} ──\n${r.fix.diff}`);
       if (r.verify_command) parts.push(`verify: ${r.verify_command}`);
       return parts.join("\n");
     }
@@ -346,7 +365,7 @@ function _formatStructuredResponse(sr: StructuredResponse): string {
       const r = d as { files?: Array<{ path: string; content: string; language: string }>; explanation?: string };
       const parts: string[] = [];
       if (r.explanation) parts.push(r.explanation);
-      for (const f of r.files ?? []) parts.push(`\nΓöÇΓöÇ ${f.path} (${f.language}) ΓöÇΓöÇ\n${f.content}`);
+      for (const f of r.files ?? []) parts.push(`\n── ${f.path} (${f.language}) ──\n${f.content}`);
       return parts.join("\n");
     }
     case "general": {
@@ -402,7 +421,7 @@ function getFileMentionToken(block: FileMentionBlock): string {
 const SPLIT = {
   topLeft: "",
   bottomLeft: "",
-  vertical: "Γöâ",
+  vertical: "┃",
   topRight: "",
   bottomRight: "",
   horizontal: " ",
@@ -412,7 +431,7 @@ const SPLIT = {
   leftT: "",
   rightT: "",
 };
-const _SPLIT_END = { ...SPLIT, bottomLeft: "Γò╣" };
+const _SPLIT_END = { ...SPLIT, bottomLeft: "╹" };
 const _EMPTY = {
   topLeft: "",
   bottomLeft: "",
@@ -427,17 +446,17 @@ const _EMPTY = {
   rightT: "",
 };
 const _LINE = {
-  topLeft: "Γöü",
-  bottomLeft: "Γöü",
+  topLeft: "━",
+  bottomLeft: "━",
   vertical: "",
-  topRight: "Γöü",
-  bottomRight: "Γöü",
-  horizontal: "Γöü",
-  bottomT: "Γöü",
-  topT: "Γöü",
-  cross: "Γöü",
-  leftT: "Γöü",
-  rightT: "Γöü",
+  topRight: "━",
+  bottomRight: "━",
+  horizontal: "━",
+  bottomT: "━",
+  topT: "━",
+  cross: "━",
+  leftT: "━",
+  rightT: "━",
 };
 
 const REVIEW_PROMPT = `Review all current changes in this repository. Follow these steps:
@@ -566,12 +585,14 @@ ${prompt}`;
 
 // AppStartupConfig, AppProps, ActiveTurnState extracted to ./types.ts
 
-// Splash UX: only DeepSeek + SiliconFlow are surfaced. Other providers
-// (openai/anthropic/google/xai/ollama) keep working programmatically when
-// the router picks them, but the user-facing picker hides them so the
-// user cannot enable a provider we are not actively maintaining UX for.
+// Splash UX: the curated primary providers surfaced in the picker. Other
+// providers (openai/anthropic/ollama) keep working programmatically when the
+// router picks them, but the user-facing picker hides them so the user cannot
+// enable a provider we are not actively maintaining UX for. NOTE: keep this in
+// sync with SPLASH_PROVIDERS in app.tsx — siliconflow/google were removed from
+// ProviderId, so they MUST NOT appear here (they render as dead "no key" chips).
 // Hoisted to module-level so React useEffect deps stay stable across renders.
-const SPLASH_PROVIDERS: readonly ProviderId[] = ["deepseek", "siliconflow", "zai", "opencode-go"];
+const SPLASH_PROVIDERS: readonly ProviderId[] = ["deepseek", "zai", "opencode-go", "xai"];
 
 export interface AppLogicProps {
   agent: any;
@@ -608,7 +629,7 @@ export function useAppLogic(props: AppLogicProps) {
   useEffect(() => wireStatusBar(), []);
 
   // Agent-mode: wire addPostProcessFn so each renderer pass triggers a registry
-  // snapshot ΓåÆ LiveFrame diff ΓåÆ JSONL write on fd 3.
+  // snapshot → LiveFrame diff → JSONL write on fd 3.
   const agentRuntime = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as AgentModeRuntime | undefined;
   // biome-ignore lint/correctness/useExhaustiveDependencies: agentRuntime is a process-lifetime stable ref from globalThis; it never changes after App mounts
   useEffect(() => {
@@ -625,10 +646,10 @@ export function useAppLogic(props: AppLogicProps) {
       renderer.removePostProcessFn(captureFrame);
     };
   }, [renderer, agentRuntime]);
-  // Wire fd4 input bridge: translate agent JSONL ops ΓåÆ synthetic key events.
+  // Wire fd4 input bridge: translate agent JSONL ops → synthetic key events.
   useAgentInputBridge(agentRuntime);
 
-  // ΓöÇΓöÇΓöÇ Phase 21 / Plan 02 ΓÇö Toast subscriber ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  // ─── Phase 21 / Plan 02 — Toast subscriber ────────────────────────────────
   // Hook into the same agentRuntime.emitEvent sink used by `logEeFailure` so
   // EE failures (and any explicit `kind: "toast"` event) surface visually.
   //
@@ -674,7 +695,7 @@ export function useAppLogic(props: AppLogicProps) {
     return () => setRetryReporter(null);
   }, [pushToast]);
 
-  // Stable handler ΓÇö only reads from refs, never recreated, so the patched
+  // Stable handler — only reads from refs, never recreated, so the patched
   // emitEvent reference below remains valid for the lifetime of the runtime.
   const handleHarnessEvent = useCallback(
     (raw: unknown) => {
@@ -691,7 +712,7 @@ export function useAppLogic(props: AppLogicProps) {
 
       if (e.kind === "steer-inject") {
         const count = typeof e.count === "number" ? e.count : 1;
-        pushToast("info", `Γå│ steering applied (${count} message${count === 1 ? "" : "s"})`);
+        pushToast("info", `↳ steering applied (${count} message${count === 1 ? "" : "s"})`);
         return;
       }
 
@@ -737,7 +758,7 @@ export function useAppLogic(props: AppLogicProps) {
     // Tap point 2 (no agent-mode): install a fallback __muonroiAgentRuntime
     // stub so logEeFailure (src/utils/ee-logger.ts) can deliver ee-timeout /
     // ee-error events to the toast subscriber in normal interactive sessions.
-    // Without this stub, EE failures only emit to stderr ΓÇö the user never
+    // Without this stub, EE failures only emit to stderr — the user never
     // sees a toast.
     const globals = globalThis as Record<string, unknown>;
     const existing = globals.__muonroiAgentRuntime;
@@ -757,7 +778,7 @@ export function useAppLogic(props: AppLogicProps) {
 
   // Live-queue steering: expose the mid-turn queue to the running turn so
   // prepareStep can inject typed-while-busy messages at the next step boundary
-  // instead of deferring them to a new turn. Disabled ΓåÆ callback not wired, so
+  // instead of deferring them to a new turn. Disabled → callback not wired, so
   // finishTurnProcessing drains the queue post-turn exactly as before.
   useEffect(() => {
     if (!getSteerInjectionEnabled()) return;
@@ -772,7 +793,7 @@ export function useAppLogic(props: AppLogicProps) {
   }, [agent]);
 
   const dismissToast = useCallback(() => setActiveToast(null), []);
-  // ΓöÇΓöÇΓöÇ /Phase 21 toast subscriber ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  // ─── /Phase 21 toast subscriber ────────────────────────────────────────────
 
   const {
     model,
@@ -816,7 +837,7 @@ export function useAppLogic(props: AppLogicProps) {
       // for users who set keys via env/settings.
       const configured = await getConfiguredProviders();
       // Surface every credentialed provider that has catalog models (e.g. an
-      // OAuth-authenticated OpenAI) in the picker ΓÇö not just the curated splash
+      // OAuth-authenticated OpenAI) in the picker — not just the curated splash
       // set. Previously configuredProviders stayed pinned to SPLASH_PROVIDERS,
       // so OAuth providers worked at the routing layer but could never be
       // selected in /models. Splash providers stay listed even with no key so
@@ -834,7 +855,7 @@ export function useAppLogic(props: AppLogicProps) {
   useEffect(() => {
     let cancelled = false;
     // Paint the curated splash providers immediately, then replace with the
-    // resolved list (splash Γê¬ configured-with-models) once the async credential
+    // resolved list (splash ∪ configured-with-models) once the async credential
     // check completes. The modal shows a "(no key)" badge and lets the user
     // press `k` to set a key without leaving the TUI.
     setConfiguredProviders([...SPLASH_PROVIDERS]);
@@ -860,7 +881,7 @@ export function useAppLogic(props: AppLogicProps) {
     try {
       const ok = await setKeyForProvider(apiKeyPrompt.provider, key);
       if (!ok) {
-        setApiKeyPrompt({ ...apiKeyPrompt, error: "Keychain unavailable ΓÇö set env var instead" });
+        setApiKeyPrompt({ ...apiKeyPrompt, error: "Keychain unavailable — set env var instead" });
         return;
       }
       await refreshProvidersWithKey();
@@ -870,8 +891,8 @@ export function useAppLogic(props: AppLogicProps) {
     }
   }, [apiKeyPrompt, refreshProvidersWithKey]);
 
-  // ΓöÇΓöÇ BW sync flow (Option A) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-  // Two phases: password ΓåÆ picker. Lives entirely in TUI memory; we never
+  // ── BW sync flow (Option A) ────────────────────────────────────────────
+  // Two phases: password → picker. Lives entirely in TUI memory; we never
   // export BW_SESSION or persist the master password.
   type BwSyncState =
     | { phase: "password"; value: string; error: string | null; loading: boolean }
@@ -971,8 +992,8 @@ export function useAppLogic(props: AppLogicProps) {
   const [messages, setMessages] = useState<ChatEntry[]>(() => agent.getChatEntries());
   const [streamContent, setStreamContent] = useState("");
   // Reasoning state: track activity + last-elapsed for a "💭 Thought for Ns"
-  // pill instead of dumping CoT into the chat (saves 80ΓÇô120 setState/sec on
-  // DeepSeek Flash's verbose reasoning stream ΓÇö was a freeze contributor).
+  // pill instead of dumping CoT into the chat (saves 80–120 setState/sec on
+  // DeepSeek Flash's verbose reasoning stream — was a freeze contributor).
   const [reasoningActive, setReasoningActive] = useState(false);
   const [lastReasoningElapsedMs, setLastReasoningElapsedMs] = useState(0);
   const reasoningStartRef = useRef<number | null>(null);
@@ -1012,12 +1033,12 @@ export function useAppLogic(props: AppLogicProps) {
   const [pendingCouncilQuestion, setPendingCouncilQuestion] = useState<CouncilQuestionData | null>(null);
   const [councilCardState, setCouncilCardState] = useState<CouncilCardState | null>(null);
   const [preflightCardState, setPreflightCardState] = useState<CouncilCardState | null>(null);
-  // Ref mirrors ΓÇö keep current synchronously so keyboard-burst handlers read
+  // Ref mirrors — keep current synchronously so keyboard-burst handlers read
   // the correct idx without waiting on React's setState commit (same pattern as showSlashMenuRef).
   const pendingCouncilQuestionRef = useRef<CouncilQuestionData | null>(null);
   const councilCardStateRef = useRef<CouncilCardState | null>(null);
   const preflightCardStateRef = useRef<CouncilCardState | null>(null);
-  // E2 ΓÇö post-action heartbeat shown while waiting for the NEXT chunk after the
+  // E2 — post-action heartbeat shown while waiting for the NEXT chunk after the
   // user answers an AskCard. Avoids the silent gap between accept-N and the
   // arrival of chunk-(N+1) (next AskCard, council phase chunk, sprint stage).
   // The chunk loop in /ideal calls clearInterCardHeartbeat() on every chunk.
@@ -1029,7 +1050,7 @@ export function useAppLogic(props: AppLogicProps) {
   const setCouncilCardStateSync = useCallback(
     (v: CouncilCardState | null | ((prev: CouncilCardState | null) => CouncilCardState | null)) => {
       // Compute the new value against the CURRENT ref so the ref reflects the
-      // latest state immediately ΓÇö handlers running before React flushes the
+      // latest state immediately — handlers running before React flushes the
       // setState updater must see this value. Putting the ref write inside
       // the updater closure defers it until React commits, which races with
       // a harness Enter that arrives between this call and the React flush.
@@ -1044,7 +1065,7 @@ export function useAppLogic(props: AppLogicProps) {
   );
   const setPreflightCardStateSync = useCallback(
     (v: CouncilCardState | null | ((prev: CouncilCardState | null) => CouncilCardState | null)) => {
-      // Same pattern as setCouncilCardStateSync ΓÇö ref must be written before
+      // Same pattern as setCouncilCardStateSync — ref must be written before
       // the React batch flush so synchronous handlers see the latest value.
       const next =
         typeof v === "function"
@@ -1076,12 +1097,42 @@ export function useAppLogic(props: AppLogicProps) {
   // P3 — council metadata for the context rail (leader/panel/budget/research/
   // cost), upsert-merged from incremental council_meta patches.
   const [councilMeta, setCouncilMeta] = useState<CouncilMetaPatch>({});
-  const applyCouncilMetaPatch = useCallback((patch: CouncilMetaPatch) => {
-    setCouncilMeta((prev) => ({ ...prev, ...patch }));
-  }, []);
+  // Tracks the current council's topic so a NEW council (topic change) can flush
+  // the prior council's residue even when clearLiveTurnUi (turn-end) was skipped
+  // — e.g. an Esc-interrupt before a fresh /council. applyCouncilMetaPatch is
+  // defined below, after councilRounds, so it can reset that state too.
+  const councilTopicRef = useRef<string | undefined>(undefined);
   // P5/P6 — per-round lifecycle records, upsert-merged by round number so a
   // `running` record is overwritten by its `done` record in place.
   const [councilRounds, setCouncilRounds] = useState<CouncilRoundRecord[]>([]);
+  // P2/D — round selected in the rail to scope the MAIN transcript pane. null =
+  // global (all/live rounds). Mirrored into a ref so the global key handler can
+  // read the current round list without re-subscribing on every round update.
+  const [selectedRound, setSelectedRound] = useState<number | null>(null);
+  const councilRoundsRef = useRef<CouncilRoundRecord[]>([]);
+  useEffect(() => {
+    councilRoundsRef.current = councilRounds;
+    // Drop a stale selection if that round is gone (new debate / cleared).
+    if (selectedRound !== null && !councilRounds.some((r) => r.round === selectedRound)) {
+      setSelectedRound(null);
+    }
+  }, [councilRounds, selectedRound]);
+  const applyCouncilMetaPatch = useCallback((patch: CouncilMetaPatch) => {
+    const newTopic = patch.topic;
+    // A topic that differs from the one we're tracking means a new council began.
+    // Only treat it as new when we already had a topic (first council of a turn
+    // sets it without a reset). Flush prior round records + replace meta so a
+    // previous council's Progress row / criteriaMet / leader / panel don't bleed
+    // into the new one. selectedRound follows via the councilRounds effect above.
+    const isNewCouncil = !!newTopic && !!councilTopicRef.current && newTopic !== councilTopicRef.current;
+    if (newTopic) councilTopicRef.current = newTopic;
+    if (isNewCouncil) {
+      setCouncilRounds([]);
+      setCouncilMeta({ ...patch });
+      return;
+    }
+    setCouncilMeta((prev) => ({ ...prev, ...patch }));
+  }, []);
   const applyCouncilRound = useCallback((rec: CouncilRoundRecord) => {
     setCouncilRounds((prev) => {
       const idx = prev.findIndex((r) => r.round === rec.round);
@@ -1093,7 +1144,10 @@ export function useAppLogic(props: AppLogicProps) {
     });
   }, []);
   const [councilPlaceholders, setCouncilPlaceholders] = useState<
-    Map<string, { role: string; side: "left" | "right"; color: string; variant: "participant" | "leader" }>
+    Map<
+      string,
+      { role: string; side: "left" | "right"; color: string; variant: "participant" | "leader"; detail?: string }
+    >
   >(new Map());
 
   const resolveStyle = useRolePalette();
@@ -1102,6 +1156,9 @@ export function useAppLogic(props: AppLogicProps) {
   const [productStatus, setProductStatus] = useState<ProductStatusCardData | null>(null);
   const [activeHaltCard, setActiveHaltCard] = useState<HaltChunk | null>(null);
   const [haltSelectedIndex, setHaltSelectedIndex] = useState(0);
+  // A — most recent sprint number seen on a product_status_card, used to title
+  // the recovery card ("Sprint N failed") when an /ideal run throws mid-run.
+  const lastProductSprintNRef = useRef<number | null>(null);
   const [initNewForm, setInitNewForm] = useState<InitNewFormState | null>(null);
   const lastInitNewStepRef = useRef<string | null>(null);
 
@@ -1168,7 +1225,7 @@ export function useAppLogic(props: AppLogicProps) {
     hasContent: boolean;
     error?: string;
   } | null>(null);
-  // TEST SEAM ΓÇö inject a synthetic halt chunk on boot when --inject-halt is set.
+  // TEST SEAM — inject a synthetic halt chunk on boot when --inject-halt is set.
   // This lets harness E2E specs verify the recovery card without a real CB-3 run.
   useEffect(() => {
     if (!startupConfig.injectHalt) return;
@@ -1196,6 +1253,19 @@ export function useAppLogic(props: AppLogicProps) {
     });
     setHaltSelectedIndex(0);
   }, [startupConfig.injectHalt]);
+  // TEST SEAM (A) — inject a synthetic sprint-failed recovery card on boot when
+  // --inject-halt-sprint is set, so E2E specs can verify the break-recovery card.
+  useEffect(() => {
+    if (!startupConfig.injectHaltSprint) return;
+    setActiveHaltCard({
+      type: "halt",
+      reason: "sprint_failed",
+      sprintN: 3,
+      detail: "Injected by --inject-halt-sprint for E2E testing.",
+      recovery_options: [...SPRINT_FAILED_RECOVERY_OPTIONS],
+    });
+    setHaltSelectedIndex(0);
+  }, [startupConfig.injectHaltSprint]);
   // Reap completed status rows after their hold window so the row clears.
   useEffect(() => {
     if (councilStatuses.length === 0) return;
@@ -1274,7 +1344,7 @@ export function useAppLogic(props: AppLogicProps) {
   const inputRef = useRef<TextareaRenderable>(null);
   // Per-session input history: ArrowUp recalls earlier submitted prompts when
   // the prompt buffer is empty. Lives only in component state, so each session
-  // (process) starts with a clean slate ΓÇö no r├íc history bleeding between sessions.
+  // (process) starts with a clean slate — no rác history bleeding between sessions.
   const inputHistoryRef = useRef<string[]>([]);
   const historyIndexRef = useRef<number>(-1);
   const historyDraftRef = useRef<string>("");
@@ -1345,7 +1415,7 @@ export function useAppLogic(props: AppLogicProps) {
   const processedInitial = useRef(false);
   const contentAccRef = useRef("");
   const startTimeRef = useRef(0);
-  // Plan 23-02 ΓÇö Capture the most recent `/ideal "..."` idea so the init-new
+  // Plan 23-02 — Capture the most recent `/ideal "..."` idea so the init-new
   // form can route it through designBBPackages() for EE-driven template + pkg
   // suggestion. Empty string falls back to the manual template menu.
   const lastIdealIdeaRef = useRef<string>("");
@@ -1509,7 +1579,7 @@ export function useAppLogic(props: AppLogicProps) {
   const modelInfo = getModelInfo(model);
   const contextStats = modelInfo ? agent.getContextStats(modelInfo.contextWindow, streamContent) : null;
 
-  // UI Loading logic for dynamic models ΓÇö restrict to providers that have API keys configured
+  // UI Loading logic for dynamic models — restrict to providers that have API keys configured
   // and have not been explicitly disabled by the user. Catalog entries lacking a provider are
   // kept (defensive); models with an unknown provider are filtered out to avoid clutter.
   const activeProviders = useMemo(() => {
@@ -1541,7 +1611,7 @@ export function useAppLogic(props: AppLogicProps) {
         // Rank by exactness so the command the user TYPED wins: exact label/id
         // (0) > label/id prefix (1) > label substring (2) > description
         // substring (3). Without ranking, a command whose DESCRIPTION contains
-        // the query (e.g. /ee "ΓÇªstatusΓÇª") sorts above the exact match the user
+        // the query (e.g. /ee "…status…") sorts above the exact match the user
         // typed (/status) and Enter runs the wrong command. See VERIFY F5/F6.
         const rank = (item: SlashMenuItem): number => {
           const label = item.label.toLowerCase();
@@ -1588,7 +1658,7 @@ export function useAppLogic(props: AppLogicProps) {
         telegramAgent.setSandboxMode(next);
       }
       setSandboxModeState(next);
-      // sandboxMode settings removed ΓÇö sandbox will be redesigned later
+      // sandboxMode settings removed — sandbox will be redesigned later
     },
     [agent],
   );
@@ -1600,7 +1670,7 @@ export function useAppLogic(props: AppLogicProps) {
         telegramAgent.setSandboxSettings(next);
       }
       setSandboxSettingsState(next);
-      // sandbox settings removed ΓÇö sandbox will be redesigned later
+      // sandbox settings removed — sandbox will be redesigned later
     },
     [agent],
   );
@@ -1621,7 +1691,7 @@ export function useAppLogic(props: AppLogicProps) {
     setWalletFocusIndex(0);
     setWalletSettings(loadPaymentSettings());
     setShowWalletPicker(true);
-    // Wallet UI disabled ΓÇö Stripe billing pending.
+    // Wallet UI disabled — Stripe billing pending.
     setWalletDisplayInfo({ address: null, ethBalance: null, usdcBalance: null });
   }, []);
 
@@ -1639,7 +1709,7 @@ export function useAppLogic(props: AppLogicProps) {
 
   const setAsDefaultProvider = useCallback(
     (provider: ProviderId) => {
-      // Disabled providers cannot be default ΓÇö router would just skip them.
+      // Disabled providers cannot be default — router would just skip them.
       if (disabledProviders.includes(provider)) return;
       const pickModel = (id: ProviderId): string | null => {
         for (const tier of ["balanced", "fast", "premium"] as const) {
@@ -2161,7 +2231,9 @@ export function useAppLogic(props: AppLogicProps) {
     setCouncilInfoCards([]);
     setCouncilMeta({});
     setCouncilRounds([]);
+    setSelectedRound(null);
     setCouncilPlaceholders(new Map());
+    councilTopicRef.current = undefined;
   }, []);
 
   const finishTurnProcessing = useCallback(() => {
@@ -2269,8 +2341,8 @@ export function useAppLogic(props: AppLogicProps) {
 
   const applyLocalAssistantDelta = useCallback(
     (delta: string) => {
-      // First non-empty assistant text after a tool streak ends that streak ΓÇö
-      // mirrors Claude Code's "Done (N tool uses ┬╖ ...)" collapse moment.
+      // First non-empty assistant text after a tool streak ends that streak —
+      // mirrors Claude Code's "Done (N tool uses · ...)" collapse moment.
       if (delta && currentToolGroupIdRef.current) {
         closeCurrentToolGroup();
       }
@@ -2354,7 +2426,7 @@ export function useAppLogic(props: AppLogicProps) {
       const groupId = currentToolGroupIdRef.current;
       if (groupId) {
         // Update the matching item in the active group. If the item is missing
-        // (tool_result arrived before tool_call ΓÇö rare race), append it.
+        // (tool_result arrived before tool_call — rare race), append it.
         setMessages((prev) =>
           prev.map((m) => {
             if (m.type !== "tool_group" || m.toolGroup?.id !== groupId) return m;
@@ -2373,7 +2445,7 @@ export function useAppLogic(props: AppLogicProps) {
           }),
         );
       } else {
-        // Fallback: no active group (e.g. legacy code path) ΓÇö preserve the
+        // Fallback: no active group (e.g. legacy code path) — preserve the
         // pre-grouping behaviour so headless / non-TUI consumers see results.
         setMessages((prev) => [
           ...prev,
@@ -2410,19 +2482,19 @@ export function useAppLogic(props: AppLogicProps) {
 
   // Register the tool-loop cap handler. The orchestrator calls this when
   // stepCount reaches the cap or a repetition pattern fires. Previously this
-  // surfaced an askcard; now the agent is trusted to self-regulate ΓÇö we auto-
+  // surfaced an askcard; now the agent is trusted to self-regulate — we auto-
   // resolve so the session is never interrupted by a blocking user prompt.
-  //   ΓÇó pattern kind ΓåÆ always "continue": the single-shot pattern guard already
+  //   • pattern kind → always "continue": the single-shot pattern guard already
   //     fires only once per session, so auto-continuing lets the agent keep going
   //     (the cap guard is still in place as the ultimate hard stop).
-  //   ΓÇó cap kind ΓåÆ always "stop": hard cap reached, return the best answer.
+  //   • cap kind → always "stop": hard cap reached, return the best answer.
   // All auto-resolutions are logged to the audit trail so sessions can be reviewed.
   useEffect(() => {
     agent.setToolLoopCapHandler(async (info) => {
       const isPattern = info.kind === "pattern";
       const qid = isPattern ? `tool-pattern-loop-${Date.now()}` : `tool-loop-cap-${info.stepNumber}-${Date.now()}`;
       const verdict: "continue" | "stop" = isPattern ? "continue" : "stop";
-      // Audit log ΓÇö keep the trail so sessions are still reviewable.
+      // Audit log — keep the trail so sessions are still reviewable.
       try {
         const patternInfo = isPattern ? (info as { toolName: string; count: number; naturalCeiling?: number }) : null;
         const capInfo = !isPattern ? (info as { cap: number }) : null;
@@ -2737,7 +2809,7 @@ export function useAppLogic(props: AppLogicProps) {
         }).catch(() => {});
       }
     } catch {
-      // Swallow all errors ΓÇö exit must never fail due to EE
+      // Swallow all errors — exit must never fail due to EE
     }
 
     void bridgeRef.current?.stop();
@@ -2769,8 +2841,8 @@ export function useAppLogic(props: AppLogicProps) {
   const handleRootMouseUp = useCallback(
     (event?: { button?: number; type?: string; x?: number; y?: number }) => {
       // Right-click semantics:
-      //   - With selection ΓåÆ copy (same as left).
-      //   - Without selection ΓåÆ paste clipboard text into the input buffer.
+      //   - With selection → copy (same as left).
+      //   - Without selection → paste clipboard text into the input buffer.
       // Left/middle-click keep the prior copy-on-release-with-selection behavior.
       const isRightClick = event?.button === 2;
       if (isRightClick) {
@@ -2919,7 +2991,7 @@ export function useAppLogic(props: AppLogicProps) {
         try {
           await runUpdate(startupConfig.version);
         } catch {
-          // Silent ΓÇö surface in the modal as fallback.
+          // Silent — surface in the modal as fallback.
           setShowUpdateModal(true);
         }
         return;
@@ -3046,18 +3118,28 @@ export function useAppLogic(props: AppLogicProps) {
         key?.stopPropagation();
         return true;
       }
+      // A pending council/preflight askcard owns the Escape key: the card's
+      // own handler cancels it (routed as an empty answer → save-and-exit
+      // semantics). Without this guard the renderer-internal Escape listener
+      // (below) also fired Stage 2 — clearLiveTurnUi() + abort() — wiping the
+      // whole debate transcript the instant the user dismissed the card
+      // (live-verified 2026-07-06). Mirrors the pendingCouncilQuestionRef
+      // guard the typing-jump listener already has.
+      if (pendingCouncilQuestionRef.current || preflightCardStateRef.current) {
+        return false;
+      }
       if (!isProcessingRef.current) return false;
       key?.preventDefault();
       key?.stopPropagation();
 
-      // Stage 1: queue has items ΓåÆ clear queue only, keep process running
+      // Stage 1: queue has items → clear queue only, keep process running
       if (queuedMessagesRef.current.length > 0) {
         queuedMessagesRef.current = [];
         setQueuedMessages([]);
         return true;
       }
 
-      // Stage 2: queue empty ΓåÆ abort current process
+      // Stage 2: queue empty → abort current process
       interruptedRunIdRef.current = activeRunIdRef.current;
       const activeAgent = activeTurnRef.current?.agent ?? agent;
       activeTurnRef.current = null;
@@ -3070,6 +3152,9 @@ export function useAppLogic(props: AppLogicProps) {
 
   useEffect(() => {
     const onInternalKey = (key: KeyEvent) => {
+      // Skip keys another handler already consumed (e.g. the council askcard
+      // Esc-cancel path calls preventDefault before nulling its refs).
+      if ((key as { defaultPrevented?: boolean }).defaultPrevented) return;
       if (isEscapeKey(key)) {
         interruptActiveRun(key);
       }
@@ -3166,7 +3251,7 @@ export function useAppLogic(props: AppLogicProps) {
     setQueuedMessages([]);
   }, [agent, clearLiveTurnUi, replacePasteBlocks]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: getSide, resolveStyle, storeQuote are stable hooks/callbacks that do not need to be in the dep array ΓÇö adding them would cause unnecessary re-creation of processMessage on every render
+  // biome-ignore lint/correctness/useExhaustiveDependencies: getSide, resolveStyle, storeQuote are stable hooks/callbacks that do not need to be in the dep array — adding them would cause unnecessary re-creation of processMessage on every render
   const processMessage = useCallback(
     async (text: string, displayText?: string, images?: Array<{ path: string; mediaType: string; base64: string }>) => {
       if (!text.trim() || isProcessingRef.current) return;
@@ -3212,7 +3297,7 @@ export function useAppLogic(props: AppLogicProps) {
           setActiveEeYield((eeChunk) => {
             if (eeChunk.type === "experience_warning") {
               applyLocalAssistantDelta(
-                `\nΓÜá [Experience] ${eeChunk.experienceWarning?.message ?? eeChunk.content ?? ""}\nWhy: ${eeChunk.experienceWarning?.why ?? ""}\n`,
+                `\n⚠ [Experience] ${eeChunk.experienceWarning?.message ?? eeChunk.content ?? ""}\nWhy: ${eeChunk.experienceWarning?.why ?? ""}\n`,
               );
             } else if (eeChunk.type === "experience_injected") {
               applyLocalAssistantDelta(formatExperienceInjectedBlock(eeChunk.experienceInjected ?? {}));
@@ -3226,7 +3311,7 @@ export function useAppLogic(props: AppLogicProps) {
             switch (chunk.type) {
               case "content":
                 // Reasoning streak ended (model started speaking). Stamp the
-                // elapsed time so the pill can replace the live "ThinkingΓÇª"
+                // elapsed time so the pill can replace the live "Thinking…"
                 // indicator.
                 if (reasoningStartRef.current !== null) {
                   setLastReasoningElapsedMs(Date.now() - reasoningStartRef.current);
@@ -3309,14 +3394,14 @@ export function useAppLogic(props: AppLogicProps) {
                 if (chunk.councilQuestion) {
                   process.stderr.write(`[app.tsx] RECEIVED council_question: ${chunk.councilQuestion.questionId}\n`);
                   const cq = chunk.councilQuestion;
-                  // Render the card via dedicated state ΓÇö do NOT bleed text into
+                  // Render the card via dedicated state — do NOT bleed text into
                   // the assistant stream (that caused the freetext-soup look).
-                  // Sync ref + React state ΓÇö ref is checked by the key handler
+                  // Sync ref + React state — ref is checked by the key handler
                   // so a fast harness Enter after the askcard-open event lands
                   // even before React commits (mirror of councilCardStateRef).
                   setPendingCouncilQuestionSync(cq);
                   setCouncilCardStateSync(initialCardState(cq));
-                  // Task 2.3 ΓÇö emit askcard-open harness event (agent-mode only).
+                  // Task 2.3 — emit askcard-open harness event (agent-mode only).
                   try {
                     agentRuntime?.emitEvent({
                       t: "event",
@@ -3402,6 +3487,7 @@ export function useAppLogic(props: AppLogicProps) {
                         side,
                         color: styleForRole?.color ?? t.councilLeaderBorder,
                         variant: isLeader ? "leader" : "participant",
+                        detail: cs.detail,
                       });
                       return next;
                     });
@@ -3415,7 +3501,7 @@ export function useAppLogic(props: AppLogicProps) {
                     });
                   }
                   setCouncilStatuses((prev) => upsertStatus(prev, cs));
-                  // Task 2.2b ΓÇö emit council-speaker harness event (agent-mode only).
+                  // Task 2.2b — emit council-speaker harness event (agent-mode only).
                   try {
                     agentRuntime?.emitEvent({
                       t: "event",
@@ -3433,7 +3519,7 @@ export function useAppLogic(props: AppLogicProps) {
                 if (chunk.councilPhase) {
                   const cp = chunk.councilPhase;
                   setCouncilPhases((prev) => upsertPhase(prev, cp));
-                  // Task 2.2 ΓÇö emit council-step harness event (agent-mode only).
+                  // Task 2.2 — emit council-step harness event (agent-mode only).
                   try {
                     agentRuntime?.emitEvent({
                       t: "event",
@@ -3465,7 +3551,7 @@ export function useAppLogic(props: AppLogicProps) {
                 break;
               case "experience_warning":
                 applyLocalAssistantDelta(
-                  `\nΓÜá [Experience] ${chunk.experienceWarning?.message ?? chunk.content ?? ""}\nWhy: ${chunk.experienceWarning?.why ?? ""}\n`,
+                  `\n⚠ [Experience] ${chunk.experienceWarning?.message ?? chunk.content ?? ""}\nWhy: ${chunk.experienceWarning?.why ?? ""}\n`,
                 );
                 break;
               case "experience_injected":
@@ -3514,7 +3600,7 @@ export function useAppLogic(props: AppLogicProps) {
                 // Models often write the initial todo list but forget to call todo_write
                 // again with all items marked "completed" at the end of the task.
                 // This synthetic update marks every item completed and starts the 2s
-                // auto-hide timer ΓÇö same UX as if the model had done it explicitly.
+                // auto-hide timer — same UX as if the model had done it explicitly.
                 setTaskListSnapshot((prev) => {
                   if (!prev) return prev;
                   const allDone = prev.items.every((it) => it.status === "completed");
@@ -3607,7 +3693,7 @@ export function useAppLogic(props: AppLogicProps) {
     processMessageRef.current = processMessage;
   }, [processMessage]);
 
-  // Scaffold-checkpoint integration ΓÇö wraps initNewProject() so a single helper
+  // Scaffold-checkpoint integration — wraps initNewProject() so a single helper
   // serves both submit branches (design-preview + bb-template) and the R-key
   // retry on the error step. Persists a checkpoint at submitted/done/error to
   // .muonroi-flow/runs/<runId>/scaffold-checkpoint.json so future restarts can
@@ -3623,7 +3709,7 @@ export function useAppLogic(props: AppLogicProps) {
           ? {
               ...s,
               step: "running",
-              progressMessage: "dotnet new ΓÇö scaffolding templateΓÇª",
+              progressMessage: "dotnet new — scaffolding template…",
               replayInputs,
               checkpointRunId: runId,
               errorRetryable: false,
@@ -3656,7 +3742,7 @@ export function useAppLogic(props: AppLogicProps) {
           onPackageProgress: (info) => {
             const verb = info.status === "start" ? "Adding" : info.status === "ok" ? "Added" : "Failed";
             setInitNewForm((s) =>
-              s ? { ...s, progressMessage: `[${info.index}/${info.total}] ${verb} package ${info.pkgId}ΓÇª` } : s,
+              s ? { ...s, progressMessage: `[${info.index}/${info.total}] ${verb} package ${info.pkgId}…` } : s,
             );
           },
         });
@@ -3684,7 +3770,7 @@ export function useAppLogic(props: AppLogicProps) {
                 step: "done",
                 resultMessage: originalPrompt
                   ? `Created: ${result.projectDir}`
-                  : `Created: ${result.projectDir}\n(project scaffolded ΓÇö start a new prompt to continue)`,
+                  : `Created: ${result.projectDir}\n(project scaffolded — start a new prompt to continue)`,
                 scaffoldedTemplate: templateName ?? undefined,
                 scaffoldedCoverage: result.usedDotnetTemplate ? "full" : "partial",
               }
@@ -3861,7 +3947,7 @@ export function useAppLogic(props: AppLogicProps) {
         return true;
       }
       // Phase 21 / Plan 02 / T3: BB-context feature flag toggle.
-      // `/ee-context on|off|status` ΓÇö surfaces userSettings.eeBBContext.
+      // `/ee-context on|off|status` — surfaces userSettings.eeBBContext.
       if (c === "/ee-context" || c.startsWith("/ee-context ")) {
         const arg = c.slice("/ee-context".length).trim();
         const current = loadUserSettings().eeBBContext !== false; // default ON
@@ -4065,10 +4151,14 @@ export function useAppLogic(props: AppLogicProps) {
                 setMessages((prev) => [...prev, buildAssistantEntry(`/ideal parse error: ${e}`)]);
                 return;
               }
-              // Plan 23-02 ΓÇö capture the original idea for EE-driven BB design.
+              // Plan 23-02 — capture the original idea for EE-driven BB design.
               if (payload.subcommand === "start" && typeof payload.idea === "string") {
                 lastIdealIdeaRef.current = payload.idea;
                 originalIdealPromptRef.current = payload.idea;
+                // A — a brand-new run re-enables verification even if a prior
+                // recovery chose "Skip verify", and clears the last sprint marker.
+                delete process.env.MUONROI_SPRINT_SKIP_VERIFY;
+                lastProductSprintNRef.current = null;
               }
               const heading =
                 payload.subcommand === "start"
@@ -4079,16 +4169,16 @@ export function useAppLogic(props: AppLogicProps) {
                 buildUserEntry(heading),
                 buildAssistantEntry(
                   warningPrefix
-                    ? `${warningPrefix}\nProduct loop startingΓÇª (initializing council + discovery ΓÇö first phase usually appears within 30s)\n`
-                    : "Product loop startingΓÇª (initializing council + discovery ΓÇö first phase usually appears within 30s)\n",
+                    ? `${warningPrefix}\nProduct loop starting… (initializing council + discovery — first phase usually appears within 30s)\n`
+                    : "Product loop starting… (initializing council + discovery — first phase usually appears within 30s)\n",
                 ),
               ]);
-              // Fresh product-loop run ΓÇö clear any persisted phase/status so old
+              // Fresh product-loop run — clear any persisted phase/status so old
               // runs don't bleed into the new one (phaseIds collide across runs).
               setCouncilPhases([]);
               setCouncilStatuses([]);
               councilDoneAtRef.current.clear();
-              // Liveness heartbeat ΓÇö between "Product loop startingΓÇª" and the
+              // Liveness heartbeat — between "Product loop starting…" and the
               // first phase event (CB-1 + discovery + leader call can take
               // 5-60s), the UI used to look frozen with no indication of
               // activity. We append a single-line elapsed counter every second
@@ -4097,7 +4187,7 @@ export function useAppLogic(props: AppLogicProps) {
               // flow takes over.
               const heartbeatStartedAt = Date.now();
               let firstChunkSeen = false;
-              const heartbeatLineMarker = "\nΓÅ│ InitializingΓÇª elapsed ";
+              const heartbeatLineMarker = "\n⏳ Initializing… elapsed ";
               const writeHeartbeat = () => {
                 if (firstChunkSeen) return;
                 const elapsed = Math.floor((Date.now() - heartbeatStartedAt) / 1000);
@@ -4150,7 +4240,7 @@ export function useAppLogic(props: AppLogicProps) {
                     const cq2 = chunk.councilQuestion;
                     setPendingCouncilQuestionSync(cq2);
                     setCouncilCardStateSync(initialCardState(cq2));
-                    // Task 2.2c ΓÇö emit askcard-open in branch 2 (agent-mode only).
+                    // Task 2.2c — emit askcard-open in branch 2 (agent-mode only).
                     try {
                       agentRuntime?.emitEvent({
                         t: "event",
@@ -4220,6 +4310,7 @@ export function useAppLogic(props: AppLogicProps) {
                           side,
                           color: styleForRole?.color ?? t.councilLeaderBorder,
                           variant: isLeader ? "leader" : "participant",
+                          detail: cs.detail,
                         });
                         return next;
                       });
@@ -4233,7 +4324,7 @@ export function useAppLogic(props: AppLogicProps) {
                       });
                     }
                     setCouncilStatuses((prev) => upsertStatus(prev, cs));
-                    // Task 2.2b ΓÇö emit council-speaker in branch 2 (agent-mode only).
+                    // Task 2.2b — emit council-speaker in branch 2 (agent-mode only).
                     try {
                       agentRuntime?.emitEvent({
                         t: "event",
@@ -4249,7 +4340,7 @@ export function useAppLogic(props: AppLogicProps) {
                   if (chunk.type === "council_phase" && chunk.councilPhase) {
                     const cp2 = chunk.councilPhase;
                     setCouncilPhases((prev) => upsertPhase(prev, cp2));
-                    // Task 2.2 ΓÇö emit council-step in branch 2 (agent-mode only).
+                    // Task 2.2 — emit council-step in branch 2 (agent-mode only).
                     try {
                       agentRuntime?.emitEvent({
                         t: "event",
@@ -4266,6 +4357,9 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   if (chunk.type === "product_status_card" && chunk.productStatusCard) {
                     const d = chunk.productStatusCard;
+                    // A — remember the live sprint number so a subsequent break
+                    // can title the recovery card with the sprint that failed.
+                    if (typeof d.sprintN === "number") lastProductSprintNRef.current = d.sprintN;
                     setProductStatus((prev) => {
                       // Accumulate per-sprint history client-side so loop-driver
                       // doesn't have to ship the full history every chunk.
@@ -4293,11 +4387,11 @@ export function useAppLogic(props: AppLogicProps) {
                           ...prev.slice(0, -1),
                           {
                             ...last,
-                            content: `${last.content ?? ""}\nΓÜá [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
+                            content: `${last.content ?? ""}\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
                           },
                         ];
                       }
-                      return [...prev, buildAssistantEntry(`ΓÜá [Experience] ${chunk.experienceWarning!.message}`)];
+                      return [...prev, buildAssistantEntry(`⚠ [Experience] ${chunk.experienceWarning!.message}`)];
                     });
                   }
                   if (chunk.type === "experience_injected" && chunk.experienceInjected) {
@@ -4344,7 +4438,29 @@ export function useAppLogic(props: AppLogicProps) {
                 if (process.env.MUONROI_DEBUG_LEADER === "1") {
                   process.stderr.write(`[ideal-loop-error] ${String(e)}\n`);
                 }
-                setMessages((prev) => [...prev, buildAssistantEntry(`Product loop error: ${e}`)]);
+                // A — a break mid-run (thrown implement/verify error, cap breach,
+                // provider outage) used to surface only an opaque one-line
+                // "Product loop error" with no way forward. Instead render the
+                // actionable recovery card: Resume / Retry / Skip verify / Abort.
+                // Resume/Retry/Abort auto-detect the newest incomplete run (A/B)
+                // so the user never has to know the runId.
+                const errMsg = e instanceof Error ? e.message : String(e);
+                const brokenSprintN =
+                  payload.subcommand === "resume" ? undefined : (lastProductSprintNRef.current ?? undefined);
+                setMessages((prev) => [...prev, buildAssistantEntry(`Product loop error: ${errMsg}`)]);
+                setActiveHaltCard({
+                  type: "halt",
+                  reason: "sprint_failed",
+                  sprintN: brokenSprintN,
+                  runId: typeof payload.runId === "string" ? payload.runId : undefined,
+                  detail: `The run broke: ${errMsg}`,
+                  recovery_options: SPRINT_FAILED_RECOVERY_OPTIONS,
+                });
+                setHaltSelectedIndex(0);
+                logUIInteraction(agent.getSessionId() ?? undefined, {
+                  subtype: "halt_card_open",
+                  data: { reason: "sprint_failed", trigger: "loop_throw", sprintN: brokenSprintN ?? null },
+                });
               } finally {
                 if (!firstChunkSeen) clearHeartbeat();
                 setCouncilPhases([]);
@@ -4363,7 +4479,7 @@ export function useAppLogic(props: AppLogicProps) {
                 buildUserEntry(`/council ${topic}`),
                 buildAssistantEntry("Council convening...\n"),
               ]);
-              // Fresh council run ΓÇö clear any persisted phase timeline so old runs
+              // Fresh council run — clear any persisted phase timeline so old runs
               // don't bleed into the new one (phaseIds collide across runs).
               setCouncilPhases([]);
               setCouncilStatuses([]);
@@ -4373,7 +4489,7 @@ export function useAppLogic(props: AppLogicProps) {
               // `dispatchSlash(...).then(...)` promise: the submit handler returns
               // (and resets isProcessing) before this callback runs, so without
               // re-arming it here `interruptActiveRun` bails on `!isProcessingRef`
-              // and Esc never reaches `agent.abort()` ΓÇö the multi-minute council
+              // and Esc never reaches `agent.abort()` — the multi-minute council
               // was uncancellable. Set the ref (read synchronously by the Esc
               // handler) AND the state (drives the "esc to interrupt" affordance).
               isProcessingRef.current = true;
@@ -4381,11 +4497,11 @@ export function useAppLogic(props: AppLogicProps) {
               try {
                 const gen = agent.runCouncilV2(topic);
                 for await (const chunk of gen) {
-                  // Council emitted a chunk ΓÇö clear the "Waiting for next phase"
+                  // Council emitted a chunk — clear the "Waiting for next phase"
                   // inter-card heartbeat started after the last askcard answer.
                   // The /council chunk loop never cleared it (only /ideal's did),
                   // so on cancel/done it orphaned and kept overwriting the final
-                  // message ΓÇö making a cancelled/finished run look stuck.
+                  // message — making a cancelled/finished run look stuck.
                   // clearInterCardHeartbeat is idempotent.
                   clearInterCardHeartbeat();
                   if (chunk.type === "content") {
@@ -4401,7 +4517,7 @@ export function useAppLogic(props: AppLogicProps) {
                     const cq3 = chunk.councilQuestion;
                     setPendingCouncilQuestionSync(cq3);
                     setCouncilCardStateSync(initialCardState(cq3));
-                    // Task 2.2c ΓÇö emit askcard-open in branch 3 (agent-mode only).
+                    // Task 2.2c — emit askcard-open in branch 3 (agent-mode only).
                     try {
                       agentRuntime?.emitEvent({
                         t: "event",
@@ -4481,6 +4597,7 @@ export function useAppLogic(props: AppLogicProps) {
                           side,
                           color: styleForRole?.color ?? t.councilLeaderBorder,
                           variant: isLeader ? "leader" : "participant",
+                          detail: cs.detail,
                         });
                         return next;
                       });
@@ -4494,7 +4611,7 @@ export function useAppLogic(props: AppLogicProps) {
                       });
                     }
                     setCouncilStatuses((prev) => upsertStatus(prev, cs));
-                    // Task 2.2b ΓÇö emit council-speaker in branch 3 (agent-mode only).
+                    // Task 2.2b — emit council-speaker in branch 3 (agent-mode only).
                     try {
                       agentRuntime?.emitEvent({
                         t: "event",
@@ -4510,7 +4627,7 @@ export function useAppLogic(props: AppLogicProps) {
                   if (chunk.type === "council_phase" && chunk.councilPhase) {
                     const cp3 = chunk.councilPhase;
                     setCouncilPhases((prev) => upsertPhase(prev, cp3));
-                    // Task 2.2 ΓÇö emit council-step in branch 3 (agent-mode only).
+                    // Task 2.2 — emit council-step in branch 3 (agent-mode only).
                     try {
                       agentRuntime?.emitEvent({
                         t: "event",
@@ -4533,11 +4650,11 @@ export function useAppLogic(props: AppLogicProps) {
                           ...prev.slice(0, -1),
                           {
                             ...last,
-                            content: `${last.content ?? ""}\nΓÜá [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
+                            content: `${last.content ?? ""}\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
                           },
                         ];
                       }
-                      return [...prev, buildAssistantEntry(`ΓÜá [Experience] ${chunk.experienceWarning!.message}`)];
+                      return [...prev, buildAssistantEntry(`⚠ [Experience] ${chunk.experienceWarning!.message}`)];
                     });
                   }
                   if (chunk.type === "experience_injected" && chunk.experienceInjected) {
@@ -4558,8 +4675,8 @@ export function useAppLogic(props: AppLogicProps) {
                   if (chunk.type === "done") break;
                   // C (latency UX): re-arm the inter-chunk heartbeat so the long
                   // silent gaps BETWEEN council phases (planDebate, each debate
-                  // pair call, synthesis ΓÇö 30-60s each on a slow provider) show a
-                  // ticking "ΓÅ│ Council workingΓÇª elapsed Ns" instead of a
+                  // pair call, synthesis — 30-60s each on a slow provider) show a
+                  // ticking "⏳ Council working… elapsed Ns" instead of a
                   // frozen-looking UI. The next chunk clears it at the top of the
                   // loop (clearInterCardHeartbeat), and finally clears it on exit.
                   startInterCardHeartbeat("Council working");
@@ -4575,7 +4692,7 @@ export function useAppLogic(props: AppLogicProps) {
                 setCouncilStatuses([]);
                 councilDoneAtRef.current.clear();
                 // Stop any orphaned inter-card heartbeat so a finished/cancelled
-                // run doesn't keep ticking "Waiting for next phaseΓÇª".
+                // run doesn't keep ticking "Waiting for next phase…".
                 clearInterCardHeartbeat();
                 // Release the processing flag re-armed before the run so the
                 // composer returns to idle and a subsequent turn isn't blocked.
@@ -4589,7 +4706,7 @@ export function useAppLogic(props: AppLogicProps) {
           })
           .catch((err: unknown) => {
             // A slash handler that throws must never escape as an unhandled
-            // rejection ΓÇö that path (headless) calls process.exit(1) and (TUI) is
+            // rejection — that path (headless) calls process.exit(1) and (TUI) is
             // now suppressed by setTuiActive, so without this the user is either
             // kicked out or sees nothing (e.g. /export when buildChatEntries' DB
             // read throws). Surface it in-band, log to crash.log, release the
@@ -4659,7 +4776,7 @@ export function useAppLogic(props: AppLogicProps) {
             ...p,
             {
               type: "assistant",
-              content: VISIBLE_SLASH_MENU_ITEMS.map((i) => `/${i.label} ΓÇö ${i.description}`).join("\n"),
+              content: VISIBLE_SLASH_MENU_ITEMS.map((i) => `/${i.label} — ${i.description}`).join("\n"),
               timestamp: new Date(),
             },
           ]);
@@ -4921,10 +5038,10 @@ export function useAppLogic(props: AppLogicProps) {
     showAgentsModal ||
     showAgentsEditor ||
     showUpdateModal ||
-    // Overlay forms ΓÇö when these are up the composer textarea must NOT capture
+    // Overlay forms — when these are up the composer textarea must NOT capture
     // Enter, otherwise PromptBox.onSubmit fires first and swallows the key
     // before the global useKeyboard handler can route it to the overlay's
-    // own Enter handler (halt-card ΓåÆ init-new, init-new step transitions,
+    // own Enter handler (halt-card → init-new, init-new step transitions,
     // point-to-existing path validation).
     activeHaltCard !== null ||
     initNewForm !== null ||
@@ -5001,7 +5118,7 @@ export function useAppLogic(props: AppLogicProps) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: setters from useMcpEditor/useModelPicker hooks are stable useState setters (stable identity across renders)
   const handleKey = useCallback(
     (key: KeyEvent) => {
-      // Ctrl+G ΓÇö mark the most-recent surfaced experience hints as noise.
+      // Ctrl+G — mark the most-recent surfaced experience hints as noise.
       // Sends IRRELEVANT verdict with reason='wrong_task' for every match
       // in the last intercept batch. Default to wrong_task because we can't
       // detect lang/repo mismatch from a keypress; user can use the
@@ -5024,7 +5141,7 @@ export function useAppLogic(props: AppLogicProps) {
           clearLastSurfacedMatches();
           setMessages((prev) => [
             ...prev,
-            buildAssistantEntry(`≡ƒÜ½ [Experience] Marked ${matches.length} hint(s) as noise (wrong_task).`),
+            buildAssistantEntry(`🚫 [Experience] Marked ${matches.length} hint(s) as noise (wrong_task).`),
           ]);
         }
         return;
@@ -5045,6 +5162,22 @@ export function useAppLogic(props: AppLogicProps) {
       if (key.name === "b" && key.ctrl && !key.meta) {
         setRailVisible((v) => !v);
         return;
+      }
+
+      // P2/D — Ctrl+←/→ scope the main transcript to a single debate round (and
+      // back to the global view). Composer-aware: only when the prompt is empty,
+      // so Ctrl+arrows still do word-nav while composing. No-op when no rounds
+      // exist. Mirrors the rail's clickable round list (council-rail-rounds).
+      if (key.ctrl && !key.meta && (key.name === "left" || key.name === "right")) {
+        const rounds = councilRoundsRef.current;
+        if (rounds.length > 0) {
+          const composerEmpty = !(inputRef.current?.plainText ?? "").trim();
+          if (composerEmpty) {
+            const nums = rounds.map((r) => r.round);
+            setSelectedRound((cur) => cycleRoundSelection(nums, cur, key.name === "right" ? 1 : -1));
+            return;
+          }
+        }
       }
 
       // Scroll-lock navigation (MUONROI_SCROLL_LOCK). Composer-aware: only act
@@ -5095,20 +5228,52 @@ export function useAppLogic(props: AppLogicProps) {
             pointToExisting({
               path: rawPath,
               detectVerifyRecipe: async (cwd) => {
-                // Sprint re-entry via detectVerifyRecipe is DEFERRED ΓÇö the orchestrator
-                // instance is not accessible from app.tsx without a shared context seam.
-                // See Task 5.4 report. Returns null so the user sees the error state until
-                // the seam is built in a follow-up task.
-                // TODO: inject via AppStartupConfig or React context.
-                void cwd;
-                return null;
+                // Filesystem recipe detection for the pointed-to project. The
+                // orchestrator's LLM verify-detect runs against the SESSION cwd (via
+                // this.bash.getCwd()), not this arbitrary path, so a pure-fs inference
+                // is the correct detector here (see detectExistingProjectRecipe).
+                // Previously stubbed to `return null` while the seam was deferred,
+                // which left this recovery option permanently inert.
+                try {
+                  return detectExistingProjectRecipe(cwd);
+                } catch (err) {
+                  console.error(`[point-to-existing] recipe detection failed for ${cwd}: ${(err as Error)?.message}`);
+                  return null;
+                }
               },
             })
               .then((result) => {
                 if (result.ok) {
+                  const adoptedDir = result.absolutePath;
                   setPointToExistingForm((s) =>
-                    s ? { ...s, step: "done", resultPath: result.absolutePath, errorMessage: null } : s,
+                    s ? { ...s, step: "done", resultPath: adoptedDir, errorMessage: null } : s,
                   );
+                  // Re-enter the /ideal loop in the adopted project so the halted
+                  // run actually continues (mirrors the init_new resume seam:
+                  // switch the agent cwd, then re-dispatch the original request as a
+                  // fresh turn). Without this the card only reported "done" and the
+                  // run stayed halted. Deferred to setTimeout so the "done" frame
+                  // paints before the continuation turn takes over input.
+                  const originalPrompt = originalIdealPromptRef.current;
+                  if (originalPrompt) {
+                    setTimeout(() => {
+                      try {
+                        agent.setCwd(adoptedDir);
+                      } catch (err) {
+                        console.error(`[point-to-existing] setCwd(${adoptedDir}) failed: ${(err as Error)?.message}`);
+                      }
+                      logUIInteraction(sessionId, {
+                        subtype: "point_to_existing_resume",
+                        data: { projectDir: adoptedDir, originalPrompt },
+                      });
+                      originalIdealPromptRef.current = null;
+                      setPointToExistingForm(null);
+                      void processMessageRef.current(
+                        buildAdoptExistingContinuationPrompt({ originalPrompt, projectDir: adoptedDir }),
+                        "(resuming /ideal in existing project)",
+                      );
+                    }, 500);
+                  }
                 } else if (result.reason === "not_a_dir") {
                   setPointToExistingForm((s) =>
                     s ? { ...s, step: "input", errorMessage: "Path does not exist or is not a directory." } : s,
@@ -5147,7 +5312,7 @@ export function useAppLogic(props: AppLogicProps) {
           }
           return;
         }
-        // done / error ΓÇö any key dismisses. loading ignores keys.
+        // done / error — any key dismisses. loading ignores keys.
         if (pointToExistingForm.step === "done" || pointToExistingForm.step === "error") {
           setPointToExistingForm(null);
           return;
@@ -5200,7 +5365,7 @@ export function useAppLogic(props: AppLogicProps) {
             return;
           }
           if (key.name === "return") {
-            // Plan 23-02 ΓÇö when /ideal intent is captured, route through EE design.
+            // Plan 23-02 — when /ideal intent is captured, route through EE design.
             if (initNewForm.intent.trim().length > 0) {
               setInitNewForm((s) => (s ? { ...s, step: "designing", designError: null } : s));
               (async () => {
@@ -5229,13 +5394,13 @@ export function useAppLogic(props: AppLogicProps) {
               })();
               return;
             }
-            // No intent ΓåÆ manual template picker (task 6.2a, back-compat).
+            // No intent → manual template picker (task 6.2a, back-compat).
             setInitNewForm((s) => (s ? { ...s, step: "bb-template" } : s));
             return;
           }
           return;
         }
-        // Plan 23-02 ΓÇö EE designing step. Esc skips to manual menu; ignore other keys.
+        // Plan 23-02 — EE designing step. Esc skips to manual menu; ignore other keys.
         if (initNewForm.step === "designing") {
           if (isEscapeKey(key)) {
             setInitNewForm((s) => (s ? { ...s, step: "bb-template" } : s));
@@ -5243,7 +5408,7 @@ export function useAppLogic(props: AppLogicProps) {
           }
           return;
         }
-        // Plan 23-02 ΓÇö EE design-preview step: navigate / toggle / confirm.
+        // Plan 23-02 — EE design-preview step: navigate / toggle / confirm.
         if (initNewForm.step === "design-preview") {
           if (isEscapeKey(key)) {
             setInitNewForm((s) => (s ? { ...s, step: "bb-template" } : s));
@@ -5331,7 +5496,7 @@ export function useAppLogic(props: AppLogicProps) {
           }
           return;
         }
-        // Task 6.2a ΓÇö BB template picker step
+        // Task 6.2a — BB template picker step
         if (initNewForm.step === "bb-template") {
           if (isEscapeKey(key)) {
             setInitNewForm((s) => (s ? { ...s, step: "fe-stack" } : s));
@@ -5357,7 +5522,7 @@ export function useAppLogic(props: AppLogicProps) {
           }
           return;
         }
-        // Error step ΓÇö R retries with stored inputs (no debate re-run); any
+        // Error step — R retries with stored inputs (no debate re-run); any
         // other key dismisses. running ignores keys; done dismisses too.
         if (initNewForm.step === "error") {
           if (
@@ -5402,7 +5567,7 @@ export function useAppLogic(props: AppLogicProps) {
             if (chosen.id === "init_new") {
               // Abort any in-flight LLM stream so its text reply doesn't bleed
               // into the TUI while the init-new form runs (observed session
-              // 6ff8dabe1aa7: hot-path "Bß║ín muß╗æn tß║ío..." reply landed 20s
+              // 6ff8dabe1aa7: hot-path "Bạn muốn tạo..." reply landed 20s
               // after halt-card was answered, mid-scaffold).
               interruptActiveRun();
               setInitNewForm(initialInitNewFormState(lastIdealIdeaRef.current));
@@ -5432,6 +5597,30 @@ export function useAppLogic(props: AppLogicProps) {
               setCouncilProgress({ status: "running", specPath: "", hasContent: false });
               return;
             }
+            // A — sprint-break recovery. Resume/Retry/Abort re-dispatch through
+            // the existing `/ideal` slash pipeline; the runId is optional because
+            // runResume/runAbort auto-detect the newest incomplete run (A/B).
+            if (
+              chosen.id === "resume" ||
+              chosen.id === "retry" ||
+              chosen.id === "skip_verify" ||
+              chosen.id === "abort"
+            ) {
+              interruptActiveRun();
+              const rid = activeHaltCard.runId ? ` ${activeHaltCard.runId}` : "";
+              setActiveHaltCard(null);
+              setHaltSelectedIndex(0);
+              if (chosen.id === "abort") {
+                handleCommand(`/ideal abort${rid}`);
+              } else {
+                if (chosen.id === "skip_verify") {
+                  // Consumed by sprint-runner Step 5; reset on the next fresh start.
+                  process.env.MUONROI_SPRINT_SKIP_VERIFY = "1";
+                }
+                handleCommand(`/ideal resume${rid}`);
+              }
+              return;
+            }
             console.log("halt recovery: unknown option id:", chosen.id);
           }
           setActiveHaltCard(null);
@@ -5455,12 +5644,21 @@ export function useAppLogic(props: AppLogicProps) {
       if (pendingQuestion && councilCardStateRef.current) {
         const cardKey = mapCouncilCardKey(key);
         if (cardKey) {
+          // Mark the key consumed BEFORE mutating card state: the renderer's
+          // internal Escape listener (onInternalKey → interruptActiveRun) runs
+          // AFTER this handler in the same dispatch, and by then the cancel
+          // branch below has already nulled pendingCouncilQuestionRef — so the
+          // ref guard alone can't tell "card just handled this Esc" from "no
+          // card at all", and Stage 2 wiped the whole debate transcript
+          // (live-verified stack trace 2026-07-06).
+          key.preventDefault?.();
+          key.stopPropagation?.();
           const result = reduceCardKey(pendingQuestion, councilCardStateRef.current, cardKey);
           setCouncilCardStateSync(result.state);
           if (result.emit?.type === "answer") {
             const qid = pendingQuestion.questionId;
             const ans = result.emit.answer;
-            // Tool-loop-cap askcards bypass the council answer machinery ΓÇö the
+            // Tool-loop-cap askcards bypass the council answer machinery — the
             // verdict resolves a stored Promise that's awaited inside the
             // streamText stopWhen predicate. Drain the resolver, emit the
             // harness event, and return so the council path doesn't see this.
@@ -5524,7 +5722,7 @@ export function useAppLogic(props: AppLogicProps) {
             // "chat" the user typed a free reply and there is no option to
             // reference. The label gives forensics tooling the recommendation
             // value next to the bare answerText (e.g. "accept" vs. the actual
-            // recommendation string "Recommended: 'saas' ΓÇö ΓÇª").
+            // recommendation string "Recommended: 'saas' — …").
             const cardOptions = pendingQuestion.options ?? [];
             const cardIdx = councilCardStateRef.current?.idx ?? -1;
             const selectedOptionLabel =
@@ -5532,20 +5730,27 @@ export function useAppLogic(props: AppLogicProps) {
             setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
             agent.respondToCouncilQuestion(qid, ans.text, pendingQuestion.question);
-            setMessages((prev) => [
-              ...prev,
-              buildUserEntry(
-                formatAnswerForLog(ans, {
-                  selectedOptionLabel,
-                  questionId: pendingQuestion.question?.match(/^Question:\s*(\w+)/)?.[1],
-                }),
-              ),
-            ]);
-            // E2 ΓÇö start a heartbeat while we wait for the NEXT chunk from
+            // Suppress the transcript echo for no-op "Skip — leave as-is" choices:
+            // they contribute nothing, and a post-debate refine over N sections
+            // produces N blank "· Skip" user rows (transcript garbage — see the
+            // 2217600e1f27 export). Every real answer / non-skip choice still echoes.
+            const isNoopSkip = ans.kind === "choice" && !ans.text.trim() && /^skip\b/i.test(selectedOptionLabel ?? "");
+            if (!isNoopSkip) {
+              setMessages((prev) => [
+                ...prev,
+                buildUserEntry(
+                  formatAnswerForLog(ans, {
+                    selectedOptionLabel,
+                    questionId: pendingQuestion.question?.match(/^Question:\s*(\w+)/)?.[1],
+                  }),
+                ),
+              ]);
+            }
+            // E2 — start a heartbeat while we wait for the NEXT chunk from
             // /ideal (next AskCard, council phase tick, or sprint stage event).
             // chunk loop clears it on first arrival.
             startInterCardHeartbeat("Waiting for next phase");
-            // Task 2.4 ΓÇö emit askcard-answered harness event (agent-mode only).
+            // Task 2.4 — emit askcard-answered harness event (agent-mode only).
             try {
               agentRuntime?.emitEvent({
                 t: "event",
@@ -5568,7 +5773,7 @@ export function useAppLogic(props: AppLogicProps) {
             });
           } else if (result.emit?.type === "cancel") {
             const qid = pendingQuestion.questionId;
-            // Tool-loop-cap cancel ΓåÆ treat as "stop" (user wants out, not loop).
+            // Tool-loop-cap cancel → treat as "stop" (user wants out, not loop).
             if (pendingQuestion.phase === "tool-loop-cap") {
               const resolver = toolLoopCapResolversRef.current.get(qid);
               toolLoopCapResolversRef.current.delete(qid);
@@ -5583,7 +5788,7 @@ export function useAppLogic(props: AppLogicProps) {
               }
               return;
             }
-            // Safety-override cancel ΓåÆ treat as "block" (user wants out).
+            // Safety-override cancel → treat as "block" (user wants out).
             if (pendingQuestion.phase === "safety-override") {
               const resolver = safetyOverrideResolversRef.current.get(qid);
               safetyOverrideResolversRef.current.delete(qid);
@@ -5602,7 +5807,7 @@ export function useAppLogic(props: AppLogicProps) {
             setCouncilCardStateSync(null);
             clearInterCardHeartbeat();
             agent.respondToCouncilQuestion(qid, "", pendingQuestion.question);
-            // Task 2.4 ΓÇö emit askcard-cancel harness event (agent-mode only).
+            // Task 2.4 — emit askcard-cancel harness event (agent-mode only).
             try {
               agentRuntime?.emitEvent({
                 t: "event",
@@ -5682,7 +5887,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
 
-        // Tab / left / right ΓÇö switch between question tabs
+        // Tab / left / right — switch between question tabs
         if (key.name === "tab") {
           const dir = key.shift ? -1 : 1;
           setPqs((s) => ({ ...s, tab: (s.tab + dir + planTabCount) % planTabCount, selected: 0 }));
@@ -5714,7 +5919,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
 
-        // Up/down ΓÇö navigate options
+        // Up/down — navigate options
         const options = q.options ?? [];
         const showCustom = true;
         const totalItems = options.length + 1;
@@ -5737,7 +5942,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
 
-        // Enter ΓÇö select current option
+        // Enter — select current option
         if (key.name === "return") {
           handlePlanSelect(q, pqs.selected, options, showCustom);
           return;
@@ -5753,7 +5958,7 @@ export function useAppLogic(props: AppLogicProps) {
         if (key.name === "return") {
           setIsUpdating(true);
           setShowUpdateModal(false);
-          // Echo into the message log too ΓÇö same reason as the /update command:
+          // Echo into the message log too — same reason as the /update command:
           // the updateOutput banner only renders on the home/splash screen.
           setMessages((prev) => [...prev, buildAssistantEntry("🔄 Checking for updates...")]);
           runUpdate(startupConfig.version).then((result) => {
@@ -6033,7 +6238,7 @@ export function useAppLogic(props: AppLogicProps) {
         if (key.name === "return") {
           // Safety: when the user has already typed args after the slash
           // command (e.g. "/ideal --force-council <topic>"), pressing Enter
-          // must dispatch the composer text ΓÇö NOT trigger the currently
+          // must dispatch the composer text — NOT trigger the currently
           // selected menu item. Previously this defaulted to "/exit" and
           // killed the CLI on power-user enter-after-args flows.
           // Detect args: any non-leading whitespace in the composer text
@@ -6043,7 +6248,7 @@ export function useAppLogic(props: AppLogicProps) {
           if (hasArgsAfterSlashCommand) {
             setShowSlashMenuSync(false);
             setSlashSearchQuery("");
-            // Do NOT call key.preventDefault() ΓÇö textarea must receive Enter
+            // Do NOT call key.preventDefault() — textarea must receive Enter
             // so the typed command (with args) is submitted normally.
             return;
           }
@@ -6054,12 +6259,12 @@ export function useAppLogic(props: AppLogicProps) {
             setSlashSearchQuery("");
             key.preventDefault?.();
           } else {
-            // No items match the current filter ΓÇö close the menu and let
+            // No items match the current filter — close the menu and let
             // Enter fall through to the textarea's submit handler so the
             // typed command (e.g. "/council <topic>") is submitted as-is.
             setShowSlashMenuSync(false);
             setSlashSearchQuery("");
-            // Do NOT call key.preventDefault() ΓÇö textarea must receive Enter.
+            // Do NOT call key.preventDefault() — textarea must receive Enter.
           }
           return;
         }
@@ -6122,14 +6327,14 @@ export function useAppLogic(props: AppLogicProps) {
           setSlashSearchQuery(predicted);
           setSlashMenuIndex(0);
           // If the query is already empty, the next backspace will eat the
-          // leading "/" ΓÇö close the menu so the user is back to free typing.
+          // leading "/" — close the menu so the user is back to free typing.
           if (slashSearchQuery.length === 0) {
             setShowSlashMenuSync(false);
           }
           return;
         }
         if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
-          // Textarea is focused ΓÇö let it insert the character natively. We
+          // Textarea is focused — let it insert the character natively. We
           // only sync the search query so the menu filter stays accurate.
           // No preventDefault, no insertText: that combination caused the
           // "/iideall" duplication AND the focus-loss feeling because the
@@ -6161,9 +6366,9 @@ export function useAppLogic(props: AppLogicProps) {
           }
           // Close the modal first so the toast renders before the spawn.
           setShowSessionPicker(false);
-          pushToast("info", `Resuming session ${picked.id}ΓÇª restarting CLI`);
+          pushToast("info", `Resuming session ${picked.id}… restarting CLI`);
           // Defer to the next tick so OpenTUI flushes the toast frame, then hand
-          // off to onRelaunch ΓÇö which tears down the renderer + restores the
+          // off to onRelaunch — which tears down the renderer + restores the
           // terminal (raw mode / mouse tracking / alt-screen) and supervises the
           // child. Doing the spawn here directly (the old relaunchWithSession
           // call) skipped that teardown and dropped the user to a corrupted
@@ -6198,7 +6403,7 @@ export function useAppLogic(props: AppLogicProps) {
               return;
             }
             if (key.name === "backspace") {
-              // Functional updater ΓÇö burst-safe (see API-key prompt above).
+              // Functional updater — burst-safe (see API-key prompt above).
               setBwSync((bw) =>
                 bw && bw.phase === "password" ? { ...bw, value: bw.value.slice(0, -1), error: null } : bw,
               );
@@ -6501,7 +6706,7 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
 
-      // Γåæ arrow while processing with queue ΓåÆ pop last queued message into input for editing
+      // ↑ arrow while processing with queue → pop last queued message into input for editing
       if (key.name === "up" && isProcessingRef.current && queuedMessagesRef.current.length > 0) {
         const popped = queuedMessagesRef.current.pop()!;
         setQueuedMessages(queuedMessagesRef.current.map((msg) => msg.displayText));
@@ -6562,7 +6767,7 @@ export function useAppLogic(props: AppLogicProps) {
         key.stopPropagation();
         return;
       }
-      // ΓîÿC: Kitty / iTerm report Command as `super`; some setups use `meta` instead.
+      // ⌘C: Kitty / iTerm report Command as `super`; some setups use `meta` instead.
       if (key.name === "c" && !key.ctrl && (key.meta || key.super)) {
         if (copyTuiSelectionToHost()) {
           key.preventDefault();
@@ -6727,7 +6932,7 @@ export function useAppLogic(props: AppLogicProps) {
       providerChipIndex,
       configuredProviders,
       toggleProviderEnabled,
-      // Model-picker credential sub-modals ΓÇö MUST stay in deps. handleKey reads
+      // Model-picker credential sub-modals — MUST stay in deps. handleKey reads
       // these directly; omitting them froze the closure on a stale `null`, which
       // is why typing/pasting into the per-provider key prompt did nothing.
       apiKeyPrompt,
@@ -6781,6 +6986,7 @@ export function useAppLogic(props: AppLogicProps) {
       slashSearchQuery.slice,
       activeHaltCard,
       haltSelectedIndex,
+      handleCommand,
       initNewForm,
       toggleModelDisabled,
       pointToExistingForm,
@@ -6820,7 +7026,7 @@ export function useAppLogic(props: AppLogicProps) {
       }
       if (bwSync && bwSync.phase === "password") {
         event.preventDefault();
-        // Master passwords may contain spaces ΓÇö keep them; only drop guards,
+        // Master passwords may contain spaces — keep them; only drop guards,
         // control bytes and line breaks (which a trailing paste newline adds).
         const pasted = stripControlBytes(decodePasteBytes(event.bytes)).replace(/[\r\n]+/g, "");
         if (pasted) {
@@ -6863,7 +7069,7 @@ export function useAppLogic(props: AppLogicProps) {
       const hist = inputHistoryRef.current;
       const last = hist[hist.length - 1];
       if (raw !== last) hist.push(raw);
-      // Keep history bounded ΓÇö 200 most recent entries is plenty for one session.
+      // Keep history bounded — 200 most recent entries is plenty for one session.
       if (hist.length > 200) hist.splice(0, hist.length - 200);
     }
     historyIndexRef.current = -1;
@@ -6925,7 +7131,7 @@ export function useAppLogic(props: AppLogicProps) {
         };
         images.push({ path: resolved, mediaType: mimeMap[ext] ?? "image/png", base64: buf.toString("base64") });
       } catch {
-        // File unreadable ΓÇö keep path as text fallback
+        // File unreadable — keep path as text fallback
       }
     }
 
@@ -6940,7 +7146,7 @@ export function useAppLogic(props: AppLogicProps) {
       openApiKeyModal();
       return;
     }
-    // Council question response ΓÇö route answer back to council generator.
+    // Council question response — route answer back to council generator.
     // The card now owns keyboard input; this branch survives only for the
     // legacy code path where the user typed an answer in the main prompt
     // before the card was wired up.
@@ -6966,7 +7172,7 @@ export function useAppLogic(props: AppLogicProps) {
     }
     // Sync the displayed model (from status bar / router upgrade) to the agent
     // so the next turn starts from the correct base model. This covers both
-    // routing upgrades (e.g. flashΓåÆpro) and downgrades (e.g. proΓåÆflash).
+    // routing upgrades (e.g. flash→pro) and downgrades (e.g. pro→flash).
     const displayedModel = modelRef.current;
     if (displayedModel && displayedModel !== agent.getModel()) {
       agent.setModel(displayedModel);
@@ -6995,8 +7201,8 @@ export function useAppLogic(props: AppLogicProps) {
   // point-to-existing-form + council-progress) whenever ANY of these overlays
   // is active. Previously only message-stream signals flipped this, which meant
   // /ideal halts (and their --inject-halt E2E counterpart) registered the halt
-  // state but the home-screen branch never rendered the card ΓåÆ semantic tree
-  // missing ΓåÆ harness wait_for timed out across multiple specs.
+  // state but the home-screen branch never rendered the card → semantic tree
+  // missing → harness wait_for timed out across multiple specs.
   const hasMessages =
     messages.length > 0 ||
     streamContent !== "" ||
@@ -7039,6 +7245,8 @@ export function useAppLogic(props: AppLogicProps) {
     councilInfoCards,
     councilMeta,
     councilRounds,
+    selectedRound,
+    setSelectedRound,
     councilMessages,
     councilTranscriptExpanded,
     councilPhases,

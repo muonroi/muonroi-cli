@@ -234,8 +234,10 @@ export class BatchTurnRunner {
           const batchRequestId = `turn-${Date.now()}-${stepNumber}`;
           // Phase O1 — capture providerOptions SHAPE for batch path too.
           deps.setLastProviderOptionsShape(extractProviderOptionsShape(runtime.providerOptions));
-            const _messagesForCall = deps.messages.map((m) => (m === args.userModelMessage ? args.userEnrichedMessage : m));
-            await addBatchRequests({
+          const _messagesForCall = deps.messages.map((m) =>
+            m === args.userModelMessage ? args.userEnrichedMessage : m,
+          );
+          await addBatchRequests({
             ...deps.getBatchClientOptions(signal),
             batchId: batch.batch_id,
             batchRequests: [
@@ -246,7 +248,7 @@ export class BatchTurnRunner {
                     modelId: runtime.modelId,
                     system,
                     messages: [..._messagesForCall, ...turnMessages],
-                    temperature: 0.7,
+                    temperature: runtime.modelInfo?.fixedTemperature ?? 0.7,
                     maxOutputTokens: !batchCaps.acceptsParam("maxOutputTokens", runtime.modelInfo)
                       ? undefined
                       : deps.maxTokens,

@@ -255,10 +255,15 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
       ...p,
       collection: p.collection ?? "experience-behavioral",
     }));
-    // Suppress already-fedback entries so they don't re-inject as noise.
+    // Suppress (a) already-fed-back entries AND (b) entries already surfaced
+    // earlier this session (still pending) — re-injecting the full body of a
+    // hint the agent already saw is pure repetition (the "hint lặp"); the hit
+    // stays in the feedback nudge (shown once via _surfacedPendingIds) so the
+    // rating path is preserved without duplicating content every turn.
     if (isRecallLedgerEnabled()) {
-      principleItems = principleItems.filter((p) => !sessionRecallLedger.wasCleared(String(p.id)));
-      behavioralItems = behavioralItems.filter((p) => !sessionRecallLedger.wasCleared(String(p.id)));
+      const alreadyShown = (id: string) => sessionRecallLedger.wasCleared(id) || sessionRecallLedger.isPending(id);
+      principleItems = principleItems.filter((p) => !alreadyShown(String(p.id)));
+      behavioralItems = behavioralItems.filter((p) => !alreadyShown(String(p.id)));
     }
     // Render the [id:..] handle inline (mirrors formatPrincipleRules/Hints) so the
     // [id collection] reminder below refers to handles the agent can actually see.
@@ -454,15 +459,17 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
         })
       : result.checkpointPoints || [];
 
-  // Feedback-cleared suppression: skip points that were already rated via ee_feedback in an earlier turn.
-  // This prevents already-judged entries from being re-injected as noise.
+  // Suppression: skip rateable hints that were already (a) rated via ee_feedback
+  // OR (b) surfaced earlier this session (still pending). Re-injecting the full
+  // body of a hint the agent already saw is the "hint lặp" repetition; the entry
+  // stays in the feedback nudge (shown once) so rating is still prompted.
+  // Checkpoints are GSD status context (not rateable) — only cleared-suppressed,
+  // they may legitimately re-surface each turn.
   const ledgerEnabled = isRecallLedgerEnabled();
-  const clearedFilteredPrinciples = deduplicatedPrinciples.filter(
-    (p) => !(ledgerEnabled && sessionRecallLedger.wasCleared(String(p.id))),
-  );
-  const clearedFilteredBehavioral = deduplicatedBehavioral.filter(
-    (p) => !(ledgerEnabled && sessionRecallLedger.wasCleared(String(p.id))),
-  );
+  const alreadyShown = (id: string) =>
+    ledgerEnabled && (sessionRecallLedger.wasCleared(id) || sessionRecallLedger.isPending(id));
+  const clearedFilteredPrinciples = deduplicatedPrinciples.filter((p) => !alreadyShown(String(p.id)));
+  const clearedFilteredBehavioral = deduplicatedBehavioral.filter((p) => !alreadyShown(String(p.id)));
   const clearedFilteredCheckpoints = deduplicatedCheckpoints.filter(
     (p) => !(ledgerEnabled && sessionRecallLedger.wasCleared(String(p.id))),
   );

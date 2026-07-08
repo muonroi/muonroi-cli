@@ -14,9 +14,28 @@ const DECISION_LABEL: Record<NonNullable<CouncilRoundRecord["leaderDecision"]>, 
 
 export interface CouncilRoundGroupProps {
   record: CouncilRoundRecord;
-  /** Live turn nodes for this round — rendered only while the round is running. */
+  /**
+   * Turn nodes for this round. Rendered while the round is running (live stream)
+   * OR when the round is selected in the rail (inspect a finished round's debate).
+   */
   children?: ReactNode;
+  /** True when this round is the one selected in the rail — highlight + expand. */
+  selected?: boolean;
   theme: Theme;
+}
+
+/** Color the leader's decision by whether the round landed well. */
+function decisionColor(decision: NonNullable<CouncilRoundRecord["leaderDecision"]>, theme: Theme): string {
+  switch (decision) {
+    case "stop":
+      return theme.diffAddedFg; // sufficient — a clean landing
+    case "aborted":
+    case "circuit-break":
+    case "eval-unavailable":
+      return theme.diffRemovedFg; // ended abnormally
+    default:
+      return theme.accent; // continue / extend — still in progress
+  }
 }
 
 /**
@@ -24,14 +43,24 @@ export interface CouncilRoundGroupProps {
  * opens and streams its turns live; a done round collapses to an expanded-inline
  * summary — input (topic + members), outcome (criteria met/total), and the
  * leader's decision — so a finished round always shows what it achieved instead
- * of a bare "done". No click-to-open accordion (the feed has no selection
- * cursor); the summary is always visible.
+ * of a bare "done". When `selected` (P2/D — the round chosen in the rail), a
+ * finished round also expands its debate turns and highlights.
  */
-export function CouncilRoundGroup({ record, children, theme }: CouncilRoundGroupProps) {
+export function CouncilRoundGroup({ record, children, selected = false, theme }: CouncilRoundGroupProps) {
   const running = record.state === "running";
   const headParts = [`Round ${record.round}`];
   if (record.topic) headParts.push(record.topic);
   if (record.emergent) headParts.push("(emergent)");
+
+  // Outcome verdict: how many acceptance criteria the round met. Colored + marked
+  // so a scan of the transcript shows at a glance which rounds landed cleanly.
+  const total = record.criteriaTotal ?? -1;
+  const met = record.criteriaMet ?? 0;
+  const hasCriteria = total > 0;
+  const allMet = hasCriteria && met >= total;
+  const noneMet = hasCriteria && met === 0;
+  const outcomeColor = allMet ? theme.diffAddedFg : noneMet ? theme.diffRemovedFg : theme.mdItalic;
+  const outcomeMark = allMet ? "✓" : noneMet ? "✗" : "◐";
 
   return (
     <Semantic
@@ -41,20 +70,22 @@ export function CouncilRoundGroup({ record, children, theme }: CouncilRoundGroup
       props={{
         state: record.state,
         emergent: record.emergent,
+        selected,
         criteriaMet: record.criteriaMet ?? -1,
         criteriaTotal: record.criteriaTotal ?? -1,
         decision: record.leaderDecision ?? "",
+        directive: record.directive ?? "",
       }}
     >
       <box
         flexDirection="column"
         marginBottom={1}
         border={["left"]}
-        borderColor={running ? theme.accent : theme.councilLeaderBorder}
+        borderColor={running || selected ? theme.accent : theme.councilLeaderBorder}
         paddingLeft={2}
       >
-        <text fg={running ? theme.accent : theme.textMuted} attributes={1}>
-          {`${running ? "> " : "✓ "}${headParts.join(" · ")}`}
+        <text fg={running || selected ? theme.accent : theme.textMuted} attributes={1}>
+          {`${running ? "> " : selected ? "› " : "✓ "}${headParts.join(" · ")}`}
         </text>
         {/* Members / input line. */}
         {record.participants.length > 0 && (
@@ -66,15 +97,33 @@ export function CouncilRoundGroup({ record, children, theme }: CouncilRoundGroup
             {children}
           </box>
         ) : (
-          // Done round: outcome + leader decision summary.
+          // Done round: expanded debate turns (when selected in the rail) followed
+          // by the outcome verdict + leader decision summary.
           <box flexDirection="column">
-            {typeof record.criteriaTotal === "number" && record.criteriaTotal >= 0 && (
-              <text fg={theme.textMuted}>
-                {`Outcome: ${record.criteriaMet ?? 0}/${record.criteriaTotal} criteria met`}
+            {children ? (
+              <box flexDirection="column" marginTop={1} marginBottom={1}>
+                {children}
+              </box>
+            ) : null}
+            {/* B5 — the leader's pre-round directive, persisted on the record so
+                the conductor's opening steer survives into this collapsed summary
+                (not just the ephemeral live bubble). Accent + ▶ so the leader
+                visibly opens the round. */}
+            {record.directive &&
+              record.directive.split("\n").map((line, i) => (
+                <text key={`dir-${i}`} fg={theme.accent} attributes={i === 0 ? 1 : 0}>
+                  {i === 0 ? `▶ ${line}` : `  ${line}`}
+                </text>
+              ))}
+            {hasCriteria && (
+              <text fg={outcomeColor} attributes={1}>
+                {`${outcomeMark} Outcome: ${met}/${total} criteria met`}
               </text>
             )}
             {record.leaderDecision && (
-              <text fg={theme.textMuted}>{`Leader: ${DECISION_LABEL[record.leaderDecision]}`}</text>
+              <text fg={decisionColor(record.leaderDecision, theme)} attributes={1}>
+                {`Decision: ${DECISION_LABEL[record.leaderDecision]}`}
+              </text>
             )}
             {record.leaderReason && <text fg={theme.textMuted}>{record.leaderReason}</text>}
             {record.nextRoundFocus && <text fg={theme.textMuted}>{`Next focus: ${record.nextRoundFocus}`}</text>}

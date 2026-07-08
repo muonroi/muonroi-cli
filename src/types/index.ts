@@ -306,6 +306,8 @@ export interface CouncilStatusData {
   detail?: string;
   role?: string;
   elapsedMs?: number;
+  /** Client-side first-seen stamp (upsertStatus), back-dated by the emitted elapsedMs. Drives live-ticking elapsed. */
+  startedAt?: number;
   tokensIn?: number;
   tokensOut?: number;
   errorMessage?: string;
@@ -431,6 +433,14 @@ export interface CouncilRoundRecord {
   leaderDecision?: "continue" | "stop" | "extend" | "aborted" | "circuit-break" | "eval-unavailable";
   /** Topic the leader set for the NEXT round (drives the overview). */
   nextRoundFocus?: string;
+  /**
+   * B5 — the leader's pre-round DIRECTIVE for this round (goal + criteria still
+   * unmet going in). Captured on the round record so it survives into the
+   * post-debate conclusion card, not only the ephemeral live directive bubble —
+   * otherwise a user who looks away during the debate never sees the leader
+   * conduct the round. Present only when the conductor is on + criteria pinned.
+   */
+  directive?: string;
 }
 
 /**
@@ -455,6 +465,19 @@ export interface CouncilMetaPatch {
   researchMode?: boolean;
   /** Cost-aware budgeting active. */
   costAware?: boolean;
+  /**
+   * The pinned outcome criteria the debate is graded against (the user-owned
+   * `ClarifiedSpec.successCriteria`). Emitted once after clarify so the rail can
+   * show the OUTCOME the debate is chasing — fixes "criteria met là gì tôi không
+   * biết". Stable for the whole debate.
+   */
+  successCriteria?: string[];
+  /**
+   * Per-criterion met status, index-aligned to `successCriteria`. Upsert-merged
+   * and refreshed after each round's leader evaluation so the rail shows live
+   * ✓/○ against the pinned criteria. Length matches `successCriteria`.
+   */
+  criteriaMet?: boolean[];
 }
 
 export interface CouncilMessage {
@@ -462,6 +485,10 @@ export interface CouncilMessage {
   speaker: { role: string; model: string };
   partner?: { role: string }; // debate turns only
   round?: number; // debate / leader only
+  // Leader-only (B5 conductor). "directive" = pre-round steering the leader
+  // issues BEFORE the exchanges (round goal + which criteria are still unmet);
+  // "verdict" = post-round grading AFTER the eval. Absent → a plain leader eval.
+  phase?: "directive" | "verdict";
   text: string; // raw markdown body
   toolCalls?: { name: string }[];
   attempts?: number; // >1 → "recovered on retry" badge

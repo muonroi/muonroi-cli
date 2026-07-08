@@ -27,12 +27,17 @@ const REASON_LABELS: Record<HaltChunk["reason"], string> = {
   no_recipe: "No verification recipe found",
   zero_coverage: "No test coverage found",
   budget_exhausted: "Token budget used up",
+  sprint_failed: "Sprint failed",
 };
 
 export function HaltRecoveryCard({ halt, selectedIndex, terminalCols, theme }: HaltRecoveryCardProps) {
   const fallback = terminalCols < FALLBACK_THRESHOLD;
   const width = fallback ? terminalCols : Math.min(terminalCols - 2, MAX_CARD_COLS);
-  const title = `Halted — ${REASON_LABELS[halt.reason] ?? halt.reason}`;
+  // A — a sprint break titles with the failing sprint number ("Sprint 3 failed").
+  const title =
+    halt.reason === "sprint_failed" && typeof halt.sprintN === "number"
+      ? `Halted — Sprint ${halt.sprintN} failed`
+      : `Halted — ${REASON_LABELS[halt.reason] ?? halt.reason}`;
 
   return (
     <Semantic id="ideal-halt-card" role="dialog" name="Recovery options" isModal>

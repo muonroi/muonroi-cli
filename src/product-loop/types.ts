@@ -399,8 +399,12 @@ export interface PhaseDigestEntry {
  * The UI (Task 5.2) wires each id to a concrete handler.
  */
 export interface RecoveryOption {
-  /** Stable key. Used by the UI to wire actions. */
-  id: "init_new" | "point_to_existing" | "continue_as_council";
+  /**
+   * Stable key. Used by the UI to wire actions.
+   *   - CB-3 halt (no recipe): init_new | point_to_existing | continue_as_council
+   *   - Sprint break (A): resume | retry | skip_verify | abort
+   */
+  id: "init_new" | "point_to_existing" | "continue_as_council" | "resume" | "retry" | "skip_verify" | "abort";
   /** Label shown in the recovery card. */
   label: string;
   /** One-line user-facing description of what choosing this does. */
@@ -414,10 +418,22 @@ export interface RecoveryOption {
  */
 export interface HaltChunk {
   type: "halt";
-  /** CB-3 emits "no_recipe" / "zero_coverage"; product-loop emits "budget_exhausted" when --budget-tokens trips. */
-  reason: "no_recipe" | "zero_coverage" | "budget_exhausted";
+  /**
+   * CB-3 emits "no_recipe" / "zero_coverage"; product-loop emits
+   * "budget_exhausted" when --budget-tokens trips; "sprint_failed" (A) when a
+   * sprint breaks mid-run (thrown implement/verify error, cap breach, etc.).
+   */
+  reason: "no_recipe" | "zero_coverage" | "budget_exhausted" | "sprint_failed";
   /** Optional human-readable detail rendered alongside the recovery card. */
   detail?: string;
+  /**
+   * A — the run this halt belongs to. Lets the recovery card auto-wire
+   * Resume/Retry/Abort to `/ideal <action> <runId>` without the user knowing
+   * (or typing) the runId. Set on "sprint_failed" halts.
+   */
+  runId?: string;
+  /** A — the sprint number that broke, for the "Sprint N failed" card title. */
+  sprintN?: number;
   /** Actionable choices. UI renders these as buttons / list items. */
   recovery_options: RecoveryOption[];
 }

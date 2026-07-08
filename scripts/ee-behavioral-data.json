@@ -1,22 +1,122 @@
 [
-{"t":"agent ignores custom instructions","s":"Place highest-priority rules in AGENT OPERATING CONTRACT at front. Tail rules have lower primacy.","c1":"repo:muonroi-cli","c2":"scope:system-prompt"},
-{"t":"sub-agent huge prompt cost","s":"Use task(explore). Enforce getSubAgentBudgetChars() cap. B3/B4 auto-compaction keeps under 80K.","c1":"repo:muonroi-cli","c2":"scope:cost"},
-{"t":"hardcoded model ID","s":"Use getModelByTier() from registry.ts. Via catalog.json+settings+runtime. Throw on unresolvable.","c1":"repo:muonroi-cli","c2":"scope:providers"},
-{"t":"silent catch block","s":"Always log err.message+context. For HTTP: statusCode+responseBody. Never empty catch.","c1":"repo:muonroi-cli","c2":"scope:error-handling"},
-{"t":"no self-verify after TUI change","s":"Run selfverify_start(mode=tier1). Pre-push hook auto-triggers on watched surfaces.","c1":"repo:muonroi-cli","c2":"scope:testing"},
-{"t":"cost leak maxOutputTokens on OAuth","s":"Use shouldDropParam() from runtime.ts. Never inline unsupportedParams check.","c1":"repo:muonroi-cli","c2":"scope:providers"},
-{"t":"ee_query not used before risky step","s":"Call ee_query before unfamiliar work. ee_feedback after acting. ee_write after fixing error.","c1":"repo:muonroi-cli","c2":"scope:ee"},
-{"t":"test fails on WSL native bindings","s":"Clone repo separately in WSL home. Never share node_modules between Win/WSL.","c1":"repo:muonroi-cli","c2":"scope:environment"},
-{"t":"compaction elides important output","s":"Use ee_query(tool-artifact id=XXX) to rehydrate. PRESERVE_FULL_CONTEXT veto or KEEP_TOOL_IDS.","c1":"repo:muonroi-cli","c2":"scope:context"},
-{"t":"dependency without ponytail check","s":"Check stdlib->native->oneliner->YAGNI before adding npm dep.","c1":"repo:muonroi-cli","c2":"scope:dependencies"},
-{"t":"push without full test suite","s":"Pre-push: bun test 0 failures + tsc --noEmit 0 errors. For UI: selfverify_start.","c1":"repo:muonroi-cli","c2":"scope:git"},
-{"t":"agent cognitive overload","s":"Max tool rounds 8. Strip irrelevant tool descriptions. Add SELF-LIMIT section.","c1":"repo:muonroi-cli","c2":"scope:system-prompt"},
-{"t":"React state update freezes TUI","s":"Throttle to 150ms. useRef accumulator. Store reasoning in ChatEntry.","c1":"repo:muonroi-cli","c2":"scope:ui"},
-{"t":"Semantic missing on new TUI element","s":"Wrap with <Semantic>. Pick role from protocol.ts. Run lint:semantic.","c1":"repo:muonroi-cli","c2":"scope:testing"},
-{"t":"TypeScript any overuse","s":"Prefer unknown. Use type guards, discriminated unions, Zod for validation.","c1":"lang:typescript","c2":"scope:code-quality"},
-{"t":"async without error handling","s":"Every async call needs try/catch or .catch() handler. allSettled for parallel.","c1":"lang:typescript","c2":"scope:error-handling"},
-{"t":"zod schema not matching runtime","s":"Use safeParse() in production. Explicit passthrough/strip.","c1":"lang:typescript","c2":"scope:validation"},
-{"t":"BB scaffold compile error","s":"Run dotnet restore before build. Check NuGet sources and Directory.Build.props.","c1":"framework:building-block","c2":"scope:scaffold"},
-{"t":"rule engine expression throws","s":"Test with ExpressionTestHelper. Priority ordering. Per-rule try/catch.","c1":"framework:building-block","c2":"scope:rule-engine"},
-{"t":"tenant context not to background job","s":"Capture at enqueue. Restore via TenantContext.Restore(). AsyncLocal for flow.","c1":"framework:building-block","c2":"scope:tenancy"}
+  {
+    "t": "agent ignores custom instructions",
+    "s": "Place highest-priority rules in AGENT OPERATING CONTRACT at front. Tail rules have lower primacy.",
+    "c1": "repo:muonroi-cli",
+    "c2": "scope:system-prompt"
+  },
+  {
+    "t": "sub-agent huge prompt cost",
+    "s": "Use task(explore). Enforce getSubAgentBudgetChars() cap. B3/B4 auto-compaction keeps under 80K.",
+    "c1": "repo:muonroi-cli",
+    "c2": "scope:cost"
+  },
+  {
+    "t": "hardcoded model ID",
+    "s": "Use getModelByTier() from registry.ts. Via catalog.json+settings+runtime. Throw on unresolvable.",
+    "c1": "repo:muonroi-cli",
+    "c2": "scope:providers"
+  },
+  {
+    "t": "silent catch block",
+    "s": "Always log err.message+context. For HTTP: statusCode+responseBody. Never empty catch.",
+    "c1": "repo:muonroi-cli",
+    "c2": "scope:error-handling"
+  },
+  {
+    "t": "no self-verify after TUI change",
+    "s": "Run selfverify_start(mode=tier1). Pre-push hook auto-triggers on watched surfaces.",
+    "c1": "repo:muonroi-cli",
+    "c2": "scope:testing"
+  },
+  {
+    "t": "cost leak maxOutputTokens on OAuth",
+    "s": "Use shouldDropParam() from runtime.ts. Never inline unsupportedParams check.",
+    "c1": "repo:muonroi-cli",
+    "c2": "scope:providers"
+  },
+  {
+    "t": "ee_query not used before risky step",
+    "s": "Call ee_query before unfamiliar work. ee_feedback after acting. ee_write after fixing error.",
+    "c1": "repo:muonroi-cli",
+    "c2": "scope:ee"
+  },
+  {
+    "t": "test fails on WSL native bindings",
+    "s": "Clone repo separately in WSL home. Never share node_modules between Win/WSL.",
+    "c1": "repo:muonroi-cli",
+    "c2": "scope:environment"
+  },
+  {
+    "t": "compaction elides important output",
+    "s": "Use ee_query(tool-artifact id=XXX) to rehydrate. PRESERVE_FULL_CONTEXT veto or KEEP_TOOL_IDS.",
+    "c1": "repo:muonroi-cli",
+    "c2": "scope:context"
+  },
+  {
+    "t": "dependency without ponytail check",
+    "s": "Check stdlib->native->oneliner->YAGNI before adding npm dep.",
+    "c1": "repo:muonroi-cli",
+    "c2": "scope:dependencies"
+  },
+  {
+    "t": "push without full test suite",
+    "s": "Pre-push: bun test 0 failures + tsc --noEmit 0 errors. For UI: selfverify_start.",
+    "c1": "repo:muonroi-cli",
+    "c2": "scope:git"
+  },
+  {
+    "t": "agent cognitive overload",
+    "s": "Max tool rounds 8. Strip irrelevant tool descriptions. Add SELF-LIMIT section.",
+    "c1": "repo:muonroi-cli",
+    "c2": "scope:system-prompt"
+  },
+  {
+    "t": "React state update freezes TUI",
+    "s": "Throttle to 150ms. useRef accumulator. Store reasoning in ChatEntry.",
+    "c1": "repo:muonroi-cli",
+    "c2": "scope:ui"
+  },
+  {
+    "t": "Semantic missing on new TUI element",
+    "s": "Wrap with <Semantic>. Pick role from protocol.ts. Run lint:semantic.",
+    "c1": "repo:muonroi-cli",
+    "c2": "scope:testing"
+  },
+  {
+    "t": "TypeScript any overuse",
+    "s": "Prefer unknown. Use type guards, discriminated unions, Zod for validation.",
+    "c1": "lang:typescript",
+    "c2": "scope:code-quality"
+  },
+  {
+    "t": "async without error handling",
+    "s": "Every async call needs try/catch or .catch() handler. allSettled for parallel.",
+    "c1": "lang:typescript",
+    "c2": "scope:error-handling"
+  },
+  {
+    "t": "zod schema not matching runtime",
+    "s": "Use safeParse() in production. Explicit passthrough/strip.",
+    "c1": "lang:typescript",
+    "c2": "scope:validation"
+  },
+  {
+    "t": "BB scaffold compile error",
+    "s": "Run dotnet restore before build. Check NuGet sources and Directory.Build.props.",
+    "c1": "framework:building-block",
+    "c2": "scope:scaffold"
+  },
+  {
+    "t": "rule engine expression throws",
+    "s": "Test with ExpressionTestHelper. Priority ordering. Per-rule try/catch.",
+    "c1": "framework:building-block",
+    "c2": "scope:rule-engine"
+  },
+  {
+    "t": "tenant context not to background job",
+    "s": "Capture at enqueue. Restore via TenantContext.Restore(). AsyncLocal for flow.",
+    "c1": "framework:building-block",
+    "c2": "scope:tenancy"
+  }
 ]

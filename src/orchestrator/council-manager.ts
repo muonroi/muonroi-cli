@@ -18,6 +18,7 @@ import {
   createProviderFactory,
   detectProviderForModel,
   resolveModelRuntime,
+  resolveTemperatureParam,
   shouldDropParam,
 } from "../providers/runtime.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
@@ -69,6 +70,12 @@ export interface CouncilManagerDeps {
 export class CouncilManager {
   // ---- Mutable state (was Agent private fields) ----
   private _lastSynthesis: string | null = null;
+  /**
+   * Post-debate action the user chose on the last runCouncilV2 (e.g.
+   * "continue_session", "save_exit"). Relayed to the auto-council caller
+   * (tool-engine) so it can honor the choice instead of always continuing.
+   */
+  private _lastPostDebateAction: string | null = null;
   private _isContinuation = false;
   private _questionResolvers = new Map<string, (answer: string) => void>();
   private _preflightResolvers = new Map<string, (approved: boolean) => void>();
@@ -85,6 +92,12 @@ export class CouncilManager {
   }
   setLastSynthesis(v: string | null): void {
     this._lastSynthesis = v;
+  }
+  get lastPostDebateAction(): string | null {
+    return this._lastPostDebateAction;
+  }
+  setLastPostDebateAction(v: string | null): void {
+    this._lastPostDebateAction = v;
   }
   get isContinuation(): boolean {
     return this._isContinuation;
@@ -189,7 +202,7 @@ export class CouncilManager {
       system,
       prompt,
       ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: maxTokens }),
-      ...(shouldDropParam(runtime, "temperature") ? {} : { temperature: 0.7 }),
+      ...resolveTemperatureParam(runtime, 0.7),
       ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     });
     this.stats.calls++;
@@ -243,7 +256,7 @@ export class CouncilManager {
         tools: researchTools,
         stopWhen: stepCountIs(10),
         ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 4096 }),
-        ...(shouldDropParam(runtime, "temperature") ? {} : { temperature: 0.3 }),
+        ...resolveTemperatureParam(runtime, 0.3),
         ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
         ...(signal ? { abortSignal: signal } : {}),
       });

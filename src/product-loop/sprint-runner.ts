@@ -22,6 +22,8 @@
  *   - CB-2 (oscillation) is checked AFTER this sprint's score is known.
  */
 
+import { existsSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { prependDecisionsLock, readDecisionsLock } from "../council/decisions-lock.js";
 import { runCouncil } from "../council/index.js";
@@ -46,21 +48,204 @@ import { readProjectContext } from "./discovery-persistence.js";
 import { evaluateDoneGate } from "./done-gate.js";
 import type { ContinueFeedback } from "./feedback-routing.js";
 import { buildContinueFeedback } from "./feedback-routing.js";
+import { idealTrace } from "./ideal-trace.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
 import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snapshot.js";
 import { appendRoleMemory } from "./role-memory.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
 import { loadVerifyFailureSignatures, recordVerifyFailureAndMaybePush } from "./verify-failure-tracking.js";
-import { parseVerifyResult } from "./verify-result.js";
+import { parseVerifyResult, VERIFY_PASS_MARKER } from "./verify-result.js";
 
 // P3.7: track one-shot CB-2 retry bonus per run (keyed by runId).
 // The Map is module-scoped so multiple sprints within the same run share state
 // without touching DriverContext / IterationState shapes.
 const _cb2RetryUsed = new Map<string, boolean>();
 
+/** Watchdog ceiling for the verify stage (ms). Override with MUONROI_SPRINT_VERIFY_TIMEOUT_MS. */
+function getVerifyWatchdogTimeoutMs(): number {
+  const raw = process.env.MUONROI_SPRINT_VERIFY_TIMEOUT_MS;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(n) && n > 0) return n;
+  return 10 * 60 * 1000; // 10 min default
+}
+
+/**
+ * Bound the verify stage with a watchdog timeout.
+ *
+ * `runVerifyOrchestration` can hang indefinitely with no visible signal:
+ * `prepareVerifyRun` → `ensureVerifyCheckpoint` spawns the `shuru` sandbox
+ * (`spawnWithProgress("shuru", …)`) which stalls on hosts where shuru is
+ * unavailable/misconfigured (e.g. Windows), and the verify sub-agent itself has
+ * no TTFB timeout. Because sprint-runner previously called it as a bare
+ * `await runVerifyOrchestration(agent)` with NO abortSignal and NO timeout, a
+ * single hung verify BRICKED the whole /ideal run silently — no error, no
+ * recovery card — observed live as a 30+ min dead stall right after
+ * "Committed: N sprints planned" (the impl turn finished, verify never returned).
+ *
+ * On timeout we abort the sub-agent, log with context (No-Silent-Catch), and
+ * return an ERROR ToolResult so the sprint loop treats it as a failed verify
+ * (Step 5 → verifyVerdict FAIL/ERROR → feedback-routing) instead of hanging
+ * forever. The hung sandbox op may leak in the background, but the run recovers
+ * and the failure is surfaced + resumable. `onProgress` is forwarded to console
+ * so a future hang is diagnosable (e.g. "Creating checkpoint: <name>").
+ */
+async function runVerifyWithWatchdog(
+  verifyAgent: VerifyAgentLike,
+  runId: string,
+  sprintN: number,
+): Promise<ToolResult> {
+  const timeoutMs = getVerifyWatchdogTimeoutMs();
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const onProgress = (detail: string) => {
+    if (process.env.MUONROI_DEBUG_VERIFY === "1") console.error(`[verify:sprint-${sprintN}] ${detail}`);
+  };
+  const timeout = new Promise<ToolResult>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      const msg =
+        `verify stage exceeded ${Math.round(timeoutMs / 1000)}s watchdog and was aborted ` +
+        `(sprint ${sprintN}, run ${runId}) — likely a hung sandbox checkpoint (shuru) or a ` +
+        `verify sub-agent LLM call with no TTFB timeout`;
+      console.error(`[sprint-runner] ${msg}`);
+      resolve({ success: false, output: "", error: `verify-timeout: ${msg}` });
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      runVerifyOrchestration(verifyAgent, { abortSignal: controller.signal, onProgress }),
+      timeout,
+    ]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[sprint-runner] verify stage threw (sprint ${sprintN}, run ${runId}): ${message}`);
+    return { success: false, output: "", error: `verify-error: ${message}` };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** @internal Test-only: reset CB-2 retry state for a given runId. */
 export function _resetCb2RetryUsed(runId: string): void {
   _cb2RetryUsed.delete(runId);
+}
+
+/**
+ * Idle-chunk ceiling for the implementation stage (ms). Override with
+ * MUONROI_SPRINT_IMPL_IDLE_MS. This is a TIME-SINCE-LAST-CHUNK budget, not a
+ * total-turn cap — a legitimately long implementation streams progress the
+ * whole way, so it may run for many minutes, but it must never go completely
+ * silent (no chunk at all) for this long.
+ */
+export function getImplIdleTimeoutMs(): number {
+  const raw = process.env.MUONROI_SPRINT_IMPL_IDLE_MS;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(n) && n > 0) return n;
+  return 4 * 60 * 1000; // 4 min of total silence → treat the impl turn as stalled
+}
+
+/**
+ * Hard total-elapsed ceiling for the implementation stage (ms). Override with
+ * MUONROI_SPRINT_IMPL_TOTAL_MS. Unlike the idle budget this is armed once and is
+ * NOT reset by chunks, so it catches a hang that keeps the idle guard alive with
+ * heartbeat/status chunks. Generous by default so a legitimately large sprint is
+ * not cut short; a genuine hang still terminates within this ceiling.
+ */
+export function getImplTotalTimeoutMs(): number {
+  const raw = process.env.MUONROI_SPRINT_IMPL_TOTAL_MS;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(n) && n > 0) return n;
+  return 15 * 60 * 1000; // 15 min hard ceiling on a single impl turn
+}
+
+/**
+ * Imperative execution directive prepended to the sprint plan before it is
+ * handed to the orchestrator. The raw plan synthesis is a declarative design
+ * document; without this prefix the impl turn narrates it back instead of
+ * applying edits. Exported for test assertion. @internal
+ */
+export const IMPL_EXECUTION_DIRECTIVE =
+  "You are the sprint IMPLEMENTER. EXECUTE the sprint plan below as an implementation task. Make the " +
+  "actual code changes NOW using your file-edit tools — read the target files, then edit/write them to " +
+  "apply every action item. Do NOT merely restate, summarize, or re-plan the design; apply the edits to " +
+  "the repository. Run the plan's own verification commands where given. Before you finish, self-verify " +
+  "as a reviewer would: confirm every target file named in the plan actually exists on disk with the " +
+  "intended change — do not stop with action items unaddressed. Stop only when the action items are " +
+  "implemented.\n\n" +
+  "--- SPRINT PLAN TO IMPLEMENT ---\n\n";
+
+/**
+ * Wrap the implementation `processMessageFn` stream with an idle-chunk watchdog.
+ *
+ * Root cause it addresses (observed live 2026-07-08, /ideal resume of the
+ * gsd-core migration): the implementation stage delegates to the host
+ * orchestrator turn via `ctx.processMessageFn(implPrompt)` and consumes it with
+ * `for await (const chunk of implGen)`. The orchestrator turn finished its final
+ * LLM response cleanly (finishReason "stop", text-only) but the generator then
+ * suspended post-finish and never completed — the `for await` blocked for 17+
+ * minutes with NO chunk, NO phaseDone, NO advance to Verify, NO error. Because
+ * the LLM STREAM had already finished, the orchestrator's mid-stream
+ * time-to-next-chunk stall-watchdog does not fire — the hang is on the JS side
+ * after the stream terminator.
+ *
+ * TWO complementary guards (a single idle guard was observed live to be
+ * defeated: the impl created 2 files then emitted only non-progress heartbeat
+ * chunks for 9+ min, resetting a per-chunk idle timer without ever completing):
+ *   - `idleMs` — resets on every yielded chunk; catches a TOTALLY silent stall
+ *     (the post-finish hang above, zero chunks) quickly.
+ *   - `totalMs` — armed ONCE at entry, NOT reset by chunks; a hard ceiling that
+ *     fires even when heartbeat/status chunks keep the idle guard alive while no
+ *     real progress is made.
+ * Either firing throws so the caller's existing try/catch converts the wedge
+ * into a visible phaseError (the sprint then surfaces + can recover), exactly
+ * like `runVerifyWithWatchdog` does for the verify stage. The suspended
+ * orchestrator promise may leak in the background, but the run recovers.
+ */
+export async function* withImplIdleWatchdog(
+  gen: AsyncGenerator<StreamChunk, void, unknown>,
+  idleMs: number,
+  sprintN: number,
+  totalMs: number = getImplTotalTimeoutMs(),
+): AsyncGenerator<StreamChunk, void, unknown> {
+  const it = gen[Symbol.asyncIterator]();
+  let totalTimer: ReturnType<typeof setTimeout> | undefined;
+  const total = new Promise<never>((_, reject) => {
+    totalTimer = setTimeout(() => {
+      reject(
+        new Error(
+          `implementation stage exceeded ${Math.round(totalMs / 1000)}s total watchdog and was ` +
+            `treated as stalled (sprint ${sprintN}) — the orchestrator turn never completed ` +
+            `(likely hung after its final response while emitting only heartbeat chunks)`,
+        ),
+      );
+    }, totalMs);
+  });
+  try {
+    while (true) {
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      const idle = new Promise<never>((_, reject) => {
+        idleTimer = setTimeout(() => {
+          reject(
+            new Error(
+              `implementation stage produced no output for ${Math.round(idleMs / 1000)}s and was ` +
+                `treated as stalled (sprint ${sprintN}) — the orchestrator turn hung post-finish ` +
+                `(finished its LLM response but the generator never completed)`,
+            ),
+          );
+        }, idleMs);
+      });
+      let res: IteratorResult<StreamChunk, void>;
+      try {
+        res = await Promise.race([it.next(), idle, total]);
+      } finally {
+        if (idleTimer) clearTimeout(idleTimer);
+      }
+      if (res.done) return;
+      yield res.value;
+    }
+  } finally {
+    if (totalTimer) clearTimeout(totalTimer);
+  }
 }
 
 export {
@@ -100,6 +285,102 @@ export interface RunSprintArgs {
  * Throws on circuit-breaker halt — caller (loop driver) catches and writes
  * the appropriate halt state to manifest/state.
  */
+
+/** Path to the persisted per-sprint plan synthesis (Wave 2). @internal */
+export function sprintPlanPath(runDir: string, sprintN: number): string {
+  return path.join(runDir, `sprint-${sprintN}-plan.md`);
+}
+
+/**
+ * Wave 2: read a persisted sprint plan if present. Returns "" when absent or on
+ * read error (caller then runs the planning council). Never throws.
+ *
+ * The planning council is non-deterministic — re-running it on a resumed/retried
+ * sprint produces a different design AND a different target folder, which is why
+ * the impl turn was observed re-scaffolding in a new location each run. Reusing
+ * the persisted plan makes per-sprint planning idempotent so the same target
+ * files are continued across resume.
+ */
+export async function readPersistedSprintPlan(planPath: string): Promise<string> {
+  try {
+    if (!existsSync(planPath)) return "";
+    return (await readFile(planPath, "utf8")).trim();
+  } catch (err) {
+    console.error(`[sprint-runner] readPersistedSprintPlan failed for ${planPath}: ${(err as Error).message}`);
+    return "";
+  }
+}
+
+/** Wave 2: persist a sprint plan synthesis for idempotent resume. Never throws. */
+export async function persistSprintPlan(planPath: string, synthesis: string): Promise<void> {
+  if (!synthesis.trim()) return;
+  try {
+    await writeFile(planPath, synthesis, "utf8");
+  } catch (err) {
+    console.error(`[sprint-runner] persistSprintPlan failed for ${planPath}: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Extract repo-relative target file paths a sprint plan names (src/…, packages/…,
+ * tests/…). Deduped, capped. Used by Wave 3 (existing targets → continue) and 4A
+ * (missing targets → completeness re-check). Never throws.
+ */
+export function extractPlanTargetPaths(planSynthesis: string, cap = 40): string[] {
+  try {
+    const tokens = new Set<string>();
+    const re = /\b((?:src|packages|tests|scripts|lib|app|apps)\/[\w./@-]+\.[a-z]{1,5})\b/gi;
+    let m: RegExpExecArray | null = re.exec(planSynthesis);
+    while (m !== null) {
+      tokens.add(m[1]!.replace(/\\/g, "/"));
+      if (tokens.size >= cap) break;
+      m = re.exec(planSynthesis);
+    }
+    return [...tokens];
+  } catch (err) {
+    console.error(`[sprint-runner] extractPlanTargetPaths failed: ${(err as Error).message}`);
+    return [];
+  }
+}
+
+/**
+ * Wave 3: plan-named target file paths that ALREADY EXIST on disk, so the impl
+ * turn continues them rather than re-scaffolding in a new location. Empty on a
+ * greenfield sprint (files don't exist yet) → no injection.
+ */
+export async function detectExistingPlanTargets(planSynthesis: string, cwd: string, cap = 20): Promise<string[]> {
+  const existing: string[] = [];
+  for (const t of extractPlanTargetPaths(planSynthesis)) {
+    if (existsSync(path.resolve(cwd, t))) existing.push(t);
+    if (existing.length >= cap) break;
+  }
+  return existing;
+}
+
+/**
+ * 4A: plan-named target file paths that STILL DO NOT EXIST after the impl turn —
+ * i.e. action items the implementer left unaddressed. Drives the post-impl
+ * completeness re-check (spend an extra turn ONLY when there is proven-incomplete
+ * work, unlike an unconditional reviewer pass). Empty ⇒ every named target landed.
+ */
+export async function computeMissingPlanTargets(planSynthesis: string, cwd: string, cap = 20): Promise<string[]> {
+  const missing: string[] = [];
+  for (const t of extractPlanTargetPaths(planSynthesis)) {
+    if (!existsSync(path.resolve(cwd, t))) missing.push(t);
+    if (missing.length >= cap) break;
+  }
+  return missing;
+}
+
+/**
+ * 4A completeness re-check toggle. Default ON; disable with
+ * MUONROI_SPRINT_IMPL_RECHECK=0. When on, and the impl turn left plan-named
+ * target files missing, ONE focused follow-up turn is spent to finish them.
+ */
+export function getImplRecheckEnabled(): boolean {
+  return process.env.MUONROI_SPRINT_IMPL_RECHECK !== "0";
+}
+
 export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChunk, IterationState, unknown> {
   const { sprintN, ctx, productSpec, roleAssignments, history, carryOver, phaseScope } = args;
   const runDir = path.join(ctx.flowDir, "runs", ctx.runId);
@@ -270,26 +551,62 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     /* no host orchestrator wired during planning */
   };
 
-  const planGen = runCouncil(
-    councilTopic,
-    sessionModelId,
-    [],
-    ctx.runId,
-    productLlm,
-    ctx.respondToQuestion,
-    ctx.respondToPreflight,
-    ctx.processMessageFn ?? noopProcess,
-    { skipClarification: true, cwd, runDir, suppressInlineMeta: isContextRailEnabled() },
-  );
+  // Wave 2 (2026-07-08): reuse a persisted per-sprint plan if one exists, making
+  // per-sprint planning idempotent across resume/retry. Without this the
+  // non-deterministic planning council re-ran on every runSprint call and emitted
+  // a different design → a different target folder each time (run1 src/council/,
+  // run4 src/engine/), so the impl turn re-scaffolded instead of continuing.
+  const planPath = sprintPlanPath(runDir, sprintN);
+  let planSynthesis = await readPersistedSprintPlan(planPath);
+  if (planSynthesis) {
+    idealTrace("sprint.planCouncil.reused", { runId: ctx.runId, sprintN, planSynthesisLen: planSynthesis.length });
+    yield {
+      type: "content",
+      content: `\n> [sprint-plan] Reusing persisted plan for sprint ${sprintN} (${planSynthesis.length} chars) — re-planning skipped so the same target files are continued.\n`,
+    };
+  } else {
+    idealTrace("sprint.planCouncil.before", { runId: ctx.runId, sprintN });
+    const planGen = runCouncil(
+      councilTopic,
+      sessionModelId,
+      [],
+      ctx.runId,
+      productLlm,
+      ctx.respondToQuestion,
+      ctx.respondToPreflight,
+      ctx.processMessageFn ?? noopProcess,
+      {
+        skipClarification: true,
+        cwd,
+        runDir,
+        suppressInlineMeta: isContextRailEnabled(),
+        // The product plan + spec were already debated (CB-1) and approved at the
+        // `/ideal` preflight. Re-gating and re-researching each sprint's internal
+        // plan strands the loop before implementation is ever reached (the exact
+        // "debate great, never implements" symptom). Auto-approve the per-sprint
+        // plan and reuse CB-1 research; the post-sprint customer verdict still lets
+        // the user review each sprint's OUTPUT.
+        autoApprovePreflight: true,
+        skipResearch: true,
+        // Automated per-sprint planning: suppress the interactive post-debate menu
+        // (it stranded the sprint before implementation — blocker 4/5) and skip the
+        // session-scoped persistence that FK-fails on the product-run id. The plan
+        // is auto-locked and control returns here for the Implementation stage.
+        sprintPlanningMode: true,
+      },
+    );
 
-  let planSynthesis = "";
-  while (true) {
-    const step = await planGen.next();
-    if (step.done) {
-      planSynthesis = step.value ?? "";
-      break;
+    while (true) {
+      const step = await planGen.next();
+      if (step.done) {
+        planSynthesis = step.value ?? "";
+        break;
+      }
+      yield step.value as StreamChunk;
     }
-    yield step.value as StreamChunk;
+    idealTrace("sprint.planCouncil.after", { runId: ctx.runId, sprintN, planSynthesisLen: planSynthesis.length });
+    // Persist so a resumed/retried sprint reuses this exact plan (and target folder).
+    await persistSprintPlan(planPath, planSynthesis);
   }
 
   // P4-C: close the planning phase row before opening implementation.
@@ -301,6 +618,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   });
 
   // ── Step 4: Implement stage — pipe plan through host process loop ─────────
+  idealTrace("sprint.implementation.enter", { runId: ctx.runId, sprintN, planSynthesisLen: planSynthesis.length });
   yield { type: "content", content: `\n## Sprint ${sprintN} — Implementation\n` };
   const implPhaseId = `sprint-${sprintN}-implementation`;
   const implStartedAt = Date.now();
@@ -330,9 +648,17 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     subtype: "sprint_stage",
     data: { sprintIndex: sprintN, stage: "implementation", runId: ctx.runId },
   });
+  // Defect fix (2026-07-08): the raw plan synthesis is a DECLARATIVE design
+  // document ("## Agreed Architecture / Function Signatures / Acceptance
+  // Criteria"). Passed verbatim as the orchestrator message it reads as
+  // something to discuss, so the impl turn narrated the plan back as markdown
+  // (finishReason "stop", zero edits) instead of applying it — observed live on
+  // the gsd-core migration. Prepend an explicit execution directive (module-level
+  // IMPL_EXECUTION_DIRECTIVE) so the PIL classifier routes it to the
+  // implement/edit path, not the respond path.
   // C2: Pre-impl gate — read decisions.lock.md and prepend to implementation prompt.
   // When lock file is missing (greenfield / no council with runDir), pass-through unchanged.
-  let implPrompt = planSynthesis;
+  let implPrompt = planSynthesis.trim() ? IMPL_EXECUTION_DIRECTIVE + planSynthesis : planSynthesis;
   try {
     const lockContent = await readDecisionsLock(runDir);
     if (lockContent) {
@@ -346,15 +672,37 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     /* fail-open — lock read failure must not block implementation */
   }
 
+  // Wave 3 (2026-07-08): the impl turn was blind to files a prior sprint/run had
+  // already created, so it re-created them from scratch. Tell it which of the
+  // plan's OWN named target files already exist on disk so it reads + continues
+  // them instead of re-scaffolding. Empty on greenfield (nothing exists yet).
+  if (planSynthesis.trim()) {
+    const existingTargets = await detectExistingPlanTargets(planSynthesis, cwd);
+    if (existingTargets.length > 0) {
+      implPrompt = `${implPrompt}\n\n--- FILES ALREADY PRESENT ON DISK (prior-sprint work — READ and CONTINUE these; do NOT recreate them from scratch) ---\n${existingTargets
+        .map((f) => `- ${f}`)
+        .join("\n")}\n`;
+      yield {
+        type: "content",
+        content: `\n> [continuation] ${existingTargets.length} plan target file(s) already exist — instructed to continue, not recreate.\n`,
+      };
+    }
+  }
+
   let implError: string | null = null;
   if (ctx.processMessageFn && implPrompt.trim()) {
     try {
       const implGen = ctx.processMessageFn(implPrompt);
-      for await (const chunk of implGen) {
+      // Guard the impl turn with an idle-chunk watchdog so a post-finish
+      // orchestrator hang surfaces as a phaseError instead of a silent wedge.
+      for await (const chunk of withImplIdleWatchdog(implGen, getImplIdleTimeoutMs(), sprintN)) {
         yield chunk as StreamChunk;
       }
     } catch (e) {
       implError = e instanceof Error ? e.message : String(e);
+      // No-Silent-Catch: the finally below surfaces a phaseError chunk, but log
+      // here too so the hang/failure is diagnosable from stderr / MUONROI logs.
+      console.error(`[sprint-runner] implementation stage failed (sprint ${sprintN}, run ${ctx.runId}): ${implError}`);
     } finally {
       // A3 FIX: phaseDone for implementation MUST always fire, even when
       // processMessageFn throws mid-stream (e.g. /gsd executor fails after
@@ -393,6 +741,77 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     throw new Error(implError);
   }
 
+  // ── Step 4b: 4A completeness re-check ─────────────────────────────────────
+  // The impl turn can "finish" (finishReason stop) with plan action items
+  // unaddressed — narrated but not applied. Rather than an unconditional
+  // (2-3x cost) reviewer pass, spend ONE focused follow-up turn ONLY when
+  // plan-named target files are provably still missing on disk. No missing
+  // targets ⇒ no extra turn (the resume/migration case where the targets already
+  // exist is a no-op). A re-check failure never fails the sprint — the primary
+  // impl already succeeded and verify/tests are the real gate.
+  if (ctx.processMessageFn && getImplRecheckEnabled() && planSynthesis.trim()) {
+    const missing = await computeMissingPlanTargets(planSynthesis, cwd);
+    if (missing.length > 0) {
+      idealTrace("sprint.implementation.recheck", { runId: ctx.runId, sprintN, missing: missing.length });
+      const recheckPhaseId = `sprint-${sprintN}-impl-recheck`;
+      const recheckStartedAt = Date.now();
+      yield phaseStart({
+        phaseId: recheckPhaseId,
+        kind: "sprint_stage",
+        label: `Sprint ${sprintN} — Completeness re-check`,
+        detail: `${missing.length} plan target(s) still missing — finishing`,
+        startedAt: recheckStartedAt,
+      });
+      const recheckPrompt =
+        "The sprint plan named these target files but they DO NOT exist on disk yet — the sprint is NOT " +
+        "finished. Create/complete each one NOW using your file-edit tools. Do NOT explain or re-plan; " +
+        "make the edits.\n" +
+        missing.map((f) => `- ${f}`).join("\n") +
+        "\n";
+      let recheckErr: string | null = null;
+      try {
+        const recheckGen = ctx.processMessageFn(recheckPrompt);
+        for await (const chunk of withImplIdleWatchdog(recheckGen, getImplIdleTimeoutMs(), sprintN)) {
+          yield chunk as StreamChunk;
+        }
+      } catch (e) {
+        recheckErr = e instanceof Error ? e.message : String(e);
+        console.error(
+          `[sprint-runner] impl completeness re-check failed (sprint ${sprintN}, run ${ctx.runId}): ${recheckErr}`,
+        );
+      } finally {
+        if (recheckErr) {
+          yield phaseError({
+            phaseId: recheckPhaseId,
+            kind: "sprint_stage",
+            label: `Sprint ${sprintN} — Completeness re-check`,
+            startedAt: recheckStartedAt,
+            errorMessage: recheckErr,
+          });
+        } else {
+          yield phaseDone({
+            phaseId: recheckPhaseId,
+            kind: "sprint_stage",
+            label: `Sprint ${sprintN} — Completeness re-check`,
+            startedAt: recheckStartedAt,
+          });
+        }
+      }
+      const stillMissing = await computeMissingPlanTargets(planSynthesis, cwd);
+      idealTrace("sprint.implementation.recheck.after", {
+        runId: ctx.runId,
+        sprintN,
+        stillMissing: stillMissing.length,
+      });
+      if (stillMissing.length > 0) {
+        yield {
+          type: "content",
+          content: `\n> [completeness] ${stillMissing.length} plan target(s) still missing after re-check — deferring to verify.\n`,
+        };
+      }
+    }
+  }
+
   // ── Step 5: Verify stage ──────────────────────────────────────────────────
   yield { type: "content", content: `\n## Sprint ${sprintN} — Verification\n` };
   const verifyPhaseId = `sprint-${sprintN}-verification`;
@@ -417,7 +836,31 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     subtype: "sprint_stage",
     data: { sprintIndex: sprintN, stage: "verification", runId: ctx.runId },
   });
-  const verifyResult: ToolResult = await runVerifyOrchestration(verifyAgent);
+  // A — "Skip verify" recovery option: the user chose to bypass a broken verify
+  // stage (e.g. shuru sandbox unavailable on Windows that hangs the watchdog
+  // every sprint). Treat verify as a PASS with an explicit synthetic output so
+  // the done-gate is not blocked, and log loudly so the bypass is auditable.
+  // The env var is set by the recovery-card handler and reset on the next fresh
+  // `/ideal "<idea>"` start, so a new run re-enables verification.
+  const skipVerify = process.env.MUONROI_SPRINT_SKIP_VERIFY === "1";
+  let verifyResult: ToolResult;
+  if (skipVerify) {
+    console.error(
+      `[sprint-runner] MUONROI_SPRINT_SKIP_VERIFY=1 — verify stage bypassed (sprint ${sprintN}, run ${ctx.runId})`,
+    );
+    verifyResult = {
+      success: true,
+      // Include the canonical PASS marker so parseVerifyResult → PASS (the user
+      // explicitly opted to treat verify as satisfied for this recovery).
+      output: `${VERIFY_PASS_MARKER}\nverify skipped by user recovery choice (MUONROI_SPRINT_SKIP_VERIFY=1)`,
+    };
+    yield {
+      type: "content",
+      content: `\n> [skip-verify] Verify stage bypassed for sprint ${sprintN} (user recovery choice).\n`,
+    };
+  } else {
+    verifyResult = await runVerifyWithWatchdog(verifyAgent, ctx.runId, sprintN);
+  }
   yield phaseDone({
     phaseId: verifyPhaseId,
     kind: "sprint_stage",

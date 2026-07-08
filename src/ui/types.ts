@@ -62,6 +62,13 @@ export interface AppStartupConfig {
    * Never set this in production — only passed via --inject-halt CLI flag.
    */
   injectHalt?: boolean;
+  /**
+   * TEST SEAM (A): when true, dispatch a synthetic `sprint_failed` halt chunk
+   * (Resume / Retry / Skip verify / Abort) after first idle. Lets harness E2E
+   * specs verify the sprint-break recovery card without a real mid-run failure.
+   * Never set this in production — only passed via --inject-halt-sprint.
+   */
+  injectHaltSprint?: boolean;
 }
 
 export interface AppProps {

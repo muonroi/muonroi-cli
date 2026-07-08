@@ -106,6 +106,7 @@ import {
   initialCardState,
   reduceCardKey,
 } from "./components/council-question-card.js";
+import { CouncilRailRounds } from "./components/council-rail-rounds.js";
 import { CouncilRoundGroup, CouncilRoundsOverview } from "./components/council-round-group.js";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
 import { CouncilSynthesisBanner } from "./components/council-synthesis-banner.js";
@@ -232,12 +233,12 @@ function formatExperienceInjectedBlock(d: {
   scoreFloor?: number;
   points?: Array<{ id: string; title: string; tier: string }>;
 }): string {
-  const head = `\n≡ƒÆí [Experience Injected] ${d.pointCount ?? 0} point(s) loaded (score ΓëÑ ${d.scoreFloor ?? 0})`;
+  const head = `\n💡 [Experience Injected] ${d.pointCount ?? 0} point(s) loaded (score ≥ ${d.scoreFloor ?? 0})`;
   const pts = d.points ?? [];
   if (pts.length === 0) return `${head}\n`;
   const MAX = 8;
-  const lines = pts.slice(0, MAX).map((p) => `   ΓÇó [${p.tier}] ${p.title || "(untitled)"} {id:${p.id.slice(0, 8)}}`);
-  if (pts.length > MAX) lines.push(`   ΓÇª +${pts.length - MAX} more`);
+  const lines = pts.slice(0, MAX).map((p) => `   • [${p.tier}] ${p.title || "(untitled)"} {id:${p.id.slice(0, 8)}}`);
+  if (pts.length > MAX) lines.push(`   … +${pts.length - MAX} more`);
   return `${head}\n${lines.join("\n")}\n`;
 }
 
@@ -258,7 +259,7 @@ function stripControlBytes(raw: string): string {
 
 /**
  * Sanitize text destined for a single-line secret field (provider API key).
- * stripControlBytes + removes every whitespace character ΓÇö an API key never
+ * stripControlBytes + removes every whitespace character — an API key never
  * contains whitespace, and terminal paste often arrives wrapped in guards or
  * with a trailing newline. Shared by the keydown and paste handlers so both
  * input routes behave identically.
@@ -270,7 +271,7 @@ function sanitizeSecretInput(raw: string): string {
 const DEFAULT_MODEL = getCurrentModel();
 
 // ---------------------------------------------------------------------------
-// Telegram stubs ΓÇö removed feature, compile-only placeholders
+// Telegram stubs — removed feature, compile-only placeholders
 // ---------------------------------------------------------------------------
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -296,7 +297,7 @@ function _formatStructuredResponse(sr: StructuredResponse): string {
     case "refactor": {
       const r = d as { summary?: string; changes?: Array<{ file: string; diff: string }>; verify_command?: string };
       const parts = [r.summary ?? ""];
-      for (const c of r.changes ?? []) parts.push(`\nΓöÇΓöÇ ${c.file} ΓöÇΓöÇ\n${c.diff}`);
+      for (const c of r.changes ?? []) parts.push(`\n── ${c.file} ──\n${c.diff}`);
       if (r.verify_command) parts.push(`\nverify: ${r.verify_command}`);
       return parts.join("\n");
     }
@@ -308,7 +309,7 @@ function _formatStructuredResponse(sr: StructuredResponse): string {
         verify_command?: string;
       };
       const parts = [`hypothesis: ${r.hypothesis}`, `root cause: ${r.root_cause}`];
-      if (r.fix) parts.push(`\nΓöÇΓöÇ fix: ${r.fix.file} ΓöÇΓöÇ\n${r.fix.diff}`);
+      if (r.fix) parts.push(`\n── fix: ${r.fix.file} ──\n${r.fix.diff}`);
       if (r.verify_command) parts.push(`verify: ${r.verify_command}`);
       return parts.join("\n");
     }
@@ -341,7 +342,7 @@ function _formatStructuredResponse(sr: StructuredResponse): string {
       const r = d as { files?: Array<{ path: string; content: string; language: string }>; explanation?: string };
       const parts: string[] = [];
       if (r.explanation) parts.push(r.explanation);
-      for (const f of r.files ?? []) parts.push(`\nΓöÇΓöÇ ${f.path} (${f.language}) ΓöÇΓöÇ\n${f.content}`);
+      for (const f of r.files ?? []) parts.push(`\n── ${f.path} (${f.language}) ──\n${f.content}`);
       return parts.join("\n");
     }
     case "general": {
@@ -397,7 +398,7 @@ function getFileMentionToken(block: FileMentionBlock): string {
 const SPLIT = {
   topLeft: "",
   bottomLeft: "",
-  vertical: "Γöâ",
+  vertical: "┃",
   topRight: "",
   bottomRight: "",
   horizontal: " ",
@@ -407,7 +408,7 @@ const SPLIT = {
   leftT: "",
   rightT: "",
 };
-const _SPLIT_END = { ...SPLIT, bottomLeft: "Γò╣" };
+const _SPLIT_END = { ...SPLIT, bottomLeft: "╹" };
 const _EMPTY = {
   topLeft: "",
   bottomLeft: "",
@@ -422,17 +423,17 @@ const _EMPTY = {
   rightT: "",
 };
 const _LINE = {
-  topLeft: "Γöü",
-  bottomLeft: "Γöü",
+  topLeft: "━",
+  bottomLeft: "━",
   vertical: "",
-  topRight: "Γöü",
-  bottomRight: "Γöü",
-  horizontal: "Γöü",
-  bottomT: "Γöü",
-  topT: "Γöü",
-  cross: "Γöü",
-  leftT: "Γöü",
-  rightT: "Γöü",
+  topRight: "━",
+  bottomRight: "━",
+  horizontal: "━",
+  bottomT: "━",
+  topT: "━",
+  cross: "━",
+  leftT: "━",
+  rightT: "━",
 };
 
 const REVIEW_PROMPT = `Review all current changes in this repository. Follow these steps:
@@ -599,6 +600,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     councilInfoCards,
     councilMeta,
     councilRounds,
+    selectedRound,
+    setSelectedRound,
     councilMessages,
     councilTranscriptExpanded,
     councilPhases,
@@ -741,6 +744,26 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     const t = councilMeta.topic.trim();
     railRows.push({ label: "Topic", value: t.length > 90 ? `${t.slice(0, 89)}…` : t });
   }
+  // B2: the pinned OUTCOME — the exact criteria the debate is graded against,
+  // with live ✓ (met) / ○ (pending) per criterion. Pinned beside Topic so the
+  // user always sees WHAT "criteria met" refers to. `criteriaMet` is index-
+  // aligned to `successCriteria` (may be shorter/absent before the first eval).
+  if (councilMeta?.successCriteria?.length) {
+    const crits = councilMeta.successCriteria;
+    // Defense-in-depth: only trust criteriaMet when it is index-aligned to the
+    // current criteria (same length). A count mismatch means it is stale from a
+    // prior council (upsert-merge leak) — treat as all-not-met rather than paint
+    // wrong ✓ marks. index.ts also emits a count-matched all-false reset.
+    const rawMet = councilMeta.criteriaMet ?? [];
+    const met = rawMet.length === crits.length ? rawMet : [];
+    const metCount = met.filter(Boolean).length;
+    railRows.push({ label: "Outcome", value: `${metCount}/${crits.length} criteria met` });
+    crits.forEach((c, i) => {
+      const mark = met[i] ? "✓" : "○";
+      const text = c.trim();
+      railRows.push({ label: "", value: `  ${mark} ${text.length > 64 ? `${text.slice(0, 63)}…` : text}` });
+    });
+  }
   if (councilMeta?.leader) railRows.push({ label: "Leader", value: councilMeta.leader });
   if (councilMeta?.panel?.length) {
     railRows.push({ label: "Panel", value: `${councilMeta.panel.length}: ${councilMeta.panel.join(", ")}` });
@@ -808,6 +831,15 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
           <CouncilInfoCardView key={`info-card-${idx}-${card.title}`} card={card} terminalCols={cols} theme={t} />
         </Semantic>
       ))}
+      {isRoundGroupsEnabled() && councilRounds.length > 0 && (
+        <CouncilRailRounds
+          rounds={councilRounds}
+          selected={selectedRound}
+          onSelect={setSelectedRound}
+          width={cols}
+          theme={t}
+        />
+      )}
     </>
   );
 
@@ -859,7 +891,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
                     {(() => {
                       const mcpRuns = computeMcpRunInfo(messages);
-                      // Phase 5 F7 ΓÇö index of the last assistant message so
+                      // Phase 5 F7 — index of the last assistant message so
                       // MessageView can skip auto-collapse on it (final answer
                       // should always be fully visible, not hidden behind
                       // "ctrl+e expand").
@@ -891,14 +923,14 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         </Semantic>
                       ));
                     })()}
-                    {/* taskListSnapshot moved below scrollbox ΓÇö renders as a
+                    {/* taskListSnapshot moved below scrollbox — renders as a
                       fixed-bottom panel so agent text can never push it up. */}
                     {liveTurnSourceLabel && (activeToolCalls.length > 0 || streamContent || isProcessing) && (
                       <box paddingLeft={3} marginTop={1} flexShrink={0}>
                         <text fg={t.textMuted}>{liveTurnSourceLabel}</text>
                       </box>
                     )}
-                    {/* Active tool calls ΓÇö pending inline */}
+                    {/* Active tool calls — pending inline */}
                     {activeToolCalls.map((tc) =>
                       tc.function.name === "task" ? (
                         <SubagentTaskLine
@@ -965,7 +997,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                               name={semName}
                               value={cm.text}
                             >
-                              <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} />
+                              <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} theme={t} />
                             </Semantic>
                           );
                         }
@@ -1005,13 +1037,29 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                           {roundGroupsActive ? (
                             <>
                               <CouncilRoundsOverview rounds={councilRounds} theme={t} />
-                              {councilRounds.map((rec) => (
-                                <CouncilRoundGroup key={`round-${rec.round}`} record={rec} theme={t}>
-                                  {rec.state === "running"
-                                    ? debateTurns.filter(({ cm }) => cm.round === rec.round).map(renderTurn)
-                                    : null}
-                                </CouncilRoundGroup>
-                              ))}
+                              {councilRounds
+                                // When a round is selected in the rail, scope the
+                                // main pane to just that round (its debate turns
+                                // expanded); otherwise show every round group.
+                                .filter((rec) => selectedRound === null || rec.round === selectedRound)
+                                .map((rec) => {
+                                  const isSelected = selectedRound === rec.round;
+                                  // Render turns while running (live) OR when this
+                                  // round is the selected one (inspect its debate).
+                                  const showTurns = rec.state === "running" || isSelected;
+                                  return (
+                                    <CouncilRoundGroup
+                                      key={`round-${rec.round}`}
+                                      record={rec}
+                                      selected={isSelected}
+                                      theme={t}
+                                    >
+                                      {showTurns
+                                        ? debateTurns.filter(({ cm }) => cm.round === rec.round).map(renderTurn)
+                                        : null}
+                                    </CouncilRoundGroup>
+                                  );
+                                })}
                             </>
                           ) : (
                             debateTurns.length > 0 && (
@@ -1045,7 +1093,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                               name={`${cm.kind}:${cm.speaker?.role ?? "?"}`}
                               value={cm.text}
                             >
-                              <CouncilSynthesisBanner key={idx} msg={cm} />
+                              <CouncilSynthesisBanner key={idx} msg={cm} theme={t} />
                             </Semantic>
                           ))}
                         </>
@@ -1060,6 +1108,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         color={p.color}
                         theme={t}
                         variant={p.variant}
+                        detail={p.detail}
                       />
                     ))}
                     {/* Council question / preflight askcards render at the END of
@@ -1067,10 +1116,10 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       always anchors to the active question. Rendered here they
                       sat ABOVE trailing live content (streamContent,
                       councilProgress, reasoning pill), which owned the sticky
-                      anchor during the council debate phase ΓÇö leaving the card
+                      anchor during the council debate phase — leaving the card
                       scrolled above the fold so the user had to scroll UP to
                       find it. See fix/tui-askcard-anchor. */}
-                    {/* Reasoning pill ΓÇö Claude-style "💭 ThinkingΓÇª" while a
+                    {/* Reasoning pill — Claude-style "💭 Thinking…" while a
                       reasoning streak is active, then "💭 Thought for Ns"
                       once the model emits text or a tool call. CoT body is
                       discarded so we never re-render heavy markdown for it. */}
@@ -1098,7 +1147,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                                   .split("\n")
                                   .filter((l) => l.trim().length > 0)
                                   .slice(-3)
-                                  .join(" ┬╖ ")}
+                                  .join(" · ")}
                               </text>
                             ) : (
                               <Markdown content={streamReasoning} t={t} />
@@ -1117,7 +1166,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     {isProcessing && !streamContent && activeToolCalls.length === 0 && (
                       <ShimmerText t={t} text="Planning next moves" />
                     )}
-                    {/* Plan questions panel ΓÇö inline, OpenCode-style */}
+                    {/* Plan questions panel — inline, OpenCode-style */}
                     {showPlanPanel && <PlanQuestionsPanel t={t} questions={planQuestions} state={pqs} />}
                     {pendingPaymentApproval && <PaymentApprovalPanel t={t} payment={pendingPaymentApproval} />}
                     {/* Modals/wizards anchored to the bottom so sticky-bottom
@@ -1145,9 +1194,9 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                           marginTop={1}
                         >
                           <text fg={t.text}>
-                            {councilProgress.status === "running" && "Council brainstorming ΓÇö writing spec.md..."}
+                            {councilProgress.status === "running" && "Council brainstorming — writing spec.md..."}
                             {councilProgress.status === "done" &&
-                              `Council brainstorm complete: ${councilProgress.specPath}${councilProgress.hasContent ? "" : " (no content ΓÇö production council wiring deferred)"}`}
+                              `Council brainstorm complete: ${councilProgress.specPath}${councilProgress.hasContent ? "" : " (no content — production council wiring deferred)"}`}
                             {councilProgress.status === "error" &&
                               `Council brainstorm failed: ${councilProgress.error}`}
                           </text>
@@ -1156,7 +1205,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     )}
                     {/* Active council askcards LAST so the bottom-sticky scroll
                       anchors to the pending question (moved here from above
-                      streamContent/councilProgress ΓÇö see fix/tui-askcard-anchor). */}
+                      streamContent/councilProgress — see fix/tui-askcard-anchor). */}
                     {pendingCouncilQuestion && councilCardState && (
                       <CouncilQuestionCard question={pendingCouncilQuestion} theme={t} state={councilCardState} />
                     )}
@@ -1175,7 +1224,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   </box>
                 )}
                 {btwState && <BtwOverlay state={btwState} theme={t} />}
-                {/* TodoCard ΓÇö fixed bottom so agent text cannot push it up */}
+                {/* TodoCard — fixed bottom so agent text cannot push it up */}
                 {taskListSnapshot && (
                   <box flexShrink={0} paddingLeft={2} paddingRight={2} marginBottom={1}>
                     <TaskListPanel snapshot={taskListSnapshot} t={t} expanded={false} />
@@ -1233,7 +1282,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             </box>
             <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" flexShrink={0}>
               <text fg={t.textDim}>{agent.getCwd().replace(os.homedir(), "~")}</text>
-              {sandboxMode === "shuru" ? <text fg="#f97316">{" ┬╖ sandbox"}</text> : null}
+              {sandboxMode === "shuru" ? <text fg="#f97316">{" · sandbox"}</text> : null}
               <box flexGrow={1} />
             </box>
           </box>
@@ -1289,23 +1338,23 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             {updateInfo?.hasUpdate && (
               <box paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0}>
                 <text fg="#f59e0b">
-                  {"Γöâ Update available: v"}
+                  {"┃ Update available: v"}
                   {startupConfig.version}
-                  {" ΓåÆ v"}
+                  {" → v"}
                   {updateInfo.latestVersion}
-                  {" ΓÇö run /update to install"}
+                  {" — run /update to install"}
                 </text>
               </box>
             )}
             {isUpdating && (
               <box paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0}>
-                <text fg="#f59e0b">{"Γöâ Updating..."}</text>
+                <text fg="#f59e0b">{"┃ Updating..."}</text>
               </box>
             )}
             {updateOutput && !isUpdating && (
               <box paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0}>
                 <text fg={updateOutput.startsWith("Update complete") ? "#22c55e" : "#ef4444"}>
-                  {"Γöâ "}
+                  {"┃ "}
                   {updateOutput}
                 </text>
               </box>
@@ -1315,7 +1364,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             </box>
             <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" flexShrink={0}>
               <text fg={t.textDim}>{agent.getCwd().replace(os.homedir(), "~")}</text>
-              {sandboxMode === "shuru" ? <text fg="#f97316">{" ┬╖ sandbox"}</text> : null}
+              {sandboxMode === "shuru" ? <text fg="#f97316">{" · sandbox"}</text> : null}
               <box flexGrow={1} />
               <text fg={t.textDim}>{`v${startupConfig.version}`}</text>
             </box>

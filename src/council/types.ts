@@ -107,6 +107,23 @@ export interface DebateState {
   finalTaggedClaims?: number;
   /** Role-indexed per-round positions for follow-up citations. */
   archive?: DebateArchiveEntry[];
+  /**
+   * F1 — the last successful round's per-criterion met flags, index-aligned to
+   * `spec.successCriteria`. Lets the post-debate card tell whether the debate
+   * actually satisfied the pinned success criteria (distinct from evidence
+   * density) so an unmet outcome is framed as provisional, not a settled
+   * decision. Undefined when the spec had no pinned criteria or no round eval
+   * ever produced a criteria status (treated as all-unmet by the card).
+   */
+  finalCriteriaMet?: boolean[];
+  /**
+   * B4 interactive escalation outcome. Set only when the user was prompted at a
+   * stop-with-unmet boundary and chose an action: `extend` granted extra rounds
+   * past the ceiling, `accept` proceeded with criteria open, `rescope` asked to
+   * narrow the scope. Undefined when no escalation fired (auto-resolved, headless,
+   * or all criteria met). Lets synthesis/caller react to a user-driven partial stop.
+   */
+  escalation?: { action: "extend" | "accept" | "rescope"; grantedRounds?: number };
 }
 
 /**
@@ -284,6 +301,30 @@ export interface CouncilConfig {
    * stable literal); has no effect on debate behaviour.
    */
   runId?: string;
+  /**
+   * B4 interactive escalation channel. When wired, a debate about to STOP with
+   * pinned criteria still unmet (leader gave up or hit the ceiling) hands the
+   * decision to the user via a council_question askcard instead of silently
+   * synthesizing a partial outcome. Optional: headless/direct callers omit it and
+   * the debate falls through to the diagnostic closing verdict unchanged. Same
+   * responder the clarifier + post-debate askcards use.
+   */
+  respondToQuestion?: QuestionResponder;
+  /**
+   * C (mid-debate checkpoint) — directory to persist the per-round debate
+   * checkpoint (`debate-checkpoint.json`), normally the run dir
+   * `.muonroi-flow/runs/<runId>`. When set, runDebate snapshots its state after
+   * each completed round and deletes it on normal completion. Unset → no
+   * checkpointing (direct callers/tests).
+   */
+  checkpointDir?: string;
+  /**
+   * C — a prior checkpoint to resume from. When present AND it matches this
+   * debate (same problem statement + panel), runDebate skips the research +
+   * opening phases and the already-completed rounds, restoring the accumulated
+   * transcript, and continues from the last completed round. Ignored on mismatch.
+   */
+  resumeCheckpoint?: import("./debate-checkpoint.js").DebateCheckpoint;
 }
 
 // ── Persisted Council Memory ─────────────────────────────────────────────────

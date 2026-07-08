@@ -1,20 +1,71 @@
 [
-{"t":"premature optimization","s":"Make it correct first, then fast. Profile before optimizing. 90% of issues from 10% of code."},
-{"t":"error swallowing","s":"Never empty catch. Every caught error must log context (message, stack, inputs). Silent failures are hardest to debug."},
-{"t":"hardcoded values","s":"Never hardcode config (connection strings, API keys, URLs, magic numbers). Use env, config files, or secret managers."},
-{"t":"copy-paste duplication","s":"DRY: extract shared logic into one module. Duplication multiplies maintenance cost linearly."},
-{"t":"missing tests for critical path","s":"Every critical path (auth, payment, data mutation) must have automated tests. Proof code works."},
-{"t":"implicit type coercion","s":"Use strict equality === and explicit conversion. Implicit coercion creates subtle bugs."},
-{"t":"no input validation","s":"Validate ALL external input at boundary (query, body, headers, files, env vars). Never trust client."},
-{"t":"tight coupling to framework","s":"Keep domain logic framework-agnostic. Depend on abstractions (interfaces), not concrete framework types."},
-{"t":"N+1 query problem","s":"Batch DB queries. Eager loading (.Include), batch endpoints, or DataLoader."},
-{"t":"large pull request","s":"Keep PRs under 400 lines. Small PRs reviewed thoroughly, merged faster, fewer conflicts."},
-{"t":"no logging in production","s":"Structured JSON logging with correlation IDs. Levels: Debug/Info/Warning/Error. Never log secrets or PII."},
-{"t":"circular dependency","s":"Dependency graph must be DAG. Break cycles with interfaces, events, or mediation."},
-{"t":"mutable global state","s":"Avoid mutable global/static state. Makes tests order-dependent. Use DI with scoped lifetimes."},
-{"t":"SQL injection via string concat","s":"Always parameterized queries or ORM. Never concatenate user input into SQL."},
-{"t":"no retry on transient failure","s":"Network/DB/external API can fail transiently. Exponential backoff with jitter. Circuit breaker for non-idempotent."},
-{"t":"monolithic function","s":"Functions should do ONE thing. Over 50 lines = warning. Extract well-named helpers."},
-{"t":"no graceful degradation","s":"When non-critical dep fails, degrade gracefully. Return cached/default data, disable feature, queue retry."},
-{"t":"missing API versioning","s":"Version API from day one (/v1/, Accept-Version header, content negotiation). Breaking changes without versioning break clients."}
+  {
+    "t": "premature optimization",
+    "s": "Make it correct first, then fast. Profile before optimizing. 90% of issues from 10% of code."
+  },
+  {
+    "t": "error swallowing",
+    "s": "Never empty catch. Every caught error must log context (message, stack, inputs). Silent failures are hardest to debug."
+  },
+  {
+    "t": "hardcoded values",
+    "s": "Never hardcode config (connection strings, API keys, URLs, magic numbers). Use env, config files, or secret managers."
+  },
+  {
+    "t": "copy-paste duplication",
+    "s": "DRY: extract shared logic into one module. Duplication multiplies maintenance cost linearly."
+  },
+  {
+    "t": "missing tests for critical path",
+    "s": "Every critical path (auth, payment, data mutation) must have automated tests. Proof code works."
+  },
+  {
+    "t": "implicit type coercion",
+    "s": "Use strict equality === and explicit conversion. Implicit coercion creates subtle bugs."
+  },
+  {
+    "t": "no input validation",
+    "s": "Validate ALL external input at boundary (query, body, headers, files, env vars). Never trust client."
+  },
+  {
+    "t": "tight coupling to framework",
+    "s": "Keep domain logic framework-agnostic. Depend on abstractions (interfaces), not concrete framework types."
+  },
+  { "t": "N+1 query problem", "s": "Batch DB queries. Eager loading (.Include), batch endpoints, or DataLoader." },
+  {
+    "t": "large pull request",
+    "s": "Keep PRs under 400 lines. Small PRs reviewed thoroughly, merged faster, fewer conflicts."
+  },
+  {
+    "t": "no logging in production",
+    "s": "Structured JSON logging with correlation IDs. Levels: Debug/Info/Warning/Error. Never log secrets or PII."
+  },
+  {
+    "t": "circular dependency",
+    "s": "Dependency graph must be DAG. Break cycles with interfaces, events, or mediation."
+  },
+  {
+    "t": "mutable global state",
+    "s": "Avoid mutable global/static state. Makes tests order-dependent. Use DI with scoped lifetimes."
+  },
+  {
+    "t": "SQL injection via string concat",
+    "s": "Always parameterized queries or ORM. Never concatenate user input into SQL."
+  },
+  {
+    "t": "no retry on transient failure",
+    "s": "Network/DB/external API can fail transiently. Exponential backoff with jitter. Circuit breaker for non-idempotent."
+  },
+  {
+    "t": "monolithic function",
+    "s": "Functions should do ONE thing. Over 50 lines = warning. Extract well-named helpers."
+  },
+  {
+    "t": "no graceful degradation",
+    "s": "When non-critical dep fails, degrade gracefully. Return cached/default data, disable feature, queue retry."
+  },
+  {
+    "t": "missing API versioning",
+    "s": "Version API from day one (/v1/, Accept-Version header, content negotiation). Breaking changes without versioning break clients."
+  }
 ]

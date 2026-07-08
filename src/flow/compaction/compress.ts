@@ -7,7 +7,11 @@
 
 import { generateText, type ModelMessage } from "ai";
 import { serializeConversation } from "../../orchestrator/compaction.js";
-import { type ProviderFactory as LegacyProvider, resolveModelRuntime } from "../../providers/runtime.js";
+import {
+  type ProviderFactory as LegacyProvider,
+  resolveModelRuntime,
+  resolveTemperatureParam,
+} from "../../providers/runtime.js";
 import { extractPreservedBlocks, type PreservedBlock, restorePreservedBlocks } from "./preserve.js";
 
 export interface CompressResult {
@@ -65,7 +69,7 @@ export async function compressChat(
         system:
           "You are an AI context compaction agent. Your job is to heavily summarize a chat history. Keep the core outcomes, the final state, and the technical context. Remove verbose pleasantries, step-by-step thinking, and irrelevant intermediate steps. Do NOT wrap in markdown unless it's code.",
         prompt: `The following conversation exceeds the token budget. Please summarize it concisely, maintaining the essence of what was discussed, what code was written, and what decisions were reached:${extraPrompt}\n\n${cleaned}`,
-        temperature: 0.1,
+        ...resolveTemperatureParam(runtime, 0.1),
       });
       compressedContent = result.text.trim();
       usedLLM = true;

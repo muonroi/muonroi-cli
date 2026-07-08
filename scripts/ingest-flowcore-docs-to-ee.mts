@@ -36,7 +36,7 @@ async function main() {
   const file = resolve(points);
   const raw = readFileSync(file, "utf8");
   const lines = raw.trim().split(/\r?\n/);
-  const pts = lines.map(l => JSON.parse(l));
+  const pts = lines.map((l) => JSON.parse(l));
 
   console.log(`Loading ${pts.length} docs points from flowcore crawler...`);
 
@@ -49,7 +49,7 @@ async function main() {
     const payload = { ...p.payload, ingested_via: "flowcore-docs-crawl", crawled_at: p.payload?.crawled_at };
 
     const point = {
-      id: id || crypto.randomUUID().replace(/-/g, "").slice(0,32),
+      id: id || crypto.randomUUID().replace(/-/g, "").slice(0, 32),
       text: p.text,
       collection: targetCollection,
       payload,
@@ -77,4 +77,7 @@ async function main() {
   console.log(`${dryRun ? "[DRY-RUN] " : ""}Accepted/processed ${accepted} docs points (${collection || "mixed"})`);
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

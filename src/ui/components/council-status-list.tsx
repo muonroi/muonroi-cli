@@ -14,6 +14,21 @@ function Spinner() {
   return <>{SPINNER_FRAMES[frame]}</>;
 }
 
+/**
+ * Re-render every `tickMs` so active rows show a live-ticking elapsed counter.
+ * Without this the row freezes at the last emitter-sent elapsedMs (emitters
+ * only send on state transitions) — the same "im lìm" symptom the phase
+ * timeline fixed with its own heartbeat (council-phase-timeline.tsx).
+ */
+function useHeartbeat(tickMs = 1000): number {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => force((n) => n + 1), tickMs);
+    return () => clearInterval(id);
+  }, [tickMs]);
+  return Date.now();
+}
+
 function formatElapsed(ms?: number): string {
   if (!ms || ms < 0) return "0s";
   const sec = Math.floor(ms / 1000);
@@ -36,6 +51,8 @@ export interface CouncilStatusListProps {
 }
 
 export function CouncilStatusList({ statuses, theme: t }: CouncilStatusListProps) {
+  // Hook must run unconditionally — before the empty-list early return.
+  const now = useHeartbeat(1000);
   if (statuses.length === 0) return null;
   return (
     <box flexDirection="column" paddingLeft={2} paddingTop={0} flexShrink={0}>
@@ -45,7 +62,9 @@ export function CouncilStatusList({ statuses, theme: t }: CouncilStatusListProps
         const marker = isError ? "✗" : isDone ? "✓" : <Spinner />;
         const markerColor = isError ? t.diffRemovedFg : isDone ? t.planOptionCheck : t.accent;
         const labelColor = isError ? t.diffRemovedFg : t.text;
-        const meta = `(${formatElapsed(s.elapsedMs)}${formatTokens(s)})`;
+        const isLive = s.state === "start" || s.state === "tick";
+        const liveElapsedMs = isLive && typeof s.startedAt === "number" ? Math.max(0, now - s.startedAt) : s.elapsedMs;
+        const meta = `(${formatElapsed(liveElapsedMs)}${formatTokens(s)})`;
         return (
           <box key={s.statusId} flexDirection="column">
             <box>
@@ -82,9 +101,14 @@ function truncate(s: string, max: number): string {
  */
 export function upsertStatus(prev: CouncilStatusData[], next: CouncilStatusData): CouncilStatusData[] {
   const idx = prev.findIndex((s) => s.statusId === next.statusId);
-  if (idx === -1) return [...prev, next];
+  if (idx === -1) {
+    // Stamp a client-side start anchor so the row can live-tick between emitter
+    // updates (emitters only send elapsedMs on state transitions).
+    const startedAt = next.startedAt ?? Date.now() - (next.elapsedMs ?? 0);
+    return [...prev, { ...next, startedAt }];
+  }
   const out = prev.slice();
-  out[idx] = next;
+  out[idx] = { ...next, startedAt: next.startedAt ?? out[idx].startedAt };
   return out;
 }
 

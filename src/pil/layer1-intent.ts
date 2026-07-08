@@ -1,24 +1,23 @@
 /**
  * src/pil/layer1-intent.ts
  *
- * Layer 1: Intent detection.
- * Pass 1 — classifier (regex + tree-sitter): maps all 14 possible reason strings to TaskType.
- * Pass 2 — keyword fallback: catches debug/plan/documentation that classifier misses.
- * Pass 3 — EE brain fallback via bridge.classifyViaBrain (replaces ollamaClassify).
- * Populates taskType, confidence, and domain on PipelineContext.
- * outputStyle is always null from Layer 1 — Layer 6 handles output style detection via bridge.
+ * Layer 1: Intent detection — MODEL-FIRST ONLY.
+ * The configured chat model (via opts.llmFallback) classifies taskType / intent
+ * / style / depth / clarity / scope / language. The old keyword-regex "Pass 0-4"
+ * cascade was DELETED (2026-07-07, no-regex rule) — regex no longer decides
+ * intent. When no classifier is wired the layer degrades to UNKNOWN (taskType
+ * null, keep-tools), never a regex guess. On a classify miss the classifier
+ * self-repairs (see createLlmClassifier) before surfacing UNKNOWN.
  * Fail-open: any error returns ctx unchanged with applied=false.
+ *
+ * NOTE: scoreComplexity / scoreSufficiency below are retained ONLY because other
+ * modules (playbook, discovery, orchestrator) still import them; they no longer
+ * run on this layer's classification path.
  */
 
-import { classifyViaBrain, pilContext } from "../ee/bridge.js";
+import { pilContext } from "../ee/bridge.js";
 import type { GsdPhase } from "../gsd/types.js";
-import { classify } from "../router/classifier/index.js";
-import {
-  getUnifiedPilBudgetMs,
-  isLlmFirstBrainEnabled,
-  isLlmFirstClassifyEnabled,
-  isUnifiedPilEnabled,
-} from "./config.js";
+import { getUnifiedPilBudgetMs, isLlmFirstBrainEnabled } from "./config.js";
 import type { LlmClassifyFn, LlmClassifyResult } from "./llm-classify.js";
 import type { BrainData, IntentDetectionTrace, OutputStyle, PipelineContext, TaskType } from "./types.js";
 
@@ -164,34 +163,6 @@ export function scoreComplexity(input: ComplexityInput): ComplexityOutput {
 
   return { complexity, score };
 }
-
-// Maps every classifier reason string to a TaskType (or null for non-coding signals).
-const REASON_TO_TASK_TYPE: Partial<Record<string, TaskType>> = {
-  "regex:refactor": "refactor",
-  "regex:edit": "generate",
-  "regex:create-file": "generate",
-  "regex:run-command": "analyze",
-  "regex:explain": "analyze",
-  "regex:search": "analyze",
-  "regex:install": "analyze",
-  // tree-sitter:* parses indicate code presence ONLY — no intent signal.
-  // Mapping these to "refactor" caused 4/5 baseline misclassifications
-  // (Phase 4, 4P-1). Leave undefined so Pass 2 keyword fallback decides.
-  "tree-sitter:typescript": undefined,
-  "tree-sitter:python": undefined,
-  "regex:read": "analyze",
-  "regex:git": "analyze",
-  "regex:short-message": "general",
-  "regex:design": "plan",
-  "regex:debug": "debug",
-  // no-match / error / cold / low-confidence → null (conversational passthrough)
-  "regex:no-match": undefined,
-  "tree-sitter:no-fenced-code": undefined,
-  "tree-sitter:cold": undefined,
-  "tree-sitter:typescript-parse-error": undefined,
-  "tree-sitter:python-parse-error": undefined,
-  "low-confidence": undefined,
-};
 
 /**
  * Pass 0 — deterministic full-prompt overrides.
@@ -363,64 +334,6 @@ export function isStatusCheckQuestion(raw: string): boolean {
   return STATUS_CHECK_VI_RE.test(t) || STATUS_CHECK_EN_RE.test(t);
 }
 
-// Keyword patterns for task types the classifier doesn't natively handle.
-// Applied when classifier abstains OR matches the low-signal "general" path.
-// Patterns are bilingual (EN + VN) — Vietnamese cues use accent-insensitive
-// alternations so common diacritic drops still match.
-const KEYWORD_PATTERNS: Array<{ pattern: RegExp; taskType: TaskType; confidence: number }> = [
-  {
-    // EN: fix/bug/error/etc.  VN: sửa lỗi, lỗi, hỏng, không chạy
-    pattern:
-      /\b(fix|bug|error|exception|crash|fail(?:s|ed|ing)?|broken|wrong|issue|traceback)\b|(sửa lỗi|sua loi|báo lỗi|bao loi|\blỗi\b|\bloi\b|hỏng|hong|không chạy|khong chay)/i,
-    taskType: "debug",
-    confidence: 0.65,
-  },
-  {
-    // EN: plan/roadmap/architecture.  VN: kế hoạch, thiết kế, kiến trúc, lộ trình
-    pattern:
-      /\b(plan|roadmap|phase|step(?:s)?|approach|design|architect(?:ure)?|strategy)\b|(kế hoạch|ke hoach|thiết kế|thiet ke|kiến trúc|kien truc|lộ trình|lo trinh)/i,
-    taskType: "plan",
-    confidence: 0.6,
-  },
-  {
-    // EN: docs/readme/jsdoc.  VN: tài liệu, viết doc, ghi chú, comment
-    pattern:
-      /\b(doc(?:s|umentation)?|readme|comment|jsdoc|tsdoc|docstring)\b|(tài liệu|tai lieu|viết doc|viet doc|ghi chú|ghi chu)/i,
-    taskType: "documentation",
-    confidence: 0.6,
-  },
-  {
-    // EN: test/spec/coverage.  VN: kiểm thử, viết test, kiểm tra
-    pattern:
-      /\b(test(?:s|ing)?|spec|unit test|coverage|assert(?:ion)?)\b|(kiểm thử|kiem thu|viết test|viet test|kiểm tra|kiem tra)/i,
-    taskType: "analyze",
-    confidence: 0.65,
-  },
-  {
-    // EN: refactor.  VN: tái cấu trúc, viết lại, tổ chức lại
-    pattern: /\brefactor(?:ing)?\b|(tái cấu trúc|tai cau truc|viết lại|viet lai|tổ chức lại|to chuc lai)/i,
-    taskType: "refactor",
-    confidence: 0.7,
-  },
-  {
-    // EN: create/generate.  VN: tạo, sinh, viết mới
-    pattern: /\b(generate|scaffold|bootstrap)\b|(tạo file|tao file|tạo module|tao module|sinh code|viết mới|viet moi)/i,
-    taskType: "generate",
-    confidence: 0.65,
-  },
-];
-
-// Catch-all classifier reasons whose taskType assignment is weak — Pass 2 keyword
-// rescue is allowed to override them when confidence is sub-threshold. Specific
-// rules like `regex:run-command` / `regex:git` stay authoritative.
-const CATCHALL_REASONS = new Set<string>(["regex:edit", "regex:create-file"]);
-const HIGH_CONF_THRESHOLD_PASS2 = 0.7;
-
-// Valid task types for bridge classification parsing (matches RESPONSE_SCHEMAS keys minus 'general').
-const VALID_TASK_TYPES: TaskType[] = ["refactor", "debug", "plan", "analyze", "documentation", "generate"];
-
-const VALID_STYLES = ["concise", "balanced", "detailed"] as const;
-
 // Detect language/domain from prompt content. Order matters: code fences first
 // (highest signal), file extensions next, then bare keywords.
 const DOMAIN_PATTERNS: Array<{ pattern: RegExp; domain: string }> = [
@@ -468,7 +381,7 @@ const STYLE_PATTERNS: Array<{ pattern: RegExp; style: OutputStyle }> = [
   { pattern: /\b(balanced|normal|standard|cân bằng|bình thường)\b/i, style: "balanced" },
 ];
 
-function detectStyleFromText(raw: string): OutputStyle | null {
+function _detectStyleFromText(raw: string): OutputStyle | null {
   for (const { pattern, style } of STYLE_PATTERNS) {
     if (pattern.test(raw)) return style;
   }
@@ -691,7 +604,10 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
     // downstream (layer3 retrieval) as before. Trivial turns ("ok", greetings)
     // also go through the model so chitchat is a semantic decision, not a regex
     // whitelist; the model returns intentKind="chat" for pure pleasantries.
-    if (isLlmFirstClassifyEnabled() && opts.llmFallback) {
+    // Model-first is the SOLE classifier whenever one is wired. The old
+    // MUONROI_LLM_FIRST_CLASSIFY killswitch is gone: it used to select the
+    // keyword-regex cascade, which was deleted (2026-07-07, no-regex rule).
+    if (opts.llmFallback) {
       let llmRes: LlmClassifyResult | null = null;
       let classifyError: string | null = null;
       try {
@@ -705,14 +621,15 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
         // request must never be chitchat — chitchat drops the whole toolset and
         // breaks the turn. Only ever upgrades chitchat → task.
         if (intentKind === "chitchat" && hasActionableToolIntent(ctx.raw)) intentKind = "task";
-        const outputStyle = llmRes.outputStyle ?? detectStyleFromText(ctx.raw);
+        // Style + complexity come from the MODEL, never a keyword regex. Style
+        // is the model's word or null (layer4/6 handle null without regex).
+        // Complexity is derived from the model's depthTier purely for the
+        // telemetry trace — routing reads depthTier directly, not this.
+        const outputStyle = llmRes.outputStyle;
         const domain = extractDomain("", ctx.raw);
-        const { complexity, score: complexityScore } = scoreComplexity({
-          rawText: ctx.raw,
-          taskType: llmRes.taskType,
-          t0HitCount: 0,
-          hasMaxSprintsOne: false,
-        });
+        const complexity: "low" | "medium" | "high" =
+          llmRes.depthTier === "heavy" ? "high" : llmRes.depthTier === "quick" ? "low" : "medium";
+        const complexityScore = 0;
         const intentTrace: IntentDetectionTrace = {
           pass1Reason: "llm-first",
           pass1Confidence: llmRes.confidence,
@@ -729,7 +646,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
           pass3LegacyStyleSucceeded: false,
           pass4LlmAttempted: true,
           pass4LlmSucceeded: true,
-          styleSource: llmRes.outputStyle ? "brain-unified" : outputStyle ? "explicit-regex" : "none",
+          styleSource: llmRes.outputStyle ? "brain-unified" : "none",
           finalTaskType: llmRes.taskType,
           finalConfidence: llmRes.confidence,
           complexity,
@@ -829,12 +746,10 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
           `reason=${classifyError ?? "null/unparseable model response"} ` +
           `model-classifier=wired rawPreview=${JSON.stringify(ctx.raw.slice(0, 120))}`,
       );
-      const { complexity: failComplexity, score: failComplexityScore } = scoreComplexity({
-        rawText: ctx.raw,
-        taskType: null,
-        t0HitCount: 0,
-        hasMaxSprintsOne: false,
-      });
+      // No regex on the failure path either — UNKNOWN classification carries a
+      // neutral "medium" complexity for the telemetry trace, decided by nothing.
+      const failComplexity: "low" | "medium" | "high" = "medium";
+      const failComplexityScore = 0;
       return {
         ...ctx,
         taskType: null,
@@ -877,697 +792,47 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
       };
     }
 
-    // Pass 0 — deterministic full-prompt overrides (Phase 5 BUG-B / BUG-D).
-    // LEGACY regex cascade — reached ONLY when no model classifier is wired
-    // (opts.llmFallback absent) or the model-first flag is off. On the main chat
-    // path the model classifier is always wired, so this never decides intent in
-    // production. It is NOT a runtime fallback for a failed model call (that path
-    // returns above with a logged failure).
-    // Two narrow patterns short-circuit the whole pipeline:
-    //  - continuation phrase → general/chitchat
-    //  - performance/optimization verbs → refactor/task
-    // Both eliminate LLM-bridge nondeterminism on inputs whose correct
-    // label is unambiguous from the prompt alone.
-    if (isContinuationPhrase(ctx.raw)) {
-      const { complexity, score: complexityScore } = scoreComplexity({
-        rawText: ctx.raw,
-        taskType: "general",
-        t0HitCount: 0,
-        hasMaxSprintsOne: false,
-      });
-      const intentTrace: IntentDetectionTrace = {
-        pass1Reason: "pass0:continuation",
-        pass1Confidence: 0.9,
-        pass1TaskType: "general",
-        pass1Hit: true,
-        pass2Hit: false,
-        pass25ChitchatHit: false,
-        pass3UnifiedAttempted: false,
-        pass3UnifiedSucceeded: false,
-        pass3LegacyTaskAttempted: false,
-        pass3LegacyTaskSucceeded: false,
-        pass3LegacyStyleAttempted: false,
-        pass3LegacyStyleSucceeded: false,
-        pass4LlmAttempted: false,
-        pass4LlmSucceeded: false,
-        styleSource: "chitchat-default",
-        finalTaskType: "general",
-        finalConfidence: 0.9,
-        complexity,
-        complexityScore,
-      };
-      return {
-        ...ctx,
-        taskType: "general",
-        domain: null,
-        confidence: 0.9,
-        outputStyle: "concise",
-        intentKind: "chitchat",
-        _brainData: null,
-        _intentTrace: intentTrace,
-        layers: [
-          ...ctx.layers,
-          {
-            name: "intent-detection",
-            applied: true,
-            delta: "taskType=general,kind=chitchat,conf=0.90,domain=none,style=concise,pass0=continuation",
-          },
-        ],
-      };
-    }
-    if (isStatusCheckQuestion(ctx.raw)) {
-      // A meta question about prior work → conversational continuation. Route to
-      // chitchat so layer4-gsd skips the "make a NEW plan + implement" scaffold
-      // and the agent answers from the existing thread context (session
-      // c6387d2c6e1b root cause). Mirrors the continuation branch above.
-      const { complexity, score: complexityScore } = scoreComplexity({
-        rawText: ctx.raw,
-        taskType: "general",
-        t0HitCount: 0,
-        hasMaxSprintsOne: false,
-      });
-      const intentTrace: IntentDetectionTrace = {
-        pass1Reason: "pass0:status-check",
-        pass1Confidence: 0.9,
-        pass1TaskType: "general",
-        pass1Hit: true,
-        pass2Hit: false,
-        pass25ChitchatHit: false,
-        pass3UnifiedAttempted: false,
-        pass3UnifiedSucceeded: false,
-        pass3LegacyTaskAttempted: false,
-        pass3LegacyTaskSucceeded: false,
-        pass3LegacyStyleAttempted: false,
-        pass3LegacyStyleSucceeded: false,
-        pass4LlmAttempted: false,
-        pass4LlmSucceeded: false,
-        styleSource: "chitchat-default",
-        finalTaskType: "general",
-        finalConfidence: 0.9,
-        complexity,
-        complexityScore,
-      };
-      return {
-        ...ctx,
-        taskType: "general",
-        domain: null,
-        confidence: 0.9,
-        outputStyle: "concise",
-        intentKind: "chitchat",
-        _brainData: null,
-        _intentTrace: intentTrace,
-        layers: [
-          ...ctx.layers,
-          {
-            name: "intent-detection",
-            applied: true,
-            delta: "taskType=general,kind=chitchat,conf=0.90,domain=none,style=concise,pass0=status-check",
-          },
-        ],
-      };
-    }
-    if (isTestGenerationTask(ctx.raw)) {
-      const domainPass0 = extractDomain("", ctx.raw);
-      const styleFromText = detectStyleFromText(ctx.raw) ?? "balanced";
-      const { complexity, score: complexityScore } = scoreComplexity({
-        rawText: ctx.raw,
-        taskType: "generate",
-        t0HitCount: 0,
-        hasMaxSprintsOne: false,
-      });
-      const intentTrace: IntentDetectionTrace = {
-        pass1Reason: "pass0:test-generation",
-        pass1Confidence: 0.9,
-        pass1TaskType: "generate",
-        pass1Hit: true,
-        pass2Hit: false,
-        pass25ChitchatHit: false,
-        pass3UnifiedAttempted: false,
-        pass3UnifiedSucceeded: false,
-        pass3LegacyTaskAttempted: false,
-        pass3LegacyTaskSucceeded: false,
-        pass3LegacyStyleAttempted: false,
-        pass3LegacyStyleSucceeded: false,
-        pass4LlmAttempted: false,
-        pass4LlmSucceeded: false,
-        styleSource: detectStyleFromText(ctx.raw) ? "explicit-regex" : "classifier-default",
-        finalTaskType: "generate",
-        finalConfidence: 0.9,
-        complexity,
-        complexityScore,
-      };
-      return {
-        ...ctx,
-        taskType: "generate",
-        domain: domainPass0,
-        confidence: 0.9,
-        outputStyle: styleFromText,
-        intentKind: "task",
-        _brainData: null,
-        _intentTrace: intentTrace,
-        layers: [
-          ...ctx.layers,
-          {
-            name: "intent-detection",
-            applied: true,
-            delta: `taskType=generate,kind=task,conf=0.90,domain=${domainPass0 ?? "none"},style=${styleFromText},pass0=test-generation`,
-          },
-        ],
-      };
-    }
-    if (isPerformanceRefactor(ctx.raw)) {
-      const domainPass0 = extractDomain("", ctx.raw);
-      const styleFromText = detectStyleFromText(ctx.raw) ?? "balanced";
-      const { complexity, score: complexityScore } = scoreComplexity({
-        rawText: ctx.raw,
-        taskType: "refactor",
-        t0HitCount: 0,
-        hasMaxSprintsOne: false,
-      });
-      const intentTrace: IntentDetectionTrace = {
-        pass1Reason: "pass0:performance",
-        pass1Confidence: 0.85,
-        pass1TaskType: "refactor",
-        pass1Hit: true,
-        pass2Hit: false,
-        pass25ChitchatHit: false,
-        pass3UnifiedAttempted: false,
-        pass3UnifiedSucceeded: false,
-        pass3LegacyTaskAttempted: false,
-        pass3LegacyTaskSucceeded: false,
-        pass3LegacyStyleAttempted: false,
-        pass3LegacyStyleSucceeded: false,
-        pass4LlmAttempted: false,
-        pass4LlmSucceeded: false,
-        styleSource: detectStyleFromText(ctx.raw) ? "explicit-regex" : "classifier-default",
-        finalTaskType: "refactor",
-        finalConfidence: 0.85,
-        complexity,
-        complexityScore,
-      };
-      return {
-        ...ctx,
-        taskType: "refactor",
-        domain: domainPass0,
-        confidence: 0.85,
-        outputStyle: styleFromText,
-        intentKind: "task",
-        _brainData: null,
-        _intentTrace: intentTrace,
-        layers: [
-          ...ctx.layers,
-          {
-            name: "intent-detection",
-            applied: true,
-            delta: `taskType=refactor,kind=task,conf=0.85,domain=${domainPass0 ?? "none"},style=${styleFromText},pass0=performance`,
-          },
-        ],
-      };
-    }
-    if (isGreenfieldBuildTask(ctx.raw)) {
-      const domainPass0 = extractDomain("", ctx.raw);
-      const styleFromText = detectStyleFromText(ctx.raw) ?? "balanced";
-      const { complexity, score: complexityScore } = scoreComplexity({
-        rawText: ctx.raw,
-        taskType: "build",
-        t0HitCount: 0,
-        hasMaxSprintsOne: false,
-      });
-      const intentTrace: IntentDetectionTrace = {
-        pass1Reason: "pass0:greenfield-build",
-        pass1Confidence: 0.85,
-        pass1TaskType: "build",
-        pass1Hit: true,
-        pass2Hit: false,
-        pass25ChitchatHit: false,
-        pass3UnifiedAttempted: false,
-        pass3UnifiedSucceeded: false,
-        pass3LegacyTaskAttempted: false,
-        pass3LegacyTaskSucceeded: false,
-        pass3LegacyStyleAttempted: false,
-        pass3LegacyStyleSucceeded: false,
-        pass4LlmAttempted: false,
-        pass4LlmSucceeded: false,
-        styleSource: detectStyleFromText(ctx.raw) ? "explicit-regex" : "classifier-default",
-        finalTaskType: "build",
-        finalConfidence: 0.85,
-        complexity,
-        complexityScore,
-      };
-      return {
-        ...ctx,
-        taskType: "build",
-        domain: domainPass0,
-        confidence: 0.85,
-        outputStyle: styleFromText,
-        intentKind: "task",
-        _brainData: null,
-        _intentTrace: intentTrace,
-        layers: [
-          ...ctx.layers,
-          {
-            name: "intent-detection",
-            applied: true,
-            delta: `taskType=build,kind=task,conf=0.85,domain=${domainPass0 ?? "none"},style=${styleFromText},pass0=greenfield-build`,
-          },
-        ],
-      };
-    }
-
-    // Pass 1: local classifier.
-    const result = classify(ctx.raw);
-    const pass1TaskType: TaskType | null = REASON_TO_TASK_TYPE[result.reason] ?? null;
-    let taskType: TaskType | null = pass1TaskType;
-    let confidence = result.confidence;
-    const domain = extractDomain(result.reason, ctx.raw);
-    let outputStyle: OutputStyle | null = null;
-    let intentKind: "task" | "chitchat" | null = null;
-    let brainData: BrainData | null = null;
-    // Step-by-step trace — populated as each pass runs so cost reports can
-    // attribute which pass actually decided the outcome.
-    let pass2Pattern: string | undefined;
-    let pass2Hit = false;
-    let pass25ChitchatHit = false;
-    let pass3UnifiedSucceeded = false;
-    let pass3LegacyTaskAttempted = false;
-    let pass3LegacyTaskSucceeded = false;
-    let pass3LegacyStyleAttempted = false;
-    let pass3LegacyStyleSucceeded = false;
-    let styleSource: IntentDetectionTrace["styleSource"] = "none";
-
-    // Pass 2: keyword fallback. Runs when classifier abstains OR when the
-    // classifier match was a low-signal "general" (regex:short-message) OR
-    // when the catch-all `regex:edit` / `regex:create-file` mapped a vague
-    // "fix X" / "tạo X" verb to taskType=generate at sub-threshold confidence
-    // (< 0.7). The catch-all v2 rules are deliberately weak (conf 0.55) so a
-    // VN debug prompt like "ci/cd đang bị lỗi, check và fix cho tôi" still
-    // routes through the keyword rescue here — which carries the bare-`lỗi`
-    // and `\bfix\b` debug cues that the catch-all regex cannot tell apart
-    // from generic edit.
-    const lowSignal = taskType === "general" && result.reason === "regex:short-message";
-    const catchAllRescue =
-      taskType !== null && confidence < HIGH_CONF_THRESHOLD_PASS2 && CATCHALL_REASONS.has(result.reason);
-    if (taskType === null || lowSignal || catchAllRescue) {
-      for (const { pattern, taskType: kwType, confidence: kwConf } of KEYWORD_PATTERNS) {
-        if (pattern.test(ctx.raw)) {
-          taskType = kwType;
-          confidence = kwConf;
-          pass2Hit = true;
-          pass2Pattern = pattern.source;
-          break;
-        }
-      }
-    }
-
-    // Pass 2.5: hot-path chitchat short-circuit for ultra-short greetings
-    // ("hi", "ok", "thanks", "ty") — mapped to taskType="general" without
-    // burning a brain round-trip. Both conditions required (AND) so we don't
-    // accidentally swallow phrases like "refactor this" or "fix the bug" that
-    // happen to be short.
-    //
-    // WhoAmI v4.0: the outputStyle baseline from communication.brevity +
-    // decision_speed is now wired below (getWhoAmIProfile/outputStyleFromProfile
-    // at the classifier-default branch — it replaces "balanced" when no per-turn
-    // signal resolves the style). Not applied at this chitchat hot-path: greetings
-    // already force "concise" regardless of profile.
-    const trimmed = ctx.raw.trim();
-    const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
-    const noTaskSignal = taskType === null || (taskType === "general" && result.reason === "regex:short-message");
-    if (noTaskSignal && trimmed.length < 10 && wordCount <= 2) {
-      taskType = "general";
-      confidence = 0.5;
-      intentKind = "chitchat";
-      outputStyle = "concise";
-      pass25ChitchatHit = true;
-      styleSource = "chitchat-default";
-    }
-
-    // Pass 2.6 — multi-word PURE social pleasantries ("cảm ơn bạn rất nhiều
-    // nhé", "thank you so much", "ok great thanks") that the 2-word hot-path
-    // above misses. Without this they fall through to the brain/LLM passes,
-    // which classify intentKind inconsistently (live session 40c726a31a37
-    // returned intentKind=null → toolCount=37, ~15-20K wasted tool-schema
-    // tokens for a thank-you). isSocialPleasantry is strict (every token is
-    // greeting/thanks/ack/filler vocab) so it can never swallow a task; the
-    // hasActionableToolIntent veto is belt-and-suspenders. Classifying here is
-    // also a cost win: it skips the brain round-trip (needsBrain requires
-    // intentKind !== "chitchat").
-    if (
-      intentKind !== "chitchat" &&
-      (taskType === null || taskType === "general") &&
-      !hasActionableToolIntent(trimmed) &&
-      isSocialPleasantry(trimmed)
-    ) {
-      taskType = "general";
-      confidence = 0.5;
-      intentKind = "chitchat";
-      outputStyle = "concise";
-      pass25ChitchatHit = true;
-      styleSource = "chitchat-default";
-    }
-
-    // Pass 3 UNIFIED: single /api/pil-context call replaces the multi-call
-    // cascade (classifier rescue + style brain). Fires only when flag is on
-    // AND local signal is weak (no taskType or low confidence) AND we haven't
-    // already short-circuited to chitchat.
-    const HIGH_CONF_THRESHOLD = 0.7;
-    const needsBrain =
-      isUnifiedPilEnabled() && intentKind !== "chitchat" && (taskType === null || confidence < HIGH_CONF_THRESHOLD);
-
-    let unifiedFailed = false;
-    let brainGsdPhase: GsdPhase | null = mapBrainGsdPhase(ctx.gsdPhase);
-    if (needsBrain) {
-      // Step 8 (ee-anti-mu): enrich the raw passed to pilContext for sessions that may have
-      // experienced compaction (or any sessionId-bearing turn) so the brain sees EE checkpoints
-      // + the PRESERVE_FULL_CONTEXT veto token. Unconditional for any turn with sessionId
-      // (covers _compactionStats.count > 0 or step > K cases even if local conf high).
-      let brainRaw = ctx.raw;
-      if (ctx.sessionId) {
-        brainRaw =
-          ctx.raw +
-          ' [EE task checkpoints ("Context checkpoint summary" with ✔ DONE) from prior compactions are available via the ee.query tool. ' +
-          "To keep full tool history this turn when you see pre-warn or compaction note, emit exact literal PRESERVE_FULL_CONTEXT in reasoning or assistant note. " +
-          'Self-check "task finished?" or "compacted yet this turn?" using the checkpoints.]';
-      }
-      const resp = await pilContext(brainRaw, {
-        projectCtx: domain ? { domain } : undefined,
-        budgetMs: getUnifiedPilBudgetMs(),
-      });
-      if (resp) {
-        if (resp.taskType) taskType = resp.taskType;
-        if (resp.intentKind) intentKind = resp.intentKind;
-        if (resp.outputStyle) {
-          outputStyle = resp.outputStyle;
-          styleSource = "brain-unified";
-        }
-        if (resp.confidence) confidence = resp.confidence;
-        brainGsdPhase = mapBrainGsdPhase(resp.gsd_phase) ?? brainGsdPhase;
-        brainData = {
-          t0_principles: resp.t0_principles,
-          t1_rules: resp.t1_rules,
-          t2_patterns: resp.t2_patterns,
-          retrieval_skipped_reason: resp.retrieval_skipped_reason,
-        };
-        pass3UnifiedSucceeded = true;
-      } else {
-        unifiedFailed = true;
-      }
-    }
-
-    // Pass 4 LLM FALLBACK: fires when the brain's confidence is below the
-    // hot-path skip threshold (HIGH_CONF_THRESHOLD = 0.7).
-    //
-    // Earlier iteration tried a tighter floor (0.5) to skip Pass 4 on "good
-    // enough" brain answers, but session eda85985dce9 showed the brain
-    // routinely returns 0.55–0.65 for ambiguous prompts like "fix CI fail"
-    // — and at that confidence band the brain's answer is wrong often
-    // enough that skipping Pass 4 reintroduces the classification leak we
-    // shipped Pass 4 to fix. The ~1s LLM round-trip is the price of
-    // correctness on borderline turns; high-confidence turns (brain ≥ 0.7)
-    // bypass Pass 4 entirely so the cost only hits weak signals.
-    let pass4LlmAttempted = false;
-    let pass4LlmSucceeded = false;
-    const llmFallbackEligible =
-      !!opts.llmFallback &&
-      intentKind !== "chitchat" &&
-      (taskType === null || unifiedFailed || confidence < HIGH_CONF_THRESHOLD);
-    if (llmFallbackEligible) {
-      pass4LlmAttempted = true;
-      try {
-        const llmRes = await opts.llmFallback!(ctx.raw, { recentTurns: opts.recentTurns });
-        if (llmRes) {
-          pass4LlmSucceeded = true;
-          taskType = llmRes.taskType;
-          confidence = llmRes.confidence;
-          // Pass 4 is reached ONLY when intentKind !== "chitchat" (see
-          // llmFallbackEligible above) — every genuine social pleasantry was
-          // already short-circuited upstream by Pass 0 (continuation /
-          // status-check), Pass 2.5 (ultra-short greeting) and Pass 2.6
-          // (isSocialPleasantry). So a taskType="general" result HERE is a
-          // SUBSTANTIVE question that slipped past the greeting detectors —
-          // NOT chitchat. Live repro (session b51ba653e890): "bạn đang được
-          // chạy bên trong CLI này thì ... CLI tác động thế nào đến bạn?" was
-          // mapped general→chitchat, which nuked the entire action toolset
-          // (message-processor.ts:1285 `isChitchat && !_priorTurnHadTools →
-          // {}`). The model announced "Tôi cần điều tra code ... không đoán"
-          // (Evidence-First contract) but had only respond_general — no
-          // read_file/grep/bash to act with → narration → respond_general
-          // spam-abort, zero answer. A general question is tool-capable:
-          // classify it "task" so the toolset survives. Per the established
-          // keep-tools precedent in this file (TOOL_NAME_RE veto), a false
-          // "task" merely re-adds ~1.5K tokens of tool schema, while a false
-          // "chitchat" BREAKS the turn.
-          intentKind = "task";
-          if (llmRes.outputStyle) {
-            outputStyle = llmRes.outputStyle;
-            styleSource = "brain-unified"; // closest existing source — LLM acts in same role
-          }
-        }
-      } catch (err) {
-        console.error(`[pil.layer1] LLM fallback failed: ${(err as Error)?.message}`);
-      }
-    }
-
-    // Pass 3 LEGACY FALLBACK: only runs when flag off.
-    // Cost optimization: when unified call FAILED, we skip the legacy brain
-    // round-trips entirely. The unified pilContext already tried the same
-    // backend; a second classifyViaBrain ~1.5s after a failure almost always
-    // fails too, wasting tokens and ~2.3s of wall time. The cheap regex style
-    // detector still runs below to recover explicit "ngắn gọn"/"detailed" cues.
-    const runLegacyBrain = !isUnifiedPilEnabled();
-    let legacyBrainAttempted = false;
-    if (runLegacyBrain) {
-      if (taskType === null) {
-        legacyBrainAttempted = true;
-        pass3LegacyTaskAttempted = true;
-        // 4P-2: neutral bridge-classifier prompt. Earlier wording biased the
-        // LLM toward `refactor` for any code touch (baseline trace
-        // taskType=refactor,conf=0.75 on a clear feature-add). The rewrite:
-        //   - Lists categories in neutral order (analyze first, refactor 4th).
-        //   - Restricts refactor to explicit restructure verbs.
-        //   - Tells the model to prefer 'general' over guessing when ambiguous.
-        //   - Clarifies that feature additions are 'generate' even when they
-        //     touch existing files.
-        // 0.7 confidence threshold for Pass 2 keyword override remains
-        // unchanged (HIGH_CONF_THRESHOLD_PASS2 above).
-        const brainRaw = await classifyViaBrain(
-          `You are a multilingual prompt classifier. The user's prompt may be in English, Vietnamese, or a mix of both.
-Classify the prompt's INTENT (not its language). Reply with TWO lowercase words separated by a comma: <category>,<style>
-
-Category — pick ONE (listed in neutral order, no precedence):
-  analyze       — explain / inspect / review existing code (giải thích, phân tích, review)
-  debug         — fix a bug or investigate failure (sửa lỗi, fix bug, lỗi, traceback)
-  generate      — create new code/file or add new behavior (tạo, sinh code, viết function mới, thêm)
-  refactor      — restructure existing code (tái cấu trúc, refactor)
-  plan          — design / roadmap / architecture (kế hoạch, thiết kế, kiến trúc)
-  documentation — write docs/comments (viết docs, comment, jsdoc)
-  general       — chitchat OR unclear / ambiguous coding intent
-
-Rules (Phase 4 4P-2 disambiguation):
-- Only return refactor when the user EXPLICITLY uses one of: rename, restructure, reorganize, extract, inline, move, migrate, reshape — applied to EXISTING code WITHOUT adding new behavior.
-- Feature additions ('add flag', 'thêm', 'create endpoint', 'thêm option'), changing a DEFAULT value, adding tests, or improving coverage are 'generate' — NOT refactor.
-- 'improve', 'change', 'update', 'modify', 'đổi', 'cải thiện' alone do NOT imply refactor — pick the specific category by what the change actually does.
-- When the request is ambiguous, prefer 'general' over guessing refactor.
-
-Negative examples (NOT refactor):
-- "đổi default --max-tool-rounds 8 sang 12" → generate
-- "improve test coverage" → generate
-- "tại sao X trả empty" → analyze
-- "fix CI failing" → debug
-
-Style — pick ONE:
-  concise (ngắn gọn) | balanced (cân bằng) | detailed (chi tiết)
-
-Examples:
-  "Refactor this function" → refactor,balanced
-  "tại sao test fail" → debug,balanced
-  "thiết kế hệ thống auth" → plan,detailed
-  "thêm flag --foo" → generate,concise
-  "hi" → general,concise
-
-Prompt: "${ctx.raw.slice(0, 500)}"`,
-          1500,
-        );
-        if (brainRaw) {
-          pass3LegacyTaskSucceeded = true;
-          const lower = brainRaw.toLowerCase();
-          // 4P-2: match `general` BEFORE the coding-category list so an
-          // ambiguous prompt the model marked `general,*` doesn't accidentally
-          // fall through to a substring hit later. `none` kept as legacy alias.
-          if (/\bgeneral\b/.test(lower) || /\bnone\b/.test(lower)) {
-            taskType = "general";
-            confidence = 0.6;
-            intentKind = "chitchat";
-            if (outputStyle === null) {
-              outputStyle = "concise";
-              styleSource = "chitchat-default";
-            }
-          } else {
-            const matched = VALID_TASK_TYPES.find((t) => lower.includes(t));
-            if (matched) {
-              taskType = matched;
-              confidence = 0.55;
-              intentKind = "task";
-            }
-          }
-          const styleMatched = VALID_STYLES.find((s) => lower.includes(s));
-          if (styleMatched) {
-            outputStyle = styleMatched;
-            styleSource = "brain-legacy";
-          }
-        }
-      }
-
-      // Pass 3.5: regex style detection — free, always runs before any brain call.
-      // Catches explicit user cues ("ngắn gọn", "chi tiết", "step by step").
-      if (outputStyle === null) {
-        const regexStyle = detectStyleFromText(ctx.raw);
-        if (regexStyle) {
-          outputStyle = regexStyle;
-          styleSource = "explicit-regex";
-        }
-      }
-
-      // Pass 3b: style brain call — only when task detection ITSELF needed the
-      // brain (pass3LegacyTaskAttempted). When pass1 or pass2 already decided
-      // the task cheaply, the 800ms style call adds no signal (confirmed by
-      // 112/112 wasted calls in production — 100% returned styleSource=none).
-      // Default to "balanced" instead: clear, cheap, and accurate for most
-      // coding turns.
-      if (outputStyle === null && taskType !== null) {
-        if (pass3LegacyTaskAttempted) {
-          legacyBrainAttempted = true;
-          pass3LegacyStyleAttempted = true;
-          const brainRawStyle = await classifyViaBrain(
-            `Detect the user's preferred output style. The prompt may be EN or VN.
-Reply with ONE word: concise (ngắn gọn) | balanced (bình thường) | detailed (chi tiết).
-
-Prompt: "${ctx.raw.slice(0, 300)}"`,
-            800,
-          );
-          if (brainRawStyle) {
-            pass3LegacyStyleSucceeded = true;
-            const styleMatched = VALID_STYLES.find((s) => brainRawStyle.toLowerCase().includes(s));
-            if (styleMatched) {
-              outputStyle = styleMatched;
-              styleSource = "brain-legacy";
-            }
-          }
-        } else if (opts.profileStyleBaseline) {
-          // WhoAmI v4.0 baseline: a standing communication.brevity/decision_speed
-          // preference (computed once in the pipeline from the on-device profile)
-          // fills in when no per-turn signal resolved the style. Per-turn detection
-          // above still wins (override); this only replaces the generic "balanced".
-          outputStyle = opts.profileStyleBaseline;
-          styleSource = "whoami-profile";
-        } else {
-          outputStyle = "balanced";
-          styleSource = "classifier-default";
-        }
-      }
-    } else if (unifiedFailed && outputStyle === null) {
-      // Cheap rescue path when unified PIL is enabled but its call failed:
-      // run only the free regex style detector. The L6 brain-rescue call is
-      // suppressed below by the `_brainData` sentinel so we don't repeat the
-      // same network round-trip that just timed out.
-      const regexStyle = detectStyleFromText(ctx.raw);
-      if (regexStyle) {
-        outputStyle = regexStyle;
-        styleSource = "explicit-regex";
-      }
-    }
-
-    if (intentKind === null && taskType !== null && taskType !== "general") {
-      intentKind = "task";
-    }
-
-    // Safety net (harness 817e508f57ee): an explicit command/tool-execution
-    // request must NEVER be chitchat. Chitchat drops the whole toolset (incl.
-    // bash) in message-processor, so a "run this command" turn would leave the
-    // agent unable to act. Only ever UPGRADES chitchat → task (never the
-    // reverse), so the token-saving for genuine greetings is preserved.
-    if (intentKind === "chitchat" && hasActionableToolIntent(ctx.raw)) {
-      intentKind = "task";
-    }
-
-    // L6 brain-rescue suppression sentinel. L6 only checks truthiness of
-    // _brainData to decide whether to spend another 50ms brain round-trip on
-    // style detection. If we either (a) succeeded with unified pilContext,
-    // (b) failed unified (network already down), or (c) attempted a legacy
-    // brain call here, then L6 has nothing new to learn — set a sentinel.
-    const brainDataOut: BrainData | null =
-      brainData ??
-      (unifiedFailed || legacyBrainAttempted
-        ? {
-            t0_principles: [],
-            t1_rules: [],
-            t2_patterns: [],
-            retrieval_skipped_reason: unifiedFailed ? "unified-failed" : "legacy-attempted",
-          }
-        : null);
-
-    // pass1Hit = Pass 1 alone decided the final outcome (no later pass overrode).
-    // Note: chitchat short-circuit overrides Pass 1, so we exclude that case.
-    const pass1Hit =
-      pass1TaskType !== null &&
-      taskType === pass1TaskType &&
-      !pass2Hit &&
-      !pass25ChitchatHit &&
-      !pass3UnifiedSucceeded &&
-      !pass3LegacyTaskSucceeded;
-
-    const { complexity, score: complexityScore } = scoreComplexity({
-      rawText: ctx.raw,
-      taskType,
-      t0HitCount: 0, // TODO P2: feed from prior-run state.md if available
-      hasMaxSprintsOne: false, // TODO P2: thread CLI flag down through ctx
-    });
-
-    const intentTrace: IntentDetectionTrace = {
-      pass1Reason: result.reason,
-      pass1Confidence: result.confidence,
-      pass1TaskType,
-      pass1Hit,
-      pass2Hit,
-      pass2Pattern,
-      pass25ChitchatHit,
-      pass3UnifiedAttempted: needsBrain,
-      pass3UnifiedSucceeded,
-      pass3LegacyTaskAttempted,
-      pass3LegacyTaskSucceeded,
-      pass3LegacyStyleAttempted,
-      pass3LegacyStyleSucceeded,
-      pass4LlmAttempted,
-      pass4LlmSucceeded,
-      styleSource,
-      finalTaskType: taskType,
-      finalConfidence: confidence,
-      complexity,
-      complexityScore,
-    };
-
+    // No model classifier wired (opts.llmFallback absent) → the regex
+    // classification cascade that used to run here was DELETED (2026-07-07,
+    // no-regex rule). Degrade to UNKNOWN (keep-tools): no PIL scaffold is
+    // imposed and the chat model still answers the turn, but nothing fabricates
+    // an intent from keyword regex.
+    console.error(
+      "[pil.layer1] no model classifier wired (opts.llmFallback absent) — UNKNOWN classification, NO regex cascade.",
+    );
     return {
       ...ctx,
-      taskType,
-      gsdPhase: brainGsdPhase,
-      domain,
-      confidence,
-      outputStyle,
-      intentKind,
-      _brainData: brainDataOut,
-      _intentTrace: intentTrace,
+      taskType: null,
+      domain: null,
+      confidence: 0,
+      outputStyle: null,
+      intentKind: "task",
+      _brainData: null,
+      _intentTrace: {
+        pass1Reason: "no-classifier-wired",
+        pass1Confidence: 0,
+        pass1TaskType: null,
+        pass1Hit: false,
+        pass2Hit: false,
+        pass2Pattern: undefined,
+        pass25ChitchatHit: false,
+        pass3UnifiedAttempted: false,
+        pass3UnifiedSucceeded: false,
+        pass3LegacyTaskAttempted: false,
+        pass3LegacyTaskSucceeded: false,
+        pass3LegacyStyleAttempted: false,
+        pass3LegacyStyleSucceeded: false,
+        pass4LlmAttempted: false,
+        pass4LlmSucceeded: false,
+        styleSource: "none",
+        finalTaskType: null,
+        finalConfidence: 0,
+        complexity: "medium",
+        complexityScore: 0,
+      },
       layers: [
         ...ctx.layers,
-        {
-          name: "intent-detection",
-          applied: taskType !== null,
-          delta:
-            taskType !== null
-              ? `taskType=${taskType},kind=${intentKind ?? "unknown"},conf=${confidence.toFixed(2)},domain=${domain ?? "none"},style=${outputStyle ?? "none"},unified=${brainData ? "ok" : unifiedFailed ? "fail" : "skip"},llm=${pass4LlmSucceeded ? "ok" : pass4LlmAttempted ? "fail" : "skip"}`
-              : unifiedFailed
-                ? `taskType=null,unified=fail,llm=${pass4LlmSucceeded ? "ok" : pass4LlmAttempted ? "fail" : "skip"}`
-                : null,
-        },
+        { name: "intent-detection", applied: false, delta: "no-model-classifier — UNKNOWN, NO regex cascade" },
       ],
     };
   } catch {

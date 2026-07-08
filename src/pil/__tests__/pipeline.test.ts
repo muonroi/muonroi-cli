@@ -72,7 +72,22 @@ describe("runPipeline()", () => {
   });
 
   it("coding task runs all 7 layers normally (no skip)", async () => {
-    const ctx = await runPipeline("refactor this function");
+    // Model-first: wire a mock classifier so layer1 resolves taskType=refactor
+    // (the regex cascade that used to derive it from the classify mock was
+    // deleted, 2026-07-07 no-regex rule).
+    const ctx = await runPipeline("refactor this function", {
+      llmFallback: async () => ({
+        taskType: "refactor" as const,
+        outputStyle: "concise" as const,
+        confidence: 0.9,
+        intentKind: "task" as const,
+        deliverableKind: "code" as const,
+        depthTier: "standard" as const,
+        needsClarification: null,
+        ecosystemScope: null,
+        replyLanguage: null,
+      }),
+    });
     expect(ctx.layers).toHaveLength(7);
     expect(ctx.taskType).toBe("refactor");
     // layers 2-5 (which include indices 1 to 5) should NOT have skipped delta
