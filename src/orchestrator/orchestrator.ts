@@ -99,7 +99,12 @@ import {
   type SandboxSettings,
 } from "../utils/settings";
 import { runSideQuestion, type SideQuestionResult } from "../utils/side-question";
-import { buildVerifyDetectPrompt, inferVerifyProjectProfile, normalizeVerifyRecipe } from "../verify/entrypoint";
+import {
+  buildVerifyDetectPrompt,
+  inferVerifyProjectProfile,
+  normalizeVerifyRecipe,
+  shouldTrustDeterministicRecipe,
+} from "../verify/entrypoint";
 import { runVerifyOrchestration } from "../verify/orchestrator";
 import {
   type AgentOptions,
@@ -3529,9 +3534,7 @@ export class Agent {
         if (maybeJson) llmRecipe = normalizeVerifyRecipe(JSON.parse(maybeJson));
       }
     } catch (err) {
-      console.error(
-        `[orchestrator] verify-detect turn failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      console.error(`[orchestrator] verify-detect turn failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     if (llmRecipe) return llmRecipe;
 
@@ -3544,7 +3547,7 @@ export class Agent {
     // profiler recognizes the ecosystem AND found real test commands.
     try {
       const profile = inferVerifyProjectProfile(cwd, effectiveSettings);
-      if (profile.recipe.appKind !== "unknown" && profile.recipe.testCommands.length > 0) {
+      if (shouldTrustDeterministicRecipe(profile.recipe)) {
         return profile.recipe;
       }
     } catch (err) {
