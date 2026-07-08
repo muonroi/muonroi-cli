@@ -75,14 +75,46 @@ function ItemRow({ item, t }: ItemRowProps) {
   );
 }
 
+/**
+ * One-line summary used by the collapsed panel. Kept pure + exported so it can be
+ * unit-tested without rendering OpenTUI. Mirrors the expanded footer's bucket
+ * wording so the two views read consistently.
+ */
+function buildCollapsedLine(snapshot: TaskListSnapshot): string {
+  const { completed, inProgress, pending } = snapshot.counts;
+  const parts: string[] = [];
+  if (completed > 0) parts.push(`${completed} completed`);
+  if (inProgress > 0) parts.push(`${inProgress} in progress`);
+  if (pending > 0) parts.push(`${pending} queued`);
+  const body = parts.length > 0 ? parts.join(" · ") : "0 todos";
+  return `▸ Todos · ${body} (ctrl+e)`;
+}
+
 export interface TaskListPanelProps {
   snapshot: TaskListSnapshot;
   t: Theme;
   expanded: boolean;
+  /**
+   * Render a single summary line instead of the full panel. Set while a council
+   * debate is active so the todo band stops eating the debate scrollbox's height
+   * (~11 rows → 1). `ctrl+e` flips it back to the full panel for a peek.
+   */
+  collapsed?: boolean;
 }
 
-export function TaskListPanel({ snapshot, t, expanded }: TaskListPanelProps) {
+export function TaskListPanel({ snapshot, t, expanded, collapsed = false }: TaskListPanelProps) {
   if (snapshot.items.length === 0) return null;
+
+  if (collapsed) {
+    return (
+      <Semantic id="task-list" role="listbox" name="Todos" state="collapsed">
+        <box paddingLeft={2} paddingRight={2} marginBottom={1}>
+          <text fg={t.textMuted}>{buildCollapsedLine(snapshot)}</text>
+        </box>
+      </Semantic>
+    );
+  }
+
   const sorted = sortItems(snapshot.items);
   const overflow = !expanded && sorted.length > MAX_VISIBLE ? sorted.length - MAX_VISIBLE : 0;
   const visible = overflow > 0 ? sorted.slice(0, MAX_VISIBLE) : sorted;
@@ -129,4 +161,4 @@ export function TaskListPanel({ snapshot, t, expanded }: TaskListPanelProps) {
   );
 }
 
-export const __TEST_ONLY__ = { sortItems, MAX_VISIBLE };
+export const __TEST_ONLY__ = { sortItems, MAX_VISIBLE, buildCollapsedLine };

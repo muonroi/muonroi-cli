@@ -1093,6 +1093,9 @@ export function useAppLogic(props: AppLogicProps) {
   // debate runs, a one-line summary once done). Ctrl+O expands to the full
   // back-and-forth. Synthesis renders outside the pill so it stays visible.
   const [councilTranscriptExpanded, setCouncilTranscriptExpanded] = useState(false);
+  // Peek toggle (ctrl+e) for the todo panel while it auto-collapses during a
+  // council debate. Default collapsed; expands back to the full panel on demand.
+  const [councilTodoExpanded, setCouncilTodoExpanded] = useState(false);
   const [councilInfoCards, setCouncilInfoCards] = useState<CouncilInfoCard[]>([]);
   // P3 — council metadata for the context rail (leader/panel/budget/research/
   // cost), upsert-merged from incremental council_meta patches.
@@ -5156,6 +5159,15 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
 
+      // Ctrl+E — peek the full todo panel while it is auto-collapsed during a
+      // council debate (app.tsx collapses it to one line so the debate scrollbox
+      // keeps its height). Global + unconditional toggle; a no-op visually when
+      // no todo snapshot exists or no council is active.
+      if (key.name === "e" && key.ctrl && !key.meta) {
+        setCouncilTodoExpanded((v) => !v);
+        return;
+      }
+
       // Ctrl+B — toggle the right context rail (MUONROI_CONTEXT_RAIL). No-op
       // visually when the rail flag is off or the terminal is too narrow; the
       // toggle only flips intent, app.tsx gates actual rendering on width.
@@ -7249,6 +7261,7 @@ export function useAppLogic(props: AppLogicProps) {
     setSelectedRound,
     councilMessages,
     councilTranscriptExpanded,
+    councilTodoExpanded,
     councilPhases,
     councilPlaceholders,
     councilProgress,
