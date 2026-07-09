@@ -62,6 +62,10 @@ export const CHEAP_MODEL_PLAYBOOK = `[CRITICAL TOOL-USE RULES — read before in
 
 7. ANTI-MÙ / COMPACTION (for long sessions): On pre-warn or "[context compacted at step...", emit PRESERVE_FULL_CONTEXT (full veto) or lighter KEEP_TOOL_IDS: id1,id2 (from stub id=) to protect specific high-value results. read_file/grep/lsp/bash on src/PLAN/error are auto-kept (idea 1). Use ee.query tool with "tool-artifact id=XXX" for on-demand full. Self-check "task finished?" / "compacted yet?". Use EE checkpoints. If you are reaching tool/step limits in a long session, suggest the user run "/compact" in the chat to compress this session's history.
 
+8. CITATIONS: only write a \`file:line\` you can SEE in a read_file result
+   (\`N |\` prefix; header \`of TOTAL\`). Never guess a line or reuse one file's
+   numbers for another. Unsure → re-read or omit the line.
+
 [END CRITICAL TOOL-USE RULES — your regular instructions begin below]
 
 `;
