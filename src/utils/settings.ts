@@ -249,6 +249,15 @@ export interface UserSettings {
    * to restore the old skip-clarification behaviour.
    */
   autoCouncilClarify?: boolean;
+  /**
+   * When true (default), auto-council is skipped if the current session model is
+   * a reasoning model (catalog `reasoning: true`). Reasoning models already
+   * perform an internal self-debate via extended thinking, so running an
+   * explicit multi-role council on the same prompt is usually low-ROI and
+   * expensive. Set false (or env MUONROI_AUTOCOUNCIL_SKIP_REASONING=0) to force
+   * council even for reasoning models.
+   */
+  autoCouncilSkipReasoning?: boolean;
   councilPreferMultiProvider?: boolean;
   /** EE involvement level in council debates. Default: advisory. CQ-19. */
   councilExperienceMode?: CouncilExperienceMode;
@@ -1241,6 +1250,19 @@ export function isAutoCouncilClarifyEnabled(): boolean {
   if (env === "0" || env === "false") return false;
   if (env === "1" || env === "true") return true;
   return loadUserSettings().autoCouncilClarify ?? true;
+}
+
+/**
+ * Whether auto-council should be skipped when the session model is a reasoning
+ * model. Default true. Env override wins over the user setting for quick dev
+ * toggling; env "0"/"false" disables the skip (forces council), "1"/"true"
+ * enables the skip.
+ */
+export function isAutoCouncilSkipReasoning(): boolean {
+  const env = process.env.MUONROI_AUTOCOUNCIL_SKIP_REASONING?.trim().toLowerCase();
+  if (env === "0" || env === "false") return false;
+  if (env === "1" || env === "true") return true;
+  return loadUserSettings().autoCouncilSkipReasoning ?? true;
 }
 
 export function getAutoCouncilMinRoles(): number {

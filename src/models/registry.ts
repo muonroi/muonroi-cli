@@ -82,6 +82,11 @@ export function getEffectiveReasoningEffort(
   return requestedEffort;
 }
 
+/** Returns true if the resolved model has built-in reasoning / extended thinking. */
+export function isReasoningModel(modelId: string): boolean {
+  return getModelInfo(modelId)?.reasoning ?? false;
+}
+
 export function getSupportedReasoningEfforts(modelId: string): ReasoningEffort[] {
   const info = getModelInfo(modelId);
   if (!info?.reasoning) return [];

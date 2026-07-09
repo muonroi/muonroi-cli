@@ -75,7 +75,7 @@ import type {
 } from "../hooks/types";
 import { acquireMcpTools } from "../mcp/client-pool";
 import { dropRedundantFsMcpTools, filterMcpServersByMessage } from "../mcp/smart-filter";
-import { getModelInfo } from "../models/registry.js";
+import { getModelInfo, isReasoningModel } from "../models/registry.js";
 import {
   cheapModelShellLine,
   injectCheapModelPlaybook,
@@ -156,6 +156,7 @@ import {
   loadMcpServers,
   loadValidSubAgents,
 } from "../utils/settings";
+import { isAutoCouncilSkipReasoning } from "../utils/settings.js";
 import { resolveShell } from "../utils/shell.js";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
@@ -646,6 +647,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       : (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
   const autoCouncilConfidence = getAutoCouncilConfidence();
   const autoCouncilMinRoles = getAutoCouncilMinRoles();
+  const sessionModelIsReasoning = isReasoningModel(deps.modelId);
+  const skipReasoningSetting = isAutoCouncilSkipReasoning();
   const _complexityFromTrace = (pilCtx as { _intentTrace?: { complexity?: "low" | "medium" | "high" } })._intentTrace
     ?.complexity;
   const _complexityGatePassed =
@@ -655,10 +658,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     autoCouncilTypes.has(pilCtx.taskType) &&
     pilCtx.confidence >= autoCouncilConfidence &&
     _complexityGatePassed;
+  const shouldSkipForReasoning = sessionModelIsReasoning && skipReasoningSetting;
   const shouldAutoCouncil =
     !deps.councilManager.isContinuation &&
     isAutoCouncilEnabled() &&
     configuredRoleCount >= autoCouncilMinRoles &&
+    !shouldSkipForReasoning &&
     (taskTypeMatch || heavyTier);
 
   // Always log the auto-council decision (taken or skipped) with the gate
@@ -669,6 +674,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     if (!isAutoCouncilEnabled()) return "feature-disabled";
     if (configuredRoleCount < autoCouncilMinRoles)
       return `role-count<${autoCouncilMinRoles} (have ${configuredRoleCount})`;
+    if (shouldSkipForReasoning)
+      return `reasoning-model=${deps.modelId} (internal self-debate active; skip with MUONROI_AUTOCOUNCIL_SKIP_REASONING=0)`;
     if (!taskTypeMatch && !heavyTier) {
       if (!pilCtx.taskType || !autoCouncilTypes.has(pilCtx.taskType))
         return `taskType=${pilCtx.taskType ?? "null"} not in plan|analyze`;
@@ -696,6 +703,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       autoCouncilConfidence,
       autoCouncilMinRoles,
       heavyTier,
+      sessionModelIsReasoning,
+      skipReasoningSetting,
       isContinuation: deps.councilManager.isContinuation,
     },
   }).catch(() => undefined);
@@ -739,6 +748,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       }
     }
     return;
+  }
+
+  if (shouldSkipForReasoning) {
+    yield {
+      type: "content",
+      content: `\n[Auto-council skipped: ${deps.modelId} is a reasoning model and already performs internal self-debate. Set MUONROI_AUTOCOUNCIL_SKIP_REASONING=0 or autoCouncilSkipReasoning=false to force council.]\n`,
+    };
   }
 
   if (deps.batchApi) {

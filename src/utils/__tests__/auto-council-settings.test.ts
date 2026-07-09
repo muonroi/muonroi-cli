@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   isAutoCouncilClarifyEnabled,
+  isAutoCouncilSkipReasoning,
   normalizeAutoCouncilConfidence,
   normalizeAutoCouncilMinRoles,
 } from "../settings.js";
@@ -80,5 +81,39 @@ describe("isAutoCouncilClarifyEnabled", () => {
   it("ignores an unrecognized env value and falls back to the default", () => {
     process.env.MUONROI_AUTOCOUNCIL_CLARIFY = "maybe";
     expect(isAutoCouncilClarifyEnabled()).toBe(true);
+  });
+});
+
+describe("isAutoCouncilSkipReasoning", () => {
+  const prev = process.env.MUONROI_AUTOCOUNCIL_SKIP_REASONING;
+  afterEach(() => {
+    if (prev === undefined) delete process.env.MUONROI_AUTOCOUNCIL_SKIP_REASONING;
+    else process.env.MUONROI_AUTOCOUNCIL_SKIP_REASONING = prev;
+  });
+
+  it("defaults to true — auto-council skips reasoning models by default", () => {
+    delete process.env.MUONROI_AUTOCOUNCIL_SKIP_REASONING;
+    expect(isAutoCouncilSkipReasoning()).toBe(true);
+  });
+
+  it("env '0' / 'false' disables the skip (forces council for reasoning models)", () => {
+    process.env.MUONROI_AUTOCOUNCIL_SKIP_REASONING = "0";
+    expect(isAutoCouncilSkipReasoning()).toBe(false);
+    process.env.MUONROI_AUTOCOUNCIL_SKIP_REASONING = "false";
+    expect(isAutoCouncilSkipReasoning()).toBe(false);
+    process.env.MUONROI_AUTOCOUNCIL_SKIP_REASONING = "FALSE";
+    expect(isAutoCouncilSkipReasoning()).toBe(false);
+  });
+
+  it("env '1' / 'true' force-enables the skip", () => {
+    process.env.MUONROI_AUTOCOUNCIL_SKIP_REASONING = "1";
+    expect(isAutoCouncilSkipReasoning()).toBe(true);
+    process.env.MUONROI_AUTOCOUNCIL_SKIP_REASONING = "true";
+    expect(isAutoCouncilSkipReasoning()).toBe(true);
+  });
+
+  it("ignores an unrecognized env value and falls back to the default", () => {
+    process.env.MUONROI_AUTOCOUNCIL_SKIP_REASONING = "maybe";
+    expect(isAutoCouncilSkipReasoning()).toBe(true);
   });
 });

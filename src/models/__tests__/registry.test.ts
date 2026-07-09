@@ -10,6 +10,7 @@ import {
   getProviderPeakHourRule,
   getSupportedReasoningEfforts,
   getVisionProxyRouting,
+  isReasoningModel,
   loadCatalog,
   MODELS,
   normalizeModelId,
@@ -98,6 +99,28 @@ describe("getSupportedReasoningEfforts", () => {
   test("returns efforts for reasoning-capable model", () => {
     const efforts = getSupportedReasoningEfforts("deepseek-v4-flash");
     expect(efforts.length).toBeGreaterThan(0);
+  });
+});
+
+describe("isReasoningModel", () => {
+  test("returns true for reasoning models", () => {
+    const reasoning = MODELS.find((m) => m.reasoning);
+    expect(reasoning).toBeDefined();
+    expect(isReasoningModel(reasoning!.id)).toBe(true);
+    // Also exercise alias resolution and known IDs if present in the loaded catalog.
+    if (getModelInfo("deepseek-v4-flash")) {
+      expect(isReasoningModel("deepseek-v4-flash")).toBe(true);
+    }
+  });
+
+  test("returns false for non-reasoning models", () => {
+    const nonReasoning = MODELS.find((m) => !m.reasoning);
+    expect(nonReasoning).toBeDefined();
+    expect(isReasoningModel(nonReasoning!.id)).toBe(false);
+  });
+
+  test("returns false for unknown model IDs", () => {
+    expect(isReasoningModel("nonexistent-model")).toBe(false);
   });
 });
 
