@@ -18,7 +18,19 @@
  * returns a fresh wrapper with its own counters. Don't share across
  * sub-agent runs.
  *
- * Tiers (default 120_000 chars cumulative ≈ ~30k tokens):
+ * BUDGET SOURCE — do not read the 120_000 below as "the sub-agent budget".
+ * DEFAULT_MAX_CUMULATIVE_CHARS (120_000) is only the fallback used when
+ * wrapToolSetWithCap() is called WITHOUT maxCumulativeChars. The wired
+ * budgets come from settings, not this constant:
+ *   - sub-agent (`task`) turns: getSubAgentBudgetChars() → default 240_000
+ *     (settings.ts), passed at stream-runner.ts.
+ *   - top-level orchestrator turn: getTopLevelToolBudgetChars() → default
+ *     400_000, wired at tool-engine.ts with looser 0.5/0.8 tier ratios.
+ * See docs/agent-harness/CONTEXT-CONTROL-LAYERS.md for how this cap relates
+ * to the other four context-control layers (compactor, rotation, reactive
+ * sub-session, top-level cap).
+ *
+ * Tiers (percentages of whichever budget is in effect, NOT of 120_000):
  *   < 30%   → pass through (A1's 32KB per-call cap already applied)
  *   30-70%  → truncate each new result to 8_000 chars head/tail
  *   70-100% → truncate to 2_000 chars head + "[budget low, finalize work]" note
@@ -63,6 +75,9 @@ export interface SubAgentCapOptions {
   label?: string;
 }
 
+// Fallback ONLY — used when wrapToolSetWithCap gets no maxCumulativeChars.
+// Real wired budgets are 240_000 (sub-agent) / 400_000 (top-level) from
+// settings; see the header note. Keep this in sync only as the no-arg floor.
 const DEFAULT_MAX_CUMULATIVE_CHARS = 120_000;
 const DEFAULT_DEDUP_MIN_CHARS = 500;
 const DEFAULT_MID_TIER_RATIO = 0.3;
