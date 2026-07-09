@@ -59,6 +59,30 @@ const NOUN_SEP_NUM_RE = new RegExp(
 // filename.ext:line — basename only (the char class excludes "/").
 const FILELINE_RE = /\b([\w.-]+\.[a-z]{1,5}):(\d+)\b/gi;
 
+// read_file emits a header `[<path>: lines A-B of TOTAL]` (src/tools/file.ts:75).
+// TOTAL is always the FULL file length (not the slice end B), so it is the
+// ground truth for "does line N exist in this file". Path may use "/" or "\";
+// the basename char class excludes both, so it captures just "planner.ts".
+const READ_HEADER_RE = /([\w.-]+\.[a-z]{1,5}):\s*lines\s+\d+-\d+\s+of\s+(\d+)/gi;
+
+/**
+ * Map basename → largest known full-file line count, parsed from read_file
+ * headers in the corpus. Used to catch a file:line that names a REAL (read)
+ * file but a FABRICATED line number beyond the file's length — the failure the
+ * basename-only check misses.
+ */
+function parseReadLineCounts(corpus: string): Map<string, number> {
+  const totals = new Map<string, number>();
+  for (const m of corpus.matchAll(READ_HEADER_RE)) {
+    const base = m[1]!.toLowerCase();
+    const total = Number.parseInt(m[2]!, 10);
+    if (!Number.isFinite(total)) continue;
+    const prev = totals.get(base);
+    if (prev === undefined || total > prev) totals.set(base, total);
+  }
+  return totals;
+}
+
 // Hedge markers immediately before a number mean it is an estimate, not a fact.
 const HEDGE_RE = /(~|≈|\babout\b|\bapprox(?:imately)?\b|\broughly\b|\baround\b|\bnearly\b|\best\.?\b)\s*$/i;
 
@@ -75,6 +99,7 @@ export function findUnverifiedClaims(finalText: string, corpus: string): Unverif
   if (!finalText) return [];
   const corpusNorm = stripCommas(corpus).toLowerCase();
   const corpusLower = corpus.toLowerCase();
+  const readTotals = parseReadLineCounts(corpus);
   const out: UnverifiedClaim[] = [];
   const seen = new Set<string>();
 
@@ -119,7 +144,20 @@ export function findUnverifiedClaims(finalText: string, corpus: string): Unverif
     // Skip path/URL/port shapes ("http://host:8080", "a/b.ts:1" handled by basename).
     if (idx > 0 && finalText[idx - 1] === "/") continue;
     const basename = m[1]!;
-    if (corpusLower.includes(basename.toLowerCase())) continue; // file was read/grepped → verified
+    const lineNo = Number.parseInt(m[2]!, 10);
+    const knownTotal = readTotals.get(basename.toLowerCase());
+    // Provably-fabricated line: the file WAS read this turn (header parsed), but
+    // the cited line exceeds its real length. Deterministic — flag even though
+    // the basename appears in the corpus (the basename check below would pass).
+    if (knownTotal !== undefined && Number.isFinite(lineNo) && lineNo > knownTotal) {
+      push({
+        kind: "fileline",
+        value: `${basename}:${m[2]}`,
+        text: `${basename}:${m[2]} (file has ${knownTotal} lines)`,
+      });
+      continue;
+    }
+    if (corpusLower.includes(basename.toLowerCase())) continue; // file was read/grepped & in-bounds → verified
     push({ kind: "fileline", value: `${basename}:${m[2]}`, text: `${basename}:${m[2]}` });
   }
 
