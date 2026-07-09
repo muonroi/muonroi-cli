@@ -15,7 +15,7 @@ import type { AgentMode, TaskRequest, ToolResult } from "../types/index.js";
 import { loadMcpServers } from "../utils/settings.js";
 import type { BashTool } from "./bash.js";
 import { type BashSliceMode, getBashRun, sliceBashOutput } from "./bash-output-cache.js";
-import { editFile, readFile, writeFile } from "./file.js";
+import { editFile, readFile, readFiles, writeFile } from "./file.js";
 import { FileTracker } from "./file-tracker.js";
 import {
   analyzeGitCommand,
@@ -167,18 +167,35 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // read_file
   tools.read_file = dynamicTool({
     description:
-      "Read file contents. For large files, you MUST use start_line and end_line to extract only the needed sections (e.g. specific functions). Reading full large files will quickly exhaust your context budget. Use grep or lsp first to find line numbers.",
+      "Read file contents. To read SEVERAL files, pass them ALL in one call via file_paths (array) — STRONGLY PREFERRED over issuing separate read_file calls: each extra call re-sends the whole conversation as input, so N single reads cost O(N²) tokens while one batched read costs O(N). For a large SINGLE file, use start_line/end_line to extract only the needed section (start_line/end_line apply to file_path only; file_paths reads whole files). Use grep or lsp first to find line numbers.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
-        file_path: { type: "string", description: "Path to the file to read" },
-        start_line: { type: "number", description: "First line to read (1-based)" },
-        end_line: { type: "number", description: "Last line to read (1-based)" },
+        file_path: { type: "string", description: "Path to a single file to read (supports start_line/end_line)." },
+        file_paths: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Read MULTIPLE files in ONE call (preferred when you need 2+ files). Each is returned with its own header; each is capped independently so none is dropped. Best for small-to-medium files; for a large file use file_path + line range.",
+        },
+        start_line: { type: "number", description: "First line to read (1-based). Applies to file_path only." },
+        end_line: { type: "number", description: "Last line to read (1-based). Applies to file_path only." },
       },
-      required: ["file_path"],
     }),
     execute: async (input: any) => {
-      const result = readFile(input.file_path, bash.getCwd(), input.start_line, input.end_line, fileTracker);
+      const batch: string[] =
+        Array.isArray(input.file_paths) && input.file_paths.length > 0
+          ? input.file_paths.filter((p: unknown): p is string => typeof p === "string" && p.trim() !== "")
+          : [];
+      if (batch.length > 1) {
+        // Per-file fair-share of the output cap so the concatenated result
+        // stays under MAX_TOOL_OUTPUT_CHARS and every file survives (no silent
+        // head/tail drop of whole files). Floor keeps each file legible.
+        const perFileCap = Math.max(4_000, Math.floor(MAX_TOOL_OUTPUT_CHARS / batch.length));
+        return formatResult(readFiles(batch, bash.getCwd(), fileTracker, perFileCap));
+      }
+      const single = batch.length === 1 ? batch[0] : input.file_path;
+      const result = readFile(single, bash.getCwd(), input.start_line, input.end_line, fileTracker);
       return formatResult(result);
     },
   });

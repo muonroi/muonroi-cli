@@ -40,7 +40,8 @@ describe("CrossTurnDedup", () => {
       // cache size since the marker no longer embeds the hash post-G3).
       expect(dedup.getStats().size).toBe(2);
 
-      // Re-emitting either payload now triggers a dedup hit.
+      // Next user turn — re-emitting either payload triggers a cross-turn hit.
+      dedup.beginTurn();
       const stubA = dedup.maybeDedup("read_file", a);
       const stubB = dedup.maybeDedup("read_file", b);
       expect(stubA).not.toBeNull();
@@ -55,10 +56,33 @@ describe("CrossTurnDedup", () => {
       const b = "b".repeat(1_000);
       expect(dedup.maybeDedup("read_file", a)).toBeNull();
       expect(dedup.maybeDedup("read_file", b)).toBeNull();
-      // Re-run yields a hit for a, miss for c.
+      // Next turn — re-run yields a cross-turn hit for a, miss for c.
+      dedup.beginTurn();
       expect(dedup.maybeDedup("read_file", a)).not.toBeNull();
       const c = "c".repeat(1_000);
       expect(dedup.maybeDedup("read_file", c)).toBeNull();
+    });
+
+    it("same-turn loop: re-serves content on the first in-turn repeat, then hard-stops", () => {
+      // Regression for the O1 fallback: a cheap model that re-issues an
+      // identical read WITHIN one turn used to get a bare "reuse" stub, then
+      // fell back to reading each file singly (measured: batch → stub → stub →
+      // 4 single reads). The fix re-serves content ONCE so the loop is
+      // satisfied, then hard-stops any further in-turn repeat.
+      const dedup = new CrossTurnDedup({ minChars: 10 });
+      dedup.beginTurn();
+      const payload = "L".repeat(1_000);
+
+      // First occurrence — passthrough.
+      expect(dedup.maybeDedup("read_file", payload)).toBeNull();
+      // First SAME-TURN repeat — re-serve content (null passthrough), NOT a stub.
+      expect(dedup.maybeDedup("read_file", payload)).toBeNull();
+      // Second same-turn repeat — hard-stop stub instructing the model to stop.
+      const stop = dedup.maybeDedup("read_file", payload);
+      expect(stop).not.toBeNull();
+      expect(stop).toContain("STOP re-calling");
+      // Only the hard-stop counts as a saved hit (the re-serve re-bills).
+      expect(dedup.getStats().hits).toBe(1);
     });
 
     it("skips outputs below the min-chars threshold", () => {
@@ -79,6 +103,9 @@ describe("CrossTurnDedup", () => {
       for (const p of payloads) expect(dedup.maybeDedup("read_file", p)).toBeNull();
       expect(dedup.getStats().size).toBe(3);
 
+      // Next turn — so a re-run is a cross-turn hit (stub), not a same-turn
+      // re-serve (null), isolating the eviction assertion.
+      dedup.beginTurn();
       // First payload should no longer be cached (evicted) — re-running it
       // returns null, not a stub.
       expect(dedup.maybeDedup("read_file", payloads[0]!)).toBeNull();
@@ -146,6 +173,7 @@ describe("CrossTurnDedup", () => {
       const first = await exec({});
       expect(first).toBe(payload);
 
+      dedup.beginTurn();
       const second = (await exec({})) as string;
       expect(second).not.toBe(payload);
       expect(second).toContain("[dup of");
@@ -162,6 +190,7 @@ describe("CrossTurnDedup", () => {
       const first = (await exec({})) as { output: string };
       expect(first.output).toBe(payload);
 
+      dedup.beginTurn();
       const second = (await exec({})) as { output: string };
       expect(second.output).toContain("[dup of");
     });
@@ -182,6 +211,7 @@ describe("CrossTurnDedup", () => {
       const first = (await exec({})) as { value: Array<{ text: string }> };
       expect(first.value[0]!.text).toBe(payload);
 
+      dedup.beginTurn();
       const second = (await exec({})) as { value: Array<{ text: string }> };
       expect(second.value[0]!.text).toContain("[dup of");
     });

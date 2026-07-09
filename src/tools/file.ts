@@ -80,6 +80,39 @@ export function readFile(
   }
 }
 
+/**
+ * O1 — read MULTIPLE files in ONE tool call. This is the lossless batching
+ * lever: a single `read_file` carrying N paths is ONE tool_call, so it is
+ * NEVER split by `splitParallelToolCalls` (which only reshapes assistant turns
+ * with >1 tool_calls) — the ≥50% fresh-input cut holds on every provider,
+ * including the kimi/glm/deepseek-go sequential-split cohort.
+ *
+ * Quality gate (council regression vector "partial multi-path reads"): each
+ * file is capped INDEPENDENTLY at `perFileCap` with an EXPLICIT truncation
+ * marker, so no file is ever silently dropped by a downstream head/tail
+ * whole-result cap. With `perFileCap = floor(MAX_TOOL_OUTPUT_CHARS / n)` the
+ * concatenated total stays under the registry cap, making the outer
+ * `truncateOutput` a no-op — every requested file is represented.
+ */
+export function readFiles(filePaths: string[], cwd: string, tracker?: FileTracker, perFileCap?: number): FileResult {
+  if (filePaths.length === 0) {
+    return { success: false, output: "read_file: no paths provided (file_path or file_paths required)" };
+  }
+  const parts: string[] = [];
+  for (const filePath of filePaths) {
+    const r = readFile(filePath, cwd, undefined, undefined, tracker);
+    let out = r.output;
+    if (perFileCap && perFileCap > 0 && out.length > perFileCap) {
+      // Head-truncate this ONE file with an explicit, self-describing marker.
+      // Never silently elide: the model is told this file was cut and how to
+      // get the rest (single read + line range).
+      out = `${out.slice(0, perFileCap)}\n... [${out.length - perFileCap} chars of ${filePath} truncated in this batch read — read it singly with start_line/end_line for the rest] ...`;
+    }
+    parts.push(out);
+  }
+  return { success: true, output: parts.join("\n\n") };
+}
+
 export async function writeFile(
   filePath: string,
   content: string,

@@ -1947,7 +1947,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   }
                 }
                 if (_total > 0 && _ro === _total && _total <= 2) {
-                  const _b = `[Tool batching: you called ${_total} read-only tool(s) last round. Calling them one-at-a-time wastes tokens and delays results. The SDK supports up to ~12 parallel tool calls. In the NEXT response, emit ALL pending read-only calls (read_file, grep, bash_output_get, etc.) in a SINGLE assistant turn — do NOT sequence them across multiple steps.]`;
+                  // Prefer the SINGLE-CALL multi-path form (read_file file_paths=[…])
+                  // over "parallel tool_calls": a batch of parallel tool_calls is
+                  // reshaped into sequential single-call turns for the kimi/glm/
+                  // deepseek-go cohort (splitParallelToolCalls) — which re-inflates
+                  // history and defeats the batching win. One read_file carrying N
+                  // paths is ONE tool_call → never split → the token cut holds on
+                  // every provider.
+                  const _b = `[Tool batching: you called ${_total} read-only tool(s) one-at-a-time — each extra call re-sends the whole conversation, so N single reads cost O(N²) tokens. To read MULTIPLE files, call read_file ONCE with file_paths=["a","b","c"] — a SINGLE tool_call that no provider splits. For other read-only tools (grep, bash_output_get), emit all pending calls in ONE assistant turn. Do NOT sequence reads across steps.]`;
                   // Attach to `coalesced` (the B4-compacted history), NOT `stripped`:
                   // read-only tools (read_file/grep/…) are exactly what triggers this
                   // reminder, and returning `stripped` here silently discarded the
