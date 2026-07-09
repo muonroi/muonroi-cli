@@ -161,7 +161,7 @@ import { loadFlowResumeDigest } from "./flow-resume.js";
 import { MessageProcessor, type MessageProcessorDeps } from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
 import { buildSystemPrompt, HARD_MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS } from "./prompts";
-import { shouldReactivelyEscalate } from "./reactive-delegation.js";
+import { getReactiveDelegationThresholdChars, shouldReactivelyEscalate } from "./reactive-delegation.js";
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
 import { withStreamRetry } from "./retry-stream.js";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
@@ -433,6 +433,11 @@ export class Agent {
   // chars (from the top-level cap), reported by the tool engine at turn end and
   // read at the next turn's route decision. See reactive-delegation.ts.
   private _lastTurnToolChars = 0;
+  // Instrument (cold-first-turn measurement): ordinal of the top-level turn whose
+  // tool load was last reported. Lets telemetry distinguish a turn-1 blow-up
+  // (which reactive escalation CANNOT isolate) from a later one (which it can).
+  // Gates the decision to build an in-turn checkpoint. See CONTEXT-CONTROL-LAYERS.md.
+  private _turnLoadOrdinal = 0;
   // Phase C4 — input-keyed read-path budget. Complements C3 (output hash) by
   // catching re-reads of files the agent edited between rounds. Disabled
   // when MUONROI_MAX_READS_PER_PATH=0.
@@ -3290,6 +3295,27 @@ export class Agent {
       getCompactionStats: () => self.getCompactionStats(),
       reportTurnToolLoad: (chars) => {
         self._lastTurnToolChars = Number.isFinite(chars) && chars > 0 ? chars : 0;
+        self._turnLoadOrdinal += 1;
+        // Cold-first-turn instrument: record every turn whose load crosses the
+        // reactive threshold, tagged with its ordinal. A later query counts what
+        // fraction of threshold-crossing turns are ordinal 1 (the un-isolatable
+        // cold turn) — the evidence that gates building an in-turn checkpoint.
+        try {
+          if (self.session && self._lastTurnToolChars >= getReactiveDelegationThresholdChars()) {
+            logInteraction(self.session.id, "turn_tool_load", {
+              data: {
+                chars: self._lastTurnToolChars,
+                ordinal: self._turnLoadOrdinal,
+                coldFirstTurn: self._turnLoadOrdinal === 1,
+                threshold: getReactiveDelegationThresholdChars(),
+              },
+            });
+          }
+        } catch (err) {
+          logger.debug("orchestrator", "turn_tool_load telemetry failed (best-effort)", {
+            error: (err as Error)?.message,
+          });
+        }
       },
       setTurnUserGoalExcerpt: (v) => {
         self._turnUserGoalExcerpt = v;

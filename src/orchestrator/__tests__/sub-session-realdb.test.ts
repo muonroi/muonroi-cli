@@ -209,6 +209,18 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
     expect(childrenAfter[0]!.kind).toBe("subagent");
     expect(agent.getSessionId()).toBe(parentId); // restored after absorption
 
+    // INSTRUMENT: the cold-first-turn telemetry must record turn 1's heavy load
+    // tagged coldFirstTurn=true (ordinal 1) — that's the row a later query counts
+    // to decide whether an in-turn checkpoint is worth building.
+    const loadRows = db
+      .prepare("SELECT session_id, metadata_json FROM interaction_logs WHERE event_type = 'turn_tool_load'")
+      .all() as Array<{ session_id: string; metadata_json: string }>;
+    expect(loadRows.length).toBeGreaterThanOrEqual(1);
+    const cold = loadRows.map((r) => JSON.parse(r.metadata_json)).find((d) => d.ordinal === 1);
+    expect(cold).toBeDefined();
+    expect(cold.coldFirstTurn).toBe(true);
+    expect(cold.chars).toBe(150_000);
+
     delete process.env.MUONROI_REACTIVE_DELEGATE_CHARS;
   });
 
