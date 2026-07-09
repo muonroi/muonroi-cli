@@ -377,7 +377,11 @@ export async function* runCouncil(
   };
 
   const baseContext = buildCouncilContext(messages);
-  const projectInfo = options?.cwd ? await buildProjectSnapshot(options.cwd) : { snapshot: "", isEmpty: true };
+  // Fall back to process.cwd() when the caller omits cwd. The old default of
+  // { isEmpty: true } forced internet-first research (and skipped codebase-first
+  // analysis) even when the council was invoked inside a real repo.
+  const projectCwd = options?.cwd ?? process.cwd();
+  const projectInfo = await buildProjectSnapshot(projectCwd);
   const conversationContext = projectInfo.snapshot
     ? `## Current Project\n${projectInfo.snapshot}\n\n---\n\n${baseContext}`
     : baseContext;
@@ -774,7 +778,12 @@ export async function* runCouncil(
       // never measured — not that every claim was refuted. Surfacing "Low 0%"
       // there reads as a scoring failure on debates that are actually fine
       // (session de4bafe5ecb7). Only applies when synthesis itself succeeded.
-      const confidenceNotMeasured = !synthesisFailed && taggedClaims === 0;
+      // Also treat a genuine 0 density (tags emitted but none resolved to a
+      // citation) as "not measured" rather than a literal "Low 0%" score — a
+      // bare 0% reads as a scoring failure on debates that were degraded (e.g.
+      // the debate model tripped the tool-verification circuit breaker and ran
+      // tool-free, so no claims could be grounded). Session 65b66c99ed36.
+      const confidenceNotMeasured = !synthesisFailed && (taggedClaims === 0 || evidenceDensity === 0);
       const confidenceLevel: "high" | "medium" | "low" = synthesisFailed
         ? "low"
         : evidenceDensity >= 0.6
@@ -951,23 +960,49 @@ export async function* runCouncil(
         });
       }
 
+      // A2 — synthesis succeeded but grounding is weak (density 0 / low /
+      // "not measured"). The honest next move is to RAISE confidence, not to
+      // commit or to ask a blind clarification — the user reported the askcard
+      // asked "clarify more?" without saying WHAT would help. Pin a guided
+      // follow-up that names the concrete confidence-raising ask (make the
+      // council cite/verify its weakest claims) and make it the default.
+      // Reuses ask_followup routing (freetext, re-runs on this debate's
+      // context) — no new downstream action. Skipped when `inconclusive`
+      // already pinned a criteria-aware follow-up, or when synthesis failed
+      // (the retry_synthesis path owns that recovery).
+      const lowGrounding = !synthesisFailed && !inconclusive && (confidenceNotMeasured || confidenceLevel === "low");
+      if (lowGrounding) {
+        for (let i = baseOptions.length - 1; i >= 0; i--) {
+          if (baseOptions[i].value === "ask_followup") baseOptions.splice(i, 1);
+        }
+        baseOptions.unshift({
+          label: "Raise confidence — have the council cite & verify",
+          description:
+            "Grounding is weak: no claims were cited or resolved, so evidence density stayed at 0. Pose a follow-up that forces the council to back its weakest claims against the codebase or sources — that lifts confidence instead of committing on thin evidence.",
+          value: "ask_followup",
+          kind: "freetext",
+        });
+      }
+
       // Model orders actions best-first (index 0 = recommended default); the
       // fallback set uses the deterministic recommendation. When inconclusive,
       // the pinned criteria option at index 0 is the honest default regardless of
       // path.
-      const defaultIndex = inconclusive
-        ? 0
-        : modelActions
+      const defaultIndex =
+        inconclusive || lowGrounding
           ? 0
-          : Math.max(
-              0,
-              baseOptions.findIndex((o) => o.value === recommendation.value),
-            );
-      const recommendReason = inconclusive
-        ? (baseOptions[0]?.description ?? recommendation.reason)
-        : modelActions
+          : modelActions
+            ? 0
+            : Math.max(
+                0,
+                baseOptions.findIndex((o) => o.value === recommendation.value),
+              );
+      const recommendReason =
+        inconclusive || lowGrounding
           ? (baseOptions[0]?.description ?? recommendation.reason)
-          : recommendation.reason;
+          : modelActions
+            ? (baseOptions[0]?.description ?? recommendation.reason)
+            : recommendation.reason;
 
       const heading = synthesisFailed
         ? "## Debate Synthesis Failed"
@@ -980,7 +1015,18 @@ export async function* runCouncil(
         ? `\n\n⚠ Outcome: ${critOutcome.metCount}/${critOutcome.total} criteria met. Unmet: ${critOutcome.unmetLabels.join("; ")}. Treat the synthesis as provisional — not a settled decision.`
         : "";
       const recommendLine = `**Recommended:** ${baseOptions[defaultIndex]?.label ?? recommendation.value} — ${recommendReason}`;
-      const headerBlock = `${heading}\n\n> ${confidenceBadge}\n>\n> **Why:** ${confidenceReason}${outcomeLine}\n\n${recommendLine}\n\nLeader: \`${leaderModelId}\`. What would you like to do next?`;
+      // B — the live per-round transcript is cleared from the view at turn end
+      // (it renders as a bottom block decoupled from the timeline, so keeping it
+      // would mis-order later messages). The full exchange IS persisted though —
+      // point the user at it so the rounds aren't "lost" (user report: after a
+      // debate the rounds vanish with no way to re-read them). `/council inspect`
+      // is a registered slash command that replays [Council Round N] / [Council
+      // Memory] from the DB.
+      const roundsArchivedLine =
+        debateState.roundCount > 0
+          ? `\n\n📋 All ${debateState.roundCount} debate round(s) are archived — run \`/council inspect ${sessionId}\` to re-read the full exchange.`
+          : "";
+      const headerBlock = `${heading}\n\n> ${confidenceBadge}\n>\n> **Why:** ${confidenceReason}${outcomeLine}\n\n${recommendLine}${roundsArchivedLine}\n\nLeader: \`${leaderModelId}\`. What would you like to do next?`;
 
       let answer: string;
       if (options?.sprintPlanningMode) {

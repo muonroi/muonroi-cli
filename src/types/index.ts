@@ -519,6 +519,7 @@ export interface StreamChunk {
     | "experience_injected"
     | "push_notification"
     | "halt"
+    | "toast"
     | "task_list_update";
   content?: string;
   toolCalls?: ToolCall[];
@@ -542,6 +543,13 @@ export interface StreamChunk {
   experienceWarning?: ExperienceWarningData;
   experienceInjected?: ExperienceInjectedData;
   taskListSnapshot?: TaskListSnapshot;
+  /**
+   * Populated when type === "toast". A transient, ephemeral notice (e.g.
+   * "initializing sub-session…") that the UI shows briefly then auto-dismisses
+   * — it is NOT appended to the persisted assistant message. `content` holds
+   * the text; `toastLevel` selects the style (defaults to "info").
+   */
+  toastLevel?: "info" | "warn" | "error";
 }
 
 export type TaskListItemStatus = "pending" | "in_progress" | "completed";

@@ -3324,6 +3324,14 @@ export function useAppLogic(props: AppLogicProps) {
                 }
                 applyLocalAssistantDelta(chunk.content || "");
                 break;
+              case "toast":
+                // Ephemeral notice — flash it, do NOT append to the persisted
+                // assistant message (that was the old "message thừa ở console"
+                // the user reported: transient status stuck permanently in log).
+                if (chunk.content) {
+                  pushToast(chunk.toastLevel ?? "info", chunk.content);
+                }
+                break;
               case "reasoning":
                 if (reasoningStartRef.current === null) {
                   reasoningStartRef.current = Date.now();

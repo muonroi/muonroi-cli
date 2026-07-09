@@ -154,6 +154,62 @@ export function loadTranscript(sessionId: string): ModelMessage[] {
   return loadTranscriptState(sessionId).messages;
 }
 
+interface ChainMessageRecord {
+  sessionId: string;
+  message: ModelMessage;
+  seq: number | null;
+  timestamp: Date;
+}
+
+/**
+ * Resume a session together with every session in its conversation tree.
+ *
+ * When a session has spawned child sessions (silent rotations, sub-agents,
+ * sub-sessions), resuming only the parent loses the work that happened in the
+ * children. This loader walks up to the root and then down through all
+ * descendants, applies each session's own compaction, merges the messages
+ * chronologically, and returns them as one flat transcript for the model.
+ *
+ * Sequence numbers from sessions other than the one being resumed are replaced
+ * with `null` so that usage attribution and compaction still belong to the
+ * resumed session.
+ */
+export function loadSessionChainTranscriptState(sessionId: string): LoadedTranscriptState {
+  const chain = getSessionChain(sessionId);
+  if (chain.length <= 1) {
+    return loadTranscriptState(sessionId);
+  }
+
+  const records: ChainMessageRecord[] = [];
+  for (const sid of chain) {
+    const rows = loadMessageRows(sid);
+    const messages = rows.map((row) => JSON.parse(row.message_json) as ModelMessage);
+    const seqs = rows.map((row) => row.seq);
+    const timestamps = rows.map((row) => new Date(row.created_at));
+    const effective = buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sid));
+
+    for (let i = 0; i < effective.messages.length; i++) {
+      records.push({
+        sessionId: sid,
+        message: effective.messages[i],
+        seq: effective.seqs[i],
+        timestamp: effective.timestamps[i],
+      });
+    }
+  }
+
+  // getSessionChain already orders sessions by creation time. Preserve each
+  // session's internal effective-transcript order (especially compaction
+  // summaries, which must precede their kept tail) instead of re-sorting by
+  // individual message timestamps.
+  return {
+    messages: records.map((r) => r.message),
+    seqs: records.map((r) => (r.sessionId === sessionId ? r.seq : null)),
+    timestamps: records.map((r) => r.timestamp),
+    compaction: loadLatestCompaction(sessionId),
+  };
+}
+
 export function getNextMessageSequence(sessionId: string): number {
   return getNextSequence(getDatabase(), sessionId);
 }

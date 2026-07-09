@@ -729,6 +729,14 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     width,
   } = useAppLogic({ agent, startupConfig, initialMessage, onExit, onRelaunch });
 
+  // Agent-mode input bridge: translate harness {op:"type"/"press"} commands into
+  // synthetic OpenTUI keypresses (via the shared useAppContext().keyHandler) so
+  // an external driver (MCP harness / vitest spec) can actually type into the
+  // composer. It was imported but never mounted — the agent-mode command channel
+  // had no consumer, so type/press silently no-opped (frames flowed out, input
+  // was dead). No-op when agentRuntime is undefined (normal interactive mode).
+  useAgentInputBridge(agentRuntime);
+
   // Context rail (MUONROI_CONTEXT_RAIL): only render when enabled, the user
   // hasn't hidden it (Ctrl+B), and the terminal is wide enough that a fixed
   // side panel doesn't starve the transcript. Below 100 cols it stays inline.
@@ -767,7 +775,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   }
   if (councilMeta?.leader) railRows.push({ label: "Leader", value: councilMeta.leader });
   if (councilMeta?.panel?.length) {
-    railRows.push({ label: "Panel", value: `${councilMeta.panel.length}: ${councilMeta.panel.join(", ")}` });
+    railRows.push({ label: "Panel", value: `${councilMeta.panel.length} (${councilMeta.panel.join(", ")})` });
   }
   // Round budget is a CEILING the leader may stop under once the panel converges
   // — not a commitment to run that many. Label it as a budget so it doesn't read
@@ -1042,6 +1050,21 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                                 theme={t}
                                 sessionId={sessionId ?? undefined}
                               />
+                              {/* Opening Analysis turns carry round 0, but
+                                  council_round group records only exist for
+                                  rounds >= 1 — so the round-grouped view below
+                                  silently dropped the openings the moment Round
+                                  1 began (the "opening content cut off" bug).
+                                  Render any turn whose round has no group record
+                                  (round 0, plus any defensive orphan) above the
+                                  groups, but only in the unscoped overview — when
+                                  a specific round is selected in the rail we scope
+                                  to just that round. */}
+                              {selectedRound === null
+                                ? debateTurns
+                                    .filter(({ cm }) => !councilRounds.some((r) => r.round === cm.round))
+                                    .map(renderTurn)
+                                : null}
                               {councilRounds
                                 // When a round is selected in the rail, scope the
                                 // main pane to just that round (its debate turns

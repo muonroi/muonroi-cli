@@ -3,6 +3,7 @@ import type { ToolSet } from "ai";
 import { generateText, stepCountIs } from "ai";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { emitMatches } from "../ee/render.js";
+import { getMcpKey } from "../mcp/mcp-keychain.js";
 import type { McpToolBundle } from "../mcp/runtime.js";
 import { buildMcpToolSet } from "../mcp/runtime.js";
 import { getModelInfo } from "../models/registry.js";
@@ -674,15 +675,24 @@ export function createCouncilLLM(
       const internetFirst = options?.internetFirst === true;
       const systemPrompt = buildResearchSystemPrompt(hasUrl, internetFirst);
 
-      // Warn early if internet-first mode is requested but no internet/browser tools are loaded.
-      const internetToolAvailable = Object.keys(allTools).some((n) =>
-        /fetch_url|web_search|tavily|web[_-]?fetch|web[_-]?search|playwright|chrome|context7|firecrawl|exa/i.test(n),
+      // Warn early if internet-first mode is requested but no *working* web
+      // research capability exists. The builtin `web_search`/`fetch_url` tools
+      // are ALWAYS registered, so the old tool-NAME check was always true — even
+      // when `web_search` will just return `ERROR no_tavily_key`, so the warning
+      // never fired and internet-first research failed silently. Gate on real
+      // capability: a Tavily key, or an MCP search/browser tool actually loaded
+      // (builtins alone don't count — open-ended search needs the key).
+      const hasTavilyKey = ((await getMcpKey("tavily")) || process.env.TAVILY_API_KEY || "").trim().length >= 10;
+      const mcpSearchTool = Object.keys(mcpBundle?.tools ?? {}).some((n) =>
+        /tavily|web[_-]?search|web[_-]?fetch|playwright|chrome|context7|firecrawl|exa|browser/i.test(n),
       );
+      const internetToolAvailable = hasTavilyKey || mcpSearchTool;
       const internetGapWarning =
         internetFirst && !internetToolAvailable
-          ? `\n\n## Research Gap\n- Internet-first mode requested but no web research tool ` +
-            `(fetch_url, web_search, tavily, playwright, context7, etc.) is available. ` +
-            `Findings will be limited to what the model already knows.`
+          ? `\n\n## Research Gap\n- Internet-first mode requested but no working web-search capability ` +
+            `(a Tavily API key or an MCP search/browser tool) is available. ` +
+            `\`fetch_url\` still works for explicit URLs, but open-ended search is unavailable — ` +
+            `findings will be limited to what the model already knows.`
           : "";
 
       const userPrompt = conversationContext

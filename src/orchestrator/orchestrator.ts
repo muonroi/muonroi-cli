@@ -48,8 +48,7 @@ import {
   getLastTodoWriteArgs,
   getNextMessageSequence,
   getSessionTotalTokens,
-  loadTranscript,
-  loadTranscriptState,
+  loadSessionChainTranscriptState,
   logInteraction,
   markMessageCompleted,
   persistApprovedPlan,
@@ -512,7 +511,7 @@ export class Agent {
       this.workspace = this.sessionStore.getWorkspace();
       this.session = this.sessionStore.openSession(options.session, this.modelId, this.mode, this.bash.getCwd());
       this.mode = this.session.mode;
-      const transcript = loadTranscriptState(this.session.id);
+      const transcript = loadSessionChainTranscriptState(this.session.id);
       this.messages = transcript.messages;
       this.messageSeqs = transcript.seqs;
       this.sessionStore.setModel(this.session.id, this.modelId);
@@ -686,6 +685,15 @@ export class Agent {
 
   getProviderId(): ProviderId {
     return this.providerId;
+  }
+
+  /**
+   * Expose the provider factory for external callers (e.g., /compact slash command,
+   * sub-agent spawning) that need to make LLM calls outside the normal processMessage flow.
+   * Throws if no provider is configured.
+   */
+  getProvider(): LegacyProvider {
+    return this.requireProvider();
   }
 
   getCwd(): string {
@@ -1003,7 +1011,7 @@ export class Agent {
     return {
       workspace: this.workspace,
       session: this.session,
-      messages: loadTranscript(this.session.id),
+      messages: loadSessionChainTranscriptState(this.session.id).messages,
       entries: buildChatEntries(this.session.id),
       totalTokens: getSessionTotalTokens(this.session.id),
     };
@@ -2949,10 +2957,10 @@ export class Agent {
     let subSessionId: string | null = null;
 
     if (routeAction === "SPAWN_SUB_SESSION" && this.session && this.sessionStore) {
-      yield { type: "content", content: "\n⋯ Đang khởi tạo sub-session ngầm để xử lý tác vụ...\n" };
+      yield { type: "toast", toastLevel: "info", content: "Đang khởi tạo sub-session ngầm để xử lý tác vụ..." };
       parentSessionId = this.session.id;
       try {
-        const { loadLatestCompaction, getNextMessageSequence, appendCompaction, loadTranscriptState } = await import(
+        const { loadLatestCompaction, getNextMessageSequence, appendCompaction } = await import(
           "../storage/transcript.js"
         );
         const { getDatabase } = await import("../storage/db.js");
@@ -2988,9 +2996,13 @@ export class Agent {
         }
 
         if (shouldResume && subSessionId) {
-          yield { type: "content", content: "\n⋯ Phát hiện sub-session trước đó bị gián đoạn, đang khôi phục...\n" };
+          yield {
+            type: "toast",
+            toastLevel: "info",
+            content: "Phát hiện sub-session trước đó bị gián đoạn, đang khôi phục...",
+          };
           this.session = this.sessionStore.getRequiredSession(subSessionId);
-          const childState = loadTranscriptState(subSessionId);
+          const childState = loadSessionChainTranscriptState(subSessionId);
           this.messages = childState.messages;
           this.messageSeqs = childState.seqs;
           this.sessionStore.touchSession(subSessionId, this.bash.getCwd());

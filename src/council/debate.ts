@@ -585,19 +585,30 @@ export async function* runDebate(
       startedAt: p0Start,
       detail: `via ${researchCandidate.model}`,
     });
+    // A failed research call returns a "[Research failed: …]" placeholder once
+    // both primary and fallback providers are exhausted. It is a truthy string,
+    // so injecting it verbatim (below) would plant a fake "Research Findings"
+    // block into every opening/round prompt. Detect it and show a clean status
+    // note instead of the raw placeholder.
+    const researchFailed = !!researchFindings && researchFindings.includes(RESEARCH_FAILED_MARKER);
     yield {
       type: "council_message" as const,
       councilMessage: {
         kind: "research" as const,
         speaker: { role: researchCandidate.role, model: researchCandidate.model },
-        text: researchFindings ?? "",
+        text: researchFailed
+          ? "⚠ Research unavailable — both providers failed. The council proceeds on the panel's own knowledge (no external findings injected)."
+          : (researchFindings ?? ""),
       },
     };
   }
 
-  const enrichedContext = researchFindings
-    ? `${conversationContext}\n\n---\n\n## Research Findings\n${researchFindings}`
-    : conversationContext;
+  // Only enrich when research actually produced findings — never fold the
+  // "[Research failed: …]" placeholder into the debate context.
+  const enrichedContext =
+    researchFindings && !researchFindings.includes(RESEARCH_FAILED_MARKER)
+      ? `${conversationContext}\n\n---\n\n## Research Findings\n${researchFindings}`
+      : conversationContext;
 
   // ── Phase 1: Parallel opening statements ───────────────────────────────────
   // Skipped entirely on resume — `active` was restored from the checkpoint so

@@ -15,6 +15,7 @@ export {
   getSessionChain,
   loadLatestCompaction,
   loadRawTranscript,
+  loadSessionChainTranscriptState,
   loadTranscript,
   loadTranscriptState,
   markMessageCompleted,
