@@ -1139,6 +1139,36 @@ export function getTopLevelCompactKeepLast(contextWindowTokens?: number): number
 }
 
 /**
+ * O2 — byte budget for the verbatim tail (last keepLast turns) in top-level B4
+ * compaction. The keepLast shrink is otherwise fill-ratio based, so on a
+ * large-context model a read-heavy tail stays verbatim at ~50% fill, pinning
+ * each tool round at 60-80K input (measured on July-8 sessions). This caps the
+ * tail's actual chars, shrinking keepLast further (floor 2) when the kept tool
+ * results are large. 0 disables. Env: MUONROI_TOP_LEVEL_COMPACT_TAIL_BUDGET_CHARS.
+ */
+export function getTopLevelCompactTailBudgetChars(contextWindowTokens?: number): number {
+  const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_TAIL_BUDGET_CHARS;
+  if (envRaw !== undefined && envRaw.trim() !== "") {
+    const n = Number(envRaw);
+    // 0 = explicit disable; otherwise clamp to a sane floor so a fat-fingered
+    // tiny value can't stub away all recent context.
+    if (Number.isFinite(n) && n === 0) return 0;
+    if (Number.isFinite(n) && n >= 20_000 && n <= 1_000_000) return Math.floor(n);
+  }
+  // Default 50K chars (~12.5K tokens). Chosen from a deterministic measurement:
+  // on a realistic read-heavy turn the keepLast=5 verbatim tail is ~70-100K
+  // chars, so a looser budget (e.g. 120K) never bites (no-op). 50K shrinks the
+  // effective tail to ~3 turns on heavy turns (matching the sub-agent keepLast
+  // default) — ~7K tokens/call saved — while high-value results stay verbatim
+  // and light turns (below the 200K compaction threshold) are untouched. For
+  // small windows, scale to ~20% of the window so the tail can't dominate.
+  if (contextWindowTokens && contextWindowTokens > 0) {
+    return Math.min(50_000, Math.floor(contextWindowTokens * 4 * 0.2));
+  }
+  return 50_000;
+}
+
+/**
  * Per-turn cap on cumulative tool-output chars inside the top-level
  * orchestrator agentic loop. Same tiered compression as the sub-agent cap,
  * higher default so single-tool turns are unaffected. Env override:

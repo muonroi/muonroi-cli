@@ -112,7 +112,23 @@ export interface SubAgentCompactorOptions {
    * models, false otherwise.
    */
   stripOldReasoning?: boolean;
+  /**
+   * O2 — max cumulative chars of the verbatim tail (the last keepLastTurns
+   * turns). The G2 shrink is FILL-ratio based, so on a large-context model a
+   * read-heavy tail (five 8-30k tool results) stays verbatim at only ~50%
+   * fill — pinning every tool round at 60-80k input (measured: July-8 message
+   * calls, 83 in the 60-80k bucket = 44% of message-fresh). When set, keepLast
+   * is reduced further (floor 2) until the kept tail fits this budget,
+   * regardless of fill ratio. High-value results (isHighValueToolResult) are
+   * still kept verbatim independently, so only bulk dumps get stubbed.
+   * Undefined = off (sub-agent path unchanged).
+   */
+  tailBudgetChars?: number;
 }
+
+/** O2 — floor for the tail-budget keepLast shrink; never break the live step's
+ * assistant↔tool pairing (that needs at least the current turn). */
+const TAIL_BUDGET_MIN_KEEP = 2;
 
 /**
  * G1 — coarse char→token conversion. The real ratio is provider/tokenizer
@@ -211,6 +227,7 @@ interface ResolvedOpts {
     summary?: string,
   ) => void;
   stripOldReasoning: boolean;
+  tailBudgetChars: number;
 }
 
 function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
@@ -226,7 +243,32 @@ function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
     keepToolIds: keepIds,
     persistArtifact: o?.persistArtifact,
     stripOldReasoning: o?.stripOldReasoning ?? false,
+    tailBudgetChars: Math.max(0, o?.tailBudgetChars ?? 0),
   };
+}
+
+/**
+ * O2 — given the fill-ratio-derived keepLast, shrink it further so the kept
+ * verbatim tail (the last N tool turns) fits `tailBudgetChars`. Walks keepLast
+ * down from its input value, measuring the actual chars of the tail each step,
+ * and stops at the first count that fits (or the TAIL_BUDGET_MIN_KEEP floor).
+ * Off (returns keepLast unchanged) when tailBudgetChars <= 0.
+ */
+function shrinkKeepLastToTailBudget(
+  messages: ReadonlyArray<ModelMessage>,
+  keepLast: number,
+  tailBudgetChars: number,
+): number {
+  if (tailBudgetChars <= 0 || keepLast <= TAIL_BUDGET_MIN_KEEP) return keepLast;
+  let k = keepLast;
+  while (k > TAIL_BUDGET_MIN_KEEP) {
+    const keepFrom = findKeepFromIndex(messages, k);
+    let tailChars = 0;
+    for (let i = keepFrom; i < messages.length; i++) tailChars += messageChars(messages[i]!);
+    if (tailChars <= tailBudgetChars) return k;
+    k -= 1;
+  }
+  return TAIL_BUDGET_MIN_KEEP;
 }
 
 /**
@@ -494,7 +536,16 @@ export function compactSubAgentMessages(
     processedMessages = sliceMessageHistory(messages, 30);
   }
 
-  const keepFrom = findKeepFromIndex(processedMessages, effectiveKeepLastTurns);
+  // O2 — after the fill-ratio shrink, further reduce keepLast so the verbatim
+  // tail fits the byte budget (targets read-heavy tails that stay large at low
+  // fill). No-op when tailBudgetChars is unset (sub-agent path).
+  const budgetedKeepLast = shrinkKeepLastToTailBudget(
+    processedMessages,
+    effectiveKeepLastTurns,
+    resolved.tailBudgetChars,
+  );
+
+  const keepFrom = findKeepFromIndex(processedMessages, budgetedKeepLast);
   if (keepFrom <= 0) return messages as ModelMessage[];
 
   // Walk older messages; rewrite fresh tool results into stubs, super-shrink

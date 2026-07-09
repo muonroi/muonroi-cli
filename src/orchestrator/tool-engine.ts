@@ -147,6 +147,7 @@ import {
   getProviderStallTimeoutMs,
   getSteerInjectionEnabled,
   getTopLevelCompactKeepLast,
+  getTopLevelCompactTailBudgetChars,
   getTopLevelCompactThresholdChars,
   getTopLevelToolBudgetChars,
   isAutoCouncilClarifyEnabled,
@@ -1355,6 +1356,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // elided the content.
         const topLevelCompactThreshold = getTopLevelCompactThresholdChars(contextWindow);
         const topLevelCompactKeepLast = getTopLevelCompactKeepLast(contextWindow);
+        // O2 — byte budget for the verbatim tail; shrinks keepLast on read-heavy
+        // turns that stay large at low fill (the 60-80k-per-call bucket).
+        const topLevelCompactTailBudget = getTopLevelCompactTailBudgetChars(contextWindow);
         // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
         deps.setLastProviderOptionsShape(
           Object.keys(providerOpts).length > 0 ? extractProviderOptionsShape(providerOpts) : null,
@@ -1854,6 +1858,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               keepToolIds: keepToolIds.length ? keepToolIds : undefined,
               persistArtifact,
               stripOldReasoning: isReasoningModel,
+              tailBudgetChars: topLevelCompactTailBudget,
             });
 
             const coalesced = coalesceReadOnlyMessages(compacted);
