@@ -655,6 +655,67 @@ function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
 }
 
 /**
+ * O3 — compaction hysteresis state, threaded across `prepareStep` calls within
+ * a single top-level turn. `frozenCompacted` is the compacted history captured
+ * at the last real compaction; `frozenStrippedLen` is the message count of the
+ * (un-compacted) history at that moment, so the append delta can be recovered.
+ */
+export interface CompactionHysteresisState {
+  frozenCompacted: ModelMessage[] | null;
+  frozenStrippedLen: number;
+  lastCompactTriggerChars: number;
+}
+
+export function initCompactionHysteresisState(): CompactionHysteresisState {
+  return { frozenCompacted: null, frozenStrippedLen: 0, lastCompactTriggerChars: 0 };
+}
+
+/**
+ * Decide whether to hold the frozen compacted prefix or (re)compact.
+ *
+ * Re-running the compactor on every step slides the keepLast boundary forward
+ * one tool result per step, flipping that result verbatim→stub and breaking the
+ * provider prompt-cache prefix at its position — measured as 63% of a real
+ * session's FRESH input (session 1afb2728e67a). Between compactions we instead
+ * reuse the frozen compacted prefix and append only the messages added since
+ * (history is append-only within a turn), keeping the cached prefix byte-stable
+ * until cumulative size grows past `lastCompactTriggerChars * hysteresis`.
+ *
+ * Pure: returns the next state rather than mutating. `hysteresis <= 1.0`
+ * disables the freeze (legacy per-step compaction). The delta slice uses the
+ * ORIGINAL (pre-compaction) length, so it is correct whether or not the
+ * compactor preserves message count.
+ */
+export function applyCompactionHysteresis(args: {
+  stripped: ModelMessage[];
+  currChars: number;
+  hysteresis: number;
+  state: CompactionHysteresisState;
+  runCompaction: () => ModelMessage[];
+}): { compacted: ModelMessage[]; didRecompact: boolean; state: CompactionHysteresisState } {
+  const { stripped, currChars, hysteresis, state, runCompaction } = args;
+  if (hysteresis > 1.0 && state.frozenCompacted !== null && currChars <= state.lastCompactTriggerChars * hysteresis) {
+    const delta = stripped.slice(state.frozenStrippedLen);
+    const compacted = delta.length > 0 ? [...state.frozenCompacted, ...delta] : state.frozenCompacted;
+    return { compacted, didRecompact: false, state };
+  }
+  const compacted = runCompaction();
+  const changed = compacted !== stripped;
+  if (changed && hysteresis > 1.0) {
+    return {
+      compacted,
+      didRecompact: true,
+      state: {
+        frozenCompacted: compacted,
+        frozenStrippedLen: stripped.length,
+        lastCompactTriggerChars: currChars,
+      },
+    };
+  }
+  return { compacted, didRecompact: changed, state };
+}
+
+/**
  * Injects Anthropic prompt caching (cacheControl) into the last message's content
  * block(s) if the model is Claude (starts with 'claude').
  * Creates a copy of the messages array and the last message to avoid mutating in-place.

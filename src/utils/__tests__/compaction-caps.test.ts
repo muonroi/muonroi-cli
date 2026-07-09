@@ -27,6 +27,7 @@ import {
   getSubAgentBudgetChars,
   getSubAgentCompactKeepLast,
   getSubAgentCompactThresholdChars,
+  getTopLevelCompactHysteresis,
   getTopLevelCompactKeepLast,
   getTopLevelCompactTailBudgetChars,
   getTopLevelCompactThresholdChars,
@@ -42,6 +43,7 @@ const ENV_KEYS = [
   "MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST",
   "MUONROI_TOP_LEVEL_COMPACT_TAIL_BUDGET_CHARS",
   "MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS",
+  "MUONROI_COMPACT_HYSTERESIS",
 ] as const;
 
 const saved: Record<string, string | undefined> = {};
@@ -65,6 +67,18 @@ describe("compaction cap getters — production contract (G4 drift guard)", () =
       expect(getSubAgentCompactKeepLast()).toBe(3);
       expect(getTopLevelCompactThresholdChars()).toBe(200_000);
       expect(getTopLevelCompactKeepLast()).toBe(5);
+    });
+
+    it("compaction hysteresis default 1.15; env override, disable, and clamp", () => {
+      expect(getTopLevelCompactHysteresis()).toBe(1.15);
+      process.env.MUONROI_COMPACT_HYSTERESIS = "1.5";
+      expect(getTopLevelCompactHysteresis()).toBe(1.5);
+      process.env.MUONROI_COMPACT_HYSTERESIS = "0"; // explicit disable → 1.0
+      expect(getTopLevelCompactHysteresis()).toBe(1.0);
+      process.env.MUONROI_COMPACT_HYSTERESIS = "5"; // > 3.0 → default
+      expect(getTopLevelCompactHysteresis()).toBe(1.15);
+      process.env.MUONROI_COMPACT_HYSTERESIS = "0.5"; // < 1.0 (and !=0) → default
+      expect(getTopLevelCompactHysteresis()).toBe(1.15);
     });
 
     it("clamp out-of-range env back to the default", () => {

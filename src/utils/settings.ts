@@ -1127,6 +1127,33 @@ export function getTopLevelCompactThresholdChars(contextWindowTokens?: number): 
 }
 
 /**
+ * Compaction hysteresis factor for the top-level loop. Once B4 compaction has
+ * fired within a turn, the compacted prefix is FROZEN and only new messages are
+ * appended (keeping the provider prompt-cache prefix byte-stable) until the
+ * cumulative size grows past `lastTriggerChars * factor` — then it re-compacts.
+ *
+ * Why: measured on session 1afb2728e67a — a 24-step turn re-ran compaction every
+ * step, and each step's sliding keepLast boundary flipped one more tool result
+ * verbatim→stub, breaking the cache prefix at that position. 63% of that
+ * session's FRESH input came from 5 such compaction-induced cache breaks.
+ * Holding the boundary between compactions trades a higher peak input for far
+ * fewer cache-break re-bills.
+ *
+ * Range 1.0–3.0. Default 1.15 (re-compact at +15% growth). `1.0` or env `0`
+ * disables hysteresis → legacy per-step compaction.
+ * Env override: MUONROI_COMPACT_HYSTERESIS.
+ */
+export function getTopLevelCompactHysteresis(): number {
+  const envRaw = process.env.MUONROI_COMPACT_HYSTERESIS;
+  if (envRaw !== undefined && envRaw.trim() !== "") {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n === 0) return 1.0; // explicit disable
+    if (Number.isFinite(n) && n >= 1.0 && n <= 3.0) return n;
+  }
+  return 1.15;
+}
+
+/**
  * Phase B4 — number of trailing tool turns kept verbatim during top-level
  * compaction. Higher than sub-agent default because top-level agents make
  * decisions across longer horizons.

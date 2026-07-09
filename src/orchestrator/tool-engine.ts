@@ -146,6 +146,7 @@ import {
   getProviderStallRetries,
   getProviderStallTimeoutMs,
   getSteerInjectionEnabled,
+  getTopLevelCompactHysteresis,
   getTopLevelCompactKeepLast,
   getTopLevelCompactTailBudgetChars,
   getTopLevelCompactThresholdChars,
@@ -225,7 +226,13 @@ import {
 } from "./stall-watchdog.js";
 import { planSteerInjection } from "./steer-inbox.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
-import { applyAnthropicPromptCaching, compactSubAgentMessages, cumulativeMessageChars } from "./subagent-compactor.js";
+import {
+  applyAnthropicPromptCaching,
+  applyCompactionHysteresis,
+  compactSubAgentMessages,
+  cumulativeMessageChars,
+  initCompactionHysteresisState,
+} from "./subagent-compactor.js";
 import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
 import { shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
@@ -1375,6 +1382,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // O2 — byte budget for the verbatim tail; shrinks keepLast on read-heavy
         // turns that stay large at low fill (the 60-80k-per-call bucket).
         const topLevelCompactTailBudget = getTopLevelCompactTailBudgetChars(contextWindow);
+        // O3 — compaction hysteresis state (per-turn; this scope runs once per
+        // streamText turn). Once we compact, freeze the compacted prefix and
+        // only append new messages until size grows past the hysteresis ceiling,
+        // so the provider prompt-cache prefix stays byte-stable across steps
+        // instead of breaking every step as the keepLast boundary slides.
+        const compactHysteresis = getTopLevelCompactHysteresis();
+        let hysteresisState = initCompactionHysteresisState();
         // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
         deps.setLastProviderOptionsShape(
           Object.keys(providerOpts).length > 0 ? extractProviderOptionsShape(providerOpts) : null,
@@ -1859,26 +1873,44 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 ? 0.2
                 : 0.3
               : undefined;
-            const compacted = compactSubAgentMessages(stripped, {
-              thresholdChars: topLevelCompactThreshold,
-              // Rec #1 (cheap part): on meta/self-eval turns keep a couple more
-              // trailing tool turns verbatim — those carry the reasoning the
-              // agent is being asked to reflect on, and over-eliding them is
-              // exactly what starves a self-evaluation. One boolean, no new
-              // detection logic (isMetaAnalysisPrompt already gates layer3/5).
-              keepLastTurns: topLevelCompactKeepLast + (isMetaAnalysisPrompt(userMessage) ? 2 : 0),
-              label: "top-level",
-              envelopeChars,
-              contextWindowTokens,
-              contextFillRatio: reasoningFillRatio,
-              keepToolIds: keepToolIds.length ? keepToolIds : undefined,
-              persistArtifact,
-              stripOldReasoning: isReasoningModel,
-              tailBudgetChars: topLevelCompactTailBudget,
+            const runCompaction = (): ModelMessage[] =>
+              compactSubAgentMessages(stripped, {
+                thresholdChars: topLevelCompactThreshold,
+                // Rec #1 (cheap part): on meta/self-eval turns keep a couple more
+                // trailing tool turns verbatim — those carry the reasoning the
+                // agent is being asked to reflect on, and over-eliding them is
+                // exactly what starves a self-evaluation. One boolean, no new
+                // detection logic (isMetaAnalysisPrompt already gates layer3/5).
+                keepLastTurns: topLevelCompactKeepLast + (isMetaAnalysisPrompt(userMessage) ? 2 : 0),
+                label: "top-level",
+                envelopeChars,
+                contextWindowTokens,
+                contextFillRatio: reasoningFillRatio,
+                keepToolIds: keepToolIds.length ? keepToolIds : undefined,
+                persistArtifact,
+                stripOldReasoning: isReasoningModel,
+                tailBudgetChars: topLevelCompactTailBudget,
+              });
+
+            // O3 — compaction hysteresis (holds the frozen compacted prefix
+            // between compactions so the provider prompt-cache prefix stays
+            // byte-stable across steps instead of breaking as the keepLast
+            // boundary slides). See applyCompactionHysteresis.
+            const currChars = cumulativeMessageChars(stripped) + envelopeChars;
+            const _hyst = applyCompactionHysteresis({
+              stripped,
+              currChars,
+              hysteresis: compactHysteresis,
+              state: hysteresisState,
+              runCompaction,
             });
+            const compacted = _hyst.compacted;
+            hysteresisState = _hyst.state;
 
             const coalesced = coalesceReadOnlyMessages(compacted);
-            if (compacted !== stripped) recordCompaction(sn);
+            // Count only ACTUAL (re)compactions, not held-boundary steps — the
+            // compaction counter drives the cache-churn telemetry this fixes.
+            if (_hyst.didRecompact) recordCompaction(sn);
             // Pre-compaction visibility: give the agent one step of notice
             // before B4 actually rewrites history into stubs. This is the
             // advance warning that was missing — agent can now decide to
