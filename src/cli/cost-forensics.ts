@@ -43,6 +43,16 @@ export interface CostForensicsSummary {
   totalCostUsd: number;
   cacheHitRatio: number;
   peakSingleCallInput: number;
+  /**
+   * Peak FRESH (uncached) input on any single usage event — `max(input -
+   * cacheRead)`. This is the cap-escape discriminator: `task`/`council` rows
+   * store `totalUsage` AGGREGATED across a streamText call's internal steps, so
+   * a high `peakSingleCallInput` on those sources is usually cached-prefix reuse
+   * across steps (high cache hit), NOT a single call that breached the cap. A
+   * genuine cold cap-escape sends >cap FRESH tokens in one call, which shows up
+   * here regardless of source.
+   */
+  peakSingleCallFresh: number;
   events: CostForensicsRow[];
   /** Anti-mù counters for this session (null when none recorded). */
   experience: SessionExperienceCounts | null;
@@ -150,6 +160,7 @@ export function collectCostForensics(sessionId: string): CostForensicsSummary {
   let totalCacheCreation = 0;
   let totalCostMicros = 0;
   let peakSingleCallInput = 0;
+  let peakSingleCallFresh = 0;
   for (const e of events) {
     totalInput += e.inputTokens;
     totalOutput += e.outputTokens;
@@ -157,6 +168,8 @@ export function collectCostForensics(sessionId: string): CostForensicsSummary {
     totalCacheCreation += e.cacheCreationTokens;
     totalCostMicros += e.costMicros;
     if (e.inputTokens > peakSingleCallInput) peakSingleCallInput = e.inputTokens;
+    const fresh = Math.max(0, e.inputTokens - e.cacheReadTokens);
+    if (fresh > peakSingleCallFresh) peakSingleCallFresh = fresh;
   }
   const cacheable = totalInput;
   const cacheHitRatio = cacheable > 0 ? totalCacheRead / cacheable : 0;
@@ -173,6 +186,7 @@ export function collectCostForensics(sessionId: string): CostForensicsSummary {
     totalCostUsd: totalCostMicros / 1_000_000,
     cacheHitRatio,
     peakSingleCallInput,
+    peakSingleCallFresh,
     events,
     experience: selectSessionExperience(sessionId),
   };
@@ -254,7 +268,10 @@ export function printCostForensics(summary: CostForensicsSummary, opts: { json?:
   w(`Total output tokens: ${formatNum(summary.totalOutput)}`);
   w(`Cache read tokens:   ${formatNum(summary.totalCacheRead)} (${formatPct(summary.cacheHitRatio)} of input)`);
   w(`Cache create tokens: ${formatNum(summary.totalCacheCreation)}`);
-  w(`Peak single call:    ${formatNum(summary.peakSingleCallInput)} input`);
+  w(
+    `Peak single call:    ${formatNum(summary.peakSingleCallInput)} input ` +
+      `(${formatNum(summary.peakSingleCallFresh)} fresh)`,
+  );
   w(`Estimated cost:      $${summary.totalCostUsd.toFixed(4)}`);
   // Cache-cadence diagnostic — surface fast-loop prompt-cache latency loss.
   const cadence = computeCacheCadence(summary.events);
@@ -304,9 +321,19 @@ export function printCostForensics(summary: CostForensicsSummary, opts: { json?:
 
   // Acceptance hints — surface anomalies relative to Phase A/B/C targets.
   const anomalies: string[] = [];
-  if (summary.peakSingleCallInput > 80_000) {
+  // Phase B breach = a single call that sent >80K FRESH (uncached) tokens.
+  // Use FRESH, not raw input: `task`/`council` usage rows store `totalUsage`
+  // aggregated across a streamText call's internal steps, so a high raw input
+  // there is normally cached-prefix reuse across steps (high cache hit), NOT a
+  // cold cap breach. Evidence: session 6f17a13c1591 peaked at 378,613 raw input
+  // but only 54,389 fresh (324,224 cache-read) — aggregate reuse, no breach.
+  if (summary.peakSingleCallFresh > 80_000) {
     anomalies.push(
-      `peak single-call input ${formatNum(summary.peakSingleCallInput)} > 80,000 — sub-agent cap may not have kicked in (Phase B target breach)`,
+      `peak single-call FRESH input ${formatNum(summary.peakSingleCallFresh)} > 80,000 — sub-agent cap may not have kicked in (Phase B target breach)`,
+    );
+  } else if (summary.peakSingleCallInput > 80_000) {
+    anomalies.push(
+      `peak single-call input ${formatNum(summary.peakSingleCallInput)} > 80,000 but only ${formatNum(summary.peakSingleCallFresh)} FRESH — aggregate multi-step reuse (task/council totalUsage), NOT a cap breach`,
     );
   }
   if (summary.events.some((e) => e.messageSeq === null && e.source === "message")) {

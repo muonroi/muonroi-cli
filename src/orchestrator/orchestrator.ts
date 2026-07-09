@@ -89,6 +89,8 @@ import {
   getModeSpecificModel,
   getRoleModel,
   getRoleModels,
+  getSubAgentCompactKeepLast,
+  getSubAgentCompactThresholdChars,
   isAutoCompactAfterTurnEnabled,
   isCouncilMultiProviderPreferred,
   isProviderDisabled,
@@ -167,6 +169,7 @@ import { withStreamRetry } from "./retry-stream.js";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
 import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
 import { type ModelTaskKind, resolveModelForTask } from "./sub-agent-model-tier.js";
+import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
 import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
 import { firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
@@ -1313,8 +1316,28 @@ export class Agent {
     let assistantText = "";
     let lastActivity = initialDetail;
 
+    // Phase B3 parity: the streamText sub-agent path compacts older tool
+    // results in prepareStep, but this batch path historically concatenated
+    // `[...childMessages, ...turnMessages]` unbounded every round — on a long
+    // batch loop the re-sent history balloons exactly like the stream path did
+    // before B3. Apply the same compactor here (round >= 1, mirroring the
+    // stream path's `stepNumber >= 1` gate). High-value results stay verbatim.
+    const batchCompactThreshold = getSubAgentCompactThresholdChars();
+    const batchCompactKeepLast = getSubAgentCompactKeepLast();
+    const batchChildCtxWindow = childRuntime.modelInfo?.contextWindow ?? 0;
+    const batchIsReasoningModel = childRuntime.modelInfo?.reasoning === true;
     for (let round = 0; round < maxSteps; round++) {
       const batchRequestId = `task-${Date.now()}-${round + 1}`;
+      const roundMessages =
+        round < 1
+          ? [...childMessages, ...turnMessages]
+          : compactSubAgentMessages([...childMessages, ...turnMessages], {
+              thresholdChars: batchCompactThreshold,
+              keepLastTurns: batchCompactKeepLast,
+              contextWindowTokens: batchChildCtxWindow,
+              contextFillRatio: batchIsReasoningModel ? 0.3 : undefined,
+              stripOldReasoning: batchIsReasoningModel,
+            });
       await addBatchRequests({
         ...this.getBatchClientOptions(signal),
         batchId: batch.batch_id,
@@ -1325,7 +1348,7 @@ export class Agent {
               chat_get_completion: buildBatchChatCompletionRequest({
                 modelId: childRuntime.modelId,
                 system: childSystem,
-                messages: [...childMessages, ...turnMessages],
+                messages: roundMessages,
                 temperature: childRuntime.modelInfo?.fixedTemperature ?? (request.agent === "explore" ? 0.2 : 0.5),
                 maxOutputTokens: !childCaps.acceptsParam("maxOutputTokens", childRuntime.modelInfo)
                   ? undefined
