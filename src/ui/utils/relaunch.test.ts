@@ -4,18 +4,13 @@ import { relaunchWithSession, sanitizeArgvForResume } from "./relaunch.js";
 
 describe("sanitizeArgvForResume", () => {
   it("appends --session when no prior session flag exists", () => {
-    expect(sanitizeArgvForResume(["-m", "grok-build-0.1"], "abc-123")).toEqual([
-      "-m",
-      "grok-build-0.1",
-      "--session",
-      "abc-123",
-    ]);
+    expect(sanitizeArgvForResume(["-m", "grok-4.5"], "abc-123")).toEqual(["-m", "grok-4.5", "--session", "abc-123"]);
   });
 
   it("strips an existing `-s <id>` and replaces it", () => {
-    expect(sanitizeArgvForResume(["-s", "old-id", "-m", "grok-build-0.1"], "new-id")).toEqual([
+    expect(sanitizeArgvForResume(["-s", "old-id", "-m", "grok-4.5"], "new-id")).toEqual([
       "-m",
-      "grok-build-0.1",
+      "grok-4.5",
       "--session",
       "new-id",
     ]);
@@ -49,9 +44,9 @@ describe("sanitizeArgvForResume", () => {
   });
 
   it("strips transient launch-mode flags (--agent-mode) so resume does not re-enter agent-mode", () => {
-    expect(sanitizeArgvForResume(["--agent-mode", "-m", "grok-build-0.1"], "new-id")).toEqual([
+    expect(sanitizeArgvForResume(["--agent-mode", "-m", "grok-4.5"], "new-id")).toEqual([
       "-m",
-      "grok-build-0.1",
+      "grok-4.5",
       "--session",
       "new-id",
     ]);
@@ -77,17 +72,16 @@ describe("relaunchWithSession", () => {
     const spawnMock = vi.fn(() => child) as unknown as typeof import("node:child_process").spawn;
 
     relaunchWithSession("sess-xyz", {
-      argv: ["/usr/local/bin/muonroi-cli", "-m", "grok-build-0.1"],
+      argv: ["/usr/local/bin/muonroi-cli", "-m", "grok-4.5"],
       onExit: exitMock,
       spawnFn: spawnMock,
     });
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
-    expect(spawnMock).toHaveBeenCalledWith(
-      "/usr/local/bin/muonroi-cli",
-      ["-m", "grok-build-0.1", "--session", "sess-xyz"],
-      { stdio: "inherit", detached: false },
-    );
+    expect(spawnMock).toHaveBeenCalledWith("/usr/local/bin/muonroi-cli", ["-m", "grok-4.5", "--session", "sess-xyz"], {
+      stdio: "inherit",
+      detached: false,
+    });
     // exit fires on the child's "spawn" event
     child.emit("spawn");
     expect(exitMock).toHaveBeenCalledWith(0);

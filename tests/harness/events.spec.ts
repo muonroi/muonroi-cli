@@ -66,7 +66,7 @@ function makeCouncilTurnLength(round = 0): Extract<LiveEvent, { kind: "council-t
     round,
     charCount: 842,
     wordCount: 140,
-    model: "grok-4.3",
+    model: "grok-4.5",
     correlationId: "corr-1",
   };
 }
@@ -233,7 +233,7 @@ describe("LiveEvent protocol — driver layer (synthetic inject)", () => {
       expect(e?.round).toBe(1);
       expect(e?.charCount).toBe(842);
       expect(e?.wordCount).toBe(140);
-      expect(e?.model).toBe("grok-4.3");
+      expect(e?.model).toBe("grok-4.5");
       expect(e?.correlationId).toBe("corr-1");
     });
 

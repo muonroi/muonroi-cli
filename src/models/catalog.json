@@ -1,6 +1,6 @@
 {
-  "version": "2.11",
-  "updated_at": "2026-07-01",
+  "version": "2.13",
+  "updated_at": "2026-07-09",
   "description": "Local fallback catalog: deepseek + zai + opencode-go + xai. routing.council multi-provider debate; routing.vision_proxy Z.ai/xai backend for text-only models (deepseek etc.). provider_policies.peak_hour from vendor docs. Pricing APPROXIMATE.",
   "models": [
     {
@@ -96,40 +96,41 @@
       "roles": ["implement", "verify"]
     },
     {
-      "id": "grok-4.3",
-      "name": "Grok 4.3 (xAI)",
+      "id": "grok-4.5",
+      "name": "Grok 4.5 (xAI)",
       "provider": "xai",
       "tier": "premium",
-      "context_window": 1048576,
-      "max_output_tokens": 32768,
-      "input_price_per_million": 1.25,
-      "output_price_per_million": 2.5,
+      "context_window": 500000,
+      "max_output_tokens": 65536,
+      "input_price_per_million": 2.0,
+      "output_price_per_million": 6.0,
+      "cached_input_price_per_million": 0.5,
       "reasoning": true,
       "thinking_type": "enabled",
       "supports_effort": true,
       "default_reasoning_effort": "medium",
-      "description": "xAI's current flagship. Excellent agentic tool-calling, low hallucination, supports reasoning + non-reasoning mode. 1M token context. Recommended default for Grok CLI.",
-      "aliases": ["grok-4.3", "grok-latest", "grok-4"],
+      "description": "xAI/SpaceXAI flagship (Jul 2026). Strongest model for coding, agentic tool-calling, and knowledge work. Configurable reasoning. 500k context. Pricing verified from docs.x.ai 2026-07-09.",
+      "aliases": ["grok-4.5", "grok-4.5-latest", "grok-latest", "grok-4"],
       "supports_vision": true,
-      "roles": ["leader", "implement", "verify"]
+      "roles": ["leader", "implement", "verify", "research"]
     },
     {
-      "id": "grok-build-0.1",
-      "name": "Grok Build 0.1 (xAI)",
+      "id": "grok-composer-2.5-fast",
+      "name": "Composer 2.5 (Cursor / xAI)",
       "provider": "xai",
       "tier": "balanced",
-      "context_window": 262144,
+      "context_window": 200000,
       "max_output_tokens": 65536,
-      "input_price_per_million": 1.0,
-      "output_price_per_million": 2.0,
-      "reasoning": true,
-      "thinking_type": "enabled",
+      "input_price_per_million": 3.0,
+      "output_price_per_million": 15.0,
+      "reasoning": false,
+      "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "Specialized fast coding model optimized for agentic coding workflows. The model powering Grok Build CLI. Well-suited for programming, debugging, and multi-step tasks.",
-      "aliases": ["grok-build", "grok-code-fast", "grok-build-0.1"],
-      "supports_vision": true,
-      "roles": ["research", "implement"]
+      "description": "Cursor Composer 2.5 (fast) via Grok/xAI. Agentic coding model for long-horizon tasks and complex instructions. Text-only (no native vision). Model id used by Grok Build / Grok CLI integrations. Pricing: Cursor fast tier $3/$15 per 1M.",
+      "aliases": ["composer-2.5", "composer-2.5-fast", "composer", "grok-composer-2.5"],
+      "supports_vision": false,
+      "roles": ["implement", "research", "verify"]
     },
     {
       "id": "glm-4.6v-flash",
@@ -536,10 +537,7 @@
       "default": { "provider": "zai", "model_id": "glm-4.6v-flash" },
       "ocr": { "provider": "zai", "model_id": "glm-4.6v-flash" },
       "design": { "provider": "zai", "model_id": "glm-5.2" },
-      "fallback_chain": [
-        { "provider": "xai", "model_id": "grok-build-0.1" },
-        { "provider": "zai", "model_id": "glm-5.2" }
-      ]
+      "fallback_chain": [{ "provider": "xai", "model_id": "grok-4.5" }, { "provider": "zai", "model_id": "glm-5.2" }]
     },
     "council": {
       "prefer_multi_provider": true,

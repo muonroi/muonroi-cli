@@ -33,12 +33,12 @@ describe("resolveVisionChain", () => {
       default: { provider: "zai", model_id: "glm-4.6v-flash" },
       ocr: { provider: "zai", model_id: "glm-4.6v-flash" },
       design: { provider: "zai", model_id: "glm-5.2" },
-      fallback_chain: [{ provider: "xai", model_id: "grok-build-0.1" }],
+      fallback_chain: [{ provider: "xai", model_id: "grok-4.5" }],
     });
 
     const chain = resolveVisionChain("design");
     expect(chain[0]).toEqual({ provider: "zai", model_id: "glm-5.2" });
-    expect(chain.some((s) => s.model_id === "grok-build-0.1")).toBe(true);
+    expect(chain.some((s) => s.model_id === "grok-4.5")).toBe(true);
   });
 });
 
@@ -59,7 +59,7 @@ describe("resolveAvailableVisionChain", () => {
   it("returns only slots with configured API keys", async () => {
     vi.spyOn(registry, "getVisionProxyRouting").mockReturnValue({
       default: { provider: "zai", model_id: "glm-4.6v-flash" },
-      fallback_chain: [{ provider: "xai", model_id: "grok-build-0.1" }],
+      fallback_chain: [{ provider: "xai", model_id: "grok-4.5" }],
     });
     vi.spyOn(keychain, "loadKeyForProvider").mockImplementation(async (p) => {
       if (p === "xai") return "sk-xai-key-123456789012345678";
@@ -67,7 +67,7 @@ describe("resolveAvailableVisionChain", () => {
     });
 
     const chain = await resolveAvailableVisionChain();
-    expect(chain).toEqual([{ provider: "xai", model_id: "grok-build-0.1" }]);
+    expect(chain).toEqual([{ provider: "xai", model_id: "grok-4.5" }]);
     expect(await isVisionBackendAvailable()).toBe(true);
   });
 

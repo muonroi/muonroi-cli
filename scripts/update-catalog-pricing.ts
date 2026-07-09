@@ -90,9 +90,9 @@ const KNOWN_PRICING: Record<string, KnownPricing> = {
   "claude-opus-4.6-thinking": { input: 15.0, output: 75.0 },
   "gpt-oss-120b-medium": { input: 0.2, output: 0.8 },
 
-  // ── xAI (Grok) ──
-  "grok-4.3": { input: 1.25, output: 2.5 },
-  "grok-build-0.1": { input: 1.0, output: 2.0 },
+  // ── xAI (Grok) — verified docs.x.ai / Grok CLI catalog 2026-07-09 ──
+  "grok-4.5": { input: 2.0, output: 6.0, cachedInput: 0.5 },
+  "grok-composer-2.5-fast": { input: 3.0, output: 15.0 },
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────

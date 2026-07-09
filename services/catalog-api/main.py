@@ -82,6 +82,8 @@ class CatalogModel(BaseModel):
     supports_vision: Optional[bool] = None
     tier_routing: Optional[bool] = True
     routing_tiers: Optional[list[str]] = None
+    # Mirrors CatalogModel.roles in src/models/catalog-client.ts (role routing).
+    roles: Optional[list[str]] = None
 
 
 class CatalogPeakHourWindow(BaseModel):
@@ -224,9 +226,9 @@ KNOWN_PRICING: dict[str, dict[str, float | None]] = {
     # DeepSeek native (api.deepseek.com) — verified 2026-06
     "deepseek-v4-flash": {"input": 0.27, "output": 1.1, "cachedInput": 0.027, "cacheWrite": None},
     "deepseek-v4-pro": {"input": 0.55, "output": 2.19, "cachedInput": 0.055, "cacheWrite": None},
-    # xAI (Grok)
-    "grok-4.3": {"input": 1.25, "output": 2.5, "cachedInput": None, "cacheWrite": None},
-    "grok-build-0.1": {"input": 1.0, "output": 2.0, "cachedInput": None, "cacheWrite": None},
+    # xAI (Grok) — verified docs.x.ai / Grok CLI catalog 2026-07-09
+    "grok-4.5": {"input": 2.0, "output": 6.0, "cachedInput": 0.5, "cacheWrite": None},
+    "grok-composer-2.5-fast": {"input": 3.0, "output": 15.0, "cachedInput": None, "cacheWrite": None},
     # Z.ai (GLM)
     "glm-4.7-flash": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
     "glm-4.5-air": {"input": 0.20, "output": 1.10, "cachedInput": None, "cacheWrite": None},
