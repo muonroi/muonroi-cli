@@ -600,6 +600,11 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // where 3 user messages burnt 82% of 2.44M tokens in 36 LLM calls.
   let llmCallsThisTurn = 0;
 
+  // Reactive delegation signal: reference to the top-level cap's live state so
+  // this turn's cumulative tool-output load can be reported to the Agent at
+  // turn end (drives next-turn sub-session escalation). See reactive-delegation.ts.
+  let _topLevelCapState: { cumulative: number } | null = null;
+
   // Live-queue steering: messages the user typed mid-turn are drained at a
   // prepareStep boundary and accumulated here, then re-appended (deduped) to
   // the messages returned for each subsequent step. Loop-persistent so they
@@ -1065,6 +1070,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           highTierRatio: 0.8,
           label: "top-level",
         });
+        // Expose the cap state so the reactive-delegation signal can read this
+        // turn's cumulative tool load at turn end (see report at success exit).
+        _topLevelCapState = topLevelCap.state;
         // Phase C3: layer cross-turn dedup on top of the top-level cap.
         const tools: ToolSet = wrapToolSetWithReadBudget(
           wrapToolSetWithDedup(topLevelCap.tools, deps.crossTurnDedup),
@@ -3786,6 +3794,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         if (modelInfo?.contextWindow) {
           void deps.postTurnCompact(provider, system, modelInfo.contextWindow, signal).catch(() => {});
         }
+        // Reactive delegation: report this turn's observed tool-output load so
+        // the next turn can escalate to an isolated sub-session when it proves
+        // heavy — independent of the fragile upfront router. See reactive-delegation.ts.
+        deps.reportTurnToolLoad?.(_topLevelCapState?.cumulative ?? 0);
         yield { type: "done" };
         return;
       } catch (err: unknown) {
@@ -3936,6 +3948,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         if (modelInfo?.contextWindow) {
           void deps.postTurnCompact(provider, system, modelInfo.contextWindow, signal).catch(() => {});
         }
+        // Reactive delegation: report this turn's observed tool-output load so
+        // the next turn can escalate to an isolated sub-session when it proves
+        // heavy — independent of the fragile upfront router. See reactive-delegation.ts.
+        deps.reportTurnToolLoad?.(_topLevelCapState?.cumulative ?? 0);
         yield { type: "done" };
         return;
       } finally {

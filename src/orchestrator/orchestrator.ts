@@ -161,6 +161,7 @@ import { loadFlowResumeDigest } from "./flow-resume.js";
 import { MessageProcessor, type MessageProcessorDeps } from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
 import { buildSystemPrompt, HARD_MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS } from "./prompts";
+import { shouldReactivelyEscalate } from "./reactive-delegation.js";
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
 import { withStreamRetry } from "./retry-stream.js";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
@@ -428,6 +429,10 @@ export class Agent {
   // Phase C3: cross-turn tool-output dedup. One instance per session; bumped
   // on each user turn. Lazily initialized so disabled-via-env path stays cheap.
   private _crossTurnDedup: CrossTurnDedup | null = isCrossTurnDedupEnabled() ? new CrossTurnDedup() : null;
+  // Reactive sub-session escalation: the PREVIOUS turn's cumulative tool-output
+  // chars (from the top-level cap), reported by the tool engine at turn end and
+  // read at the next turn's route decision. See reactive-delegation.ts.
+  private _lastTurnToolChars = 0;
   // Phase C4 — input-keyed read-path budget. Complements C3 (output hash) by
   // catching re-reads of files the agent edited between rounds. Disabled
   // when MUONROI_MAX_READS_PER_PATH=0.
@@ -2910,6 +2915,19 @@ export class Agent {
       }
     }
 
+    // Reactive escalation — override a DIRECT_ANSWER route (the router's blind
+    // spot on read-heavy analysis, and its silent-degrade to DIRECT on classify
+    // failure) when the PREVIOUS turn's observed tool load proves the session is
+    // doing heavy multi-tool work. Deterministic, based on real execution, not a
+    // prompt guess. Only rescues DIRECT_ANSWER — never hijacks a deliberate
+    // ROTATE_SESSION. See reactive-delegation.ts.
+    if (routeAction === "DIRECT_ANSWER" && shouldReactivelyEscalate(this._lastTurnToolChars)) {
+      logger.info("orchestrator", "Reactive escalation to sub-session (prior turn tool-heavy)", {
+        prevTurnToolChars: this._lastTurnToolChars,
+      });
+      routeAction = "SPAWN_SUB_SESSION";
+    }
+
     const shouldRotate = currentChars > threshold || routeAction === "ROTATE_SESSION";
 
     if (shouldRotate && this.session && this.sessionStore) {
@@ -3270,6 +3288,9 @@ export class Agent {
       },
       getCompactedThisTurn: () => self._compactedThisTurn,
       getCompactionStats: () => self.getCompactionStats(),
+      reportTurnToolLoad: (chars) => {
+        self._lastTurnToolChars = Number.isFinite(chars) && chars > 0 ? chars : 0;
+      },
       setTurnUserGoalExcerpt: (v) => {
         self._turnUserGoalExcerpt = v;
       },

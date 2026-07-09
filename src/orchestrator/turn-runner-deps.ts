@@ -48,6 +48,13 @@ export interface TurnRunnerDepsBase {
   setCompactedThisTurn(v: boolean): void;
   setLastProviderOptionsShape(shape: string | null): void;
   getCompactionStats(): { count: number; totalSaved: number };
+  /**
+   * Report this turn's cumulative tool-output chars (from the top-level cap)
+   * so the Agent can reactively escalate the NEXT turn to an isolated
+   * sub-session when the load proves heavy. Optional — batch path may omit it.
+   * See reactive-delegation.ts.
+   */
+  reportTurnToolLoad?(chars: number): void;
 
   // ---- Compaction behavior delegators -----------------------------------
   getCompactionSettings(contextWindow?: number): CompactionSettings;
