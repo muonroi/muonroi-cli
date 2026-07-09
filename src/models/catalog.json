@@ -108,8 +108,8 @@
       "reasoning": true,
       "thinking_type": "enabled",
       "supports_effort": true,
-      "default_reasoning_effort": "xhigh",
-      "description": "xAI/SpaceXAI flagship (Jul 2026). Strongest model for coding, agentic tool-calling, and knowledge work. Configurable reasoning (default xhigh). 500k context. Pricing verified from docs.x.ai 2026-07-09.",
+      "default_reasoning_effort": "high",
+      "description": "xAI/SpaceXAI flagship (Jul 2026). Strongest model for coding, agentic tool-calling, and knowledge work. Configurable reasoning (default high). 500k context. Pricing verified from docs.x.ai 2026-07-09.",
       "aliases": ["grok-4.5", "grok-4.5-latest", "grok-latest", "grok-4"],
       "supports_vision": true,
       "roles": ["leader", "implement", "verify", "research"]
