@@ -59,10 +59,24 @@ size-gate are the two additional triggers that feed the same fork+absorb path.
 
 **Cold first heavy turn.** Reactive escalation (Axis 3) needs a *prior* turn's
 load signal, so the very first heavy turn of a session still lands in the parent
-(bounded by the top-level cap, but not isolated). This is the one axis-3 case not
-covered. Fixing it means an *in-turn* checkpoint at a tool-round boundary — build
-only after instrumenting how often turn-1 actually crosses the threshold
-(Evidence-First; currently one known instance: session `50aa048a6303`).
+(bounded by the top-level cap, but not isolated) — UNLESS the router's
+`classifySubSessionAction` already SPAWNed a sub-session for it. This is the one
+axis-3 case not covered. Fixing it means an *in-turn* checkpoint at a tool-round
+boundary — build only after instrumenting how often it actually happens
+(Evidence-First).
+
+**Instrument (`turn_tool_load` interaction rows).** Every turn whose cumulative
+tool load crosses the reactive threshold logs `{chars, ordinal, coldFirstTurn,
+isolated, kind, threshold}`. The hole is **`coldFirstTurn && !isolated`** — a
+turn-1 blow-up that ran in the parent (`kind === "conversation"`) because
+neither the router nor reactive escalation caught it. A heavy turn-1 the router
+already isolated logs `coldFirstTurn:true, isolated:true` and is NOT the hole, so
+the metric must filter on `!isolated`. Query:
+`SELECT metadata_json FROM interaction_logs WHERE event_type='turn_tool_load'`
+then count `coldFirstTurn && !isolated` vs the rest. A first real drive
+(threshold 40k, read-heavy prompt) produced `chars:104177, ordinal:1,
+coldFirstTurn:true` — but `isolated:true` (router SPAWNed it), i.e. NOT a hole
+instance, which is exactly why the `isolated` field exists.
 
 ## Rule for adding a sixth mechanism
 

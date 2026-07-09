@@ -3302,11 +3302,21 @@ export class Agent {
         // cold turn) — the evidence that gates building an in-turn checkpoint.
         try {
           if (self.session && self._lastTurnToolChars >= getReactiveDelegationThresholdChars()) {
+            // isolated = the heavy turn ran in a forked child (router SPAWN,
+            // reactive escalation, or rotation), so the parent never held it.
+            // The cold-first-turn HOLE is specifically coldFirstTurn && !isolated
+            // — a turn-1 blow-up that landed in the parent because neither the
+            // router nor reactive escalation caught it. Recording `isolated`
+            // stops the metric from over-counting router-isolated heavy turns.
+            const kind = self.sessionStore?.getSessionKind(self.session.id) ?? "conversation";
+            const isolated = kind !== "conversation";
             logInteraction(self.session.id, "turn_tool_load", {
               data: {
                 chars: self._lastTurnToolChars,
                 ordinal: self._turnLoadOrdinal,
                 coldFirstTurn: self._turnLoadOrdinal === 1,
+                isolated,
+                kind,
                 threshold: getReactiveDelegationThresholdChars(),
               },
             });

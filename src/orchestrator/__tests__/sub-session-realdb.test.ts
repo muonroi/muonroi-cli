@@ -220,6 +220,10 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
     expect(cold).toBeDefined();
     expect(cold.coldFirstTurn).toBe(true);
     expect(cold.chars).toBe(150_000);
+    // Turn 1 ran in the PARENT (router DIRECT, reactive can't fire yet), so it is
+    // the genuine un-isolated cold-first-turn hole: coldFirstTurn && !isolated.
+    expect(cold.isolated).toBe(false);
+    expect(cold.kind).toBe("conversation");
 
     delete process.env.MUONROI_REACTIVE_DELEGATE_CHARS;
   });
