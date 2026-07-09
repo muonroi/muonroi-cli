@@ -455,8 +455,15 @@ export function buildFollowupPrompt(ctx: {
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
   const stackLock = buildStackLockSection(ctx.spec);
   return {
+    // Cache-prefix stability (see project_cache_prefix_stability): every clause
+    // here depends ONLY on (speaker, partner, stance, spec, language) — all
+    // stable across rounds — so this `system` string is byte-identical from
+    // round 2..N for the same speaker. The per-round-dynamic bits (round number,
+    // running summary) MUST live in the `prompt` tail below, never here: a
+    // provider prompt-cache keys on the exact prefix, and the round number used
+    // to sit in the FIRST sentence, busting the cached prefix every round.
     system:
-      `You are the "${me.label}" (lens: ${me.lens}) continuing a discussion (round ${ctx.round}) with the "${them.label}" (lens: ${them.lens}). ` +
+      `You are the "${me.label}" (lens: ${me.lens}) continuing a discussion with the "${them.label}" (lens: ${them.lens}). ` +
       `The easy points are settled; what remains is the hard residue — spend your words only there.\n` +
       buildLanguageRule(ctx.language) +
       EVIDENCE_RULE_FOLLOWUP +
@@ -464,9 +471,6 @@ export function buildFollowupPrompt(ctx: {
       (stackLock ? `\n${stackLock}\n` : "") +
       `\n` +
       ongoingContextBlock(ctx.spec) +
-      (ctx.runningSummary
-        ? `## Discussion State So Far\n${ctx.runningSummary}\n\nFocus on UNRESOLVED points only. Restating agreed positions is dead weight — the summary above already holds them.\n\n`
-        : "") +
       `## Success Criteria (what we need to resolve)\n` +
       ctx.spec.successCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n") +
       `\n\n` +
@@ -476,10 +480,17 @@ export function buildFollowupPrompt(ctx: {
       `- If you have genuinely converged, declare it in one sentence and stop arguing\n\n` +
       `Stay in your lane — your lens, not theirs. ` +
       `Be concise. End with: do you agree on where we've landed?\n\n` +
+      `When a "Discussion State So Far" summary is present in the message below, ` +
+      `focus on UNRESOLVED points only — restating agreed positions is dead weight.\n\n` +
       `Do NOT include round numbers (e.g. "Round N", "Response Round 2", "Round 4") ` +
       `or any numeric counter referring to the discussion round in your output. ` +
       `The orchestrator already prints round headers above your response.`,
+    // Per-round dynamic content lives here so the `system` prefix above stays
+    // cacheable. The first user message already changes every round (partner's
+    // latest response differs), so nothing cacheable is lost by placing the
+    // round number / running summary here.
     prompt:
+      (ctx.runningSummary ? `## Discussion State So Far\n${ctx.runningSummary}\n\n` : "") +
       (ctx.speakerLastPosition ? `Your previous position:\n${ctx.speakerLastPosition}\n\n` : "") +
       `Their latest (${them.label}):\n${ctx.partnerPosition}`,
   };

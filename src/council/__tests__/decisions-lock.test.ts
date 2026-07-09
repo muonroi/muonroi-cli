@@ -422,3 +422,61 @@ describe("C2: prependDecisionsLock", () => {
     expect(lockIdx).toBeLessThan(taskIdx);
   });
 });
+
+// ── Cache-prefix stability (project_cache_prefix_stability) ─────────────────────
+//
+// A provider prompt-cache keys on the exact request PREFIX, and `system` is the
+// start of it. If the follow-up `system` string varies per round, the cached
+// prefix is invalidated every round — the root cause of council's low cache-hit
+// on multi-round debates. These tests lock in that the follow-up `system` is
+// byte-identical across rounds for the same speaker+spec, with all per-round
+// dynamics (round number, running summary) in the `prompt` tail instead.
+describe("buildFollowupPrompt — cache-prefix stability", () => {
+  const base = {
+    speakerRole: "Architect",
+    partnerRole: "Pragmatist",
+    spec: makeSpec({ successCriteria: ["Feature works", "Stays cheap"] }),
+    language: "english",
+  };
+
+  it("produces a byte-identical system across rounds for the same speaker", () => {
+    const r2 = buildFollowupPrompt({
+      ...base,
+      partnerPosition: "Partner round 2 argument",
+      speakerLastPosition: "My round 1 position",
+      round: 2,
+      runningSummary: "Round 1: agreed on X.",
+    });
+    const r3 = buildFollowupPrompt({
+      ...base,
+      partnerPosition: "Partner round 3 argument — totally different",
+      speakerLastPosition: "My round 2 position",
+      round: 3,
+      runningSummary: "Round 1: agreed on X. Round 2: disputed Y.",
+    });
+    expect(r3.system).toBe(r2.system);
+  });
+
+  it("keeps the round number out of the system string entirely", () => {
+    const { system } = buildFollowupPrompt({
+      ...base,
+      partnerPosition: "p",
+      round: 4,
+      runningSummary: "s",
+    });
+    // No "round 4" framing in the cacheable prefix (the anti-repeat instruction
+    // that literally contains the token "Round 4" as an EXAMPLE is allowed).
+    expect(system).not.toContain("continuing a discussion (round");
+  });
+
+  it("carries the round's running summary in the prompt tail, not the system", () => {
+    const { system, prompt } = buildFollowupPrompt({
+      ...base,
+      partnerPosition: "p",
+      round: 2,
+      runningSummary: "UNIQUE_SUMMARY_MARKER",
+    });
+    expect(system).not.toContain("UNIQUE_SUMMARY_MARKER");
+    expect(prompt).toContain("UNIQUE_SUMMARY_MARKER");
+  });
+});
