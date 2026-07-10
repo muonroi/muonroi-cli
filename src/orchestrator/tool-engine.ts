@@ -143,6 +143,7 @@ import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/pe
 import {
   getAutoCouncilConfidence,
   getAutoCouncilMinRoles,
+  getProviderProgressTimeoutMs,
   getProviderStallRetries,
   getProviderStallTimeoutMs,
   getSteerInjectionEnabled,
@@ -1686,9 +1687,31 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // on every chunk via stall.pet(), so it never kills an actively
         // streaming call. Disposed when the stream ends or errors.
         stallTriggered = false;
-        const stall = createStallWatchdog(getProviderStallTimeoutMs(), () => {
-          stallTriggered = true;
-        });
+        // Second timer (progressTimeoutMs) is the no-forward-progress guard.
+        // stall.pet() re-arms the any-activity timer on EVERY chunk — including
+        // a reasoning model's reasoning-delta — so an endless chain-of-thought
+        // keeps it alive and it never fires (observed live 2026-07-10: a
+        // deepseek-v4-flash sub-SESSION churned reasoning 30+ min, 1.4M input
+        // tokens, ZERO text/tool output; the 2-min stall watchdog never tripped).
+        // The progress timer is reset ONLY by stall.petProgress() on real output
+        // (text-delta / tool-call), aborting a runaway-reasoning loop while a
+        // legitimately long reasoning burst that DOES emit output survives.
+        const stall = createStallWatchdog(
+          getProviderStallTimeoutMs(),
+          () => {
+            stallTriggered = true;
+          },
+          {
+            progressTimeoutMs: getProviderProgressTimeoutMs(),
+            onProgressFire: () => {
+              stallTriggered = true;
+              console.error(
+                `[tool-engine] stream aborted: no text/tool output for ${getProviderProgressTimeoutMs()}ms ` +
+                  `(runaway reasoning / no forward progress) model=${runtime.modelId}`,
+              );
+            },
+          },
+        );
         // F3c — hard-cap LLM calls per turn before this streamText()
         if (++llmCallsThisTurn > MAX_LLM_CALLS_PER_TURN) {
           stall.dispose();
@@ -2203,6 +2226,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
 
           switch (part.type) {
             case "text-delta":
+              stall.petProgress(); // real forward progress — reset the no-progress guard
               assistantText += part.text;
               // Task 2.6b — emit llm-token (agent-mode only; high-volume, default-off per Phase 4).
               try {
@@ -2237,6 +2261,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               break;
 
             case "tool-call": {
+              stall.petProgress(); // real forward progress — reset the no-progress guard
               const tc = toToolCall(part);
               activeToolCalls.push(tc);
               // SAMR: track that Phase 1 produced tool calls → transition to Phase 2
