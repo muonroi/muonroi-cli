@@ -1778,7 +1778,62 @@ export async function* runDebate(
   // slice (as lastEvidenceDensity does) reports 0.00 even when the debate
   // actually produced [CONFIRMED via …] tags earlier — that's the bug
   // session ea13da132dec hit despite 2 real web_fetch citations.
-  const fullExchangeText = [...exchangeLogs.values()].flat().join("\n\n");
+  // #3 — grounding-verify. When the debate produced weak evidence density
+  // (debaters barely tagged claims, since each is capped at stepCountIs(2)), run
+  // an isolated explore sub-agent to fact-check the load-bearing claims and emit
+  // authoritative [CONFIRMED]/[REFUTED] tags. Its output is folded into the
+  // density INPUT below (NOT into exchangeLogs, keeping the persisted transcript
+  // clean) and surfaced as a council_message. Fires only when a bridge is wired,
+  // the flag is on, we're not aborting, and grounding is genuinely weak.
+  let groundingVerifyText = "";
+  {
+    const preText = [...exchangeLogs.values()].flat().join("\n\n");
+    if (
+      config.runIsolatedTask &&
+      groundingVerifyEnabled() &&
+      !signal?.aborted &&
+      computeEvidenceDensity(preText) < GROUNDING_VERIFY_THRESHOLD
+    ) {
+      const gvStart = Date.now();
+      yield phaseStart({
+        phaseId: "phase:grounding-verify",
+        kind: "grounding_verify",
+        label: "Grounding verification",
+        detail: "verifying claims against evidence",
+      });
+      const gvTraces: string[] = [];
+      const gvOut = yield* tracedAsync(
+        () =>
+          runGroundingVerify(config.runIsolatedTask!, leaderModelId, spec.problemStatement, preText, (t) =>
+            gvTraces.push(t),
+          ),
+        { phase: "research", label: "Verifying claims against evidence", role: "verify" },
+      );
+      for (const t of gvTraces) yield { type: "council_status" as const, content: t };
+      yield phaseDone({
+        phaseId: "phase:grounding-verify",
+        kind: "grounding_verify",
+        label: "Grounding verification",
+        startedAt: gvStart,
+      });
+      // Only fold in when it actually produced verified citations — appending
+      // pure [UNVERIFIED] output would LOWER density, defeating the purpose.
+      if (gvOut && countCitations(gvOut) > 0) {
+        groundingVerifyText = gvOut;
+        yield {
+          type: "council_message" as const,
+          councilMessage: {
+            kind: "research" as const,
+            speaker: { role: "verify", model: leaderModelId },
+            text: gvOut,
+          },
+        };
+      }
+    }
+  }
+
+  const fullExchangeText =
+    [...exchangeLogs.values()].flat().join("\n\n") + (groundingVerifyText ? `\n\n${groundingVerifyText}` : "");
   const cumulativeDensity = computeEvidenceDensity(fullExchangeText);
   // Prefer cumulative when it exceeds the leader's last-round measurement —
   // we don't want a converged final round (which has fewer fact-claims to
@@ -2026,6 +2081,68 @@ export function leaderAutoRemedyEnabled(): boolean {
 }
 
 /**
+ * #3 — grounding-verify pass. When a debate ends with weak evidence density
+ * (< GROUNDING_VERIFY_THRESHOLD, i.e. debaters barely tagged any [CONFIRMED]/
+ * [REFUTED] claims — the common case since each debater is capped at
+ * stepCountIs(2)), an isolated explore sub-agent verifies the load-bearing
+ * claims against the codebase and emits authoritative tags that raise the
+ * density metric council uses for confidence. Default ON when an isolated-task
+ * bridge is wired; opt out with MUONROI_COUNCIL_GROUNDING_VERIFY=0.
+ */
+export function groundingVerifyEnabled(): boolean {
+  return process.env.MUONROI_COUNCIL_GROUNDING_VERIFY !== "0";
+}
+
+/** Density below which the grounding-verify pass fires (weak grounding). */
+const GROUNDING_VERIFY_THRESHOLD = 0.3;
+
+/**
+ * #3 — run an isolated explore sub-agent that fact-checks the debate's
+ * load-bearing claims and emits `[CONFIRMED via file:line]` / `[REFUTED via …]`
+ * tags (the exact shape `countCitations` recognises). Returns the tagged output
+ * on success, or "" on any failure (caller only folds it in when it actually
+ * raised the citation count).
+ */
+export async function runGroundingVerify(
+  runIsolatedTask: IsolatedTaskRunner,
+  model: string,
+  problemStatement: string,
+  exchangeText: string,
+  traceCb: (t: string) => void,
+): Promise<string> {
+  traceCb(`[grounding-verify] isolated explore sub-agent via ${model}`);
+  const claims = exchangeText.length > 6000 ? `${exchangeText.slice(0, 6000)}\n…[truncated]` : exchangeText;
+  const prompt =
+    `You are grounding-checking a council debate — verify its load-bearing FACTUAL claims against evidence.\n\n` +
+    `## Debate question\n${problemStatement}\n\n` +
+    `## Debaters' claims\n${claims}\n\n` +
+    `## Instructions\n` +
+    `Pick the up-to-5 most decision-relevant factual claims and check EACH against THIS repository's code ` +
+    `(grep/read files) and web sources if available. For every claim you check, emit exactly one inline tag in ` +
+    `this precise format:\n` +
+    `  [CONFIRMED via <file:line or URL>] — evidence supports the claim\n` +
+    `  [REFUTED via <file:line or URL>] — evidence contradicts the claim\n` +
+    `  [UNVERIFIED] — you genuinely could not find evidence\n` +
+    `Return a compact "## Grounding Check" list: one line per checked claim, each restating the claim in ≤15 ` +
+    `words followed by its tag. Do NOT restate the whole debate or add opinions. Prefer [CONFIRMED]/[REFUTED] ` +
+    `with a real citation over [UNVERIFIED].`;
+  try {
+    const result = await runIsolatedTask({
+      agent: "explore",
+      description: `Council grounding-verify: ${problemStatement.slice(0, 50)}`,
+      prompt,
+      modelId: model,
+    });
+    if (result.success && result.output?.trim()) return result.output.trim();
+    traceCb(`[grounding-verify] produced nothing: ${result.error ?? "no output"}`);
+    return "";
+  } catch (err) {
+    traceCb(`[grounding-verify] threw: ${err instanceof Error ? err.message : String(err)}`);
+    return "";
+  }
+}
+
+/**
  * B4: does auto-remedy want to extend the budget this round? True while pinned
  * criteria remain unmet AND progress is still being made (a new criterion was
  * met within the last 2 rounds). A stuck debate (roundsSinceProgress ≥ 2) returns
@@ -2261,7 +2378,7 @@ export function formatSpeakerRoster(list: Array<{ stance?: DebateStance; model: 
   return rows.length > 0 ? rows.join("\n") : undefined;
 }
 
-function countCitations(text: string): number {
+export function countCitations(text: string): number {
   const matches = text.match(/\[(REFUTED|CONFIRMED) via [^\]]+\]/g);
   return matches?.length ?? 0;
 }
@@ -2289,7 +2406,7 @@ function countUnverified(text: string): number {
  * shown, low confidence is correct. This biases participants (via the
  * EVIDENCE_RULE prompt) to either verify or explicitly mark unverified.
  */
-function computeEvidenceDensity(text: string): number {
+export function computeEvidenceDensity(text: string): number {
   const cited = countCitations(text);
   const unverified = countUnverified(text);
   const totalTagged = cited + unverified;

@@ -324,6 +324,7 @@ export type CouncilPhaseKind =
   | "round"
   | "evaluation"
   | "mid_research"
+  | "grounding_verify"
   | "summary"
   | "synthesis"
   | "action_plan"
