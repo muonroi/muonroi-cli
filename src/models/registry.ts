@@ -64,7 +64,21 @@ export function getModelIds(): string[] {
 }
 
 export function getModelInfo(idOrAlias: string): ModelInfo | undefined {
-  return MODELS.find((m) => m.id === idOrAlias || m.aliases?.includes(idOrAlias));
+  const direct = MODELS.find((m) => m.id === idOrAlias || m.aliases?.includes(idOrAlias));
+  if (direct) return direct;
+  // Gateway-prefix fallback: some routers/persisted configs prefix the model
+  // id with the gateway they came through (e.g. "opencode/deepseek-v4-flash",
+  // "deepseek-ai/DeepSeek-V4-Flash"). The native provider API rejects the
+  // prefixed form. Retry with the last path segment so the canonical catalog
+  // entry (and its provider) still resolves instead of leaking a dead id to
+  // runtime. Only matches when the stripped segment is a real catalog id/alias,
+  // so a non-catalog id still returns undefined (no false positives).
+  const slash = idOrAlias.lastIndexOf("/");
+  if (slash >= 0 && slash < idOrAlias.length - 1) {
+    const tail = idOrAlias.slice(slash + 1);
+    return MODELS.find((m) => m.id === tail || m.aliases?.includes(tail));
+  }
+  return undefined;
 }
 
 export function normalizeModelId(idOrAlias: string): string {

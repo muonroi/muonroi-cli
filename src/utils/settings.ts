@@ -1258,7 +1258,24 @@ export function getTopLevelToolBudgetChars(maxRounds?: number, contextWindowToke
 }
 
 export function getRoleModel(role: ModelRole): string | undefined {
-  return loadUserSettings().roleModels?.[role];
+  const configured = loadUserSettings().roleModels?.[role];
+  if (!configured) return undefined;
+  // Graceful staleness guard (mirrors getCurrentModel's pickValid): a role model
+  // persisted before a catalog rename/drop (e.g. "grok-build-0.1" after it was
+  // dropped in favor of grok-composer-2.5-fast) must NOT leak a dead id to the
+  // runtime, where resolveModelRuntime throws "not found in catalog — cannot
+  // determine provider" and takes down the whole council speaker (observed:
+  // Experience Auditor on the research role). If the catalog hasn't loaded yet,
+  // trust the normalized id; otherwise drop unresolved ids so the caller falls
+  // back to its own default instead of crashing.
+  const normalized = normalizeModelId(configured);
+  if (MODELS.length === 0) return normalized;
+  if (getModelInfo(normalized)) return normalized;
+  logger.warn(
+    "cli",
+    `roleModels.${role} = "${configured}" is not in the catalog (renamed or removed); ignoring so the caller falls back to its default. Update it via /config.`,
+  );
+  return undefined;
 }
 
 export function getRoleModels(): Partial<Record<ModelRole, string>> {

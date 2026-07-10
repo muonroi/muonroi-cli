@@ -128,7 +128,7 @@
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "Cursor Composer 2.5 (fast) via Grok/xAI. Agentic coding model for long-horizon tasks and complex instructions. Text-only (no native vision). Model id used by Grok Build / Grok CLI integrations. Pricing: Cursor fast tier $3/$15 per 1M.",
-      "aliases": ["composer-2.5", "composer-2.5-fast", "composer", "grok-composer-2.5"],
+      "aliases": ["composer-2.5", "composer-2.5-fast", "composer", "grok-composer-2.5", "grok-build-0.1"],
       "supports_vision": false,
       "roles": ["implement", "research", "verify"]
     },

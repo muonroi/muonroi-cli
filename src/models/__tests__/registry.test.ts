@@ -69,6 +69,29 @@ describe("getModelInfo", () => {
   test("returns undefined for unknown model", () => {
     expect(getModelInfo("nonexistent-model")).toBeUndefined();
   });
+
+  test("resolves a dropped id via successor alias (grok-build-0.1)", () => {
+    // grok-build-0.1 was dropped from the catalog (commit b50f1c60) in favor of
+    // Composer 2.5; the alias keeps old sessions/configs resolvable to the right
+    // provider instead of throwing "not found in catalog".
+    const info = getModelInfo("grok-build-0.1");
+    expect(info).toBeDefined();
+    expect(info!.id).toBe("grok-composer-2.5-fast");
+    expect(info!.provider).toBe("xai");
+  });
+
+  test("resolves a gateway-prefixed id by stripping the prefix", () => {
+    // A router/persisted id may carry a gateway prefix the native API rejects
+    // (e.g. "deepseek-ai/deepseek-v4-flash"). When the prefixed form is not a
+    // catalog id/alias but the tail is, the tail resolves.
+    const info = getModelInfo("deepseek-ai/deepseek-v4-flash");
+    expect(info).toBeDefined();
+    expect(info!.id).toBe("deepseek-v4-flash");
+  });
+
+  test("prefix fallback still returns undefined for a non-catalog tail", () => {
+    expect(getModelInfo("some-gateway/totally-made-up")).toBeUndefined();
+  });
 });
 
 describe("normalizeModelId", () => {
