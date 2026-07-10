@@ -67,6 +67,14 @@ export interface TurnRunnerDepsBase {
     overflow?: boolean,
   ): Promise<boolean>;
   postTurnCompact(provider: LegacyProvider, system: string, contextWindow: number, signal: AbortSignal): Promise<void>;
+  /**
+   * Extend the absolute hard-cap ceiling when the turn is sustained by
+   * auto-compaction (a productive long task, not a runaway). Optional — batch
+   * path may omit it. Called from the tool-engine auto-recover branch after a
+   * successful compaction so long tasks are not stranded by an over-tight hard
+   * cap. See Agent.extendHardCeilingForAutoCompaction.
+   */
+  extendHardCeilingForAutoCompaction?(): void;
 
   // ---- Task / delegation tool callbacks ---------------------------------
   runTask(request: TaskRequest, signal?: AbortSignal): Promise<ToolResult>;

@@ -171,6 +171,7 @@ import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
 import { type ModelTaskKind, resolveModelForTask } from "./sub-agent-model-tier.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
+import { getToolLimitAutoRecoverCap } from "./tool-limit-auto-recover.js";
 import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
 import { firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
 
@@ -355,6 +356,8 @@ export class Agent {
   private steerDrain: (() => { text: string }[]) | null = null;
   private maxToolRounds: number;
   private hardMaxToolRounds: number;
+  /** Original hard ceiling at construction — bounds auto-compaction extension. */
+  private _initialHardMaxToolRounds = 0;
   private mode: AgentMode = "agent";
   private modelId: string;
   private maxTokens: number;
@@ -490,6 +493,10 @@ export class Agent {
     this.maxToolRounds = maxToolRounds || settings.maxToolRounds || MAX_TOOL_ROUNDS;
     const baseHardMax = settings.hardMaxToolRounds || HARD_MAX_TOOL_ROUNDS;
     this.hardMaxToolRounds = Math.max(Math.floor(this.maxToolRounds * 1.5), baseHardMax);
+    // Baseline captured so auto-compaction ceiling extension (see
+    // extendHardCeilingForAutoCompaction) is bounded relative to the ORIGINAL
+    // hard cap and cannot grow without limit across a runaway turn.
+    this._initialHardMaxToolRounds = this.hardMaxToolRounds;
     const envMax = Number(process.env.MUONROI_MAX_TOKENS);
     this.maxTokens = Number.isFinite(envMax) && envMax > 0 ? envMax : 16_384;
     this.batchApi = options.batchApi ?? false;
@@ -854,6 +861,23 @@ export class Agent {
 
   setToolLoopCapHandler(fn: ToolLoopCapAsk | null): void {
     this._toolLoopCapHandler = fn;
+  }
+
+  /**
+   * Extend the absolute hard-cap ceiling when the turn is being sustained by
+   * AUTO-COMPACTION (a productive long task, not a runaway). Rationale: each
+   * auto-compacted round resets context to O(N) input, so it is cheap — the
+   * hard cap's cost-runaway purpose is already served by the compaction. We
+   * grant `maxToolRounds/2` more headroom per compaction, bounded to at most
+   * one extra auto-recover budget's worth above the ORIGINAL ceiling so a
+   * genuinely wedged turn (which trips the pattern guard, not this path) can
+   * never grow the cap without limit. Called from the tool-engine auto-recover
+   * branch after a successful compaction.
+   */
+  extendHardCeilingForAutoCompaction(): void {
+    const bump = Math.max(25, Math.floor(this.maxToolRounds / 2));
+    const absoluteMax = this._initialHardMaxToolRounds + bump * getToolLimitAutoRecoverCap();
+    this.hardMaxToolRounds = Math.min(this.hardMaxToolRounds + bump, absoluteMax);
   }
 
   // Safety-override handler — set by the UI (app.tsx) at startup. Invoked
@@ -2796,6 +2820,7 @@ export class Agent {
       getCompactionSettings: (cw) => self.getCompactionSettings(cw),
       compactForContext: (provider, system, cw, signal, settings, overflow) =>
         self.compactForContext(provider, system, cw, signal, settings, overflow),
+      extendHardCeilingForAutoCompaction: () => self.extendHardCeilingForAutoCompaction(),
       postTurnCompact: (provider, system, cw, signal) => self.postTurnCompact(provider, system, cw, signal),
       createTools: (bash, provider, mode, opts) => createTools(bash, provider, mode, opts),
       runTask: (request, signal) => self.runTask(request, signal),
@@ -3422,6 +3447,7 @@ export class Agent {
       getCompactionSettings: (cw) => self.getCompactionSettings(cw),
       compactForContext: (provider, system, cw, signal, settings, overflow) =>
         self.compactForContext(provider, system, cw, signal, settings, overflow),
+      extendHardCeilingForAutoCompaction: () => self.extendHardCeilingForAutoCompaction(),
       postTurnCompact: (provider, system, cw, signal) => self.postTurnCompact(provider, system, cw, signal),
       runTask: (request, signal) => self.runTask(request, signal),
       runDelegation: (request, signal) => self.runDelegation(request, signal),

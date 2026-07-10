@@ -6,7 +6,7 @@ export interface MutationGateDecision {
 }
 
 const NEVER_GATED_PREFIXES = ["gsd_", "respond_"];
-const NEVER_GATED = new Set(["read_file", "grep", "glob", "bash_output_get", "gsd_status"]);
+const NEVER_GATED = new Set(["read_file", "grep", "glob", "bash_output_get", "gsd_status", "compact"]);
 function isNeverGated(t: string): boolean {
   return NEVER_GATED.has(t) || NEVER_GATED_PREFIXES.some((p) => t.startsWith(p));
 }

@@ -48,7 +48,7 @@ export const AGENT_OPERATING_CONTRACT = `[AGENT OPERATING CONTRACT — read firs
 
 6. LANGUAGE: Reply in user's detected language for final output. Internal reasoning, tools, and code remain in English.
 
-7. ANTI-MÙ / COMPACTION: On compaction, emit PRESERVE_FULL_CONTEXT (veto) or KEEP_TOOL_IDS (from stub id=) to protect results. Use ee_query with "tool-artifact id=XXX" to re-hydrate. Self-check via EE checkpoints. Suggest /compact near tool limits.
+7. ANTI-MÙ / COMPACTION: On compaction, emit PRESERVE_FULL_CONTEXT (veto) or KEEP_TOOL_IDS (from stub id=) to protect results. Use ee_query with "tool-artifact id=XXX" to re-hydrate. Self-check via EE checkpoints. Use 'compact' tool near limits.
 
 8. GIT SAFETY: never push on red — run the check, await its result in a SEPARATE step, confirm 0 failures, then push. Never \`git add -A\`/\`commit -a\`; stage explicitly so secrets (.env, .muonroi-cli/, keys) aren't committed. Never \`--no-verify\`.
 

@@ -8,6 +8,7 @@
 
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
 import { registerGsdWorkflowTools } from "../gsd/workflow-tools.js";
+import { requestProactiveCompact } from "../orchestrator/compact-request.js";
 import { canonicalizeBashCommand } from "../orchestrator/tool-args-hash.js";
 import { analyzeImageFromSource, askVisionProxy, listCachedImages } from "../providers/mcp-vision-bridge.js";
 import { needsVisionProxy } from "../providers/vision-proxy.js";
@@ -219,6 +220,37 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         bash.getCwd(),
       );
       return formatResult(result);
+    },
+  });
+
+  // compact — agent-initiated proactive context compaction. The model calls
+  // this to shed accumulated tool/conversation history mid-task (freeing
+  // context + resetting tool-call bloat) BEFORE it hits a tool-round limit,
+  // so a long task never gets interrupted. The request is queued here and
+  // consumed by the tool-engine's prepareStep boundary, which forces a
+  // compaction pass before the next LLM step, then the turn continues. A
+  // decisions/facts snapshot is preserved and high-value tool results stay
+  // rehydratable via ee_query "tool-artifact id=…". This is the proactive
+  // counterpart to the reactive tool-limit auto-recover.
+  tools.compact = dynamicTool({
+    description:
+      "Proactively compress THIS turn's accumulated tool/conversation history to free context and reset tool-call bloat, then CONTINUE the task automatically. Call it after a read-heavy stretch (many read_file/grep/bash results) when context feels heavy and BEFORE you approach a tool-round limit — it prevents the 'reached tool limit' interruption entirely. The compaction runs before your next step; older tool results are summarized (a decisions/facts snapshot is kept) and remain rehydratable via ee_query \"tool-artifact id=…\". Do NOT stop after calling it — keep working toward the goal.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        focus: {
+          type: "string",
+          description: "Short note on what to keep in mind / preserve after compaction (e.g. the current sub-task).",
+        },
+      },
+    }),
+    execute: async (input: any) => {
+      requestProactiveCompact(typeof input?.focus === "string" ? input.focus : null);
+      return formatResult({
+        success: true,
+        output:
+          'Context compaction scheduled — older tool history will be compressed before your next step; continue the task afterward. High-value results stay rehydratable via ee_query "tool-artifact id=…".',
+      });
     },
   });
 

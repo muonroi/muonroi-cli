@@ -162,6 +162,7 @@ import { resolveShell } from "../utils/shell.js";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
 import { foldDynamicTailIntoUserMessage, splitFrontAndDynamicTail } from "./cache-prefix.js";
+import { consumeProactiveCompact } from "./compact-request.js";
 import { relaxCompactionSettings } from "./compaction";
 import type { CouncilManager } from "./council-manager.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
@@ -234,7 +235,7 @@ import {
   initCompactionHysteresisState,
 } from "./subagent-compactor.js";
 import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
-import { shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
+import { getToolLimitAutoRecoverCap, shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 import {
   buildToolRepetitionAbortMessage,
@@ -576,9 +577,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // the history and keep going instead of stopping and asking the user
   // to /compact. Turn-scoped (not per-stream-attempt) so a stream-error
   // retry or stall reprompt (`continue streamAttempt`) cannot reset the
-  // counter and exceed the intended cap of 2 auto-compactions per turn.
+  // counter and exceed the intended cap of auto-compactions per turn
+  // (default 6, env MUONROI_TOOL_LIMIT_AUTO_RECOVER_CAP).
   let toolLimitAutoRecoverCount = 0;
-  const TOOL_LIMIT_AUTO_RECOVER_CAP = 2;
+  const TOOL_LIMIT_AUTO_RECOVER_CAP = getToolLimitAutoRecoverCap();
   let stallTriggered = false;
   // Time-to-first-byte stall RE-PROMPT: some providers (observed:
   // xai/grok-build-0.1) accept the request then never send the first byte —
@@ -1436,6 +1438,11 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 const _cw = runtime.modelInfo?.contextWindow ?? 0;
                 if (_cw > 0) {
                   await deps.compactForContext(provider, system, _cw, signal, deps.getCompactionSettings(_cw), false);
+                  // A compacted round resets context to O(N) input (cheap), so the
+                  // hard-cap's cost-runaway purpose is served — grant the turn more
+                  // headroom instead of letting the 1.5× hard ceiling strand a
+                  // genuinely productive long task. Bounded inside the Agent.
+                  deps.extendHardCeilingForAutoCompaction?.();
                 }
               } catch (err) {
                 logger.error("orchestrator", "tool-limit auto-recover compaction failed", {
@@ -1897,20 +1904,54 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // byte-stable across steps instead of breaking as the keepLast
             // boundary slides). See applyCompactionHysteresis.
             const currChars = cumulativeMessageChars(stripped) + envelopeChars;
-            const _hyst = applyCompactionHysteresis({
-              stripped,
-              currChars,
-              hysteresis: compactHysteresis,
-              state: hysteresisState,
-              runCompaction,
-            });
-            const compacted = _hyst.compacted;
-            hysteresisState = _hyst.state;
+            // Proactive compaction (agent called the `compact` tool). Consume the
+            // one-shot request and FORCE a compaction this step, bypassing the
+            // hysteresis threshold — the agent explicitly asked to shed context,
+            // so a one-time cache-prefix break is the intended trade. Re-seed the
+            // hysteresis state to the fresh compacted prefix so the following
+            // steps hold it steady (no per-step churn) until it grows again.
+            const _proactiveCompact = consumeProactiveCompact();
+            let compacted: ModelMessage[];
+            if (_proactiveCompact) {
+              const _forced = runCompaction();
+              const _didForce = _forced !== stripped;
+              compacted = _forced;
+              hysteresisState = _didForce
+                ? { frozenCompacted: _forced, frozenStrippedLen: stripped.length, lastCompactTriggerChars: currChars }
+                : hysteresisState;
+              if (_didForce) recordCompaction(sn);
+              try {
+                const _arPc = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                  | { emitEvent: (e: unknown) => void }
+                  | undefined;
+                _arPc?.emitEvent({
+                  t: "event",
+                  kind: "toast",
+                  level: "info",
+                  text: _didForce
+                    ? "đã nén ngữ cảnh theo yêu cầu của agent — tiếp tục tác vụ"
+                    : "agent yêu cầu nén nhưng chưa có gì để nén — tiếp tục",
+                });
+              } catch {
+                /* toast best-effort */
+              }
+            } else {
+              const _hyst = applyCompactionHysteresis({
+                stripped,
+                currChars,
+                hysteresis: compactHysteresis,
+                state: hysteresisState,
+                runCompaction,
+              });
+              compacted = _hyst.compacted;
+              hysteresisState = _hyst.state;
+              // Count only ACTUAL (re)compactions, not held-boundary steps — the
+              // compaction counter drives the cache-churn telemetry this fixes.
+              if (_hyst.didRecompact) recordCompaction(sn);
+            }
 
             const coalesced = coalesceReadOnlyMessages(compacted);
-            // Count only ACTUAL (re)compactions, not held-boundary steps — the
-            // compaction counter drives the cache-churn telemetry this fixes.
-            if (_hyst.didRecompact) recordCompaction(sn);
+            // (recordCompaction already handled per-branch above.)
             // Pre-compaction visibility: give the agent one step of notice
             // before B4 actually rewrites history into stubs. This is the
             // advance warning that was missing — agent can now decide to

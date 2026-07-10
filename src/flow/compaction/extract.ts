@@ -13,6 +13,8 @@ import {
   resolveModelRuntime,
   resolveTemperatureParam,
 } from "../../providers/runtime.js";
+import { logger } from "../../utils/logger.js";
+import { capCompactionInput } from "./input-guard.js";
 import { extractPreservedBlocks } from "./preserve.js";
 
 export interface ExtractedDecisions {
@@ -68,11 +70,13 @@ export async function extractDecisions(
     try {
       const runtime = resolveModelRuntime(provider as LegacyProvider, modelId);
       const extraPrompt = customInstructions ? `\n\nUSER FOCUS/INSTRUCTIONS:\n${customInstructions}\n` : "";
+      // Guard input against the summarizer's context window (see input-guard).
+      const guardedInput = capCompactionInput(serialized, runtime.modelInfo?.contextWindow ?? 0);
       const result = await generateText({
         model: runtime.model,
         system:
           'You are an AI context compaction agent. Extract all core decisions, technical facts, and project constraints from this conversation. Return strict JSON with { "decisions": string[], "facts": string[], "constraints": string[] }.',
-        prompt: `Current conversation messages:\n\n${serialized}\n\nExtract decisions, facts, and constraints.${extraPrompt} Return strict JSON ONLY.`,
+        prompt: `Current conversation messages:\n\n${guardedInput}\n\nExtract decisions, facts, and constraints.${extraPrompt} Return strict JSON ONLY.`,
         ...resolveTemperatureParam(runtime, 0.1),
       });
 
@@ -85,7 +89,12 @@ export async function extractDecisions(
         usedLLM = true;
       }
     } catch (e) {
-      // Silently fall back to regex on failure
+      // Fall back to regex extraction, but log the reason — a swallowed failure
+      // here silently degrades /compact to marker-only extraction.
+      logger.error("orchestrator", "extractDecisions LLM failed — falling back to regex", {
+        modelId,
+        message: (e as Error)?.message,
+      });
     }
   }
 

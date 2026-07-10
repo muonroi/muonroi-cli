@@ -16,6 +16,10 @@ import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import { createCompactionSummaryMessage } from "../orchestrator/compaction.js";
 import { Agent } from "../orchestrator/orchestrator";
+import {
+  buildCompactResumeMessage,
+  detectProactiveCompactRequest,
+} from "../orchestrator/proactive-compact-detector.js";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "../orchestrator/safety-askcard.js";
 import { planSafetyAskcard } from "../orchestrator/safety-askcard.js";
 
@@ -59,6 +63,7 @@ import { processAtMentions } from "../utils/at-mentions.js";
 import { readClipboardImage } from "../utils/clipboard-image";
 import { FileIndex } from "../utils/file-index.js";
 import { copyTextToHostClipboard, readTextFromHostClipboard } from "../utils/host-clipboard";
+import { logger } from "../utils/logger.js";
 import {
   type CustomSubagentConfig,
   getApiKey,
@@ -3665,12 +3670,53 @@ export function useAppLogic(props: AppLogicProps) {
         if (!isStale()) {
           finalizeActiveTurn({ wasInterrupted, hadError: turnHadError });
 
-          // If the agent proactively requested compaction (e.g., hit max tool rounds),
-          // automatically dispatch the slash command to run the compaction pass.
+          // If the agent proactively requested compaction (ended its turn with a
+          // `/compact` line — e.g. it felt context getting heavy), run the REAL
+          // compaction pass and then AUTO-RESUME the task, so a long task is
+          // never left stranded. Note: processMessage does NOT route slash
+          // commands (it streams text to the model), so the compaction must be
+          // performed inline here — not by re-dispatching "/compact" as a prompt.
           const finalContent = contentAccRef.current.trim();
-          if (finalContent.startsWith("/compact ") || finalContent === "/compact") {
+          if (finalContent.startsWith("/compact")) {
+            const _pc = detectProactiveCompactRequest(finalContent);
+            const _resume = buildCompactResumeMessage(_pc.instructions);
             setTimeout(() => {
-              if (processMessageRef.current) processMessageRef.current(finalContent);
+              void (async () => {
+                try {
+                  const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
+                  const cr = await deliberateCompact(
+                    flowDir,
+                    agent.getMessages(),
+                    "",
+                    4096,
+                    agent.getProvider(),
+                    model,
+                    _pc.instructions ?? undefined,
+                  );
+                  const sessionId = agent.getSessionId();
+                  if (sessionId) {
+                    const nextSeq = getNextMessageSequence(sessionId);
+                    appendCompaction(sessionId, nextSeq, cr.summary, cr.tokensBeforeCompress);
+                  }
+                  agent.setMessages([createCompactionSummaryMessage(cr.summary)]);
+                  setMessages(agent.getChatEntries());
+                  setMessages((prev) => [
+                    ...prev,
+                    buildAssistantEntry(
+                      `⋯ Đã tự nén ngữ cảnh (${cr.tokensBeforeCompress} → ${cr.tokensAfterCompress} tokens, giữ ${cr.decisionsExtracted} quyết định; kết quả tool vẫn rehydrate được qua ee_query). Tiếp tục tác vụ...`,
+                    ),
+                  ]);
+                } catch (e) {
+                  logger.error("ui", "proactive compaction failed", {
+                    message: (e as Error)?.message,
+                    stack: (e as Error)?.stack?.split("\n").slice(0, 3),
+                  });
+                  setMessages((prev) => [...prev, buildAssistantEntry(`Compaction failed: ${e}`)]);
+                }
+                // Resume the task with the fresh compacted context so the long
+                // task continues without the user having to type "tiếp tục".
+                if (processMessageRef.current) void processMessageRef.current(_resume);
+              })();
             }, 100);
           }
         }

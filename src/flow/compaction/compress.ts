@@ -12,6 +12,8 @@ import {
   resolveModelRuntime,
   resolveTemperatureParam,
 } from "../../providers/runtime.js";
+import { logger } from "../../utils/logger.js";
+import { capCompactionInput } from "./input-guard.js";
 import { extractPreservedBlocks, type PreservedBlock, restorePreservedBlocks } from "./preserve.js";
 
 export interface CompressResult {
@@ -64,17 +66,29 @@ export async function compressChat(
     try {
       const runtime = resolveModelRuntime(provider as LegacyProvider, modelId);
       const extraPrompt = customInstructions ? `\n\nUSER FOCUS/INSTRUCTIONS:\n${customInstructions}\n` : "";
+      // Guard the compaction INPUT against the model's own context window —
+      // compaction fires when history is large, which is exactly when the full
+      // serialized text can overflow the summarizer. Keep head + tail.
+      const guardedInput = capCompactionInput(cleaned, runtime.modelInfo?.contextWindow ?? 0);
       const result = await generateText({
         model: runtime.model,
         system:
           "You are an AI context compaction agent. Your job is to heavily summarize a chat history. Keep the core outcomes, the final state, and the technical context. Remove verbose pleasantries, step-by-step thinking, and irrelevant intermediate steps. Do NOT wrap in markdown unless it's code.",
-        prompt: `The following conversation exceeds the token budget. Please summarize it concisely, maintaining the essence of what was discussed, what code was written, and what decisions were reached:${extraPrompt}\n\n${cleaned}`,
+        prompt: `The following conversation exceeds the token budget. Please summarize it concisely, maintaining the essence of what was discussed, what code was written, and what decisions were reached:${extraPrompt}\n\n${guardedInput}`,
         ...resolveTemperatureParam(runtime, 0.1),
       });
       compressedContent = result.text.trim();
       usedLLM = true;
     } catch (e) {
-      // Fallback below
+      // Fall back to deterministic truncation below, but do NOT swallow the
+      // reason — a hidden compaction-LLM failure (auth, overflow, provider
+      // 400) is exactly what makes "why did compaction do nothing" undebuggable.
+      logger.error("orchestrator", "compressChat LLM summarize failed — falling back to truncation", {
+        modelId,
+        inputChars: cleaned.length,
+        message: (e as Error)?.message,
+        stack: (e as Error)?.stack?.split("\n").slice(0, 3),
+      });
     }
   }
 
