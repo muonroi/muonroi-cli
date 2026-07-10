@@ -2249,6 +2249,21 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             }
           }
 
+          // Terminal part of the ENTIRE multi-step turn (AI SDK v6 emits exactly
+          // one `finish` after every step's `finish-step`; it carries the final
+          // finishReason/totalUsage). onFinish has already run by now (usage
+          // recorded + llm-done emitted, and result.response is resolved), so
+          // there is nothing left to drain. Some providers — observed live:
+          // xai/grok-composer-2.5-fast — emit `finish` but then never CLOSE the
+          // fullStream async iterator, so `for await` would block on the next
+          // `.next()` until the turn watchdog fires (up to MUONROI_TURN_IDLE_MS).
+          // Breaking on `finish` finalizes the turn immediately instead. Safe:
+          // `finish` is strictly last, so this can never truncate a multi-step
+          // turn (per-step boundaries are `finish-step`, handled by fall-through).
+          if (part.type === "finish") {
+            break;
+          }
+
           switch (part.type) {
             case "text-delta":
               stall.petProgress(); // real forward progress — reset the no-progress guard
