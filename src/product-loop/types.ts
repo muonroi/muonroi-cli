@@ -139,6 +139,20 @@ export interface DriverContext {
    */
   processMessageFn?: (message: string) => AsyncGenerator<import("../types/index.js").StreamChunk, void, unknown>;
   /**
+   * Bridge into the orchestrator's ISOLATED task-runner (Agent.runTaskRequest →
+   * StreamRunner). Unlike processMessageFn — which appends to the shared
+   * top-level context and therefore inherits the (large) council-debate history —
+   * each call here runs in a FRESH, budget-capped (getSubAgentBudgetChars) child
+   * context with independent in-loop compaction, and returns a compact ToolResult
+   * summary instead of streaming into the parent. Sprint-runner uses this for the
+   * implement stage so the impl never inherits the debate context (which caused a
+   * live ctx-overflow wedge). Optional: legacy/test drivers omit it → sprint-runner
+   * falls back to processMessageFn.
+   */
+  runIsolatedTask?: (
+    request: import("../types/index.js").TaskRequest,
+  ) => Promise<import("../types/index.js").ToolResult>;
+  /**
    * Optional bridge for verify-recipe detection. Mirrors `Orchestrator.detectVerifyRecipe`.
    * If absent, sprint-runner uses a deterministic fallback based on the inferVerifyProjectProfile
    * heuristic.

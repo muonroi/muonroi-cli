@@ -160,6 +160,32 @@ export function getImplTotalTimeoutMs(): number {
 }
 
 /**
+ * Whether the implement stage runs in an ISOLATED bounded sub-agent context
+ * (ctx.runIsolatedTask) instead of the shared top-level turn (processMessageFn).
+ * Default ON. Disable with MUONROI_SPRINT_ISOLATED_IMPL=0.
+ *
+ * The isolated path is the fix for the live ctx-overflow wedge: the flat
+ * processMessageFn turn inherited the full council-debate history (~5.9M tokens
+ * observed), started implementation already at ~94% context, then wedged after a
+ * mid-turn compaction. A fresh child context (getSubAgentBudgetChars cap +
+ * independent in-loop compaction) never inherits the debate, so it starts near
+ * empty and its clutter is absorbed as one compact ToolResult.
+ */
+export function getSprintIsolatedImplEnabled(): boolean {
+  return process.env.MUONROI_SPRINT_ISOLATED_IMPL !== "0";
+}
+
+/**
+ * Pure decision: use the isolated sub-agent path for the implement stage?
+ * True only when the flag is on AND the driver actually provides the bridge
+ * (legacy/test drivers omit runIsolatedTask → fall back to processMessageFn).
+ * Extracted for unit testing without spinning up a full runSprint.
+ */
+export function shouldUseIsolatedImpl(hasBridge: boolean, enabled: boolean = getSprintIsolatedImplEnabled()): boolean {
+  return enabled && hasBridge;
+}
+
+/**
  * Imperative execution directive prepended to the sprint plan before it is
  * handed to the orchestrator. The raw plan synthesis is a declarative design
  * document; without this prefix the impl turn narrates it back instead of
@@ -700,12 +726,40 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
 
   let implError: string | null = null;
   if (ctx.processMessageFn && implPrompt.trim()) {
+    const useIsolated = shouldUseIsolatedImpl(!!ctx.runIsolatedTask);
     try {
-      const implGen = ctx.processMessageFn(implPrompt);
-      // Guard the impl turn with an idle-chunk watchdog so a post-finish
-      // orchestrator hang surfaces as a phaseError instead of a silent wedge.
-      for await (const chunk of withImplIdleWatchdog(implGen, getImplIdleTimeoutMs(), sprintN)) {
-        yield chunk as StreamChunk;
+      if (useIsolated && ctx.runIsolatedTask) {
+        // ISOLATED path — run the sprint plan in a fresh, budget-capped child
+        // context that does NOT inherit the council-debate history. This is the
+        // fix for the ctx-overflow wedge: the sub-agent starts near-empty, has
+        // full tool access (edit/bash), compacts independently in-loop, and
+        // returns a compact ToolResult (its tool clutter is absorbed, not piped
+        // into the parent). No stream to watchdog — the sub-agent has its own
+        // stall + no-forward-progress guards (stall-watchdog.ts).
+        yield {
+          type: "content",
+          content:
+            "\n> [isolated impl] Executing the sprint in a fresh sub-agent context " +
+            "(anti-overflow: does not inherit the debate history).\n",
+        };
+        const result = await ctx.runIsolatedTask({
+          agent: "general",
+          description: `Sprint ${sprintN} implementation`,
+          prompt: implPrompt,
+          modelId: ctx.sessionModelId,
+        });
+        if (!result.success) {
+          implError = result.error?.trim() || "isolated implementation task failed";
+        } else if (result.output?.trim()) {
+          yield { type: "content", content: `\n${result.output.trim()}\n` };
+        }
+      } else {
+        const implGen = ctx.processMessageFn(implPrompt);
+        // Guard the impl turn with an idle-chunk watchdog so a post-finish
+        // orchestrator hang surfaces as a phaseError instead of a silent wedge.
+        for await (const chunk of withImplIdleWatchdog(implGen, getImplIdleTimeoutMs(), sprintN)) {
+          yield chunk as StreamChunk;
+        }
       }
     } catch (e) {
       implError = e instanceof Error ? e.message : String(e);

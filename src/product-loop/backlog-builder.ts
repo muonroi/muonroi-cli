@@ -48,10 +48,34 @@ function keywordMatch(haystack: string, needle: string): boolean {
 }
 
 /**
+ * Deterministic keyword heuristic for a story-point prior (1 | 3 | 5).
+ *
+ * Used as the FALLBACK when the LLM effort estimate fails or returns unparseable
+ * JSON — cheap models (deepseek) often emit malformed arrays, and the previous
+ * flat-3 fallback made every item identical, so sprint bin-packing degenerated
+ * into a mechanical "≈2-3 items per sprint" split with no relation to real size
+ * (observed live: a "migrate 5 native modules" item and a "remove dependency"
+ * item both scored 3). A rough size signal from the title is strictly better than
+ * uniform. Verb-driven: creation/migration reads large, deletion/config reads
+ * small, everything else medium.
+ */
+export function heuristicEffort(title: string): EffortPoints {
+  const t = title.toLowerCase();
+  const large =
+    /\b(implement|build|create|migrat\w*|rewrite|refactor|orchestrat\w*|engine|subsystem|native|integrat\w*|pipeline|architect\w*)\b/;
+  const small = /\b(remove|delete|drop|inventory|rename|config\w*|flag|doc\w*|cleanup|wire|rename|bump|stub|export)\b/;
+  if (large.test(t)) return 5;
+  if (small.test(t)) return 1;
+  return 3;
+}
+
+/**
  * Ask the LLM to estimate effortPoints for a batch of feature titles in a
  * single call. Parses JSON array response: [1, 3, 5, ...].
  *
- * Falls back to 3 (medium) for any item that fails to parse correctly.
+ * Falls back to a per-title keyword heuristic ({@link heuristicEffort}) — NOT a
+ * flat 3 — for any item the LLM fails to score, so sprint packing keeps a real
+ * size signal even when the cheap model returns garbage.
  *
  * Model selection: pickCouncilTaskModel("effort_estimate", leaderModelId, costAware)
  */
@@ -79,25 +103,25 @@ async function estimateEffortBatch(
   try {
     raw = await llm.generate(model, system, prompt, 256);
   } catch {
-    // Graceful degrade: default everything to M=3
-    return titles.map(() => 3 as EffortPoints);
+    // Graceful degrade: keyword heuristic prior per title (NOT flat 3).
+    return titles.map((t) => heuristicEffort(t));
   }
 
   try {
     const match = raw.match(/\[[\s\S]*\]/);
     if (match) {
       const arr = JSON.parse(match[0]) as unknown[];
-      return titles.map((_, i) => {
+      return titles.map((t, i) => {
         const v = arr[i];
         if (v === 1 || v === 3 || v === 5) return v as EffortPoints;
-        return 3 as EffortPoints;
+        return heuristicEffort(t); // this item unscored/invalid → heuristic, not flat 3
       });
     }
   } catch {
     // JSON parse failed — fall through
   }
 
-  return titles.map(() => 3 as EffortPoints);
+  return titles.map((t) => heuristicEffort(t));
 }
 
 /**
