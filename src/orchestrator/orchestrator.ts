@@ -2160,7 +2160,71 @@ export class Agent {
       // processMessage (auto-council) or drained by the runDebate tool — those
       // callers manage their own continuation.
       const continuationPrompt = ownsController && synthesis ? postDebateContinuation(chosenAction, synthesis) : null;
-      if (continuationPrompt) {
+      const isBuildContinuation = chosenAction === "implement" || chosenAction === "generate_plan";
+      if (continuationPrompt && isBuildContinuation && process.env.MUONROI_COUNCIL_ISOLATE_IMPL !== "0") {
+        // #1 — build the council decision in an ISOLATED sub-agent instead of
+        // re-entering the full processMessage turn. The flat turn inherited the
+        // entire multi-round debate history and could overflow the context window
+        // (the exact wedge 97bc9d12 fixed for the /ideal sprint-runner but that
+        // /council never got). runTaskRequest starts near-empty and returns a
+        // compact ToolResult. ANTI-MÙ: the child is NOT blind — it is seeded with
+        // (a) the approved synthesis-as-spec (already in continuationPrompt) and
+        // (b) councilManager.buildContext(), the same compaction-summary + Recent
+        // Conversation + [Council Decision]/[Council Memory] "Key Decisions"
+        // checkpoint the anti-mù layer surfaces — so it has the decision + its
+        // rationale without carrying the raw transcript. Opt out with
+        // MUONROI_COUNCIL_ISOLATE_IMPL=0 (falls back to the processMessage path).
+        yield { type: "content", content: "\n[Implementing the council decision in an isolated context…]\n" };
+        this.councilManager.setContinuation(true);
+        try {
+          let councilCheckpoint = "";
+          try {
+            councilCheckpoint = this.councilManager.buildContext();
+          } catch {
+            /* anti-mù bundle is best-effort — the synthesis alone still grounds the build */
+          }
+          const seededPrompt = councilCheckpoint
+            ? `${continuationPrompt}\n\n## Council context (decision + recent session — do NOT re-debate, just build)\n${councilCheckpoint}`
+            : continuationPrompt;
+          let result: import("../types/index.js").ToolResult;
+          try {
+            result = await this.runTaskRequest(
+              { agent: "general", description: "Council implementation", prompt: seededPrompt, modelId: this.modelId },
+              undefined,
+              signal,
+            );
+          } catch (err) {
+            // A throw (vs a returned {success:false}) must not escape and take the
+            // whole /council run down — surface it in-band like the processMessage
+            // path's TurnStallError handling and end the turn cleanly.
+            yield {
+              type: "error",
+              content: `Council implementation failed: ${err instanceof Error ? err.message : String(err)}`,
+            };
+            yield { type: "done" };
+            return;
+          }
+          if (result.success && result.output?.trim()) {
+            yield { type: "content", content: `\n${result.output.trim()}\n` };
+          } else if (result.error) {
+            yield { type: "error", content: `Council implementation failed: ${result.error}` };
+          }
+          // Persist a COMPACT record so the /council slash session stays resumable
+          // (the processMessage path wrote rows for this) WITHOUT re-inheriting the
+          // debate bloat the isolated child deliberately avoided.
+          try {
+            this.appendCompletedTurn(
+              { role: "user", content: "[Council implementation of the debate decision]" } as ModelMessage,
+              [{ role: "assistant", content: (result.output ?? result.error ?? "(no output)").trim() } as ModelMessage],
+            );
+          } catch {
+            /* non-critical persistence */
+          }
+          yield { type: "done" };
+        } finally {
+          this.councilManager.setContinuation(false);
+        }
+      } else if (continuationPrompt) {
         yield { type: "content", content: "\n[Continuing with the debate conclusion…]\n" };
         this.councilManager.setContinuation(true);
         try {
