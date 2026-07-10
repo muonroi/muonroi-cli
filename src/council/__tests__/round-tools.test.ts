@@ -12,22 +12,37 @@
  *    options.enableVerificationTools=true, capped at stepCountIs(2)
  *    (1 verification call + final text). The caller (debate.ts) only enables
  *    it for balanced/premium tier; fast-tier reasoning models stay tool-free.
+ *  - debate() now STREAMS (collectStreamText) instead of generateText — the
+ *    codex/oauth endpoint 400s on non-stream requests. These tests mock
+ *    streamText's fullStream and assert the same call shape + { text, toolCalls }.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+/** A minimal streamText mock: records the call args and replays `parts`. */
+function streamTextMock(captured: Record<string, unknown>[], parts: Array<Record<string, unknown>>) {
+  return vi.fn().mockImplementation((args: Record<string, unknown>) => {
+    captured.push(args);
+    return {
+      fullStream: (async function* () {
+        for (const p of parts) yield p;
+      })(),
+    };
+  });
+}
+
+const FINISH = { type: "finish", finishReason: "stop", totalUsage: { inputTokens: 1, outputTokens: 1 } };
 
 describe("debate() call shape — tools off by default, on with explicit opt-in", () => {
   beforeEach(() => {
     vi.resetModules();
   });
 
-  it("does NOT pass tools to generateText when enableVerificationTools is absent", async () => {
+  it("does NOT pass tools to streamText when enableVerificationTools is absent", async () => {
     const capturedArgs: Record<string, unknown>[] = [];
 
     vi.doMock("ai", () => ({
-      generateText: vi.fn().mockImplementation(async (args: Record<string, unknown>) => {
-        capturedArgs.push(args);
-        return { text: "debate response", toolCalls: [], steps: [] };
-      }),
+      generateText: vi.fn(),
+      streamText: streamTextMock(capturedArgs, [{ type: "text-delta", text: "debate response" }, FINISH]),
       stepCountIs: vi.fn().mockReturnValue({ __stepCountIs: 2 }),
     }));
     vi.doMock("../../providers/keychain.js", () => ({
@@ -60,10 +75,8 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
     const stepCountIsMock = vi.fn().mockReturnValue({ __stepCountIs: 2 });
 
     vi.doMock("ai", () => ({
-      generateText: vi.fn().mockImplementation(async (args: Record<string, unknown>) => {
-        capturedArgs.push(args);
-        return { text: "verified response", toolCalls: [], steps: [] };
-      }),
+      generateText: vi.fn(),
+      streamText: streamTextMock(capturedArgs, [{ type: "text-delta", text: "verified response" }, FINISH]),
       stepCountIs: stepCountIsMock,
     }));
     vi.doMock("../../providers/keychain.js", () => ({
@@ -113,13 +126,11 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
   });
 
   it("uses temperature 0.7 and maxOutputTokens 6144", async () => {
-    let capturedArgs: { temperature?: number; maxOutputTokens?: number } = {};
+    const capturedArgs: Record<string, unknown>[] = [];
 
     vi.doMock("ai", () => ({
-      generateText: vi.fn().mockImplementation(async (args: typeof capturedArgs) => {
-        capturedArgs = args;
-        return { text: "response", toolCalls: [], steps: [] };
-      }),
+      generateText: vi.fn(),
+      streamText: streamTextMock(capturedArgs, [{ type: "text-delta", text: "response" }, FINISH]),
       stepCountIs: vi.fn().mockReturnValue({}),
     }));
     vi.doMock("../../providers/keychain.js", () => ({
@@ -154,11 +165,12 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
 
     await llm.debate("gpt-4o", "system", "prompt");
 
-    expect(capturedArgs.temperature).toBe(0.7);
+    const args = capturedArgs[0] as { temperature?: number; maxOutputTokens?: number };
+    expect(args.temperature).toBe(0.7);
     // Reasoning models share output budget with reasoning_tokens — e2e showed
     // 2048 truncated debate turns mid-thought (finishReason=length). Raised to
     // 6144 so reasoning models still have ~4K text-token headroom.
-    expect(capturedArgs.maxOutputTokens).toBe(6144);
+    expect(args.maxOutputTokens).toBe(6144);
   });
 });
 
@@ -169,13 +181,19 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
     vi.resetModules();
   });
 
-  it("returns an object with text and toolCalls array", async () => {
+  it("returns an object with text and toolCalls array collected from the stream", async () => {
     vi.doMock("ai", () => ({
-      generateText: vi.fn().mockResolvedValue({
-        text: "debate answer",
-        toolCalls: [{ toolName: "bash", result: "ls output" }, { toolName: "grep" }],
-        steps: [],
-      }),
+      generateText: vi.fn(),
+      streamText: streamTextMock(
+        [],
+        [
+          { type: "tool-call", toolCallId: "1", toolName: "bash", input: {} },
+          { type: "tool-result", toolCallId: "1", output: "ls output" },
+          { type: "tool-call", toolCallId: "2", toolName: "grep", input: {} },
+          { type: "text-delta", text: "debate answer" },
+          FINISH,
+        ],
+      ),
       stepCountIs: vi.fn().mockReturnValue({}),
     }));
     vi.doMock("../../providers/keychain.js", () => ({
@@ -191,11 +209,9 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
       createBuiltinTools: vi.fn().mockReturnValue({}),
     }));
     vi.doMock("../../mcp/runtime.js", () => ({
-      buildMcpToolSet: vi.fn().mockResolvedValue({
-        tools: {},
-        errors: [],
-        close: vi.fn().mockResolvedValue(undefined),
-      }),
+      buildMcpToolSet: vi
+        .fn()
+        .mockResolvedValue({ tools: {}, errors: [], close: vi.fn().mockResolvedValue(undefined) }),
     }));
     vi.doMock("../../utils/settings.js", () => ({
       loadMcpServers: vi.fn().mockReturnValue([]),
@@ -210,24 +226,19 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
 
     const result = await llm.debate("gpt-4o", "system", "prompt");
 
-    // Must be an object, not a string
     expect(typeof result).toBe("object");
-    expect(result).toHaveProperty("text");
-    expect(result).toHaveProperty("toolCalls");
     expect(result.text).toBe("debate answer");
     expect(Array.isArray(result.toolCalls)).toBe(true);
     expect(result.toolCalls).toHaveLength(2);
     expect(result.toolCalls[0].toolName).toBe("bash");
+    expect((result.toolCalls[0] as { result?: unknown }).result).toBe("ls output");
     expect(result.toolCalls[1].toolName).toBe("grep");
   });
 
-  it("returns empty toolCalls array when generateText returns no toolCalls", async () => {
+  it("returns empty toolCalls array when the stream emits no tool calls", async () => {
     vi.doMock("ai", () => ({
-      generateText: vi.fn().mockResolvedValue({
-        text: "answer without tools",
-        toolCalls: undefined,
-        steps: [],
-      }),
+      generateText: vi.fn(),
+      streamText: streamTextMock([], [{ type: "text-delta", text: "answer without tools" }, FINISH]),
       stepCountIs: vi.fn().mockReturnValue({}),
     }));
     vi.doMock("../../providers/keychain.js", () => ({
@@ -243,11 +254,9 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
       createBuiltinTools: vi.fn().mockReturnValue({}),
     }));
     vi.doMock("../../mcp/runtime.js", () => ({
-      buildMcpToolSet: vi.fn().mockResolvedValue({
-        tools: {},
-        errors: [],
-        close: vi.fn().mockResolvedValue(undefined),
-      }),
+      buildMcpToolSet: vi
+        .fn()
+        .mockResolvedValue({ tools: {}, errors: [], close: vi.fn().mockResolvedValue(undefined) }),
     }));
     vi.doMock("../../utils/settings.js", () => ({
       loadMcpServers: vi.fn().mockReturnValue([]),
@@ -261,13 +270,13 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
     const llm = createCouncilLLM({} as any, "agent" as any, undefined, stats);
 
     const result = await llm.debate("gpt-4o", "system", "prompt");
-
     expect(result.toolCalls).toEqual([]);
   });
 
   it("increments stats.calls after a successful debate() call", async () => {
     vi.doMock("ai", () => ({
-      generateText: vi.fn().mockResolvedValue({ text: "ok", toolCalls: [], steps: [] }),
+      generateText: vi.fn(),
+      streamText: streamTextMock([], [{ type: "text-delta", text: "ok" }, FINISH]),
       stepCountIs: vi.fn().mockReturnValue({}),
     }));
     vi.doMock("../../providers/keychain.js", () => ({
@@ -283,11 +292,9 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
       createBuiltinTools: vi.fn().mockReturnValue({}),
     }));
     vi.doMock("../../mcp/runtime.js", () => ({
-      buildMcpToolSet: vi.fn().mockResolvedValue({
-        tools: {},
-        errors: [],
-        close: vi.fn().mockResolvedValue(undefined),
-      }),
+      buildMcpToolSet: vi
+        .fn()
+        .mockResolvedValue({ tools: {}, errors: [], close: vi.fn().mockResolvedValue(undefined) }),
     }));
     vi.doMock("../../utils/settings.js", () => ({
       loadMcpServers: vi.fn().mockReturnValue([]),
@@ -310,9 +317,6 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
 
 describe("CQ-09: Per-round persistence output format", () => {
   it("roundPersistText contains literal '[Council Round' followed by round number", () => {
-    // Test the persistence text format directly — pure function behavior
-    // The debate.ts code builds: `[Council Round ${round}]\n${roundSummaryText}`
-    // We validate the expected string format that gets emitted as council_status content
     const round = 1;
     const exampleSummaryText = "[primary] → [secondary]: response text";
     const roundPersistText = `[Council Round ${round}]\n${exampleSummaryText}`;
@@ -330,7 +334,6 @@ describe("CQ-09: Per-round persistence output format", () => {
   });
 
   it("persistence text includes tool usage suffix when toolCalls present", () => {
-    // Validate the suffix format: "[tools: bash, grep]"
     const toolCalls = [{ toolName: "bash" }, { toolName: "grep" }];
     const toolSuffix = toolCalls.length ? ` [tools: ${toolCalls.map((t) => t.toolName).join(", ")}]` : "";
     const chunkText = `some response${toolSuffix}`;

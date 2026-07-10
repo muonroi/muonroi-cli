@@ -359,6 +359,12 @@ const COUNCIL_LLM_TIMEOUT_MS = (() => {
  *
  * A provider `error` part is re-thrown so the caller's retry / cross-provider
  * fallback treats it as a failure exactly as a thrown `generateText` did.
+ *
+ * Also used by `debate()` (the panel pair turns) with the tiny verification
+ * toolset: pass `tools`/`stopWhen`/`prepareStep` and the collected `toolCalls`
+ * (toolName + input + matched result) come back in the same shape the old
+ * `generateText` result exposed. A debater on the codex/oauth endpoint hit the
+ * exact same non-stream 400 as the eval path — streaming fixes it uniformly.
  */
 async function collectStreamText(args: {
   model: LanguageModel;
@@ -368,7 +374,17 @@ async function collectStreamText(args: {
   temperature?: number;
   providerOptions?: Record<string, unknown>;
   abortSignal?: AbortSignal;
-}): Promise<{ text: string; usage?: unknown; finishReason?: string; reasoningText?: string }> {
+  tools?: ToolSet;
+  stopWhen?: ReturnType<typeof stepCountIs>;
+  prepareStep?: (opts: { stepNumber: number; messages: readonly unknown[] }) => unknown;
+}): Promise<{
+  text: string;
+  usage?: unknown;
+  finishReason?: string;
+  reasoningText?: string;
+  toolCalls: Array<{ toolName: string; input?: unknown; result?: unknown }>;
+}> {
+  const hasTools = !!args.tools && Object.keys(args.tools).length > 0;
   const result = streamText({
     model: args.model,
     system: args.system,
@@ -377,12 +393,15 @@ async function collectStreamText(args: {
     maxRetries: 0,
     ...(args.temperature === undefined ? {} : { temperature: args.temperature }),
     ...(args.providerOptions ? { providerOptions: args.providerOptions as never } : {}),
+    ...(hasTools ? { tools: args.tools, stopWhen: args.stopWhen, prepareStep: args.prepareStep as never } : {}),
     abortSignal: args.abortSignal,
   });
   let text = "";
   let reasoningText = "";
   let usage: unknown;
   let finishReason: string | undefined;
+  const toolCalls: Array<{ toolName: string; input?: unknown; result?: unknown }> = [];
+  const byId = new Map<string, { toolName: string; input?: unknown; result?: unknown }>();
   for await (const part of result.fullStream) {
     switch (part.type) {
       case "text-delta":
@@ -391,6 +410,19 @@ async function collectStreamText(args: {
       case "reasoning-delta":
         reasoningText += (part as { text?: string }).text ?? "";
         break;
+      case "tool-call": {
+        const p = part as { toolCallId: string; toolName: string; input?: unknown };
+        const tc = { toolName: p.toolName, input: p.input };
+        byId.set(p.toolCallId, tc);
+        toolCalls.push(tc);
+        break;
+      }
+      case "tool-result": {
+        const p = part as { toolCallId: string; output?: unknown };
+        const tc = byId.get(p.toolCallId);
+        if (tc) tc.result = p.output;
+        break;
+      }
       case "finish":
         usage = (part as { totalUsage?: unknown; usage?: unknown }).totalUsage ?? (part as { usage?: unknown }).usage;
         finishReason = (part as { finishReason?: string }).finishReason;
@@ -403,7 +435,7 @@ async function collectStreamText(args: {
         break;
     }
   }
-  return { text, usage, finishReason, reasoningText: reasoningText || undefined };
+  return { text, usage, finishReason, reasoningText: reasoningText || undefined, toolCalls };
 }
 
 export function createCouncilLLM(
@@ -587,21 +619,15 @@ export function createCouncilLLM(
           () =>
             withVisibleRetry(
               () =>
-                generateText({
+                // Stream + collect (NOT generateText). A debater on the codex/oauth
+                // endpoint hits the same non-stream 400 ("Stream must be set to
+                // true") that nulled the eval path; streaming is uniform across
+                // providers. Tools (when the tier + circuit breaker allow) ride
+                // through with stepCountIs(2) + the same sanitizeHistory prepareStep.
+                collectStreamText({
                   model: runtime.model,
                   system,
                   prompt,
-                  ...(verificationTools && Object.keys(verificationTools).length > 0
-                    ? {
-                        tools: verificationTools,
-                        stopWhen: stepCountIs(2),
-                        prepareStep: ({ stepNumber, messages }) => {
-                          if (stepNumber < 1) return {};
-                          const stripped = debateCaps.sanitizeHistory(messages) as typeof messages;
-                          return stripped === messages ? {} : { messages: stripped };
-                        },
-                      }
-                    : {}),
                   // Reasoning models (deepseek-v4-*, anthropic thinking) consume part
                   // of this budget on reasoning_tokens before producing user-visible
                   // text. E2E showed 2048 caused finishReason=length on 3KB debate
@@ -609,17 +635,20 @@ export function createCouncilLLM(
                   // overhead and avoids cuts mid-thought.
                   maxOutputTokens: 6144,
                   // See generate(): capability-aware temperature (omit / clamp).
-                  ...(() => {
-                    const t = resolveTemperature(providerId, runtime.modelInfo, 0.7);
-                    return t === undefined ? {} : { temperature: t };
-                  })(),
-                  // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent
-                  // exponential backoff (2,4,8,16,32s). When SiliconFlow rate-limits
-                  // with 429, user now sees "[retry] rate-limited (429) — waiting Xs
-                  // before attempt N/6" instead of a 62s blank window that looks hung.
-                  maxRetries: 0,
-                  ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+                  temperature: resolveTemperature(providerId, runtime.modelInfo, 0.7),
+                  providerOptions: runtime.providerOptions as Record<string, unknown> | undefined,
                   abortSignal: timedSignal,
+                  ...(verificationTools && Object.keys(verificationTools).length > 0
+                    ? {
+                        tools: verificationTools,
+                        stopWhen: stepCountIs(2),
+                        prepareStep: ({ stepNumber, messages }) => {
+                          if (stepNumber < 1) return {};
+                          const stripped = debateCaps.sanitizeHistory(messages as never) as typeof messages;
+                          return stripped === messages ? {} : { messages: stripped };
+                        },
+                      }
+                    : {}),
                 }),
               { label: "council.debate" },
             ),
