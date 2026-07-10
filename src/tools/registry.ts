@@ -861,7 +861,9 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             // output in-process by toolCallId. For an exact "tool-artifact id=X"
             // lookup this is the authoritative full content for THIS session and
             // works even when EE is down — the failure window long sessions hit.
-            const { findArtifactByQuery, findArtifactOnDisk } = await import("../ee/artifact-cache.js");
+            const { findArtifactByQuery, findArtifactByHint, findArtifactOnDisk } = await import(
+              "../ee/artifact-cache.js"
+            );
             // Lived-experience telemetry: record where the rehydrate came from so
             // a "cảm nhận trong CLI" question (and the measure-first instrumentation)
             // sees cache vs disk vs ee vs needed-but-unavailable.
@@ -873,6 +875,17 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
               recordRehydration(mem ? "cache" : "disk");
               return truncateOutput(
                 `[tool-artifact id=${local.toolCallId} tool=${local.toolName} — rehydrated from ${src}]\n${local.content}`,
+              );
+            }
+            // B (cheap-model anti-mù) — the exact id missed locally. Cheap models
+            // often pass FILE PATHS instead of the opaque toolCallId, which
+            // extractArtifactId can't parse. Try a path match against the local
+            // cache before the EE round-trip so a botched id still recovers.
+            const fuzzy = findArtifactByHint(query);
+            if (fuzzy) {
+              recordRehydration("cache");
+              return truncateOutput(
+                `[tool-artifact id=${fuzzy.toolCallId} tool=${fuzzy.toolName} — rehydrated by path match; your id was malformed (pass the exact id from the "[… elided id=X …]" stub next time)]\n${fuzzy.content}`,
               );
             }
             // EE fallback (cross-session / post-restart) → raw /api/search exact lookup.
