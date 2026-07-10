@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
-import type { ToolSet } from "ai";
-import { generateText, stepCountIs } from "ai";
+import type { LanguageModel, ToolSet } from "ai";
+import { generateText, stepCountIs, streamText } from "ai";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { emitMatches } from "../ee/render.js";
 import { getMcpKey } from "../mcp/mcp-keychain.js";
@@ -340,6 +340,72 @@ const COUNCIL_LLM_TIMEOUT_MS = (() => {
 // pre-flight LLM call sites (council, debate-planner, scope-ceiling) share one
 // implementation. Imported at the top of this file.
 
+/**
+ * Run a single-shot LLM call over the STREAMING transport and collect the full
+ * result, returning a `generateText`-shaped object ({ text, usage, finishReason,
+ * reasoningText }).
+ *
+ * Why stream a one-shot generate? The OpenAI codex/oauth endpoint
+ * (chatgpt.com/backend-api/codex/responses, used by gpt-5.*-codex subscription
+ * auth) HARD-REJECTS non-streaming requests with 400 `{"detail":"Stream must be
+ * set to true"}`. `generateText` issues a non-stream POST, so every council
+ * sub-task that ran through it (leader round evaluation, clarify, spec
+ * synthesis, running summary) failed on a codex session — surfacing to the user
+ * as the opaque "Decision: evaluation unavailable" round card (diagnosed from
+ * session 8191ecaee149: gpt-5.4-mini → codex/responses → "Stream must be set to
+ * true"). The panel debate never hit this because it streams. Streaming is the
+ * universal transport (every provider + the whole TUI already use it), so
+ * collecting a streamed result fixes codex without special-casing it.
+ *
+ * A provider `error` part is re-thrown so the caller's retry / cross-provider
+ * fallback treats it as a failure exactly as a thrown `generateText` did.
+ */
+async function collectStreamText(args: {
+  model: LanguageModel;
+  system: string;
+  prompt: string;
+  maxOutputTokens: number;
+  temperature?: number;
+  providerOptions?: Record<string, unknown>;
+  abortSignal?: AbortSignal;
+}): Promise<{ text: string; usage?: unknown; finishReason?: string; reasoningText?: string }> {
+  const result = streamText({
+    model: args.model,
+    system: args.system,
+    prompt: args.prompt,
+    maxOutputTokens: args.maxOutputTokens,
+    maxRetries: 0,
+    ...(args.temperature === undefined ? {} : { temperature: args.temperature }),
+    ...(args.providerOptions ? { providerOptions: args.providerOptions as never } : {}),
+    abortSignal: args.abortSignal,
+  });
+  let text = "";
+  let reasoningText = "";
+  let usage: unknown;
+  let finishReason: string | undefined;
+  for await (const part of result.fullStream) {
+    switch (part.type) {
+      case "text-delta":
+        text += (part as { text?: string }).text ?? "";
+        break;
+      case "reasoning-delta":
+        reasoningText += (part as { text?: string }).text ?? "";
+        break;
+      case "finish":
+        usage = (part as { totalUsage?: unknown; usage?: unknown }).totalUsage ?? (part as { usage?: unknown }).usage;
+        finishReason = (part as { finishReason?: string }).finishReason;
+        break;
+      case "error": {
+        const raw = (part as { error?: unknown }).error;
+        throw raw instanceof Error ? raw : new Error(String(raw));
+      }
+      default:
+        break;
+    }
+  }
+  return { text, usage, finishReason, reasoningText: reasoningText || undefined };
+}
+
 export function createCouncilLLM(
   bash: BashTool,
   mode: AgentMode,
@@ -375,7 +441,12 @@ export function createCouncilLLM(
           () =>
             withVisibleRetry(
               () =>
-                generateText({
+                // Stream + collect (NOT generateText). The codex/oauth endpoint
+                // 400s on non-stream requests ("Stream must be set to true"),
+                // which nulled every council eval/clarify/synthesis on a codex
+                // session → the opaque "evaluation unavailable" card. See
+                // collectStreamText's doc for the full diagnosis.
+                collectStreamText({
                   model: runtime.model,
                   system,
                   prompt,
@@ -384,16 +455,8 @@ export function createCouncilLLM(
                   // opencode-go) reject any value but their pinned one, which
                   // failed every clarify/spec call on a Kimi session. resolveTemperature
                   // omits the field or clamps to the model's fixed value.
-                  ...(() => {
-                    const t = resolveTemperature(providerId, runtime.modelInfo, 0.7);
-                    return t === undefined ? {} : { temperature: t };
-                  })(),
-                  // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent
-                  // exponential backoff (2,4,8,16,32s). When SiliconFlow rate-limits
-                  // with 429, user now sees "[retry] rate-limited (429) — waiting Xs
-                  // before attempt N/6" instead of a 62s blank window that looks hung.
-                  maxRetries: 0,
-                  ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+                  temperature: resolveTemperature(providerId, runtime.modelInfo, 0.7),
+                  providerOptions: runtime.providerOptions as Record<string, unknown> | undefined,
                   abortSignal: timedSignal,
                 }),
               { label: "council.generate" },
