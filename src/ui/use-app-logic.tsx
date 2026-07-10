@@ -1203,14 +1203,24 @@ export function useAppLogic(props: AppLogicProps) {
       clearInterCardHeartbeat();
       const startedAt = Date.now();
       const marker = "⏳ ";
-      setMessages((prev) => [...prev, buildAssistantEntry(`${marker}${label}... elapsed 0s\n`)]);
+      // Do NOT render the heartbeat immediately. Council phase transitions are
+      // frequently sub-second, and an entry that flashes "elapsed 0s" for every
+      // short gap is pure noise (this is exactly the "meaningless elapsed 0s" the
+      // user reported). Only surface the ticking entry once a gap is long enough
+      // to warrant a "still working" reassurance — and never show "0s". The tail
+      // is stripped by clearInterCardHeartbeat() at the top of the next chunk
+      // iteration, so the heartbeat is always the last entry while active; that
+      // invariant lets us detect-or-create idempotently on each tick.
+      const MIN_VISIBLE_S = 3;
       const interval = setInterval(() => {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+        if (elapsed < MIN_VISIBLE_S) return;
+        const line = `${marker}${label}... elapsed ${elapsed}s\n`;
         setMessages((prev) => {
-          if (prev.length === 0) return prev;
           const last = prev[prev.length - 1];
-          if (!last || last.type !== "assistant" || !last.content?.includes(marker)) return prev;
-          return [...prev.slice(0, -1), { ...last, content: `${marker}${label}... elapsed ${elapsed}s\n` }];
+          const hasHeartbeat = last?.type === "assistant" && !!last.content?.includes(marker);
+          if (!hasHeartbeat) return [...prev, buildAssistantEntry(line)];
+          return [...prev.slice(0, -1), { ...last, content: line }];
         });
       }, 1_000);
       interCardHeartbeatRef.current = { interval, marker };
@@ -3213,7 +3223,15 @@ export function useAppLogic(props: AppLogicProps) {
       ) {
         return;
       }
-      scrollToBottom();
+      // Follow the live tail while composing, but ONLY when already pinned to the
+      // bottom. Typing must never inflate the jump-to-latest "N new below" pill:
+      // that counter tracks new *content* arriving while the user reads history,
+      // not keystrokes. Calling the soft scrollToBottom() unconditionally ran its
+      // scroll-locked branch on every printable key, which did `newSinceLock += 1`
+      // — so merely typing into the composer made the counter climb (the reported
+      // bug). When the user is scroll-locked-away we now do nothing: no yank, no
+      // miscount; the pill keeps its accurate real-content count.
+      if (isPinnedToBottom()) scrollToBottom();
     };
     renderer._internalKeyInput.onInternal("keypress", onTypingKey);
     return () => {
@@ -3222,6 +3240,7 @@ export function useAppLogic(props: AppLogicProps) {
   }, [
     renderer,
     scrollToBottom,
+    isPinnedToBottom,
     showModelPicker,
     showSandboxPicker,
     showWalletPicker,
@@ -4546,11 +4565,14 @@ export function useAppLogic(props: AppLogicProps) {
             if (result.startsWith("__COUNCIL__")) {
               const lines = result.split("\n");
               const topic = lines.slice(2).join("\n");
-              setMessages((prev) => [
-                ...prev,
-                buildUserEntry(`/council ${topic}`),
-                buildAssistantEntry("Council convening...\n"),
-              ]);
+              // No "Council convening..." placeholder message — the council phase
+              // timeline + inter-card heartbeat already signal liveness, and a
+              // seeded assistant entry both (a) rendered a meaningless line at
+              // elapsed 0s and (b) got PREPENDED to the real synthesis because the
+              // content handler appends into the last assistant entry. The content
+              // handler below already creates a fresh assistant entry when the tail
+              // is the user message, so the anchor is unnecessary.
+              setMessages((prev) => [...prev, buildUserEntry(`/council ${topic}`)]);
               // Fresh council run — clear any persisted phase timeline so old runs
               // don't bleed into the new one (phaseIds collide across runs).
               setCouncilPhases([]);
@@ -5035,11 +5057,10 @@ export function useAppLogic(props: AppLogicProps) {
               }
               if (result.startsWith("__COUNCIL__")) {
                 const topic = result.replace(/^__COUNCIL__\n/, "");
-                setMessages((prev) => [
-                  ...prev,
-                  buildUserEntry(`/council ${topic}`),
-                  buildAssistantEntry("Council convening...\n"),
-                ]);
+                // No "Council convening..." placeholder — see the branch above:
+                // the content handler creates a fresh assistant entry on demand,
+                // so seeding one only produced 0s-noise + prepended the real reply.
+                setMessages((prev) => [...prev, buildUserEntry(`/council ${topic}`)]);
                 try {
                   const gen = agent.runCouncilRound(topic);
                   for await (const chunk of gen) {
