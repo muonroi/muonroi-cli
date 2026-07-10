@@ -7,7 +7,7 @@
 
 export interface StateDocumentModule {
   stateExtractField: (content: string, fieldName: string) => string | null;
-  stateReplaceField: (content: string, fieldName: string, newValue: string) => string;
+  stateReplaceField: (content: string, fieldName: string, newValue: string) => string | null;
 }
 
 function escapeRegex(str: string): string {
