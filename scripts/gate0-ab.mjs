@@ -162,6 +162,10 @@ function runArm(arm, opts) {
   if (opts.model) env.MUONROI_MODEL = opts.model;
   const entry = resolve("src/index.ts");
   const args = ["run", entry, "-p", opts.prompt, "--format", "text"];
+  // Headless reads the model from the -m flag, NOT MUONROI_MODEL (that env is
+  // only honored on the TUI-drive path). Pass -m too so --model actually binds
+  // the arm to the requested provider instead of silently using the default.
+  if (opts.model) args.push("-m", opts.model);
   const started = Date.now();
   const res = spawnSync("bun", args, { env, encoding: "utf8", timeout: 300_000 });
   const wallMs = Date.now() - started;
