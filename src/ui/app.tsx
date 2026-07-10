@@ -129,6 +129,7 @@ import {
 import { PromptBox } from "./components/prompt-box.js";
 import { useRolePalette } from "./components/role-palette.js";
 import { SessionHeader } from "./components/session-header.js";
+import { SessionTreeCard } from "./components/session-tree-card.js";
 import { Toast, type ToastLevel } from "./components/Toast.js";
 import { TaskListPanel } from "./components/task-list-panel.js";
 import {
@@ -685,6 +686,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     sessionPickerIndex,
     sessionPickerList,
     sessionTitle,
+    sessionTree,
     showAgentsEditor,
     showAgentsModal,
     showApiKeyModal,
@@ -1306,6 +1308,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               </box>
               {railActive && (
                 <ContextRail width={railWidth} rows={railRows}>
+                  <SessionTreeCard nodes={sessionTree} />
                   {renderCouncilMeta(railWidth)}
                 </ContextRail>
               )}

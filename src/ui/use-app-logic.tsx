@@ -166,7 +166,12 @@ import { PaymentApprovalPanel, WalletPickerModal } from "./modals/wallet-picker-
 import { resolvePickerProviders } from "./picker-providers.js";
 import { formatPlanAnswers, initialPlanQuestionsState, PlanQuestionsPanel, type PlanQuestionsState } from "./plan";
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
-import { SLASH_MENU_ITEMS, type SlashMenuItem, VISIBLE_SLASH_MENU_ITEMS } from "./slash/menu-items.js";
+import {
+  SLASH_MENU_ITEMS,
+  SLASH_MENU_ITEMS_ARROW_ORDER,
+  type SlashMenuItem,
+  VISIBLE_SLASH_MENU_ITEMS,
+} from "./slash/menu-items.js";
 import { dispatchSlash } from "./slash/registry.js";
 import { StatusBar } from "./status-bar/index.js";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
@@ -1308,6 +1313,13 @@ export function useAppLogic(props: AppLogicProps) {
   const taskListClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [sessionTitle, setSessionTitle] = useState<string | null>(() => agent.getSessionTitle());
   const [sessionId, setSessionId] = useState<string | null>(() => agent.getSessionId());
+  // Session tree (root + rotation/sub-agent descendants) for the rail's
+  // "Sessions" block. Recomputed when the visible transcript or session id
+  // changes — sub-sessions are spawned/absorbed across turns, so message.length
+  // is the cheapest signal that the tree may have grown. getSessionTree() never
+  // throws (internal try/catch → []).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: sessionId + messages.length are intentional recompute signals (getSessionTree reads the current session internally)
+  const sessionTree = useMemo(() => agent.getSessionTree(), [agent, sessionId, messages.length]);
   const [showApiKeyModal, setShowApiKeyModal] = useState(() => !initialHasApiKey);
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const [showSlashMenu, setShowSlashMenu] = useState(false);
@@ -1635,7 +1647,10 @@ export function useAppLogic(props: AppLogicProps) {
           .sort((a, b) => a.r - b.r || a.i - b.i)
           .map((x) => x.item);
       })()
-    : VISIBLE_SLASH_MENU_ITEMS;
+    : // Empty query (just "/"): primary surface first, then the rest so the
+      // full command set is reachable by arrow-scroll — the dropdown viewport
+      // scrolls, keeping the splash lean while nothing stays unreachable.
+      SLASH_MENU_ITEMS_ARROW_ORDER;
   const slashInputIsMatched = useMemo(() => {
     if (!showSlashMenu) return false;
     const typed = slashSearchQuery.toLowerCase();
@@ -7397,6 +7412,7 @@ export function useAppLogic(props: AppLogicProps) {
     sessionPickerIndex,
     sessionPickerList,
     sessionTitle,
+    sessionTree,
     showAgentsEditor,
     showAgentsModal,
     showApiKeyModal,

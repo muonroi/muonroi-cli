@@ -47,6 +47,7 @@ import {
   buildChatEntries,
   getLastTodoWriteArgs,
   getNextMessageSequence,
+  getSessionChainInfos,
   getSessionTotalTokens,
   loadSessionChainTranscriptState,
   logInteraction,
@@ -1025,6 +1026,22 @@ export class Agent {
   getChatEntries(): ChatEntry[] {
     if (!this.session) return [];
     return buildChatEntries(this.session.id);
+  }
+
+  /**
+   * The session tree this TUI currently hosts: the root conversation plus every
+   * rotation / sub-agent descendant, with per-session metadata. Content from
+   * these sessions is already merged into the transcript on resume; this exposes
+   * WHICH sessions produced it so the rail can show the multi-session structure.
+   */
+  getSessionTree(): import("../storage/transcript.js").SessionChainNode[] {
+    if (!this.session) return [];
+    try {
+      return getSessionChainInfos(this.session.id);
+    } catch (err) {
+      logger.error("orchestrator", "getSessionTree failed", { message: (err as Error)?.message });
+      return [];
+    }
   }
 
   getLastTodoSnapshot(): TaskListSnapshot | null {

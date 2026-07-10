@@ -13,6 +13,7 @@ export {
   getLastTodoWriteArgs,
   getNextMessageSequence,
   getSessionChain,
+  getSessionChainInfos,
   loadLatestCompaction,
   loadRawTranscript,
   loadSessionChainTranscriptState,
@@ -25,6 +26,7 @@ export {
   persistMessageWriteAhead,
   persistToolCallWriteAhead,
   revertLatestCompaction,
+  type SessionChainNode,
 } from "./transcript";
 export { buildEffectiveTranscript, type LoadedTranscriptState, type PersistedCompaction } from "./transcript-view";
 export { logUIInteraction, type UIInteractionSubtype } from "./ui-interaction-log.js";
