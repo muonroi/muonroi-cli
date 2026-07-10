@@ -2159,11 +2159,17 @@ export function buildLeaderDirective(round: number, criteria: string[], metSoFar
         ? "Establish concrete evidence for every outcome criterion."
         : "Drive the remaining criteria to done.",
   );
-  lines.push(
-    pending.length > 0
-      ? `Unmet (${pending.length}/${criteria.length}): ${pending.map((c) => shortCriterion(c, 56)).join("; ")}`
-      : "All criteria met so far — pressure-test the weakest before closing.",
-  );
+  if (pending.length > 0) {
+    // One criterion per line (bulleted) rather than a single "; "-joined blob.
+    // The joined form produced a ~300-char logical line (5 criteria × ~56 chars)
+    // that word-wrapped into a dense, unreadable block overflowing the round-
+    // summary card and the leader directive bubble — the "loạn/không rõ ràng"
+    // the user reported. A vertical list reads cleanly and wraps per-criterion.
+    lines.push(`Unmet (${pending.length}/${criteria.length}):`);
+    for (const c of pending) lines.push(`  • ${shortCriterion(c, 72)}`);
+  } else {
+    lines.push("All criteria met so far — pressure-test the weakest before closing.");
+  }
   return lines.join("\n");
 }
 
