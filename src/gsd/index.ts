@@ -1,7 +1,17 @@
+// Native modules (replaced .cjs require path)
+export {
+  type CapabilityRegistry,
+  debateErrorStub,
+  type LoopHook,
+  type LoopPointEntry,
+  REGISTRY,
+} from "./capability-registry.js";
 export { type AssessInput, type AssessResult, assessComplexity, shouldAssess } from "./complexity-assessor.js";
 export { buildPlanningConfig, ensurePlanningWorkspace } from "./config-bridge.js";
+export { loadConfig, type PlanningConfig, resolveConfigKey } from "./config-loader.js";
 export { fireGsdVerifyOutcome, logGsdNativeEvent, PLANNING_CHECKPOINT_QUERY } from "./ee-closure.js";
 export { isComplexityAssessorEnabled, isGsdHardGateEnabled, isGsdNativeEnabled } from "./flags.js";
+// GSD dispatch (subprocess path — runsGsdTools still uses createRequire for gsd-tools.cjs)
 export {
   dispatchInitProgress,
   dispatchLoopRenderHooks,
@@ -16,8 +26,11 @@ export {
   resolveGsdToolsBin,
   runGsdTools,
 } from "./gsd-dispatch.js";
-export { allLoopHostPoints, loadLoopHostContract } from "./gsd-runtime.js";
+// GSD runtime (native module wrappers)
+export { allLoopHostPoints, loadLoopHostContract, loadStateDocument } from "./gsd-runtime.js";
 export { createDefaultHostAdapter, GsdHostAdapter, GsdLoopHost, getGsdLoopHost } from "./host-adapter.js";
+export { getAllCanonicalPoints, LOOP_HOST_CONTRACT, type LoopHostContractEntry } from "./loop-host-contract.js";
+export { type ResolvedLoopHooks, renderLoopHooksEnvelope, resolveLoopHooks } from "./loop-resolver.js";
 export { evaluateMutationGate, type MutationGateDecision } from "./mutation-gate.js";
 export { orderPhasesForExecution, syncPhasePlanToRoadmap, topologicalPhaseOrder } from "./phase-dag.js";
 export {
@@ -33,6 +46,17 @@ export {
   syncRoadmapFromPhasePlan,
 } from "./product-workspace.js";
 export { runTaskShip } from "./ship-bridge.js";
+// State-document functions
+export {
+  computeProgressPercent,
+  isStateTemplateDefault,
+  KNOWN_STATUS_PATTERNS,
+  KNOWN_TEMPLATE_DEFAULTS,
+  normalizeStateStatus,
+  stateExtractField,
+  stateReplaceField,
+  stateReplaceFieldWithFallback,
+} from "./state-document.js";
 export { detectGsdPhase, GSD_PHASES, type GsdPhase, isGsdPhase, type WorkflowKind } from "./types.js";
 export { buildVerifyContextBundle, type VerifyContextBundle } from "./verify-context.js";
 export { runVerifyCouncil, type VerifyCouncilResult } from "./verify-council.js";
