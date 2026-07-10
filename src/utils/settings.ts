@@ -1034,6 +1034,30 @@ export function getProviderStallTimeoutMs(): number {
 }
 
 /**
+ * No-forward-progress watchdog timeout (ms) for streaming model calls. Distinct
+ * from the stall watchdog: the stall watchdog re-arms on ANY stream chunk —
+ * including a reasoning model's `reasoning-delta` chunks — so a model stuck in an
+ * endless chain-of-thought keeps petting it and it NEVER fires (observed live
+ * 2026-07-10: a deepseek-v4-flash sub-agent churned reasoning for 30+ min, 1.4M
+ * input tokens, ZERO text/tool output, and the 2-min stall watchdog never tripped
+ * because reasoning chunks kept arriving). This second watchdog is petted ONLY on
+ * REAL forward progress (a text-delta or a tool-call), so a runaway-reasoning /
+ * no-output loop is aborted while a legitimately long reasoning burst that DOES
+ * eventually emit text/tools survives. Set generously above a normal reasoning
+ * burst. Range 30_000–1_800_000; 0 disables. Default 300_000 (5 min). Env
+ * override: MUONROI_PROVIDER_PROGRESS_TIMEOUT_MS.
+ */
+export function getProviderProgressTimeoutMs(): number {
+  const envRaw = process.env.MUONROI_PROVIDER_PROGRESS_TIMEOUT_MS;
+  if (envRaw !== undefined && envRaw !== "") {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n === 0) return 0; // explicit disable
+    if (Number.isFinite(n) && n >= 30_000 && n <= 1_800_000) return Math.floor(n);
+  }
+  return 300_000;
+}
+
+/**
  * Number of times to AUTOMATICALLY re-issue a streaming model call after the
  * stall watchdog fires WITHOUT any chunk having arrived (a time-to-first-byte
  * "frozen" stall). Some providers (observed: xai/grok-build-0.1) accept a

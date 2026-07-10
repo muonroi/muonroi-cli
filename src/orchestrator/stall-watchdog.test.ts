@@ -90,6 +90,59 @@ describe("createStallWatchdog", () => {
   });
 });
 
+describe("createStallWatchdog — no-forward-progress timer", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("fires on the progress timer when pet() keeps the stall timer alive but petProgress() never runs (runaway reasoning)", () => {
+    const onFire = vi.fn();
+    const onProgressFire = vi.fn();
+    // Stall timer 1s, progress timer 10s. Simulate a reasoning model that emits
+    // a reasoning chunk every 500ms (pets stall) but never any text/tool output.
+    const wd = createStallWatchdog(1000, onFire, { progressTimeoutMs: 10_000, onProgressFire });
+    for (let i = 0; i < 30; i++) {
+      vi.advanceTimersByTime(500);
+      wd.pet(); // reasoning-delta arrived: re-arms the stall timer only
+    }
+    // 15s of "activity" elapsed: the stall timer never fired (petted), but the
+    // progress timer (never petted) has fired.
+    expect(wd.fired()).toBe(true);
+    expect(wd.signal.aborted).toBe(true);
+    expect(onProgressFire).toHaveBeenCalledTimes(1);
+    expect(onFire).not.toHaveBeenCalled();
+  });
+
+  it("petProgress() re-arms the progress timer so a stream producing real output survives", () => {
+    const wd = createStallWatchdog(1000, undefined, { progressTimeoutMs: 10_000 });
+    // Every 800ms a real output chunk arrives → pet BOTH timers.
+    for (let i = 0; i < 20; i++) {
+      vi.advanceTimersByTime(800);
+      wd.pet();
+      wd.petProgress();
+    }
+    expect(wd.fired()).toBe(false);
+    expect(wd.signal.aborted).toBe(false);
+  });
+
+  it("progressTimeoutMs <= 0 disables the progress timer (petProgress is a no-op)", () => {
+    const wd = createStallWatchdog(1000, undefined, { progressTimeoutMs: 0 });
+    // Keep the stall timer alive forever; with no progress timer, nothing fires.
+    for (let i = 0; i < 100; i++) {
+      vi.advanceTimersByTime(500);
+      wd.pet();
+    }
+    expect(wd.fired()).toBe(false);
+  });
+
+  it("dispose() clears BOTH timers", () => {
+    const wd = createStallWatchdog(1000, undefined, { progressTimeoutMs: 10_000 });
+    wd.dispose();
+    vi.advanceTimersByTime(1_000_000);
+    expect(wd.fired()).toBe(false);
+    expect(wd.signal.aborted).toBe(false);
+  });
+});
+
 describe("shouldRepromptStall", () => {
   // A clean time-to-first-byte stall: watchdog fired, zero chunks, no text,
   // under the cap, not cancelled — the ONLY case that re-prompts.

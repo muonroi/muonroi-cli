@@ -93,7 +93,7 @@ import {
   runPipeline,
   shouldHaltOnResponseTool,
 } from "../pil/index.js";
-import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
+import { isMetaAnalysisPrompt, isSprintPlanExecution } from "../pil/layer6-output.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
 import { mentionsEcosystemScope } from "../playbook/directives.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
@@ -143,6 +143,7 @@ import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/pe
 import {
   getAutoCouncilConfidence,
   getAutoCouncilMinRoles,
+  getProviderProgressTimeoutMs,
   getProviderStallRetries,
   getProviderStallTimeoutMs,
   getSteerInjectionEnabled,
@@ -242,6 +243,31 @@ import {
   recordToolError as recordToolRepetitionError,
   recordToolSuccess as recordToolRepetitionSuccess,
 } from "./tool-repetition-detector.js";
+
+/**
+ * Resolve the per-turn `maxOutputTokens` budget.
+ *
+ * Normally the budget is derived from the PIL-classified `taskType`
+ * (`taskTypeToMaxTokens`). But a sprint IMPLEMENTATION turn — the /ideal
+ * loop's handoff into the host orchestrator via `processMessageFn`, marked
+ * with `SPRINT_EXECUTION_MARKER` — is a KNOWN code-writing task that must not
+ * be starved by a noisy classify. Observed live (2026-07-10, gsd-core
+ * migration): the impl prompt was classified `analyze`/default → capped at
+ * 4_096 output → the model spent the whole budget narrating its plan, hit
+ * `finishReason:"length"` mid-word, produced ZERO code, and the turn wedged.
+ *
+ * Fix: for a sprint-execution turn, floor the budget at the build/generate
+ * tier (12_288) regardless of the classified type. Scoped to the marker only
+ * (NOT the broad `isImplementationIntent`) so ordinary refactor/debug turns
+ * keep their intentionally tighter L6 budgets.
+ */
+export function resolveTurnMaxOutputTokens(pilCtx: { taskType: string | null; raw?: string }): number {
+  const base = taskTypeToMaxTokens(pilCtx.taskType);
+  if (isSprintPlanExecution(pilCtx.raw ?? "")) {
+    return Math.max(base, taskTypeToMaxTokens("build"));
+  }
+  return base;
+}
 
 /**
  * F2 — approximate the char cost of the FIXED prompt envelope (system +
@@ -1686,9 +1712,31 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // on every chunk via stall.pet(), so it never kills an actively
         // streaming call. Disposed when the stream ends or errors.
         stallTriggered = false;
-        const stall = createStallWatchdog(getProviderStallTimeoutMs(), () => {
-          stallTriggered = true;
-        });
+        // Second timer (progressTimeoutMs) is the no-forward-progress guard.
+        // stall.pet() re-arms the any-activity timer on EVERY chunk — including
+        // a reasoning model's reasoning-delta — so an endless chain-of-thought
+        // keeps it alive and it never fires (observed live 2026-07-10: a
+        // deepseek-v4-flash sub-SESSION churned reasoning 30+ min, 1.4M input
+        // tokens, ZERO text/tool output; the 2-min stall watchdog never tripped).
+        // The progress timer is reset ONLY by stall.petProgress() on real output
+        // (text-delta / tool-call), aborting a runaway-reasoning loop while a
+        // legitimately long reasoning burst that DOES emit output survives.
+        const stall = createStallWatchdog(
+          getProviderStallTimeoutMs(),
+          () => {
+            stallTriggered = true;
+          },
+          {
+            progressTimeoutMs: getProviderProgressTimeoutMs(),
+            onProgressFire: () => {
+              stallTriggered = true;
+              console.error(
+                `[tool-engine] stream aborted: no text/tool output for ${getProviderProgressTimeoutMs()}ms ` +
+                  `(runaway reasoning / no forward progress) model=${runtime.modelId}`,
+              );
+            },
+          },
+        );
         // F3c — hard-cap LLM calls per turn before this streamText()
         if (++llmCallsThisTurn > MAX_LLM_CALLS_PER_TURN) {
           stall.dispose();
@@ -2093,7 +2141,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             return withSteers({ messages: coalesced });
           },
           ...resolveTemperatureParam(runtime, 0.7),
-          ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
+          ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: resolveTurnMaxOutputTokens(pilCtx) }),
           ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
           experimental_onStepStart: (event: unknown) => {
             stepNumber = getStepNumber(event, stepNumber + 1);
@@ -2203,6 +2251,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
 
           switch (part.type) {
             case "text-delta":
+              stall.petProgress(); // real forward progress — reset the no-progress guard
               assistantText += part.text;
               // Task 2.6b — emit llm-token (agent-mode only; high-volume, default-off per Phase 4).
               try {
@@ -2237,6 +2286,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               break;
 
             case "tool-call": {
+              stall.petProgress(); // real forward progress — reset the no-progress guard
               const tc = toToolCall(part);
               activeToolCalls.push(tc);
               // SAMR: track that Phase 1 produced tool calls → transition to Phase 2

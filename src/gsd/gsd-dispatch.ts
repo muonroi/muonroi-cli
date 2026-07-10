@@ -2,8 +2,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { gsdCoreLibDir, loadGsdLib } from "./gsd-runtime.js";
+import { REGISTRY } from "./capability-registry.js";
+import { loadConfig } from "./config-loader.js";
+import { resolveLoopHooks } from "./loop-resolver.js";
 import { planningArtifact } from "./paths.js";
 
 const require = createRequire(import.meta.url);
@@ -15,7 +16,10 @@ export interface GsdDispatchResult<T = unknown> {
   raw?: string;
 }
 
-/** Resolve gsd-tools binary shipped with @opengsd/gsd-core. */
+/**
+ * Resolve gsd-tools binary shipped with @opengsd/gsd-core.
+ * TODO(sprint 2): remove this dep when gsd-tools.cjs is natively reimplemented.
+ */
 export function resolveGsdToolsBin(): string {
   const pkgJson = require.resolve("@opengsd/gsd-core/package.json");
   return join(dirname(pkgJson), "gsd-core", "bin", "gsd-tools.cjs");
@@ -223,28 +227,20 @@ export function dispatchStateJson(cwd: string): GsdDispatchResult<Record<string,
   }) as GsdDispatchResult<Record<string, unknown>>;
 }
 
-/** In-process loop hook resolution (no subprocess) — for tests and low-latency paths. */
+/**
+ * In-process loop hook resolution — uses native modules instead of dynamic require().
+ * For tests and low-latency paths. Replaces the old loadGsdLib() approach.
+ */
 export function resolveLoopHooksInProcess(
   cwd: string,
   point: string,
 ): { point: string; activeHooks: Array<Record<string, unknown>> } | null {
   try {
-    const loopResolver = loadGsdLib<{
-      resolveLoopHooks: (args: {
-        point: string;
-        registry: Record<string, unknown>;
-        config: Record<string, unknown>;
-      }) => { point: string; activeHooks: Array<Record<string, unknown>> };
-    }>("loop-resolver");
-    const configLoader = loadGsdLib<{ loadConfig: (c: string) => Record<string, unknown> }>("config-loader");
-    const registry = loadGsdLib<Record<string, unknown>>("capability-registry");
-    const config = configLoader.loadConfig(cwd);
-    return loopResolver.resolveLoopHooks({ point, registry, config, cwd } as {
-      point: string;
-      registry: Record<string, unknown>;
-      config: Record<string, unknown>;
-      cwd: string;
-    });
+    const config = loadConfig(cwd);
+    const resolved = resolveLoopHooks({ point, registry: REGISTRY, config, cwd });
+    // Convert LoopHook[] to the broader array shape for backward compatibility
+    const activeHooks = resolved.activeHooks as unknown as Array<Record<string, unknown>>;
+    return { point: resolved.point, activeHooks };
   } catch (err) {
     console.error(`[gsd-dispatch] resolveLoopHooksInProcess(${point}) failed: ${(err as Error).message}`);
     return null;
@@ -260,7 +256,3 @@ export const PHASE_TO_GSD_STATUS: Record<string, string> = {
   review: "Phase complete",
   debug: "In progress",
 };
-
-export function gsdCoreLibPath(): string {
-  return gsdCoreLibDir();
-}

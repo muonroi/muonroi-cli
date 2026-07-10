@@ -64,6 +64,7 @@ import type { AgentMode, TaskRequest, ToolResult, VerifyRecipe } from "../types/
 import { openUrl } from "../utils/open-url.js";
 import {
   getCurrentShellSettings,
+  getProviderProgressTimeoutMs,
   getProviderStallTimeoutMs,
   getSubAgentBudgetChars,
   getSubAgentCompactKeepLast,
@@ -590,9 +591,33 @@ export class StreamRunner {
     // and is re-armed by stall.pet() on every chunk. Cheap models (which run
     // mostly as sub-agents via SAMR) hit this most.
     let stallTriggered = false;
-    const stall = createStallWatchdog(getProviderStallTimeoutMs(), () => {
-      stallTriggered = true;
-    });
+    // Second timer (progressTimeoutMs) is the no-forward-progress guard: the
+    // stall timer re-arms on EVERY chunk — including a reasoning model's
+    // `reasoning-delta` chunks — so a sub-agent stuck in an endless
+    // chain-of-thought keeps petting it and it never fires (observed live
+    // 2026-07-10: a deepseek-v4-flash sprint sub-agent churned reasoning for
+    // 30+ min, 1.4M input tokens, ZERO text/tool output; the 2-min stall
+    // watchdog never tripped). The progress timer is reset ONLY by
+    // stall.petProgress() on real output (text-delta / tool-call), so a runaway
+    // reasoning loop is aborted while a legitimately long reasoning burst that
+    // DOES eventually emit output survives. Both timers abort the same signal
+    // and set stallTriggered, so the existing surface-and-return path handles it.
+    const stall = createStallWatchdog(
+      getProviderStallTimeoutMs(),
+      () => {
+        stallTriggered = true;
+      },
+      {
+        progressTimeoutMs: getProviderProgressTimeoutMs(),
+        onProgressFire: () => {
+          stallTriggered = true;
+          console.error(
+            `[stream-runner] sub-agent aborted: no text/tool output for ${getProviderProgressTimeoutMs()}ms ` +
+              `(runaway reasoning / no forward progress) model=${childRuntime.modelId}`,
+          );
+        },
+      },
+    );
     const result = streamText({
       model: childRuntime.model,
       system: childSystem,
@@ -788,6 +813,7 @@ export class StreamRunner {
         }
 
         if (part.type === "text-delta") {
+          stall.petProgress(); // real forward progress — reset the no-progress guard
           textDeltaCount++;
           assistantText += part.text;
           // Task 2.6b — emit llm-token (agent-mode only; high-volume, default-off per Phase 4).
@@ -809,6 +835,7 @@ export class StreamRunner {
         }
 
         if (part.type === "tool-call") {
+          stall.petProgress(); // real forward progress — reset the no-progress guard
           toolCallCount++;
           lastActivity = formatSubagentActivity(part.toolName, part.input);
           onActivity?.(lastActivity);

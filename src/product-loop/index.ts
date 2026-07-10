@@ -152,7 +152,16 @@ export async function* runProductLoop(
       // reached — so `/ideal --force-council` in an existing project was silently
       // downgraded to maint-edit (observed: route-decision forceCouncil:false,
       // path:maintain). Explicit --maintain above still wins over --force-council.
-      if (opts.mode !== "new" && !opts.flags.forceCouncil && opts.detectVerifyRecipe) {
+      //
+      // complexity==="high" ALSO bypasses the recipe auto-detect. An
+      // architectural change (migration, SDK removal, subsystem rewrite) in a
+      // recipe-bearing repo must still earn the full Council — the very intent
+      // the complexity gate at :196-207 (and comment :188-195) documents. Before
+      // this guard, that gate was dead code for any repo with a verify recipe
+      // (real orchestrator ALWAYS wires detectVerifyRecipe), so a high-complexity
+      // /ideal was silently downgraded to maint-edit and jumped straight to Edit
+      // with no debate (observed: route-decision complexity:high path:maintain).
+      if (opts.mode !== "new" && !opts.flags.forceCouncil && opts.complexity !== "high" && opts.detectVerifyRecipe) {
         try {
           const recipe = await opts.detectVerifyRecipe();
           if (recipe) {

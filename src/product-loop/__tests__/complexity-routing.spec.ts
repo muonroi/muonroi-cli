@@ -384,6 +384,25 @@ describe("Mode-C auto-detect vs --force-council", () => {
     expect(runLoopDriver).not.toHaveBeenCalled();
   });
 
+  it("recipe present + complexity=high + NO forceCouncil → bypasses Mode C → full Council (architectural change)", async () => {
+    const flowDir = await tmpFlowDir();
+    const cwd = await tmpExistingCwd();
+    const detectVerifyRecipe = recipeDetector();
+
+    // biome-ignore lint/correctness/useYield: intentional mock generator
+    (runSprint as any).mockImplementationOnce(async function* () {
+      return shippedIter();
+    });
+
+    const { result } = await drain(runProductLoop(makeOpts({ flowDir, cwd, complexity: "high", detectVerifyRecipe })));
+
+    expect(result.success).toBe(true);
+    // complexity=high short-circuits the recipe auto-detect BEFORE it is consulted,
+    // so an architectural migration in a recipe-bearing repo still earns Council.
+    expect(detectVerifyRecipe).not.toHaveBeenCalled();
+    expect(runLoopDriver).toHaveBeenCalled();
+  });
+
   it("recipe present + forceCouncil=true → bypasses Mode C → full path (runLoopDriver called)", async () => {
     const flowDir = await tmpFlowDir();
     const cwd = await tmpExistingCwd();

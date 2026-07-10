@@ -664,7 +664,14 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   try {
     const lockContent = await readDecisionsLock(runDir);
     if (lockContent) {
-      implPrompt = prependDecisionsLock(planSynthesis, lockContent);
+      // Prepend the lock to the DIRECTIVE-carrying implPrompt, NOT the bare
+      // planSynthesis. Passing planSynthesis here (the original 2026-07-08 C2
+      // gate bug) silently dropped IMPL_EXECUTION_DIRECTIVE + its
+      // SPRINT_EXECUTION_MARKER, so every council-backed sprint (a lock always
+      // exists once the council ran) reached the orchestrator as a bare design
+      // doc: the impl turn narrated the plan instead of executing it, classified
+      // taskType=null (4_096 output cap), then wedged on finishReason:"length".
+      implPrompt = prependDecisionsLock(implPrompt, lockContent);
       yield {
         type: "content",
         content: "\n> [decisions.lock.md] Locked decisions prepended to implementation prompt.\n",

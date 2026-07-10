@@ -22,12 +22,34 @@
 export interface StallWatchdog {
   /** Combine this into the streamText abortSignal. */
   readonly signal: AbortSignal;
-  /** Call on every received stream chunk to reset the stall timer. */
+  /** Call on every received stream chunk to reset the any-activity stall timer. */
   pet(): void;
-  /** Stop the timer (call when the stream completes or errors). Idempotent. */
+  /**
+   * Call ONLY on real forward-progress chunks (a text-delta or a tool-call) to
+   * reset the no-forward-progress timer. No-op when the watchdog was created
+   * without a progressTimeoutMs. This is what makes the guard catch a reasoning
+   * model stuck in an endless chain-of-thought: `pet()` (called on EVERY chunk,
+   * including reasoning-delta) keeps the any-activity timer alive, but the
+   * progress timer only survives if actual output flows.
+   */
+  petProgress(): void;
+  /** Stop the timers (call when the stream completes or errors). Idempotent. */
   dispose(): void;
   /** True iff the watchdog aborted the stream because of a stall. */
   fired(): boolean;
+}
+
+/** Options for the second (no-forward-progress) timer of a stall watchdog. */
+export interface StallWatchdogProgressOpts {
+  /**
+   * If > 0, arm a SECOND timer that is reset only by petProgress() (real
+   * output), not by pet() (any chunk). Aborts the same signal when no forward
+   * progress happens for this long — catching runaway reasoning that keeps the
+   * any-activity timer alive with reasoning-delta chunks. <= 0 disables it.
+   */
+  progressTimeoutMs: number;
+  /** Called when the no-forward-progress timer fires (before abort). */
+  onProgressFire?: () => void;
 }
 
 export const STALL_ABORT_REASON = "provider-stall";
@@ -135,27 +157,48 @@ export function stallRepromptBackoffMs(attempt: number): number {
   return Math.min(500 * 2 ** (Math.max(1, attempt) - 1), 4_000);
 }
 
-export function createStallWatchdog(timeoutMs: number, onFire?: () => void): StallWatchdog {
+export function createStallWatchdog(
+  timeoutMs: number,
+  onFire?: () => void,
+  progressOpts?: StallWatchdogProgressOpts,
+): StallWatchdog {
   const controller = new AbortController();
   let firedFlag = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const enabled = Number.isFinite(timeoutMs) && timeoutMs > 0;
 
+  const progressTimeoutMs = progressOpts?.progressTimeoutMs ?? 0;
+  const progressEnabled = Number.isFinite(progressTimeoutMs) && progressTimeoutMs > 0;
+  let progressTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const fire = (onSpecificFire?: () => void) => {
+    if (firedFlag) return;
+    firedFlag = true;
+    // Stop the OTHER timer so it can't also fire after the abort (e.g. the
+    // any-activity stall timer that was armed just before the progress timer
+    // tripped — otherwise both onFire callbacks would run).
+    clearBoth();
+    // DOMException(TimeoutError) mirrors AbortSignal.timeout() semantics so
+    // downstream isAbortError-style checks treat it as an abort.
+    controller.abort(new DOMException(STALL_ABORT_REASON, "TimeoutError"));
+    try {
+      onSpecificFire?.();
+    } catch {
+      /* callback must not break the watchdog */
+    }
+  };
+
   const arm = () => {
     if (!enabled) return;
-    timer = setTimeout(() => {
-      firedFlag = true;
-      // DOMException(TimeoutError) mirrors AbortSignal.timeout() semantics so
-      // downstream isAbortError-style checks treat it as an abort.
-      controller.abort(new DOMException(STALL_ABORT_REASON, "TimeoutError"));
-      try {
-        onFire?.();
-      } catch {
-        /* callback must not break the watchdog */
-      }
-    }, timeoutMs);
+    timer = setTimeout(() => fire(onFire), timeoutMs);
     // Don't keep the event loop alive solely for the watchdog (Node).
     (timer as { unref?: () => void }).unref?.();
+  };
+
+  const armProgress = () => {
+    if (!progressEnabled) return;
+    progressTimer = setTimeout(() => fire(progressOpts?.onProgressFire), progressTimeoutMs);
+    (progressTimer as { unref?: () => void }).unref?.();
   };
 
   const clear = () => {
@@ -165,7 +208,20 @@ export function createStallWatchdog(timeoutMs: number, onFire?: () => void): Sta
     }
   };
 
+  const clearProgress = () => {
+    if (progressTimer) {
+      clearTimeout(progressTimer);
+      progressTimer = null;
+    }
+  };
+
+  function clearBoth() {
+    clear();
+    clearProgress();
+  }
+
   arm();
+  armProgress();
 
   return {
     signal: controller.signal,
@@ -174,8 +230,14 @@ export function createStallWatchdog(timeoutMs: number, onFire?: () => void): Sta
       clear();
       arm();
     },
+    petProgress() {
+      if (!progressEnabled || firedFlag) return;
+      clearProgress();
+      armProgress();
+    },
     dispose() {
       clear();
+      clearProgress();
     },
     fired() {
       return firedFlag;
