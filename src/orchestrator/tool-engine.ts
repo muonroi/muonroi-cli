@@ -693,7 +693,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     autoCouncilTypes.has(pilCtx.taskType) &&
     pilCtx.confidence >= autoCouncilConfidence &&
     _complexityGatePassed;
-  const shouldSkipForReasoning = sessionModelIsReasoning && skipReasoningSetting;
+  // Skip reasoning-model skip for heavy/complex tasks — they benefit from
+  // multi-role diversity even when the session model already does extended thinking.
+  const shouldSkipForReasoning = sessionModelIsReasoning && skipReasoningSetting && !heavyTier;
   const shouldAutoCouncil =
     !deps.councilManager.isContinuation &&
     isAutoCouncilEnabled() &&
