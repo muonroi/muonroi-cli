@@ -2251,6 +2251,7 @@ export class Agent {
     let complexity: "low" | "medium" | "high" | undefined;
     let needsClarification: boolean | undefined;
     let sufficiencyMissing: readonly import("../pil/layer1-intent.js").SufficiencyMissing[] | undefined;
+    let routeForceCouncil = payload.flags.forceCouncil;
     if (payload.subcommand === "start" && payload.idea) {
       let depth: import("../pil/llm-classify.js").DepthTier = "standard";
       try {
@@ -2266,26 +2267,35 @@ export class Agent {
             `[ideal/route] model depth classify returned no depthTier — defaulting to "standard". idea=${JSON.stringify(payload.idea.slice(0, 80))}`,
           );
         }
-        // LLM-first clarity signal — the agent-first replacement for the regex
-        // `scoreSufficiency`. An underspecified `standard` task earns the
-        // interview/Council path even inside an existing repo (see
-        // runProductLoop gate); null/absent → not-underspecified (don't over-ask).
+        // LLM-first clarity signal — feeds the downstream interview as a hint.
         if (res?.needsClarification === true) needsClarification = true;
       } catch (err) {
-        // Fail-open to the safe middle (standard → hot-path single sprint); never
-        // block /ideal on a classify hiccup. Logged for diagnosis (No-Silent-Catch).
+        // Fail-open: never block /ideal on a classify hiccup (No-Silent-Catch).
         console.error(`[ideal/route] depth classify failed, defaulting to "standard": ${(err as Error)?.message}`);
       }
-      // heavy → full Council pipeline (never hot-path); standard/quick → hot-path.
-      // Maps onto runProductLoop's low|medium|high gate: "high" is the ONLY tier
-      // that both fails the existing-repo bypass (`!== "high"`) and the `=== "low"`
-      // hot-path check, so ONLY heavy reaches runStart/Council — a large task can
-      // no longer skip the interview just because it was phrased plainly.
+
+      // The cheap 8-word classify above is only a HINT for the downstream GSD
+      // depth pipeline — it is NOT a routing gate. It was too noisy to gate the
+      // council decision: the SAME architectural prompt scored `heavy` on one run
+      // and `standard` the next, so routing flip-flopped between full Council and
+      // a straight-to-Edit maint-edit that skipped the debate. /ideal is the
+      // DELIBERATE path — it must ALWAYS run the full Council/loop-driver
+      // pipeline, in this order:
+      //   1. scan the source (discovery/scoping) to understand what the user's
+      //      request actually touches,
+      //   2. interview the user (AskCard — adaptive: only asks what the source
+      //      can't answer, so an existing repo isn't dragged through 6 questions),
+      //   3. leader-tier complexity assessment + debate INSIDE that flow, AFTER
+      //      scope is understood — never a "no debate" verdict from a bare-prompt
+      //      guess.
+      // So we force Council for every /ideal start; the fast classify only
+      // seeds depth/clarity hints for that flow. Explicit `--maintain` still opts
+      // out of Council (handled at the top of runProductLoop dispatch).
       complexity = depth === "heavy" ? "high" : depth === "quick" ? "low" : "medium";
-      // Sufficiency is no longer a separate regex gate (`scoreSufficiency` is
-      // gone from the routing path): a vague / ambiguous brief is exactly what the
-      // model tiers as "heavy" → Council, so depthTier already subsumes it.
       sufficiencyMissing = undefined;
+      if (payload.flags.mode !== "maintain") {
+        routeForceCouncil = true;
+      }
     }
 
     const gen = runProductLoop({
@@ -2301,7 +2311,7 @@ export class Agent {
         doneThreshold: payload.flags.doneThreshold,
         budgetTokens: payload.flags.budgetTokens,
         stack: payload.flags.stack,
-        forceCouncil: payload.flags.forceCouncil,
+        forceCouncil: routeForceCouncil,
       },
       respondToQuestion: this.councilManager.createQuestionResponder(),
       respondToPreflight: this.councilManager.createPreflightResponder(),
