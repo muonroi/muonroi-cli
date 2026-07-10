@@ -813,18 +813,23 @@ export function buildSynthesisPrompt(ctx: {
     `decision each warrant DIFFERENT follow-ups. A fixed "accept / research / apply" menu is wrong. ` +
     `Choose 2-4 actions from this fixed vocabulary, ordered best-first (index 0 = your recommended ` +
     `default), writing each label/reason in the user's native language:\n` +
-    `  - "continue_session" → hand the trusted conclusion back to the session so the agent keeps ` +
-    `working on the ORIGINAL task with this debate as context. The right default for a pure ` +
-    `discussion / hard-problem debate whose deliverable is the conclusion itself.\n` +
-    `  - "ask_followup"  → user poses a sharper question re-using this debate's context (freetext)\n` +
-    `  - "generate_plan" → turn this outcome into concrete executable steps and start a sprint\n` +
-    `  - "implement"     → begin executing an already-produced plan now\n` +
-    `  - "save_exit"     → the analysis IS the deliverable; save it and stop here\n` +
-    `Rules: offer "generate_plan"/"implement" ONLY when acting on the outcome means writing code ` +
-    `(e.g. an implementation_plan, or a bug investigation ready to be fixed). For a debate that just ` +
-    `worked through a hard problem, lead with "continue_session" so the agent carries the conclusion ` +
-    `forward. For a pure evaluation or decision whose deliverable is the analysis, prefer ` +
-    `"continue_session"/"save_exit" and "ask_followup". Always include an escape ("save_exit" or ` +
+    `  - "implement" → the conclusion is ready to BUILD. Offer this whenever acting on the outcome ` +
+    `means changing code — INCLUDING a decision to refactor / remove / add. The conclusion itself is ` +
+    `the spec (no separate plan artifact needed); picking it loads that spec and carries it out ` +
+    `through the normal workflow (plan → change → verify). Make it the recommended default (index 0) ` +
+    `when the debate converged on a concrete, buildable decision. Label it with the ACTION (e.g. ` +
+    `"Triển khai …" / "Implement …"), never "continue".\n` +
+    `  - "continue_session" → return to the composer WITHOUT building. The user keeps DISCUSSING with ` +
+    `this debate as context (their next message inherits the conclusion automatically). The right ` +
+    `default for a pure evaluation / discussion whose deliverable is the analysis itself, or when the ` +
+    `user should weigh in before any code change. This ALSO covers "ask a follow-up" — do NOT emit a ` +
+    `separate follow-up action.\n` +
+    `  - "save_exit" → the analysis IS the deliverable; save it and stop here.\n` +
+    `Rules: choose from {"implement","continue_session","save_exit"}. Offer "implement" whenever the ` +
+    `outcome is actionable in code (a build decision, an implementation_plan, or a bug investigation ` +
+    `ready to fix) and make it index 0; otherwise lead with "continue_session". NEVER attach an ` +
+    `implementation-flavoured label ("triển khai", "build", "fix now") to "continue_session" — if you ` +
+    `mean build, the action MUST be "implement". Always include an escape ("save_exit" or ` +
     `"continue_session"). Emit each as ` +
     `{"action":"<id>","label":"<short button text>","reason":"<one line: why this fits THIS debate>"}.\n\n` +
     `**Part 2: Human-readable** — after \`---READABLE---\`, write in markdown with these headings (in this order):\n` +

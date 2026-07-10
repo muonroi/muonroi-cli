@@ -262,24 +262,41 @@ export function postDebateContinuation(
   outputKind?: string,
 ): string | null {
   if (!synthesis || !action) return null;
+  // IMPLEMENT — the user decided there is enough to build. Load the council
+  // conclusion back as the approved spec and carry it out through the normal
+  // workflow (the native GSD depth pipeline plans → executes → verifies). Works
+  // for ANY output kind: an analysis/decision synthesis is itself a sufficient
+  // spec, so this no longer needs a separate plan artifact. Scoped so the agent
+  // builds exactly what was decided and cannot balloon into phantom phases.
   if (action === "generate_plan" || action === "implement") {
-    return `Council debate completed. Synthesis:\n\n${synthesis}\n\nProceed with the recommended action items.`;
+    return (
+      `Council debate completed. Approved conclusion:\n\n${synthesis}\n\n` +
+      `Implement this now. Treat the council conclusion above as the approved spec ` +
+      `— load it as your working context and carry it out through your normal ` +
+      `workflow: plan the concrete steps, make the changes in the smallest correct ` +
+      `increments, and verify (build/tests) as you go. Do NOT re-litigate the ` +
+      `decision or expand scope beyond it. If a required detail is genuinely ` +
+      `ambiguous, ask ONE focused question before editing.`
+    );
   }
   if (action === "continue_session") {
     const kind = outputKind ?? synthesisOutputKind(synthesis);
-    // Only an implementation-shaped debate has an "original task" left to build.
+    // Only an implementation-shaped debate has an "original task" left to build
+    // (the /ideal build flow relies on this carry-forward — do NOT null it out).
     if (kind && IMPLEMENTATION_OUTPUT_KINDS.has(kind)) {
       return `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`;
     }
-    // Analysis/evaluation/decision/investigation (or unknown → treat as analysis):
-    // the conclusion is the deliverable. Re-enter so the turn is resumable, but
-    // forbid the implementation drift that phantom-todo'd and hung the session.
-    return (
-      `Council debate completed. Conclusion:\n\n${synthesis}\n\n` +
-      `The analysis above IS the deliverable — present it clearly to the user. ` +
-      `Do NOT edit files, create plans or todos, run build/migration commands, or spawn sub-agents ` +
-      `unless the user explicitly asks for that next step. Wait for the user's direction.`
-    );
+    // Analysis/evaluation/decision/investigation (or unknown → analysis): the
+    // user chose to KEEP THE SESSION GOING without implementing. Stop at the
+    // composer — the synthesis was already shown on the debate card and is
+    // persisted as [Council Decision]/[Council Memory] system messages, so the
+    // user's NEXT message inherits the full council context automatically
+    // (buildCouncilContextBundle surfaces it under "Key Decisions"). Returning
+    // null avoids the wasteful re-present turn AND the old forbid lecture, while
+    // still preventing the phantom-implementation drift (nothing runs). To
+    // actually build, the user picks Implement above; to keep discussing, they
+    // just type — that turn inherits the council context.
+    return null;
   }
   return null;
 }
@@ -850,8 +867,11 @@ export async function* runCouncil(
 
       if (modelActions) {
         for (const a of modelActions) {
-          // "implement" needs an existing plan; drop it if the debate produced none.
-          if (a.action === "implement" && !hasPlan) continue;
+          // "implement" no longer needs a separate plan artifact — an analysis /
+          // decision synthesis IS the spec (postDebateContinuation loads it and
+          // runs the normal plan→change→verify workflow). The old `!hasPlan` drop
+          // is why a decision-to-change-code debate had NO build path and the
+          // user's "implement"-labelled pick did nothing (session 8191ecaee149).
           baseOptions.push({
             label: a.label,
             // Description is the model's own `reason` (model-first — no hardcoded
@@ -929,10 +949,50 @@ export async function* runCouncil(
           kind: "freetext",
         });
 
-        if (hasPlan) {
+        if (!synthesisFailed) {
           baseOptions.push({
             label: "Start Implementation",
-            description: "Execute the action plan now",
+            description: "Load the council conclusion as the spec and build it (plan → change → verify)",
+            value: "implement",
+            kind: "choice",
+          });
+        }
+      }
+
+      // Canonicalize the post-analysis choices to the user's mental model:
+      // IMPLEMENT / CONTINUE / SAVE (session 8191ecaee149 redesign).
+      //   (a) "ask a follow-up" and "continue with council context" are the same
+      //       thing to the user (both = keep the session going with the debate as
+      //       context), so collapse a generic ask_followup into continue_session.
+      //       A pinned criteria-recovery follow-up is added LATER (inconclusive /
+      //       lowGrounding) and is intentionally distinct, so this only affects
+      //       the base set built above.
+      //   (b) guarantee a CONTINUE option exists.
+      //   (c) offer IMPLEMENT whenever the synthesis is substantive (grounded &
+      //       conclusive) — the conclusion IS the spec, no plan artifact needed.
+      if (!options?.sprintPlanningMode) {
+        const CONTINUE_OPT = {
+          label: "Continue with council context",
+          description: "Return to the composer — your next message keeps this debate's conclusion as context.",
+          value: "continue_session",
+          kind: "choice" as const,
+        };
+        const hasContinue = baseOptions.some((o) => o.value === "continue_session");
+        for (let i = baseOptions.length - 1; i >= 0; i--) {
+          if (baseOptions[i].value !== "ask_followup") continue;
+          if (hasContinue)
+            baseOptions.splice(i, 1); // merged away — continue already covers it
+          else baseOptions[i] = { ...CONTINUE_OPT }; // convert the lone follow-up into continue
+        }
+        if (!baseOptions.some((o) => o.value === "continue_session")) baseOptions.push({ ...CONTINUE_OPT });
+        if (!synthesisFailed && !inconclusive && !baseOptions.some((o) => o.value === "implement")) {
+          // Insert at index 1, NOT 0 — the model's own best-first pick stays the
+          // default (defaultIndex is 0 for model-first). We only GUARANTEE the
+          // build path is present + prominent; we don't override the model's
+          // judgment that building wasn't the recommended next move.
+          baseOptions.splice(1, 0, {
+            label: "Start Implementation",
+            description: "Load the council conclusion as the spec and build it (plan → change → verify)",
             value: "implement",
             kind: "choice",
           });
