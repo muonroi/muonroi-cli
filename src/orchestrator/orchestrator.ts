@@ -2239,6 +2239,12 @@ export class Agent {
     };
     const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, productStats);
     const processMessageFn = (m: string) => this.processMessage(m, options?.observer);
+    // Isolated bounded task-runner bridge for the sprint implement stage: a fresh
+    // child context (getSubAgentBudgetChars cap, independent compaction) that does
+    // NOT inherit this turn's council-debate history — the root fix for the live
+    // ctx-overflow wedge. Returns a compact ToolResult (absorbed, no parent bloat).
+    const runIsolatedTask = (request: import("../types/index.js").TaskRequest) =>
+      this.runTaskRequest(request, undefined, this.abortController?.signal);
     const flowDir = nodePath.join(this.bash.getCwd(), ".muonroi-flow");
 
     // P2.7 (LLM-first — no-regex routing): the work-depth tier that decides
@@ -2317,6 +2323,7 @@ export class Agent {
       respondToPreflight: this.councilManager.createPreflightResponder(),
       cwd: this.bash.getCwd(),
       processMessageFn,
+      runIsolatedTask,
       // Mode C — wire verify-recipe detector so runProductLoop auto-detect can probe cwd.
       detectVerifyRecipe: () => this.detectVerifyRecipe(),
       skipPriorContext: payload.flags.noPriorContext === true,

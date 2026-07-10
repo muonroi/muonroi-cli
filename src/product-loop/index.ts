@@ -60,6 +60,10 @@ export interface ProductLoopOptions {
   /** Optional bridges; sprint-runner uses them when present. */
   cwd?: string;
   processMessageFn?: (message: string) => AsyncGenerator<StreamChunk, void, unknown>;
+  /** Isolated bounded task-runner bridge — see DriverContext.runIsolatedTask. */
+  runIsolatedTask?: (
+    request: import("../types/index.js").TaskRequest,
+  ) => Promise<import("../types/index.js").ToolResult>;
   detectVerifyRecipe?: () => Promise<VerifyRecipe | null>;
   /** Test hook: pre-resolved role assignments so the harness can pin model ids. */
   roleAssignments?: Map<RoleSlot, { modelId: string; provider: string; tier?: string }>;
@@ -377,6 +381,7 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
     cwd: opts.cwd,
     sessionId: opts.sessionId,
     processMessageFn: opts.processMessageFn,
+    runIsolatedTask: opts.runIsolatedTask,
     detectVerifyRecipe: opts.detectVerifyRecipe,
     skipPriorContext: opts.skipPriorContext,
     sufficiencyMissing: opts.sufficiencyMissing,
@@ -792,6 +797,7 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
     cwd: opts.cwd,
     sessionId: opts.sessionId,
     processMessageFn: opts.processMessageFn,
+    runIsolatedTask: opts.runIsolatedTask,
     detectVerifyRecipe: opts.detectVerifyRecipe,
     skipPriorContext: opts.skipPriorContext,
     sufficiencyMissing: opts.sufficiencyMissing,
@@ -1839,6 +1845,7 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
     cwd: opts.cwd,
     sessionId: opts.sessionId,
     processMessageFn: opts.processMessageFn,
+    runIsolatedTask: opts.runIsolatedTask,
     detectVerifyRecipe: opts.detectVerifyRecipe,
   };
 
