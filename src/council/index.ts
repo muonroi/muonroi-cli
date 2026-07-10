@@ -29,6 +29,7 @@ import type {
   CouncilParticipant,
   CouncilStats,
   EnhancedCouncilOutcome,
+  IsolatedTaskRunner,
   PreflightResponder,
   QuestionResponder,
 } from "./types.js";
@@ -140,6 +141,13 @@ export interface RunCouncilOptions {
    *     decisions.lock artifact actually get written for sprint-runner injection.
    */
   sprintPlanningMode?: boolean;
+  /**
+   * #2 — isolated sub-agent bridge (orchestrator.runTaskRequest). When wired,
+   * the debate's research phase runs in a budget-capped explore sub-agent
+   * instead of an in-process 15-step generateText. Forwarded onto CouncilConfig
+   * for runDebate. Optional — omitted by headless/direct callers/tests.
+   */
+  runIsolatedTask?: IsolatedTaskRunner;
 }
 
 export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis";
@@ -668,6 +676,9 @@ export async function* runCouncil(
       internetFirst,
       costAware,
       runId: sessionId,
+      // #2 — isolated research bridge; when wired, runDebate runs research in a
+      // budget-capped explore sub-agent instead of an in-process 15-step call.
+      runIsolatedTask: options?.runIsolatedTask,
       // B4 interactive escalation — same responder the clarifier + post-debate
       // askcards use. When the debate is about to stop with pinned criteria
       // unmet, runDebate asks the user (extend / accept / rescope) instead of

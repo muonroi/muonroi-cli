@@ -2107,6 +2107,12 @@ export class Agent {
           // ambient sidebar rows, so suppress the duplicate inline summary.
           suppressInlineMeta: isContextRailEnabled(),
           runDir, // B1 — persist decisions.lock.md for the /council slash path
+          // #2 — isolated research bridge. Same StreamRunner sub-agent the /ideal
+          // sprint-runner uses (runTaskRequest): a budget-capped, near-empty
+          // explore child runs the debate's research phase so its multi-step tool
+          // clutter never accretes into the council thread/context. Threads the
+          // council abort signal so Esc cancels the research child too.
+          runIsolatedTask: (request) => this.runTaskRequest(request, undefined, signal),
           onPostDebateAction: (action) => {
             chosenAction = action;
             // Relay to the auto-council caller (tool-engine) so nested runs honor

@@ -27,6 +27,7 @@ import type {
   CouncilParticipant,
   DebateStance,
   DebateState,
+  IsolatedTaskRunner,
   LeaderEvaluation,
   QuestionResponder,
 } from "./types.js";
@@ -334,7 +335,57 @@ const RESEARCH_FAILED_MARKER = "[Research failed:";
  * substantive. debateWithRetry already had cross-provider fallback; research
  * did not.
  */
-async function researchWithFallback(
+/**
+ * #2 — run the research phase in an ISOLATED explore sub-agent (near-empty
+ * context, budget-capped, independent compaction) instead of the in-process
+ * 15-step generateText that accretes tool clutter into the council thread.
+ * Returns the findings string on success; a `[Research failed: …]` marker string
+ * on failure so `researchWithFallback` transparently falls back to `llm.research`.
+ */
+async function runResearchIsolated(
+  runIsolatedTask: IsolatedTaskRunner,
+  model: string,
+  topic: string,
+  conversationContext: string,
+  traceCb: (t: string) => void,
+  options: { internetFirst?: boolean },
+): Promise<string> {
+  traceCb(`[research] isolated explore sub-agent via ${model}`);
+  // Keep the child near-empty — pass only the question + a bounded context slice
+  // (the whole point is to NOT inherit the council's growing transcript).
+  const ctxSlice =
+    conversationContext.length > 4000
+      ? `${conversationContext.slice(0, 4000)}\n…[context truncated]`
+      : conversationContext;
+  const sourcePref = options.internetFirst
+    ? "This is a greenfield task with little/no local source: PREFER web + documentation sources (use web_search / fetch tools if available), then any local files."
+    : "PREFER grounding every claim in THIS repo's code — cite concrete file:line. Use web sources only to fill genuine gaps.";
+  const prompt =
+    `You are grounding a council debate with EVIDENCE. Research the question below and return concise, sourced findings.\n\n` +
+    `## Question\n${topic}\n\n` +
+    `## Debate context\n${ctxSlice}\n\n` +
+    `## Instructions\n${sourcePref}\n` +
+    `Return a compact "## Research Findings" section: only the concrete facts that bear on the question, each with its source (file:line or URL). ` +
+    `Be terse and factual — no opinions, no recommendations. If you cannot find solid evidence, say so in one line.`;
+  try {
+    const result = await runIsolatedTask({
+      agent: "explore",
+      description: `Council research: ${topic.slice(0, 60)}`,
+      prompt,
+      // Pin the research-role model; bypasses the parent-tier cap in StreamRunner.
+      modelId: model,
+    });
+    if (result.success && result.output?.trim()) return result.output.trim();
+    traceCb(`[research] isolated sub-agent produced nothing: ${result.error ?? "no output"}`);
+    return `[Research failed: ${result.error ?? "isolated sub-agent produced no output"}]`;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    traceCb(`[research] isolated sub-agent threw: ${msg}`);
+    return `[Research failed: ${msg}]`;
+  }
+}
+
+export async function researchWithFallback(
   llm: CouncilLLM,
   primaryModel: string,
   topic: string,
@@ -343,7 +394,16 @@ async function researchWithFallback(
   traceCb: (t: string) => void,
   options: { internetFirst?: boolean },
   fallbackPool: string[],
+  runIsolatedTask?: IsolatedTaskRunner,
 ): Promise<string> {
+  // #2 — prefer the isolated explore sub-agent when the orchestrator wired one.
+  // On any failure (marker) we transparently fall through to the legacy
+  // in-process research below, preserving resilience for headless/degraded runs.
+  if (runIsolatedTask && !signal?.aborted) {
+    const iso = await runResearchIsolated(runIsolatedTask, primaryModel, topic, conversationContext, traceCb, options);
+    if (!iso.includes(RESEARCH_FAILED_MARKER)) return iso;
+    traceCb("[research] isolated sub-agent unavailable — falling back to in-process research");
+  }
   const primary = await llm.research(primaryModel, topic, conversationContext, signal, traceCb, options);
   if (!primary.includes(RESEARCH_FAILED_MARKER) || signal?.aborted) return primary;
 
@@ -566,6 +626,7 @@ export async function* runDebate(
           (t) => researchTraces.push(t),
           { internetFirst },
           fallbackPool,
+          config.runIsolatedTask,
         ),
       {
         phase: "research",
@@ -1400,6 +1461,7 @@ export async function* runDebate(
               (t) => midTraces.push(t),
               {},
               fallbackPool,
+              config.runIsolatedTask,
             ),
           {
             phase: "research",

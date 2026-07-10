@@ -1,6 +1,16 @@
 import type { ModelMessage } from "ai";
 import type { ProcessMessageObserver } from "../orchestrator/agent-options.js";
+import type { TaskRequest, ToolResult } from "../types/index.js";
 import type { ModelRole } from "../utils/settings.js";
+
+/**
+ * Bridge to the orchestrator's isolated sub-agent runner (runTaskRequest). When
+ * wired into a council run, heavy phases (research; #3 grounding-verify) execute
+ * in a budget-capped, near-empty explore sub-agent instead of an in-process
+ * multi-step generateText that bloats the council thread/context. The bridge
+ * closure captures the council abort signal, so callers pass only the request.
+ */
+export type IsolatedTaskRunner = (request: TaskRequest) => Promise<ToolResult>;
 
 // ── Clarification Phase ─────────────────────────────────────────────────────
 
@@ -332,6 +342,15 @@ export interface CouncilConfig {
    * transcript, and continues from the last completed round. Ignored on mismatch.
    */
   resumeCheckpoint?: import("./debate-checkpoint.js").DebateCheckpoint;
+  /**
+   * #2 — isolated research bridge. When wired (interactive /council + auto-
+   * council), the initial/mid-debate research phase runs in a budget-capped
+   * explore sub-agent (near-empty context, independent compaction) instead of
+   * an in-process 15-step generateText that accretes tool clutter into the
+   * council thread. Optional: headless/direct callers/tests omit it and research
+   * falls back to `llm.research`.
+   */
+  runIsolatedTask?: IsolatedTaskRunner;
 }
 
 // ── Persisted Council Memory ─────────────────────────────────────────────────
