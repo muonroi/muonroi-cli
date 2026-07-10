@@ -3178,6 +3178,23 @@ export class Agent {
     const cwd = this.bash.getCwd();
     const dirtyBefore = autoCommitOn ? await snapshotDirtyPaths(cwd) : new Set<string>();
 
+    // Top-level turn watchdog. The per-chunk stall watchdog only covers
+    // streamText byte flow; it does NOT cover a turn generator that keeps the
+    // socket open but never RETURNS after the model is done. Observed live:
+    // xai/grok-composer-2.5-fast fires onFinish/llm-done (finishReason=stop) but
+    // its stream generator never terminates, so processor.run() hangs, the UI's
+    // `for await` never ends, finalizeActiveTurn never runs, and the TUI stays
+    // frozen in the "processing" state (partial/raw markdown) until the next
+    // message forces a new run. Mirrors the council-continuation guard (idle +
+    // hard total). On fire we abort the turn and emit a terminal `done` so the
+    // consumer finalizes cleanly instead of hanging forever. idleMs resets on
+    // every yielded chunk, so long legitimate tool calls are safe; totalMs is a
+    // hard ceiling (0 = disabled by default, since a big multi-tool turn is not a
+    // hang). Env-overridable.
+    const { withTurnWatchdog, TurnStallError } = await import("./turn-watchdog.js");
+    const turnIdleMs = Number(process.env.MUONROI_TURN_IDLE_MS ?? 120_000);
+    const turnTotalMs = Number(process.env.MUONROI_TURN_TOTAL_MS ?? 0);
+
     try {
       let attempts = 0;
       const maxAttempts = 3;
@@ -3187,7 +3204,27 @@ export class Agent {
       while (attempts < maxAttempts) {
         try {
           attempts++;
-          yield* processor.run(userMessage, observer, images);
+          try {
+            yield* withTurnWatchdog(processor.run(userMessage, observer, images), {
+              idleMs: turnIdleMs,
+              totalMs: turnTotalMs,
+              label: "assistant turn",
+            });
+          } catch (stallErr) {
+            // A hung turn is NOT a transient error — retrying it (below) would
+            // just hang again. Abort, surface a toast, and terminate the turn.
+            if (stallErr instanceof TurnStallError) {
+              logger.warn("orchestrator", "Top-level turn watchdog fired — finalizing turn", {
+                kind: stallErr.kind,
+                message: stallErr.message,
+              });
+              this.abortController?.abort(new DOMException(stallErr.message, "TimeoutError"));
+              yield { type: "toast", toastLevel: "warn", content: `Turn ended by watchdog: ${stallErr.message}` };
+              yield { type: "done" };
+            } else {
+              throw stallErr;
+            }
+          }
           break;
         } catch (err) {
           if (isSubSessionForked && isTransientError(err) && attempts < maxAttempts && subSessionId) {
