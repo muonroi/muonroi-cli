@@ -14,7 +14,7 @@ import { loadKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
 import { ALL_PROVIDER_IDS } from "../providers/types.js";
 import { defaultResolveChannelId, maybeAutoFire } from "../reporter/auto-fire.js";
-import { activeRunStore } from "../state/active-run.js";
+import { clearWorkspaceFocus, setWorkspaceFocus } from "../state/active-run.js";
 import { logInteraction, logUIInteraction } from "../storage/index.js";
 import type { ModelInfo, StreamChunk, VerifyRecipe } from "../types/index.js";
 import { markIterationCrashed, readIterations, readManifest, writeManifest } from "./artifact-io.js";
@@ -351,7 +351,7 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
   try {
     const { productSlug: deriveSlug } = await import("./product-identity.js");
     const slug = deriveSlug(idea);
-    activeRunStore.setActiveRun(runId, flowDir, slug);
+    await setWorkspaceFocus(flowDir, { runId, productSlug: slug, reason: "sprint-plan-committed" });
     fireAutoReport("sprint-plan-committed", { runId, flowDir, productSlug: slug, sprintCount: 1 });
   } catch {
     /* best-effort */
@@ -891,7 +891,7 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
   try {
     const { productSlug: deriveSlug } = await import("./product-identity.js");
     const slug = deriveSlug(idea);
-    activeRunStore.setActiveRun(runId, flowDir, slug);
+    await setWorkspaceFocus(flowDir, { runId, productSlug: slug, reason: "sprint-plan-committed" });
     fireAutoReport("sprint-plan-committed", { runId, flowDir, productSlug: slug, sprintCount });
   } catch {
     /* best-effort — never break /ideal over status bar or reporter */
@@ -1106,7 +1106,7 @@ async function* drainSprints(args: {
             const { productSlug: deriveSlug } = await import("./product-identity.js");
             const slug = deriveSlug(productSpec.idea);
             fireAutoReport("sprint-halt", { runId: ctx.runId, flowDir: ctx.flowDir, productSlug: slug, haltReason });
-            activeRunStore.clearActiveRun();
+            clearWorkspaceFocus();
           } catch {
             /* best-effort */
           }
@@ -1157,7 +1157,7 @@ async function* drainSprints(args: {
         const { productSlug: deriveSlug } = await import("./product-identity.js");
         const slug = deriveSlug(productSpec.idea);
         fireAutoReport("sprint-halt", { runId: ctx.runId, flowDir: ctx.flowDir, productSlug: slug, haltReason: msg });
-        activeRunStore.clearActiveRun();
+        clearWorkspaceFocus();
       } catch {
         /* best-effort */
       }
@@ -1250,7 +1250,7 @@ async function* drainSprints(args: {
         }
       }
       // B1: clear active-run on successful ship.
-      activeRunStore.clearActiveRun();
+      clearWorkspaceFocus();
       return {
         runId: ctx.runId,
         stage: "approved",
@@ -1277,7 +1277,7 @@ async function* drainSprints(args: {
     content: `\n> Reached max-sprints (${flags.maxSprints}) without satisfying Definition-of-Done.\n`,
   } as StreamChunk;
   // B1: clear active-run when max-sprints reached.
-  activeRunStore.clearActiveRun();
+  clearWorkspaceFocus();
   return {
     runId: ctx.runId,
     stage: "halted",
