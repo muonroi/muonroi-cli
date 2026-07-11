@@ -221,7 +221,10 @@ export type ScaleT = "1-100" | "100-1k" | "1k-100k" | "100k-1M" | "1M+";
 
 export type BackendArchT = "monolith" | "modular-monolith" | "microservices" | "serverless" | "none";
 
-export type DbModeT = "greenfield" | "existing-schema" | "migrate-from";
+// "none" = the product needs no persistent storage (a stateless CLI/tool/filter).
+// Without it the recommender was forced to rank among the DB strategies and
+// mis-recommended "greenfield" for stateless products (F7).
+export type DbModeT = "none" | "greenfield" | "existing-schema" | "migrate-from";
 
 export type FeLibraryT = "shadcn" | "radix" | "headlessui" | "none";
 
