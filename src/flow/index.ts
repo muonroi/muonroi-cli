@@ -10,6 +10,7 @@ export { readArtifact, writeArtifact } from "./artifact-io.js";
 export {
   type ActivePointer,
   attachRunToPhase,
+  clearLegacyActivePointerSections,
   createMilestone,
   createPhase,
   ensureRunScoped,
@@ -23,7 +24,6 @@ export {
   type MilestoneRecord,
   migrateLegacyRuns,
   type PhaseRecord,
-  setActivePointer,
   updateMilestone,
   updatePhase,
 } from "./hierarchy.js";

@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   attachRunToPhase,
+  clearLegacyActivePointerSections,
   createMilestone,
   createPhase,
   ensureRunScoped,
@@ -13,10 +14,10 @@ import {
   listPhases,
   loadMilestone,
   loadPhase,
-  setActivePointer,
   updateMilestone,
   updatePhase,
 } from "../hierarchy.js";
+import { setActiveRunId } from "../run-manager.js";
 
 const NOW = "2026-07-11T00:00:00.000Z";
 const LATER = "2026-07-12T00:00:00.000Z";
@@ -217,17 +218,50 @@ describe("hierarchy", () => {
     });
   });
 
-  describe("active pointers", () => {
-    it("round-trips active milestone + phase through state.md", async () => {
+  describe("active pointer (F8 — derived from the active run)", () => {
+    it("derives milestone/phase from whichever run is active", async () => {
+      // No active run → nulls.
       expect(await getActivePointer(flowDir)).toEqual({ milestoneId: null, phaseId: null });
-      await setActivePointer(flowDir, { milestoneId: "m01-core", phaseId: "p01-scoping" });
-      expect(await getActivePointer(flowDir)).toEqual({ milestoneId: "m01-core", phaseId: "p01-scoping" });
+
+      const m = await createMilestone(flowDir, { title: "Core" }, NOW);
+      const p = await createPhase(flowDir, m.id, { title: "Scoping", runId: "run-1" }, NOW);
+      // Point the active run at the indexed run → milestone/phase are derived.
+      await setActiveRunId(flowDir, "run-1");
+      expect(await getActivePointer(flowDir)).toEqual({ milestoneId: m.id, phaseId: p.id });
     });
 
-    it("clears pointers when set to null", async () => {
-      await setActivePointer(flowDir, { milestoneId: "m01-core", phaseId: "p01-scoping" });
-      await setActivePointer(flowDir, { milestoneId: null, phaseId: null });
+    it("resolves to nulls when the active run is not indexed (chat/skeleton run)", async () => {
+      const m = await createMilestone(flowDir, { title: "Core" }, NOW);
+      await createPhase(flowDir, m.id, { title: "Scoping", runId: "run-1" }, NOW);
+      await setActiveRunId(flowDir, "run-unindexed");
       expect(await getActivePointer(flowDir)).toEqual({ milestoneId: null, phaseId: null });
+    });
+
+    it("ensureRunScoped makes the run the active focus, ending Active-Run drift", async () => {
+      await setActiveRunId(flowDir, "stale-skeleton-run");
+      const scoped = await ensureRunScoped(
+        flowDir,
+        { runId: "prod-run", milestoneTitle: "App", phaseTitle: "Build" },
+        NOW,
+      );
+      // Active run is now the product run, and the derived pointer matches it.
+      const { getActiveRunId } = await import("../run-manager.js");
+      expect(await getActiveRunId(flowDir)).toBe("prod-run");
+      expect(await getActivePointer(flowDir)).toEqual(scoped);
+    });
+
+    it("clearLegacyActivePointerSections blanks stale legacy sections, idempotently", async () => {
+      const { readArtifact, writeArtifact } = await import("../artifact-io.js");
+      const map = { preamble: "", sections: new Map<string, string>() };
+      map.sections.set("Active Milestone", "m99-stale");
+      map.sections.set("Active Phase", "p99-stale");
+      await writeArtifact(flowDir, "state.md", map);
+      await clearLegacyActivePointerSections(flowDir);
+      const after = await readArtifact(flowDir, "state.md");
+      expect(after?.sections.get("Active Milestone")).toBe("");
+      expect(after?.sections.get("Active Phase")).toBe("");
+      // Idempotent — a second call is a no-op (already blank).
+      await clearLegacyActivePointerSections(flowDir);
     });
   });
 });
