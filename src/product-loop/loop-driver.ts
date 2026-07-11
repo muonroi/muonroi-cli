@@ -552,7 +552,13 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         if (researcherIdx >= 0) {
           const current = participants[researcherIdx]!.model;
           if (!modelHasNativeWebResearch(current)) {
-            const webModel = getWebResearchModel(reachableIds) ?? getWebResearchModel();
+            // ONLY reroute to a web-native model that is actually REACHABLE this
+            // session. A model whose provider has no factory wired (e.g. grok/xai
+            // when only opencode-go is authed) would fail council participant
+            // creation ("no factory for model's provider") and wedge the debate —
+            // so if no reachable web-native model exists, degrade gracefully and
+            // KEEP the current reachable model rather than swap in a dead id.
+            const webModel = getWebResearchModel(reachableIds);
             if (webModel) {
               participants[researcherIdx]!.model = webModel.id;
               researchWebConfidence = { confidence: "native", model: webModel.id };
@@ -560,7 +566,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
               researchWebConfidence = { confidence: "degraded" };
               logLoopEvent(ctx, "research_web_degraded", {
                 phase: "research",
-                reason: "no native_web_research model reachable",
+                reason: "no reachable native_web_research model",
                 researcherModel: current,
               });
             }
