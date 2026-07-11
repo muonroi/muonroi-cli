@@ -143,14 +143,13 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
         provider: "deepseek",
         modelId: "deepseek-v4-flash",
         stream: [
-          // Round 0: ABSORBER for PIL Layer 1's classifier call (PIL fires
-          // before the main agent and consumes one doStream from the queue).
-          // Returning a JSON classification matches what the unified PIL
-          // brain expects; PIL parses it, sets task_type, and routing
-          // continues normally to the main agent. A plain-text response
-          // (e.g. "debug") confuses the chitchat detector and short-circuits
-          // the whole turn — verified empirically while wiring this spec.
-          buildFinalTextRound('{"task_type":"debug","confidence":0.9}'),
+          // NOTE: PIL Layer-1's model-first classifier doStream is now
+          // intercepted by mock-model.ts (CLASSIFY_SIGNATURE) and returns a
+          // canned classification line WITHOUT advancing the fixture cursor —
+          // so it no longer consumes a fixture round. The old round-0 absorber
+          // was therefore orphaned and got mis-fed to the main agent (a
+          // text-stop round → the turn ended after one round). The fixture now
+          // starts directly at the main-agent's first turn.
           // Round 1: main-agent first turn → bash with big output.
           buildToolCallRound("bash-1", "bash", { command: bigOutputCmd() }),
           // Round 2: after bash returns, model picks bash_output_get with the

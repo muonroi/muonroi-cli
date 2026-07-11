@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // All external modules are mocked so the test exercises only sprint-runner orchestration.
 vi.mock("../../council/index.js", () => ({
@@ -60,10 +63,19 @@ import { postSprintBoundary } from "../phase-tracker-bridge.js";
 import { runSprint } from "../sprint-runner.js";
 import type { IterationState, ProductSpec, RoleSlot } from "../types.js";
 
+// Per-test isolated flow dir. sprint-runner does REAL filesystem persistence of
+// per-sprint plans (persistSprintPlan/readPersistedSprintPlan live in the module
+// under test, so they can't be mocked). A shared "/tmp/flow" + fixed runId let a
+// plan persisted by one test be read back by a later test with the same
+// runId+sprintN — which silently skips the planning council (reused-plan path),
+// so runCouncil is never called and the assertions here fail. A fresh mkdtemp dir
+// per test keeps each run hermetic regardless of order or leftover files.
+let testFlowDir = "/tmp/flow";
+
 function makeCtx(overrides: any = {}): any {
   return {
     runId: "run-123",
-    flowDir: "/tmp/flow",
+    flowDir: testFlowDir,
     cwd: "/tmp/cwd",
     idea: "test idea",
     llm: { generate: vi.fn(async () => "synthesis text"), research: vi.fn(async () => "research") },
@@ -113,6 +125,13 @@ async function drain<T, R>(
     return { chunks, result: undefined, error };
   }
 }
+
+beforeEach(() => {
+  testFlowDir = mkdtempSync(join(tmpdir(), "sprint-runner-"));
+});
+afterEach(() => {
+  rmSync(testFlowDir, { recursive: true, force: true });
+});
 
 describe("sprint-runner", () => {
   beforeEach(() => {

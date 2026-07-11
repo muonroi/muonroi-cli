@@ -136,10 +136,12 @@ async function spawnGateHarness(
     responses,
     model: {
       stream: [
-        // Round 0: absorber for PIL's Pass-4 offline-cascade LLM fallback
-        // (src/pil/llm-classify.ts), which issues its own streamText call
-        // ahead of the main agent even with MUONROI_LLM_FIRST_CLASSIFY=0.
-        buildFinalTextRound("generate,concise,task,code,standard,local,english"),
+        // NOTE: PIL's model-first classifier streamText call is now intercepted
+        // by mock-model.ts (CLASSIFY_SIGNATURE) and returns a canned line WITHOUT
+        // advancing the fixture cursor, so it no longer consumes a fixture round.
+        // The old round-0 "absorber" was therefore orphaned and got mis-fed to the
+        // main agent (a text-stop round → agent halted before the tool-call). The
+        // main agent's first doStream must be the tool-call round directly.
         buildToolCallRound("wf-1", "write_file", toolCallInput),
         buildFinalTextRound("done"),
       ],

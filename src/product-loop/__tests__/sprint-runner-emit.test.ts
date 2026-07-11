@@ -12,6 +12,9 @@
  * __muonroiAgentRuntime is unset, runSprint must not throw.
  */
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // All external modules are mocked so this test exercises only sprint-runner
@@ -76,10 +79,23 @@ import type { ProductSpec, RoleSlot } from "../types.js";
 
 const NO_ROLES = new Map<RoleSlot, { modelId: string; provider: string; tier?: string }>();
 
+// Per-test isolated flow dir — see sprint-runner.test.ts for the rationale: a
+// shared "/tmp/flow" + fixed runId lets persisted per-sprint plans leak across
+// tests (and across parallel test files that reuse this runId), silently skipping
+// the planning council on the reused-plan path.
+let testFlowDir = "/tmp/flow";
+
+beforeEach(() => {
+  testFlowDir = mkdtempSync(join(tmpdir(), "sprint-runner-emit-"));
+});
+afterEach(() => {
+  rmSync(testFlowDir, { recursive: true, force: true });
+});
+
 function makeCtx(overrides: Record<string, unknown> = {}): unknown {
   return {
     runId: "run-test-123",
-    flowDir: "/tmp/flow",
+    flowDir: testFlowDir,
     cwd: "/tmp/cwd",
     idea: "test idea",
     llm: {

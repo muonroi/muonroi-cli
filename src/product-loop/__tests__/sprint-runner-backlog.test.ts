@@ -6,6 +6,9 @@
  * NOT add the anchor when no backlog.json file is present.
  */
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // All external modules mocked identically to sprint-runner-emit.test.ts pattern.
@@ -71,10 +74,16 @@ import type { Backlog, BacklogItem, ProductSpec, RoleSlot } from "../types.js";
 
 const NO_ROLES = new Map<RoleSlot, { modelId: string; provider: string; tier?: string }>();
 
+// Per-test isolated flow dir — see sprint-runner.test.ts for the rationale: a
+// shared "/tmp/flow" + fixed runId let a persisted per-sprint plan leak across
+// tests and silently skip the planning council (reused-plan path), so runCouncil
+// never runs and the topic assertions below capture undefined.
+let testFlowDir = "/tmp/flow";
+
 function makeCtx(overrides: Record<string, unknown> = {}): unknown {
   return {
     runId: "run-test-123",
-    flowDir: "/tmp/flow",
+    flowDir: testFlowDir,
     cwd: "/tmp/cwd",
     idea: "test idea",
     llm: {
@@ -155,6 +164,7 @@ async function drain<T, R>(
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
+  testFlowDir = mkdtempSync(join(tmpdir(), "sprint-runner-backlog-"));
   vi.clearAllMocks();
   (CB3_verifyBlank as ReturnType<typeof vi.fn>).mockReturnValue({ halt: false });
   (evaluateDoneGate as ReturnType<typeof vi.fn>).mockResolvedValue({ pass: true, score: 1.0 });
@@ -172,6 +182,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  rmSync(testFlowDir, { recursive: true, force: true });
   delete (globalThis as Record<string, unknown>).__muonroiAgentRuntime;
 });
 
