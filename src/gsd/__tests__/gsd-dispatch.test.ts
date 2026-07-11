@@ -9,7 +9,6 @@ import {
   dispatchLoopRenderHooks,
   dispatchStateJson,
   invalidateGsdCache,
-  resolveGsdToolsBin,
   resolveLoopHooksInProcess,
 } from "../gsd-dispatch.js";
 import { planningArtifact } from "../paths.js";
@@ -21,12 +20,7 @@ describe("gsd-dispatch", () => {
     if (tmp) rmSync(tmp, { recursive: true, force: true });
   });
 
-  it("resolves gsd-tools binary from @opengsd/gsd-core", () => {
-    const bin = resolveGsdToolsBin();
-    expect(bin).toContain("gsd-tools.cjs");
-  });
-
-  it("dispatchConfigEnsure creates .planning/config.json", () => {
+  it("dispatchConfigEnsure ensures .planning/ (native)", () => {
     tmp = mkdtempSync(join(tmpdir(), "gsd-dispatch-"));
     const result = dispatchConfigEnsure(tmp);
     expect(result.ok).toBe(true);
@@ -41,13 +35,13 @@ describe("gsd-dispatch", () => {
     expect(Array.isArray(result.data?.activeHooks)).toBe(true);
   });
 
-  it("resolveLoopHooksInProcess matches subprocess hook count", () => {
+  it("dispatchLoopRenderHooks wraps the in-process resolver", () => {
     tmp = mkdtempSync(join(tmpdir(), "gsd-dispatch-"));
     ensurePlanningWorkspace(tmp, "deepseek-v4-flash");
     const inProc = resolveLoopHooksInProcess(tmp, "execute:pre");
-    const sub = dispatchLoopRenderHooks(tmp, "execute:pre");
+    const dispatched = dispatchLoopRenderHooks(tmp, "execute:pre");
     expect(inProc?.point).toBe("execute:pre");
-    expect(sub.data?.activeHooks?.length).toBe(inProc?.activeHooks.length);
+    expect(dispatched.data?.activeHooks?.length).toBe(inProc?.activeHooks.length);
   });
 });
 

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ensurePlanningWorkspace } from "../config-bridge.js";
-import { planningPhasesRoot } from "../paths.js";
+import { planningArtifact, planningPhasesRoot } from "../paths.js";
 import { ensureTaskRoadmap, extractPlanTitle, syncTaskPhaseOnPlan, syncTaskPhaseOnVerifyPass } from "../phase-sync.js";
 
 describe("phase-sync", () => {
@@ -24,7 +24,7 @@ describe("phase-sync", () => {
 
   it("ensureTaskRoadmap creates ROADMAP when missing", () => {
     ensureTaskRoadmap(tmp, "Auth fix");
-    expect(existsSync(join(tmp, ".planning", "ROADMAP.md"))).toBe(true);
+    expect(existsSync(planningArtifact(tmp, "ROADMAP.md"))).toBe(true);
   });
 
   it("syncTaskPhaseOnPlan creates phase dir and copies PLAN.md", () => {

@@ -2,8 +2,8 @@
  * gsd-runtime.ts — Native GSD runtime (replaces dynamic require() of .cjs blobs).
  *
  * Sprint 1: 5 in-process .cjs modules migrated to native TS.
- * The subprocess path (runGsdTools -> gsd-tools.cjs) still uses createRequire
- * in gsd-dispatch.ts and is deferred to sprint 2 for full dependency removal.
+ * Sprint 2: the last gsd-tools subprocess calls were reimplemented natively and
+ * the `@opengsd/gsd-core` dependency was removed entirely (see gsd-dispatch.ts).
  */
 import { LOOP_HOST_CONTRACT, type LoopHostContractEntry } from "./loop-host-contract.js";
 import {
