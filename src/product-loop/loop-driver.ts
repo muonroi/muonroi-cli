@@ -59,6 +59,21 @@ function logLoopEvent(ctx: DriverContext, subtype: string, data: Record<string, 
   }
 }
 
+/**
+ * Clamp a title for the milestone/phase index (F12): truncate at a word
+ * boundary when possible and strip trailing punctuation/whitespace so a raw
+ * slice can't leave a dangling "(" or a half word. Falls back to a hard slice
+ * for a single long token.
+ */
+export function clampTitle(raw: string, max: number): string {
+  const s = (raw ?? "").trim();
+  if (s.length <= max) return s.replace(/[\s([{<"'.,;:–—-]+$/u, "").trim() || s;
+  const hard = s.slice(0, max);
+  const lastSpace = hard.lastIndexOf(" ");
+  const base = lastSpace >= Math.floor(max * 0.6) ? hard.slice(0, lastSpace) : hard;
+  return base.replace(/[\s([{<"'.,;:–—-]+$/u, "").trim() || hard.trim();
+}
+
 function buildWorkspaceDiscoveryCard(d: DiscoveryResult, a: RepoAudit, priorRunCount: number): CouncilInfoCard | null {
   const sections: CouncilInfoCard["sections"] = [];
 
@@ -1030,9 +1045,9 @@ interface ProductSpec {
             ctx.flowDir,
             {
               runId: ctx.runId,
-              milestoneTitle: ctx.idea.slice(0, 60),
+              milestoneTitle: clampTitle(ctx.idea, 60),
               milestoneGoal: (productSpec?.architecture ?? "").slice(0, 200),
-              phaseTitle: (mvpHead || ctx.idea).slice(0, 50),
+              phaseTitle: clampTitle(mvpHead || ctx.idea, 50),
               phaseGoal: (productSpec?.persona ?? "").slice(0, 200),
             },
             new Date().toISOString(),

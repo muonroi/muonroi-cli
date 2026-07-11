@@ -336,6 +336,33 @@ export async function attachRunToPhase(
   return next;
 }
 
+/**
+ * A run is "substantive" once it has progressed past the boot skeleton — i.e.
+ * it carries research (`research.md`), a scoped spec (`tasks.json`, or a
+ * `Product Specification` section in `roadmap.md`), or context (`context.md`).
+ * The eager on-boot run has only the six empty base `.md` files, so it fails
+ * every check. Tolerant: any read error → treat as non-substantive.
+ */
+async function isSubstantiveRun(flowDir: string, runId: string): Promise<boolean> {
+  const runDir = path.join(flowDir, "runs", runId);
+  for (const marker of ["research.md", "tasks.json", "context.md"]) {
+    if (
+      await fs.stat(path.join(runDir, marker)).then(
+        () => true,
+        () => false,
+      )
+    )
+      return true;
+  }
+  try {
+    const roadmap = await fs.readFile(path.join(runDir, "roadmap.md"), "utf8");
+    if (roadmap.includes("Product Specification")) return true;
+  } catch {
+    /* no roadmap → not substantive via this marker */
+  }
+  return false;
+}
+
 // ─── High-level wiring ───────────────────────────────────────────────────────
 
 /**
@@ -421,6 +448,10 @@ export async function migrateLegacyRuns(flowDir: string, nowIso: string): Promis
     const stat = await fs.stat(path.join(flowDir, "runs", runId)).catch(() => null);
     if (!stat?.isDirectory()) continue;
     if (await findPhaseForRun(flowDir, runId)) continue;
+    // F1 — skip skeleton runs: the TUI eagerly creates an empty run on boot
+    // (only the base .md files, no ProductSpec / research). Indexing those as
+    // "legacy" clutters the hierarchy with runs the user never actually used.
+    if (!(await isSubstantiveRun(flowDir, runId))) continue;
     orphans.push(runId);
   }
   if (orphans.length === 0) return 0;
