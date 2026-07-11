@@ -351,6 +351,15 @@ export interface CouncilConfig {
    * falls back to `llm.research`.
    */
   runIsolatedTask?: IsolatedTaskRunner;
+  /**
+   * Sprint-2 item 3 — per-stance recall at debate opening. When wired, runDebate
+   * calls this once before opening statements with the panel's stances/roles and
+   * a query; the returned per-role seed text is folded into each participant's
+   * opening context so every stance opens grounded in the prior experience its
+   * lens cares about (the EE server weights recall collections by stance).
+   * Optional: headless/direct callers/tests omit it and openings run unchanged.
+   */
+  stanceRecall?: (roles: string[], query: string) => Promise<Map<string, string>>;
 }
 
 // ── Persisted Council Memory ─────────────────────────────────────────────────

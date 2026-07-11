@@ -9,8 +9,10 @@ import {
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
 import { phaseStart } from "../council/phase-events.js";
 import { runPreflight } from "../council/preflight.js";
+import { makeStanceRecall } from "../council/stance-recall.js";
 import type { ClarifiedSpec, CouncilLLM, CouncilParticipant, DebateState } from "../council/types.js";
 import { fetchBBContext, inferBBFromPrompt, renderBBContextBlock } from "../ee/bb-retrieval.js";
+import { getDefaultEEClient } from "../ee/intercept.js";
 import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import { ensureRunScoped } from "../flow/hierarchy.js";
@@ -663,6 +665,13 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
               runId: ctx.sessionId ?? ctx.runId,
               checkpointDir: runDir,
               resumeCheckpoint,
+              // Item 3 — per-stance recall: each participant opens grounded in the
+              // stance-weighted slice of the brain its lens cares about. Bounded +
+              // failure-tolerant; unavailable EE leaves openings unchanged.
+              stanceRecall: makeStanceRecall(getDefaultEEClient(), {
+                cwd: ctx.flowDir,
+                sourceSession: ctx.sessionId ?? ctx.runId,
+              }),
             },
             ctx.llm,
           );
