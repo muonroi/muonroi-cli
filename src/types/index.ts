@@ -615,6 +615,8 @@ export interface ModelInfo {
   /** Extra tiers this model may satisfy in getModelByTier (primary tier remains `tier`). */
   routingTiers?: ModelTier[];
   roles?: string[];
+  /** Part E — model has native online web research (its own web_search/browsing). */
+  nativeWebResearch?: boolean;
 }
 
 export type AgentMode = "agent" | "plan" | "ask";

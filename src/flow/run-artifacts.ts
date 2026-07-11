@@ -146,6 +146,13 @@ export interface ResearchDoc {
   findings?: string;
   /** EE recall seed surfaced before the debate, if any. */
   eeSeed?: string;
+  /**
+   * Part E — web-research confidence for this run. "native" = a model with
+   * native online web research drove the Researcher stance; "degraded" = no
+   * web-native model was reachable, so online facts fall back to the (untrusted)
+   * add-in path. Recorded so `/ideal review` surfaces research trustworthiness.
+   */
+  webResearch?: { confidence: "native" | "degraded"; model?: string };
 }
 
 function runDirOf(flowDir: string, runId: string): string {
@@ -162,6 +169,13 @@ export async function writeResearchDoc(flowDir: string, runId: string, doc: Rese
   if (doc.eeSeed?.trim()) {
     parts.push("## Experience seed (EE recall)\n");
     parts.push(`${doc.eeSeed.trim()}\n`);
+  }
+  if (doc.webResearch) {
+    const line =
+      doc.webResearch.confidence === "native"
+        ? `native — web-capable model${doc.webResearch.model ? ` (${doc.webResearch.model})` : ""}`
+        : "degraded — no native web model reachable; online facts via add-in fallback";
+    parts.push(`## Research Confidence: ${line}\n`);
   }
   parts.push("## Debate summary\n");
   parts.push(`${doc.summary?.trim() || "(no summary produced)"}\n`);

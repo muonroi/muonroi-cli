@@ -10,9 +10,11 @@ import {
   getProviderPeakHourRule,
   getSupportedReasoningEfforts,
   getVisionProxyRouting,
+  getWebResearchModel,
   isReasoningModel,
   loadCatalog,
   MODELS,
+  modelHasNativeWebResearch,
   normalizeModelId,
   SWITCH_PROVIDER_ORDER,
 } from "../registry";
@@ -24,6 +26,30 @@ beforeAll(async () => {
 describe("MODELS catalog", () => {
   test("has at least one model", () => {
     expect(MODELS.length).toBeGreaterThan(0);
+  });
+
+  describe("Part E — native web research", () => {
+    test("openai + xai + zai models are web-native; deepseek + opencode-go are not", () => {
+      for (const m of MODELS) {
+        const expected = m.provider === "openai" || m.provider === "xai" || m.provider === "zai";
+        expect(modelHasNativeWebResearch(m.id)).toBe(expected);
+      }
+    });
+
+    test("getWebResearchModel returns a web-native routable model", () => {
+      const m = getWebResearchModel();
+      expect(m).toBeDefined();
+      expect(m!.nativeWebResearch).toBe(true);
+    });
+
+    test("getWebResearchModel honors a reachable-id constraint", () => {
+      const webNative = MODELS.filter((m) => m.nativeWebResearch === true);
+      const only = new Set([webNative[0]!.id]);
+      expect(getWebResearchModel(only)?.id).toBe(webNative[0]!.id);
+      // No web-native model reachable → undefined (drives degraded confidence).
+      const deepseekOnly = new Set(MODELS.filter((m) => m.provider === "deepseek").map((m) => m.id));
+      expect(getWebResearchModel(deepseekOnly)).toBeUndefined();
+    });
   });
 
   test("every model has required fields", () => {

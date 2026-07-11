@@ -127,6 +127,20 @@ export interface CatalogModel {
   /** Additional tiers for automatic routing (primary tier remains `tier`). */
   routing_tiers?: string[];
   roles?: string[];
+  /**
+   * Part E — model has NATIVE online web research (its own web_search / browsing
+   * / Live Search), not just codebase read. Source of truth for whether the
+   * council research phase can trust this model for online facts. Per-model
+   * (audited), NOT per-provider. Absent → treated as false (safe: forces the
+   * add-in fallback + a degraded-confidence log). Never inferred from provider.
+   */
+  native_web_research?: boolean;
+  /**
+   * Optional mechanism hint for HOW native web research is activated:
+   * "live-search" (xAI) | "web-tool" | "browsing" (OpenAI Responses web_search)
+   * | null. Advisory only — `native_web_research` is the gate.
+   */
+  web_research_kind?: string | null;
 }
 
 // ─── Schema validation (catalog drift / corruption guard) ───────────────────
@@ -153,6 +167,8 @@ const CatalogModelSchema = z
     tier_routing: z.boolean().optional(),
     routing_tiers: z.array(z.string()).optional(),
     roles: z.array(z.string()).optional(),
+    native_web_research: z.boolean().optional(),
+    web_research_kind: z.string().nullable().optional(),
   })
   .loose();
 
@@ -374,5 +390,6 @@ export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
     tierRouting: m.tier_routing ?? true,
     routingTiers: m.routing_tiers as ModelInfo["routingTiers"],
     roles: m.roles,
+    nativeWebResearch: m.native_web_research ?? false,
   };
 }
