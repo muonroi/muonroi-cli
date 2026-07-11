@@ -1,5 +1,6 @@
 import type { CouncilContextBundle } from "./council-context.js";
 import { renderCouncilContextBlock } from "./council-context.js";
+import { type PlanGateDimensionId, renderGateAxes } from "./plan-gate-vocabulary.js";
 import { VERDICT_OUTPUT_CONTRACT } from "./verdict-schema.js";
 
 export type PlanPerspectiveId = "architect" | "skeptic" | "research" | "security" | "implementer";
@@ -8,6 +9,12 @@ export interface PlanPerspective {
   id: PlanPerspectiveId;
   role: string;
   mandate: string;
+  /**
+   * The shared gate axis this perspective primarily owns. Ties the headless
+   * perspective set to the same criteria the interactive debate uses; the full
+   * perspective set must cover every PLAN_GATE_DIMENSION (parity-tested).
+   */
+  dimension: PlanGateDimensionId;
 }
 
 export const PLAN_PERSPECTIVES: PlanPerspective[] = [
@@ -15,26 +22,31 @@ export const PLAN_PERSPECTIVES: PlanPerspective[] = [
     id: "architect",
     role: "architect",
     mandate: "Structural fit, file map correctness, dependency order, module boundaries.",
+    dimension: "structure",
   },
   {
     id: "skeptic",
     role: "devil's advocate",
     mandate: "Challenge assumptions, missing edge cases, YAGNI violations, scope creep.",
+    dimension: "feasibility",
   },
   {
     id: "research",
     role: "researcher",
     mandate: "Ground plan claims against codebase evidence (file:line citations required).",
+    dimension: "grounding",
   },
   {
     id: "security",
     role: "security reviewer",
     mandate: "Permission model, path traversal, secret handling, dangerous bash patterns in planned edits.",
+    dimension: "safety",
   },
   {
     id: "implementer",
     role: "implementer",
     mandate: "Feasibility, estimate realism, testability of acceptance criteria.",
+    dimension: "correctness",
   },
 ];
 
@@ -57,6 +69,10 @@ export function buildPerspectivePrompt(
   }
   lines.push(
     "",
+    // Shared gate axes (single source with the interactive debate) so headless
+    // and interactive reviews judge the plan against identical criteria.
+    renderGateAxes(),
+    "",
     "Review the draft PLAN.md below, then emit your structured verdict.",
     VERDICT_OUTPUT_CONTRACT,
     "",
@@ -78,6 +94,10 @@ export function buildDebateTopic(planBody: string, bundle: CouncilContextBundle)
   return [
     "Review and debate the proposed plan to determine if it is complete, correct, safe, and optimal for the task.",
     "Debate the trade-offs, then converge on a single merged verdict.",
+    "",
+    // Shared gate axes (single source with the headless perspective review) so
+    // both gate paths judge the plan against identical criteria — no drift.
+    renderGateAxes(),
     "",
     renderCouncilContextBlock(bundle),
     "",
