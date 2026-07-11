@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildLanguageRule,
   buildOpeningPrompt,
+  buildResponsePrompt,
   buildRoundSummaryPrompt,
   buildSynthesisLanguageRule,
   buildSynthesisPrompt,
@@ -20,6 +21,27 @@ const spec: ClarifiedSpec = {
   scope: "analysis",
   rawQA: [],
 };
+
+describe("debate scope discipline (F10 — no plan/file dumps in turns)", () => {
+  it("opening + response prompts forbid file contents and implementation plans", () => {
+    for (const built of [
+      buildOpeningPrompt({ speakerRole: "research", partnerRole: "architect", spec }),
+      buildResponsePrompt({
+        speakerRole: "research",
+        partnerRole: "architect",
+        speakerPosition: "p",
+        partnerPosition: "q",
+        spec,
+      }),
+    ]) {
+      const s = built.system.toLowerCase();
+      expect(s).toContain("debate about direction");
+      expect(s).toContain("implementation");
+      expect(s).toContain("file content");
+      expect(s).toContain("synthesis owns the plan");
+    }
+  });
+});
 
 describe("buildLanguageRule", () => {
   it("returns the historical English-only rule for undefined and 'english'", () => {
