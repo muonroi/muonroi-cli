@@ -27,6 +27,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { prependDecisionsLock, readDecisionsLock } from "../council/decisions-lock.js";
 import { runCouncil } from "../council/index.js";
+import { resolveLeaderModel } from "../council/leader.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
 import type { CouncilLLM } from "../council/types.js";
 import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
@@ -59,6 +60,7 @@ import type { ContinueFeedback } from "./feedback-routing.js";
 import { buildContinueFeedback } from "./feedback-routing.js";
 import { idealTrace } from "./ideal-trace.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
+import { runPlanAdherenceReview } from "./plan-adherence-review.js";
 import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snapshot.js";
 import { appendRoleMemory } from "./role-memory.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
@@ -921,6 +923,51 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
           content: `\n> [completeness] ${stillMissing.length} plan target(s) still missing after re-check — deferring to verify.\n`,
         };
       }
+    }
+  }
+
+  // ── Step 4c: Plan-adherence review gate (strong reviewer → cheap fixer) ────
+  // A high-tier reviewer checks the diff against the approved plan; deviations are
+  // handed to a lower-tier fixer and re-reviewed (bounded). Opt out with
+  // MUONROI_IDEAL_ADHERENCE_REVIEW=0. Never halts — verify + the criteria done-gate
+  // remain the hard gates; this tightens plan fidelity before verification so a
+  // cheap implementer's divergence is caught and corrected, not shipped.
+  if (ctx.runIsolatedTask && planSynthesis.trim() && process.env.MUONROI_IDEAL_ADHERENCE_REVIEW !== "0") {
+    const adhPhaseId = `sprint-${sprintN}-adherence`;
+    const adhStartedAt = Date.now();
+    yield phaseStart({
+      phaseId: adhPhaseId,
+      kind: "sprint_stage",
+      label: `Sprint ${sprintN} — Plan-adherence review`,
+      startedAt: adhStartedAt,
+    });
+    try {
+      const reviewModelId = process.env.MUONROI_IDEAL_REVIEW_MODEL?.trim() || resolveLeaderModel(ctx.sessionModelId);
+      const verdict = yield* runPlanAdherenceReview({
+        sprintN,
+        planSynthesis,
+        cwd,
+        reviewModelId,
+        fixModelId: ctx.sessionModelId,
+        runIsolatedTask: ctx.runIsolatedTask,
+        maxRounds: Number.parseInt(process.env.MUONROI_IDEAL_ADHERENCE_ROUNDS ?? "2", 10) || 2,
+      });
+      idealTrace("sprint.adherence.after", {
+        runId: ctx.runId,
+        sprintN,
+        rounds: verdict.rounds,
+        adherent: verdict.adherent,
+        deviations: verdict.deviations.length,
+      });
+    } catch (err) {
+      console.error(`[sprint-runner] plan-adherence review failed (sprint ${sprintN}): ${(err as Error).message}`);
+    } finally {
+      yield phaseDone({
+        phaseId: adhPhaseId,
+        kind: "sprint_stage",
+        label: `Sprint ${sprintN} — Plan-adherence review`,
+        startedAt: adhStartedAt,
+      });
     }
   }
 
