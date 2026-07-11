@@ -167,12 +167,16 @@ describe("hierarchy", () => {
   describe("migrateLegacyRuns", () => {
     it("indexes orphan runs under m00-legacy, is idempotent, skips indexed runs", async () => {
       const { migrateLegacyRuns } = await import("../hierarchy.js");
-      await fs.mkdir(path.join(flowDir, "runs", "run-a"), { recursive: true });
-      await fs.mkdir(path.join(flowDir, "runs", "run-b"), { recursive: true });
+      // Substantive orphan runs (carry research.md) so they qualify for backfill.
+      for (const r of ["run-a", "run-b"]) {
+        await fs.mkdir(path.join(flowDir, "runs", r), { recursive: true });
+        await fs.writeFile(path.join(flowDir, "runs", r, "research.md"), "# Research\n", "utf8");
+      }
       // run-c is already indexed under a real milestone — must not be re-homed.
       const m = await createMilestone(flowDir, { title: "Real" }, NOW);
       await createPhase(flowDir, m.id, { title: "Phase", runId: "run-c" }, NOW);
       await fs.mkdir(path.join(flowDir, "runs", "run-c"), { recursive: true });
+      await fs.writeFile(path.join(flowDir, "runs", "run-c", "research.md"), "# Research\n", "utf8");
 
       const n = await migrateLegacyRuns(flowDir, NOW);
       expect(n).toBe(2);
@@ -191,6 +195,25 @@ describe("hierarchy", () => {
     it("returns 0 when there is no runs dir", async () => {
       const { migrateLegacyRuns } = await import("../hierarchy.js");
       expect(await migrateLegacyRuns(flowDir, NOW)).toBe(0);
+    });
+
+    it("skips skeleton runs (no research/tasks/spec) — F1", async () => {
+      const { migrateLegacyRuns } = await import("../hierarchy.js");
+      // Skeleton: only base .md files, empty roadmap → must NOT be indexed.
+      await fs.mkdir(path.join(flowDir, "runs", "run-skel"), { recursive: true });
+      await fs.writeFile(path.join(flowDir, "runs", "run-skel", "roadmap.md"), "", "utf8");
+      // Substantive via research.md.
+      await fs.mkdir(path.join(flowDir, "runs", "run-research"), { recursive: true });
+      await fs.writeFile(path.join(flowDir, "runs", "run-research", "research.md"), "# Research\n", "utf8");
+      // Substantive via a Product Specification section in roadmap.md.
+      await fs.mkdir(path.join(flowDir, "runs", "run-spec"), { recursive: true });
+      await fs.writeFile(path.join(flowDir, "runs", "run-spec", "roadmap.md"), "## Product Specification\n{}", "utf8");
+
+      const n = await migrateLegacyRuns(flowDir, NOW);
+      expect(n).toBe(2);
+      const legacy = await listPhases(flowDir, "m00-legacy");
+      expect(legacy.map((p) => p.runIds[0]).sort()).toEqual(["run-research", "run-spec"]);
+      expect(await findPhaseForRun(flowDir, "run-skel")).toBeNull();
     });
   });
 
