@@ -21,7 +21,7 @@ describe("gsd model-tier", () => {
   it("research perspective uses explore agent with premium model override", () => {
     const req = buildGsdPerspectiveTaskRequest(
       "review plan",
-      { id: "research", role: "researcher", mandate: "x" },
+      { id: "research", role: "researcher", mandate: "x", dimension: "grounding" },
       SESSION_FLASH,
     );
     expect(req.agent).toBe("explore");
@@ -31,7 +31,7 @@ describe("gsd model-tier", () => {
   it("skeptic perspective uses verify agent with premium model override", () => {
     const req = buildGsdPerspectiveTaskRequest(
       "review plan",
-      { id: "skeptic", role: "devil's advocate", mandate: "x" },
+      { id: "skeptic", role: "devil's advocate", mandate: "x", dimension: "feasibility" },
       SESSION_FLASH,
     );
     expect(req.agent).toBe("verify");
