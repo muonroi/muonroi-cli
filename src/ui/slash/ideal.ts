@@ -52,7 +52,7 @@ export interface IdealFlags {
   ghPr?: boolean;
 }
 
-export type IdealSubcommand = "start" | "status" | "resume" | "abort" | "ship" | "help";
+export type IdealSubcommand = "start" | "status" | "resume" | "abort" | "ship" | "review" | "help";
 
 export interface IdealParseResult {
   subcommand: IdealSubcommand;
@@ -75,6 +75,7 @@ const HELP_TEXT = [
   '  /ideal "<idea>"           Start a new product run',
   "  /ideal status [runId]    List active runs (or detail one)",
   "  /ideal resume [runId]    Resume a run (no id = newest incomplete run)",
+  "  /ideal review [runId]    Render a run's transcript + sprint scores (no id = newest run)",
   "  /ideal abort  [runId]    Hard-kill a run (no id = newest incomplete run)",
   "  /ideal ship   <runId>    Force user-approval gate (skip Cond #1-#4 if passing)",
   "",
@@ -127,7 +128,7 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
   }
 
   // Detect non-start subcommands by first token (subcommand keywords are reserved).
-  const RESERVED = new Set(["status", "resume", "abort", "ship", "help", "--help", "-h"]);
+  const RESERVED = new Set(["status", "resume", "abort", "ship", "review", "help", "--help", "-h"]);
   const head = args[0]!;
 
   if (RESERVED.has(head)) {
@@ -277,6 +278,7 @@ export const handleIdealSlash: SlashHandler = async (args) => {
     result.subcommand !== "status" &&
     result.subcommand !== "resume" &&
     result.subcommand !== "abort" &&
+    result.subcommand !== "review" &&
     !result.runId
   ) {
     return `error: /ideal ${result.subcommand} requires a runId\n\n${HELP_TEXT}`;

@@ -12,6 +12,7 @@ import { runPreflight } from "../council/preflight.js";
 import type { ClarifiedSpec, CouncilLLM, CouncilParticipant, DebateState } from "../council/types.js";
 import { fetchBBContext, inferBBFromPrompt, renderBBContextBlock } from "../ee/bb-retrieval.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import { renderResumeDigest, writeContextDoc, writeResearchDoc } from "../flow/run-artifacts.js";
 import { logInteraction } from "../storage/index.js";
 import type { CouncilInfoCard, StreamChunk } from "../types/index.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
@@ -238,6 +239,19 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           yield { type: "council_info_card", councilInfoCard: discoveryCard } as StreamChunk;
         }
 
+        // Part A — persist prior-run context as a first-class context.md. The
+        // digest is intentionally NOT re-injected into the live system prompt
+        // (PIL Layer 3 already does semantic injection), but writing it to disk
+        // makes it a reviewable, resumable surface — the run's inherited memory.
+        try {
+          const ctxParts = [`Prior runs on this workspace: ${prior.runs.length}`];
+          if (prior.digest?.trim()) ctxParts.push("", prior.digest.trim());
+          if (audit.hasProject) ctxParts.push("", "## Repo audit", conversationContext);
+          await writeContextDoc(ctx.flowDir, ctx.runId, ctxParts.join("\n"));
+        } catch {
+          /* non-critical — context.md is a review surface, never blocks the FSM */
+        }
+
         // Persist discovery evidence + repo audit so resume can replay.
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
         if (discovery.evidence.length > 0) {
@@ -294,7 +308,15 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
 
         // Write Resume Digest to state.md
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
-        stateMap.sections.set("Resume Digest", "Stage: Gather - Defining product dimensions");
+        stateMap.sections.set(
+          "Resume Digest",
+          renderResumeDigest({
+            stage: "gather",
+            lastCompleted: "discover",
+            nextAction: "Answer clarification questions to define product dimensions",
+            updatedAt: new Date().toISOString(),
+          }),
+        );
         await writeArtifact(runDir, "state.md", stateMap);
 
         // runGatherPhase is async (not a generator), but the discovery
@@ -450,7 +472,15 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         });
 
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
-        stateMap.sections.set("Resume Digest", "Stage: Research - Multi-expert debate");
+        stateMap.sections.set(
+          "Resume Digest",
+          renderResumeDigest({
+            stage: "research",
+            lastCompleted: "gather",
+            nextAction: "Run / resume the multi-expert council debate",
+            updatedAt: new Date().toISOString(),
+          }),
+        );
         await writeArtifact(runDir, "state.md", stateMap);
 
         // inside research phase, before building councilTopic:
@@ -698,13 +728,26 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           councilInfoCard: buildResearchSummaryCard(summaryText, debateState?.researchFindings),
         } as StreamChunk;
 
-        // Append research summary to delegations.md
+        // Append research summary to delegations.md (kept for back-compat: the
+        // EE transcript extractor + legacy readers still read these sections).
         const delegationsMap = (await readArtifact(runDir, "delegations.md")) ?? { preamble: "", sections: new Map() };
         delegationsMap.sections.set("Research Summary", debateState.runningSummary);
         if (debateState.researchFindings) {
           delegationsMap.sections.set("Research Findings", debateState.researchFindings);
         }
         await writeArtifact(runDir, "delegations.md", delegationsMap);
+
+        // Part A — promote the debate output to a first-class research.md. This
+        // is the canonical, reviewable surface (`/ideal review`) and the home
+        // for the EE recall seed once per-turn grounding lands (deferred).
+        try {
+          await writeResearchDoc(ctx.flowDir, ctx.runId, {
+            summary: debateState.runningSummary ?? "",
+            findings: debateState.researchFindings ?? undefined,
+          });
+        } catch {
+          /* non-critical — research.md is a review surface, never blocks the FSM */
+        }
 
         // P6 - extract assumptions from the research debate so foundational
         // claims (perf budgets, SDK contracts, etc.) become trackable across
@@ -774,7 +817,15 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         });
 
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
-        stateMap.sections.set("Resume Digest", "Stage: Scoping - Synthesizing product roadmap");
+        stateMap.sections.set(
+          "Resume Digest",
+          renderResumeDigest({
+            stage: "scoping",
+            lastCompleted: "research",
+            nextAction: "Synthesize the ProductSpec and confirm the roadmap at the preflight gate",
+            updatedAt: new Date().toISOString(),
+          }),
+        );
         await writeArtifact(runDir, "state.md", stateMap);
 
         // Visible progress indicator — without this the TUI sits silent for
