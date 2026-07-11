@@ -25,6 +25,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { atomicWriteJSON, atomicWriteText } from "../storage/atomic-io.js";
 import { readArtifact, writeArtifact } from "./artifact-io.js";
+import { getActiveRunId, setActiveRunId } from "./run-manager.js";
 
 // ─── Records ────────────────────────────────────────────────────────────────
 
@@ -398,15 +399,20 @@ export async function ensureRunScoped(
   input: { runId: string; milestoneTitle: string; milestoneGoal?: string; phaseTitle: string; phaseGoal?: string },
   nowIso: string,
 ): Promise<{ milestoneId: string; phaseId: string }> {
+  // Reuse the active run's milestone when the current focus resolves to one
+  // (a prior product run in this session), computed BEFORE we repoint focus.
+  const priorMilestoneId = (await getActivePointer(flowDir)).milestoneId;
+
   const existing = await findPhaseForRun(flowDir, input.runId);
   if (existing) {
-    await setActivePointer(flowDir, existing);
+    // Make this run the single canonical focus — the active milestone/phase are
+    // derived from it, ending the old Active-Run-vs-Active-Phase drift (F8).
+    await setActiveRunId(flowDir, input.runId);
+    await clearLegacyActivePointerSections(flowDir);
     return existing;
   }
 
-  // Reuse the active milestone when one is set + still exists; else open one.
-  const ptr = await getActivePointer(flowDir);
-  let milestoneId = ptr.milestoneId;
+  let milestoneId = priorMilestoneId;
   if (!milestoneId || !(await loadMilestone(flowDir, milestoneId))) {
     const m = await createMilestone(flowDir, { title: input.milestoneTitle, goal: input.milestoneGoal }, nowIso);
     milestoneId = m.id;
@@ -418,9 +424,9 @@ export async function ensureRunScoped(
     { title: input.phaseTitle, goal: input.phaseGoal, runId: input.runId },
     nowIso,
   );
-  const result = { milestoneId, phaseId: phase.id };
-  await setActivePointer(flowDir, result);
-  return result;
+  await setActiveRunId(flowDir, input.runId);
+  await clearLegacyActivePointerSections(flowDir);
+  return { milestoneId, phaseId: phase.id };
 }
 
 /**
@@ -475,24 +481,45 @@ export async function migrateLegacyRuns(flowDir: string, nowIso: string): Promis
   return orphans.length;
 }
 
-// ─── Active pointers (top-level state.md) ────────────────────────────────────
+// ─── Active pointer — DERIVED from the one canonical focus (the active run) ───
 
 export interface ActivePointer {
   milestoneId: string | null;
   phaseId: string | null;
 }
 
+/**
+ * F8 — the active milestone/phase are DERIVED from the single canonical focus,
+ * the active run, via the hierarchy index; they are NOT separately persisted.
+ *
+ * Previously `state.md` carried independent `Active Run` (set for chat-runs) and
+ * `Active Milestone`/`Active Phase` (set by `ensureRunScoped` for product-runs)
+ * pointers that routinely drifted out of sync — `/ideal` never updated `Active
+ * Run`, so it pointed at a stale skeleton run while the milestone/phase pointed
+ * at the product run. Council decision (5/5): collapse to one truth. Whatever run
+ * is active, its phase (and that phase's milestone) is the active one; a
+ * chat/skeleton run that was never indexed resolves to nulls.
+ */
 export async function getActivePointer(flowDir: string): Promise<ActivePointer> {
-  const stateMap = await readArtifact(flowDir, "state.md");
-  const milestoneId = stateMap?.sections.get("Active Milestone")?.trim() || null;
-  const phaseId = stateMap?.sections.get("Active Phase")?.trim() || null;
-  return { milestoneId, phaseId };
+  const runId = await getActiveRunId(flowDir);
+  if (!runId) return { milestoneId: null, phaseId: null };
+  const hit = await findPhaseForRun(flowDir, runId);
+  return { milestoneId: hit?.milestoneId ?? null, phaseId: hit?.phaseId ?? null };
 }
 
-export async function setActivePointer(flowDir: string, ptr: ActivePointer): Promise<void> {
-  let stateMap = await readArtifact(flowDir, "state.md");
-  if (!stateMap) stateMap = { preamble: "", sections: new Map() };
-  stateMap.sections.set("Active Milestone", ptr.milestoneId ?? "");
-  stateMap.sections.set("Active Phase", ptr.phaseId ?? "");
+/**
+ * Blank the legacy `Active Milestone`/`Active Phase` sections if an old
+ * `state.md` still carries them, so a stale value can never be mistaken for the
+ * (now derived) truth. One-time, idempotent; no-op when the sections are absent
+ * or already empty. Legacy files are otherwise read-as-junk — never migrated.
+ */
+export async function clearLegacyActivePointerSections(flowDir: string): Promise<void> {
+  const stateMap = await readArtifact(flowDir, "state.md");
+  if (!stateMap) return;
+  const hadM = stateMap.sections.get("Active Milestone")?.trim();
+  const hadP = stateMap.sections.get("Active Phase")?.trim();
+  if (!hadM && !hadP) return;
+  stateMap.sections.set("Active Milestone", "");
+  stateMap.sections.set("Active Phase", "");
   await writeArtifact(flowDir, "state.md", stateMap);
 }

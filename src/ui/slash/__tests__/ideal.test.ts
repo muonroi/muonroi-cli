@@ -2,7 +2,8 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createMilestone, createPhase, setActivePointer } from "../../../flow/hierarchy.js";
+import { createMilestone, createPhase } from "../../../flow/hierarchy.js";
+import { setActiveRunId } from "../../../flow/run-manager.js";
 import { getIdealHelpText, handleIdealSlash, parseIdealArgs } from "../ideal.js";
 
 const NOOP_CTX: any = {
@@ -187,8 +188,9 @@ describe("/ideal slash handler dispatch", () => {
     it("milestones: lists milestones + phases + active marker", async () => {
       const flowDir = path.join(cwd, ".muonroi-flow");
       const m = await createMilestone(flowDir, { title: "Todo App", goal: "ship it" }, NOW);
-      const p = await createPhase(flowDir, m.id, { title: "MVP", runId: "run-xyz" }, NOW);
-      await setActivePointer(flowDir, { milestoneId: m.id, phaseId: p.id });
+      await createPhase(flowDir, m.id, { title: "MVP", runId: "run-xyz" }, NOW);
+      // F8 — the active marker derives from the active run, not a stored pointer.
+      await setActiveRunId(flowDir, "run-xyz");
       const out = await handleIdealSlash(["milestones"], { ...NOOP_CTX, cwd });
       expect(out).toContain("m01-todo-app: Todo App");
       expect(out).toContain("← active");
@@ -196,11 +198,11 @@ describe("/ideal slash handler dispatch", () => {
       expect(out).toContain("run-xyz");
     });
 
-    it("phases: falls back to active milestone when no id given", async () => {
+    it("phases: falls back to active milestone (derived from active run) when no id given", async () => {
       const flowDir = path.join(cwd, ".muonroi-flow");
       const m = await createMilestone(flowDir, { title: "App" }, NOW);
-      await createPhase(flowDir, m.id, { title: "Scope" }, NOW);
-      await setActivePointer(flowDir, { milestoneId: m.id, phaseId: null });
+      await createPhase(flowDir, m.id, { title: "Scope", runId: "run-scope" }, NOW);
+      await setActiveRunId(flowDir, "run-scope");
       const out = await handleIdealSlash(["phases"], { ...NOOP_CTX, cwd });
       expect(out).toContain("Phases of m01-app");
       expect(out).toContain("p01-scope: Scope");
