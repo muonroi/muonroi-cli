@@ -42,6 +42,21 @@ const NAMED: Record<string, { name: string; sequence: string; raw: string }> = {
   PageDown: { name: "pagedown", sequence: "\x1b[6~", raw: "\x1b[6~" },
 };
 
+// Case-insensitive view of NAMED. The map above is capitalized, but drivers
+// naturally send lowercase ("enter", "escape", "tab", "space") — those missed
+// the exact-case lookup, so keyForNamed returned null and the keystroke was a
+// SILENT no-op (Enter never submitted, Escape never dismissed a modal). Resolve
+// on the lowercased base so every casing works. Includes a couple of common
+// short aliases drivers reach for.
+const NAMED_LC: Record<string, { name: string; sequence: string; raw: string }> = {
+  ...Object.fromEntries(Object.entries(NAMED).map(([k, v]) => [k.toLowerCase(), v])),
+  ret: NAMED.Return,
+  del: NAMED.Delete,
+  spacebar: NAMED.Space,
+  pgup: NAMED.PageUp,
+  pgdn: NAMED.PageDown,
+};
+
 type KeyMods = { ctrl?: boolean; meta?: boolean; shift?: boolean };
 
 /**
@@ -120,9 +135,12 @@ function keyForChar(ch: string, mods: KeyMods = {}): KeyEvent {
   return makeKey({ name: ch, sequence: ch, raw: ch }, mods);
 }
 
-function keyForNamed(key: string): KeyEvent | null {
+export function keyForNamed(key: string): KeyEvent | null {
   const { mods, base } = parseModifiers(key);
-  const m = NAMED[base];
+  // Exact case first (fast path), then case-insensitive so "enter"/"Enter"/
+  // "ENTER"/"return" all resolve. Single-letter bases never collide with a
+  // NAMED word, so they still fall through to the literal-char path below.
+  const m = NAMED[base] ?? NAMED_LC[base.toLowerCase()];
   if (!m) {
     // Unknown named key — fall back to treating it as a literal character if it's 1 char.
     if (base.length === 1) return keyForChar(base, mods);
