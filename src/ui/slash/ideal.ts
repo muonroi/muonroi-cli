@@ -26,7 +26,9 @@
  * the existing __COUNCIL__ pattern in src/ui/slash/council.ts.
  */
 
+import * as path from "node:path";
 import { Command, InvalidArgumentError } from "commander";
+import { getActivePointer, listMilestones, listPhases, migrateLegacyRuns } from "../../flow/hierarchy.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 
@@ -52,7 +54,16 @@ export interface IdealFlags {
   ghPr?: boolean;
 }
 
-export type IdealSubcommand = "start" | "status" | "resume" | "abort" | "ship" | "review" | "help";
+export type IdealSubcommand =
+  | "start"
+  | "status"
+  | "resume"
+  | "abort"
+  | "ship"
+  | "review"
+  | "milestones"
+  | "phases"
+  | "help";
 
 export interface IdealParseResult {
   subcommand: IdealSubcommand;
@@ -76,6 +87,8 @@ const HELP_TEXT = [
   "  /ideal status [runId]    List active runs (or detail one)",
   "  /ideal resume [runId]    Resume a run (no id = newest incomplete run)",
   "  /ideal review [runId]    Render a run's transcript + sprint scores (no id = newest run)",
+  "  /ideal milestones        List milestones (idea/product groups) and their phases",
+  "  /ideal phases [mId]      List phases under a milestone (no id = active milestone)",
   "  /ideal abort  [runId]    Hard-kill a run (no id = newest incomplete run)",
   "  /ideal ship   <runId>    Force user-approval gate (skip Cond #1-#4 if passing)",
   "",
@@ -128,7 +141,18 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
   }
 
   // Detect non-start subcommands by first token (subcommand keywords are reserved).
-  const RESERVED = new Set(["status", "resume", "abort", "ship", "review", "help", "--help", "-h"]);
+  const RESERVED = new Set([
+    "status",
+    "resume",
+    "abort",
+    "ship",
+    "review",
+    "milestones",
+    "phases",
+    "help",
+    "--help",
+    "-h",
+  ]);
   const head = args[0]!;
 
   if (RESERVED.has(head)) {
@@ -258,16 +282,84 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
   };
 }
 
+function flowDirOf(cwd: string): string {
+  return path.join(cwd, ".muonroi-flow");
+}
+
+/** Render `/ideal milestones` — every milestone with its phases + linked runs. */
+export async function renderMilestones(cwd: string): Promise<string> {
+  const flowDir = flowDirOf(cwd);
+  // Lazily backfill pre-hierarchy runs so old work is visible. Idempotent.
+  await migrateLegacyRuns(flowDir, new Date().toISOString()).catch(() => 0);
+  const milestones = await listMilestones(flowDir);
+  if (milestones.length === 0) {
+    return 'No milestones yet. Start one with `/ideal "<idea>"`.';
+  }
+  const { milestoneId: activeM, phaseId: activeP } = await getActivePointer(flowDir);
+  const lines: string[] = ["# Milestones", ""];
+  for (const m of milestones) {
+    const active = m.id === activeM ? " ← active" : "";
+    lines.push(`## ${m.id}: ${m.title} [${m.status}]${active}`);
+    if (m.goal) lines.push(`  goal: ${m.goal}`);
+    const phases = await listPhases(flowDir, m.id);
+    if (phases.length === 0) {
+      lines.push("  (no phases yet)");
+    } else {
+      for (const p of phases) {
+        const runs = p.runIds.length > 0 ? ` — runs: ${p.runIds.join(", ")}` : "";
+        const pActive = m.id === activeM && p.id === activeP ? " ←" : "";
+        lines.push(`  - [${p.status === "done" ? "x" : " "}] ${p.id}: ${p.title} [${p.status}]${runs}${pActive}`);
+      }
+    }
+    lines.push("");
+  }
+  return lines.join("\n").trimEnd();
+}
+
+/** Render `/ideal phases [milestoneId]` — phases under one milestone. */
+export async function renderPhases(cwd: string, milestoneId?: string): Promise<string> {
+  const flowDir = flowDirOf(cwd);
+  let mId = milestoneId;
+  if (!mId) {
+    mId = (await getActivePointer(flowDir)).milestoneId ?? undefined;
+  }
+  if (!mId) {
+    return "No active milestone. Run `/ideal milestones` to list, or pass a milestone id.";
+  }
+  const phases = await listPhases(flowDir, mId);
+  if (phases.length === 0) {
+    return `No phases under ${mId}.`;
+  }
+  const { phaseId: activeP } = await getActivePointer(flowDir);
+  const lines: string[] = [`# Phases of ${mId}`, ""];
+  for (const p of phases) {
+    const runs = p.runIds.length > 0 ? ` — runs: ${p.runIds.join(", ")}` : "";
+    const pActive = p.id === activeP ? " ← active" : "";
+    lines.push(`- [${p.status === "done" ? "x" : " "}] ${p.id}: ${p.title} [${p.status}]${runs}${pActive}`);
+    if (p.goal) lines.push(`  goal: ${p.goal}`);
+  }
+  return lines.join("\n");
+}
+
 /**
  * Slash handler. Returns a sentinel string parseable by app.tsx, OR a help/error
  * string when no orchestrator dispatch is appropriate.
  */
-export const handleIdealSlash: SlashHandler = async (args) => {
+export const handleIdealSlash: SlashHandler = async (args, ctx) => {
   const result = parseIdealArgs(args);
 
   if (result.subcommand === "help") {
     const warnings = result.warnings.length ? `\n\n${result.warnings.join("\n")}` : "";
     return `${HELP_TEXT}${warnings}`;
+  }
+
+  // Milestones/phases are read-only index views — render inline (no orchestrator
+  // dispatch). `runId` carries the optional milestone id for `phases`.
+  if (result.subcommand === "milestones") {
+    return renderMilestones(ctx.cwd);
+  }
+  if (result.subcommand === "phases") {
+    return renderPhases(ctx.cwd, result.runId);
   }
 
   // Status/resume/abort without a runId are allowed: status lists all runs,

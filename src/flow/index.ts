@@ -6,6 +6,27 @@
 
 // Artifact I/O
 export { readArtifact, writeArtifact } from "./artifact-io.js";
+// Hierarchy (milestone → phase → run index layer)
+export {
+  type ActivePointer,
+  attachRunToPhase,
+  createMilestone,
+  createPhase,
+  ensureRunScoped,
+  findPhaseForRun,
+  getActivePointer,
+  listMilestones,
+  listPhases,
+  loadMilestone,
+  loadPhase,
+  MILESTONES_DIR,
+  type MilestoneRecord,
+  migrateLegacyRuns,
+  type PhaseRecord,
+  setActivePointer,
+  updateMilestone,
+  updatePhase,
+} from "./hierarchy.js";
 // Migration
 export { detectLegacyFlow, migrateQuickCodexFlow } from "./migration.js";
 export type { SectionMap } from "./parser.js";
