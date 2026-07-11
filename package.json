@@ -31,7 +31,7 @@
     "build:binary": "bun build --compile --outfile ./dist/muonroi-cli-standalone ./src/index.ts",
     "start": "bun run dist/index.js",
     "typecheck": "tsc --noEmit",
-    "ci:local": "rm -rf /tmp/flow /tmp/gsd-* /tmp/muonroi-* /tmp/sprint-runner-* 2>/dev/null; bun install --frozen-lockfile && bun --filter @muonroi/agent-harness-core build && bunx tsc --noEmit && bunx vitest run && bunx vitest -c vitest.harness.config.ts run tests/harness/",
+    "ci:local": "rm -rf /tmp/flow /tmp/gsd-* /tmp/muonroi-* /tmp/sprint-runner-* 2>/dev/null; bun install --frozen-lockfile && bun --filter @muonroi/agent-harness-core build && bunx tsc --noEmit && bunx vitest run && DBUS_SESSION_BUS_ADDRESS=unix:path=/dev/null GNOME_KEYRING_CONTROL= bunx vitest -c vitest.harness.config.ts run tests/harness/",
     "test": "bunx vitest run",
     "test:watch": "bunx vitest",
     "test:harness": "bunx vitest -c vitest.harness.config.ts run tests/harness/",

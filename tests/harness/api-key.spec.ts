@@ -33,6 +33,10 @@ describe("api-key modal E2E", () => {
         ANTHROPIC_API_KEY: "",
         OPENAI_API_KEY: "",
         GOOGLE_GENERATIVE_AI_API_KEY: "",
+        // Clear the mock deepseek key seeded by the default spawnHarness env,
+        // otherwise the active provider would have a key and the onboarding
+        // modal this spec asserts on would never appear.
+        DEEPSEEK_API_KEY: "",
       },
     });
     proc = ctx.proc;
