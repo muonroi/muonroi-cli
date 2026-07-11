@@ -176,7 +176,10 @@ export function buildEcosystemPreamble(): string {
     "- Angular with @muonroi/agent-harness-angular directive.",
     'When recommending `frontendApproach`, ALWAYS fill the optional `agentHarness` slot — pick "react" for React/Next, "angular" for Angular, "opentui" for terminal UI, "core" for non-DOM integration. Only use "none" when the project has no UI at all.',
     "",
-    "Recommend non-ecosystem options ONLY when the user's prompt explicitly opts out (e.g. mentions Node.js/Express/Django by name).",
+    "Strongest-default, still extensible:",
+    "- Keep the Muonroi/.NET path as the PRIMARY recommendation — it is the ecosystem's strongest, best-supported option.",
+    "- BUT for stack choices (architecture/stack/platform) ALWAYS include at least one mainstream NON-ecosystem alternative in `alternatives` (pick what genuinely fits the task — e.g. Python for data/ML/scripting, Go or Rust for a fast static-binary CLI, Node/TypeScript for JS-native tooling), with a one-line rationale. A user outside the Muonroi ecosystem must always see a real, viable path — never a .NET-only menu.",
+    "- Promote the non-ecosystem option to PRIMARY only when the prompt names another stack, or the task is a poor fit for .NET (e.g. a shell-glue one-liner, a data-science notebook, an npm-ecosystem plugin). Otherwise it stays a first-class alternative, not the default.",
   ].join("\n");
 }
 
