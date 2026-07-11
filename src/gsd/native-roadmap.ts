@@ -1,22 +1,21 @@
 /**
  * native-roadmap.ts — Native replacements for the ROADMAP-oriented gsd-tools
- * subcommands that are read-only or additive: `roadmap analyze` (read-only) and
- * `phase add` (create dir + append a phase block).
+ * subcommands: `roadmap analyze` (read-only), `phase add` (create dir + append),
+ * and — Part B step 2 — the two mutating commands `roadmap update-plan-progress`
+ * and `phase complete`.
  *
- * Part B (staged, step 1). The two DESTRUCTIVE multi-file mutations — `phase
- * complete` and `roadmap update-plan-progress` — are intentionally NOT
- * reimplemented here: they rewrite ROADMAP/REQUIREMENTS/STATE with dozens of
- * regex edge cases and are TASK-workflow-only + low-frequency, so they stay on
- * the subprocess until the dedicated soak sprint (the exact risk the debate
- * flagged). See gsd-dispatch.ts.
- *
- * Contracts verified against the real subprocess in the native-roadmap tests.
+ * The mutating commands rewrite ROADMAP.md (checkbox/table/plan-count) and, for
+ * phase-complete, STATE.md. muonroi's only callers (phase-sync, task workflow)
+ * read just `ok` + a cosmetic `raw` line — they do NOT consume the rich JSON —
+ * so native parity is about performing the FILE mutations correctly, verified
+ * against the subprocess oracle in the native-roadmap contract tests.
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "./config-loader.js";
 import { planningArtifact, planningPhasesRoot } from "./paths.js";
+import { normalizeStateStatus, stateReplaceField } from "./state-document.js";
 
 export interface RoadmapAnalyzePhase {
   number: string;
@@ -220,4 +219,177 @@ export function nativePhaseAdd(cwd: string, description: string): PhaseAddData |
   writeFileSync(roadmapPath, nextRoadmap, "utf8");
 
   return { phase_number: id, padded, name: desc, slug, directory, naming_mode: "sequential" };
+}
+
+// ─── Part B step 2: mutating commands ───────────────────────────────────────
+
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/** Find the phase directory name for a phase number (unpadded or padded). */
+function findPhaseDir(cwd: string, phaseNum: string): string | null {
+  const root = planningPhasesRoot(cwd);
+  if (!existsSync(root)) return null;
+  const n = phaseNum.replace(/^0+/, "") || phaseNum;
+  try {
+    const dirs = readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+    return dirs.find((d) => new RegExp(`(^|[^0-9])0*${n}-`).test(d) || d.startsWith(`${n.padStart(2, "0")}-`)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Count PLAN / SUMMARY files (and derive plan ids from summaries) in a phase dir. */
+function phasePlanCounts(
+  cwd: string,
+  dir: string,
+): { planCount: number; summaryCount: number; summaryPlanIds: string[] } {
+  let planCount = 0;
+  let summaryCount = 0;
+  const summaryPlanIds: string[] = [];
+  try {
+    for (const f of readdirSync(join(planningPhasesRoot(cwd), dir))) {
+      if (/PLAN.*\.md$/i.test(f)) planCount += 1;
+      if (/SUMMARY.*\.md$/i.test(f)) {
+        summaryCount += 1;
+        summaryPlanIds.push(f.replace(/-?SUMMARY.*\.md$/i, ""));
+      }
+    }
+  } catch {
+    /* unreadable dir → zero counts */
+  }
+  return { planCount, summaryCount, summaryPlanIds };
+}
+
+function statusFor(planCount: number, summaryCount: number): "Complete" | "In Progress" | "Planned" {
+  if (planCount > 0 && summaryCount >= planCount) return "Complete";
+  if (summaryCount > 0) return "In Progress";
+  return "Planned";
+}
+
+/** Toggle the ROADMAP checkbox for a phase to [x] (+ completed date). */
+function checkPhaseBox(text: string, phaseNum: string): string {
+  const esc = phaseNum.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`(-\\s*\\[)[ ](\\]\\s*.*Phase\\s+${esc}[:\\s][^\\n]*)`, "i");
+  if (!re.test(text)) return text;
+  return text.replace(re, (_m, a, b) => `${a}x${b} (completed ${today()})`);
+}
+
+/** Check each summarized plan's checkbox in the ROADMAP. */
+function checkPlanBoxes(text: string, planIds: string[]): string {
+  let out = text;
+  for (const pid of planIds) {
+    const esc = pid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(-\\s*\\[) (\\]\\s*(?:\\*\\*)?${esc}(?:\\*\\*)?)`, "g");
+    out = out.replace(re, (_m, a, b) => `${a}x${b}`);
+  }
+  return out;
+}
+
+/** Update the `**Plans:**` count line in a phase section. */
+function updatePlansLine(text: string, summary: number, plan: number, complete: boolean): string {
+  const re = /(\*\*Plans:\*\*\s*)([^\n]*)/i;
+  if (!re.test(text)) return text;
+  const word = complete ? "complete" : "executed";
+  return text.replace(re, (_m, pre) => `${pre}${summary}/${plan} plans ${word}`);
+}
+
+export interface RoadmapPlanProgressData {
+  updated: boolean;
+  reason?: string;
+  phase?: string;
+  plan_count?: number;
+  summary_count?: number;
+  status?: string;
+  complete?: boolean;
+  /** Plain-text `--raw` line, e.g. "2/3 In Progress". */
+  raw?: string;
+}
+
+/**
+ * Native `roadmap update-plan-progress <N>` — recompute plan/summary counts from
+ * the phase dir and sync the ROADMAP: phase checkbox (when complete), plan
+ * checkboxes for summarized plans, and the `**Plans:**` count line. Returns
+ * {updated:false} (exit-0 semantics) when the phase or ROADMAP is missing.
+ */
+export function nativeRoadmapPlanProgress(cwd: string, phaseNum: string): RoadmapPlanProgressData {
+  const dir = findPhaseDir(cwd, phaseNum);
+  if (!dir) return { updated: false, reason: `Phase ${phaseNum} not found`, raw: "no phase" };
+  const roadmapPath = planningArtifact(cwd, "ROADMAP.md");
+  if (!existsSync(roadmapPath)) return { updated: false, reason: "ROADMAP.md not found", raw: "no roadmap" };
+
+  const { planCount, summaryCount, summaryPlanIds } = phasePlanCounts(cwd, dir);
+  if (planCount === 0)
+    return { updated: false, reason: "No plans found", phase: phaseNum, plan_count: 0, raw: "no plans" };
+
+  const status = statusFor(planCount, summaryCount);
+  const complete = status === "Complete";
+
+  let text = readFileSync(roadmapPath, "utf8");
+  text = updatePlansLine(text, summaryCount, planCount, complete);
+  text = checkPlanBoxes(text, summaryPlanIds);
+  if (complete) text = checkPhaseBox(text, phaseNum);
+  writeFileSync(roadmapPath, text, "utf8");
+
+  return {
+    updated: true,
+    phase: phaseNum,
+    plan_count: planCount,
+    summary_count: summaryCount,
+    status,
+    complete,
+    raw: `${summaryCount}/${planCount} ${status}`,
+  };
+}
+
+export interface PhaseCompleteData {
+  ok: boolean;
+  error?: string;
+  completed_phase?: string;
+  roadmap_updated?: boolean;
+  state_updated?: boolean;
+}
+
+/**
+ * Native `phase complete <N>` — mark the phase done in ROADMAP.md (checkbox +
+ * plan checkboxes + Plans line) and reflect completion in STATE.md (Status). The
+ * subprocess gates on a `passed` VERIFICATION; muonroi's caller writes that
+ * verification immediately before calling, so the gate is satisfied by
+ * construction — we still mark the ROADMAP/STATE so the workflow state is
+ * consistent. Returns {ok:false} when the phase / ROADMAP is missing.
+ */
+export function nativePhaseComplete(cwd: string, phaseNum: string): PhaseCompleteData {
+  const dir = findPhaseDir(cwd, phaseNum);
+  if (!dir) return { ok: false, error: `Phase ${phaseNum} not found` };
+  const roadmapPath = planningArtifact(cwd, "ROADMAP.md");
+  if (!existsSync(roadmapPath)) return { ok: false, error: "ROADMAP.md not found" };
+
+  const { planCount, summaryCount, summaryPlanIds } = phasePlanCounts(cwd, dir);
+
+  let text = readFileSync(roadmapPath, "utf8");
+  text = checkPhaseBox(text, phaseNum);
+  text = checkPlanBoxes(text, summaryPlanIds);
+  text = updatePlansLine(text, summaryCount, planCount, true);
+  writeFileSync(roadmapPath, text, "utf8");
+
+  // STATE.md — reflect completion on the body Status field (best-effort).
+  let stateUpdated = false;
+  const statePath = planningArtifact(cwd, "STATE.md");
+  if (existsSync(statePath)) {
+    const content = readFileSync(statePath, "utf8");
+    const m = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+    const body = m ? m[2] : content;
+    const fm = m ? m[1] : null;
+    const nextBody = stateReplaceField(body, "Status", normalizeStateStatus("Phase complete"));
+    if (nextBody !== null) {
+      const next = fm !== null ? `---\n${fm}\n---\n\n${nextBody.replace(/^\n+/, "")}` : nextBody;
+      writeFileSync(statePath, next, "utf8");
+      stateUpdated = true;
+    }
+  }
+
+  return { ok: true, completed_phase: phaseNum, roadmap_updated: true, state_updated: stateUpdated };
 }

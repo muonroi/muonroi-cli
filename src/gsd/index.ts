@@ -11,7 +11,7 @@ export { buildPlanningConfig, ensurePlanningWorkspace } from "./config-bridge.js
 export { loadConfig, type PlanningConfig, resolveConfigKey } from "./config-loader.js";
 export { fireGsdVerifyOutcome, logGsdNativeEvent, PLANNING_CHECKPOINT_QUERY } from "./ee-closure.js";
 export { isComplexityAssessorEnabled, isGsdHardGateEnabled, isGsdNativeEnabled } from "./flags.js";
-// GSD dispatch (subprocess path — runsGsdTools still uses createRequire for gsd-tools.cjs)
+// GSD dispatch (fully native — @opengsd/gsd-core subprocess removed in Part B step 2)
 export {
   dispatchInitProgress,
   dispatchLoopRenderHooks,
@@ -21,10 +21,7 @@ export {
   dispatchRoadmapPlanProgress,
   dispatchStateUpdate,
   type PhaseAddResult,
-  parsePhaseAddStdout,
   type RoadmapAnalyzeResult,
-  resolveGsdToolsBin,
-  runGsdTools,
 } from "./gsd-dispatch.js";
 // GSD runtime (native module wrappers)
 export { allLoopHostPoints, loadLoopHostContract, loadStateDocument } from "./gsd-runtime.js";

@@ -22,10 +22,17 @@ export const FOLDED_PLANNING_DIR = join(".muonroi-flow", "planning");
  */
 export function planningRoot(cwd: string): string {
   const canonical = join(cwd, PLANNING_DIR);
+  // Existing `.planning/` projects keep using it (back-compat, no disruption).
   if (existsSync(canonical)) return canonical;
   const folded = join(cwd, FOLDED_PLANNING_DIR);
   if (existsSync(folded)) return folded;
-  return canonical;
+  // Part B step 2 — LIVE CUTOVER: now that native code owns all GSD path
+  // resolution (the subprocess that hardcoded `.planning/` is gone), a FRESH
+  // project consolidates its GSD state under `.muonroi-flow/planning/` — one
+  // state tree alongside the /ideal `.muonroi-flow/runs/`. Opt back into the
+  // legacy split location with MUONROI_GSD_LEGACY_PLANNING=1.
+  if (process.env.MUONROI_GSD_LEGACY_PLANNING === "1") return canonical;
+  return folded;
 }
 
 export function planningArtifact(cwd: string, name: string): string {

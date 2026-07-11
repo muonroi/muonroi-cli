@@ -2,17 +2,13 @@
  * native-state.ts — Native replacements for the STATE.md-oriented gsd-tools
  * subcommands (`state update`, `state json`, `init progress`).
  *
- * Part B (staged, step 1): these replace the `@opengsd/gsd-core` subprocess on
- * the hot read/write paths. The subprocess (`runGsdTools`) is kept as the
- * contract-test ORACLE + rollback fallback while `MUONROI_GSD_NATIVE` is on.
- * Contracts verified against the real subprocess in native-state contract tests.
- *
- * Output shapes mirror gsd-tools `--raw`/JSON contract (see research in
- * SPRINT-2 plan): state update → {updated:boolean, reason?}, state json →
- * frontmatter object, init progress → progress projection.
+ * Part B: these fully replace the former `@opengsd/gsd-core` subprocess (removed
+ * in step 2). Output shapes follow the old gsd-tools `--raw`/JSON contract:
+ * state update → {updated:boolean, reason?}, state json → frontmatter object,
+ * init progress → progress projection.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { planningArtifact, planningPhasesRoot, planningRoot } from "./paths.js";
 import {
   computeProgressPercent,
@@ -206,4 +202,19 @@ export function stateFileMtime(cwd: string): number {
   } catch {
     return 0;
   }
+}
+
+/**
+ * Native `config-ensure-section` — ensure the `.planning/` directory exists.
+ * muonroi's only caller (loop-host.ensureHost) invokes this immediately before
+ * `ensurePlanningWorkspace`, which writes the real model-bound config.json. So
+ * native config-ensure MUST NOT write a stub config here — that would shadow the
+ * proper config (ensurePlanningWorkspace only writes when config.json is absent).
+ * We just guarantee the directory, matching the pair's net effect.
+ */
+export function nativeConfigEnsure(cwd: string): { ok: boolean; created: boolean } {
+  const root = planningRoot(cwd);
+  const existed = existsSync(root);
+  if (!existed) mkdirSync(root, { recursive: true });
+  return { ok: true, created: !existed };
 }
