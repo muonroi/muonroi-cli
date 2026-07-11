@@ -11,6 +11,7 @@ import { phaseStart } from "../council/phase-events.js";
 import { runPreflight } from "../council/preflight.js";
 import type { ClarifiedSpec, CouncilLLM, CouncilParticipant, DebateState } from "../council/types.js";
 import { fetchBBContext, inferBBFromPrompt, renderBBContextBlock } from "../ee/bb-retrieval.js";
+import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import { renderResumeDigest, writeContextDoc, writeResearchDoc } from "../flow/run-artifacts.js";
 import { logInteraction } from "../storage/index.js";
@@ -780,6 +781,17 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             findings: debateState.researchFindings ?? undefined,
             webResearch: researchWebConfidence,
           });
+          // Part C — persist the debate as a workflow_debate experience so a
+          // future run on a similar topic can seed its stances with what this
+          // council concluded (gate-on-outcome: fired after the debate produced
+          // a summary, not per-turn — Kill #4/#5).
+          fireAndForgetWorkflowEvent({
+            kind: "council-debate",
+            phaseRef: `runs/${ctx.runId}#research`,
+            sessionId: ctx.sessionId ?? ctx.runId,
+            text: (debateState.runningSummary ?? "").slice(0, 2000) || `debate on: ${ctx.idea.slice(0, 200)}`,
+            payload: { topic: ctx.idea.slice(0, 200), roundCount: debateState.roundCount ?? 0 },
+          });
         } catch {
           /* non-critical — research.md is a review surface, never blocks the FSM */
         }
@@ -956,6 +968,21 @@ interface ProductSpec {
         const roadmapMap = (await readArtifact(runDir, "roadmap.md")) ?? { preamble: "", sections: new Map() };
         roadmapMap.sections.set("Product Specification", JSON.stringify(productSpec, null, 2));
         await writeArtifact(runDir, "roadmap.md", roadmapMap);
+
+        // Part C — the synthesized spec IS the council's decision. Persist it as
+        // a workflow_decision experience so future runs don't re-litigate a
+        // settled architectural/scoping choice.
+        fireAndForgetWorkflowEvent({
+          kind: "decision",
+          phaseRef: `runs/${ctx.runId}#scoping`,
+          sessionId: ctx.sessionId ?? ctx.runId,
+          text: `Scoped "${ctx.idea.slice(0, 120)}": ${(productSpec?.architecture ?? "").slice(0, 400)}`,
+          payload: {
+            persona: productSpec?.persona ?? null,
+            mvp: productSpec?.mvp ?? [],
+            sprintEstimate: productSpec?.sprintEstimate ?? null,
+          },
+        });
 
         // C-v2 — debate + scoping are done and the spec is persisted, so the
         // cross-session resume inputs are obsolete (the checkpoint was already

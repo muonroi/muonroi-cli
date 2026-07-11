@@ -29,6 +29,7 @@ import { prependDecisionsLock, readDecisionsLock } from "../council/decisions-lo
 import { runCouncil } from "../council/index.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
 import type { CouncilLLM } from "../council/types.js";
+import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import { renderResumeDigest, writeSprintOutcome, writeSprintVerify } from "../flow/run-artifacts.js";
 import { isContextRailEnabled } from "../gsd/flags.js";
@@ -1189,6 +1190,24 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     evidence: { score: verdict.score, verifyResult: verifyVerdict },
   }).catch(() => {
     /* EE failures must not derail the loop */
+  });
+
+  // Part C — write-during-execution: persist this sprint's outcome as a NEW
+  // workflow_sprint experience (not just reinforcement) so a later sprint in the
+  // SAME run — or a future run — can recall "how this kind of sprint went".
+  // gate-on-outcome (Kill #4): fired here, AFTER verify+judge produced a verdict.
+  fireAndForgetWorkflowEvent({
+    kind: "sprint-execution",
+    phaseRef: `runs/${ctx.runId}#sprint-${sprintN}`,
+    sessionId: ctx.runId,
+    text: `Sprint ${sprintN} ${verdict.pass ? "passed" : "failed"} (score ${verdict.score.toFixed(2)}, verify ${verifyVerdict})${verdict.failedCondition ? ` — ${verdict.failedCondition}` : ""}`,
+    payload: {
+      sprintN,
+      pass: verdict.pass,
+      score: verdict.score,
+      verify: verifyVerdict,
+      failedCondition: verdict.failedCondition ?? null,
+    },
   });
 
   // ── Step 9: If not done, surface continue-feedback to the user ───────────
