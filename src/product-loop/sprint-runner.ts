@@ -30,6 +30,7 @@ import { runCouncil } from "../council/index.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
 import type { CouncilLLM } from "../council/types.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import { renderResumeDigest, writeSprintOutcome, writeSprintVerify } from "../flow/run-artifacts.js";
 import { isContextRailEnabled } from "../gsd/flags.js";
 import { SPRINT_EXECUTION_MARKER } from "../pil/layer6-output.js";
 import { detectProviderForModel } from "../providers/runtime.js";
@@ -1110,9 +1111,46 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
   stateMap.sections.set(
     "Resume Digest",
-    `Sprint: ${sprintN} | Stage: ${iter.stage} | Score: ${verdict.score.toFixed(2)} | Verify: ${verifyVerdict}`,
+    renderResumeDigest({
+      stage: `sprint-${sprintN}`,
+      lastCompleted: `sprint-${sprintN} ${iter.stage}`,
+      nextAction: verdict.pass
+        ? "Definition-of-Done met — advance to the next phase or ship"
+        : `Retry sprint ${sprintN}: ${verdict.failedCondition ?? "continue toward Definition-of-Done"}`,
+      sprintN,
+      score: verdict.score,
+      verify: verifyVerdict,
+      updatedAt: new Date().toISOString(),
+    }),
   );
   await writeArtifact(runDir, "state.md", stateMap);
+
+  // Part A — persist a first-class per-sprint outcome record + verify report so
+  // `/ideal review` and cross-run memory render real sprint history (not just
+  // the fire-and-forget EE boundary event, which leaves nothing on disk).
+  try {
+    await writeSprintOutcome(ctx.flowDir, ctx.runId, {
+      sprintN,
+      pass: verdict.pass,
+      score: verdict.score,
+      verify: verifyVerdict,
+      failedCondition: verdict.failedCondition ?? undefined,
+      criteriaMet: iter.criteriaMet,
+      criteriaPartial: iter.criteriaPartial,
+      criteriaUnmet: iter.criteriaUnmet,
+      finishedAt: new Date().toISOString(),
+    });
+    const verifyReport =
+      (verifyResult.error?.trim() ? verifyResult.error : (verifyResult.output ?? "")).trim() || "(no verify output)";
+    await writeSprintVerify(
+      ctx.flowDir,
+      ctx.runId,
+      sprintN,
+      `# Sprint ${sprintN} verify — ${verifyVerdict} (score ${verdict.score.toFixed(2)})\n\n\`\`\`\n${verifyReport.slice(0, 8000)}\n\`\`\`\n`,
+    );
+  } catch {
+    /* non-critical — sprint artifacts are a review surface, never derail the loop */
+  }
 
   // Emit ProgressSnapshot on sprint boundary so the user sees rolling progress.
   // Wrapped in try/catch — never crash sprint-runner because the snapshot failed.

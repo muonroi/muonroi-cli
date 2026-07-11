@@ -8,6 +8,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { planningRoot } from "./paths.js";
 
 export interface PlanningConfig {
   model_profile?: string;
@@ -20,7 +21,9 @@ export interface PlanningConfig {
  * Returns an empty object when no config is present.
  */
 export function loadConfig(cwd: string): PlanningConfig {
-  const configPath = join(cwd, ".planning", "config.json");
+  // planningRoot resolves `.planning/` when present, else the folded location
+  // (`.muonroi-flow/planning/`) — see paths.ts. `.planning/` still wins today.
+  const configPath = join(planningRoot(cwd), "config.json");
   if (!existsSync(configPath)) return {};
 
   try {

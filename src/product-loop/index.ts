@@ -7,6 +7,7 @@ import type { EERouteResult } from "../ee/bridge.js";
 import { routeModel as eeRouteModel } from "../ee/bridge.js";
 import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
 import { readArtifact } from "../flow/artifact-io.js";
+import { parseResumeDigest, readSprintOutcomes } from "../flow/run-artifacts.js";
 import { createRun, loadRun } from "../flow/run-manager.js";
 import { getModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
@@ -20,7 +21,7 @@ import { markIterationCrashed, readIterations, readManifest, writeManifest } fro
 import { buildBacklog } from "./backlog-builder.js";
 import { readBacklog, writeBacklog } from "./backlog-store.js";
 import { formatCostPreview, previewRunCost } from "./cost-preview.js";
-import { extractRunToEE } from "./cross-run-memory.js";
+import { composeRunTranscript, extractRunToEE } from "./cross-run-memory.js";
 import { buildContinueFeedback, type ContinueFeedback } from "./feedback-routing.js";
 import { type DriverContext, type DriverResult, runLoopDriver } from "./loop-driver.js";
 import { resolveRoles } from "./role-registry.js";
@@ -47,7 +48,7 @@ export interface ProductLoopOptions {
   /** Required for resume/abort/ship/status<runId>. */
   runId?: string;
   /** Subcommand selector. Default = start. */
-  subcommand?: "start" | "status" | "resume" | "abort" | "ship";
+  subcommand?: "start" | "status" | "resume" | "abort" | "ship" | "review";
 
   flowDir: string;
   /** Session model id from the orchestrator (this.modelId). Used to resolve real council models. */
@@ -134,6 +135,8 @@ export async function* runProductLoop(
   switch (sub) {
     case "status":
       return yield* runStatus(opts);
+    case "review":
+      return yield* runReview(opts);
     case "resume":
       return yield* runResume(opts);
     case "abort":
@@ -1656,13 +1659,34 @@ async function* runStatus(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
       return { runId: opts.runId, stage: "error", success: false, reason: "not_found" };
     }
     const iters = await readIterations(opts.flowDir, opts.runId);
-    yield {
-      type: "content",
-      content:
-        `Run ${opts.runId}: ${m.idea}\n` +
-        `Cap: $${m.capUsd}  MaxSprints: ${m.maxSprints}  DoneThreshold: ${m.doneThreshold}\n` +
-        `Iterations: ${iters.length}  Aborted: ${m.aborted ?? false}  DoneAt: ${m.doneAt?.toISOString() ?? "—"}\n`,
-    } as StreamChunk;
+    const digest = await readResumeDigest(opts.flowDir, opts.runId);
+    const outcomes = await readSprintOutcomes(opts.flowDir, opts.runId).catch(() => []);
+    const lines = [
+      `Run ${opts.runId}: ${m.idea}`,
+      `Cap: $${m.capUsd}  MaxSprints: ${m.maxSprints}  DoneThreshold: ${m.doneThreshold}`,
+      `Iterations: ${iters.length}  Aborted: ${m.aborted ?? false}  DoneAt: ${m.doneAt?.toISOString() ?? "—"}`,
+    ];
+    if (digest) {
+      lines.push(
+        "",
+        "Resume Digest:",
+        `  Stage: ${digest.stage}` +
+          (typeof digest.sprintN === "number" ? `  Sprint: ${digest.sprintN}` : "") +
+          (typeof digest.score === "number" ? `  Score: ${digest.score.toFixed(2)}` : "") +
+          (digest.verify ? `  Verify: ${digest.verify}` : ""),
+        `  Next: ${digest.nextAction || "—"}`,
+      );
+    }
+    if (outcomes.length > 0) {
+      lines.push("", "Sprints:");
+      for (const o of outcomes) {
+        lines.push(
+          `  #${o.sprintN}  ${o.pass ? "✓ pass" : "✗ fail"}  score=${o.score.toFixed(2)}  verify=${o.verify}` +
+            (o.failedCondition ? `  (${o.failedCondition})` : ""),
+        );
+      }
+    }
+    yield { type: "content", content: `${lines.join("\n")}\n` } as StreamChunk;
     return { runId: opts.runId, stage: "approved", success: true };
   }
 
@@ -1671,10 +1695,98 @@ async function* runStatus(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
     const m = await readManifest(opts.flowDir, id).catch(() => null);
     const iters = await readIterations(opts.flowDir, id).catch(() => []);
     if (!m) continue;
-    lines.push(`  ${id}  ${m.idea.slice(0, 60)}  sprints=${iters.length}  aborted=${m.aborted ?? false}`);
+    const digest = await readResumeDigest(opts.flowDir, id).catch(() => null);
+    const stagePart = digest ? `  stage=${digest.stage}` : "";
+    lines.push(`  ${id}  ${m.idea.slice(0, 60)}  sprints=${iters.length}${stagePart}  aborted=${m.aborted ?? false}`);
   }
   yield { type: "content", content: `${lines.join("\n")}\n` } as StreamChunk;
   return { runId: "", stage: "approved", success: true };
+}
+
+/**
+ * Read + parse the structured Resume Digest from a run's top-level state.md.
+ * Returns null when the run has no digest yet (or only a legacy one-liner).
+ */
+async function readResumeDigest(flowDir: string, runId: string) {
+  const run = await loadRun(flowDir, runId).catch(() => null);
+  if (!run) return null;
+  return parseResumeDigest(run.state.sections.get("Resume Digest"));
+}
+
+/**
+ * `/ideal review [runId]` — render a run's composed transcript plus a scored
+ * sprint table. Read-only. With no runId, reviews the most recent run (any
+ * status — review is a post-hoc lens, not restricted to incomplete runs).
+ */
+async function* runReview(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+  let resolvedRunId = opts.runId;
+  if (!resolvedRunId) {
+    const runsRoot = path.join(opts.flowDir, "runs");
+    let entries: string[] = [];
+    try {
+      entries = await fs.readdir(runsRoot);
+    } catch {
+      yield { type: "content", content: "No runs to review.\n" } as StreamChunk;
+      return { runId: "", stage: "error", success: false, reason: "no_runs" };
+    }
+    const dated: Array<{ id: string; createdAt: number }> = [];
+    for (const id of entries) {
+      const m = await readManifest(opts.flowDir, id).catch(() => null);
+      if (!m) continue;
+      const createdAt = m.createdAt instanceof Date && !Number.isNaN(m.createdAt.getTime()) ? m.createdAt.getTime() : 0;
+      dated.push({ id, createdAt });
+    }
+    if (dated.length === 0) {
+      yield { type: "content", content: "No runs to review.\n" } as StreamChunk;
+      return { runId: "", stage: "error", success: false, reason: "no_runs" };
+    }
+    dated.sort((a, b) => b.createdAt - a.createdAt);
+    resolvedRunId = dated[0]!.id;
+  }
+
+  const manifest = await readManifest(opts.flowDir, resolvedRunId);
+  if (!manifest) {
+    yield { type: "content", content: `Run not found: ${resolvedRunId}\n` } as StreamChunk;
+    return { runId: resolvedRunId, stage: "error", success: false, reason: "not_found" };
+  }
+
+  const header = [
+    `# Review — run ${resolvedRunId}`,
+    "",
+    `Idea: ${manifest.idea}`,
+    `Aborted: ${manifest.aborted ?? false}  DoneAt: ${manifest.doneAt?.toISOString() ?? "—"}`,
+  ];
+  const digest = await readResumeDigest(opts.flowDir, resolvedRunId);
+  if (digest) {
+    header.push(`Last stage: ${digest.stage} — ${digest.nextAction || "—"}`);
+  }
+
+  const outcomes = await readSprintOutcomes(opts.flowDir, resolvedRunId).catch(() => []);
+  if (outcomes.length > 0) {
+    header.push(
+      "",
+      "## Sprint scores",
+      "",
+      "| Sprint | Result | Score | Verify | Failed condition |",
+      "|---|---|---|---|---|",
+    );
+    for (const o of outcomes) {
+      header.push(
+        `| ${o.sprintN} | ${o.pass ? "pass" : "fail"} | ${o.score.toFixed(2)} | ${o.verify} | ${o.failedCondition ?? "—"} |`,
+      );
+    }
+  }
+
+  yield { type: "content", content: `${header.join("\n")}\n` } as StreamChunk;
+
+  // The composed transcript (manifest/roadmap/delegations/gray-areas) rounds out
+  // the review with the actual debate + spec text. Bounded to 32KB by the composer.
+  const transcript = await composeRunTranscript(opts.flowDir, resolvedRunId).catch(() => "");
+  if (transcript.trim()) {
+    yield { type: "content", content: `\n## Transcript\n${transcript}\n` } as StreamChunk;
+  }
+
+  return { runId: resolvedRunId, stage: "approved", success: true };
 }
 
 async function* runAbort(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
@@ -1800,6 +1912,18 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
   if (manifest.aborted) {
     yield { type: "content", content: `Run ${resolvedRunId} was aborted; cannot resume.\n` } as StreamChunk;
     return { runId: resolvedRunId, stage: "halted", success: false, reason: "aborted" };
+  }
+
+  // Surface the Resume Digest so the user sees where the run stopped and what
+  // resuming will do — the whole point of giving the digest real content.
+  {
+    const digest = parseResumeDigest(run.state.sections.get("Resume Digest"));
+    if (digest) {
+      yield {
+        type: "content",
+        content: `> Resume Digest — stage: ${digest.stage}${typeof digest.sprintN === "number" ? ` (sprint ${digest.sprintN})` : ""} · next: ${digest.nextAction || "—"}\n`,
+      } as StreamChunk;
+    }
   }
 
   // Detect crashed in-flight sprint: an iterations.md entry without a closing

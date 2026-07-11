@@ -11,7 +11,7 @@ import {
   dispatchRoadmapPlanProgress,
   type PhaseAddResult,
 } from "./gsd-dispatch.js";
-import { phaseDirPath, planningArtifact, planningPhasesRoot } from "./paths.js";
+import { phaseDirPath, planningArtifact, planningPhasesRoot, planningRoot } from "./paths.js";
 import { readState, readWorkflowKind, setStateField } from "./workflow-engine.js";
 
 export interface PhaseSyncStep {
@@ -277,7 +277,7 @@ export function mirrorVerifyMdToPhaseDir(cwd: string, phaseDirName: string): voi
 
 /** Automatically append user AskCard answers as clarifications to CONTEXT.md under GSD. */
 export function appendClarificationToContext(cwd: string, question: string, answer: string): void {
-  const planningDir = join(cwd, ".planning");
+  const planningDir = planningRoot(cwd);
   if (!existsSync(planningDir)) return;
   const contextPath = join(planningDir, "CONTEXT.md");
   let prior = "";
@@ -294,7 +294,7 @@ export function appendClarificationToContext(cwd: string, question: string, answ
 /** Build TaskListSnapshot directly from GSD PLAN.md and STATE.md for automatic TUI checklist synchronization. */
 export function getTaskListSnapshotFromGsd(cwd: string): TaskListSnapshot | null {
   if (!isGsdNativeEnabled()) return null;
-  const planPath = join(cwd, ".planning", "PLAN.md");
+  const planPath = join(planningRoot(cwd), "PLAN.md");
   if (!existsSync(planPath)) return null;
 
   try {

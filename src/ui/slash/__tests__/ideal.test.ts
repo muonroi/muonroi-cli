@@ -131,6 +131,22 @@ describe("/ideal slash handler dispatch", () => {
     expect(payload.runId).toBeUndefined();
   });
 
+  it("allows review without runId (defaults to newest run)", async () => {
+    const out = await handleIdealSlash(["review"], NOOP_CTX);
+    expect(out).toContain("__PRODUCT_LOOP__");
+    const payload = JSON.parse(out.split("__PRODUCT_LOOP__\n")[1]!);
+    expect(payload.subcommand).toBe("review");
+    expect(payload.runId).toBeUndefined();
+  });
+
+  it("passes an explicit runId to review", async () => {
+    const out = await handleIdealSlash(["review", "abc123"], NOOP_CTX);
+    expect(out).toContain("__PRODUCT_LOOP__");
+    const payload = JSON.parse(out.split("__PRODUCT_LOOP__\n")[1]!);
+    expect(payload.subcommand).toBe("review");
+    expect(payload.runId).toBe("abc123");
+  });
+
   it("still refuses ship without runId", async () => {
     const out = await handleIdealSlash(["ship"], NOOP_CTX);
     expect(out.toLowerCase()).toContain("requires a runid");

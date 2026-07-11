@@ -2277,7 +2277,7 @@ export class Agent {
 
   async *runProductLoopV1(
     payload: {
-      subcommand: "start" | "status" | "resume" | "abort" | "ship";
+      subcommand: "start" | "status" | "resume" | "abort" | "ship" | "review";
       idea?: string;
       runId?: string;
       flags: {
