@@ -1,4 +1,8 @@
+import { promises as fs } from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createMilestone, createPhase, setActivePointer } from "../../../flow/hierarchy.js";
 import { getIdealHelpText, handleIdealSlash, parseIdealArgs } from "../ideal.js";
 
 const NOOP_CTX: any = {
@@ -162,6 +166,64 @@ describe("/ideal slash handler dispatch", () => {
     const out = await handleIdealSlash(["--done-threshold", "0.5", "idea"], NOOP_CTX);
     expect(out).toContain("clamped");
     expect(out).toContain("__PRODUCT_LOOP__");
+  });
+
+  describe("milestones / phases (read-only index views)", () => {
+    let cwd: string;
+    const NOW = "2026-07-11T00:00:00.000Z";
+
+    beforeEach(async () => {
+      cwd = await fs.mkdtemp(path.join(os.tmpdir(), "ideal-hier-"));
+    });
+    afterEach(async () => {
+      await fs.rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    });
+
+    it("milestones: empty-state message when none exist", async () => {
+      const out = await handleIdealSlash(["milestones"], { ...NOOP_CTX, cwd });
+      expect(out).toContain("No milestones yet");
+    });
+
+    it("milestones: lists milestones + phases + active marker", async () => {
+      const flowDir = path.join(cwd, ".muonroi-flow");
+      const m = await createMilestone(flowDir, { title: "Todo App", goal: "ship it" }, NOW);
+      const p = await createPhase(flowDir, m.id, { title: "MVP", runId: "run-xyz" }, NOW);
+      await setActivePointer(flowDir, { milestoneId: m.id, phaseId: p.id });
+      const out = await handleIdealSlash(["milestones"], { ...NOOP_CTX, cwd });
+      expect(out).toContain("m01-todo-app: Todo App");
+      expect(out).toContain("← active");
+      expect(out).toContain("p01-mvp: MVP");
+      expect(out).toContain("run-xyz");
+    });
+
+    it("phases: falls back to active milestone when no id given", async () => {
+      const flowDir = path.join(cwd, ".muonroi-flow");
+      const m = await createMilestone(flowDir, { title: "App" }, NOW);
+      await createPhase(flowDir, m.id, { title: "Scope" }, NOW);
+      await setActivePointer(flowDir, { milestoneId: m.id, phaseId: null });
+      const out = await handleIdealSlash(["phases"], { ...NOOP_CTX, cwd });
+      expect(out).toContain("Phases of m01-app");
+      expect(out).toContain("p01-scope: Scope");
+    });
+
+    it("phases: message when no active milestone and no id", async () => {
+      const out = await handleIdealSlash(["phases"], { ...NOOP_CTX, cwd });
+      expect(out).toContain("No active milestone");
+    });
+
+    it("phases: accepts an explicit milestone id", async () => {
+      const flowDir = path.join(cwd, ".muonroi-flow");
+      const m = await createMilestone(flowDir, { title: "Explicit" }, NOW);
+      await createPhase(flowDir, m.id, { title: "One" }, NOW);
+      const out = await handleIdealSlash(["phases", m.id], { ...NOOP_CTX, cwd });
+      expect(out).toContain("Phases of m01-explicit");
+      expect(out).toContain("p01-one: One");
+    });
+
+    it("does not emit the __PRODUCT_LOOP__ sentinel for index views", async () => {
+      const out = await handleIdealSlash(["milestones"], { ...NOOP_CTX, cwd });
+      expect(out).not.toContain("__PRODUCT_LOOP__");
+    });
   });
 
   // Mode C — explicit flag wiring (see .planning/MAINTAIN-MODE.md)

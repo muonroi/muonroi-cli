@@ -13,6 +13,7 @@ import type { ClarifiedSpec, CouncilLLM, CouncilParticipant, DebateState } from 
 import { fetchBBContext, inferBBFromPrompt, renderBBContextBlock } from "../ee/bb-retrieval.js";
 import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import { ensureRunScoped } from "../flow/hierarchy.js";
 import { renderResumeDigest, writeContextDoc, writeResearchDoc } from "../flow/run-artifacts.js";
 import { logInteraction } from "../storage/index.js";
 import type { CouncilInfoCard, StreamChunk } from "../types/index.js";
@@ -995,6 +996,26 @@ interface ProductSpec {
         // deleted by runDebate on completion). Clean them up so a later
         // `/ideal resume` of this run does not re-enter the debate FSM.
         await deleteDebateInputs(runDir);
+
+        // Hierarchy index — place this run under a milestone (the product idea)
+        // and a phase (this scoped iteration). Idempotent across resume; purely
+        // an index over runs/, never rewrites run artifacts or ROADMAP phases.
+        try {
+          const mvpHead = Array.isArray(productSpec?.mvp) && productSpec!.mvp.length > 0 ? productSpec!.mvp[0] : "";
+          await ensureRunScoped(
+            ctx.flowDir,
+            {
+              runId: ctx.runId,
+              milestoneTitle: ctx.idea.slice(0, 60),
+              milestoneGoal: (productSpec?.architecture ?? "").slice(0, 200),
+              phaseTitle: (mvpHead || ctx.idea).slice(0, 50),
+              phaseGoal: (productSpec?.persona ?? "").slice(0, 200),
+            },
+            new Date().toISOString(),
+          );
+        } catch {
+          /* non-critical — hierarchy is an index; failure must not block scoping */
+        }
 
         // P8 - derive tasks.json from the spec (canonical machine-readable
         // surface for downstream /execute consumption). MVP items get
