@@ -252,9 +252,9 @@ function stripControlBytes(raw: string): string {
   return (
     raw
       // biome-ignore lint/suspicious/noControlCharactersInRegex: strip terminal bracketed-paste guards (ESC[200~ / ESC[201~)
-      .replace(/?\[20[01]~/g, "")
+      .replace(/\x1b?\[20[01]~/g, "")
       // biome-ignore lint/suspicious/noControlCharactersInRegex: strip control bytes + DEL from typed/pasted secrets
-      .replace(/[ -]/g, "")
+      .replace(/[\x00-\x1f\x7f]/g, "")
   );
 }
 
