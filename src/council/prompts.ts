@@ -293,6 +293,22 @@ const EVIDENCE_RULE_FOLLOWUP =
   `Uncited numbers you cannot verify: \`[UNVERIFIED: <claim>]\`.\n`;
 
 /**
+ * Scope discipline (F10). Debate turns are for DIRECTION — a stance, its
+ * reasoning, and a cross-question — not for delivering the work product. Left
+ * unconstrained, models "over-deliver": a researcher opening once emitted a full
+ * `docs/plans/…-implementation-plan.md` with file contents and a
+ * "REQUIRED SUB-SKILL: executing-plans / Which approach?" handoff — the
+ * synthesis stage's job, not a debate turn's. This keeps turns argumentative and
+ * leaves the plan/spec/code to the Leader's synthesis.
+ */
+const DEBATE_SCOPE_RULE =
+  `\n## Scope\n` +
+  `This is a debate about DIRECTION, not an implementation handoff. In your turn do NOT:\n` +
+  `- write out file contents, code files, or a full step-by-step implementation/execution plan;\n` +
+  `- emit task lists, "Final file content:", plan-file templates, or "next steps / which approach?" handoffs.\n` +
+  `Argue your position and its trade-offs; the Leader's synthesis owns the plan and any artifacts.\n`;
+
+/**
  * Length discipline injected into every debate turn (F13 token-thrift). The
  * debate-turn ceilings are generous (4096-6144 maxTokens) and reasoning models
  * left unbounded emit ~400-600 words/turn — ~17 turns/debate is token-heavy and
@@ -381,6 +397,7 @@ export function buildOpeningPrompt(ctx: {
       focusLine +
       buildLanguageRule(ctx.language) +
       EVIDENCE_RULE_OPENING +
+      DEBATE_SCOPE_RULE +
       concisenessRule(220) +
       (stackLock ? `\n${stackLock}\n` : "") +
       guardrails +
@@ -417,6 +434,7 @@ export function buildResponsePrompt(ctx: {
       `This is a working session between peers — candid, specific, zero diplomacy theater.\n` +
       buildLanguageRule(ctx.language) +
       EVIDENCE_RULE_RESPONSE +
+      DEBATE_SCOPE_RULE +
       concisenessRule(160) +
       (stackLock ? `\n${stackLock}\n` : "") +
       `\n## Discussion Brief\n` +
