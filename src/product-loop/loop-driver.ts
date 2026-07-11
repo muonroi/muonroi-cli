@@ -6,6 +6,7 @@ import {
   readDebateInputs,
   writeDebateInputs,
 } from "../council/debate-checkpoint.js";
+import { resolveDebateSummary } from "../council/debate-summary.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
 import { phaseStart } from "../council/phase-events.js";
 import { runPreflight } from "../council/preflight.js";
@@ -148,6 +149,12 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
   let state: Stage = "idle";
   let clarifiedSpec: ClarifiedSpec | undefined;
   let debateState: DebateState | undefined;
+  // Resolved once the research debate completes (F9): runningSummary, or a
+  // faithful fallback synthesized from participant positions when the debate
+  // returned after openings without a running summary. Reused across the
+  // research artifacts AND the scoping synthesis prompt so neither loses the
+  // debate. Empty until the research phase runs.
+  let resolvedDebateSummary = "";
   let discovery: DiscoveryResult | undefined;
   let audit: RepoAudit | undefined;
   let productSpec: ProductSpec | undefined;
@@ -743,6 +750,11 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           }
         }
 
+        // F9 — resolve the debate summary once (runningSummary or a fallback
+        // synthesized from participant positions) for reuse across the research
+        // artifacts + scoping synthesis.
+        if (debateState) resolvedDebateSummary = resolveDebateSummary(debateState);
+
         // Forensics row mirrors the council/index.ts council_summary record
         // (which only fires for sprint planning via runCouncil). The /ideal
         // initial debate goes through runDebate here and was previously
@@ -772,8 +784,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           });
         }
 
-        const summaryText =
-          debateState?.runningSummary?.trim() || "(debate produced no summary — using empty research findings)";
+        const summaryText = resolvedDebateSummary || "(debate produced no summary — using empty research findings)";
         yield {
           type: "council_info_card",
           councilInfoCard: buildResearchSummaryCard(summaryText, debateState?.researchFindings),
@@ -781,8 +792,12 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
 
         // Append research summary to delegations.md (kept for back-compat: the
         // EE transcript extractor + legacy readers still read these sections).
+        // A debate that returns after openings (leader routes straight to the
+        // preflight gate) leaves runningSummary empty — synthesize a faithful
+        // fallback from the participants' positions so the canonical research
+        // artifacts never silently drop the whole debate.
         const delegationsMap = (await readArtifact(runDir, "delegations.md")) ?? { preamble: "", sections: new Map() };
-        delegationsMap.sections.set("Research Summary", debateState.runningSummary);
+        delegationsMap.sections.set("Research Summary", resolvedDebateSummary);
         if (debateState.researchFindings) {
           delegationsMap.sections.set("Research Findings", debateState.researchFindings);
         }
@@ -793,7 +808,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         // for the EE recall seed once per-turn grounding lands (deferred).
         try {
           await writeResearchDoc(ctx.flowDir, ctx.runId, {
-            summary: debateState.runningSummary ?? "",
+            summary: resolvedDebateSummary,
             findings: debateState.researchFindings ?? undefined,
             webResearch: researchWebConfidence,
           });
@@ -910,7 +925,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         const synthesisPrompt = `Synthesize a ProductSpec JSON based on the following:
 Idea: ${ctx.idea}
 Clarified Spec: ${JSON.stringify(clarifiedSpec)}
-Debate Summary: ${debateState.runningSummary}
+Debate Summary: ${resolvedDebateSummary || debateState.runningSummary}
 Research Findings: ${debateState.researchFindings ?? "N/A"}
 
 Output ONLY a JSON object matching this interface:
