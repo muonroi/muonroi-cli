@@ -4,7 +4,10 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { REGISTRY } from "./capability-registry.js";
 import { loadConfig } from "./config-loader.js";
+import { isGsdNativeEnabled } from "./flags.js";
 import { resolveLoopHooks } from "./loop-resolver.js";
+import { nativePhaseAdd, nativeRoadmapAnalyze } from "./native-roadmap.js";
+import { nativeInitProgress, nativeStateJson, nativeStateUpdate } from "./native-state.js";
 import { planningArtifact } from "./paths.js";
 
 const require = createRequire(import.meta.url);
@@ -79,15 +82,26 @@ export interface LoopHooksEnvelope {
   warnings?: string[];
 }
 
-/** gsd-tools loop render-hooks <point> — resolves Capability Registry hooks at a loop point. */
+/** gsd-tools loop render-hooks <point> — resolves Capability Registry hooks at a loop point.
+ * Part B: native in-process resolution when MUONROI_GSD_NATIVE is on (default). */
 export function dispatchLoopRenderHooks(cwd: string, point: string): GsdDispatchResult<LoopHooksEnvelope> {
+  if (isGsdNativeEnabled()) {
+    const native = resolveLoopHooksInProcess(cwd, point);
+    if (native) {
+      return { ok: true, data: { point: native.point, activeHooks: native.activeHooks } };
+    }
+    // Native returned null (config/registry error) → fall through to subprocess.
+  }
   const result = runGsdTools(cwd, ["loop", "render-hooks", point]);
   if (!result.ok) return result as GsdDispatchResult<LoopHooksEnvelope>;
   return { ok: true, data: result.data as LoopHooksEnvelope, raw: result.raw };
 }
 
-/** gsd-tools init progress — milestone/phase progress JSON. */
+/** gsd-tools init progress — milestone/phase progress JSON. Native when enabled. */
 export function dispatchInitProgress(cwd: string): GsdDispatchResult {
+  if (isGsdNativeEnabled()) {
+    return readThroughCache(cwd, "init.progress", () => ({ ok: true, data: nativeInitProgress(cwd) }));
+  }
   return readThroughCache(cwd, "init.progress", () => runGsdTools(cwd, ["init", "progress"]));
 }
 
@@ -144,9 +158,11 @@ export function invalidateGsdCache(cwd: string): void {
   _dispatchCache.delete(cwd);
 }
 
-/** gsd-tools state update <field> <value> — uses gsd-core state-transition module. */
+/** gsd-tools state update <field> <value>. Native STATE.md field replace when enabled. */
 export function dispatchStateUpdate(cwd: string, field: string, value: string): GsdDispatchResult {
-  const result = runGsdTools(cwd, ["state", "update", field, value]);
+  const result = isGsdNativeEnabled()
+    ? ({ ok: true, data: nativeStateUpdate(cwd, field, value) } as GsdDispatchResult)
+    : runGsdTools(cwd, ["state", "update", field, value]);
   // State writes mutate STATE.md → drop cached reads so the next dispatch
   // sees fresh data.
   invalidateGsdCache(cwd);
@@ -187,9 +203,14 @@ export function parsePhaseAddStdout(raw: string | undefined): PhaseAddResult | n
   return null;
 }
 
-/** gsd-tools phase add <description> — creates .planning/phases/<NN>-<slug>/ */
+/** gsd-tools phase add <description> — creates .planning/phases/<NN>-<slug>/. Native when enabled. */
 export function dispatchPhaseAdd(cwd: string, description: string): GsdDispatchResult<PhaseAddResult> {
   const sanitized = description.trim().slice(0, 120);
+  if (isGsdNativeEnabled()) {
+    const native = nativePhaseAdd(cwd, sanitized);
+    if ("error" in native) return { ok: false, error: native.error };
+    return { ok: true, data: { phaseNumber: native.padded, rawStdout: native.padded } };
+  }
   const result = runGsdTools(cwd, ["phase", "add", sanitized]);
   if (!result.ok) return result as GsdDispatchResult<PhaseAddResult>;
   const parsed = parsePhaseAddStdout(result.raw ?? String(result.data ?? ""));
@@ -211,16 +232,22 @@ export function dispatchRoadmapPlanProgress(cwd: string, phaseNum: string): GsdD
   return runGsdTools(cwd, ["roadmap", "update-plan-progress", num]);
 }
 
-/** gsd-tools roadmap analyze — parse ROADMAP.md + disk status. */
+/** gsd-tools roadmap analyze — parse ROADMAP.md + disk status. Native (read-only) when enabled. */
 export function dispatchRoadmapAnalyze(cwd: string): GsdDispatchResult<RoadmapAnalyzeResult> {
+  if (isGsdNativeEnabled()) {
+    return { ok: true, data: nativeRoadmapAnalyze(cwd) as unknown as RoadmapAnalyzeResult };
+  }
   const result = runGsdTools(cwd, ["roadmap", "analyze"]);
   if (!result.ok) return result as GsdDispatchResult<RoadmapAnalyzeResult>;
   return { ok: true, data: result.data as RoadmapAnalyzeResult, raw: result.raw };
 }
 
-/** gsd-tools state json — frontmatter snapshot. */
+/** gsd-tools state json — frontmatter snapshot. Native derivation when enabled. */
 export function dispatchStateJson(cwd: string): GsdDispatchResult<Record<string, unknown>> {
   return readThroughCache(cwd, "state.json", () => {
+    if (isGsdNativeEnabled()) {
+      return { ok: true, data: nativeStateJson(cwd) };
+    }
     const result = runGsdTools(cwd, ["state", "json"]);
     if (!result.ok) return result as GsdDispatchResult<Record<string, unknown>>;
     return { ok: true, data: result.data as Record<string, unknown>, raw: result.raw };
