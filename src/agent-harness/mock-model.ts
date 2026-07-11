@@ -52,6 +52,67 @@ export interface MockModelFixture {
   provider?: string;
   /** Reported model id. Default "mock-model". */
   modelId?: string;
+  /**
+   * Response for PIL's model-first intent classifier (src/pil/llm-classify.ts).
+   * Since the no-regex refactor (2026-07-07) PIL classifies EVERY turn by
+   * calling the model with a distinctive system prompt ("Reply with ONE line of
+   * EIGHT lowercase words…") and parses a comma-separated line. The generic
+   * fixture stream ("Hello back!" / arbitrary chunks) does not parse → the turn
+   * degrades to intentKind=UNKNOWN, which skips the gsd gate and breaks routing
+   * in E2E specs. The mock detects that classify call by its system prompt and
+   * returns THIS line instead of consuming the turn fixture — so every spec gets
+   * a sane classification for free. Override per-fixture when a spec needs a
+   * specific taskType/intent/depth. Format:
+   *   <taskType>,<style>,<intent>,<deliverable>,<depth>,<scope>,<lang>,<clarity>
+   */
+  classify?: string;
+  /**
+   * Opt in to the PIL-classifier intercept described on `classify`. When true,
+   * a `doStream` call carrying the classifier's system prompt is answered with
+   * `classify` (or DEFAULT_CLASSIFY_LINE) WITHOUT consuming a turn fixture.
+   *
+   * This is a convenience for the file-based E2E harness (`loadMockModelFromDir`
+   * sets it true by default) whose fixtures supply agent turn-rounds and must
+   * not spend a round on the classify call. Direct in-memory callers
+   * (`createMockModel`/`installMockModel`, e.g. llm-classify.test.ts) leave it
+   * OFF so the fixture stream they configure IS delivered to the classifier —
+   * otherwise every classification would collapse to DEFAULT_CLASSIFY_LINE.
+   * Setting `classify` implies opting in.
+   */
+  autoClassify?: boolean;
+}
+
+/**
+ * System-prompt substring that uniquely identifies PIL's model-first intent
+ * classifier call (see SYSTEM_PROMPT in src/pil/llm-classify.ts). Kept in sync
+ * with that constant's opening line.
+ */
+const CLASSIFY_SIGNATURE = "Reply with ONE line of EIGHT lowercase words";
+
+/**
+ * Safe default classification: a non-chitchat coding task of standard depth.
+ * `intent=task` keeps the toolset + gsd gate active; `standard` depth avoids
+ * forcing heavy-only paths. First word MUST be a valid taskType.
+ */
+const DEFAULT_CLASSIFY_LINE = "generate, balanced, task, code, standard, local, english, clear";
+
+/** Concatenated text of every `system` message in a doStream call's prompt. */
+function systemPromptText(options: LanguageModelV3CallOptions): string {
+  const prompt = (options as { prompt?: unknown }).prompt;
+  if (!Array.isArray(prompt)) return "";
+  const parts: string[] = [];
+  for (const msg of prompt) {
+    const m = msg as { role?: string; content?: unknown };
+    if (m.role !== "system") continue;
+    if (typeof m.content === "string") parts.push(m.content);
+    else if (Array.isArray(m.content)) {
+      for (const c of m.content) {
+        const t = (c as { text?: string }).text;
+        if (typeof t === "string") parts.push(t);
+      }
+    }
+  }
+  return parts.join("\n");
 }
 
 export interface MockModelHandle {
@@ -86,11 +147,35 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
   let genIdx = 0;
   const provider = fx.provider ?? "mock";
   const modelId = fx.modelId ?? "mock-model";
+  const classifyLine = fx.classify ?? DEFAULT_CLASSIFY_LINE;
+  // Intercept the PIL classifier call ONLY when the fixture opts in (E2E
+  // harness fixtures do, via loadMockModelFromDir). Direct in-memory callers
+  // (llm-classify.test.ts) leave it off so the stream they configure IS
+  // delivered to the classifier — intercepting would override their reply with
+  // DEFAULT_CLASSIFY_LINE and make every classification collapse to "generate".
+  const interceptClassify = fx.autoClassify === true || fx.classify !== undefined;
 
   const model = new MockLanguageModelV3({
     provider,
     modelId,
-    doStream: async () => {
+    doStream: async (options: LanguageModelV3CallOptions) => {
+      // PIL model-first classifier call — answer with the parseable eight-word
+      // line and DO NOT advance the turn-fixture cursor, so the classify call
+      // (which fires on every turn) never steals the round chunks meant for the
+      // agent's actual reply. Without this the generic fixture text fails
+      // parseResponse → intentKind=UNKNOWN → gsd gate/routing break in E2E.
+      if (interceptClassify && systemPromptText(options).includes(CLASSIFY_SIGNATURE)) {
+        if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
+          process.stderr.write(`[mock-model] doStream classify → "${classifyLine}"\n`);
+        }
+        return {
+          stream: simulateReadableStream<LanguageModelV3StreamPart>({
+            chunks: textOnlyStream(classifyLine),
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
+      }
       const chunks = streams[Math.min(callIdx, streams.length - 1)]!;
       callIdx += 1;
       if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
@@ -481,6 +566,10 @@ export async function loadMockModelFromDir(dir: string): Promise<LoadedMockModel
     // to createMockModel, so the AI SDK stream-loop and orchestrator see a
     // consistent Error shape regardless of fixture serialization.
     const normalized: MockModelFixture = {
+      // File-based E2E fixtures supply agent turn-rounds; auto-answer the PIL
+      // classifier call so it never consumes a round (a fixture may still set
+      // autoClassify:false to opt out, or classify:"…" to force a line).
+      autoClassify: true,
       ...raw.model,
       stream: isNestedArray(raw.model.stream)
         ? raw.model.stream.map(normalizeStreamChunks)

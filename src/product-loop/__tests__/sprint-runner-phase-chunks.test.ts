@@ -12,6 +12,9 @@
  *   3. phaseId is stable & unique per stage (so upsertPhase replaces in place)
  */
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../council/index.js", () => ({
@@ -70,10 +73,20 @@ import type { ProductSpec, RoleSlot } from "../types.js";
 
 const NO_ROLES = new Map<RoleSlot, { modelId: string; provider: string; tier?: string }>();
 
+// Per-test isolated flow dir — see sprint-runner.test.ts for the rationale.
+let testFlowDir = "/tmp/flow";
+
+beforeEach(() => {
+  testFlowDir = mkdtempSync(join(tmpdir(), "sprint-runner-phase-"));
+});
+afterEach(() => {
+  rmSync(testFlowDir, { recursive: true, force: true });
+});
+
 function makeCtx(): unknown {
   return {
     runId: "run-test-phase",
-    flowDir: "/tmp/flow",
+    flowDir: testFlowDir,
     cwd: "/tmp/cwd",
     idea: "test idea",
     llm: { generate: vi.fn(async () => "synthesis text"), research: vi.fn(async () => "research") },

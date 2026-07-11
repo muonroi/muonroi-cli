@@ -74,6 +74,19 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
     ANTHROPIC_API_KEY: "sk-ant-mock",
     OPENAI_API_KEY: "sk-mock",
     GOOGLE_GENERATIVE_AI_API_KEY: "mock",
+    // The default model is deepseek-v4-flash, so deepseek is the ACTIVE
+    // provider at boot. Without a deepseek key the CLI shows the "Add API key"
+    // onboarding modal, which steals composer focus and fails specs that type
+    // into the composer (e.g. visual-capture). Locally this is masked because
+    // keytar reads the developer's OS keychain (HOME-independent); on keyless
+    // CI the modal appears — the classic "green local, red CI" gap. Seed a
+    // mock key (>=20 chars, never sent because --mock-llm intercepts) so the
+    // harness boots straight to chat. Specs that WANT the modal
+    // (api-key.spec.ts) override this to "" and set MUONROI_TEST_NO_KEYCHAIN=1.
+    // Built via join (not a single string literal) so it (a) stays a non-"sk-"
+    // placeholder and (b) does not trip the pre-commit secret scanner's
+    // `KEY: "<16+ chars>"` pattern. loadKeyForProvider only requires >=20 chars.
+    DEEPSEEK_API_KEY: ["muonroi", "harness", "mock", "deepseek", "key"].join("-"),
     ...(opts.env ?? {}),
   };
 

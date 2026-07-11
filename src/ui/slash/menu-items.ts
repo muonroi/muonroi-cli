@@ -55,7 +55,7 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "wallet", label: "wallet", description: "Wallet and payment settings", hidden: true },
   { id: "models", label: "models", description: "Alias of /providers", hidden: true },
   { id: "new", label: "new session", description: "Start a new session", hidden: true },
-  { id: "resume", label: "resume", description: "List recent sessions to resume", hidden: true },
+  { id: "resume", label: "resume", description: "List recent sessions to resume" },
   { id: "commit-push", label: "commit & push", description: "Commit and push", hidden: true },
   { id: "commit-pr", label: "commit & pr", description: "Commit and open PR", hidden: true },
   { id: "review", label: "review", description: "Review recent changes", hidden: true },
