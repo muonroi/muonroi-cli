@@ -683,8 +683,27 @@ export async function* runDebate(
       detail: `${participants.length} participants in parallel`,
     });
 
+    // Sprint-2 item 3 — per-stance recall. Fire one stance-weighted recall per
+    // unique role before openings; fold each role's seed into that participant's
+    // opening context so every stance opens grounded in the experience its lens
+    // cares about. Bounded + failure-tolerant inside the injected fn; a null/empty
+    // result leaves openings unchanged.
+    let stanceSeeds: Map<string, string> | null = null;
+    if (config.stanceRecall) {
+      try {
+        const roles = Array.from(new Set(participants.map((p) => p.role)));
+        stanceSeeds = await config.stanceRecall(roles, spec.problemStatement);
+      } catch {
+        stanceSeeds = null;
+      }
+    }
+
     const openingPromises = participants.map((self) => {
       const partner = participants.find((c) => c.role !== self.role) ?? participants[0];
+      const seed = stanceSeeds?.get(self.role)?.trim();
+      const selfContext = seed
+        ? `${enrichedContext}\n\n---\n\n## Experience recall — ${self.stance?.name ?? self.role} lens\n${seed}`
+        : enrichedContext;
       const { system, prompt } = buildOpeningPrompt({
         speakerRole: self.role,
         partnerRole: partner.role,
@@ -692,7 +711,7 @@ export async function* runDebate(
         partnerStance: partner.stance,
         spec,
         outputShape: debatePlan?.outputShape,
-        conversationContext: enrichedContext,
+        conversationContext: selfContext,
         language: debateLanguage,
       });
       return openingWithRetry(llm, self.model, system, prompt).then((r) => ({

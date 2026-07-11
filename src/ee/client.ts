@@ -652,6 +652,10 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       if (opts.cwd) body.cwd = relativizePath(opts.cwd);
       if (opts.project) body.project_slug = opts.project;
       if (opts.sourceSession) body.sourceSession = opts.sourceSession;
+      // Per-stance recall weighting (item 3): forward the council stance/role so
+      // the server weights recall collections toward what this stance cares about.
+      if (opts.stance) body.stance = opts.stance;
+      if (opts.role) body.role = opts.role;
       const redactedBody = redactPayload(body);
       // Server bounds the recall pipeline at ~8s internally (handleRecall's
       // AbortSignal.timeout(8000)); embedding + 3-leg search + network push real
