@@ -28,6 +28,7 @@ export type InteractionEventType =
   | "stall_rescue"
   | "stream_start"
   | "text_tool_resteer"
+  | "turn_tool_load"
   | "session_experience";
 
 // Retention: keep ~14 days of detail logs. Override via env if a workspace

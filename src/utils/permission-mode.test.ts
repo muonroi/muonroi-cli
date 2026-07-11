@@ -63,8 +63,8 @@ describe("toolNeedsApproval", () => {
       expect(toolNeedsApproval("list_directory", "auto-edit")).toBe(false);
     });
 
-    it("requires approval for bash in auto-edit mode", () => {
-      expect(toolNeedsApproval("bash", "auto-edit")).toBe(true);
+    it("auto-approves non-dangerous bash in auto-edit mode", () => {
+      expect(toolNeedsApproval("bash", "auto-edit")).toBe(false);
     });
 
     it("requires approval for task in auto-edit mode", () => {

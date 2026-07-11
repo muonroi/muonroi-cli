@@ -107,6 +107,39 @@ export function findArtifactByQuery(query: string): (ArtifactEntry & { toolCallI
   return hit ? { toolCallId: id, toolName: hit.toolName, content: hit.content } : null;
 }
 
+/** Path-like tokens (contain a slash or a trailing file extension) from a hint. */
+function pathTokens(hint: string): string[] {
+  return (hint.match(/[^\s"']+/g) ?? [])
+    .map((t) => t.replace(/^id=/i, "")) // drop the contract's `id=` glued to the first path token
+    .filter((t) => t.includes("/") || /\.[A-Za-z0-9]{1,5}$/.test(t));
+}
+
+/**
+ * B (cheap-model anti-mù) — fuzzy in-memory fallback for a MALFORMED artifact id.
+ * Cheap models routinely botch the `tool-artifact id=<toolCallId>` contract by
+ * passing FILE PATHS instead of the opaque call id (observed live:
+ * `tool-artifact id=src/todo.js src/cli.js …`). extractArtifactId can't parse a
+ * path (its id charset excludes `/`), so the exact lookup silently misses and
+ * the model is stranded. When the exact id lookup has already failed, match by
+ * path against each cached artifact's content (a read_file result carries its
+ * `[<path>: lines …]` header) so the recall still succeeds. Returns the MOST
+ * recently-recorded artifact whose content references any path token in the
+ * hint, or null when the hint has no path-like token / nothing matches — so a
+ * genuinely-unknown id never fuzzy-matches unrelated content.
+ */
+export function findArtifactByHint(hint: string): (ArtifactEntry & { toolCallId: string }) | null {
+  const tokens = pathTokens(hint || "");
+  if (tokens.length === 0) return null;
+  let match: (ArtifactEntry & { toolCallId: string }) | null = null;
+  // Map insertion order is oldest→newest; keep the LAST (newest) match.
+  for (const [toolCallId, entry] of store) {
+    if (tokens.some((t) => entry.content.includes(t))) {
+      match = { toolCallId, toolName: entry.toolName, content: entry.content };
+    }
+  }
+  return match;
+}
+
 /**
  * Disk-tier lookup (survives restart). Scans the spill file newest-first so the
  * most recent record for an id wins. Fail-open: a missing/corrupt file yields

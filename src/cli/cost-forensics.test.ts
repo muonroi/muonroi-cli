@@ -67,6 +67,7 @@ function summary(events: CostForensicsRow[]): CostForensicsSummary {
     totalCostUsd: 0,
     cacheHitRatio: totalInput > 0 ? totalCacheRead / totalInput : 0,
     peakSingleCallInput: Math.max(0, ...events.map((e) => e.inputTokens)),
+    peakSingleCallFresh: Math.max(0, ...events.map((e) => Math.max(0, e.inputTokens - e.cacheReadTokens))),
     events,
     experience: null,
   };
@@ -89,12 +90,23 @@ function captureStdout(fn: () => void): string {
 }
 
 describe("printCostForensics", () => {
-  it("flags a Phase B breach when peak single-call input exceeds 80k", () => {
+  it("flags a Phase B breach when peak single-call FRESH input exceeds 80k", () => {
+    // Genuine cold cap-escape: 504,737 input, mostly fresh (little cache reuse).
     const out = captureStdout(() =>
-      printCostForensics(summary([event({ source: "task", inputTokens: 504_737, cacheReadTokens: 452_992 })])),
+      printCostForensics(summary([event({ source: "task", inputTokens: 504_737, cacheReadTokens: 20_000 })])),
     );
     expect(out).toContain("Phase B target breach");
-    expect(out).toContain("504,737");
+    expect(out).toContain("484,737"); // fresh = 504,737 - 20,000
+  });
+
+  it("does NOT flag a breach when high input is aggregate multi-step reuse (high cache hit)", () => {
+    // Real case, session 6f17a13c1591: task totalUsage aggregated across steps —
+    // 378,613 input but 324,224 cache-read → only 54,389 fresh. Not a cap breach.
+    const out = captureStdout(() =>
+      printCostForensics(summary([event({ source: "task", inputTokens: 378_613, cacheReadTokens: 324_224 })])),
+    );
+    expect(out).not.toContain("Phase B target breach");
+    expect(out).toContain("aggregate multi-step reuse");
   });
 
   it("flags the NULL message_seq regression (A5 write-ahead bypass)", () => {

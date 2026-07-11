@@ -49,9 +49,19 @@ describe("buildEcosystemPreamble", () => {
     expect(text).toContain("@muonroi/agent-harness-angular");
   });
 
-  it("explicitly allows opt-out only when the user names a non-ecosystem stack", () => {
+  it("keeps Muonroi/.NET primary but always offers a non-ecosystem alternative (F6)", () => {
     const text = buildEcosystemPreamble();
-    expect(text.toLowerCase()).toContain("explicitly opts out");
+    const lower = text.toLowerCase();
+    // Muonroi/.NET stays the strongest default...
+    expect(lower).toContain("primary recommendation");
+    // ...but the preamble now mandates a non-ecosystem alternative for stack choices,
+    // so a user outside the ecosystem always sees a viable path (not a .NET-only menu).
+    expect(lower).toContain("non-ecosystem alternative");
+    expect(lower).toContain("alternatives");
+    // Names concrete non-.NET options so the leader has real choices to surface.
+    expect(text).toMatch(/Python|Go|Rust|Node/);
+    // Promotes non-ecosystem to primary only when the task/prompt warrants it.
+    expect(lower).toContain("promote the non-ecosystem option to primary only when");
   });
 
   it("defaults backend stack to .NET 9", () => {

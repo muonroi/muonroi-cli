@@ -42,6 +42,21 @@ const NAMED: Record<string, { name: string; sequence: string; raw: string }> = {
   PageDown: { name: "pagedown", sequence: "\x1b[6~", raw: "\x1b[6~" },
 };
 
+// Case-insensitive view of NAMED. The map above is capitalized, but drivers
+// naturally send lowercase ("enter", "escape", "tab", "space") — those missed
+// the exact-case lookup, so keyForNamed returned null and the keystroke was a
+// SILENT no-op (Enter never submitted, Escape never dismissed a modal). Resolve
+// on the lowercased base so every casing works. Includes a couple of common
+// short aliases drivers reach for.
+const NAMED_LC: Record<string, { name: string; sequence: string; raw: string }> = {
+  ...Object.fromEntries(Object.entries(NAMED).map(([k, v]) => [k.toLowerCase(), v])),
+  ret: NAMED.Return,
+  del: NAMED.Delete,
+  spacebar: NAMED.Space,
+  pgup: NAMED.PageUp,
+  pgdn: NAMED.PageDown,
+};
+
 type KeyMods = { ctrl?: boolean; meta?: boolean; shift?: boolean };
 
 /**
@@ -120,9 +135,12 @@ function keyForChar(ch: string, mods: KeyMods = {}): KeyEvent {
   return makeKey({ name: ch, sequence: ch, raw: ch }, mods);
 }
 
-function keyForNamed(key: string): KeyEvent | null {
+export function keyForNamed(key: string): KeyEvent | null {
   const { mods, base } = parseModifiers(key);
-  const m = NAMED[base];
+  // Exact case first (fast path), then case-insensitive so "enter"/"Enter"/
+  // "ENTER"/"return" all resolve. Single-letter bases never collide with a
+  // NAMED word, so they still fall through to the literal-char path below.
+  const m = NAMED[base] ?? NAMED_LC[base.toLowerCase()];
   if (!m) {
     // Unknown named key — fall back to treating it as a literal character if it's 1 char.
     if (base.length === 1) return keyForChar(base, mods);
@@ -141,26 +159,63 @@ function keyForNamed(key: string): KeyEvent | null {
  * routing in OpenTUI is owned by individual components; a global focus dispatch
  * is out of scope for this bridge.)
  */
+// Runtimes that already have the input bridge wired — module-level so the guard
+// survives App remounts (a per-component ref would reset and re-register).
+const mountedRuntimes = new WeakSet<object>();
+
 export function useAgentInputBridge(agentRuntime: AgentModeRuntime | undefined): void {
-  const { keyHandler } = useAppContext() as { keyHandler?: { emit: (ev: string, k: KeyEvent) => void } };
+  const ctx = useAppContext() as {
+    keyHandler?: { emit: (ev: string, k: KeyEvent) => void };
+    renderer?: { _internalKeyInput?: { emit: (ev: string, k: KeyEvent) => void } };
+  };
+  const keyHandler = ctx.keyHandler;
+  // Focused renderables (the composer textarea) subscribe to keypresses via
+  // renderer._internalKeyInput.onInternal("keypress"), NOT via the public
+  // keyHandler (useAppContext().keyHandler === renderer.keyInput). On the real
+  // TTY renderer both are the SAME InternalKeyHandler, but under the agent-mode
+  // headless renderer they are DISTINCT objects — so emitting only on keyHandler
+  // reached app-level useKeyboard shortcuts yet never the textarea, and typed
+  // text silently vanished (the tier-2 harness-drive bug). Prefer
+  // _internalKeyInput: its emitWithPriority dispatches to BOTH the focused
+  // renderable AND global listeners registered on it.
+  const internal = ctx.renderer?._internalKeyInput;
 
   useEffect(() => {
-    if (!agentRuntime || !keyHandler) return;
+    if (!agentRuntime) return;
+    // onCommand has no unsubscribe (it only pushes to a handler array), so
+    // registering twice doubles every keystroke (observed: a typed prompt
+    // arrived duplicated). A per-component ref is not enough — the App can
+    // remount (e.g. hero → chat transition) giving a fresh ref while the prior
+    // handler stays registered on the same long-lived runtime. Track mounted
+    // runtimes in a module-level WeakSet so registration is once-per-runtime
+    // across remounts.
+    if (mountedRuntimes.has(agentRuntime)) return;
+    const target = internal ?? keyHandler;
+    if (!target) return;
     // Toast-only stub in normal interactive mode provides emitEvent but not
     // onCommand. Guard so the bridge no-ops cleanly instead of crashing the TUI.
     if (typeof agentRuntime.onCommand !== "function") return;
+    mountedRuntimes.add(agentRuntime);
+    // Emit to the renderable channel (the focused textarea), and also to the
+    // public keyHandler when it is a distinct object so global shortcuts still
+    // fire. The `!== target` guard avoids double-dispatch on the real renderer
+    // where the two are identical.
+    const emitKey = (k: KeyEvent): void => {
+      target.emit("keypress", k);
+      if (keyHandler && keyHandler !== target) keyHandler.emit("keypress", k);
+    };
     agentRuntime.onCommand((cmd: unknown) => {
       if (!cmd || typeof cmd !== "object") return;
       const c = cmd as Cmd;
       if (c.op === "press" && typeof c.key === "string") {
         if (c.key.startsWith("__focus__:")) return;
         const k = keyForNamed(c.key);
-        if (k) keyHandler.emit("keypress", k);
+        if (k) emitKey(k);
       } else if (c.op === "type" && typeof c.text === "string") {
         for (const ch of c.text) {
-          keyHandler.emit("keypress", keyForChar(ch));
+          emitKey(keyForChar(ch));
         }
       }
     });
-  }, [agentRuntime, keyHandler]);
+  }, [agentRuntime, internal, keyHandler]);
 }

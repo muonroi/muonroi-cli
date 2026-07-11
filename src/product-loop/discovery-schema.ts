@@ -30,7 +30,8 @@ export const DISCOVERY_QUESTIONS: DiscoveryQuestion[] = [
     id: "dbStrategy",
     required: true,
     recommendMode: "council",
-    prompt: "Database strategy: greenfield, existing schema, or migration?",
+    prompt:
+      "Database strategy: none (stateless — no persistent storage), greenfield, existing schema, or migration? Choose none for a CLI/tool/filter that keeps no data.",
   },
   {
     id: "frontendApproach",
@@ -94,6 +95,10 @@ export function getSchemaHintForLeader(questionId: string): string {
       return `value MUST be an object {"persona": string, "scale": one of ${Array.from(SCALES)
         .map((s) => JSON.stringify(s))
         .join("|")}, "geography": string}`;
+    case "dbStrategy":
+      // F7 — give the recommender an explicit "no persistence" option so it
+      // stops mis-ranking "greenfield" for stateless products (CLI/tool/filter).
+      return `value MUST be an object {"mode": one of "none"|"greenfield"|"existing-schema"|"migrate-from", "engine": string, "notes"?: string}. Pick "mode":"none" with "engine":"" when the product keeps NO persistent data (e.g. a stateless CLI, filter, or one-shot tool) — do NOT default to "greenfield" in that case.`;
     case "frontendApproach":
       return `value MUST be an object {"library": one of ${Array.from(ACCEPTED_FE_LIBRARIES)
         .map((l) => JSON.stringify(l))

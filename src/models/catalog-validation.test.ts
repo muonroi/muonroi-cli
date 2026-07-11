@@ -37,6 +37,16 @@ describe("catalog schema validation", () => {
     }
   });
 
+  // Part E — drift guard: every bundled model MUST declare native_web_research
+  // explicitly (true/false, never absent). A new model added without a decision
+  // fails here, forcing the author to audit its real web-research capability
+  // instead of silently defaulting (Kill #6: never infer from provider).
+  it("every bundled catalog model declares native_web_research explicitly", () => {
+    const raw = realCatalog as { models: Array<Record<string, unknown>> };
+    const missing = raw.models.filter((m) => typeof m.native_web_research !== "boolean").map((m) => m.id);
+    expect(missing).toEqual([]);
+  });
+
   it("safeValidateCatalog returns the models for a valid payload", () => {
     expect(safeValidateCatalog(VALID)?.[0]?.id).toBe("m-fast");
   });

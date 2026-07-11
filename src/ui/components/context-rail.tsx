@@ -61,9 +61,17 @@ export function ContextRail({ width, rows, children }: ContextRailProps) {
               // Index key: list-style rows (e.g. per-criterion outcome lines) may
               // share an empty or duplicate label, which would collide on a
               // label-keyed map. An empty label renders value-only (no "· : ").
-              <box key={idx} flexDirection="row">
-                {r.label ? <text fg={dark.textMuted}>{`${r.label}: `}</text> : null}
-                <text>{r.value}</text>
+              //
+              // Label + value MUST live in one <text> node (via an inline <span>),
+              // not two sibling <text> in a flex-row: when a long value wraps, the
+              // terminal trims the trailing separator of the preceding text node,
+              // so "Topic: rest…" rendered as "Topicrest…" and "Progress: Round…"
+              // lost its space. A single text flow keeps the "Label: " prefix.
+              <box key={idx} flexDirection="column">
+                <text>
+                  {r.label ? <span style={{ fg: dark.textMuted }}>{`${r.label}: `}</span> : null}
+                  {r.value}
+                </text>
               </box>
             ))}
           </box>

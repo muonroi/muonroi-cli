@@ -83,14 +83,14 @@ describe("createProviderFactory — headers option wires into OpenAI client", ()
       headers: { Authorization: `Bearer ${MOCK_TOKENS.accessToken}` },
     });
     expect(result.id).toBe("xai");
-    const model = result.factory("grok-4.3");
+    const model = result.factory("grok-4.5");
     expect(model).toBeDefined();
   });
 
   it("creates xai factory with API key (no headers) — regression", () => {
     const result = createProviderFactory("xai", { apiKey: ["xai", "fixture", "key"].join("-") });
     expect(result.id).toBe("xai");
-    const model = result.factory("grok-4.3");
+    const model = result.factory("grok-4.5");
     expect(model).toBeDefined();
   });
 });

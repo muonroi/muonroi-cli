@@ -278,7 +278,10 @@ export function PromptBox({
               </text>
             </box>
           ) : (
-            <>
+            // Wrap in a gap'd row like the other three hint branches — a bare
+            // fragment let the three hints run together ("@ filesshift+enter new
+            // linetab modes"); the inner box restores the 1-col separators.
+            <box flexDirection="row" gap={1}>
               <text fg={t.text}>
                 {"@ "}
                 <span style={{ fg: t.textMuted }}>{"files"}</span>
@@ -291,7 +294,7 @@ export function PromptBox({
                 {"tab "}
                 <span style={{ fg: t.textMuted }}>{"modes"}</span>
               </text>
-            </>
+            </box>
           )}
         </box>
       </box>

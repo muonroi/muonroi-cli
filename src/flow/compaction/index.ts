@@ -9,11 +9,73 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import type { ModelMessage } from "ai";
+import { recordArtifact } from "../../ee/artifact-cache.js";
+import { getDefaultEEClient } from "../../ee/intercept.js";
 import { estimateConversationTokens, serializeConversation } from "../../orchestrator/compaction.js";
 import { atomicWriteText } from "../../storage/atomic-io.js";
+import { logger } from "../../utils/logger.js";
 import { readArtifact, writeArtifact } from "../artifact-io.js";
 import { compressChat } from "./compress.js";
 import { extractDecisions } from "./extract.js";
+
+/**
+ * Anti-mù for the deliberate (/compact) path — parity with the auto/tool-loop
+ * compaction which persists every elided tool output via persistArtifact.
+ *
+ * deliberateCompact rewrites the whole history into a prose summary, so without
+ * this the model loses the ability to `ee_query "tool-artifact id=<id>"` a
+ * specific tool result after /compact. We record each tool result into the
+ * in-process + disk artifact cache (the tier ee_query reads FIRST, before EE),
+ * and fire a best-effort EE extract so cross-session rehydrate also survives.
+ * Fail-open: a cache/EE hiccup never blocks the compaction.
+ */
+export function recordToolArtifactsForRehydrate(messages: ModelMessage[], projectPath: string): number {
+  let recorded = 0;
+  for (const msg of messages) {
+    if (msg.role !== "tool" || !Array.isArray(msg.content)) continue;
+    for (const part of msg.content as Array<Record<string, unknown>>) {
+      if (part?.type !== "tool-result") continue;
+      const toolCallId = typeof part.toolCallId === "string" ? part.toolCallId : "";
+      if (!toolCallId) continue;
+      const toolName = typeof part.toolName === "string" ? part.toolName : "";
+      // AI SDK v5 tool-result payloads live under `output` (typed) or `result`.
+      const payload = part.output ?? part.result;
+      const content =
+        typeof payload === "string"
+          ? payload
+          : payload == null
+            ? ""
+            : (() => {
+                try {
+                  return JSON.stringify(payload);
+                } catch {
+                  return String(payload);
+                }
+              })();
+      if (!content) continue;
+      try {
+        recordArtifact(toolCallId, toolName, content);
+        recorded++;
+        getDefaultEEClient()
+          .extract(
+            {
+              transcript: content.slice(0, 8000),
+              projectPath,
+              meta: { source: "tool-artifact", toolCallId, toolName, reason: "deliberate-compact" },
+            },
+            AbortSignal.timeout(700),
+          )
+          .catch(() => {});
+      } catch (err) {
+        logger.error("orchestrator", "deliberate-compact artifact record failed", {
+          toolCallId,
+          message: (err as Error)?.message,
+        });
+      }
+    }
+  }
+  return recorded;
+}
 
 export interface CompactionResult {
   decisionsExtracted: number;
@@ -40,6 +102,11 @@ export async function deliberateCompact(
   modelId?: string,
   customInstructions?: string,
 ): Promise<CompactionResult> {
+  // Anti-mù parity: persist every tool result to the artifact cache (+ EE)
+  // BEFORE we summarize the history away, so the model can still rehydrate a
+  // specific tool output via ee_query "tool-artifact id=<id>" after /compact.
+  recordToolArtifactsForRehydrate(messages, flowDir);
+
   // Pass 1: Extract decisions/facts/constraints
   const extracted = await extractDecisions(messages, provider, modelId, customInstructions);
   const totalExtracted = extracted.decisions.length + extracted.facts.length + extracted.constraints.length;

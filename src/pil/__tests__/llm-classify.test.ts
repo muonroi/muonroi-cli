@@ -148,7 +148,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     expect(result?.outputStyle).toBe("balanced");
   });
 
-  // Reasoning models (grok-4.3, deepseek-v4-flash) consumed the doomed 16-token
+  // Reasoning models (grok-4.5, deepseek-v4-flash) consumed the doomed 16-token
   // budget on reasoning tokens FIRST → emitted zero text-delta → parseResponse
   // saw "" → returned null. 5/5 live grok sessions showed `llm=fail`. Fix: give
   // reasoning models a real output budget + force the lowest reasoning effort the
@@ -158,7 +158,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     cleanup = handle.uninstall;
 
     const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "grok-4.3"); // reasoning:true
+    const classify = createLlmClassifier(factory, "grok-4.5"); // reasoning:true
     const result = await classify("fix the failing CI build");
 
     expect(result?.taskType).toBe("debug");
@@ -171,7 +171,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     cleanup = handle.uninstall;
 
     const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "grok-4.3"); // xai, supports_effort:true
+    const classify = createLlmClassifier(factory, "grok-4.5"); // xai, supports_effort:true
     await classify("fix the failing CI build");
 
     const call = handle.calls[0] as {
@@ -201,7 +201,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     cleanup = handle.uninstall;
 
     const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "grok-4.3");
+    const classify = createLlmClassifier(factory, "grok-4.5");
     const result = await classify("fix the failing CI build");
 
     expect(result?.taskType).toBe("debug");

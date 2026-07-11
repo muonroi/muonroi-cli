@@ -29,7 +29,9 @@ import { prependDecisionsLock, readDecisionsLock } from "../council/decisions-lo
 import { runCouncil } from "../council/index.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
 import type { CouncilLLM } from "../council/types.js";
+import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import { renderResumeDigest, writeSprintOutcome, writeSprintVerify } from "../flow/run-artifacts.js";
 import { isContextRailEnabled } from "../gsd/flags.js";
 import { SPRINT_EXECUTION_MARKER } from "../pil/layer6-output.js";
 import { detectProviderForModel } from "../providers/runtime.js";
@@ -157,6 +159,32 @@ export function getImplTotalTimeoutMs(): number {
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
   if (Number.isFinite(n) && n > 0) return n;
   return 15 * 60 * 1000; // 15 min hard ceiling on a single impl turn
+}
+
+/**
+ * Whether the implement stage runs in an ISOLATED bounded sub-agent context
+ * (ctx.runIsolatedTask) instead of the shared top-level turn (processMessageFn).
+ * Default ON. Disable with MUONROI_SPRINT_ISOLATED_IMPL=0.
+ *
+ * The isolated path is the fix for the live ctx-overflow wedge: the flat
+ * processMessageFn turn inherited the full council-debate history (~5.9M tokens
+ * observed), started implementation already at ~94% context, then wedged after a
+ * mid-turn compaction. A fresh child context (getSubAgentBudgetChars cap +
+ * independent in-loop compaction) never inherits the debate, so it starts near
+ * empty and its clutter is absorbed as one compact ToolResult.
+ */
+export function getSprintIsolatedImplEnabled(): boolean {
+  return process.env.MUONROI_SPRINT_ISOLATED_IMPL !== "0";
+}
+
+/**
+ * Pure decision: use the isolated sub-agent path for the implement stage?
+ * True only when the flag is on AND the driver actually provides the bridge
+ * (legacy/test drivers omit runIsolatedTask → fall back to processMessageFn).
+ * Extracted for unit testing without spinning up a full runSprint.
+ */
+export function shouldUseIsolatedImpl(hasBridge: boolean, enabled: boolean = getSprintIsolatedImplEnabled()): boolean {
+  return enabled && hasBridge;
 }
 
 /**
@@ -664,7 +692,14 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   try {
     const lockContent = await readDecisionsLock(runDir);
     if (lockContent) {
-      implPrompt = prependDecisionsLock(planSynthesis, lockContent);
+      // Prepend the lock to the DIRECTIVE-carrying implPrompt, NOT the bare
+      // planSynthesis. Passing planSynthesis here (the original 2026-07-08 C2
+      // gate bug) silently dropped IMPL_EXECUTION_DIRECTIVE + its
+      // SPRINT_EXECUTION_MARKER, so every council-backed sprint (a lock always
+      // exists once the council ran) reached the orchestrator as a bare design
+      // doc: the impl turn narrated the plan instead of executing it, classified
+      // taskType=null (4_096 output cap), then wedged on finishReason:"length".
+      implPrompt = prependDecisionsLock(implPrompt, lockContent);
       yield {
         type: "content",
         content: "\n> [decisions.lock.md] Locked decisions prepended to implementation prompt.\n",
@@ -693,12 +728,40 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
 
   let implError: string | null = null;
   if (ctx.processMessageFn && implPrompt.trim()) {
+    const useIsolated = shouldUseIsolatedImpl(!!ctx.runIsolatedTask);
     try {
-      const implGen = ctx.processMessageFn(implPrompt);
-      // Guard the impl turn with an idle-chunk watchdog so a post-finish
-      // orchestrator hang surfaces as a phaseError instead of a silent wedge.
-      for await (const chunk of withImplIdleWatchdog(implGen, getImplIdleTimeoutMs(), sprintN)) {
-        yield chunk as StreamChunk;
+      if (useIsolated && ctx.runIsolatedTask) {
+        // ISOLATED path — run the sprint plan in a fresh, budget-capped child
+        // context that does NOT inherit the council-debate history. This is the
+        // fix for the ctx-overflow wedge: the sub-agent starts near-empty, has
+        // full tool access (edit/bash), compacts independently in-loop, and
+        // returns a compact ToolResult (its tool clutter is absorbed, not piped
+        // into the parent). No stream to watchdog — the sub-agent has its own
+        // stall + no-forward-progress guards (stall-watchdog.ts).
+        yield {
+          type: "content",
+          content:
+            "\n> [isolated impl] Executing the sprint in a fresh sub-agent context " +
+            "(anti-overflow: does not inherit the debate history).\n",
+        };
+        const result = await ctx.runIsolatedTask({
+          agent: "general",
+          description: `Sprint ${sprintN} implementation`,
+          prompt: implPrompt,
+          modelId: ctx.sessionModelId,
+        });
+        if (!result.success) {
+          implError = result.error?.trim() || "isolated implementation task failed";
+        } else if (result.output?.trim()) {
+          yield { type: "content", content: `\n${result.output.trim()}\n` };
+        }
+      } else {
+        const implGen = ctx.processMessageFn(implPrompt);
+        // Guard the impl turn with an idle-chunk watchdog so a post-finish
+        // orchestrator hang surfaces as a phaseError instead of a silent wedge.
+        for await (const chunk of withImplIdleWatchdog(implGen, getImplIdleTimeoutMs(), sprintN)) {
+          yield chunk as StreamChunk;
+        }
       }
     } catch (e) {
       implError = e instanceof Error ? e.message : String(e);
@@ -1049,9 +1112,46 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
   stateMap.sections.set(
     "Resume Digest",
-    `Sprint: ${sprintN} | Stage: ${iter.stage} | Score: ${verdict.score.toFixed(2)} | Verify: ${verifyVerdict}`,
+    renderResumeDigest({
+      stage: `sprint-${sprintN}`,
+      lastCompleted: `sprint-${sprintN} ${iter.stage}`,
+      nextAction: verdict.pass
+        ? "Definition-of-Done met — advance to the next phase or ship"
+        : `Retry sprint ${sprintN}: ${verdict.failedCondition ?? "continue toward Definition-of-Done"}`,
+      sprintN,
+      score: verdict.score,
+      verify: verifyVerdict,
+      updatedAt: new Date().toISOString(),
+    }),
   );
   await writeArtifact(runDir, "state.md", stateMap);
+
+  // Part A — persist a first-class per-sprint outcome record + verify report so
+  // `/ideal review` and cross-run memory render real sprint history (not just
+  // the fire-and-forget EE boundary event, which leaves nothing on disk).
+  try {
+    await writeSprintOutcome(ctx.flowDir, ctx.runId, {
+      sprintN,
+      pass: verdict.pass,
+      score: verdict.score,
+      verify: verifyVerdict,
+      failedCondition: verdict.failedCondition ?? undefined,
+      criteriaMet: iter.criteriaMet,
+      criteriaPartial: iter.criteriaPartial,
+      criteriaUnmet: iter.criteriaUnmet,
+      finishedAt: new Date().toISOString(),
+    });
+    const verifyReport =
+      (verifyResult.error?.trim() ? verifyResult.error : (verifyResult.output ?? "")).trim() || "(no verify output)";
+    await writeSprintVerify(
+      ctx.flowDir,
+      ctx.runId,
+      sprintN,
+      `# Sprint ${sprintN} verify — ${verifyVerdict} (score ${verdict.score.toFixed(2)})\n\n\`\`\`\n${verifyReport.slice(0, 8000)}\n\`\`\`\n`,
+    );
+  } catch {
+    /* non-critical — sprint artifacts are a review surface, never derail the loop */
+  }
 
   // Emit ProgressSnapshot on sprint boundary so the user sees rolling progress.
   // Wrapped in try/catch — never crash sprint-runner because the snapshot failed.
@@ -1090,6 +1190,24 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     evidence: { score: verdict.score, verifyResult: verifyVerdict },
   }).catch(() => {
     /* EE failures must not derail the loop */
+  });
+
+  // Part C — write-during-execution: persist this sprint's outcome as a NEW
+  // workflow_sprint experience (not just reinforcement) so a later sprint in the
+  // SAME run — or a future run — can recall "how this kind of sprint went".
+  // gate-on-outcome (Kill #4): fired here, AFTER verify+judge produced a verdict.
+  fireAndForgetWorkflowEvent({
+    kind: "sprint-execution",
+    phaseRef: `runs/${ctx.runId}#sprint-${sprintN}`,
+    sessionId: ctx.runId,
+    text: `Sprint ${sprintN} ${verdict.pass ? "passed" : "failed"} (score ${verdict.score.toFixed(2)}, verify ${verifyVerdict})${verdict.failedCondition ? ` — ${verdict.failedCondition}` : ""}`,
+    payload: {
+      sprintN,
+      pass: verdict.pass,
+      score: verdict.score,
+      verify: verifyVerdict,
+      failedCondition: verdict.failedCondition ?? null,
+    },
   });
 
   // ── Step 9: If not done, surface continue-feedback to the user ───────────

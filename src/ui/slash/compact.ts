@@ -19,11 +19,9 @@ import { registerSlash } from "./registry.js";
 export const handleCompactSlash: SlashHandler = async (_args, ctx) => {
   const flowDir = path.join(ctx.cwd, FLOW_DIR_NAME);
 
-  // Check for active run
+  // Check for active run (informational only). /compact should work on any
+  // session, not only inside a product-loop run, so we no longer block here.
   const runId = await getActiveRunId(flowDir);
-  if (!runId) {
-    return "No active run. Nothing to compact. Start with /discuss to create a run.";
-  }
 
   // Fire-and-forget: notify EE that surfaced suggestions are going stale due to compact
   const { surfacedIds, timestamp } = getLastSurfacedState();
@@ -38,7 +36,8 @@ export const handleCompactSlash: SlashHandler = async (_args, ctx) => {
 
   // Return signal for orchestrator to perform compaction
   const instructions = _args.length > 0 ? `\nInstructions: ${_args.join(" ")}` : "";
-  return `__COMPACT__\nRun: ${runId}${instructions}\nReady for two-pass compaction.`;
+  const runLine = runId ? `Run: ${runId}` : "No active run — compacting chat history only.";
+  return `__COMPACT__\n${runLine}${instructions}\nReady for two-pass compaction.`;
 };
 
 // Self-register on module import

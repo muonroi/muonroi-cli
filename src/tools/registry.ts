@@ -8,6 +8,7 @@
 
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
 import { registerGsdWorkflowTools } from "../gsd/workflow-tools.js";
+import { requestProactiveCompact } from "../orchestrator/compact-request.js";
 import { canonicalizeBashCommand } from "../orchestrator/tool-args-hash.js";
 import { analyzeImageFromSource, askVisionProxy, listCachedImages } from "../providers/mcp-vision-bridge.js";
 import { needsVisionProxy } from "../providers/vision-proxy.js";
@@ -15,7 +16,7 @@ import type { AgentMode, TaskRequest, ToolResult } from "../types/index.js";
 import { loadMcpServers } from "../utils/settings.js";
 import type { BashTool } from "./bash.js";
 import { type BashSliceMode, getBashRun, sliceBashOutput } from "./bash-output-cache.js";
-import { editFile, readFile, writeFile } from "./file.js";
+import { editFile, readFile, readFiles, writeFile } from "./file.js";
 import { FileTracker } from "./file-tracker.js";
 import {
   analyzeGitCommand,
@@ -167,18 +168,35 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // read_file
   tools.read_file = dynamicTool({
     description:
-      "Read file contents. For large files, you MUST use start_line and end_line to extract only the needed sections (e.g. specific functions). Reading full large files will quickly exhaust your context budget. Use grep or lsp first to find line numbers.",
+      "Read file contents. To read SEVERAL files, pass them ALL in one call via file_paths (array) — STRONGLY PREFERRED over issuing separate read_file calls: each extra call re-sends the whole conversation as input, so N single reads cost O(N²) tokens while one batched read costs O(N). For a large SINGLE file, use start_line/end_line to extract only the needed section (start_line/end_line apply to file_path only; file_paths reads whole files). Use grep or lsp first to find line numbers.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
-        file_path: { type: "string", description: "Path to the file to read" },
-        start_line: { type: "number", description: "First line to read (1-based)" },
-        end_line: { type: "number", description: "Last line to read (1-based)" },
+        file_path: { type: "string", description: "Path to a single file to read (supports start_line/end_line)." },
+        file_paths: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Read MULTIPLE files in ONE call (preferred when you need 2+ files). Each is returned with its own header; each is capped independently so none is dropped. Best for small-to-medium files; for a large file use file_path + line range.",
+        },
+        start_line: { type: "number", description: "First line to read (1-based). Applies to file_path only." },
+        end_line: { type: "number", description: "Last line to read (1-based). Applies to file_path only." },
       },
-      required: ["file_path"],
     }),
     execute: async (input: any) => {
-      const result = readFile(input.file_path, bash.getCwd(), input.start_line, input.end_line, fileTracker);
+      const batch: string[] =
+        Array.isArray(input.file_paths) && input.file_paths.length > 0
+          ? input.file_paths.filter((p: unknown): p is string => typeof p === "string" && p.trim() !== "")
+          : [];
+      if (batch.length > 1) {
+        // Per-file fair-share of the output cap so the concatenated result
+        // stays under MAX_TOOL_OUTPUT_CHARS and every file survives (no silent
+        // head/tail drop of whole files). Floor keeps each file legible.
+        const perFileCap = Math.max(4_000, Math.floor(MAX_TOOL_OUTPUT_CHARS / batch.length));
+        return formatResult(readFiles(batch, bash.getCwd(), fileTracker, perFileCap));
+      }
+      const single = batch.length === 1 ? batch[0] : input.file_path;
+      const result = readFile(single, bash.getCwd(), input.start_line, input.end_line, fileTracker);
       return formatResult(result);
     },
   });
@@ -202,6 +220,37 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         bash.getCwd(),
       );
       return formatResult(result);
+    },
+  });
+
+  // compact — agent-initiated proactive context compaction. The model calls
+  // this to shed accumulated tool/conversation history mid-task (freeing
+  // context + resetting tool-call bloat) BEFORE it hits a tool-round limit,
+  // so a long task never gets interrupted. The request is queued here and
+  // consumed by the tool-engine's prepareStep boundary, which forces a
+  // compaction pass before the next LLM step, then the turn continues. A
+  // decisions/facts snapshot is preserved and high-value tool results stay
+  // rehydratable via ee_query "tool-artifact id=…". This is the proactive
+  // counterpart to the reactive tool-limit auto-recover.
+  tools.compact = dynamicTool({
+    description:
+      "Proactively compress THIS turn's accumulated tool/conversation history to free context and reset tool-call bloat, then CONTINUE the task automatically. Call it after a read-heavy stretch (many read_file/grep/bash results) when context feels heavy and BEFORE you approach a tool-round limit — it prevents the 'reached tool limit' interruption entirely. The compaction runs before your next step; older tool results are summarized (a decisions/facts snapshot is kept) and remain rehydratable via ee_query \"tool-artifact id=…\". Do NOT stop after calling it — keep working toward the goal.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        focus: {
+          type: "string",
+          description: "Short note on what to keep in mind / preserve after compaction (e.g. the current sub-task).",
+        },
+      },
+    }),
+    execute: async (input: any) => {
+      requestProactiveCompact(typeof input?.focus === "string" ? input.focus : null);
+      return formatResult({
+        success: true,
+        output:
+          'Context compaction scheduled — older tool history will be compressed before your next step; continue the task afterward. High-value results stay rehydratable via ee_query "tool-artifact id=…".',
+      });
     },
   });
 
@@ -844,7 +893,9 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             // output in-process by toolCallId. For an exact "tool-artifact id=X"
             // lookup this is the authoritative full content for THIS session and
             // works even when EE is down — the failure window long sessions hit.
-            const { findArtifactByQuery, findArtifactOnDisk } = await import("../ee/artifact-cache.js");
+            const { findArtifactByQuery, findArtifactByHint, findArtifactOnDisk } = await import(
+              "../ee/artifact-cache.js"
+            );
             // Lived-experience telemetry: record where the rehydrate came from so
             // a "cảm nhận trong CLI" question (and the measure-first instrumentation)
             // sees cache vs disk vs ee vs needed-but-unavailable.
@@ -856,6 +907,17 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
               recordRehydration(mem ? "cache" : "disk");
               return truncateOutput(
                 `[tool-artifact id=${local.toolCallId} tool=${local.toolName} — rehydrated from ${src}]\n${local.content}`,
+              );
+            }
+            // B (cheap-model anti-mù) — the exact id missed locally. Cheap models
+            // often pass FILE PATHS instead of the opaque toolCallId, which
+            // extractArtifactId can't parse. Try a path match against the local
+            // cache before the EE round-trip so a botched id still recovers.
+            const fuzzy = findArtifactByHint(query);
+            if (fuzzy) {
+              recordRehydration("cache");
+              return truncateOutput(
+                `[tool-artifact id=${fuzzy.toolCallId} tool=${fuzzy.toolName} — rehydrated by path match; your id was malformed (pass the exact id from the "[… elided id=X …]" stub next time)]\n${fuzzy.content}`,
               );
             }
             // EE fallback (cross-session / post-restart) → raw /api/search exact lookup.

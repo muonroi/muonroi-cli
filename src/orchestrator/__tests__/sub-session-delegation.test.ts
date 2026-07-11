@@ -79,6 +79,7 @@ vi.mock("../../storage/index.js", () => {
     appendCompaction: (...args: any[]) => (mockAppendCompaction as any).apply(null, args),
     appendMessages: (...args: any[]) => (mockAppendMessages as any).apply(null, args),
     getNextMessageSequence: (...args: any[]) => (mockGetNextMessageSequence as any).apply(null, args),
+    loadSessionChainTranscriptState: (...args: any[]) => (mockLoadTranscriptState as any).apply(null, args),
     loadTranscriptState: (...args: any[]) => (mockLoadTranscriptState as any).apply(null, args),
     loadTranscript: vi.fn(() => []),
     buildChatEntries: vi.fn(() => []),
@@ -437,7 +438,9 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
 
     // 1. Verify that we yielded the resumption status message
     const hasResumeMessage = chunks.some(
-      (c) => c.type === "content" && c.content?.includes("Phát hiện sub-session trước đó bị gián đoạn"),
+      // The resumption status is emitted as a toast (ephemeral) rather than a
+      // persisted content line — see orchestrator.ts sub-session recovery.
+      (c) => c.type === "toast" && c.content?.includes("Phát hiện sub-session trước đó bị gián đoạn"),
     );
     expect(hasResumeMessage).toBe(true);
 
@@ -546,7 +549,9 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
 
     // 1. Verify that we did NOT yield the resumption message
     const hasResumeMessage = chunks.some(
-      (c) => c.type === "content" && c.content?.includes("Phát hiện sub-session trước đó bị gián đoạn"),
+      // The resumption status is emitted as a toast (ephemeral) rather than a
+      // persisted content line — see orchestrator.ts sub-session recovery.
+      (c) => c.type === "toast" && c.content?.includes("Phát hiện sub-session trước đó bị gián đoạn"),
     );
     expect(hasResumeMessage).toBe(false);
 

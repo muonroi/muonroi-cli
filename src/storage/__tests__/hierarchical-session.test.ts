@@ -75,7 +75,12 @@ vi.mock("../db", () => {
   };
 });
 
-import { buildChatEntries, getLastTodoWriteArgs, getSessionChain } from "../transcript";
+import {
+  buildChatEntries,
+  getLastTodoWriteArgs,
+  getSessionChain,
+  loadSessionChainTranscriptState,
+} from "../transcript";
 
 describe("Hierarchical Sessions (Silent Rotation Support)", () => {
   beforeEach(() => {
@@ -109,6 +114,15 @@ describe("Hierarchical Sessions (Silent Rotation Support)", () => {
       expect(chain.length).toBe(2);
       expect(chain).toContain("sessionA");
       expect(chain).toContain("sessionB");
+    });
+
+    it("walks nested descendants (parent -> child -> grandchild)", () => {
+      sessionsDb.set("sessionA", { parent_session_id: null });
+      sessionsDb.set("sessionB", { parent_session_id: "sessionA" });
+      sessionsDb.set("sessionC", { parent_session_id: "sessionB" });
+
+      expect(getSessionChain("sessionA")).toEqual(["sessionA", "sessionB", "sessionC"]);
+      expect(getSessionChain("sessionC")).toEqual(["sessionA", "sessionB", "sessionC"]);
     });
   });
 
@@ -181,6 +195,160 @@ describe("Hierarchical Sessions (Silent Rotation Support)", () => {
       expect(entries[0]).toEqual(expect.objectContaining({ type: "user", content: "Hello A" }));
       expect(entries[1]).toEqual(expect.objectContaining({ type: "assistant", content: "Reply A" }));
       expect(entries[2]).toEqual(expect.objectContaining({ type: "user", content: "Hello B" }));
+    });
+  });
+
+  describe("loadSessionChainTranscriptState", () => {
+    it("returns only the requested session state when there are no children", () => {
+      sessionsDb.set("sessionA", { parent_session_id: null });
+      messagesDb.set("sessionA", [
+        {
+          seq: 1,
+          role: "user",
+          message_json: JSON.stringify({ role: "user", content: "Hello A" }),
+          created_at: "2026-06-25T12:00:00Z",
+        },
+      ]);
+
+      const state = loadSessionChainTranscriptState("sessionA");
+      expect(state.messages).toHaveLength(1);
+      expect(state.seqs).toEqual([1]);
+    });
+
+    it("merges parent and child messages chronologically and nulls child seqs", () => {
+      sessionsDb.set("sessionA", { parent_session_id: null });
+      sessionsDb.set("sessionB", { parent_session_id: "sessionA" });
+
+      messagesDb.set("sessionA", [
+        {
+          seq: 1,
+          role: "user",
+          message_json: JSON.stringify({ role: "user", content: "Hello A" }),
+          created_at: "2026-06-25T12:00:00Z",
+        },
+        {
+          seq: 2,
+          role: "assistant",
+          message_json: JSON.stringify({ role: "assistant", content: "Reply A" }),
+          created_at: "2026-06-25T12:01:00Z",
+        },
+      ]);
+
+      messagesDb.set("sessionB", [
+        {
+          seq: 1,
+          role: "user",
+          message_json: JSON.stringify({ role: "user", content: "Hello B" }),
+          created_at: "2026-06-25T12:02:00Z",
+        },
+      ]);
+
+      const state = loadSessionChainTranscriptState("sessionA");
+      expect(state.messages.map((m) => (m as any).content)).toEqual(["Hello A", "Reply A", "Hello B"]);
+      expect(state.seqs).toEqual([1, 2, null]);
+    });
+
+    it("keeps seqs for the resumed session and nulls ancestor seqs when resuming a child", () => {
+      sessionsDb.set("sessionA", { parent_session_id: null });
+      sessionsDb.set("sessionB", { parent_session_id: "sessionA" });
+
+      messagesDb.set("sessionA", [
+        {
+          seq: 1,
+          role: "user",
+          message_json: JSON.stringify({ role: "user", content: "Hello A" }),
+          created_at: "2026-06-25T12:00:00Z",
+        },
+      ]);
+      messagesDb.set("sessionB", [
+        {
+          seq: 1,
+          role: "assistant",
+          message_json: JSON.stringify({ role: "assistant", content: "Reply B" }),
+          created_at: "2026-06-25T12:01:00Z",
+        },
+      ]);
+
+      const state = loadSessionChainTranscriptState("sessionB");
+      expect(state.messages.map((m) => (m as any).content)).toEqual(["Hello A", "Reply B"]);
+      expect(state.seqs).toEqual([null, 1]);
+    });
+
+    it("merges a nested chain (parent -> child -> grandchild)", () => {
+      sessionsDb.set("sessionA", { parent_session_id: null });
+      sessionsDb.set("sessionB", { parent_session_id: "sessionA" });
+      sessionsDb.set("sessionC", { parent_session_id: "sessionB" });
+
+      messagesDb.set("sessionA", [
+        {
+          seq: 1,
+          role: "user",
+          message_json: JSON.stringify({ role: "user", content: "Hello A" }),
+          created_at: "2026-06-25T12:00:00Z",
+        },
+      ]);
+      messagesDb.set("sessionB", [
+        {
+          seq: 1,
+          role: "user",
+          message_json: JSON.stringify({ role: "user", content: "Hello B" }),
+          created_at: "2026-06-25T12:01:00Z",
+        },
+      ]);
+      messagesDb.set("sessionC", [
+        {
+          seq: 1,
+          role: "assistant",
+          message_json: JSON.stringify({ role: "assistant", content: "Reply C" }),
+          created_at: "2026-06-25T12:02:00Z",
+        },
+      ]);
+
+      const state = loadSessionChainTranscriptState("sessionA");
+      expect(state.messages.map((m) => (m as any).content)).toEqual(["Hello A", "Hello B", "Reply C"]);
+      expect(state.seqs).toEqual([1, null, null]);
+    });
+
+    it("applies each session's compaction before merging", () => {
+      sessionsDb.set("sessionA", { parent_session_id: null });
+      sessionsDb.set("sessionB", { parent_session_id: "sessionA" });
+
+      messagesDb.set("sessionA", [
+        {
+          seq: 1,
+          role: "user",
+          message_json: JSON.stringify({ role: "user", content: "Old A" }),
+          created_at: "2026-06-25T12:00:00Z",
+        },
+        {
+          seq: 2,
+          role: "assistant",
+          message_json: JSON.stringify({ role: "assistant", content: "Reply A" }),
+          created_at: "2026-06-25T12:01:00Z",
+        },
+      ]);
+      compactionsDb.set("sessionA", {
+        first_kept_seq: 2,
+        summary: "Compacted A",
+        tokens_before: 100,
+        created_at: "2026-06-25T12:01:30Z",
+      });
+
+      messagesDb.set("sessionB", [
+        {
+          seq: 1,
+          role: "user",
+          message_json: JSON.stringify({ role: "user", content: "Hello B" }),
+          created_at: "2026-06-25T12:02:00Z",
+        },
+      ]);
+
+      const state = loadSessionChainTranscriptState("sessionA");
+      const contents = state.messages.map((m) => (m as any).content);
+      expect(contents[0]).toContain("Compacted A");
+      expect(contents).toContain("Reply A");
+      expect(contents).toContain("Hello B");
+      expect(contents).not.toContain("Old A");
     });
   });
 });

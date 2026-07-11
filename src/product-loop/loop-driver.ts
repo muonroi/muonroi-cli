@@ -6,12 +6,18 @@ import {
   readDebateInputs,
   writeDebateInputs,
 } from "../council/debate-checkpoint.js";
+import { resolveDebateSummary } from "../council/debate-summary.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
 import { phaseStart } from "../council/phase-events.js";
 import { runPreflight } from "../council/preflight.js";
+import { makeStanceRecall } from "../council/stance-recall.js";
 import type { ClarifiedSpec, CouncilLLM, CouncilParticipant, DebateState } from "../council/types.js";
 import { fetchBBContext, inferBBFromPrompt, renderBBContextBlock } from "../ee/bb-retrieval.js";
+import { getDefaultEEClient } from "../ee/intercept.js";
+import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import { ensureRunScoped } from "../flow/hierarchy.js";
+import { renderResumeDigest, writeContextDoc, writeResearchDoc } from "../flow/run-artifacts.js";
 import { logInteraction } from "../storage/index.js";
 import type { CouncilInfoCard, StreamChunk } from "../types/index.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
@@ -51,6 +57,21 @@ function logLoopEvent(ctx: DriverContext, subtype: string, data: Record<string, 
   } catch {
     /* non-critical — audit trail only */
   }
+}
+
+/**
+ * Clamp a title for the milestone/phase index (F12): truncate at a word
+ * boundary when possible and strip trailing punctuation/whitespace so a raw
+ * slice can't leave a dangling "(" or a half word. Falls back to a hard slice
+ * for a single long token.
+ */
+export function clampTitle(raw: string, max: number): string {
+  const s = (raw ?? "").trim();
+  if (s.length <= max) return s.replace(/[\s([{<"'.,;:–—-]+$/u, "").trim() || s;
+  const hard = s.slice(0, max);
+  const lastSpace = hard.lastIndexOf(" ");
+  const base = lastSpace >= Math.floor(max * 0.6) ? hard.slice(0, lastSpace) : hard;
+  return base.replace(/[\s([{<"'.,;:–—-]+$/u, "").trim() || hard.trim();
 }
 
 function buildWorkspaceDiscoveryCard(d: DiscoveryResult, a: RepoAudit, priorRunCount: number): CouncilInfoCard | null {
@@ -143,6 +164,12 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
   let state: Stage = "idle";
   let clarifiedSpec: ClarifiedSpec | undefined;
   let debateState: DebateState | undefined;
+  // Resolved once the research debate completes (F9): runningSummary, or a
+  // faithful fallback synthesized from participant positions when the debate
+  // returned after openings without a running summary. Reused across the
+  // research artifacts AND the scoping synthesis prompt so neither loses the
+  // debate. Empty until the research phase runs.
+  let resolvedDebateSummary = "";
   let discovery: DiscoveryResult | undefined;
   let audit: RepoAudit | undefined;
   let productSpec: ProductSpec | undefined;
@@ -238,6 +265,19 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           yield { type: "council_info_card", councilInfoCard: discoveryCard } as StreamChunk;
         }
 
+        // Part A — persist prior-run context as a first-class context.md. The
+        // digest is intentionally NOT re-injected into the live system prompt
+        // (PIL Layer 3 already does semantic injection), but writing it to disk
+        // makes it a reviewable, resumable surface — the run's inherited memory.
+        try {
+          const ctxParts = [`Prior runs on this workspace: ${prior.runs.length}`];
+          if (prior.digest?.trim()) ctxParts.push("", prior.digest.trim());
+          if (audit.hasProject) ctxParts.push("", "## Repo audit", conversationContext);
+          await writeContextDoc(ctx.flowDir, ctx.runId, ctxParts.join("\n"));
+        } catch {
+          /* non-critical — context.md is a review surface, never blocks the FSM */
+        }
+
         // Persist discovery evidence + repo audit so resume can replay.
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
         if (discovery.evidence.length > 0) {
@@ -294,7 +334,15 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
 
         // Write Resume Digest to state.md
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
-        stateMap.sections.set("Resume Digest", "Stage: Gather - Defining product dimensions");
+        stateMap.sections.set(
+          "Resume Digest",
+          renderResumeDigest({
+            stage: "gather",
+            lastCompleted: "discover",
+            nextAction: "Answer clarification questions to define product dimensions",
+            updatedAt: new Date().toISOString(),
+          }),
+        );
         await writeArtifact(runDir, "state.md", stateMap);
 
         // runGatherPhase is async (not a generator), but the discovery
@@ -437,6 +485,9 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           return { runId: ctx.runId, stage: "error", success: false, reason: "missing_spec_for_research" };
         }
 
+        // Part E — web-research confidence for this run, filled when the
+        // Researcher stance is (re)assigned to a web-capable model below.
+        let researchWebConfidence: { confidence: "native" | "degraded"; model?: string } | undefined;
         const researchPhaseStartMs = Date.now();
         yield phaseStart({
           phaseId: "loop:research",
@@ -450,7 +501,15 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         });
 
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
-        stateMap.sections.set("Resume Digest", "Stage: Research - Multi-expert debate");
+        stateMap.sections.set(
+          "Resume Digest",
+          renderResumeDigest({
+            stage: "research",
+            lastCompleted: "gather",
+            nextAction: "Run / resume the multi-expert council debate",
+            updatedAt: new Date().toISOString(),
+          }),
+        );
         await writeArtifact(runDir, "state.md", stateMap);
 
         // inside research phase, before building councilTopic:
@@ -503,6 +562,43 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             stance: s,
           };
         });
+
+        // Part E — the Researcher stance MUST prefer a model with NATIVE online
+        // web research (its own web_search/browsing), so the research phase gets
+        // real online facts rather than codebase-only reasoning. If a web-capable
+        // model is reachable this session, route the Researcher to it; otherwise
+        // record degraded confidence into research.md (the fallback add-in path
+        // — Tavily/MCP — is untrusted per the owner's Part E principle).
+        const { modelHasNativeWebResearch, getWebResearchModel } = await import("../models/registry.js");
+        const reachableIds = new Set<string>(
+          [...councilParticipants.map((p) => p.model), leaderModelId].filter(Boolean),
+        );
+        const researcherIdx = participants.findIndex((p) => p.stance?.name === "Researcher");
+        if (researcherIdx >= 0) {
+          const current = participants[researcherIdx]!.model;
+          if (!modelHasNativeWebResearch(current)) {
+            // ONLY reroute to a web-native model that is actually REACHABLE this
+            // session. A model whose provider has no factory wired (e.g. grok/xai
+            // when only opencode-go is authed) would fail council participant
+            // creation ("no factory for model's provider") and wedge the debate —
+            // so if no reachable web-native model exists, degrade gracefully and
+            // KEEP the current reachable model rather than swap in a dead id.
+            const webModel = getWebResearchModel(reachableIds);
+            if (webModel) {
+              participants[researcherIdx]!.model = webModel.id;
+              researchWebConfidence = { confidence: "native", model: webModel.id };
+            } else {
+              researchWebConfidence = { confidence: "degraded" };
+              logLoopEvent(ctx, "research_web_degraded", {
+                phase: "research",
+                reason: "no reachable native_web_research model",
+                researcherModel: current,
+              });
+            }
+          } else {
+            researchWebConfidence = { confidence: "native", model: current };
+          }
+        }
 
         // CB-1 — BB-aware context injection. Runs before council debate fires so
         // the research stances have access to relevant BB recipes and rules.
@@ -591,6 +687,13 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
               runId: ctx.sessionId ?? ctx.runId,
               checkpointDir: runDir,
               resumeCheckpoint,
+              // Item 3 — per-stance recall: each participant opens grounded in the
+              // stance-weighted slice of the brain its lens cares about. Bounded +
+              // failure-tolerant; unavailable EE leaves openings unchanged.
+              stanceRecall: makeStanceRecall(getDefaultEEClient(), {
+                cwd: ctx.flowDir,
+                sourceSession: ctx.sessionId ?? ctx.runId,
+              }),
             },
             ctx.llm,
           );
@@ -662,6 +765,11 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           }
         }
 
+        // F9 — resolve the debate summary once (runningSummary or a fallback
+        // synthesized from participant positions) for reuse across the research
+        // artifacts + scoping synthesis.
+        if (debateState) resolvedDebateSummary = resolveDebateSummary(debateState);
+
         // Forensics row mirrors the council/index.ts council_summary record
         // (which only fires for sprint planning via runCouncil). The /ideal
         // initial debate goes through runDebate here and was previously
@@ -691,20 +799,48 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           });
         }
 
-        const summaryText =
-          debateState?.runningSummary?.trim() || "(debate produced no summary — using empty research findings)";
+        const summaryText = resolvedDebateSummary || "(debate produced no summary — using empty research findings)";
         yield {
           type: "council_info_card",
           councilInfoCard: buildResearchSummaryCard(summaryText, debateState?.researchFindings),
         } as StreamChunk;
 
-        // Append research summary to delegations.md
+        // Append research summary to delegations.md (kept for back-compat: the
+        // EE transcript extractor + legacy readers still read these sections).
+        // A debate that returns after openings (leader routes straight to the
+        // preflight gate) leaves runningSummary empty — synthesize a faithful
+        // fallback from the participants' positions so the canonical research
+        // artifacts never silently drop the whole debate.
         const delegationsMap = (await readArtifact(runDir, "delegations.md")) ?? { preamble: "", sections: new Map() };
-        delegationsMap.sections.set("Research Summary", debateState.runningSummary);
+        delegationsMap.sections.set("Research Summary", resolvedDebateSummary);
         if (debateState.researchFindings) {
           delegationsMap.sections.set("Research Findings", debateState.researchFindings);
         }
         await writeArtifact(runDir, "delegations.md", delegationsMap);
+
+        // Part A — promote the debate output to a first-class research.md. This
+        // is the canonical, reviewable surface (`/ideal review`) and the home
+        // for the EE recall seed once per-turn grounding lands (deferred).
+        try {
+          await writeResearchDoc(ctx.flowDir, ctx.runId, {
+            summary: resolvedDebateSummary,
+            findings: debateState.researchFindings ?? undefined,
+            webResearch: researchWebConfidence,
+          });
+          // Part C — persist the debate as a workflow_debate experience so a
+          // future run on a similar topic can seed its stances with what this
+          // council concluded (gate-on-outcome: fired after the debate produced
+          // a summary, not per-turn — Kill #4/#5).
+          fireAndForgetWorkflowEvent({
+            kind: "council-debate",
+            phaseRef: `runs/${ctx.runId}#research`,
+            sessionId: ctx.sessionId ?? ctx.runId,
+            text: (debateState.runningSummary ?? "").slice(0, 2000) || `debate on: ${ctx.idea.slice(0, 200)}`,
+            payload: { topic: ctx.idea.slice(0, 200), roundCount: debateState.roundCount ?? 0 },
+          });
+        } catch {
+          /* non-critical — research.md is a review surface, never blocks the FSM */
+        }
 
         // P6 - extract assumptions from the research debate so foundational
         // claims (perf budgets, SDK contracts, etc.) become trackable across
@@ -774,7 +910,15 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         });
 
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
-        stateMap.sections.set("Resume Digest", "Stage: Scoping - Synthesizing product roadmap");
+        stateMap.sections.set(
+          "Resume Digest",
+          renderResumeDigest({
+            stage: "scoping",
+            lastCompleted: "research",
+            nextAction: "Synthesize the ProductSpec and confirm the roadmap at the preflight gate",
+            updatedAt: new Date().toISOString(),
+          }),
+        );
         await writeArtifact(runDir, "state.md", stateMap);
 
         // Visible progress indicator — without this the TUI sits silent for
@@ -796,7 +940,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         const synthesisPrompt = `Synthesize a ProductSpec JSON based on the following:
 Idea: ${ctx.idea}
 Clarified Spec: ${JSON.stringify(clarifiedSpec)}
-Debate Summary: ${debateState.runningSummary}
+Debate Summary: ${resolvedDebateSummary || debateState.runningSummary}
 Research Findings: ${debateState.researchFindings ?? "N/A"}
 
 Output ONLY a JSON object matching this interface:
@@ -871,11 +1015,46 @@ interface ProductSpec {
         roadmapMap.sections.set("Product Specification", JSON.stringify(productSpec, null, 2));
         await writeArtifact(runDir, "roadmap.md", roadmapMap);
 
+        // Part C — the synthesized spec IS the council's decision. Persist it as
+        // a workflow_decision experience so future runs don't re-litigate a
+        // settled architectural/scoping choice.
+        fireAndForgetWorkflowEvent({
+          kind: "decision",
+          phaseRef: `runs/${ctx.runId}#scoping`,
+          sessionId: ctx.sessionId ?? ctx.runId,
+          text: `Scoped "${ctx.idea.slice(0, 120)}": ${(productSpec?.architecture ?? "").slice(0, 400)}`,
+          payload: {
+            persona: productSpec?.persona ?? null,
+            mvp: productSpec?.mvp ?? [],
+            sprintEstimate: productSpec?.sprintEstimate ?? null,
+          },
+        });
+
         // C-v2 — debate + scoping are done and the spec is persisted, so the
         // cross-session resume inputs are obsolete (the checkpoint was already
         // deleted by runDebate on completion). Clean them up so a later
         // `/ideal resume` of this run does not re-enter the debate FSM.
         await deleteDebateInputs(runDir);
+
+        // Hierarchy index — place this run under a milestone (the product idea)
+        // and a phase (this scoped iteration). Idempotent across resume; purely
+        // an index over runs/, never rewrites run artifacts or ROADMAP phases.
+        try {
+          const mvpHead = Array.isArray(productSpec?.mvp) && productSpec!.mvp.length > 0 ? productSpec!.mvp[0] : "";
+          await ensureRunScoped(
+            ctx.flowDir,
+            {
+              runId: ctx.runId,
+              milestoneTitle: clampTitle(ctx.idea, 60),
+              milestoneGoal: (productSpec?.architecture ?? "").slice(0, 200),
+              phaseTitle: clampTitle(mvpHead || ctx.idea, 50),
+              phaseGoal: (productSpec?.persona ?? "").slice(0, 200),
+            },
+            new Date().toISOString(),
+          );
+        } catch {
+          /* non-critical — hierarchy is an index; failure must not block scoping */
+        }
 
         // P8 - derive tasks.json from the spec (canonical machine-readable
         // surface for downstream /execute consumption). MVP items get

@@ -8,6 +8,7 @@ import {
   __setArtifactCacheDiskPathForTests,
   __setArtifactCacheMaxForTests,
   appendArtifactToDisk,
+  findArtifactByHint,
   findArtifactByQuery,
   findArtifactOnDisk,
   flushArtifactDiskWrites,
@@ -45,6 +46,24 @@ describe("artifact-cache (in-memory tier — durable rehydrate when EE is down)"
     expect(findArtifactByQuery("tool-artifact  ID = abc123")?.content).toBe("GREP HITS"); // spacing/case
     expect(findArtifactByQuery("tool-artifact id=nope")).toBeNull(); // not cached
     expect(findArtifactByQuery("no id here")).toBeNull(); // no id=
+  });
+
+  it("findArtifactByHint (B — cheap-model malformed id) matches by file path when the exact id fails", () => {
+    // Cheap model passed file paths instead of the opaque toolCallId (observed
+    // live: `tool-artifact id=src/todo.js src/cli.js …`). The batch read_file
+    // artifact carries each file's `[<path>: lines …]` header.
+    recordArtifact("call_00_abc", "read_file", "[src/todo.js: lines 1-40 of 40]\n1 | export const x = 1");
+    // Exact id lookup fails (extractArtifactId can't parse a path) …
+    expect(findArtifactByQuery("tool-artifact id=src/todo.js src/cli.js")).toBeNull();
+    // … but the path-hint fallback recovers it.
+    const hit = findArtifactByHint("tool-artifact id=src/todo.js src/cli.js");
+    expect(hit?.toolCallId).toBe("call_00_abc");
+    expect(hit?.content).toContain("export const x = 1");
+    // A hint with no path-like token never fuzzy-matches unrelated content.
+    expect(findArtifactByHint("tool-artifact id=totallyUnknownOpaqueId")).toBeNull();
+    // Newest matching artifact wins when two reference the same path.
+    recordArtifact("call_01_def", "read_file", "[src/todo.js: lines 1-2 of 2]\nNEWER CONTENT");
+    expect(findArtifactByHint("tool-artifact id=src/todo.js")?.toolCallId).toBe("call_01_def");
   });
 
   it("evicts the oldest entries past the LRU cap; re-recording refreshes recency", () => {

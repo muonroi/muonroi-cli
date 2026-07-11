@@ -154,6 +154,159 @@ export function loadTranscript(sessionId: string): ModelMessage[] {
   return loadTranscriptState(sessionId).messages;
 }
 
+interface ChainMessageRecord {
+  sessionId: string;
+  message: ModelMessage;
+  seq: number | null;
+  timestamp: Date;
+}
+
+/**
+ * Resume a session together with every session in its conversation tree.
+ *
+ * When a session has spawned child sessions (silent rotations, sub-agents,
+ * sub-sessions), resuming only the parent loses the work that happened in the
+ * children. This loader walks up to the root and then down through all
+ * descendants, applies each session's own compaction, merges the messages
+ * chronologically, and returns them as one flat transcript for the model.
+ *
+ * Sequence numbers from sessions other than the one being resumed are replaced
+ * with `null` so that usage attribution and compaction still belong to the
+ * resumed session.
+ */
+export function loadSessionChainTranscriptState(sessionId: string): LoadedTranscriptState {
+  const chain = getSessionChain(sessionId);
+  if (chain.length <= 1) {
+    return loadTranscriptState(sessionId);
+  }
+
+  const records: ChainMessageRecord[] = [];
+  for (const sid of chain) {
+    const rows = loadMessageRows(sid);
+    const messages = rows.map((row) => JSON.parse(row.message_json) as ModelMessage);
+    const seqs = rows.map((row) => row.seq);
+    const timestamps = rows.map((row) => new Date(row.created_at));
+    const effective = buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sid));
+
+    for (let i = 0; i < effective.messages.length; i++) {
+      records.push({
+        sessionId: sid,
+        message: effective.messages[i],
+        seq: effective.seqs[i],
+        timestamp: effective.timestamps[i],
+      });
+    }
+  }
+
+  // getSessionChain already orders sessions by creation time. Preserve each
+  // session's internal effective-transcript order (especially compaction
+  // summaries, which must precede their kept tail) instead of re-sorting by
+  // individual message timestamps.
+  return {
+    messages: records.map((r) => r.message),
+    seqs: records.map((r) => (r.sessionId === sessionId ? r.seq : null)),
+    timestamps: records.map((r) => r.timestamp),
+    compaction: loadLatestCompaction(sessionId),
+  };
+}
+
+/**
+ * One node of the session tree that a single resumed TUI hosts: the root
+ * conversation plus every rotation / sub-agent descendant. Powers the rail's
+ * "Sessions" block so the multi-session structure is visible after resume
+ * (the message content is already merged by loadSessionChainTranscriptState;
+ * this exposes WHICH sessions produced it).
+ */
+export interface SessionChainNode {
+  id: string;
+  kind: "conversation" | "rotation" | "subagent" | null;
+  model: string | null;
+  status: string | null;
+  messageCount: number;
+  parentId: string | null;
+  /** Tree depth: 0 = root, 1 = direct child, … (for indented rendering). */
+  depth: number;
+  /** True for the node whose id was passed to resume (the "current" session). */
+  isCurrent: boolean;
+}
+
+/**
+ * Enumerate the full session chain (root + all descendants) with per-session
+ * metadata, ordered root-first then by creation time. Read-only; safe to call
+ * on every render. Returns a single-node array for a session with no children.
+ */
+export function getSessionChainInfos(sessionId: string): SessionChainNode[] {
+  const chain = getSessionChain(sessionId);
+  if (chain.length === 0) return [];
+  const db = getDatabase();
+  const placeholders = chain.map(() => "?").join(",");
+  let rows: Array<{
+    id: string;
+    parent_session_id: string | null;
+    kind: string | null;
+    model: string | null;
+    status: string | null;
+    created_at: string;
+    msgs: number;
+  }> = [];
+  try {
+    rows = db
+      .prepare(`
+        SELECT s.id, s.parent_session_id, s.kind, s.model, s.status, s.created_at,
+               (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS msgs
+        FROM sessions s
+        WHERE s.id IN (${placeholders})
+      `)
+      .all(...chain) as typeof rows;
+  } catch (err) {
+    logger.error("storage", "getSessionChainInfos query failed", {
+      sessionId,
+      message: (err as Error)?.message,
+    });
+    return [];
+  }
+
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const depthOf = (id: string): number => {
+    let depth = 0;
+    let cur: string | undefined = id;
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur)) {
+      seen.add(cur);
+      const parent: string | null = byId.get(cur)?.parent_session_id ?? null;
+      // Only count parents that are inside this chain (the walk-up root has none).
+      if (parent && byId.has(parent)) {
+        depth++;
+        cur = parent;
+      } else {
+        break;
+      }
+    }
+    return depth;
+  };
+
+  const nodes: SessionChainNode[] = chain
+    .map((id) => byId.get(id))
+    .filter((r): r is NonNullable<typeof r> => r !== undefined)
+    .map((r) => ({
+      id: r.id,
+      kind: (r.kind as SessionChainNode["kind"]) ?? null,
+      model: r.model,
+      status: r.status,
+      messageCount: r.msgs,
+      parentId: r.parent_session_id,
+      depth: depthOf(r.id),
+      isCurrent: r.id === sessionId,
+    }));
+
+  // Render order: shallowest first (root → children → grandchildren) so the rail
+  // always shows the parent on top with descendants indented under it. Ties keep
+  // getSessionChain's created_at order. A stable index-carrying sort — chain
+  // created_at can tie at second granularity, so depth is the deterministic key.
+  const chainIndex = new Map(nodes.map((n, i) => [n.id, i]));
+  return nodes.sort((a, b) => a.depth - b.depth || chainIndex.get(a.id)! - chainIndex.get(b.id)!);
+}
+
 export function getNextMessageSequence(sessionId: string): number {
   return getNextSequence(getDatabase(), sessionId);
 }

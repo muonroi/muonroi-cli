@@ -36,7 +36,11 @@ export function formatProjectContextForPrompt(ctx: ProjectContext): string {
     lines.push(`Backend stack: ${lang} / ${fw}${runtime}`);
   }
   if (c.dbStrategy) {
-    lines.push(`Database: ${c.dbStrategy.mode ?? "(unspecified)"} ${c.dbStrategy.engine ?? ""}`.trimEnd());
+    lines.push(
+      c.dbStrategy.mode === "none"
+        ? "Database: none (stateless — no persistent storage)"
+        : `Database: ${c.dbStrategy.mode ?? "(unspecified)"} ${c.dbStrategy.engine ?? ""}`.trimEnd(),
+    );
   }
   if (c.frontendApproach) {
     const harness = c.frontendApproach.agentHarness

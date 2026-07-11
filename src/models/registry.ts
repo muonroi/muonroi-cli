@@ -64,7 +64,21 @@ export function getModelIds(): string[] {
 }
 
 export function getModelInfo(idOrAlias: string): ModelInfo | undefined {
-  return MODELS.find((m) => m.id === idOrAlias || m.aliases?.includes(idOrAlias));
+  const direct = MODELS.find((m) => m.id === idOrAlias || m.aliases?.includes(idOrAlias));
+  if (direct) return direct;
+  // Gateway-prefix fallback: some routers/persisted configs prefix the model
+  // id with the gateway they came through (e.g. "opencode/deepseek-v4-flash",
+  // "deepseek-ai/DeepSeek-V4-Flash"). The native provider API rejects the
+  // prefixed form. Retry with the last path segment so the canonical catalog
+  // entry (and its provider) still resolves instead of leaking a dead id to
+  // runtime. Only matches when the stripped segment is a real catalog id/alias,
+  // so a non-catalog id still returns undefined (no false positives).
+  const slash = idOrAlias.lastIndexOf("/");
+  if (slash >= 0 && slash < idOrAlias.length - 1) {
+    const tail = idOrAlias.slice(slash + 1);
+    return MODELS.find((m) => m.id === tail || m.aliases?.includes(tail));
+  }
+  return undefined;
 }
 
 export function normalizeModelId(idOrAlias: string): string {
@@ -80,6 +94,11 @@ export function getEffectiveReasoningEffort(
   const info = getModelInfo(modelId);
   if (!info?.reasoning) return undefined;
   return requestedEffort;
+}
+
+/** Returns true if the resolved model has built-in reasoning / extended thinking. */
+export function isReasoningModel(modelId: string): boolean {
+  return getModelInfo(modelId)?.reasoning ?? false;
 }
 
 export function getSupportedReasoningEfforts(modelId: string): ReasoningEffort[] {
@@ -110,6 +129,26 @@ export function getModelByTier(tier: "fast" | "balanced" | "premium", preferProv
 
 export function getModelsForProvider(providerId: string): ModelInfo[] {
   return MODELS.filter((m) => m.provider === providerId);
+}
+
+/**
+ * Part E — does this model have NATIVE online web research (its own
+ * web_search/browsing/Live-Search)? Missing flag → false (safe default per the
+ * Kill #6 rule: never infer web capability from the provider).
+ */
+export function modelHasNativeWebResearch(idOrAlias: string): boolean {
+  return getModelInfo(idOrAlias)?.nativeWebResearch === true;
+}
+
+/**
+ * First catalog model with native web research (optionally constrained to a set
+ * of reachable model ids). Used by the council research phase to route the
+ * Researcher stance to a web-capable model. Returns undefined when none exist.
+ */
+export function getWebResearchModel(reachableIds?: ReadonlySet<string>): ModelInfo | undefined {
+  return MODELS.find(
+    (m) => m.nativeWebResearch === true && isTierRoutable(m) && (!reachableIds || reachableIds.has(m.id)),
+  );
 }
 
 export function getFirstCatalogModel(): ModelInfo {

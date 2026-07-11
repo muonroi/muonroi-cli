@@ -17,7 +17,7 @@ const DEFAULT_VISION_PROXY: CatalogVisionProxyRouting = {
   ocr: { provider: "zai", model_id: "glm-4.6v-flash" },
   design: { provider: "zai", model_id: "glm-5.2" },
   fallback_chain: [
-    { provider: "xai", model_id: "grok-build-0.1" },
+    { provider: "xai", model_id: "grok-4.5" },
     { provider: "zai", model_id: "glm-5.2" },
   ],
 };

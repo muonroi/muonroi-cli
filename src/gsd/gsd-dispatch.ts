@@ -1,71 +1,29 @@
-import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { gsdCoreLibDir, loadGsdLib } from "./gsd-runtime.js";
+import { REGISTRY } from "./capability-registry.js";
+import { loadConfig } from "./config-loader.js";
+import { resolveLoopHooks } from "./loop-resolver.js";
+import {
+  nativePhaseAdd,
+  nativePhaseComplete,
+  nativeRoadmapAnalyze,
+  nativeRoadmapPlanProgress,
+} from "./native-roadmap.js";
+import { nativeConfigEnsure, nativeInitProgress, nativeStateJson, nativeStateUpdate } from "./native-state.js";
 import { planningArtifact } from "./paths.js";
 
-const require = createRequire(import.meta.url);
+// Part B step 2 — the `@opengsd/gsd-core` subprocess has been fully removed. Every
+// gsd-tools subcommand muonroi used is now reimplemented natively (see
+// native-state.ts / native-roadmap.ts), so these dispatchers call native code
+// directly. The `dispatch*` names + GsdDispatchResult shape are kept so the
+// existing call sites (phase-sync, workflow-engine, phase-dag, loop-host) are
+// unchanged. Whether the gsd_* workflow is active at all is still gated upstream
+// by isGsdNativeEnabled() (flags.ts); by the time these run, native is the mode.
 
 export interface GsdDispatchResult<T = unknown> {
   ok: boolean;
   data?: T;
   error?: string;
   raw?: string;
-}
-
-/** Resolve gsd-tools binary shipped with @opengsd/gsd-core. */
-export function resolveGsdToolsBin(): string {
-  const pkgJson = require.resolve("@opengsd/gsd-core/package.json");
-  return join(dirname(pkgJson), "gsd-core", "bin", "gsd-tools.cjs");
-}
-
-const PLAIN_TEXT_OK = new Set(["exists", "created", "updated", "ok"]);
-
-function parseJsonStdout(stdout: string): unknown {
-  const trimmed = stdout.trim();
-  if (!trimmed) return null;
-  if (PLAIN_TEXT_OK.has(trimmed.toLowerCase())) {
-    return { status: trimmed.toLowerCase() };
-  }
-  if (/^\d{1,3}$/.test(trimmed)) {
-    return { phaseNumber: trimmed, raw: trimmed };
-  }
-  if (/^\d+\/\d+\s+\w+$/i.test(trimmed)) {
-    return { progress: trimmed, raw: trimmed };
-  }
-  try {
-    return JSON.parse(trimmed) as unknown;
-  } catch (err) {
-    console.error(`[gsd-dispatch] JSON parse failed: ${(err as Error).message}; stdout=${trimmed.slice(0, 200)}`);
-    return { raw: trimmed };
-  }
-}
-
-/**
- * Run gsd-tools subcommand. Always appends --raw for machine-readable JSON when supported.
- * Never throws — returns { ok: false } on failure.
- */
-export function runGsdTools(cwd: string, args: string[], timeoutMs = 30_000): GsdDispatchResult {
-  const bin = resolveGsdToolsBin();
-  const withRaw = args.includes("--raw") ? args : [...args, "--raw"];
-  try {
-    const stdout = execFileSync(process.execPath, [bin, ...withRaw], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: timeoutMs,
-      env: { ...process.env, NODE_NO_WARNINGS: "1" },
-    });
-    const data = parseJsonStdout(stdout);
-    return { ok: true, data, raw: stdout };
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException & { stdout?: string; stderr?: string };
-    const msg = e.stderr?.trim() || e.message || "gsd-tools failed";
-    console.error(`[gsd-dispatch] ${withRaw.join(" ")} failed: ${msg}`);
-    return { ok: false, error: msg, raw: e.stdout };
-  }
 }
 
 export interface LoopHooksEnvelope {
@@ -75,21 +33,21 @@ export interface LoopHooksEnvelope {
   warnings?: string[];
 }
 
-/** gsd-tools loop render-hooks <point> — resolves Capability Registry hooks at a loop point. */
+/** Resolve Capability Registry hooks at a loop point (native in-process). */
 export function dispatchLoopRenderHooks(cwd: string, point: string): GsdDispatchResult<LoopHooksEnvelope> {
-  const result = runGsdTools(cwd, ["loop", "render-hooks", point]);
-  if (!result.ok) return result as GsdDispatchResult<LoopHooksEnvelope>;
-  return { ok: true, data: result.data as LoopHooksEnvelope, raw: result.raw };
+  const native = resolveLoopHooksInProcess(cwd, point);
+  if (!native) return { ok: false, error: `loop render-hooks(${point}) failed` };
+  return { ok: true, data: { point: native.point, activeHooks: native.activeHooks } };
 }
 
-/** gsd-tools init progress — milestone/phase progress JSON. */
+/** Milestone/phase progress JSON (native). */
 export function dispatchInitProgress(cwd: string): GsdDispatchResult {
-  return readThroughCache(cwd, "init.progress", () => runGsdTools(cwd, ["init", "progress"]));
+  return readThroughCache(cwd, "init.progress", () => ({ ok: true, data: nativeInitProgress(cwd) }));
 }
 
-/** gsd-tools config-ensure-section — bootstrap .planning/config.json. */
+/** Bootstrap .planning/ (native — the paired ensurePlanningWorkspace writes the real config). */
 export function dispatchConfigEnsure(cwd: string): GsdDispatchResult {
-  return runGsdTools(cwd, ["config-ensure-section"]);
+  return { ok: true, data: nativeConfigEnsure(cwd) };
 }
 
 // ----- Per-cwd read-through cache for init.progress / state.json -----
@@ -140,9 +98,9 @@ export function invalidateGsdCache(cwd: string): void {
   _dispatchCache.delete(cwd);
 }
 
-/** gsd-tools state update <field> <value> — uses gsd-core state-transition module. */
+/** state update <field> <value> — native STATE.md field replace. */
 export function dispatchStateUpdate(cwd: string, field: string, value: string): GsdDispatchResult {
-  const result = runGsdTools(cwd, ["state", "update", field, value]);
+  const result: GsdDispatchResult = { ok: true, data: nativeStateUpdate(cwd, field, value) };
   // State writes mutate STATE.md → drop cached reads so the next dispatch
   // sees fresh data.
   invalidateGsdCache(cwd);
@@ -168,83 +126,61 @@ export interface PhaseAddResult {
   rawStdout: string;
 }
 
-/** Parse plain-text stdout from `phase add --raw` (e.g. "02"). */
-export function parsePhaseAddStdout(raw: string | undefined): PhaseAddResult | null {
-  if (!raw) return null;
-  const trimmed = raw.trim();
-  const match = trimmed.match(/^(\d{1,3})$/);
-  if (match) return { phaseNumber: match[1]!, rawStdout: trimmed };
-  const data = parseJsonStdout(trimmed);
-  if (data && typeof data === "object" && data !== null && "padded" in data) {
-    const padded = String((data as { padded: unknown }).padded).trim();
-    const m = padded.match(/^(\d{1,3})$/);
-    if (m) return { phaseNumber: m[1]!, rawStdout: trimmed };
-  }
-  return null;
-}
-
-/** gsd-tools phase add <description> — creates .planning/phases/<NN>-<slug>/ */
+/** phase add <description> — creates .planning/phases/<NN>-<slug>/ (native). */
 export function dispatchPhaseAdd(cwd: string, description: string): GsdDispatchResult<PhaseAddResult> {
   const sanitized = description.trim().slice(0, 120);
-  const result = runGsdTools(cwd, ["phase", "add", sanitized]);
-  if (!result.ok) return result as GsdDispatchResult<PhaseAddResult>;
-  const parsed = parsePhaseAddStdout(result.raw ?? String(result.data ?? ""));
-  if (!parsed) {
-    return { ok: false, error: `phase add returned unparseable stdout: ${result.raw?.slice(0, 80)}`, raw: result.raw };
-  }
-  return { ok: true, data: parsed, raw: result.raw };
+  const native = nativePhaseAdd(cwd, sanitized);
+  if ("error" in native) return { ok: false, error: native.error };
+  return { ok: true, data: { phaseNumber: native.padded, rawStdout: native.padded } };
 }
 
-/** gsd-tools phase complete <N> — marks milestone phase done. */
+/** phase complete <N> — marks milestone phase done (native). */
 export function dispatchPhaseComplete(cwd: string, phaseNum: string): GsdDispatchResult {
   const num = phaseNum.replace(/^0+/, "") || phaseNum;
-  return runGsdTools(cwd, ["phase", "complete", num]);
+  const r = nativePhaseComplete(cwd, num);
+  // STATE.md may have changed → drop cached reads.
+  invalidateGsdCache(cwd);
+  if (!r.ok) return { ok: false, error: r.error };
+  return { ok: true, data: r };
 }
 
-/** gsd-tools roadmap update-plan-progress <N> — sync ROADMAP checkboxes. */
+/** roadmap update-plan-progress <N> — sync ROADMAP checkboxes (native). */
 export function dispatchRoadmapPlanProgress(cwd: string, phaseNum: string): GsdDispatchResult {
   const num = phaseNum.replace(/^0+/, "") || phaseNum;
-  return runGsdTools(cwd, ["roadmap", "update-plan-progress", num]);
+  const r = nativeRoadmapPlanProgress(cwd, num);
+  // "no plans" / "ROADMAP missing" are soft (ok:true, updated:false); only
+  // phase-not-found is a hard error.
+  const hardFail = !r.updated && r.reason === `Phase ${num} not found`;
+  return { ok: !hardFail, data: r, raw: r.raw };
 }
 
-/** gsd-tools roadmap analyze — parse ROADMAP.md + disk status. */
+/** roadmap analyze — parse ROADMAP.md + disk status (native, read-only). */
 export function dispatchRoadmapAnalyze(cwd: string): GsdDispatchResult<RoadmapAnalyzeResult> {
-  const result = runGsdTools(cwd, ["roadmap", "analyze"]);
-  if (!result.ok) return result as GsdDispatchResult<RoadmapAnalyzeResult>;
-  return { ok: true, data: result.data as RoadmapAnalyzeResult, raw: result.raw };
+  return { ok: true, data: nativeRoadmapAnalyze(cwd) as unknown as RoadmapAnalyzeResult };
 }
 
-/** gsd-tools state json — frontmatter snapshot. */
+/** state json — frontmatter snapshot (native derivation). */
 export function dispatchStateJson(cwd: string): GsdDispatchResult<Record<string, unknown>> {
-  return readThroughCache(cwd, "state.json", () => {
-    const result = runGsdTools(cwd, ["state", "json"]);
-    if (!result.ok) return result as GsdDispatchResult<Record<string, unknown>>;
-    return { ok: true, data: result.data as Record<string, unknown>, raw: result.raw };
-  }) as GsdDispatchResult<Record<string, unknown>>;
+  return readThroughCache(cwd, "state.json", () => ({
+    ok: true,
+    data: nativeStateJson(cwd),
+  })) as GsdDispatchResult<Record<string, unknown>>;
 }
 
-/** In-process loop hook resolution (no subprocess) — for tests and low-latency paths. */
+/**
+ * In-process loop hook resolution — uses native modules instead of dynamic require().
+ * For tests and low-latency paths. Replaces the old loadGsdLib() approach.
+ */
 export function resolveLoopHooksInProcess(
   cwd: string,
   point: string,
 ): { point: string; activeHooks: Array<Record<string, unknown>> } | null {
   try {
-    const loopResolver = loadGsdLib<{
-      resolveLoopHooks: (args: {
-        point: string;
-        registry: Record<string, unknown>;
-        config: Record<string, unknown>;
-      }) => { point: string; activeHooks: Array<Record<string, unknown>> };
-    }>("loop-resolver");
-    const configLoader = loadGsdLib<{ loadConfig: (c: string) => Record<string, unknown> }>("config-loader");
-    const registry = loadGsdLib<Record<string, unknown>>("capability-registry");
-    const config = configLoader.loadConfig(cwd);
-    return loopResolver.resolveLoopHooks({ point, registry, config, cwd } as {
-      point: string;
-      registry: Record<string, unknown>;
-      config: Record<string, unknown>;
-      cwd: string;
-    });
+    const config = loadConfig(cwd);
+    const resolved = resolveLoopHooks({ point, registry: REGISTRY, config, cwd });
+    // Convert LoopHook[] to the broader array shape for backward compatibility
+    const activeHooks = resolved.activeHooks as unknown as Array<Record<string, unknown>>;
+    return { point: resolved.point, activeHooks };
   } catch (err) {
     console.error(`[gsd-dispatch] resolveLoopHooksInProcess(${point}) failed: ${(err as Error).message}`);
     return null;
@@ -260,7 +196,3 @@ export const PHASE_TO_GSD_STATUS: Record<string, string> = {
   review: "Phase complete",
   debug: "In progress",
 };
-
-export function gsdCoreLibPath(): string {
-  return gsdCoreLibDir();
-}

@@ -27,7 +27,9 @@ import {
   getSubAgentBudgetChars,
   getSubAgentCompactKeepLast,
   getSubAgentCompactThresholdChars,
+  getTopLevelCompactHysteresis,
   getTopLevelCompactKeepLast,
+  getTopLevelCompactTailBudgetChars,
   getTopLevelCompactThresholdChars,
   getTopLevelToolBudgetChars,
   loadUserSettings,
@@ -39,7 +41,9 @@ const ENV_KEYS = [
   "MUONROI_SUBAGENT_COMPACT_KEEP_LAST",
   "MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS",
   "MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST",
+  "MUONROI_TOP_LEVEL_COMPACT_TAIL_BUDGET_CHARS",
   "MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS",
+  "MUONROI_COMPACT_HYSTERESIS",
 ] as const;
 
 const saved: Record<string, string | undefined> = {};
@@ -63,6 +67,18 @@ describe("compaction cap getters — production contract (G4 drift guard)", () =
       expect(getSubAgentCompactKeepLast()).toBe(3);
       expect(getTopLevelCompactThresholdChars()).toBe(200_000);
       expect(getTopLevelCompactKeepLast()).toBe(5);
+    });
+
+    it("compaction hysteresis default 1.15; env override, disable, and clamp", () => {
+      expect(getTopLevelCompactHysteresis()).toBe(1.15);
+      process.env.MUONROI_COMPACT_HYSTERESIS = "1.5";
+      expect(getTopLevelCompactHysteresis()).toBe(1.5);
+      process.env.MUONROI_COMPACT_HYSTERESIS = "0"; // explicit disable → 1.0
+      expect(getTopLevelCompactHysteresis()).toBe(1.0);
+      process.env.MUONROI_COMPACT_HYSTERESIS = "5"; // > 3.0 → default
+      expect(getTopLevelCompactHysteresis()).toBe(1.15);
+      process.env.MUONROI_COMPACT_HYSTERESIS = "0.5"; // < 1.0 (and !=0) → default
+      expect(getTopLevelCompactHysteresis()).toBe(1.15);
     });
 
     it("clamp out-of-range env back to the default", () => {
@@ -207,5 +223,86 @@ describe("compaction fires with the REAL default getter values (G4 behavioural g
     expect(compacted).not.toBe(messages);
     expect(JSON.stringify(compacted).length).toBeLessThan(JSON.stringify(messages).length);
     expect(JSON.stringify(compacted)).toContain("elided by top-level compactor");
+  });
+});
+
+describe("O2 — top-level tail byte-budget getter", () => {
+  it("defaults to 50K chars when env unset", () => {
+    expect(getTopLevelCompactTailBudgetChars()).toBe(50_000);
+  });
+
+  it("scales down to ~20% of a small window", () => {
+    // 40K-token window → 40000 * 4 * 0.2 = 32_000 chars (< 50K default).
+    expect(getTopLevelCompactTailBudgetChars(40_000)).toBe(32_000);
+    // 128K window → min(50K, 102_400) = 50_000.
+    expect(getTopLevelCompactTailBudgetChars(128_000)).toBe(50_000);
+  });
+
+  it("0 disables; out-of-range clamps back to default; valid env wins", () => {
+    process.env.MUONROI_TOP_LEVEL_COMPACT_TAIL_BUDGET_CHARS = "0";
+    expect(getTopLevelCompactTailBudgetChars()).toBe(0);
+    process.env.MUONROI_TOP_LEVEL_COMPACT_TAIL_BUDGET_CHARS = "1000"; // < 20K floor
+    expect(getTopLevelCompactTailBudgetChars()).toBe(50_000);
+    process.env.MUONROI_TOP_LEVEL_COMPACT_TAIL_BUDGET_CHARS = "60000";
+    expect(getTopLevelCompactTailBudgetChars()).toBe(60_000);
+  });
+});
+
+describe("O2 — tailBudgetChars shrinks the verbatim tail on read-heavy, low-fill turns", () => {
+  // 8 tool turns × 20K = ~160K cumulative. Force compaction with an explicit
+  // lower threshold, and NO contextWindowTokens (fill ratio 0) so the G2
+  // fill-shrink stays at keepLast. This isolates the O2 byte-budget path: at
+  // keepLast=5 the tail is ~100K; a 70K budget drops it to keepLast=3 (~60K,
+  // 4 turns ~80K would not fit).
+  const build = () => buildToolTurns(8, 20_000);
+
+  it("without tailBudget: keepLast=5 keeps a large verbatim tail", () => {
+    const compacted = compactSubAgentMessages(build(), {
+      thresholdChars: 80_000,
+      keepLastTurns: 5,
+      label: "top-level",
+    });
+    // 5 verbatim tool results survive un-stubbed.
+    const verbatim = JSON.stringify(compacted).match(/x{20000}/g)?.length ?? 0;
+    expect(verbatim).toBe(5);
+  });
+
+  it("with a 70K tailBudget: keepLast shrinks so fewer verbatim results remain", () => {
+    const noBudget = compactSubAgentMessages(build(), {
+      thresholdChars: 80_000,
+      keepLastTurns: 5,
+      label: "top-level",
+    });
+    const budgeted = compactSubAgentMessages(build(), {
+      thresholdChars: 80_000,
+      keepLastTurns: 5,
+      tailBudgetChars: 70_000,
+      label: "top-level",
+    });
+    const budgetedVerbatim = JSON.stringify(budgeted).match(/x{20000}/g)?.length ?? 0;
+    // 3 results (~60K) fit under 70K; a 4th (~80K) would not → keepLast 5 → 3.
+    expect(budgetedVerbatim).toBe(3);
+    expect(JSON.stringify(budgeted).length).toBeLessThan(JSON.stringify(noBudget).length);
+  });
+
+  it("floors at 2 verbatim turns even under a tiny budget (never breaks pairing)", () => {
+    const budgeted = compactSubAgentMessages(build(), {
+      thresholdChars: 80_000,
+      keepLastTurns: 5,
+      tailBudgetChars: 20_000, // one result already exceeds this
+      label: "top-level",
+    });
+    const verbatim = JSON.stringify(budgeted).match(/x{20000}/g)?.length ?? 0;
+    expect(verbatim).toBe(2);
+  });
+
+  it("tailBudget unset leaves the sub-agent path unchanged", () => {
+    const a = compactSubAgentMessages(build(), { thresholdChars: 80_000, keepLastTurns: 5 });
+    const b = compactSubAgentMessages(build(), {
+      thresholdChars: 80_000,
+      keepLastTurns: 5,
+      tailBudgetChars: 0,
+    });
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
   });
 });

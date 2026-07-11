@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile as writeFsFile } from "fs/promises";
 import os from "os";
 import path from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { editFile, writeFile } from "./file";
+import { editFile, readFiles, writeFile } from "./file";
 
 const summarizeDiagnosticsMock = vi.fn<(diagnostics: unknown) => string>(() => "1 LSP issue · 1 error");
 const syncFileWithLspMock = vi.fn<
@@ -141,6 +141,65 @@ describe("editFile line-ending normalization", () => {
     const result = await editFile("tpl.html", "<li>x</li>", "<li>y</li>", cwd);
     expect(result.success).toBe(false);
     expect(result.output).toContain("not unique");
+  });
+});
+
+describe("readFiles (O1 multi-path batch read)", () => {
+  it("reads multiple files in one call, each with its own header", async () => {
+    const cwd = await createTempDir();
+    await writeFsFile(path.join(cwd, "a.ts"), "export const a = 1;\n", "utf8");
+    await writeFsFile(path.join(cwd, "b.ts"), "export const b = 2;\n", "utf8");
+
+    const result = readFiles(["a.ts", "b.ts"], cwd);
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("[a.ts: lines 1-");
+    expect(result.output).toContain("export const a = 1;");
+    expect(result.output).toContain("[b.ts: lines 1-");
+    expect(result.output).toContain("export const b = 2;");
+  });
+
+  it("caps each file INDEPENDENTLY with an explicit marker — never silently drops a later file", async () => {
+    const cwd = await createTempDir();
+    // Big first file that would blow a whole-result cap and hide the 2nd file
+    // under a naive head/tail truncation.
+    await writeFsFile(path.join(cwd, "big.ts"), "x".repeat(50_000), "utf8");
+    await writeFsFile(path.join(cwd, "small.ts"), "export const kept = true;\n", "utf8");
+
+    const result = readFiles(["big.ts", "small.ts"], cwd, undefined, 4_000);
+    expect(result.success).toBe(true);
+    // big.ts is truncated with an explicit, self-describing marker (not silent).
+    expect(result.output).toContain("chars of big.ts truncated in this batch read");
+    // The SECOND file survives in full — the regression vector the cap must avoid.
+    expect(result.output).toContain("export const kept = true;");
+  });
+
+  it("marks a missing file inline but still returns the other files (partial success)", async () => {
+    const cwd = await createTempDir();
+    await writeFsFile(path.join(cwd, "present.ts"), "export const ok = 1;\n", "utf8");
+
+    const result = readFiles(["present.ts", "ghost.ts"], cwd);
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("export const ok = 1;");
+    expect(result.output).toContain("File not found: ghost.ts");
+  });
+
+  it("marks all read files on the tracker so a later edit is not blocked", async () => {
+    const cwd = await createTempDir();
+    await writeFsFile(path.join(cwd, "a.ts"), "const a = 1;\n", "utf8");
+    await writeFsFile(path.join(cwd, "b.ts"), "const b = 2;\n", "utf8");
+    const { FileTracker } = await import("./file-tracker.js");
+    const tracker = new FileTracker();
+
+    readFiles(["a.ts", "b.ts"], cwd, tracker);
+    // Both files are now readable-before-write; editing b.ts must not be refused.
+    const edit = await editFile("b.ts", "const b = 2;", "const b = 3;", cwd, tracker);
+    expect(edit.success).toBe(true);
+  });
+
+  it("returns failure when no paths are provided", () => {
+    const result = readFiles([], "/tmp");
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("no paths provided");
   });
 });
 

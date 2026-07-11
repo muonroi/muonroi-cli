@@ -388,6 +388,15 @@ export interface EERecallOptions {
   /** Override per-call timeout. Defaults to 15000ms — server bounds recall at ~8s internally; allow margin for embed + 3-leg search + network. */
   timeoutMs?: number;
   signal?: AbortSignal;
+  /**
+   * Council stance/role for per-stance recall weighting (Sprint-2 item 3). The
+   * server weights the recall collections toward the knowledge this stance cares
+   * about (researcher → principles, implementer → behavioral, verifier →
+   * self-QA). Unknown/absent stance is a no-op server-side.
+   */
+  stance?: string;
+  /** Alias for stance; forwarded as body.role. Either resolves the same weights. */
+  role?: string;
 }
 
 // ─── User identity ───────────────────────────────────────────────────────────

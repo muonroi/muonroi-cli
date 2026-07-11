@@ -119,7 +119,7 @@ export type LlmClassifyFn = (prompt: string, opts?: LlmClassifyOptions) => Promi
 
 const LLM_CLASSIFY_TIMEOUT_MS = 2500;
 
-// Reasoning models (grok-4.3, deepseek-v4-flash, gpt-5.x) spend their output
+// Reasoning models (grok-4.5, deepseek-v4-flash, gpt-5.x) spend their output
 // budget on reasoning tokens BEFORE any visible text. The legacy 16-token cap
 // was consumed entirely by reasoning → zero text-delta → parseResponse("") →
 // null → `llm=fail` on every borderline turn (observed 5/5 live grok sessions).

@@ -293,6 +293,22 @@ const EVIDENCE_RULE_FOLLOWUP =
   `Uncited numbers you cannot verify: \`[UNVERIFIED: <claim>]\`.\n`;
 
 /**
+ * Scope discipline (F10). Debate turns are for DIRECTION — a stance, its
+ * reasoning, and a cross-question — not for delivering the work product. Left
+ * unconstrained, models "over-deliver": a researcher opening once emitted a full
+ * `docs/plans/…-implementation-plan.md` with file contents and a
+ * "REQUIRED SUB-SKILL: executing-plans / Which approach?" handoff — the
+ * synthesis stage's job, not a debate turn's. This keeps turns argumentative and
+ * leaves the plan/spec/code to the Leader's synthesis.
+ */
+const DEBATE_SCOPE_RULE =
+  `\n## Scope\n` +
+  `This is a debate about DIRECTION, not an implementation handoff. In your turn do NOT:\n` +
+  `- write out file contents, code files, or a full step-by-step implementation/execution plan;\n` +
+  `- emit task lists, "Final file content:", plan-file templates, or "next steps / which approach?" handoffs.\n` +
+  `Argue your position and its trade-offs; the Leader's synthesis owns the plan and any artifacts.\n`;
+
+/**
  * Length discipline injected into every debate turn (F13 token-thrift). The
  * debate-turn ceilings are generous (4096-6144 maxTokens) and reasoning models
  * left unbounded emit ~400-600 words/turn — ~17 turns/debate is token-heavy and
@@ -381,6 +397,7 @@ export function buildOpeningPrompt(ctx: {
       focusLine +
       buildLanguageRule(ctx.language) +
       EVIDENCE_RULE_OPENING +
+      DEBATE_SCOPE_RULE +
       concisenessRule(220) +
       (stackLock ? `\n${stackLock}\n` : "") +
       guardrails +
@@ -417,6 +434,7 @@ export function buildResponsePrompt(ctx: {
       `This is a working session between peers — candid, specific, zero diplomacy theater.\n` +
       buildLanguageRule(ctx.language) +
       EVIDENCE_RULE_RESPONSE +
+      DEBATE_SCOPE_RULE +
       concisenessRule(160) +
       (stackLock ? `\n${stackLock}\n` : "") +
       `\n## Discussion Brief\n` +
@@ -455,8 +473,15 @@ export function buildFollowupPrompt(ctx: {
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
   const stackLock = buildStackLockSection(ctx.spec);
   return {
+    // Cache-prefix stability (see project_cache_prefix_stability): every clause
+    // here depends ONLY on (speaker, partner, stance, spec, language) — all
+    // stable across rounds — so this `system` string is byte-identical from
+    // round 2..N for the same speaker. The per-round-dynamic bits (round number,
+    // running summary) MUST live in the `prompt` tail below, never here: a
+    // provider prompt-cache keys on the exact prefix, and the round number used
+    // to sit in the FIRST sentence, busting the cached prefix every round.
     system:
-      `You are the "${me.label}" (lens: ${me.lens}) continuing a discussion (round ${ctx.round}) with the "${them.label}" (lens: ${them.lens}). ` +
+      `You are the "${me.label}" (lens: ${me.lens}) continuing a discussion with the "${them.label}" (lens: ${them.lens}). ` +
       `The easy points are settled; what remains is the hard residue — spend your words only there.\n` +
       buildLanguageRule(ctx.language) +
       EVIDENCE_RULE_FOLLOWUP +
@@ -464,9 +489,6 @@ export function buildFollowupPrompt(ctx: {
       (stackLock ? `\n${stackLock}\n` : "") +
       `\n` +
       ongoingContextBlock(ctx.spec) +
-      (ctx.runningSummary
-        ? `## Discussion State So Far\n${ctx.runningSummary}\n\nFocus on UNRESOLVED points only. Restating agreed positions is dead weight — the summary above already holds them.\n\n`
-        : "") +
       `## Success Criteria (what we need to resolve)\n` +
       ctx.spec.successCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n") +
       `\n\n` +
@@ -476,10 +498,17 @@ export function buildFollowupPrompt(ctx: {
       `- If you have genuinely converged, declare it in one sentence and stop arguing\n\n` +
       `Stay in your lane — your lens, not theirs. ` +
       `Be concise. End with: do you agree on where we've landed?\n\n` +
+      `When a "Discussion State So Far" summary is present in the message below, ` +
+      `focus on UNRESOLVED points only — restating agreed positions is dead weight.\n\n` +
       `Do NOT include round numbers (e.g. "Round N", "Response Round 2", "Round 4") ` +
       `or any numeric counter referring to the discussion round in your output. ` +
       `The orchestrator already prints round headers above your response.`,
+    // Per-round dynamic content lives here so the `system` prefix above stays
+    // cacheable. The first user message already changes every round (partner's
+    // latest response differs), so nothing cacheable is lost by placing the
+    // round number / running summary here.
     prompt:
+      (ctx.runningSummary ? `## Discussion State So Far\n${ctx.runningSummary}\n\n` : "") +
       (ctx.speakerLastPosition ? `Your previous position:\n${ctx.speakerLastPosition}\n\n` : "") +
       `Their latest (${them.label}):\n${ctx.partnerPosition}`,
   };
@@ -802,18 +831,23 @@ export function buildSynthesisPrompt(ctx: {
     `decision each warrant DIFFERENT follow-ups. A fixed "accept / research / apply" menu is wrong. ` +
     `Choose 2-4 actions from this fixed vocabulary, ordered best-first (index 0 = your recommended ` +
     `default), writing each label/reason in the user's native language:\n` +
-    `  - "continue_session" → hand the trusted conclusion back to the session so the agent keeps ` +
-    `working on the ORIGINAL task with this debate as context. The right default for a pure ` +
-    `discussion / hard-problem debate whose deliverable is the conclusion itself.\n` +
-    `  - "ask_followup"  → user poses a sharper question re-using this debate's context (freetext)\n` +
-    `  - "generate_plan" → turn this outcome into concrete executable steps and start a sprint\n` +
-    `  - "implement"     → begin executing an already-produced plan now\n` +
-    `  - "save_exit"     → the analysis IS the deliverable; save it and stop here\n` +
-    `Rules: offer "generate_plan"/"implement" ONLY when acting on the outcome means writing code ` +
-    `(e.g. an implementation_plan, or a bug investigation ready to be fixed). For a debate that just ` +
-    `worked through a hard problem, lead with "continue_session" so the agent carries the conclusion ` +
-    `forward. For a pure evaluation or decision whose deliverable is the analysis, prefer ` +
-    `"continue_session"/"save_exit" and "ask_followup". Always include an escape ("save_exit" or ` +
+    `  - "implement" → the conclusion is ready to BUILD. Offer this whenever acting on the outcome ` +
+    `means changing code — INCLUDING a decision to refactor / remove / add. The conclusion itself is ` +
+    `the spec (no separate plan artifact needed); picking it loads that spec and carries it out ` +
+    `through the normal workflow (plan → change → verify). Make it the recommended default (index 0) ` +
+    `when the debate converged on a concrete, buildable decision. Label it with the ACTION (e.g. ` +
+    `"Triển khai …" / "Implement …"), never "continue".\n` +
+    `  - "continue_session" → return to the composer WITHOUT building. The user keeps DISCUSSING with ` +
+    `this debate as context (their next message inherits the conclusion automatically). The right ` +
+    `default for a pure evaluation / discussion whose deliverable is the analysis itself, or when the ` +
+    `user should weigh in before any code change. This ALSO covers "ask a follow-up" — do NOT emit a ` +
+    `separate follow-up action.\n` +
+    `  - "save_exit" → the analysis IS the deliverable; save it and stop here.\n` +
+    `Rules: choose from {"implement","continue_session","save_exit"}. Offer "implement" whenever the ` +
+    `outcome is actionable in code (a build decision, an implementation_plan, or a bug investigation ` +
+    `ready to fix) and make it index 0; otherwise lead with "continue_session". NEVER attach an ` +
+    `implementation-flavoured label ("triển khai", "build", "fix now") to "continue_session" — if you ` +
+    `mean build, the action MUST be "implement". Always include an escape ("save_exit" or ` +
     `"continue_session"). Emit each as ` +
     `{"action":"<id>","label":"<short button text>","reason":"<one line: why this fits THIS debate>"}.\n\n` +
     `**Part 2: Human-readable** — after \`---READABLE---\`, write in markdown with these headings (in this order):\n` +

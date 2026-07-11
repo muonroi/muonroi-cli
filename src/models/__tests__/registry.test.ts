@@ -10,8 +10,11 @@ import {
   getProviderPeakHourRule,
   getSupportedReasoningEfforts,
   getVisionProxyRouting,
+  getWebResearchModel,
+  isReasoningModel,
   loadCatalog,
   MODELS,
+  modelHasNativeWebResearch,
   normalizeModelId,
   SWITCH_PROVIDER_ORDER,
 } from "../registry";
@@ -23,6 +26,30 @@ beforeAll(async () => {
 describe("MODELS catalog", () => {
   test("has at least one model", () => {
     expect(MODELS.length).toBeGreaterThan(0);
+  });
+
+  describe("Part E — native web research", () => {
+    test("openai + xai + zai models are web-native; deepseek + opencode-go are not", () => {
+      for (const m of MODELS) {
+        const expected = m.provider === "openai" || m.provider === "xai" || m.provider === "zai";
+        expect(modelHasNativeWebResearch(m.id)).toBe(expected);
+      }
+    });
+
+    test("getWebResearchModel returns a web-native routable model", () => {
+      const m = getWebResearchModel();
+      expect(m).toBeDefined();
+      expect(m!.nativeWebResearch).toBe(true);
+    });
+
+    test("getWebResearchModel honors a reachable-id constraint", () => {
+      const webNative = MODELS.filter((m) => m.nativeWebResearch === true);
+      const only = new Set([webNative[0]!.id]);
+      expect(getWebResearchModel(only)?.id).toBe(webNative[0]!.id);
+      // No web-native model reachable → undefined (drives degraded confidence).
+      const deepseekOnly = new Set(MODELS.filter((m) => m.provider === "deepseek").map((m) => m.id));
+      expect(getWebResearchModel(deepseekOnly)).toBeUndefined();
+    });
   });
 
   test("every model has required fields", () => {
@@ -68,6 +95,29 @@ describe("getModelInfo", () => {
   test("returns undefined for unknown model", () => {
     expect(getModelInfo("nonexistent-model")).toBeUndefined();
   });
+
+  test("resolves a dropped id via successor alias (grok-build-0.1)", () => {
+    // grok-build-0.1 was dropped from the catalog (commit b50f1c60) in favor of
+    // Composer 2.5; the alias keeps old sessions/configs resolvable to the right
+    // provider instead of throwing "not found in catalog".
+    const info = getModelInfo("grok-build-0.1");
+    expect(info).toBeDefined();
+    expect(info!.id).toBe("grok-composer-2.5-fast");
+    expect(info!.provider).toBe("xai");
+  });
+
+  test("resolves a gateway-prefixed id by stripping the prefix", () => {
+    // A router/persisted id may carry a gateway prefix the native API rejects
+    // (e.g. "deepseek-ai/deepseek-v4-flash"). When the prefixed form is not a
+    // catalog id/alias but the tail is, the tail resolves.
+    const info = getModelInfo("deepseek-ai/deepseek-v4-flash");
+    expect(info).toBeDefined();
+    expect(info!.id).toBe("deepseek-v4-flash");
+  });
+
+  test("prefix fallback still returns undefined for a non-catalog tail", () => {
+    expect(getModelInfo("some-gateway/totally-made-up")).toBeUndefined();
+  });
 });
 
 describe("normalizeModelId", () => {
@@ -98,6 +148,28 @@ describe("getSupportedReasoningEfforts", () => {
   test("returns efforts for reasoning-capable model", () => {
     const efforts = getSupportedReasoningEfforts("deepseek-v4-flash");
     expect(efforts.length).toBeGreaterThan(0);
+  });
+});
+
+describe("isReasoningModel", () => {
+  test("returns true for reasoning models", () => {
+    const reasoning = MODELS.find((m) => m.reasoning);
+    expect(reasoning).toBeDefined();
+    expect(isReasoningModel(reasoning!.id)).toBe(true);
+    // Also exercise alias resolution and known IDs if present in the loaded catalog.
+    if (getModelInfo("deepseek-v4-flash")) {
+      expect(isReasoningModel("deepseek-v4-flash")).toBe(true);
+    }
+  });
+
+  test("returns false for non-reasoning models", () => {
+    const nonReasoning = MODELS.find((m) => !m.reasoning);
+    expect(nonReasoning).toBeDefined();
+    expect(isReasoningModel(nonReasoning!.id)).toBe(false);
+  });
+
+  test("returns false for unknown model IDs", () => {
+    expect(isReasoningModel("nonexistent-model")).toBe(false);
   });
 });
 

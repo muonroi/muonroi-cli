@@ -4,7 +4,13 @@
 import type { ModelMessage } from "ai";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { compactSubAgentMessages, cumulativeMessageChars, sliceMessageHistory } from "./subagent-compactor.js";
+import {
+  applyCompactionHysteresis,
+  compactSubAgentMessages,
+  cumulativeMessageChars,
+  initCompactionHysteresisState,
+  sliceMessageHistory,
+} from "./subagent-compactor.js";
 
 function bigText(label: string, kb: number): string {
   const block = `${label}:${"x".repeat(kb * 1000)}`;
@@ -663,27 +669,134 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
       expect(sliced[1].role).toBe("user");
     });
 
-    it("triggers slicing in compactSubAgentMessages when total exceeds 50K and messages count is > 30", () => {
+    it("preserves identity when >30 messages but below threshold (regression: phantom compaction records)", () => {
+      // Regression for session c43cc481a16e: 28 compaction records, 0 elisions.
+      // Root cause: sliceMessageHistory created a new array BEFORE the threshold
+      // check, so even when below threshold the returned array had a different
+      // identity → caller fired recordCompaction falsely.
+      const msgs = buildHistory(35, 1); // 35 turns ≈ 72 messages, ~35K chars
+      const out = compactSubAgentMessages(msgs, {
+        envelopeChars: 60_000, // total ≈ 95K
+        thresholdChars: 200_000, // well above total → below threshold
+      });
+
+      // MUST be strict identity — no phantom compaction
+      expect(out).toBe(msgs);
+    });
+
+    it("triggers slicing when threshold exceeded and messages count is > 30", () => {
       const msgs: ModelMessage[] = [
         { role: "system", content: "system" },
         { role: "user", content: "start" },
       ];
-      // Push 40 messages to exceed 30 messages limit
       for (let i = 0; i < 20; i++) {
         msgs.push({ role: "assistant", content: `helper ${i}` });
         msgs.push({ role: "user", content: `next question ${i}` });
       }
 
-      // Generate a massive envelope size or message content to exceed 50K total chars
       const out = compactSubAgentMessages(msgs, {
-        envelopeChars: 60_000, // force exceeds 50K
-        thresholdChars: 200_000, // high threshold to prevent compaction from running on top
+        envelopeChars: 60_000, // total ≈ 61K
+        thresholdChars: 50_000, // below threshold — compaction warranted
       });
 
-      // The message history should have been sliced (will be much fewer than 42 messages)
-      expect(out.length).toBeLessThan(msgs.length);
+      expect(out.length).toBeLessThanOrEqual(msgs.length);
       expect(out[0].role).toBe("system");
       expect(out[1].role).toBe("user");
     });
+  });
+});
+
+describe("subagent-compactor: applyCompactionHysteresis (O3)", () => {
+  // A user message + N appended tool turns; each "runCompaction" stub returns a
+  // deterministic compacted array (marker) so we can assert freeze/hold/append.
+  const msg = (id: string): ModelMessage => ({ role: "user", content: id }) as ModelMessage;
+  const history = (n: number): ModelMessage[] => Array.from({ length: n }, (_, i) => msg(`m${i}`));
+
+  it("first call over threshold compacts and freezes state", () => {
+    const stripped = history(10);
+    const compactedMarker = [msg("SYS"), msg("STUB")];
+    const r = applyCompactionHysteresis({
+      stripped,
+      currChars: 200_000,
+      hysteresis: 1.15,
+      state: initCompactionHysteresisState(),
+      runCompaction: () => compactedMarker,
+    });
+    expect(r.didRecompact).toBe(true);
+    expect(r.compacted).toBe(compactedMarker);
+    expect(r.state.frozenCompacted).toBe(compactedMarker);
+    expect(r.state.frozenStrippedLen).toBe(10);
+    expect(r.state.lastCompactTriggerChars).toBe(200_000);
+  });
+
+  it("holds the frozen prefix and appends only the new tail within the ceiling", () => {
+    const frozen = [msg("SYS"), msg("STUB")];
+    const state = { frozenCompacted: frozen, frozenStrippedLen: 10, lastCompactTriggerChars: 200_000 };
+    // grew from 10 → 13 messages; chars 210k < 200k*1.15 = 230k → HOLD
+    const stripped = history(13);
+    let ran = false;
+    const r = applyCompactionHysteresis({
+      stripped,
+      currChars: 210_000,
+      hysteresis: 1.15,
+      state,
+      runCompaction: () => {
+        ran = true;
+        return [];
+      },
+    });
+    expect(ran).toBe(false); // did NOT re-run the compactor
+    expect(r.didRecompact).toBe(false);
+    // prefix byte-stable: frozen prefix preserved, only the 3 new tail msgs appended
+    expect(r.compacted.slice(0, 2)).toEqual(frozen);
+    expect(r.compacted.length).toBe(5); // 2 frozen + 3 delta (m10,m11,m12)
+    expect(r.compacted[2]).toEqual(msg("m10"));
+  });
+
+  it("re-compacts once growth passes the hysteresis ceiling", () => {
+    const frozen = [msg("SYS")];
+    const state = { frozenCompacted: frozen, frozenStrippedLen: 10, lastCompactTriggerChars: 200_000 };
+    const stripped = history(20);
+    const recompacted = [msg("SYS2")];
+    // 240k > 200k*1.15 = 230k → RE-COMPACT
+    const r = applyCompactionHysteresis({
+      stripped,
+      currChars: 240_000,
+      hysteresis: 1.15,
+      state,
+      runCompaction: () => recompacted,
+    });
+    expect(r.didRecompact).toBe(true);
+    expect(r.compacted).toBe(recompacted);
+    expect(r.state.frozenCompacted).toBe(recompacted);
+    expect(r.state.lastCompactTriggerChars).toBe(240_000);
+  });
+
+  it("hysteresis <= 1.0 disables freeze — always recompacts, never stores state", () => {
+    const stripped = history(10);
+    const marker = [msg("C")];
+    const r = applyCompactionHysteresis({
+      stripped,
+      currChars: 200_000,
+      hysteresis: 1.0,
+      state: initCompactionHysteresisState(),
+      runCompaction: () => marker,
+    });
+    expect(r.compacted).toBe(marker);
+    expect(r.state.frozenCompacted).toBeNull(); // no freeze
+  });
+
+  it("under threshold (compactor no-op returns same ref) does not freeze", () => {
+    const stripped = history(4);
+    const r = applyCompactionHysteresis({
+      stripped,
+      currChars: 50_000,
+      hysteresis: 1.15,
+      state: initCompactionHysteresisState(),
+      runCompaction: () => stripped, // no-op: returns same reference
+    });
+    expect(r.didRecompact).toBe(false);
+    expect(r.compacted).toBe(stripped);
+    expect(r.state.frozenCompacted).toBeNull();
   });
 });

@@ -142,7 +142,7 @@ describe("redactEvent — council-turn-length (safe fields pass through)", () =>
       round: 2,
       charCount: 1234,
       wordCount: 210,
-      model: "grok-4.3",
+      model: "grok-4.5",
       correlationId: "sess-abc",
     };
     const out = redactEvent(e) as Extract<LiveEvent, { kind: "council-turn-length" }>;
@@ -150,7 +150,7 @@ describe("redactEvent — council-turn-length (safe fields pass through)", () =>
     expect(out.round).toBe(2);
     expect(out.charCount).toBe(1234);
     expect(out.wordCount).toBe(210);
-    expect(out.model).toBe("grok-4.3");
+    expect(out.model).toBe("grok-4.5");
     expect(out.correlationId).toBe("sess-abc");
   });
 

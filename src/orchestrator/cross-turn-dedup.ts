@@ -38,6 +38,12 @@ export interface CrossTurnDedupEntry {
   firstSeenTurn: number;
   /** Tool name that originally produced the content (for the stub). */
   firstSeenToolName: string;
+  /**
+   * Number of SAME-TURN repeat calls seen for this content (0 until the first
+   * in-turn re-call). Used to re-serve content once before hard-stopping a
+   * loop — see the same-turn branch of maybeDedup.
+   */
+  sameTurnRepeats: number;
 }
 
 export interface CrossTurnDedupStats {
@@ -111,10 +117,31 @@ export class CrossTurnDedup {
     const hash = shortHash(raw);
     const existing = this.cache.get(hash);
     if (existing) {
-      this.hits += 1;
       // Refresh LRU position so frequently-reused outputs survive eviction.
       this.cache.delete(hash);
       this.cache.set(hash, existing);
+
+      const thisTurn = this.currentTurn || 1;
+      const sameTurnLoop = existing.firstSeenTurn === thisTurn;
+      if (sameTurnLoop) {
+        // O1/O2 fix — a re-call of identical content WITHIN the same turn is a
+        // model loop, not genuine cross-turn reuse. A cheap model (kimi /
+        // deepseek) that re-issues the same read usually did so because it did
+        // NOT retain the earlier result; a bare "reuse" stub then triggers a
+        // WORSE fallback — it re-reads each file singly, inflating fresh input
+        // (measured: batch read → stub → stub → 4 single reads). Re-serve the
+        // content ONCE (passthrough) to satisfy the loop, then hard-stop on any
+        // further in-turn repeat so an infinite loop stays bounded.
+        existing.sameTurnRepeats += 1;
+        if (existing.sameTurnRepeats === 1) return null;
+        this.hits += 1;
+        return `[${existing.firstSeenToolName} already returned this EXACT result ${existing.sameTurnRepeats + 1}× this turn — it is unchanged and already in the context above. STOP re-calling it; answer from the result you already have.]`;
+      }
+
+      // Genuine cross-turn reuse (C3): the user prompted again and the agent
+      // re-ran an identical read. The model is not looping, so the short stub
+      // is the right, token-saving behavior.
+      this.hits += 1;
       // G3 — short marker. Old format was ~110 chars; this is ~45.
       return `[dup of ${existing.firstSeenToolName} from turn ${existing.firstSeenTurn} — reuse]`;
     }
@@ -123,6 +150,7 @@ export class CrossTurnDedup {
       content: raw,
       firstSeenTurn: this.currentTurn || 1,
       firstSeenToolName: toolName,
+      sameTurnRepeats: 0,
     });
     this.inserts += 1;
     while (this.cache.size > this.maxEntries) {

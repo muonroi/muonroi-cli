@@ -75,7 +75,7 @@ import type {
 } from "../hooks/types";
 import { acquireMcpTools } from "../mcp/client-pool";
 import { dropRedundantFsMcpTools, filterMcpServersByMessage } from "../mcp/smart-filter";
-import { getModelInfo } from "../models/registry.js";
+import { getModelInfo, isReasoningModel } from "../models/registry.js";
 import {
   cheapModelShellLine,
   injectCheapModelPlaybook,
@@ -93,7 +93,7 @@ import {
   runPipeline,
   shouldHaltOnResponseTool,
 } from "../pil/index.js";
-import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
+import { isMetaAnalysisPrompt, isSprintPlanExecution } from "../pil/layer6-output.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
 import { mentionsEcosystemScope } from "../playbook/directives.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
@@ -143,10 +143,13 @@ import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/pe
 import {
   getAutoCouncilConfidence,
   getAutoCouncilMinRoles,
+  getProviderProgressTimeoutMs,
   getProviderStallRetries,
   getProviderStallTimeoutMs,
   getSteerInjectionEnabled,
+  getTopLevelCompactHysteresis,
   getTopLevelCompactKeepLast,
+  getTopLevelCompactTailBudgetChars,
   getTopLevelCompactThresholdChars,
   getTopLevelToolBudgetChars,
   isAutoCouncilClarifyEnabled,
@@ -155,10 +158,12 @@ import {
   loadMcpServers,
   loadValidSubAgents,
 } from "../utils/settings";
+import { isAutoCouncilSkipReasoning } from "../utils/settings.js";
 import { resolveShell } from "../utils/shell.js";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
 import { foldDynamicTailIntoUserMessage, splitFrontAndDynamicTail } from "./cache-prefix.js";
+import { consumeProactiveCompact } from "./compact-request.js";
 import { relaxCompactionSettings } from "./compaction";
 import type { CouncilManager } from "./council-manager.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
@@ -223,15 +228,46 @@ import {
 } from "./stall-watchdog.js";
 import { planSteerInjection } from "./steer-inbox.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
-import { applyAnthropicPromptCaching, compactSubAgentMessages, cumulativeMessageChars } from "./subagent-compactor.js";
+import {
+  applyAnthropicPromptCaching,
+  applyCompactionHysteresis,
+  compactSubAgentMessages,
+  cumulativeMessageChars,
+  initCompactionHysteresisState,
+} from "./subagent-compactor.js";
 import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
-import { shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
+import { getToolLimitAutoRecoverCap, shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 import {
   buildToolRepetitionAbortMessage,
   recordToolError as recordToolRepetitionError,
   recordToolSuccess as recordToolRepetitionSuccess,
 } from "./tool-repetition-detector.js";
+
+/**
+ * Resolve the per-turn `maxOutputTokens` budget.
+ *
+ * Normally the budget is derived from the PIL-classified `taskType`
+ * (`taskTypeToMaxTokens`). But a sprint IMPLEMENTATION turn — the /ideal
+ * loop's handoff into the host orchestrator via `processMessageFn`, marked
+ * with `SPRINT_EXECUTION_MARKER` — is a KNOWN code-writing task that must not
+ * be starved by a noisy classify. Observed live (2026-07-10, gsd-core
+ * migration): the impl prompt was classified `analyze`/default → capped at
+ * 4_096 output → the model spent the whole budget narrating its plan, hit
+ * `finishReason:"length"` mid-word, produced ZERO code, and the turn wedged.
+ *
+ * Fix: for a sprint-execution turn, floor the budget at the build/generate
+ * tier (12_288) regardless of the classified type. Scoped to the marker only
+ * (NOT the broad `isImplementationIntent`) so ordinary refactor/debug turns
+ * keep their intentionally tighter L6 budgets.
+ */
+export function resolveTurnMaxOutputTokens(pilCtx: { taskType: string | null; raw?: string }): number {
+  const base = taskTypeToMaxTokens(pilCtx.taskType);
+  if (isSprintPlanExecution(pilCtx.raw ?? "")) {
+    return Math.max(base, taskTypeToMaxTokens("build"));
+  }
+  return base;
+}
 
 /**
  * F2 — approximate the char cost of the FIXED prompt envelope (system +
@@ -567,9 +603,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // the history and keep going instead of stopping and asking the user
   // to /compact. Turn-scoped (not per-stream-attempt) so a stream-error
   // retry or stall reprompt (`continue streamAttempt`) cannot reset the
-  // counter and exceed the intended cap of 2 auto-compactions per turn.
+  // counter and exceed the intended cap of auto-compactions per turn
+  // (default 6, env MUONROI_TOOL_LIMIT_AUTO_RECOVER_CAP).
   let toolLimitAutoRecoverCount = 0;
-  const TOOL_LIMIT_AUTO_RECOVER_CAP = 2;
+  const TOOL_LIMIT_AUTO_RECOVER_CAP = getToolLimitAutoRecoverCap();
   let stallTriggered = false;
   // Time-to-first-byte stall RE-PROMPT: some providers (observed:
   // xai/grok-build-0.1) accept the request then never send the first byte —
@@ -599,6 +636,11 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // the turn when exceeded.  Prevents the session 526a83cf22df pattern
   // where 3 user messages burnt 82% of 2.44M tokens in 36 LLM calls.
   let llmCallsThisTurn = 0;
+
+  // Reactive delegation signal: reference to the top-level cap's live state so
+  // this turn's cumulative tool-output load can be reported to the Agent at
+  // turn end (drives next-turn sub-session escalation). See reactive-delegation.ts.
+  let _topLevelCapState: { cumulative: number } | null = null;
 
   // Live-queue steering: messages the user typed mid-turn are drained at a
   // prepareStep boundary and accumulated here, then re-appended (deduped) to
@@ -640,6 +682,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       : (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
   const autoCouncilConfidence = getAutoCouncilConfidence();
   const autoCouncilMinRoles = getAutoCouncilMinRoles();
+  const sessionModelIsReasoning = isReasoningModel(deps.modelId);
+  const skipReasoningSetting = isAutoCouncilSkipReasoning();
   const _complexityFromTrace = (pilCtx as { _intentTrace?: { complexity?: "low" | "medium" | "high" } })._intentTrace
     ?.complexity;
   const _complexityGatePassed =
@@ -649,10 +693,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     autoCouncilTypes.has(pilCtx.taskType) &&
     pilCtx.confidence >= autoCouncilConfidence &&
     _complexityGatePassed;
+  // Skip reasoning-model skip for heavy/complex tasks — they benefit from
+  // multi-role diversity even when the session model already does extended thinking.
+  const shouldSkipForReasoning = sessionModelIsReasoning && skipReasoningSetting && !heavyTier;
   const shouldAutoCouncil =
     !deps.councilManager.isContinuation &&
     isAutoCouncilEnabled() &&
     configuredRoleCount >= autoCouncilMinRoles &&
+    !shouldSkipForReasoning &&
     (taskTypeMatch || heavyTier);
 
   // Always log the auto-council decision (taken or skipped) with the gate
@@ -663,6 +711,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     if (!isAutoCouncilEnabled()) return "feature-disabled";
     if (configuredRoleCount < autoCouncilMinRoles)
       return `role-count<${autoCouncilMinRoles} (have ${configuredRoleCount})`;
+    if (shouldSkipForReasoning)
+      return `reasoning-model=${deps.modelId} (internal self-debate active; skip with MUONROI_AUTOCOUNCIL_SKIP_REASONING=0)`;
     if (!taskTypeMatch && !heavyTier) {
       if (!pilCtx.taskType || !autoCouncilTypes.has(pilCtx.taskType))
         return `taskType=${pilCtx.taskType ?? "null"} not in plan|analyze`;
@@ -690,6 +740,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       autoCouncilConfidence,
       autoCouncilMinRoles,
       heavyTier,
+      sessionModelIsReasoning,
+      skipReasoningSetting,
       isContinuation: deps.councilManager.isContinuation,
     },
   }).catch(() => undefined);
@@ -733,6 +785,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       }
     }
     return;
+  }
+
+  if (shouldSkipForReasoning) {
+    yield {
+      type: "content",
+      content: `\n[Auto-council skipped: ${deps.modelId} is a reasoning model and already performs internal self-debate. Set MUONROI_AUTOCOUNCIL_SKIP_REASONING=0 or autoCouncilSkipReasoning=false to force council.]\n`,
+    };
   }
 
   if (deps.batchApi) {
@@ -1065,6 +1124,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           highTierRatio: 0.8,
           label: "top-level",
         });
+        // Expose the cap state so the reactive-delegation signal can read this
+        // turn's cumulative tool load at turn end (see report at success exit).
+        _topLevelCapState = topLevelCap.state;
         // Phase C3: layer cross-turn dedup on top of the top-level cap.
         const tools: ToolSet = wrapToolSetWithReadBudget(
           wrapToolSetWithDedup(topLevelCap.tools, deps.crossTurnDedup),
@@ -1347,6 +1409,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // elided the content.
         const topLevelCompactThreshold = getTopLevelCompactThresholdChars(contextWindow);
         const topLevelCompactKeepLast = getTopLevelCompactKeepLast(contextWindow);
+        // O2 — byte budget for the verbatim tail; shrinks keepLast on read-heavy
+        // turns that stay large at low fill (the 60-80k-per-call bucket).
+        const topLevelCompactTailBudget = getTopLevelCompactTailBudgetChars(contextWindow);
+        // O3 — compaction hysteresis state (per-turn; this scope runs once per
+        // streamText turn). Once we compact, freeze the compacted prefix and
+        // only append new messages until size grows past the hysteresis ceiling,
+        // so the provider prompt-cache prefix stays byte-stable across steps
+        // instead of breaking every step as the keepLast boundary slides.
+        const compactHysteresis = getTopLevelCompactHysteresis();
+        let hysteresisState = initCompactionHysteresisState();
         // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
         deps.setLastProviderOptionsShape(
           Object.keys(providerOpts).length > 0 ? extractProviderOptionsShape(providerOpts) : null,
@@ -1394,6 +1466,11 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 const _cw = runtime.modelInfo?.contextWindow ?? 0;
                 if (_cw > 0) {
                   await deps.compactForContext(provider, system, _cw, signal, deps.getCompactionSettings(_cw), false);
+                  // A compacted round resets context to O(N) input (cheap), so the
+                  // hard-cap's cost-runaway purpose is served — grant the turn more
+                  // headroom instead of letting the 1.5× hard ceiling strand a
+                  // genuinely productive long task. Bounded inside the Agent.
+                  deps.extendHardCeilingForAutoCompaction?.();
                 }
               } catch (err) {
                 logger.error("orchestrator", "tool-limit auto-recover compaction failed", {
@@ -1637,9 +1714,31 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // on every chunk via stall.pet(), so it never kills an actively
         // streaming call. Disposed when the stream ends or errors.
         stallTriggered = false;
-        const stall = createStallWatchdog(getProviderStallTimeoutMs(), () => {
-          stallTriggered = true;
-        });
+        // Second timer (progressTimeoutMs) is the no-forward-progress guard.
+        // stall.pet() re-arms the any-activity timer on EVERY chunk — including
+        // a reasoning model's reasoning-delta — so an endless chain-of-thought
+        // keeps it alive and it never fires (observed live 2026-07-10: a
+        // deepseek-v4-flash sub-SESSION churned reasoning 30+ min, 1.4M input
+        // tokens, ZERO text/tool output; the 2-min stall watchdog never tripped).
+        // The progress timer is reset ONLY by stall.petProgress() on real output
+        // (text-delta / tool-call), aborting a runaway-reasoning loop while a
+        // legitimately long reasoning burst that DOES emit output survives.
+        const stall = createStallWatchdog(
+          getProviderStallTimeoutMs(),
+          () => {
+            stallTriggered = true;
+          },
+          {
+            progressTimeoutMs: getProviderProgressTimeoutMs(),
+            onProgressFire: () => {
+              stallTriggered = true;
+              console.error(
+                `[tool-engine] stream aborted: no text/tool output for ${getProviderProgressTimeoutMs()}ms ` +
+                  `(runaway reasoning / no forward progress) model=${runtime.modelId}`,
+              );
+            },
+          },
+        );
         // F3c — hard-cap LLM calls per turn before this streamText()
         if (++llmCallsThisTurn > MAX_LLM_CALLS_PER_TURN) {
           stall.dispose();
@@ -1831,25 +1930,78 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 ? 0.2
                 : 0.3
               : undefined;
-            const compacted = compactSubAgentMessages(stripped, {
-              thresholdChars: topLevelCompactThreshold,
-              // Rec #1 (cheap part): on meta/self-eval turns keep a couple more
-              // trailing tool turns verbatim — those carry the reasoning the
-              // agent is being asked to reflect on, and over-eliding them is
-              // exactly what starves a self-evaluation. One boolean, no new
-              // detection logic (isMetaAnalysisPrompt already gates layer3/5).
-              keepLastTurns: topLevelCompactKeepLast + (isMetaAnalysisPrompt(userMessage) ? 2 : 0),
-              label: "top-level",
-              envelopeChars,
-              contextWindowTokens,
-              contextFillRatio: reasoningFillRatio,
-              keepToolIds: keepToolIds.length ? keepToolIds : undefined,
-              persistArtifact,
-              stripOldReasoning: isReasoningModel,
-            });
+            const runCompaction = (): ModelMessage[] =>
+              compactSubAgentMessages(stripped, {
+                thresholdChars: topLevelCompactThreshold,
+                // Rec #1 (cheap part): on meta/self-eval turns keep a couple more
+                // trailing tool turns verbatim — those carry the reasoning the
+                // agent is being asked to reflect on, and over-eliding them is
+                // exactly what starves a self-evaluation. One boolean, no new
+                // detection logic (isMetaAnalysisPrompt already gates layer3/5).
+                keepLastTurns: topLevelCompactKeepLast + (isMetaAnalysisPrompt(userMessage) ? 2 : 0),
+                label: "top-level",
+                envelopeChars,
+                contextWindowTokens,
+                contextFillRatio: reasoningFillRatio,
+                keepToolIds: keepToolIds.length ? keepToolIds : undefined,
+                persistArtifact,
+                stripOldReasoning: isReasoningModel,
+                tailBudgetChars: topLevelCompactTailBudget,
+              });
+
+            // O3 — compaction hysteresis (holds the frozen compacted prefix
+            // between compactions so the provider prompt-cache prefix stays
+            // byte-stable across steps instead of breaking as the keepLast
+            // boundary slides). See applyCompactionHysteresis.
+            const currChars = cumulativeMessageChars(stripped) + envelopeChars;
+            // Proactive compaction (agent called the `compact` tool). Consume the
+            // one-shot request and FORCE a compaction this step, bypassing the
+            // hysteresis threshold — the agent explicitly asked to shed context,
+            // so a one-time cache-prefix break is the intended trade. Re-seed the
+            // hysteresis state to the fresh compacted prefix so the following
+            // steps hold it steady (no per-step churn) until it grows again.
+            const _proactiveCompact = consumeProactiveCompact();
+            let compacted: ModelMessage[];
+            if (_proactiveCompact) {
+              const _forced = runCompaction();
+              const _didForce = _forced !== stripped;
+              compacted = _forced;
+              hysteresisState = _didForce
+                ? { frozenCompacted: _forced, frozenStrippedLen: stripped.length, lastCompactTriggerChars: currChars }
+                : hysteresisState;
+              if (_didForce) recordCompaction(sn);
+              try {
+                const _arPc = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                  | { emitEvent: (e: unknown) => void }
+                  | undefined;
+                _arPc?.emitEvent({
+                  t: "event",
+                  kind: "toast",
+                  level: "info",
+                  text: _didForce
+                    ? "đã nén ngữ cảnh theo yêu cầu của agent — tiếp tục tác vụ"
+                    : "agent yêu cầu nén nhưng chưa có gì để nén — tiếp tục",
+                });
+              } catch {
+                /* toast best-effort */
+              }
+            } else {
+              const _hyst = applyCompactionHysteresis({
+                stripped,
+                currChars,
+                hysteresis: compactHysteresis,
+                state: hysteresisState,
+                runCompaction,
+              });
+              compacted = _hyst.compacted;
+              hysteresisState = _hyst.state;
+              // Count only ACTUAL (re)compactions, not held-boundary steps — the
+              // compaction counter drives the cache-churn telemetry this fixes.
+              if (_hyst.didRecompact) recordCompaction(sn);
+            }
 
             const coalesced = coalesceReadOnlyMessages(compacted);
-            if (compacted !== stripped) recordCompaction(sn);
+            // (recordCompaction already handled per-branch above.)
             // Pre-compaction visibility: give the agent one step of notice
             // before B4 actually rewrites history into stubs. This is the
             // advance warning that was missing — agent can now decide to
@@ -1886,7 +2038,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   }
                 }
                 if (_total > 0 && _ro === _total && _total <= 2) {
-                  const _b = `[Tool batching: you called ${_total} read-only tool(s) last round. Calling them one-at-a-time wastes tokens and delays results. The SDK supports up to ~12 parallel tool calls. In the NEXT response, emit ALL pending read-only calls (read_file, grep, bash_output_get, etc.) in a SINGLE assistant turn — do NOT sequence them across multiple steps.]`;
+                  // Prefer the SINGLE-CALL multi-path form (read_file file_paths=[…])
+                  // over "parallel tool_calls": a batch of parallel tool_calls is
+                  // reshaped into sequential single-call turns for the kimi/glm/
+                  // deepseek-go cohort (splitParallelToolCalls) — which re-inflates
+                  // history and defeats the batching win. One read_file carrying N
+                  // paths is ONE tool_call → never split → the token cut holds on
+                  // every provider.
+                  const _b = `[Tool batching: you called ${_total} read-only tool(s) one-at-a-time — each extra call re-sends the whole conversation, so N single reads cost O(N²) tokens. To read MULTIPLE files, call read_file ONCE with file_paths=["a","b","c"] — a SINGLE tool_call that no provider splits. For other read-only tools (grep, bash_output_get), emit all pending calls in ONE assistant turn. Do NOT sequence reads across steps.]`;
                   // Attach to `coalesced` (the B4-compacted history), NOT `stripped`:
                   // read-only tools (read_file/grep/…) are exactly what triggers this
                   // reminder, and returning `stripped` here silently discarded the
@@ -1984,7 +2143,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             return withSteers({ messages: coalesced });
           },
           ...resolveTemperatureParam(runtime, 0.7),
-          ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
+          ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: resolveTurnMaxOutputTokens(pilCtx) }),
           ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
           experimental_onStepStart: (event: unknown) => {
             stepNumber = getStepNumber(event, stepNumber + 1);
@@ -2092,8 +2251,24 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             }
           }
 
+          // Terminal part of the ENTIRE multi-step turn (AI SDK v6 emits exactly
+          // one `finish` after every step's `finish-step`; it carries the final
+          // finishReason/totalUsage). onFinish has already run by now (usage
+          // recorded + llm-done emitted, and result.response is resolved), so
+          // there is nothing left to drain. Some providers — observed live:
+          // xai/grok-composer-2.5-fast — emit `finish` but then never CLOSE the
+          // fullStream async iterator, so `for await` would block on the next
+          // `.next()` until the turn watchdog fires (up to MUONROI_TURN_IDLE_MS).
+          // Breaking on `finish` finalizes the turn immediately instead. Safe:
+          // `finish` is strictly last, so this can never truncate a multi-step
+          // turn (per-step boundaries are `finish-step`, handled by fall-through).
+          if (part.type === "finish") {
+            break;
+          }
+
           switch (part.type) {
             case "text-delta":
+              stall.petProgress(); // real forward progress — reset the no-progress guard
               assistantText += part.text;
               // Task 2.6b — emit llm-token (agent-mode only; high-volume, default-off per Phase 4).
               try {
@@ -2128,6 +2303,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               break;
 
             case "tool-call": {
+              stall.petProgress(); // real forward progress — reset the no-progress guard
               const tc = toToolCall(part);
               activeToolCalls.push(tc);
               // SAMR: track that Phase 1 produced tool calls → transition to Phase 2
@@ -3786,6 +3962,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         if (modelInfo?.contextWindow) {
           void deps.postTurnCompact(provider, system, modelInfo.contextWindow, signal).catch(() => {});
         }
+        // Reactive delegation: report this turn's observed tool-output load so
+        // the next turn can escalate to an isolated sub-session when it proves
+        // heavy — independent of the fragile upfront router. See reactive-delegation.ts.
+        deps.reportTurnToolLoad?.(_topLevelCapState?.cumulative ?? 0);
         yield { type: "done" };
         return;
       } catch (err: unknown) {
@@ -3936,6 +4116,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         if (modelInfo?.contextWindow) {
           void deps.postTurnCompact(provider, system, modelInfo.contextWindow, signal).catch(() => {});
         }
+        // Reactive delegation: report this turn's observed tool-output load so
+        // the next turn can escalate to an isolated sub-session when it proves
+        // heavy — independent of the fragile upfront router. See reactive-delegation.ts.
+        deps.reportTurnToolLoad?.(_topLevelCapState?.cumulative ?? 0);
         yield { type: "done" };
         return;
       } finally {

@@ -58,10 +58,14 @@ async function fetchPrinciples(raw: string, budget: number): Promise<string> {
 
 async function fetchFlowState(cwd: string, budget: number): Promise<string> {
   try {
-    const activeRunPath = path.join(cwd, ".muonroi-flow", "active-run");
-    const runId = (await fs.readFile(activeRunPath, "utf8")).trim();
+    // Canonical focus pointer: `state.md` `Active Run` (run-manager). The old
+    // `.muonroi-flow/active-run` file had no writer in src and always read stale
+    // (F8 follow-up: dropped that dead path in favor of the single source).
+    const { getActiveRunId } = await import("../flow/run-manager.js");
+    const flowDir = path.join(cwd, ".muonroi-flow");
+    const runId = await getActiveRunId(flowDir);
     if (!runId) return "";
-    const statePath = path.join(cwd, ".muonroi-flow", "runs", runId, "state.md");
+    const statePath = path.join(flowDir, "runs", runId, "state.md");
     const state = await fs.readFile(statePath, "utf8");
     const phaseLine = state.match(/phase:\s*(.+)/i)?.[1]?.trim() ?? "unknown";
     const statusLine = state.match(/status:\s*(.+)/i)?.[1]?.trim() ?? "unknown";

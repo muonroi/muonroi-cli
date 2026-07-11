@@ -1,6 +1,7 @@
 import { renderCouncilContextBlock } from "./council-context.js";
 import { VERDICT_OUTPUT_CONTRACT } from "./verdict-schema.js";
 import type { VerifyContextBundle } from "./verify-context.js";
+import { renderVerifyGateAxes, type VerifyGateDimensionId } from "./verify-gate-vocabulary.js";
 
 export type VerifyPerspectiveId = "acceptance" | "correctness" | "regression" | "security";
 
@@ -8,6 +9,12 @@ export interface VerifyPerspective {
   id: VerifyPerspectiveId;
   role: string;
   mandate: string;
+  /**
+   * The shared verify-gate axis this perspective primarily owns. Ties the
+   * headless perspective set to the same criteria the interactive verify debate
+   * uses; the full set must cover every VERIFY_GATE_DIMENSION (parity-tested).
+   */
+  dimension: VerifyGateDimensionId;
 }
 
 export const VERIFY_PERSPECTIVES: VerifyPerspective[] = [
@@ -16,23 +23,27 @@ export const VERIFY_PERSPECTIVES: VerifyPerspective[] = [
     role: "acceptance auditor",
     mandate:
       "For EACH acceptance criterion, cite the diff line or evidence that satisfies it. Any criterion without concrete evidence is a concern.",
+    dimension: "acceptance",
   },
   {
     id: "correctness",
     role: "adversarial correctness reviewer",
     mandate:
       "Try to REFUTE that the implementation works. Construct a concrete failing input or state. Default to a concern when uncertain.",
+    dimension: "correctness",
   },
   {
     id: "regression",
     role: "regression reviewer",
     mandate:
       "Identify behavior OUTSIDE the task scope that the diff may have broken (removed guards, changed signatures, side effects).",
+    dimension: "regression",
   },
   {
     id: "security",
     role: "security reviewer",
     mandate: "Path traversal, secret handling, permission changes, dangerous shell patterns introduced by the diff.",
+    dimension: "safety",
   },
 ];
 
@@ -67,6 +78,10 @@ export function buildVerifyPerspectivePrompt(p: VerifyPerspective, bundle: Verif
     "The deterministic test floor has already PASSED. Your job is intent-vs-reality: does the code",
     "actually achieve the plan's goal and acceptance criteria? Tests passing is necessary, not sufficient.",
     "",
+    // Shared gate axes (single source with the interactive verify debate) so both
+    // verify-gate paths judge the implementation against identical criteria.
+    renderVerifyGateAxes(),
+    "",
     renderBundle(bundle),
     "",
     VERDICT_OUTPUT_CONTRACT,
@@ -78,6 +93,10 @@ export function buildVerifyDebateTopic(bundle: VerifyContextBundle): string {
     "Debate whether the implementation below satisfies the plan's goal and acceptance criteria.",
     "The deterministic test floor already passed — focus on goal-achievement, missed acceptance criteria,",
     "and regressions. Converge on a single merged verdict.",
+    "",
+    // Shared gate axes (single source with the headless perspective review) so
+    // both verify-gate paths judge the implementation against identical criteria.
+    renderVerifyGateAxes(),
     "",
     renderBundle(bundle),
     "",

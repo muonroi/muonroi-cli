@@ -249,6 +249,15 @@ export interface UserSettings {
    * to restore the old skip-clarification behaviour.
    */
   autoCouncilClarify?: boolean;
+  /**
+   * When true (default), auto-council is skipped if the current session model is
+   * a reasoning model (catalog `reasoning: true`). Reasoning models already
+   * perform an internal self-debate via extended thinking, so running an
+   * explicit multi-role council on the same prompt is usually low-ROI and
+   * expensive. Set false (or env MUONROI_AUTOCOUNCIL_SKIP_REASONING=0) to force
+   * council even for reasoning models.
+   */
+  autoCouncilSkipReasoning?: boolean;
   councilPreferMultiProvider?: boolean;
   /** EE involvement level in council debates. Default: advisory. CQ-19. */
   councilExperienceMode?: CouncilExperienceMode;
@@ -1025,6 +1034,30 @@ export function getProviderStallTimeoutMs(): number {
 }
 
 /**
+ * No-forward-progress watchdog timeout (ms) for streaming model calls. Distinct
+ * from the stall watchdog: the stall watchdog re-arms on ANY stream chunk —
+ * including a reasoning model's `reasoning-delta` chunks — so a model stuck in an
+ * endless chain-of-thought keeps petting it and it NEVER fires (observed live
+ * 2026-07-10: a deepseek-v4-flash sub-agent churned reasoning for 30+ min, 1.4M
+ * input tokens, ZERO text/tool output, and the 2-min stall watchdog never tripped
+ * because reasoning chunks kept arriving). This second watchdog is petted ONLY on
+ * REAL forward progress (a text-delta or a tool-call), so a runaway-reasoning /
+ * no-output loop is aborted while a legitimately long reasoning burst that DOES
+ * eventually emit text/tools survives. Set generously above a normal reasoning
+ * burst. Range 30_000–1_800_000; 0 disables. Default 300_000 (5 min). Env
+ * override: MUONROI_PROVIDER_PROGRESS_TIMEOUT_MS.
+ */
+export function getProviderProgressTimeoutMs(): number {
+  const envRaw = process.env.MUONROI_PROVIDER_PROGRESS_TIMEOUT_MS;
+  if (envRaw !== undefined && envRaw !== "") {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n === 0) return 0; // explicit disable
+    if (Number.isFinite(n) && n >= 30_000 && n <= 1_800_000) return Math.floor(n);
+  }
+  return 300_000;
+}
+
+/**
  * Number of times to AUTOMATICALLY re-issue a streaming model call after the
  * stall watchdog fires WITHOUT any chunk having arrived (a time-to-first-byte
  * "frozen" stall). Some providers (observed: xai/grok-build-0.1) accept a
@@ -1118,6 +1151,33 @@ export function getTopLevelCompactThresholdChars(contextWindowTokens?: number): 
 }
 
 /**
+ * Compaction hysteresis factor for the top-level loop. Once B4 compaction has
+ * fired within a turn, the compacted prefix is FROZEN and only new messages are
+ * appended (keeping the provider prompt-cache prefix byte-stable) until the
+ * cumulative size grows past `lastTriggerChars * factor` — then it re-compacts.
+ *
+ * Why: measured on session 1afb2728e67a — a 24-step turn re-ran compaction every
+ * step, and each step's sliding keepLast boundary flipped one more tool result
+ * verbatim→stub, breaking the cache prefix at that position. 63% of that
+ * session's FRESH input came from 5 such compaction-induced cache breaks.
+ * Holding the boundary between compactions trades a higher peak input for far
+ * fewer cache-break re-bills.
+ *
+ * Range 1.0–3.0. Default 1.15 (re-compact at +15% growth). `1.0` or env `0`
+ * disables hysteresis → legacy per-step compaction.
+ * Env override: MUONROI_COMPACT_HYSTERESIS.
+ */
+export function getTopLevelCompactHysteresis(): number {
+  const envRaw = process.env.MUONROI_COMPACT_HYSTERESIS;
+  if (envRaw !== undefined && envRaw.trim() !== "") {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n === 0) return 1.0; // explicit disable
+    if (Number.isFinite(n) && n >= 1.0 && n <= 3.0) return n;
+  }
+  return 1.15;
+}
+
+/**
  * Phase B4 — number of trailing tool turns kept verbatim during top-level
  * compaction. Higher than sub-agent default because top-level agents make
  * decisions across longer horizons.
@@ -1136,6 +1196,36 @@ export function getTopLevelCompactKeepLast(contextWindowTokens?: number): number
     return 3;
   }
   return 5;
+}
+
+/**
+ * O2 — byte budget for the verbatim tail (last keepLast turns) in top-level B4
+ * compaction. The keepLast shrink is otherwise fill-ratio based, so on a
+ * large-context model a read-heavy tail stays verbatim at ~50% fill, pinning
+ * each tool round at 60-80K input (measured on July-8 sessions). This caps the
+ * tail's actual chars, shrinking keepLast further (floor 2) when the kept tool
+ * results are large. 0 disables. Env: MUONROI_TOP_LEVEL_COMPACT_TAIL_BUDGET_CHARS.
+ */
+export function getTopLevelCompactTailBudgetChars(contextWindowTokens?: number): number {
+  const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_TAIL_BUDGET_CHARS;
+  if (envRaw !== undefined && envRaw.trim() !== "") {
+    const n = Number(envRaw);
+    // 0 = explicit disable; otherwise clamp to a sane floor so a fat-fingered
+    // tiny value can't stub away all recent context.
+    if (Number.isFinite(n) && n === 0) return 0;
+    if (Number.isFinite(n) && n >= 20_000 && n <= 1_000_000) return Math.floor(n);
+  }
+  // Default 50K chars (~12.5K tokens). Chosen from a deterministic measurement:
+  // on a realistic read-heavy turn the keepLast=5 verbatim tail is ~70-100K
+  // chars, so a looser budget (e.g. 120K) never bites (no-op). 50K shrinks the
+  // effective tail to ~3 turns on heavy turns (matching the sub-agent keepLast
+  // default) — ~7K tokens/call saved — while high-value results stay verbatim
+  // and light turns (below the 200K compaction threshold) are untouched. For
+  // small windows, scale to ~20% of the window so the tail can't dominate.
+  if (contextWindowTokens && contextWindowTokens > 0) {
+    return Math.min(50_000, Math.floor(contextWindowTokens * 4 * 0.2));
+  }
+  return 50_000;
 }
 
 /**
@@ -1168,7 +1258,24 @@ export function getTopLevelToolBudgetChars(maxRounds?: number, contextWindowToke
 }
 
 export function getRoleModel(role: ModelRole): string | undefined {
-  return loadUserSettings().roleModels?.[role];
+  const configured = loadUserSettings().roleModels?.[role];
+  if (!configured) return undefined;
+  // Graceful staleness guard (mirrors getCurrentModel's pickValid): a role model
+  // persisted before a catalog rename/drop (e.g. "grok-build-0.1" after it was
+  // dropped in favor of grok-composer-2.5-fast) must NOT leak a dead id to the
+  // runtime, where resolveModelRuntime throws "not found in catalog — cannot
+  // determine provider" and takes down the whole council speaker (observed:
+  // Experience Auditor on the research role). If the catalog hasn't loaded yet,
+  // trust the normalized id; otherwise drop unresolved ids so the caller falls
+  // back to its own default instead of crashing.
+  const normalized = normalizeModelId(configured);
+  if (MODELS.length === 0) return normalized;
+  if (getModelInfo(normalized)) return normalized;
+  logger.warn(
+    "cli",
+    `roleModels.${role} = "${configured}" is not in the catalog (renamed or removed); ignoring so the caller falls back to its default. Update it via /config.`,
+  );
+  return undefined;
 }
 
 export function getRoleModels(): Partial<Record<ModelRole, string>> {
@@ -1211,6 +1318,19 @@ export function isAutoCouncilClarifyEnabled(): boolean {
   if (env === "0" || env === "false") return false;
   if (env === "1" || env === "true") return true;
   return loadUserSettings().autoCouncilClarify ?? true;
+}
+
+/**
+ * Whether auto-council should be skipped when the session model is a reasoning
+ * model. Default true. Env override wins over the user setting for quick dev
+ * toggling; env "0"/"false" disables the skip (forces council), "1"/"true"
+ * enables the skip.
+ */
+export function isAutoCouncilSkipReasoning(): boolean {
+  const env = process.env.MUONROI_AUTOCOUNCIL_SKIP_REASONING?.trim().toLowerCase();
+  if (env === "0" || env === "false") return false;
+  if (env === "1" || env === "true") return true;
+  return loadUserSettings().autoCouncilSkipReasoning ?? true;
 }
 
 export function getAutoCouncilMinRoles(): number {

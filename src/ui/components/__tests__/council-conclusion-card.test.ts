@@ -48,7 +48,55 @@ describe("parseConclusion", () => {
   });
 
   it("returns null for JSON carrying only noise keys (nothing renderable)", () => {
-    expect(parseConclusion(JSON.stringify({ type: "evaluation", nextActions: [{ action: "x" }] }))).toBeNull();
+    expect(parseConclusion(JSON.stringify({ type: "evaluation", metadata: { correlationId: "abc" } }))).toBeNull();
+  });
+
+  it("extracts dimension scores with score bars and justifications", () => {
+    const c = parseConclusion(
+      JSON.stringify({
+        summary: "s",
+        dimension_scores: [
+          { dimension: "Architecture", score: 2, justification: "Coupled to orchestrator" },
+          { dimension: "DX", score: 3, justification: "Code-locked stance authoring" },
+        ],
+      }),
+    );
+    expect(c?.dimensionScores).toHaveLength(2);
+    expect(c?.dimensionScores[0]).toEqual({
+      dimension: "Architecture",
+      score: 2,
+      justification: "Coupled to orchestrator",
+    });
+    expect(c?.dimensionScores[1].score).toBe(3);
+  });
+
+  it("extracts operational risks with severity and trigger", () => {
+    const c = parseConclusion(
+      JSON.stringify({
+        summary: "s",
+        operational_risks: [{ risk: "Stance cascade", severity: "High", trigger: "Timeout mid-round" }],
+      }),
+    );
+    expect(c?.operationalRisks).toEqual([{ risk: "Stance cascade", severity: "High", trigger: "Timeout mid-round" }]);
+  });
+
+  it("extracts priority fixes as a numbered list", () => {
+    const c = parseConclusion(
+      JSON.stringify({ summary: "s", priority_fixes: ["Tách RoundLifecycle", "Refactor StanceDefinition"] }),
+    );
+    expect(c?.priorityFixes).toEqual(["Tách RoundLifecycle", "Refactor StanceDefinition"]);
+  });
+
+  it("extracts next actions with label and reason", () => {
+    const c = parseConclusion(
+      JSON.stringify({
+        summary: "s",
+        nextActions: [{ action: "continue_session", label: "Tiếp tục session", reason: "Đánh giá đã chốt" }],
+      }),
+    );
+    expect(c?.nextActions).toEqual([
+      { action: "continue_session", label: "Tiếp tục session", reason: "Đánh giá đã chốt" },
+    ]);
   });
 
   it("renders unknown string keys as generic sections instead of dropping to raw JSON", () => {

@@ -7,6 +7,7 @@ vi.mock("../../council/leader.js", () => ({ resolvePlanCouncilLeader: vi.fn(asyn
 
 import { resolvePlanCouncilLeader } from "../../council/leader.js";
 import { assessComplexity, shouldAssess } from "../complexity-assessor.js";
+import { planningArtifact } from "../paths.js";
 
 describe("shouldAssess pre-filter", () => {
   it("skips a high-confidence quick task", () => {
@@ -91,8 +92,8 @@ describe("assessComplexity", () => {
     expect(r.assessed).toBe(true);
     expect(r.depth).toBe("heavy");
     expect(r.autoCouncil).toBe(true);
-    expect(existsSync(join(cwd, ".planning", "ASSESSMENT.md"))).toBe(true);
-    expect(readFileSync(join(cwd, ".planning", "ASSESSMENT.md"), "utf8")).toContain("multi-file");
+    expect(existsSync(planningArtifact(cwd, "ASSESSMENT.md"))).toBe(true);
+    expect(readFileSync(planningArtifact(cwd, "ASSESSMENT.md"), "utf8")).toContain("multi-file");
   });
 
   it("falls back to priorDepth (no throw) when the assessor emits no structured verdict", async () => {
@@ -142,7 +143,7 @@ describe("assessComplexity", () => {
     expect(r.assessed).toBe(false);
     expect(r.depth).toBe("standard");
     expect(r.source).toBe("parse-failed-fallback");
-    expect(existsSync(join(cwd, ".planning", "ASSESSMENT.md"))).toBe(false);
+    expect(existsSync(planningArtifact(cwd, "ASSESSMENT.md"))).toBe(false);
   });
 
   it("passes bundle context into the assessor prompt and returns quality + enrichedPrompt", async () => {

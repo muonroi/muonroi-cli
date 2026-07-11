@@ -36,7 +36,7 @@ ${mvp}
 
 ## Context
 
-- Workflow kind: **product** (Muonroi /ideal + @opengsd/gsd-core)
+- Workflow kind: **product** (Muonroi /ideal (native workflow))
 - Stack: ${spec?.stack ?? "TBD"}
 `;
 }

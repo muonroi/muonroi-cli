@@ -82,6 +82,55 @@ describe("findUnverifiedClaims — file:line claims", () => {
   });
 });
 
+describe("findUnverifiedClaims — file:line out-of-bounds (fabricated line number)", () => {
+  // Decisive live case (session 50aa048a6303): deepseek-v4-flash READ planner.ts
+  // (332 lines) yet cited a silent catch at planner.ts:609 and 664. The basename
+  // check above passed (planner.ts IS in the corpus), so the fabricated LINE
+  // slipped through. The read_file header "[...planner.ts: lines 1-332 of 332]"
+  // is the deterministic ground truth for the file's real length.
+  it("flags a file:line whose line exceeds the file's read line-count", () => {
+    const corpus =
+      "[D:/sources/Core/muonroi-cli/src/council/planner.ts: lines 1-332 of 332]\n1 | import type { Stance }\n";
+    const claims = findUnverifiedClaims("The silent catch is at planner.ts:609.", corpus);
+    expect(claims.some((c) => c.kind === "fileline" && c.value === "planner.ts:609")).toBe(true);
+  });
+
+  it("annotates the flagged claim with the real line count", () => {
+    const corpus = "[src/council/planner.ts: lines 1-332 of 332]\n";
+    const claims = findUnverifiedClaims("See planner.ts:664.", corpus);
+    expect(claims.find((c) => c.value === "planner.ts:664")?.text).toMatch(/332 lines/);
+  });
+
+  it("does NOT flag a file:line within the read line-count", () => {
+    const corpus = "[src/council/planner.ts: lines 1-332 of 332]\n";
+    expect(findUnverifiedClaims("See planner.ts:300.", corpus)).toHaveLength(0);
+  });
+
+  it("validates against the FULL file total even on a partial read", () => {
+    // read_file of lines 1-50 still emits "of 332" (full length), so a cite to
+    // line 250 is in-bounds and 609 is out-of-bounds.
+    const corpus = "[src/council/planner.ts: lines 1-50 of 332]\n1 | import\n";
+    expect(findUnverifiedClaims("planner.ts:250 is real.", corpus)).toHaveLength(0);
+    expect(
+      findUnverifiedClaims("planner.ts:609 is fabricated.", corpus).some((c) => c.value === "planner.ts:609"),
+    ).toBe(true);
+  });
+
+  it("uses the largest total when the same file is read at different ranges", () => {
+    const corpus = "[a/foo.ts: lines 1-50 of 100]\n[a/foo.ts: lines 1-500 of 500]\n";
+    expect(findUnverifiedClaims("foo.ts:400 exists.", corpus)).toHaveLength(0);
+    expect(findUnverifiedClaims("foo.ts:600 is wrong.", corpus).some((c) => c.value === "foo.ts:600")).toBe(true);
+  });
+
+  it("does NOT flag out-of-bounds when no read header is present (grep-only corpus)", () => {
+    // Conservative: without a line-count header we cannot PROVE the line is
+    // fabricated, so we preserve the existing "file was read/grepped → verified"
+    // behaviour and stay silent (low false-positive).
+    const corpus = "$ grep -n foo planner.ts\n42:foo\n";
+    expect(findUnverifiedClaims("planner.ts:609 maybe.", corpus)).toHaveLength(0);
+  });
+});
+
 describe("findUnverifiedClaims — bounds & dedup", () => {
   it("caps the number of returned claims", () => {
     const text = "100 files, 200 files, 300 files, 400 files, 500 files, 600 files, 700 files.";

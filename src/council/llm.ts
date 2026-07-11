@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
-import type { ToolSet } from "ai";
-import { generateText, stepCountIs } from "ai";
+import type { LanguageModel, ToolSet } from "ai";
+import { generateText, stepCountIs, streamText } from "ai";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { emitMatches } from "../ee/render.js";
+import { getMcpKey } from "../mcp/mcp-keychain.js";
 import type { McpToolBundle } from "../mcp/runtime.js";
 import { buildMcpToolSet } from "../mcp/runtime.js";
 import { getModelInfo } from "../models/registry.js";
@@ -339,6 +340,104 @@ const COUNCIL_LLM_TIMEOUT_MS = (() => {
 // pre-flight LLM call sites (council, debate-planner, scope-ceiling) share one
 // implementation. Imported at the top of this file.
 
+/**
+ * Run a single-shot LLM call over the STREAMING transport and collect the full
+ * result, returning a `generateText`-shaped object ({ text, usage, finishReason,
+ * reasoningText }).
+ *
+ * Why stream a one-shot generate? The OpenAI codex/oauth endpoint
+ * (chatgpt.com/backend-api/codex/responses, used by gpt-5.*-codex subscription
+ * auth) HARD-REJECTS non-streaming requests with 400 `{"detail":"Stream must be
+ * set to true"}`. `generateText` issues a non-stream POST, so every council
+ * sub-task that ran through it (leader round evaluation, clarify, spec
+ * synthesis, running summary) failed on a codex session — surfacing to the user
+ * as the opaque "Decision: evaluation unavailable" round card (diagnosed from
+ * session 8191ecaee149: gpt-5.4-mini → codex/responses → "Stream must be set to
+ * true"). The panel debate never hit this because it streams. Streaming is the
+ * universal transport (every provider + the whole TUI already use it), so
+ * collecting a streamed result fixes codex without special-casing it.
+ *
+ * A provider `error` part is re-thrown so the caller's retry / cross-provider
+ * fallback treats it as a failure exactly as a thrown `generateText` did.
+ *
+ * Also used by `debate()` (the panel pair turns) with the tiny verification
+ * toolset: pass `tools`/`stopWhen`/`prepareStep` and the collected `toolCalls`
+ * (toolName + input + matched result) come back in the same shape the old
+ * `generateText` result exposed. A debater on the codex/oauth endpoint hit the
+ * exact same non-stream 400 as the eval path — streaming fixes it uniformly.
+ */
+async function collectStreamText(args: {
+  model: LanguageModel;
+  system: string;
+  prompt: string;
+  maxOutputTokens: number;
+  temperature?: number;
+  providerOptions?: Record<string, unknown>;
+  abortSignal?: AbortSignal;
+  tools?: ToolSet;
+  stopWhen?: ReturnType<typeof stepCountIs>;
+  prepareStep?: (opts: { stepNumber: number; messages: readonly unknown[] }) => unknown;
+}): Promise<{
+  text: string;
+  usage?: unknown;
+  finishReason?: string;
+  reasoningText?: string;
+  toolCalls: Array<{ toolName: string; input?: unknown; result?: unknown }>;
+}> {
+  const hasTools = !!args.tools && Object.keys(args.tools).length > 0;
+  const result = streamText({
+    model: args.model,
+    system: args.system,
+    prompt: args.prompt,
+    maxOutputTokens: args.maxOutputTokens,
+    maxRetries: 0,
+    ...(args.temperature === undefined ? {} : { temperature: args.temperature }),
+    ...(args.providerOptions ? { providerOptions: args.providerOptions as never } : {}),
+    ...(hasTools ? { tools: args.tools, stopWhen: args.stopWhen, prepareStep: args.prepareStep as never } : {}),
+    abortSignal: args.abortSignal,
+  });
+  let text = "";
+  let reasoningText = "";
+  let usage: unknown;
+  let finishReason: string | undefined;
+  const toolCalls: Array<{ toolName: string; input?: unknown; result?: unknown }> = [];
+  const byId = new Map<string, { toolName: string; input?: unknown; result?: unknown }>();
+  for await (const part of result.fullStream) {
+    switch (part.type) {
+      case "text-delta":
+        text += (part as { text?: string }).text ?? "";
+        break;
+      case "reasoning-delta":
+        reasoningText += (part as { text?: string }).text ?? "";
+        break;
+      case "tool-call": {
+        const p = part as { toolCallId: string; toolName: string; input?: unknown };
+        const tc = { toolName: p.toolName, input: p.input };
+        byId.set(p.toolCallId, tc);
+        toolCalls.push(tc);
+        break;
+      }
+      case "tool-result": {
+        const p = part as { toolCallId: string; output?: unknown };
+        const tc = byId.get(p.toolCallId);
+        if (tc) tc.result = p.output;
+        break;
+      }
+      case "finish":
+        usage = (part as { totalUsage?: unknown; usage?: unknown }).totalUsage ?? (part as { usage?: unknown }).usage;
+        finishReason = (part as { finishReason?: string }).finishReason;
+        break;
+      case "error": {
+        const raw = (part as { error?: unknown }).error;
+        throw raw instanceof Error ? raw : new Error(String(raw));
+      }
+      default:
+        break;
+    }
+  }
+  return { text, usage, finishReason, reasoningText: reasoningText || undefined, toolCalls };
+}
+
 export function createCouncilLLM(
   bash: BashTool,
   mode: AgentMode,
@@ -374,7 +473,12 @@ export function createCouncilLLM(
           () =>
             withVisibleRetry(
               () =>
-                generateText({
+                // Stream + collect (NOT generateText). The codex/oauth endpoint
+                // 400s on non-stream requests ("Stream must be set to true"),
+                // which nulled every council eval/clarify/synthesis on a codex
+                // session → the opaque "evaluation unavailable" card. See
+                // collectStreamText's doc for the full diagnosis.
+                collectStreamText({
                   model: runtime.model,
                   system,
                   prompt,
@@ -383,16 +487,8 @@ export function createCouncilLLM(
                   // opencode-go) reject any value but their pinned one, which
                   // failed every clarify/spec call on a Kimi session. resolveTemperature
                   // omits the field or clamps to the model's fixed value.
-                  ...(() => {
-                    const t = resolveTemperature(providerId, runtime.modelInfo, 0.7);
-                    return t === undefined ? {} : { temperature: t };
-                  })(),
-                  // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent
-                  // exponential backoff (2,4,8,16,32s). When SiliconFlow rate-limits
-                  // with 429, user now sees "[retry] rate-limited (429) — waiting Xs
-                  // before attempt N/6" instead of a 62s blank window that looks hung.
-                  maxRetries: 0,
-                  ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+                  temperature: resolveTemperature(providerId, runtime.modelInfo, 0.7),
+                  providerOptions: runtime.providerOptions as Record<string, unknown> | undefined,
                   abortSignal: timedSignal,
                 }),
               { label: "council.generate" },
@@ -523,21 +619,15 @@ export function createCouncilLLM(
           () =>
             withVisibleRetry(
               () =>
-                generateText({
+                // Stream + collect (NOT generateText). A debater on the codex/oauth
+                // endpoint hits the same non-stream 400 ("Stream must be set to
+                // true") that nulled the eval path; streaming is uniform across
+                // providers. Tools (when the tier + circuit breaker allow) ride
+                // through with stepCountIs(2) + the same sanitizeHistory prepareStep.
+                collectStreamText({
                   model: runtime.model,
                   system,
                   prompt,
-                  ...(verificationTools && Object.keys(verificationTools).length > 0
-                    ? {
-                        tools: verificationTools,
-                        stopWhen: stepCountIs(2),
-                        prepareStep: ({ stepNumber, messages }) => {
-                          if (stepNumber < 1) return {};
-                          const stripped = debateCaps.sanitizeHistory(messages) as typeof messages;
-                          return stripped === messages ? {} : { messages: stripped };
-                        },
-                      }
-                    : {}),
                   // Reasoning models (deepseek-v4-*, anthropic thinking) consume part
                   // of this budget on reasoning_tokens before producing user-visible
                   // text. E2E showed 2048 caused finishReason=length on 3KB debate
@@ -545,17 +635,20 @@ export function createCouncilLLM(
                   // overhead and avoids cuts mid-thought.
                   maxOutputTokens: 6144,
                   // See generate(): capability-aware temperature (omit / clamp).
-                  ...(() => {
-                    const t = resolveTemperature(providerId, runtime.modelInfo, 0.7);
-                    return t === undefined ? {} : { temperature: t };
-                  })(),
-                  // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent
-                  // exponential backoff (2,4,8,16,32s). When SiliconFlow rate-limits
-                  // with 429, user now sees "[retry] rate-limited (429) — waiting Xs
-                  // before attempt N/6" instead of a 62s blank window that looks hung.
-                  maxRetries: 0,
-                  ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+                  temperature: resolveTemperature(providerId, runtime.modelInfo, 0.7),
+                  providerOptions: runtime.providerOptions as Record<string, unknown> | undefined,
                   abortSignal: timedSignal,
+                  ...(verificationTools && Object.keys(verificationTools).length > 0
+                    ? {
+                        tools: verificationTools,
+                        stopWhen: stepCountIs(2),
+                        prepareStep: ({ stepNumber, messages }) => {
+                          if (stepNumber < 1) return {};
+                          const stripped = debateCaps.sanitizeHistory(messages as never) as typeof messages;
+                          return stripped === messages ? {} : { messages: stripped };
+                        },
+                      }
+                    : {}),
                 }),
               { label: "council.debate" },
             ),
@@ -674,15 +767,24 @@ export function createCouncilLLM(
       const internetFirst = options?.internetFirst === true;
       const systemPrompt = buildResearchSystemPrompt(hasUrl, internetFirst);
 
-      // Warn early if internet-first mode is requested but no internet/browser tools are loaded.
-      const internetToolAvailable = Object.keys(allTools).some((n) =>
-        /fetch_url|web_search|tavily|web[_-]?fetch|web[_-]?search|playwright|chrome|context7|firecrawl|exa/i.test(n),
+      // Warn early if internet-first mode is requested but no *working* web
+      // research capability exists. The builtin `web_search`/`fetch_url` tools
+      // are ALWAYS registered, so the old tool-NAME check was always true — even
+      // when `web_search` will just return `ERROR no_tavily_key`, so the warning
+      // never fired and internet-first research failed silently. Gate on real
+      // capability: a Tavily key, or an MCP search/browser tool actually loaded
+      // (builtins alone don't count — open-ended search needs the key).
+      const hasTavilyKey = ((await getMcpKey("tavily")) || process.env.TAVILY_API_KEY || "").trim().length >= 10;
+      const mcpSearchTool = Object.keys(mcpBundle?.tools ?? {}).some((n) =>
+        /tavily|web[_-]?search|web[_-]?fetch|playwright|chrome|context7|firecrawl|exa|browser/i.test(n),
       );
+      const internetToolAvailable = hasTavilyKey || mcpSearchTool;
       const internetGapWarning =
         internetFirst && !internetToolAvailable
-          ? `\n\n## Research Gap\n- Internet-first mode requested but no web research tool ` +
-            `(fetch_url, web_search, tavily, playwright, context7, etc.) is available. ` +
-            `Findings will be limited to what the model already knows.`
+          ? `\n\n## Research Gap\n- Internet-first mode requested but no working web-search capability ` +
+            `(a Tavily API key or an MCP search/browser tool) is available. ` +
+            `\`fetch_url\` still works for explicit URLs, but open-ended search is unavailable — ` +
+            `findings will be limited to what the model already knows.`
           : "";
 
       const userPrompt = conversationContext

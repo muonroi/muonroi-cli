@@ -10,6 +10,7 @@ import {
   restoreExchangeLogs,
   writeDebateCheckpoint,
 } from "./debate-checkpoint.js";
+import { resolveDebateSummary } from "./debate-summary.js";
 import { pickCouncilTaskModel } from "./leader.js";
 import { tracedAsync, tracedGenerate } from "./llm.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
@@ -27,6 +28,7 @@ import type {
   CouncilParticipant,
   DebateStance,
   DebateState,
+  IsolatedTaskRunner,
   LeaderEvaluation,
   QuestionResponder,
 } from "./types.js";
@@ -334,7 +336,57 @@ const RESEARCH_FAILED_MARKER = "[Research failed:";
  * substantive. debateWithRetry already had cross-provider fallback; research
  * did not.
  */
-async function researchWithFallback(
+/**
+ * #2 — run the research phase in an ISOLATED explore sub-agent (near-empty
+ * context, budget-capped, independent compaction) instead of the in-process
+ * 15-step generateText that accretes tool clutter into the council thread.
+ * Returns the findings string on success; a `[Research failed: …]` marker string
+ * on failure so `researchWithFallback` transparently falls back to `llm.research`.
+ */
+async function runResearchIsolated(
+  runIsolatedTask: IsolatedTaskRunner,
+  model: string,
+  topic: string,
+  conversationContext: string,
+  traceCb: (t: string) => void,
+  options: { internetFirst?: boolean },
+): Promise<string> {
+  traceCb(`[research] isolated explore sub-agent via ${model}`);
+  // Keep the child near-empty — pass only the question + a bounded context slice
+  // (the whole point is to NOT inherit the council's growing transcript).
+  const ctxSlice =
+    conversationContext.length > 4000
+      ? `${conversationContext.slice(0, 4000)}\n…[context truncated]`
+      : conversationContext;
+  const sourcePref = options.internetFirst
+    ? "This is a greenfield task with little/no local source: PREFER web + documentation sources (use web_search / fetch tools if available), then any local files."
+    : "PREFER grounding every claim in THIS repo's code — cite concrete file:line. Use web sources only to fill genuine gaps.";
+  const prompt =
+    `You are grounding a council debate with EVIDENCE. Research the question below and return concise, sourced findings.\n\n` +
+    `## Question\n${topic}\n\n` +
+    `## Debate context\n${ctxSlice}\n\n` +
+    `## Instructions\n${sourcePref}\n` +
+    `Return a compact "## Research Findings" section: only the concrete facts that bear on the question, each with its source (file:line or URL). ` +
+    `Be terse and factual — no opinions, no recommendations. If you cannot find solid evidence, say so in one line.`;
+  try {
+    const result = await runIsolatedTask({
+      agent: "explore",
+      description: `Council research: ${topic.slice(0, 60)}`,
+      prompt,
+      // Pin the research-role model; bypasses the parent-tier cap in StreamRunner.
+      modelId: model,
+    });
+    if (result.success && result.output?.trim()) return result.output.trim();
+    traceCb(`[research] isolated sub-agent produced nothing: ${result.error ?? "no output"}`);
+    return `[Research failed: ${result.error ?? "isolated sub-agent produced no output"}]`;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    traceCb(`[research] isolated sub-agent threw: ${msg}`);
+    return `[Research failed: ${msg}]`;
+  }
+}
+
+export async function researchWithFallback(
   llm: CouncilLLM,
   primaryModel: string,
   topic: string,
@@ -343,7 +395,16 @@ async function researchWithFallback(
   traceCb: (t: string) => void,
   options: { internetFirst?: boolean },
   fallbackPool: string[],
+  runIsolatedTask?: IsolatedTaskRunner,
 ): Promise<string> {
+  // #2 — prefer the isolated explore sub-agent when the orchestrator wired one.
+  // On any failure (marker) we transparently fall through to the legacy
+  // in-process research below, preserving resilience for headless/degraded runs.
+  if (runIsolatedTask && !signal?.aborted) {
+    const iso = await runResearchIsolated(runIsolatedTask, primaryModel, topic, conversationContext, traceCb, options);
+    if (!iso.includes(RESEARCH_FAILED_MARKER)) return iso;
+    traceCb("[research] isolated sub-agent unavailable — falling back to in-process research");
+  }
   const primary = await llm.research(primaryModel, topic, conversationContext, signal, traceCb, options);
   if (!primary.includes(RESEARCH_FAILED_MARKER) || signal?.aborted) return primary;
 
@@ -566,6 +627,7 @@ export async function* runDebate(
           (t) => researchTraces.push(t),
           { internetFirst },
           fallbackPool,
+          config.runIsolatedTask,
         ),
       {
         phase: "research",
@@ -585,19 +647,30 @@ export async function* runDebate(
       startedAt: p0Start,
       detail: `via ${researchCandidate.model}`,
     });
+    // A failed research call returns a "[Research failed: …]" placeholder once
+    // both primary and fallback providers are exhausted. It is a truthy string,
+    // so injecting it verbatim (below) would plant a fake "Research Findings"
+    // block into every opening/round prompt. Detect it and show a clean status
+    // note instead of the raw placeholder.
+    const researchFailed = !!researchFindings && researchFindings.includes(RESEARCH_FAILED_MARKER);
     yield {
       type: "council_message" as const,
       councilMessage: {
         kind: "research" as const,
         speaker: { role: researchCandidate.role, model: researchCandidate.model },
-        text: researchFindings ?? "",
+        text: researchFailed
+          ? "⚠ Research unavailable — both providers failed. The council proceeds on the panel's own knowledge (no external findings injected)."
+          : (researchFindings ?? ""),
       },
     };
   }
 
-  const enrichedContext = researchFindings
-    ? `${conversationContext}\n\n---\n\n## Research Findings\n${researchFindings}`
-    : conversationContext;
+  // Only enrich when research actually produced findings — never fold the
+  // "[Research failed: …]" placeholder into the debate context.
+  const enrichedContext =
+    researchFindings && !researchFindings.includes(RESEARCH_FAILED_MARKER)
+      ? `${conversationContext}\n\n---\n\n## Research Findings\n${researchFindings}`
+      : conversationContext;
 
   // ── Phase 1: Parallel opening statements ───────────────────────────────────
   // Skipped entirely on resume — `active` was restored from the checkpoint so
@@ -611,8 +684,27 @@ export async function* runDebate(
       detail: `${participants.length} participants in parallel`,
     });
 
+    // Sprint-2 item 3 — per-stance recall. Fire one stance-weighted recall per
+    // unique role before openings; fold each role's seed into that participant's
+    // opening context so every stance opens grounded in the experience its lens
+    // cares about. Bounded + failure-tolerant inside the injected fn; a null/empty
+    // result leaves openings unchanged.
+    let stanceSeeds: Map<string, string> | null = null;
+    if (config.stanceRecall) {
+      try {
+        const roles = Array.from(new Set(participants.map((p) => p.role)));
+        stanceSeeds = await config.stanceRecall(roles, spec.problemStatement);
+      } catch {
+        stanceSeeds = null;
+      }
+    }
+
     const openingPromises = participants.map((self) => {
       const partner = participants.find((c) => c.role !== self.role) ?? participants[0];
+      const seed = stanceSeeds?.get(self.role)?.trim();
+      const selfContext = seed
+        ? `${enrichedContext}\n\n---\n\n## Experience recall — ${self.stance?.name ?? self.role} lens\n${seed}`
+        : enrichedContext;
       const { system, prompt } = buildOpeningPrompt({
         speakerRole: self.role,
         partnerRole: partner.role,
@@ -620,7 +712,7 @@ export async function* runDebate(
         partnerStance: partner.stance,
         spec,
         outputShape: debatePlan?.outputShape,
-        conversationContext: enrichedContext,
+        conversationContext: selfContext,
         language: debateLanguage,
       });
       return openingWithRetry(llm, self.model, system, prompt).then((r) => ({
@@ -697,7 +789,17 @@ export async function* runDebate(
 
   if (active.length < 2) {
     yield { type: "content", content: "\nNot enough successful openings for discussion.\n" };
-    return { spec, exchangeLogs, runningSummary: "", roundCount: 0, researchFindings, active, archive };
+    // Even a single-opening debate is worth persisting (F9) — a deterministic
+    // synthesis of whatever position survived beats an empty research artifact.
+    return {
+      spec,
+      exchangeLogs,
+      runningSummary: resolveDebateSummary({ runningSummary: "", active, archive }),
+      roundCount: 0,
+      researchFindings,
+      active,
+      archive,
+    };
   }
 
   // ── Phase 2: Dynamic discussion rounds ─────────────────────────────────────
@@ -1389,6 +1491,7 @@ export async function* runDebate(
               (t) => midTraces.push(t),
               {},
               fallbackPool,
+              config.runIsolatedTask,
             ),
           {
             phase: "research",
@@ -1705,7 +1808,62 @@ export async function* runDebate(
   // slice (as lastEvidenceDensity does) reports 0.00 even when the debate
   // actually produced [CONFIRMED via …] tags earlier — that's the bug
   // session ea13da132dec hit despite 2 real web_fetch citations.
-  const fullExchangeText = [...exchangeLogs.values()].flat().join("\n\n");
+  // #3 — grounding-verify. When the debate produced weak evidence density
+  // (debaters barely tagged claims, since each is capped at stepCountIs(2)), run
+  // an isolated explore sub-agent to fact-check the load-bearing claims and emit
+  // authoritative [CONFIRMED]/[REFUTED] tags. Its output is folded into the
+  // density INPUT below (NOT into exchangeLogs, keeping the persisted transcript
+  // clean) and surfaced as a council_message. Fires only when a bridge is wired,
+  // the flag is on, we're not aborting, and grounding is genuinely weak.
+  let groundingVerifyText = "";
+  {
+    const preText = [...exchangeLogs.values()].flat().join("\n\n");
+    if (
+      config.runIsolatedTask &&
+      groundingVerifyEnabled() &&
+      !signal?.aborted &&
+      computeEvidenceDensity(preText) < GROUNDING_VERIFY_THRESHOLD
+    ) {
+      const gvStart = Date.now();
+      yield phaseStart({
+        phaseId: "phase:grounding-verify",
+        kind: "grounding_verify",
+        label: "Grounding verification",
+        detail: "verifying claims against evidence",
+      });
+      const gvTraces: string[] = [];
+      const gvOut = yield* tracedAsync(
+        () =>
+          runGroundingVerify(config.runIsolatedTask!, leaderModelId, spec.problemStatement, preText, (t) =>
+            gvTraces.push(t),
+          ),
+        { phase: "research", label: "Verifying claims against evidence", role: "verify" },
+      );
+      for (const t of gvTraces) yield { type: "council_status" as const, content: t };
+      yield phaseDone({
+        phaseId: "phase:grounding-verify",
+        kind: "grounding_verify",
+        label: "Grounding verification",
+        startedAt: gvStart,
+      });
+      // Only fold in when it actually produced verified citations — appending
+      // pure [UNVERIFIED] output would LOWER density, defeating the purpose.
+      if (gvOut && countCitations(gvOut) > 0) {
+        groundingVerifyText = gvOut;
+        yield {
+          type: "council_message" as const,
+          councilMessage: {
+            kind: "research" as const,
+            speaker: { role: "verify", model: leaderModelId },
+            text: gvOut,
+          },
+        };
+      }
+    }
+  }
+
+  const fullExchangeText =
+    [...exchangeLogs.values()].flat().join("\n\n") + (groundingVerifyText ? `\n\n${groundingVerifyText}` : "");
   const cumulativeDensity = computeEvidenceDensity(fullExchangeText);
   // Prefer cumulative when it exceeds the leader's last-round measurement —
   // we don't want a converged final round (which has fewer fact-claims to
@@ -1716,6 +1874,54 @@ export async function* runDebate(
   // "measured 0% grounding" apart from "no tags emitted → not measurable"
   // (session de4bafe5ecb7: substantive debate, zero tags → misleading 0%).
   const finalTaggedClaims = countCitations(fullExchangeText) + countUnverified(fullExchangeText);
+
+  // F9 root fix — `runningSummary` is only produced as an INTER-round summary
+  // (`if (round < maxRounds)` above), so a debate that ends on its final/only
+  // round, or stops early after round 1, returns an empty summary — and the
+  // /ideal research artifacts (research.md, delegations.md) silently lose the
+  // whole debate. Generate a real closing summary from the full exchange when
+  // none exists; if there were no discussion rounds (openings-only) or the
+  // model call fails, fall back to a deterministic synthesis from the
+  // participants' positions so the returned state is never emptily summarized.
+  if (!runningSummary.trim()) {
+    const exchangeTurns = [...exchangeLogs.values()].flat();
+    if (exchangeTurns.length > 0) {
+      const closeId = "phase:summary-final";
+      const closeStart = Date.now();
+      yield phaseStart({ phaseId: closeId, kind: "summary", label: "Closing summary" });
+      try {
+        const { system, prompt } = buildRoundSummaryPrompt(
+          exchangeTurns.slice(-6).join("\n\n"),
+          spec.problemStatement,
+          roundCount,
+          debateLanguage,
+        );
+        const summaryModel = pickCouncilTaskModel("round_summary", leaderModelId, costAware);
+        runningSummary = yield* tracedGenerate(llm, {
+          phase: "summary",
+          label: "Summarizing the debate",
+          modelId: costAware ? summaryModel : active[0].model,
+          system,
+          prompt,
+          maxTokens: 512,
+        });
+        yield phaseDone({ phaseId: closeId, kind: "summary", label: "Closing summary", startedAt: closeStart });
+      } catch {
+        yield phaseDone({
+          phaseId: closeId,
+          kind: "summary",
+          label: "Closing summary",
+          startedAt: closeStart,
+          detail: "skipped",
+        });
+      }
+    }
+    // Deterministic backstop: openings-only debates (no exchange turns) or a
+    // failed/empty closing-summary call still yield a non-empty summary.
+    if (!runningSummary.trim()) {
+      runningSummary = resolveDebateSummary({ runningSummary, active, archive });
+    }
+  }
 
   // C — the debate reached synthesis (normal completion or user-cancel fall-
   // through), so the checkpoint is obsolete. A mid-round THROW never reaches
@@ -1953,6 +2159,68 @@ export function leaderAutoRemedyEnabled(): boolean {
 }
 
 /**
+ * #3 — grounding-verify pass. When a debate ends with weak evidence density
+ * (< GROUNDING_VERIFY_THRESHOLD, i.e. debaters barely tagged any [CONFIRMED]/
+ * [REFUTED] claims — the common case since each debater is capped at
+ * stepCountIs(2)), an isolated explore sub-agent verifies the load-bearing
+ * claims against the codebase and emits authoritative tags that raise the
+ * density metric council uses for confidence. Default ON when an isolated-task
+ * bridge is wired; opt out with MUONROI_COUNCIL_GROUNDING_VERIFY=0.
+ */
+export function groundingVerifyEnabled(): boolean {
+  return process.env.MUONROI_COUNCIL_GROUNDING_VERIFY !== "0";
+}
+
+/** Density below which the grounding-verify pass fires (weak grounding). */
+const GROUNDING_VERIFY_THRESHOLD = 0.3;
+
+/**
+ * #3 — run an isolated explore sub-agent that fact-checks the debate's
+ * load-bearing claims and emits `[CONFIRMED via file:line]` / `[REFUTED via …]`
+ * tags (the exact shape `countCitations` recognises). Returns the tagged output
+ * on success, or "" on any failure (caller only folds it in when it actually
+ * raised the citation count).
+ */
+export async function runGroundingVerify(
+  runIsolatedTask: IsolatedTaskRunner,
+  model: string,
+  problemStatement: string,
+  exchangeText: string,
+  traceCb: (t: string) => void,
+): Promise<string> {
+  traceCb(`[grounding-verify] isolated explore sub-agent via ${model}`);
+  const claims = exchangeText.length > 6000 ? `${exchangeText.slice(0, 6000)}\n…[truncated]` : exchangeText;
+  const prompt =
+    `You are grounding-checking a council debate — verify its load-bearing FACTUAL claims against evidence.\n\n` +
+    `## Debate question\n${problemStatement}\n\n` +
+    `## Debaters' claims\n${claims}\n\n` +
+    `## Instructions\n` +
+    `Pick the up-to-5 most decision-relevant factual claims and check EACH against THIS repository's code ` +
+    `(grep/read files) and web sources if available. For every claim you check, emit exactly one inline tag in ` +
+    `this precise format:\n` +
+    `  [CONFIRMED via <file:line or URL>] — evidence supports the claim\n` +
+    `  [REFUTED via <file:line or URL>] — evidence contradicts the claim\n` +
+    `  [UNVERIFIED] — you genuinely could not find evidence\n` +
+    `Return a compact "## Grounding Check" list: one line per checked claim, each restating the claim in ≤15 ` +
+    `words followed by its tag. Do NOT restate the whole debate or add opinions. Prefer [CONFIRMED]/[REFUTED] ` +
+    `with a real citation over [UNVERIFIED].`;
+  try {
+    const result = await runIsolatedTask({
+      agent: "explore",
+      description: `Council grounding-verify: ${problemStatement.slice(0, 50)}`,
+      prompt,
+      modelId: model,
+    });
+    if (result.success && result.output?.trim()) return result.output.trim();
+    traceCb(`[grounding-verify] produced nothing: ${result.error ?? "no output"}`);
+    return "";
+  } catch (err) {
+    traceCb(`[grounding-verify] threw: ${err instanceof Error ? err.message : String(err)}`);
+    return "";
+  }
+}
+
+/**
  * B4: does auto-remedy want to extend the budget this round? True while pinned
  * criteria remain unmet AND progress is still being made (a new criterion was
  * met within the last 2 rounds). A stuck debate (roundsSinceProgress ≥ 2) returns
@@ -2148,11 +2416,17 @@ export function buildLeaderDirective(round: number, criteria: string[], metSoFar
         ? "Establish concrete evidence for every outcome criterion."
         : "Drive the remaining criteria to done.",
   );
-  lines.push(
-    pending.length > 0
-      ? `Unmet (${pending.length}/${criteria.length}): ${pending.map((c) => shortCriterion(c, 56)).join("; ")}`
-      : "All criteria met so far — pressure-test the weakest before closing.",
-  );
+  if (pending.length > 0) {
+    // One criterion per line (bulleted) rather than a single "; "-joined blob.
+    // The joined form produced a ~300-char logical line (5 criteria × ~56 chars)
+    // that word-wrapped into a dense, unreadable block overflowing the round-
+    // summary card and the leader directive bubble — the "loạn/không rõ ràng"
+    // the user reported. A vertical list reads cleanly and wraps per-criterion.
+    lines.push(`Unmet (${pending.length}/${criteria.length}):`);
+    for (const c of pending) lines.push(`  • ${shortCriterion(c, 72)}`);
+  } else {
+    lines.push("All criteria met so far — pressure-test the weakest before closing.");
+  }
   return lines.join("\n");
 }
 
@@ -2182,7 +2456,7 @@ export function formatSpeakerRoster(list: Array<{ stance?: DebateStance; model: 
   return rows.length > 0 ? rows.join("\n") : undefined;
 }
 
-function countCitations(text: string): number {
+export function countCitations(text: string): number {
   const matches = text.match(/\[(REFUTED|CONFIRMED) via [^\]]+\]/g);
   return matches?.length ?? 0;
 }
@@ -2210,7 +2484,7 @@ function countUnverified(text: string): number {
  * shown, low confidence is correct. This biases participants (via the
  * EVIDENCE_RULE prompt) to either verify or explicitly mark unverified.
  */
-function computeEvidenceDensity(text: string): number {
+export function computeEvidenceDensity(text: string): number {
   const cited = countCitations(text);
   const unverified = countUnverified(text);
   const totalTagged = cited + unverified;

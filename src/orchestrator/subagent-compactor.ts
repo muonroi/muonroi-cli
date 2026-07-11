@@ -112,7 +112,23 @@ export interface SubAgentCompactorOptions {
    * models, false otherwise.
    */
   stripOldReasoning?: boolean;
+  /**
+   * O2 — max cumulative chars of the verbatim tail (the last keepLastTurns
+   * turns). The G2 shrink is FILL-ratio based, so on a large-context model a
+   * read-heavy tail (five 8-30k tool results) stays verbatim at only ~50%
+   * fill — pinning every tool round at 60-80k input (measured: July-8 message
+   * calls, 83 in the 60-80k bucket = 44% of message-fresh). When set, keepLast
+   * is reduced further (floor 2) until the kept tail fits this budget,
+   * regardless of fill ratio. High-value results (isHighValueToolResult) are
+   * still kept verbatim independently, so only bulk dumps get stubbed.
+   * Undefined = off (sub-agent path unchanged).
+   */
+  tailBudgetChars?: number;
 }
+
+/** O2 — floor for the tail-budget keepLast shrink; never break the live step's
+ * assistant↔tool pairing (that needs at least the current turn). */
+const TAIL_BUDGET_MIN_KEEP = 2;
 
 /**
  * G1 — coarse char→token conversion. The real ratio is provider/tokenizer
@@ -211,6 +227,7 @@ interface ResolvedOpts {
     summary?: string,
   ) => void;
   stripOldReasoning: boolean;
+  tailBudgetChars: number;
 }
 
 function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
@@ -226,7 +243,32 @@ function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
     keepToolIds: keepIds,
     persistArtifact: o?.persistArtifact,
     stripOldReasoning: o?.stripOldReasoning ?? false,
+    tailBudgetChars: Math.max(0, o?.tailBudgetChars ?? 0),
   };
+}
+
+/**
+ * O2 — given the fill-ratio-derived keepLast, shrink it further so the kept
+ * verbatim tail (the last N tool turns) fits `tailBudgetChars`. Walks keepLast
+ * down from its input value, measuring the actual chars of the tail each step,
+ * and stops at the first count that fits (or the TAIL_BUDGET_MIN_KEEP floor).
+ * Off (returns keepLast unchanged) when tailBudgetChars <= 0.
+ */
+function shrinkKeepLastToTailBudget(
+  messages: ReadonlyArray<ModelMessage>,
+  keepLast: number,
+  tailBudgetChars: number,
+): number {
+  if (tailBudgetChars <= 0 || keepLast <= TAIL_BUDGET_MIN_KEEP) return keepLast;
+  let k = keepLast;
+  while (k > TAIL_BUDGET_MIN_KEEP) {
+    const keepFrom = findKeepFromIndex(messages, k);
+    let tailChars = 0;
+    for (let i = keepFrom; i < messages.length; i++) tailChars += messageChars(messages[i]!);
+    if (tailChars <= tailBudgetChars) return k;
+    k -= 1;
+  }
+  return TAIL_BUDGET_MIN_KEEP;
 }
 
 /**
@@ -473,27 +515,38 @@ export function compactSubAgentMessages(
   const resolved = resolveOpts(opts);
   const { outputPreviewChars, label, envelopeChars } = resolved;
 
-  // Step 4: Hard-limit message history sent to the model to prevent token bloating
-  // When input (messages + envelope) exceeds 50K characters and messages array is > 30,
-  // we slice the history to keep at most 30 messages (preserving system and user start).
-  let processedMessages = messages;
   const messagesTotal = cumulativeMessageChars(messages);
   const total = messagesTotal + envelopeChars;
 
-  if (total > 50_000 && messages.length > 30) {
+  const { effectiveThresholdChars, effectiveKeepLastTurns } = computeDynamicParams(total, resolved);
+
+  // No-op: return the input BY REFERENCE (contract above) so `compacted === input`.
+  // Identity contract: callers (tool-engine.ts, stream-runner.ts) use
+  // `compacted !== stripped` to decide whether to fire recordCompaction. A false
+  // identity change (new array with zero elision) produces phantom compaction
+  // records — observed as 28 compactions / 0 elisions in session c43cc481a16e.
+  // Fix: check threshold on the ORIGINAL total before slicing.
+  if (total < effectiveThresholdChars) return messages as ModelMessage[];
+
+  // Step 4: Hard-limit message history sent to the model to prevent token bloating.
+  // Only slice when compaction is actually warranted (threshold exceeded), so the
+  // slice's identity change pairs with real content reduction, not a phantom no-op.
+  let processedMessages = messages;
+  if (messages.length > 30) {
     processedMessages = sliceMessageHistory(messages, 30);
   }
 
-  // Calculate effective thresholds and keep last turns using the processed messages
-  const processedMessagesTotal = cumulativeMessageChars(processedMessages);
-  const processedTotal = processedMessagesTotal + envelopeChars;
+  // O2 — after the fill-ratio shrink, further reduce keepLast so the verbatim
+  // tail fits the byte budget (targets read-heavy tails that stay large at low
+  // fill). No-op when tailBudgetChars is unset (sub-agent path).
+  const budgetedKeepLast = shrinkKeepLastToTailBudget(
+    processedMessages,
+    effectiveKeepLastTurns,
+    resolved.tailBudgetChars,
+  );
 
-  const { effectiveThresholdChars, effectiveKeepLastTurns } = computeDynamicParams(processedTotal, resolved);
-  // No-op: return the input BY REFERENCE (contract above) so `compacted === input`.
-  if (processedTotal < effectiveThresholdChars) return processedMessages as ModelMessage[];
-
-  const keepFrom = findKeepFromIndex(processedMessages, effectiveKeepLastTurns);
-  if (keepFrom <= 0) return processedMessages as ModelMessage[];
+  const keepFrom = findKeepFromIndex(processedMessages, budgetedKeepLast);
+  if (keepFrom <= 0) return messages as ModelMessage[];
 
   // Walk older messages; rewrite fresh tool results into stubs, super-shrink
   // already-stubbed results (F1), and strip args off older assistant
@@ -599,6 +652,67 @@ function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
   });
   if (!mutated) return msg;
   return { ...msg, content: next } as unknown as ModelMessage;
+}
+
+/**
+ * O3 — compaction hysteresis state, threaded across `prepareStep` calls within
+ * a single top-level turn. `frozenCompacted` is the compacted history captured
+ * at the last real compaction; `frozenStrippedLen` is the message count of the
+ * (un-compacted) history at that moment, so the append delta can be recovered.
+ */
+export interface CompactionHysteresisState {
+  frozenCompacted: ModelMessage[] | null;
+  frozenStrippedLen: number;
+  lastCompactTriggerChars: number;
+}
+
+export function initCompactionHysteresisState(): CompactionHysteresisState {
+  return { frozenCompacted: null, frozenStrippedLen: 0, lastCompactTriggerChars: 0 };
+}
+
+/**
+ * Decide whether to hold the frozen compacted prefix or (re)compact.
+ *
+ * Re-running the compactor on every step slides the keepLast boundary forward
+ * one tool result per step, flipping that result verbatim→stub and breaking the
+ * provider prompt-cache prefix at its position — measured as 63% of a real
+ * session's FRESH input (session 1afb2728e67a). Between compactions we instead
+ * reuse the frozen compacted prefix and append only the messages added since
+ * (history is append-only within a turn), keeping the cached prefix byte-stable
+ * until cumulative size grows past `lastCompactTriggerChars * hysteresis`.
+ *
+ * Pure: returns the next state rather than mutating. `hysteresis <= 1.0`
+ * disables the freeze (legacy per-step compaction). The delta slice uses the
+ * ORIGINAL (pre-compaction) length, so it is correct whether or not the
+ * compactor preserves message count.
+ */
+export function applyCompactionHysteresis(args: {
+  stripped: ModelMessage[];
+  currChars: number;
+  hysteresis: number;
+  state: CompactionHysteresisState;
+  runCompaction: () => ModelMessage[];
+}): { compacted: ModelMessage[]; didRecompact: boolean; state: CompactionHysteresisState } {
+  const { stripped, currChars, hysteresis, state, runCompaction } = args;
+  if (hysteresis > 1.0 && state.frozenCompacted !== null && currChars <= state.lastCompactTriggerChars * hysteresis) {
+    const delta = stripped.slice(state.frozenStrippedLen);
+    const compacted = delta.length > 0 ? [...state.frozenCompacted, ...delta] : state.frozenCompacted;
+    return { compacted, didRecompact: false, state };
+  }
+  const compacted = runCompaction();
+  const changed = compacted !== stripped;
+  if (changed && hysteresis > 1.0) {
+    return {
+      compacted,
+      didRecompact: true,
+      state: {
+        frozenCompacted: compacted,
+        frozenStrippedLen: stripped.length,
+        lastCompactTriggerChars: currChars,
+      },
+    };
+  }
+  return { compacted, didRecompact: changed, state };
 }
 
 /**

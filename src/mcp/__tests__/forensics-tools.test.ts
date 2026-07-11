@@ -31,6 +31,7 @@ const fakeSummary = (id: string): CostForensicsSummary =>
     totalCostUsd: 0.01,
     cacheHitRatio: 0,
     peakSingleCallInput: 100,
+    peakSingleCallFresh: 100,
     events: [],
     experience: null,
   }) as CostForensicsSummary;

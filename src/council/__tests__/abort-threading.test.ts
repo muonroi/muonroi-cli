@@ -75,11 +75,19 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
 
   it("propagates an already-aborted parent into the SDK abortSignal", async () => {
     const captured: Array<Record<string, unknown>> = [];
+    // `generate` now streams (collectStreamText) instead of generateText — the
+    // codex/oauth endpoint 400s on non-stream. Mock streamText's fullStream.
     vi.doMock("ai", () => ({
-      generateText: vi.fn().mockImplementation(async (args: Record<string, unknown>) => {
+      streamText: vi.fn().mockImplementation((args: Record<string, unknown>) => {
         captured.push(args);
-        return { text: "done", usage: { inputTokens: 1, outputTokens: 1 }, finishReason: "stop" };
+        return {
+          fullStream: (async function* () {
+            yield { type: "text-delta", text: "done" };
+            yield { type: "finish", finishReason: "stop", totalUsage: { inputTokens: 1, outputTokens: 1 } };
+          })(),
+        };
       }),
+      generateText: vi.fn(),
       stepCountIs: vi.fn().mockReturnValue({ __step: 1 }),
     }));
     vi.doMock("../../providers/keychain.js", () => ({
@@ -108,11 +116,19 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
 
   it("does NOT abort the SDK call when the parent is live", async () => {
     const captured: Array<Record<string, unknown>> = [];
+    // `generate` now streams (collectStreamText) instead of generateText — the
+    // codex/oauth endpoint 400s on non-stream. Mock streamText's fullStream.
     vi.doMock("ai", () => ({
-      generateText: vi.fn().mockImplementation(async (args: Record<string, unknown>) => {
+      streamText: vi.fn().mockImplementation((args: Record<string, unknown>) => {
         captured.push(args);
-        return { text: "done", usage: { inputTokens: 1, outputTokens: 1 }, finishReason: "stop" };
+        return {
+          fullStream: (async function* () {
+            yield { type: "text-delta", text: "done" };
+            yield { type: "finish", finishReason: "stop", totalUsage: { inputTokens: 1, outputTokens: 1 } };
+          })(),
+        };
       }),
+      generateText: vi.fn(),
       stepCountIs: vi.fn().mockReturnValue({ __step: 1 }),
     }));
     vi.doMock("../../providers/keychain.js", () => ({
@@ -134,6 +150,71 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
 
     const sig = captured[0].abortSignal as AbortSignal | undefined;
     expect(sig?.aborted).toBe(false);
+  });
+
+  it("collects multi-part streamed text into the final string (codex-safe path)", async () => {
+    // Regression guard for the eval-unavailable fix: council generate must stream
+    // (codex/oauth rejects non-stream) AND correctly concatenate every text-delta
+    // part into the returned string, not just the first.
+    vi.doMock("ai", () => ({
+      streamText: vi.fn().mockImplementation(() => ({
+        fullStream: (async function* () {
+          yield { type: "reasoning-delta", text: "thinking…" };
+          yield { type: "text-delta", text: "Hello" };
+          yield { type: "text-delta", text: ", " };
+          yield { type: "text-delta", text: "world" };
+          yield { type: "finish", finishReason: "stop", totalUsage: { inputTokens: 2, outputTokens: 3 } };
+        })(),
+      })),
+      generateText: vi.fn(),
+      stepCountIs: vi.fn().mockReturnValue({ __step: 1 }),
+    }));
+    vi.doMock("../../providers/keychain.js", () => ({
+      loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
+    }));
+    vi.doMock("../../providers/runtime.js", () => ({
+      detectProviderForModel: vi.fn().mockReturnValue("openai"),
+      createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
+      resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+    }));
+
+    const { createCouncilLLM } = await import("../llm.js");
+    const stats = { calls: 0, startMs: Date.now(), phases: [] };
+    const llm = createCouncilLLM({} as never, "agent" as never, undefined, stats);
+
+    const text = await llm.generate("gpt-4o", "sys", "prompt", 256);
+    expect(text).toBe("Hello, world");
+  });
+
+  it("re-throws a streamed error part so cross-provider fallback still fires", async () => {
+    // evaluateDebate returns null on a thrown generate → the caller retries on
+    // the next model. A provider error arrives as an `error` fullStream part
+    // (not a throw), so collectStreamText must convert it back into a throw.
+    vi.doMock("ai", () => ({
+      streamText: vi.fn().mockImplementation(() => ({
+        fullStream: (async function* () {
+          yield { type: "error", error: new Error("Stream must be set to true") };
+        })(),
+      })),
+      generateText: vi.fn(),
+      stepCountIs: vi.fn().mockReturnValue({ __step: 1 }),
+    }));
+    vi.doMock("../../providers/keychain.js", () => ({
+      loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
+    }));
+    vi.doMock("../../providers/runtime.js", () => ({
+      detectProviderForModel: vi.fn().mockReturnValue("openai"),
+      createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
+      resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+    }));
+
+    const { createCouncilLLM } = await import("../llm.js");
+    const stats = { calls: 0, startMs: Date.now(), phases: [] };
+    const llm = createCouncilLLM({} as never, "agent" as never, undefined, stats);
+
+    await expect(llm.generate("gpt-4o", "sys", "prompt", 256)).rejects.toThrow("Stream must be set to true");
   });
 });
 

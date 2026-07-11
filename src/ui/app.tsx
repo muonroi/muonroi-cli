@@ -129,6 +129,7 @@ import {
 import { PromptBox } from "./components/prompt-box.js";
 import { useRolePalette } from "./components/role-palette.js";
 import { SessionHeader } from "./components/session-header.js";
+import { SessionTreeCard } from "./components/session-tree-card.js";
 import { Toast, type ToastLevel } from "./components/Toast.js";
 import { TaskListPanel } from "./components/task-list-panel.js";
 import {
@@ -251,9 +252,9 @@ function stripControlBytes(raw: string): string {
   return (
     raw
       // biome-ignore lint/suspicious/noControlCharactersInRegex: strip terminal bracketed-paste guards (ESC[200~ / ESC[201~)
-      .replace(/?\[20[01]~/g, "")
+      .replace(/\x1b?\[20[01]~/g, "")
       // biome-ignore lint/suspicious/noControlCharactersInRegex: strip control bytes + DEL from typed/pasted secrets
-      .replace(/[ -]/g, "")
+      .replace(/[\x00-\x1f\x7f]/g, "")
   );
 }
 
@@ -685,6 +686,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     sessionPickerIndex,
     sessionPickerList,
     sessionTitle,
+    sessionTree,
     showAgentsEditor,
     showAgentsModal,
     showApiKeyModal,
@@ -729,6 +731,14 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     width,
   } = useAppLogic({ agent, startupConfig, initialMessage, onExit, onRelaunch });
 
+  // Agent-mode input bridge: translate harness {op:"type"/"press"} commands into
+  // synthetic OpenTUI keypresses (via the shared useAppContext().keyHandler) so
+  // an external driver (MCP harness / vitest spec) can actually type into the
+  // composer. It was imported but never mounted — the agent-mode command channel
+  // had no consumer, so type/press silently no-opped (frames flowed out, input
+  // was dead). No-op when agentRuntime is undefined (normal interactive mode).
+  useAgentInputBridge(agentRuntime);
+
   // Context rail (MUONROI_CONTEXT_RAIL): only render when enabled, the user
   // hasn't hidden it (Ctrl+B), and the terminal is wide enough that a fixed
   // side panel doesn't starve the transcript. Below 100 cols it stays inline.
@@ -767,7 +777,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   }
   if (councilMeta?.leader) railRows.push({ label: "Leader", value: councilMeta.leader });
   if (councilMeta?.panel?.length) {
-    railRows.push({ label: "Panel", value: `${councilMeta.panel.length}: ${councilMeta.panel.join(", ")}` });
+    railRows.push({ label: "Panel", value: `${councilMeta.panel.length} (${councilMeta.panel.join(", ")})` });
   }
   // Round budget is a CEILING the leader may stop under once the panel converges
   // — not a commitment to run that many. Label it as a budget so it doesn't read
@@ -819,7 +829,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
       {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
       {councilStatuses.length > 0 && (
         <Semantic id="council-status" role="listbox" name="Council Status">
-          <CouncilStatusList statuses={councilStatuses} theme={t} />
+          <CouncilStatusList statuses={councilStatuses} theme={t} sessionId={sessionId ?? undefined} />
         </Semantic>
       )}
       {councilInfoCards.map((card, idx) => (
@@ -1037,7 +1047,26 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         <>
                           {roundGroupsActive ? (
                             <>
-                              <CouncilRoundsOverview rounds={councilRounds} theme={t} />
+                              <CouncilRoundsOverview
+                                rounds={councilRounds}
+                                theme={t}
+                                sessionId={sessionId ?? undefined}
+                              />
+                              {/* Opening Analysis turns carry round 0, but
+                                  council_round group records only exist for
+                                  rounds >= 1 — so the round-grouped view below
+                                  silently dropped the openings the moment Round
+                                  1 began (the "opening content cut off" bug).
+                                  Render any turn whose round has no group record
+                                  (round 0, plus any defensive orphan) above the
+                                  groups, but only in the unscoped overview — when
+                                  a specific round is selected in the rail we scope
+                                  to just that round. */}
+                              {selectedRound === null
+                                ? debateTurns
+                                    .filter(({ cm }) => !councilRounds.some((r) => r.round === cm.round))
+                                    .map(renderTurn)
+                                : null}
                               {councilRounds
                                 // When a round is selected in the rail, scope the
                                 // main pane to just that round (its debate turns
@@ -1164,9 +1193,15 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       </box>
                     )}
                     {/* Waiting indicator */}
-                    {isProcessing && !streamContent && activeToolCalls.length === 0 && (
-                      <ShimmerText t={t} text="Planning next moves" />
-                    )}
+                    {isProcessing &&
+                      !streamContent &&
+                      activeToolCalls.length === 0 &&
+                      // F3 — an ask/preflight card blocking for the user's answer is
+                      // NOT the model working; the "Planning next moves" shimmer above
+                      // a pending card misreads as progress while the run is parked on
+                      // input. Suppress it whenever a council card owns the turn.
+                      !pendingCouncilQuestion &&
+                      !pendingCouncilPreflight && <ShimmerText t={t} text="Planning next moves" />}
                     {/* Plan questions panel — inline, OpenCode-style */}
                     {showPlanPanel && <PlanQuestionsPanel t={t} questions={planQuestions} state={pqs} />}
                     {pendingPaymentApproval && <PaymentApprovalPanel t={t} payment={pendingPaymentApproval} />}
@@ -1279,6 +1314,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               </box>
               {railActive && (
                 <ContextRail width={railWidth} rows={railRows}>
+                  <SessionTreeCard nodes={sessionTree} />
                   {renderCouncilMeta(railWidth)}
                 </ContextRail>
               )}

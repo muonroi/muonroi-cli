@@ -27,7 +27,7 @@ describe("F15 — council reachability counts OAuth-only providers", () => {
   });
 
   it("resolves >=2 participants when the session provider is OAuth-only (xai, no API key)", async () => {
-    const participants = await resolveParticipants("grok-build-0.1", false);
+    const participants = await resolveParticipants("grok-4.5", false);
     // Pre-fix this returned [] (loadKeyForProvider('xai') threw) → council bailed.
     expect(participants.length).toBeGreaterThanOrEqual(2);
     expect(participants.every((p) => p.model.startsWith("grok"))).toBe(true);

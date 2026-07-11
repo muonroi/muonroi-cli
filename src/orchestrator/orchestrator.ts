@@ -47,9 +47,9 @@ import {
   buildChatEntries,
   getLastTodoWriteArgs,
   getNextMessageSequence,
+  getSessionChainInfos,
   getSessionTotalTokens,
-  loadTranscript,
-  loadTranscriptState,
+  loadSessionChainTranscriptState,
   logInteraction,
   markMessageCompleted,
   persistApprovedPlan,
@@ -90,6 +90,8 @@ import {
   getModeSpecificModel,
   getRoleModel,
   getRoleModels,
+  getSubAgentCompactKeepLast,
+  getSubAgentCompactThresholdChars,
   isAutoCompactAfterTurnEnabled,
   isCouncilMultiProviderPreferred,
   isProviderDisabled,
@@ -162,12 +164,15 @@ import { loadFlowResumeDigest } from "./flow-resume.js";
 import { MessageProcessor, type MessageProcessorDeps } from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
 import { buildSystemPrompt, HARD_MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS } from "./prompts";
+import { getReactiveDelegationThresholdChars, shouldReactivelyEscalate } from "./reactive-delegation.js";
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
 import { withStreamRetry } from "./retry-stream.js";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
 import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
 import { type ModelTaskKind, resolveModelForTask } from "./sub-agent-model-tier.js";
+import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
+import { getToolLimitAutoRecoverCap } from "./tool-limit-auto-recover.js";
 import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
 import { firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
 
@@ -352,6 +357,8 @@ export class Agent {
   private steerDrain: (() => { text: string }[]) | null = null;
   private maxToolRounds: number;
   private hardMaxToolRounds: number;
+  /** Original hard ceiling at construction — bounds auto-compaction extension. */
+  private _initialHardMaxToolRounds = 0;
   private mode: AgentMode = "agent";
   private modelId: string;
   private maxTokens: number;
@@ -429,6 +436,15 @@ export class Agent {
   // Phase C3: cross-turn tool-output dedup. One instance per session; bumped
   // on each user turn. Lazily initialized so disabled-via-env path stays cheap.
   private _crossTurnDedup: CrossTurnDedup | null = isCrossTurnDedupEnabled() ? new CrossTurnDedup() : null;
+  // Reactive sub-session escalation: the PREVIOUS turn's cumulative tool-output
+  // chars (from the top-level cap), reported by the tool engine at turn end and
+  // read at the next turn's route decision. See reactive-delegation.ts.
+  private _lastTurnToolChars = 0;
+  // Instrument (cold-first-turn measurement): ordinal of the top-level turn whose
+  // tool load was last reported. Lets telemetry distinguish a turn-1 blow-up
+  // (which reactive escalation CANNOT isolate) from a later one (which it can).
+  // Gates the decision to build an in-turn checkpoint. See CONTEXT-CONTROL-LAYERS.md.
+  private _turnLoadOrdinal = 0;
   // Phase C4 — input-keyed read-path budget. Complements C3 (output hash) by
   // catching re-reads of files the agent edited between rounds. Disabled
   // when MUONROI_MAX_READS_PER_PATH=0.
@@ -478,6 +494,10 @@ export class Agent {
     this.maxToolRounds = maxToolRounds || settings.maxToolRounds || MAX_TOOL_ROUNDS;
     const baseHardMax = settings.hardMaxToolRounds || HARD_MAX_TOOL_ROUNDS;
     this.hardMaxToolRounds = Math.max(Math.floor(this.maxToolRounds * 1.5), baseHardMax);
+    // Baseline captured so auto-compaction ceiling extension (see
+    // extendHardCeilingForAutoCompaction) is bounded relative to the ORIGINAL
+    // hard cap and cannot grow without limit across a runaway turn.
+    this._initialHardMaxToolRounds = this.hardMaxToolRounds;
     const envMax = Number(process.env.MUONROI_MAX_TOKENS);
     this.maxTokens = Number.isFinite(envMax) && envMax > 0 ? envMax : 16_384;
     this.batchApi = options.batchApi ?? false;
@@ -512,7 +532,7 @@ export class Agent {
       this.workspace = this.sessionStore.getWorkspace();
       this.session = this.sessionStore.openSession(options.session, this.modelId, this.mode, this.bash.getCwd());
       this.mode = this.session.mode;
-      const transcript = loadTranscriptState(this.session.id);
+      const transcript = loadSessionChainTranscriptState(this.session.id);
       this.messages = transcript.messages;
       this.messageSeqs = transcript.seqs;
       this.sessionStore.setModel(this.session.id, this.modelId);
@@ -688,6 +708,15 @@ export class Agent {
     return this.providerId;
   }
 
+  /**
+   * Expose the provider factory for external callers (e.g., /compact slash command,
+   * sub-agent spawning) that need to make LLM calls outside the normal processMessage flow.
+   * Throws if no provider is configured.
+   */
+  getProvider(): LegacyProvider {
+    return this.requireProvider();
+  }
+
   getCwd(): string {
     return this.bash.getCwd();
   }
@@ -704,6 +733,9 @@ export class Agent {
   setMessages(messages: ModelMessage[]): void {
     this.messages = messages;
     this.messageSeqs = messages.map(() => null);
+    // Manual compaction (/compact) or /clear replaces the conversation; reset
+    // the per-turn auto-compact latch so future tool loops can compact again.
+    this._compactedThisTurn = false;
   }
 
   async listSchedules(): Promise<StoredSchedule[]> {
@@ -830,6 +862,23 @@ export class Agent {
 
   setToolLoopCapHandler(fn: ToolLoopCapAsk | null): void {
     this._toolLoopCapHandler = fn;
+  }
+
+  /**
+   * Extend the absolute hard-cap ceiling when the turn is being sustained by
+   * AUTO-COMPACTION (a productive long task, not a runaway). Rationale: each
+   * auto-compacted round resets context to O(N) input, so it is cheap — the
+   * hard cap's cost-runaway purpose is already served by the compaction. We
+   * grant `maxToolRounds/2` more headroom per compaction, bounded to at most
+   * one extra auto-recover budget's worth above the ORIGINAL ceiling so a
+   * genuinely wedged turn (which trips the pattern guard, not this path) can
+   * never grow the cap without limit. Called from the tool-engine auto-recover
+   * branch after a successful compaction.
+   */
+  extendHardCeilingForAutoCompaction(): void {
+    const bump = Math.max(25, Math.floor(this.maxToolRounds / 2));
+    const absoluteMax = this._initialHardMaxToolRounds + bump * getToolLimitAutoRecoverCap();
+    this.hardMaxToolRounds = Math.min(this.hardMaxToolRounds + bump, absoluteMax);
   }
 
   // Safety-override handler — set by the UI (app.tsx) at startup. Invoked
@@ -979,6 +1028,22 @@ export class Agent {
     return buildChatEntries(this.session.id);
   }
 
+  /**
+   * The session tree this TUI currently hosts: the root conversation plus every
+   * rotation / sub-agent descendant, with per-session metadata. Content from
+   * these sessions is already merged into the transcript on resume; this exposes
+   * WHICH sessions produced it so the rail can show the multi-session structure.
+   */
+  getSessionTree(): import("../storage/transcript.js").SessionChainNode[] {
+    if (!this.session) return [];
+    try {
+      return getSessionChainInfos(this.session.id);
+    } catch (err) {
+      logger.error("orchestrator", "getSessionTree failed", { message: (err as Error)?.message });
+      return [];
+    }
+  }
+
   getLastTodoSnapshot(): TaskListSnapshot | null {
     if (!this.session) return null;
 
@@ -1000,7 +1065,7 @@ export class Agent {
     return {
       workspace: this.workspace,
       session: this.session,
-      messages: loadTranscript(this.session.id),
+      messages: loadSessionChainTranscriptState(this.session.id).messages,
       entries: buildChatEntries(this.session.id),
       totalTokens: getSessionTotalTokens(this.session.id),
     };
@@ -1292,8 +1357,28 @@ export class Agent {
     let assistantText = "";
     let lastActivity = initialDetail;
 
+    // Phase B3 parity: the streamText sub-agent path compacts older tool
+    // results in prepareStep, but this batch path historically concatenated
+    // `[...childMessages, ...turnMessages]` unbounded every round — on a long
+    // batch loop the re-sent history balloons exactly like the stream path did
+    // before B3. Apply the same compactor here (round >= 1, mirroring the
+    // stream path's `stepNumber >= 1` gate). High-value results stay verbatim.
+    const batchCompactThreshold = getSubAgentCompactThresholdChars();
+    const batchCompactKeepLast = getSubAgentCompactKeepLast();
+    const batchChildCtxWindow = childRuntime.modelInfo?.contextWindow ?? 0;
+    const batchIsReasoningModel = childRuntime.modelInfo?.reasoning === true;
     for (let round = 0; round < maxSteps; round++) {
       const batchRequestId = `task-${Date.now()}-${round + 1}`;
+      const roundMessages =
+        round < 1
+          ? [...childMessages, ...turnMessages]
+          : compactSubAgentMessages([...childMessages, ...turnMessages], {
+              thresholdChars: batchCompactThreshold,
+              keepLastTurns: batchCompactKeepLast,
+              contextWindowTokens: batchChildCtxWindow,
+              contextFillRatio: batchIsReasoningModel ? 0.3 : undefined,
+              stripOldReasoning: batchIsReasoningModel,
+            });
       await addBatchRequests({
         ...this.getBatchClientOptions(signal),
         batchId: batch.batch_id,
@@ -1304,7 +1389,7 @@ export class Agent {
               chat_get_completion: buildBatchChatCompletionRequest({
                 modelId: childRuntime.modelId,
                 system: childSystem,
-                messages: [...childMessages, ...turnMessages],
+                messages: roundMessages,
                 temperature: childRuntime.modelInfo?.fixedTemperature ?? (request.agent === "explore" ? 0.2 : 0.5),
                 maxOutputTokens: !childCaps.acceptsParam("maxOutputTokens", childRuntime.modelInfo)
                   ? undefined
@@ -2022,6 +2107,12 @@ export class Agent {
           // ambient sidebar rows, so suppress the duplicate inline summary.
           suppressInlineMeta: isContextRailEnabled(),
           runDir, // B1 — persist decisions.lock.md for the /council slash path
+          // #2 — isolated research bridge. Same StreamRunner sub-agent the /ideal
+          // sprint-runner uses (runTaskRequest): a budget-capped, near-empty
+          // explore child runs the debate's research phase so its multi-step tool
+          // clutter never accretes into the council thread/context. Threads the
+          // council abort signal so Esc cancels the research child too.
+          runIsolatedTask: (request) => this.runTaskRequest(request, undefined, signal),
           onPostDebateAction: (action) => {
             chosenAction = action;
             // Relay to the auto-council caller (tool-engine) so nested runs honor
@@ -2069,7 +2160,71 @@ export class Agent {
       // processMessage (auto-council) or drained by the runDebate tool — those
       // callers manage their own continuation.
       const continuationPrompt = ownsController && synthesis ? postDebateContinuation(chosenAction, synthesis) : null;
-      if (continuationPrompt) {
+      const isBuildContinuation = chosenAction === "implement" || chosenAction === "generate_plan";
+      if (continuationPrompt && isBuildContinuation && process.env.MUONROI_COUNCIL_ISOLATE_IMPL !== "0") {
+        // #1 — build the council decision in an ISOLATED sub-agent instead of
+        // re-entering the full processMessage turn. The flat turn inherited the
+        // entire multi-round debate history and could overflow the context window
+        // (the exact wedge 97bc9d12 fixed for the /ideal sprint-runner but that
+        // /council never got). runTaskRequest starts near-empty and returns a
+        // compact ToolResult. ANTI-MÙ: the child is NOT blind — it is seeded with
+        // (a) the approved synthesis-as-spec (already in continuationPrompt) and
+        // (b) councilManager.buildContext(), the same compaction-summary + Recent
+        // Conversation + [Council Decision]/[Council Memory] "Key Decisions"
+        // checkpoint the anti-mù layer surfaces — so it has the decision + its
+        // rationale without carrying the raw transcript. Opt out with
+        // MUONROI_COUNCIL_ISOLATE_IMPL=0 (falls back to the processMessage path).
+        yield { type: "content", content: "\n[Implementing the council decision in an isolated context…]\n" };
+        this.councilManager.setContinuation(true);
+        try {
+          let councilCheckpoint = "";
+          try {
+            councilCheckpoint = this.councilManager.buildContext();
+          } catch {
+            /* anti-mù bundle is best-effort — the synthesis alone still grounds the build */
+          }
+          const seededPrompt = councilCheckpoint
+            ? `${continuationPrompt}\n\n## Council context (decision + recent session — do NOT re-debate, just build)\n${councilCheckpoint}`
+            : continuationPrompt;
+          let result: import("../types/index.js").ToolResult;
+          try {
+            result = await this.runTaskRequest(
+              { agent: "general", description: "Council implementation", prompt: seededPrompt, modelId: this.modelId },
+              undefined,
+              signal,
+            );
+          } catch (err) {
+            // A throw (vs a returned {success:false}) must not escape and take the
+            // whole /council run down — surface it in-band like the processMessage
+            // path's TurnStallError handling and end the turn cleanly.
+            yield {
+              type: "error",
+              content: `Council implementation failed: ${err instanceof Error ? err.message : String(err)}`,
+            };
+            yield { type: "done" };
+            return;
+          }
+          if (result.success && result.output?.trim()) {
+            yield { type: "content", content: `\n${result.output.trim()}\n` };
+          } else if (result.error) {
+            yield { type: "error", content: `Council implementation failed: ${result.error}` };
+          }
+          // Persist a COMPACT record so the /council slash session stays resumable
+          // (the processMessage path wrote rows for this) WITHOUT re-inheriting the
+          // debate bloat the isolated child deliberately avoided.
+          try {
+            this.appendCompletedTurn(
+              { role: "user", content: "[Council implementation of the debate decision]" } as ModelMessage,
+              [{ role: "assistant", content: (result.output ?? result.error ?? "(no output)").trim() } as ModelMessage],
+            );
+          } catch {
+            /* non-critical persistence */
+          }
+          yield { type: "done" };
+        } finally {
+          this.councilManager.setContinuation(false);
+        }
+      } else if (continuationPrompt) {
         yield { type: "content", content: "\n[Continuing with the debate conclusion…]\n" };
         this.councilManager.setContinuation(true);
         try {
@@ -2122,7 +2277,7 @@ export class Agent {
 
   async *runProductLoopV1(
     payload: {
-      subcommand: "start" | "status" | "resume" | "abort" | "ship";
+      subcommand: "start" | "status" | "resume" | "abort" | "ship" | "review";
       idea?: string;
       runId?: string;
       flags: {
@@ -2154,6 +2309,12 @@ export class Agent {
     };
     const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, productStats);
     const processMessageFn = (m: string) => this.processMessage(m, options?.observer);
+    // Isolated bounded task-runner bridge for the sprint implement stage: a fresh
+    // child context (getSubAgentBudgetChars cap, independent compaction) that does
+    // NOT inherit this turn's council-debate history — the root fix for the live
+    // ctx-overflow wedge. Returns a compact ToolResult (absorbed, no parent bloat).
+    const runIsolatedTask = (request: import("../types/index.js").TaskRequest) =>
+      this.runTaskRequest(request, undefined, this.abortController?.signal);
     const flowDir = nodePath.join(this.bash.getCwd(), ".muonroi-flow");
 
     // P2.7 (LLM-first — no-regex routing): the work-depth tier that decides
@@ -2166,6 +2327,7 @@ export class Agent {
     let complexity: "low" | "medium" | "high" | undefined;
     let needsClarification: boolean | undefined;
     let sufficiencyMissing: readonly import("../pil/layer1-intent.js").SufficiencyMissing[] | undefined;
+    let routeForceCouncil = payload.flags.forceCouncil;
     if (payload.subcommand === "start" && payload.idea) {
       let depth: import("../pil/llm-classify.js").DepthTier = "standard";
       try {
@@ -2181,26 +2343,35 @@ export class Agent {
             `[ideal/route] model depth classify returned no depthTier — defaulting to "standard". idea=${JSON.stringify(payload.idea.slice(0, 80))}`,
           );
         }
-        // LLM-first clarity signal — the agent-first replacement for the regex
-        // `scoreSufficiency`. An underspecified `standard` task earns the
-        // interview/Council path even inside an existing repo (see
-        // runProductLoop gate); null/absent → not-underspecified (don't over-ask).
+        // LLM-first clarity signal — feeds the downstream interview as a hint.
         if (res?.needsClarification === true) needsClarification = true;
       } catch (err) {
-        // Fail-open to the safe middle (standard → hot-path single sprint); never
-        // block /ideal on a classify hiccup. Logged for diagnosis (No-Silent-Catch).
+        // Fail-open: never block /ideal on a classify hiccup (No-Silent-Catch).
         console.error(`[ideal/route] depth classify failed, defaulting to "standard": ${(err as Error)?.message}`);
       }
-      // heavy → full Council pipeline (never hot-path); standard/quick → hot-path.
-      // Maps onto runProductLoop's low|medium|high gate: "high" is the ONLY tier
-      // that both fails the existing-repo bypass (`!== "high"`) and the `=== "low"`
-      // hot-path check, so ONLY heavy reaches runStart/Council — a large task can
-      // no longer skip the interview just because it was phrased plainly.
+
+      // The cheap 8-word classify above is only a HINT for the downstream GSD
+      // depth pipeline — it is NOT a routing gate. It was too noisy to gate the
+      // council decision: the SAME architectural prompt scored `heavy` on one run
+      // and `standard` the next, so routing flip-flopped between full Council and
+      // a straight-to-Edit maint-edit that skipped the debate. /ideal is the
+      // DELIBERATE path — it must ALWAYS run the full Council/loop-driver
+      // pipeline, in this order:
+      //   1. scan the source (discovery/scoping) to understand what the user's
+      //      request actually touches,
+      //   2. interview the user (AskCard — adaptive: only asks what the source
+      //      can't answer, so an existing repo isn't dragged through 6 questions),
+      //   3. leader-tier complexity assessment + debate INSIDE that flow, AFTER
+      //      scope is understood — never a "no debate" verdict from a bare-prompt
+      //      guess.
+      // So we force Council for every /ideal start; the fast classify only
+      // seeds depth/clarity hints for that flow. Explicit `--maintain` still opts
+      // out of Council (handled at the top of runProductLoop dispatch).
       complexity = depth === "heavy" ? "high" : depth === "quick" ? "low" : "medium";
-      // Sufficiency is no longer a separate regex gate (`scoreSufficiency` is
-      // gone from the routing path): a vague / ambiguous brief is exactly what the
-      // model tiers as "heavy" → Council, so depthTier already subsumes it.
       sufficiencyMissing = undefined;
+      if (payload.flags.mode !== "maintain") {
+        routeForceCouncil = true;
+      }
     }
 
     const gen = runProductLoop({
@@ -2216,12 +2387,13 @@ export class Agent {
         doneThreshold: payload.flags.doneThreshold,
         budgetTokens: payload.flags.budgetTokens,
         stack: payload.flags.stack,
-        forceCouncil: payload.flags.forceCouncil,
+        forceCouncil: routeForceCouncil,
       },
       respondToQuestion: this.councilManager.createQuestionResponder(),
       respondToPreflight: this.councilManager.createPreflightResponder(),
       cwd: this.bash.getCwd(),
       processMessageFn,
+      runIsolatedTask,
       // Mode C — wire verify-recipe detector so runProductLoop auto-detect can probe cwd.
       detectVerifyRecipe: () => this.detectVerifyRecipe(),
       skipPriorContext: payload.flags.noPriorContext === true,
@@ -2752,6 +2924,7 @@ export class Agent {
       getCompactionSettings: (cw) => self.getCompactionSettings(cw),
       compactForContext: (provider, system, cw, signal, settings, overflow) =>
         self.compactForContext(provider, system, cw, signal, settings, overflow),
+      extendHardCeilingForAutoCompaction: () => self.extendHardCeilingForAutoCompaction(),
       postTurnCompact: (provider, system, cw, signal) => self.postTurnCompact(provider, system, cw, signal),
       createTools: (bash, provider, mode, opts) => createTools(bash, provider, mode, opts),
       runTask: (request, signal) => self.runTask(request, signal),
@@ -2899,6 +3072,19 @@ export class Agent {
       }
     }
 
+    // Reactive escalation — override a DIRECT_ANSWER route (the router's blind
+    // spot on read-heavy analysis, and its silent-degrade to DIRECT on classify
+    // failure) when the PREVIOUS turn's observed tool load proves the session is
+    // doing heavy multi-tool work. Deterministic, based on real execution, not a
+    // prompt guess. Only rescues DIRECT_ANSWER — never hijacks a deliberate
+    // ROTATE_SESSION. See reactive-delegation.ts.
+    if (routeAction === "DIRECT_ANSWER" && shouldReactivelyEscalate(this._lastTurnToolChars)) {
+      logger.info("orchestrator", "Reactive escalation to sub-session (prior turn tool-heavy)", {
+        prevTurnToolChars: this._lastTurnToolChars,
+      });
+      routeAction = "SPAWN_SUB_SESSION";
+    }
+
     const shouldRotate = currentChars > threshold || routeAction === "ROTATE_SESSION";
 
     if (shouldRotate && this.session && this.sessionStore) {
@@ -2946,10 +3132,10 @@ export class Agent {
     let subSessionId: string | null = null;
 
     if (routeAction === "SPAWN_SUB_SESSION" && this.session && this.sessionStore) {
-      yield { type: "content", content: "\n⋯ Đang khởi tạo sub-session ngầm để xử lý tác vụ...\n" };
+      yield { type: "toast", toastLevel: "info", content: "Đang khởi tạo sub-session ngầm để xử lý tác vụ..." };
       parentSessionId = this.session.id;
       try {
-        const { loadLatestCompaction, getNextMessageSequence, appendCompaction, loadTranscriptState } = await import(
+        const { loadLatestCompaction, getNextMessageSequence, appendCompaction } = await import(
           "../storage/transcript.js"
         );
         const { getDatabase } = await import("../storage/db.js");
@@ -2985,9 +3171,13 @@ export class Agent {
         }
 
         if (shouldResume && subSessionId) {
-          yield { type: "content", content: "\n⋯ Phát hiện sub-session trước đó bị gián đoạn, đang khôi phục...\n" };
+          yield {
+            type: "toast",
+            toastLevel: "info",
+            content: "Phát hiện sub-session trước đó bị gián đoạn, đang khôi phục...",
+          };
           this.session = this.sessionStore.getRequiredSession(subSessionId);
-          const childState = loadTranscriptState(subSessionId);
+          const childState = loadSessionChainTranscriptState(subSessionId);
           this.messages = childState.messages;
           this.messageSeqs = childState.seqs;
           this.sessionStore.touchSession(subSessionId, this.bash.getCwd());
@@ -3058,6 +3248,23 @@ export class Agent {
     const cwd = this.bash.getCwd();
     const dirtyBefore = autoCommitOn ? await snapshotDirtyPaths(cwd) : new Set<string>();
 
+    // Top-level turn watchdog. The per-chunk stall watchdog only covers
+    // streamText byte flow; it does NOT cover a turn generator that keeps the
+    // socket open but never RETURNS after the model is done. Observed live:
+    // xai/grok-composer-2.5-fast fires onFinish/llm-done (finishReason=stop) but
+    // its stream generator never terminates, so processor.run() hangs, the UI's
+    // `for await` never ends, finalizeActiveTurn never runs, and the TUI stays
+    // frozen in the "processing" state (partial/raw markdown) until the next
+    // message forces a new run. Mirrors the council-continuation guard (idle +
+    // hard total). On fire we abort the turn and emit a terminal `done` so the
+    // consumer finalizes cleanly instead of hanging forever. idleMs resets on
+    // every yielded chunk, so long legitimate tool calls are safe; totalMs is a
+    // hard ceiling (0 = disabled by default, since a big multi-tool turn is not a
+    // hang). Env-overridable.
+    const { withTurnWatchdog, TurnStallError } = await import("./turn-watchdog.js");
+    const turnIdleMs = Number(process.env.MUONROI_TURN_IDLE_MS ?? 120_000);
+    const turnTotalMs = Number(process.env.MUONROI_TURN_TOTAL_MS ?? 0);
+
     try {
       let attempts = 0;
       const maxAttempts = 3;
@@ -3067,7 +3274,27 @@ export class Agent {
       while (attempts < maxAttempts) {
         try {
           attempts++;
-          yield* processor.run(userMessage, observer, images);
+          try {
+            yield* withTurnWatchdog(processor.run(userMessage, observer, images), {
+              idleMs: turnIdleMs,
+              totalMs: turnTotalMs,
+              label: "assistant turn",
+            });
+          } catch (stallErr) {
+            // A hung turn is NOT a transient error — retrying it (below) would
+            // just hang again. Abort, surface a toast, and terminate the turn.
+            if (stallErr instanceof TurnStallError) {
+              logger.warn("orchestrator", "Top-level turn watchdog fired — finalizing turn", {
+                kind: stallErr.kind,
+                message: stallErr.message,
+              });
+              this.abortController?.abort(new DOMException(stallErr.message, "TimeoutError"));
+              yield { type: "toast", toastLevel: "warn", content: `Turn ended by watchdog: ${stallErr.message}` };
+              yield { type: "done" };
+            } else {
+              throw stallErr;
+            }
+          }
           break;
         } catch (err) {
           if (isSubSessionForked && isTransientError(err) && attempts < maxAttempts && subSessionId) {
@@ -3255,6 +3482,40 @@ export class Agent {
       },
       getCompactedThisTurn: () => self._compactedThisTurn,
       getCompactionStats: () => self.getCompactionStats(),
+      reportTurnToolLoad: (chars) => {
+        self._lastTurnToolChars = Number.isFinite(chars) && chars > 0 ? chars : 0;
+        self._turnLoadOrdinal += 1;
+        // Cold-first-turn instrument: record every turn whose load crosses the
+        // reactive threshold, tagged with its ordinal. A later query counts what
+        // fraction of threshold-crossing turns are ordinal 1 (the un-isolatable
+        // cold turn) — the evidence that gates building an in-turn checkpoint.
+        try {
+          if (self.session && self._lastTurnToolChars >= getReactiveDelegationThresholdChars()) {
+            // isolated = the heavy turn ran in a forked child (router SPAWN,
+            // reactive escalation, or rotation), so the parent never held it.
+            // The cold-first-turn HOLE is specifically coldFirstTurn && !isolated
+            // — a turn-1 blow-up that landed in the parent because neither the
+            // router nor reactive escalation caught it. Recording `isolated`
+            // stops the metric from over-counting router-isolated heavy turns.
+            const kind = self.sessionStore?.getSessionKind(self.session.id) ?? "conversation";
+            const isolated = kind !== "conversation";
+            logInteraction(self.session.id, "turn_tool_load", {
+              data: {
+                chars: self._lastTurnToolChars,
+                ordinal: self._turnLoadOrdinal,
+                coldFirstTurn: self._turnLoadOrdinal === 1,
+                isolated,
+                kind,
+                threshold: getReactiveDelegationThresholdChars(),
+              },
+            });
+          }
+        } catch (err) {
+          logger.debug("orchestrator", "turn_tool_load telemetry failed (best-effort)", {
+            error: (err as Error)?.message,
+          });
+        }
+      },
       setTurnUserGoalExcerpt: (v) => {
         self._turnUserGoalExcerpt = v;
       },
@@ -3327,6 +3588,7 @@ export class Agent {
       getCompactionSettings: (cw) => self.getCompactionSettings(cw),
       compactForContext: (provider, system, cw, signal, settings, overflow) =>
         self.compactForContext(provider, system, cw, signal, settings, overflow),
+      extendHardCeilingForAutoCompaction: () => self.extendHardCeilingForAutoCompaction(),
       postTurnCompact: (provider, system, cw, signal) => self.postTurnCompact(provider, system, cw, signal),
       runTask: (request, signal) => self.runTask(request, signal),
       runDelegation: (request, signal) => self.runDelegation(request, signal),

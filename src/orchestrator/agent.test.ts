@@ -12,6 +12,7 @@ async function importAgentModule() {
     getNextMessageSequence: vi.fn(() => 0),
     getSessionTotalTokens: vi.fn(() => 0),
     loadTranscript: vi.fn(() => []),
+    loadSessionChainTranscriptState: vi.fn(() => ({ messages: [], seqs: [] })),
     loadTranscriptState: vi.fn(() => ({ messages: [], seqs: [] })),
     recordUsageEvent: vi.fn(),
     SessionStore: class {

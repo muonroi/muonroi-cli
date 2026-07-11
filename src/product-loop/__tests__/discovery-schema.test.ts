@@ -99,4 +99,17 @@ describe("discovery-schema", () => {
     expect(hint).toContain('"core"');
     expect(hint).toContain('"none"');
   });
+
+  it("dbStrategy offers a stateless 'none' option so the recommender stops defaulting to greenfield (F7)", () => {
+    const q = DISCOVERY_QUESTIONS.find((x) => x.id === "dbStrategy")!;
+    // The question the recommender reads must offer 'none' for stateless products.
+    expect(q.prompt.toLowerCase()).toContain("none");
+    expect(q.prompt.toLowerCase()).toContain("stateless");
+
+    const hint = getSchemaHintForLeader("dbStrategy");
+    expect(hint).toContain('"none"');
+    expect(hint).toContain('"greenfield"');
+    // The hint must actively steer away from greenfield for no-persistence products.
+    expect(hint.toLowerCase()).toContain("do not default to");
+  });
 });

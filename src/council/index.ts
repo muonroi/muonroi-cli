@@ -29,6 +29,7 @@ import type {
   CouncilParticipant,
   CouncilStats,
   EnhancedCouncilOutcome,
+  IsolatedTaskRunner,
   PreflightResponder,
   QuestionResponder,
 } from "./types.js";
@@ -140,6 +141,13 @@ export interface RunCouncilOptions {
    *     decisions.lock artifact actually get written for sprint-runner injection.
    */
   sprintPlanningMode?: boolean;
+  /**
+   * #2 — isolated sub-agent bridge (orchestrator.runTaskRequest). When wired,
+   * the debate's research phase runs in a budget-capped explore sub-agent
+   * instead of an in-process 15-step generateText. Forwarded onto CouncilConfig
+   * for runDebate. Optional — omitted by headless/direct callers/tests.
+   */
+  runIsolatedTask?: IsolatedTaskRunner;
 }
 
 export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis";
@@ -262,24 +270,41 @@ export function postDebateContinuation(
   outputKind?: string,
 ): string | null {
   if (!synthesis || !action) return null;
+  // IMPLEMENT — the user decided there is enough to build. Load the council
+  // conclusion back as the approved spec and carry it out through the normal
+  // workflow (the native GSD depth pipeline plans → executes → verifies). Works
+  // for ANY output kind: an analysis/decision synthesis is itself a sufficient
+  // spec, so this no longer needs a separate plan artifact. Scoped so the agent
+  // builds exactly what was decided and cannot balloon into phantom phases.
   if (action === "generate_plan" || action === "implement") {
-    return `Council debate completed. Synthesis:\n\n${synthesis}\n\nProceed with the recommended action items.`;
+    return (
+      `Council debate completed. Approved conclusion:\n\n${synthesis}\n\n` +
+      `Implement this now. Treat the council conclusion above as the approved spec ` +
+      `— load it as your working context and carry it out through your normal ` +
+      `workflow: plan the concrete steps, make the changes in the smallest correct ` +
+      `increments, and verify (build/tests) as you go. Do NOT re-litigate the ` +
+      `decision or expand scope beyond it. If a required detail is genuinely ` +
+      `ambiguous, ask ONE focused question before editing.`
+    );
   }
   if (action === "continue_session") {
     const kind = outputKind ?? synthesisOutputKind(synthesis);
-    // Only an implementation-shaped debate has an "original task" left to build.
+    // Only an implementation-shaped debate has an "original task" left to build
+    // (the /ideal build flow relies on this carry-forward — do NOT null it out).
     if (kind && IMPLEMENTATION_OUTPUT_KINDS.has(kind)) {
       return `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`;
     }
-    // Analysis/evaluation/decision/investigation (or unknown → treat as analysis):
-    // the conclusion is the deliverable. Re-enter so the turn is resumable, but
-    // forbid the implementation drift that phantom-todo'd and hung the session.
-    return (
-      `Council debate completed. Conclusion:\n\n${synthesis}\n\n` +
-      `The analysis above IS the deliverable — present it clearly to the user. ` +
-      `Do NOT edit files, create plans or todos, run build/migration commands, or spawn sub-agents ` +
-      `unless the user explicitly asks for that next step. Wait for the user's direction.`
-    );
+    // Analysis/evaluation/decision/investigation (or unknown → analysis): the
+    // user chose to KEEP THE SESSION GOING without implementing. Stop at the
+    // composer — the synthesis was already shown on the debate card and is
+    // persisted as [Council Decision]/[Council Memory] system messages, so the
+    // user's NEXT message inherits the full council context automatically
+    // (buildCouncilContextBundle surfaces it under "Key Decisions"). Returning
+    // null avoids the wasteful re-present turn AND the old forbid lecture, while
+    // still preventing the phantom-implementation drift (nothing runs). To
+    // actually build, the user picks Implement above; to keep discussing, they
+    // just type — that turn inherits the council context.
+    return null;
   }
   return null;
 }
@@ -377,7 +402,11 @@ export async function* runCouncil(
   };
 
   const baseContext = buildCouncilContext(messages);
-  const projectInfo = options?.cwd ? await buildProjectSnapshot(options.cwd) : { snapshot: "", isEmpty: true };
+  // Fall back to process.cwd() when the caller omits cwd. The old default of
+  // { isEmpty: true } forced internet-first research (and skipped codebase-first
+  // analysis) even when the council was invoked inside a real repo.
+  const projectCwd = options?.cwd ?? process.cwd();
+  const projectInfo = await buildProjectSnapshot(projectCwd);
   const conversationContext = projectInfo.snapshot
     ? `## Current Project\n${projectInfo.snapshot}\n\n---\n\n${baseContext}`
     : baseContext;
@@ -647,6 +676,9 @@ export async function* runCouncil(
       internetFirst,
       costAware,
       runId: sessionId,
+      // #2 — isolated research bridge; when wired, runDebate runs research in a
+      // budget-capped explore sub-agent instead of an in-process 15-step call.
+      runIsolatedTask: options?.runIsolatedTask,
       // B4 interactive escalation — same responder the clarifier + post-debate
       // askcards use. When the debate is about to stop with pinned criteria
       // unmet, runDebate asks the user (extend / accept / rescope) instead of
@@ -774,7 +806,12 @@ export async function* runCouncil(
       // never measured — not that every claim was refuted. Surfacing "Low 0%"
       // there reads as a scoring failure on debates that are actually fine
       // (session de4bafe5ecb7). Only applies when synthesis itself succeeded.
-      const confidenceNotMeasured = !synthesisFailed && taggedClaims === 0;
+      // Also treat a genuine 0 density (tags emitted but none resolved to a
+      // citation) as "not measured" rather than a literal "Low 0%" score — a
+      // bare 0% reads as a scoring failure on debates that were degraded (e.g.
+      // the debate model tripped the tool-verification circuit breaker and ran
+      // tool-free, so no claims could be grounded). Session 65b66c99ed36.
+      const confidenceNotMeasured = !synthesisFailed && (taggedClaims === 0 || evidenceDensity === 0);
       const confidenceLevel: "high" | "medium" | "low" = synthesisFailed
         ? "low"
         : evidenceDensity >= 0.6
@@ -841,8 +878,11 @@ export async function* runCouncil(
 
       if (modelActions) {
         for (const a of modelActions) {
-          // "implement" needs an existing plan; drop it if the debate produced none.
-          if (a.action === "implement" && !hasPlan) continue;
+          // "implement" no longer needs a separate plan artifact — an analysis /
+          // decision synthesis IS the spec (postDebateContinuation loads it and
+          // runs the normal plan→change→verify workflow). The old `!hasPlan` drop
+          // is why a decision-to-change-code debate had NO build path and the
+          // user's "implement"-labelled pick did nothing (session 8191ecaee149).
           baseOptions.push({
             label: a.label,
             // Description is the model's own `reason` (model-first — no hardcoded
@@ -920,10 +960,50 @@ export async function* runCouncil(
           kind: "freetext",
         });
 
-        if (hasPlan) {
+        if (!synthesisFailed) {
           baseOptions.push({
             label: "Start Implementation",
-            description: "Execute the action plan now",
+            description: "Load the council conclusion as the spec and build it (plan → change → verify)",
+            value: "implement",
+            kind: "choice",
+          });
+        }
+      }
+
+      // Canonicalize the post-analysis choices to the user's mental model:
+      // IMPLEMENT / CONTINUE / SAVE (session 8191ecaee149 redesign).
+      //   (a) "ask a follow-up" and "continue with council context" are the same
+      //       thing to the user (both = keep the session going with the debate as
+      //       context), so collapse a generic ask_followup into continue_session.
+      //       A pinned criteria-recovery follow-up is added LATER (inconclusive /
+      //       lowGrounding) and is intentionally distinct, so this only affects
+      //       the base set built above.
+      //   (b) guarantee a CONTINUE option exists.
+      //   (c) offer IMPLEMENT whenever the synthesis is substantive (grounded &
+      //       conclusive) — the conclusion IS the spec, no plan artifact needed.
+      if (!options?.sprintPlanningMode) {
+        const CONTINUE_OPT = {
+          label: "Continue with council context",
+          description: "Return to the composer — your next message keeps this debate's conclusion as context.",
+          value: "continue_session",
+          kind: "choice" as const,
+        };
+        const hasContinue = baseOptions.some((o) => o.value === "continue_session");
+        for (let i = baseOptions.length - 1; i >= 0; i--) {
+          if (baseOptions[i].value !== "ask_followup") continue;
+          if (hasContinue)
+            baseOptions.splice(i, 1); // merged away — continue already covers it
+          else baseOptions[i] = { ...CONTINUE_OPT }; // convert the lone follow-up into continue
+        }
+        if (!baseOptions.some((o) => o.value === "continue_session")) baseOptions.push({ ...CONTINUE_OPT });
+        if (!synthesisFailed && !inconclusive && !baseOptions.some((o) => o.value === "implement")) {
+          // Insert at index 1, NOT 0 — the model's own best-first pick stays the
+          // default (defaultIndex is 0 for model-first). We only GUARANTEE the
+          // build path is present + prominent; we don't override the model's
+          // judgment that building wasn't the recommended next move.
+          baseOptions.splice(1, 0, {
+            label: "Start Implementation",
+            description: "Load the council conclusion as the spec and build it (plan → change → verify)",
             value: "implement",
             kind: "choice",
           });
@@ -951,23 +1031,49 @@ export async function* runCouncil(
         });
       }
 
+      // A2 — synthesis succeeded but grounding is weak (density 0 / low /
+      // "not measured"). The honest next move is to RAISE confidence, not to
+      // commit or to ask a blind clarification — the user reported the askcard
+      // asked "clarify more?" without saying WHAT would help. Pin a guided
+      // follow-up that names the concrete confidence-raising ask (make the
+      // council cite/verify its weakest claims) and make it the default.
+      // Reuses ask_followup routing (freetext, re-runs on this debate's
+      // context) — no new downstream action. Skipped when `inconclusive`
+      // already pinned a criteria-aware follow-up, or when synthesis failed
+      // (the retry_synthesis path owns that recovery).
+      const lowGrounding = !synthesisFailed && !inconclusive && (confidenceNotMeasured || confidenceLevel === "low");
+      if (lowGrounding) {
+        for (let i = baseOptions.length - 1; i >= 0; i--) {
+          if (baseOptions[i].value === "ask_followup") baseOptions.splice(i, 1);
+        }
+        baseOptions.unshift({
+          label: "Raise confidence — have the council cite & verify",
+          description:
+            "Grounding is weak: no claims were cited or resolved, so evidence density stayed at 0. Pose a follow-up that forces the council to back its weakest claims against the codebase or sources — that lifts confidence instead of committing on thin evidence.",
+          value: "ask_followup",
+          kind: "freetext",
+        });
+      }
+
       // Model orders actions best-first (index 0 = recommended default); the
       // fallback set uses the deterministic recommendation. When inconclusive,
       // the pinned criteria option at index 0 is the honest default regardless of
       // path.
-      const defaultIndex = inconclusive
-        ? 0
-        : modelActions
+      const defaultIndex =
+        inconclusive || lowGrounding
           ? 0
-          : Math.max(
-              0,
-              baseOptions.findIndex((o) => o.value === recommendation.value),
-            );
-      const recommendReason = inconclusive
-        ? (baseOptions[0]?.description ?? recommendation.reason)
-        : modelActions
+          : modelActions
+            ? 0
+            : Math.max(
+                0,
+                baseOptions.findIndex((o) => o.value === recommendation.value),
+              );
+      const recommendReason =
+        inconclusive || lowGrounding
           ? (baseOptions[0]?.description ?? recommendation.reason)
-          : recommendation.reason;
+          : modelActions
+            ? (baseOptions[0]?.description ?? recommendation.reason)
+            : recommendation.reason;
 
       const heading = synthesisFailed
         ? "## Debate Synthesis Failed"
@@ -980,7 +1086,18 @@ export async function* runCouncil(
         ? `\n\n⚠ Outcome: ${critOutcome.metCount}/${critOutcome.total} criteria met. Unmet: ${critOutcome.unmetLabels.join("; ")}. Treat the synthesis as provisional — not a settled decision.`
         : "";
       const recommendLine = `**Recommended:** ${baseOptions[defaultIndex]?.label ?? recommendation.value} — ${recommendReason}`;
-      const headerBlock = `${heading}\n\n> ${confidenceBadge}\n>\n> **Why:** ${confidenceReason}${outcomeLine}\n\n${recommendLine}\n\nLeader: \`${leaderModelId}\`. What would you like to do next?`;
+      // B — the live per-round transcript is cleared from the view at turn end
+      // (it renders as a bottom block decoupled from the timeline, so keeping it
+      // would mis-order later messages). The full exchange IS persisted though —
+      // point the user at it so the rounds aren't "lost" (user report: after a
+      // debate the rounds vanish with no way to re-read them). `/council inspect`
+      // is a registered slash command that replays [Council Round N] / [Council
+      // Memory] from the DB.
+      const roundsArchivedLine =
+        debateState.roundCount > 0
+          ? `\n\n📋 All ${debateState.roundCount} debate round(s) are archived — run \`/council inspect ${sessionId}\` to re-read the full exchange.`
+          : "";
+      const headerBlock = `${heading}\n\n> ${confidenceBadge}\n>\n> **Why:** ${confidenceReason}${outcomeLine}\n\n${recommendLine}${roundsArchivedLine}\n\nLeader: \`${leaderModelId}\`. What would you like to do next?`;
 
       let answer: string;
       if (options?.sprintPlanningMode) {

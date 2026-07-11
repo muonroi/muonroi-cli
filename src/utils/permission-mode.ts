@@ -3,7 +3,8 @@
  *
  * safe      - Every tool call prompts the user for approval.
  * auto-edit - File operation tools (read/write/edit/grep/list) auto-approve;
- *             shell execution and computer tools still require confirmation.
+ *             shell execution auto-approves for non-dangerous commands;
+ *             computer tools still require confirmation.
  * yolo      - All tool calls auto-approve without any prompting.
  */
 import { appendDecisionLog } from "../usage/decision-log.js";
@@ -242,7 +243,8 @@ export function toolNeedsApproval(
     return false;
   }
   if (mode === "auto-edit") {
-    if (toolName === "bash" && dangerous(context?.command)) return true;
+    // bash auto-approves when non-dangerous; only dangerous bash needs approval
+    if (toolName === "bash") return dangerous(context?.command);
     return !AUTO_EDIT_ALLOWED.has(toolName);
   }
   // "safe" — always confirm; dangerous patterns explicitly require (no bypass)

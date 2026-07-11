@@ -16,6 +16,10 @@ import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import { createCompactionSummaryMessage } from "../orchestrator/compaction.js";
 import { Agent } from "../orchestrator/orchestrator";
+import {
+  buildCompactResumeMessage,
+  detectProactiveCompactRequest,
+} from "../orchestrator/proactive-compact-detector.js";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "../orchestrator/safety-askcard.js";
 import { planSafetyAskcard } from "../orchestrator/safety-askcard.js";
 
@@ -59,6 +63,7 @@ import { processAtMentions } from "../utils/at-mentions.js";
 import { readClipboardImage } from "../utils/clipboard-image";
 import { FileIndex } from "../utils/file-index.js";
 import { copyTextToHostClipboard, readTextFromHostClipboard } from "../utils/host-clipboard";
+import { logger } from "../utils/logger.js";
 import {
   type CustomSubagentConfig,
   getApiKey,
@@ -161,7 +166,12 @@ import { PaymentApprovalPanel, WalletPickerModal } from "./modals/wallet-picker-
 import { resolvePickerProviders } from "./picker-providers.js";
 import { formatPlanAnswers, initialPlanQuestionsState, PlanQuestionsPanel, type PlanQuestionsState } from "./plan";
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
-import { SLASH_MENU_ITEMS, type SlashMenuItem, VISIBLE_SLASH_MENU_ITEMS } from "./slash/menu-items.js";
+import {
+  SLASH_MENU_ITEMS,
+  SLASH_MENU_ITEMS_ARROW_ORDER,
+  type SlashMenuItem,
+  VISIBLE_SLASH_MENU_ITEMS,
+} from "./slash/menu-items.js";
 import { dispatchSlash } from "./slash/registry.js";
 import { StatusBar } from "./status-bar/index.js";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
@@ -222,6 +232,7 @@ import {
   buildUserEntry,
   formatAnswerForLog,
   formatScheduleDetails,
+  isCouncilStartPatch,
   mapCouncilCardKey,
 } from "./utils/format.js";
 import { isEscapeKey } from "./utils/modal.js";
@@ -1122,14 +1133,21 @@ export function useAppLogic(props: AppLogicProps) {
   }, [councilRounds, selectedRound]);
   const applyCouncilMetaPatch = useCallback((patch: CouncilMetaPatch) => {
     const newTopic = patch.topic;
-    // A topic that differs from the one we're tracking means a new council began.
-    // Only treat it as new when we already had a topic (first council of a turn
-    // sets it without a reset). Flush prior round records + replace meta so a
-    // previous council's Progress row / criteriaMet / leader / panel don't bleed
-    // into the new one. selectedRound follows via the councilRounds effect above.
-    const isNewCouncil = !!newTopic && !!councilTopicRef.current && newTopic !== councilTopicRef.current;
+    // The council entrypoint (index.ts) emits leader+panel+topic together exactly
+    // once, at the START of each debate; every later patch is partial (a lone
+    // roundBudget / researchMode / successCriteria / criteriaMet). That combo is
+    // the STRONGEST new-council signal — stronger than a topic change, which
+    // misses a re-run on the SAME topic (auto-council re-firing on a phase, or a
+    // fresh /council after an Esc that skipped clearLiveTurnUi) and leaks the
+    // prior council's pinned successCriteria into the rail as stale ○ rows (F5).
+    // Reset on it unconditionally; keep the topic-change check as a fallback.
+    const isCouncilStart = isCouncilStartPatch(patch);
+    const isNewTopic = !!newTopic && !!councilTopicRef.current && newTopic !== councilTopicRef.current;
     if (newTopic) councilTopicRef.current = newTopic;
-    if (isNewCouncil) {
+    if (isCouncilStart || isNewTopic) {
+      // Flush prior round records + replace meta so a previous council's Progress
+      // row / criteriaMet / successCriteria / leader / panel can't bleed into the
+      // new one. selectedRound follows via the councilRounds effect above.
       setCouncilRounds([]);
       setCouncilMeta({ ...patch });
       return;
@@ -1193,14 +1211,24 @@ export function useAppLogic(props: AppLogicProps) {
       clearInterCardHeartbeat();
       const startedAt = Date.now();
       const marker = "⏳ ";
-      setMessages((prev) => [...prev, buildAssistantEntry(`${marker}${label}... elapsed 0s\n`)]);
+      // Do NOT render the heartbeat immediately. Council phase transitions are
+      // frequently sub-second, and an entry that flashes "elapsed 0s" for every
+      // short gap is pure noise (this is exactly the "meaningless elapsed 0s" the
+      // user reported). Only surface the ticking entry once a gap is long enough
+      // to warrant a "still working" reassurance — and never show "0s". The tail
+      // is stripped by clearInterCardHeartbeat() at the top of the next chunk
+      // iteration, so the heartbeat is always the last entry while active; that
+      // invariant lets us detect-or-create idempotently on each tick.
+      const MIN_VISIBLE_S = 3;
       const interval = setInterval(() => {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+        if (elapsed < MIN_VISIBLE_S) return;
+        const line = `${marker}${label}... elapsed ${elapsed}s\n`;
         setMessages((prev) => {
-          if (prev.length === 0) return prev;
           const last = prev[prev.length - 1];
-          if (!last || last.type !== "assistant" || !last.content?.includes(marker)) return prev;
-          return [...prev.slice(0, -1), { ...last, content: `${marker}${label}... elapsed ${elapsed}s\n` }];
+          const hasHeartbeat = last?.type === "assistant" && !!last.content?.includes(marker);
+          if (!hasHeartbeat) return [...prev, buildAssistantEntry(line)];
+          return [...prev.slice(0, -1), { ...last, content: line }];
         });
       }, 1_000);
       interCardHeartbeatRef.current = { interval, marker };
@@ -1303,6 +1331,13 @@ export function useAppLogic(props: AppLogicProps) {
   const taskListClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [sessionTitle, setSessionTitle] = useState<string | null>(() => agent.getSessionTitle());
   const [sessionId, setSessionId] = useState<string | null>(() => agent.getSessionId());
+  // Session tree (root + rotation/sub-agent descendants) for the rail's
+  // "Sessions" block. Recomputed when the visible transcript or session id
+  // changes — sub-sessions are spawned/absorbed across turns, so message.length
+  // is the cheapest signal that the tree may have grown. getSessionTree() never
+  // throws (internal try/catch → []).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: sessionId + messages.length are intentional recompute signals (getSessionTree reads the current session internally)
+  const sessionTree = useMemo(() => agent.getSessionTree(), [agent, sessionId, messages.length]);
   const [showApiKeyModal, setShowApiKeyModal] = useState(() => !initialHasApiKey);
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const [showSlashMenu, setShowSlashMenu] = useState(false);
@@ -1630,7 +1665,10 @@ export function useAppLogic(props: AppLogicProps) {
           .sort((a, b) => a.r - b.r || a.i - b.i)
           .map((x) => x.item);
       })()
-    : VISIBLE_SLASH_MENU_ITEMS;
+    : // Empty query (just "/"): primary surface first, then the rest so the
+      // full command set is reachable by arrow-scroll — the dropdown viewport
+      // scrolls, keeping the splash lean while nothing stays unreachable.
+      SLASH_MENU_ITEMS_ARROW_ORDER;
   const slashInputIsMatched = useMemo(() => {
     if (!showSlashMenu) return false;
     const typed = slashSearchQuery.toLowerCase();
@@ -3193,7 +3231,15 @@ export function useAppLogic(props: AppLogicProps) {
       ) {
         return;
       }
-      scrollToBottom();
+      // Follow the live tail while composing, but ONLY when already pinned to the
+      // bottom. Typing must never inflate the jump-to-latest "N new below" pill:
+      // that counter tracks new *content* arriving while the user reads history,
+      // not keystrokes. Calling the soft scrollToBottom() unconditionally ran its
+      // scroll-locked branch on every printable key, which did `newSinceLock += 1`
+      // — so merely typing into the composer made the counter climb (the reported
+      // bug). When the user is scroll-locked-away we now do nothing: no yank, no
+      // miscount; the pill keeps its accurate real-content count.
+      if (isPinnedToBottom()) scrollToBottom();
     };
     renderer._internalKeyInput.onInternal("keypress", onTypingKey);
     return () => {
@@ -3202,6 +3248,7 @@ export function useAppLogic(props: AppLogicProps) {
   }, [
     renderer,
     scrollToBottom,
+    isPinnedToBottom,
     showModelPicker,
     showSandboxPicker,
     showWalletPicker,
@@ -3323,6 +3370,14 @@ export function useAppLogic(props: AppLogicProps) {
                   setStreamReasoning(reasoningAccRef.current);
                 }
                 applyLocalAssistantDelta(chunk.content || "");
+                break;
+              case "toast":
+                // Ephemeral notice — flash it, do NOT append to the persisted
+                // assistant message (that was the old "message thừa ở console"
+                // the user reported: transient status stuck permanently in log).
+                if (chunk.content) {
+                  pushToast(chunk.toastLevel ?? "info", chunk.content);
+                }
                 break;
               case "reasoning":
                 if (reasoningStartRef.current === null) {
@@ -3657,12 +3712,53 @@ export function useAppLogic(props: AppLogicProps) {
         if (!isStale()) {
           finalizeActiveTurn({ wasInterrupted, hadError: turnHadError });
 
-          // If the agent proactively requested compaction (e.g., hit max tool rounds),
-          // automatically dispatch the slash command to run the compaction pass.
+          // If the agent proactively requested compaction (ended its turn with a
+          // `/compact` line — e.g. it felt context getting heavy), run the REAL
+          // compaction pass and then AUTO-RESUME the task, so a long task is
+          // never left stranded. Note: processMessage does NOT route slash
+          // commands (it streams text to the model), so the compaction must be
+          // performed inline here — not by re-dispatching "/compact" as a prompt.
           const finalContent = contentAccRef.current.trim();
-          if (finalContent.startsWith("/compact ") || finalContent === "/compact") {
+          if (finalContent.startsWith("/compact")) {
+            const _pc = detectProactiveCompactRequest(finalContent);
+            const _resume = buildCompactResumeMessage(_pc.instructions);
             setTimeout(() => {
-              if (processMessageRef.current) processMessageRef.current(finalContent);
+              void (async () => {
+                try {
+                  const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
+                  const cr = await deliberateCompact(
+                    flowDir,
+                    agent.getMessages(),
+                    "",
+                    4096,
+                    agent.getProvider(),
+                    model,
+                    _pc.instructions ?? undefined,
+                  );
+                  const sessionId = agent.getSessionId();
+                  if (sessionId) {
+                    const nextSeq = getNextMessageSequence(sessionId);
+                    appendCompaction(sessionId, nextSeq, cr.summary, cr.tokensBeforeCompress);
+                  }
+                  agent.setMessages([createCompactionSummaryMessage(cr.summary)]);
+                  setMessages(agent.getChatEntries());
+                  setMessages((prev) => [
+                    ...prev,
+                    buildAssistantEntry(
+                      `⋯ Đã tự nén ngữ cảnh (${cr.tokensBeforeCompress} → ${cr.tokensAfterCompress} tokens, giữ ${cr.decisionsExtracted} quyết định; kết quả tool vẫn rehydrate được qua ee_query). Tiếp tục tác vụ...`,
+                    ),
+                  ]);
+                } catch (e) {
+                  logger.error("ui", "proactive compaction failed", {
+                    message: (e as Error)?.message,
+                    stack: (e as Error)?.stack?.split("\n").slice(0, 3),
+                  });
+                  setMessages((prev) => [...prev, buildAssistantEntry(`Compaction failed: ${e}`)]);
+                }
+                // Resume the task with the fresh compacted context so the long
+                // task continues without the user having to type "tiếp tục".
+                if (processMessageRef.current) void processMessageRef.current(_resume);
+              })();
             }, 100);
           }
         }
@@ -4047,7 +4143,7 @@ export function useAppLogic(props: AppLogicProps) {
                   agent.getMessages(),
                   "",
                   4096,
-                  agent.getProviderId(),
+                  agent.getProvider(),
                   model,
                   instructions,
                 );
@@ -4477,11 +4573,14 @@ export function useAppLogic(props: AppLogicProps) {
             if (result.startsWith("__COUNCIL__")) {
               const lines = result.split("\n");
               const topic = lines.slice(2).join("\n");
-              setMessages((prev) => [
-                ...prev,
-                buildUserEntry(`/council ${topic}`),
-                buildAssistantEntry("Council convening...\n"),
-              ]);
+              // No "Council convening..." placeholder message — the council phase
+              // timeline + inter-card heartbeat already signal liveness, and a
+              // seeded assistant entry both (a) rendered a meaningless line at
+              // elapsed 0s and (b) got PREPENDED to the real synthesis because the
+              // content handler appends into the last assistant entry. The content
+              // handler below already creates a fresh assistant entry when the tail
+              // is the user message, so the anchor is unnecessary.
+              setMessages((prev) => [...prev, buildUserEntry(`/council ${topic}`)]);
               // Fresh council run — clear any persisted phase timeline so old runs
               // don't bleed into the new one (phaseIds collide across runs).
               setCouncilPhases([]);
@@ -4872,7 +4971,7 @@ export function useAppLogic(props: AppLogicProps) {
                     agent.getMessages(),
                     "",
                     4096,
-                    agent.getProviderId(),
+                    agent.getProvider(),
                     model,
                     instructions,
                   );
@@ -4966,11 +5065,10 @@ export function useAppLogic(props: AppLogicProps) {
               }
               if (result.startsWith("__COUNCIL__")) {
                 const topic = result.replace(/^__COUNCIL__\n/, "");
-                setMessages((prev) => [
-                  ...prev,
-                  buildUserEntry(`/council ${topic}`),
-                  buildAssistantEntry("Council convening...\n"),
-                ]);
+                // No "Council convening..." placeholder — see the branch above:
+                // the content handler creates a fresh assistant entry on demand,
+                // so seeding one only produced 0s-noise + prepended the real reply.
+                setMessages((prev) => [...prev, buildUserEntry(`/council ${topic}`)]);
                 try {
                   const gen = agent.runCouncilRound(topic);
                   for await (const chunk of gen) {
@@ -6568,6 +6666,18 @@ export function useAppLogic(props: AppLogicProps) {
             const pid = pendingCouncilPreflight.preflightId;
             setPendingCouncilPreflight(null);
             setPreflightCardStateSync(null);
+            // F4 — Esc on the preflight card is a CLEAN CANCEL of the whole
+            // council, not a plan rejection. The council entrypoint loops
+            // `while (!approved)`, so respondToPreflight(false) ALONE just re-runs
+            // clarification (or, on auto-council with skipClarification, re-shows
+            // the same card) — there was no way out ("no clean cancel"). Its only
+            // real exit is a post-await userAborted() check. Abort FIRST so that
+            // check is true when the generator resumes, THEN resolve the preflight
+            // false to unblock the await. Safe here — preflight is pre-debate, so
+            // there is no live transcript to wipe (unlike the mid-debate question
+            // card the global Esc handler deliberately shields).
+            const activeAgent = activeTurnRef.current?.agent ?? agent;
+            activeAgent.abort();
             agent.respondToCouncilPreflight(pid, false);
           }
           return;
@@ -7343,6 +7453,7 @@ export function useAppLogic(props: AppLogicProps) {
     sessionPickerIndex,
     sessionPickerList,
     sessionTitle,
+    sessionTree,
     showAgentsEditor,
     showAgentsModal,
     showApiKeyModal,

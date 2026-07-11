@@ -81,7 +81,6 @@ export function renderStatusBar(s: StatusBarState): React.ReactElement {
     React.createElement(UsdMeter, {
       key: "usd",
       session_usd: s.session_usd,
-      month_usd: s.month_usd,
       current_pct: s.current_pct,
     }),
     React.createElement("text", { key: "ee", fg: ee.color, "data-testid": "slot-ee" }, ee.symbol),

@@ -66,6 +66,20 @@ describe("buildLeaderDirective (B5 pre-round steering)", () => {
     const out = buildLeaderDirective(3, criteria, [true, true, true]);
     expect(out).toContain("All criteria met so far");
   });
+
+  it("lists unmet criteria one-per-line (bulleted), not a single ';'-joined blob", () => {
+    // Regression guard: the joined form produced a ~300-char logical line that
+    // word-wrapped into an unreadable block overflowing the round card / leader
+    // bubble. Each criterion must now be its own bulleted line.
+    const out = buildLeaderDirective(1, criteria, []);
+    const bulletLines = out.split("\n").filter((l) => l.trim().startsWith("•"));
+    expect(bulletLines).toHaveLength(criteria.length);
+    for (const c of criteria) {
+      expect(out).toContain(`• ${c}`);
+    }
+    // No line should concatenate two criteria with a semicolon separator.
+    expect(out).not.toMatch(/;\s*(?:No crash|Clear diagnostic|Terminal restored)/);
+  });
 });
 
 describe("buildLeaderVerdict (B5 post-round grading)", () => {

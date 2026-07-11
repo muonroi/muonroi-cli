@@ -139,6 +139,19 @@ export class SessionStore {
     return row ? toSessionInfo(row) : null;
   }
 
+  /**
+   * Authoritative session kind ("conversation" | "rotation" | "subagent").
+   * SessionInfo omits `kind`, so callers that need to know whether a session is
+   * a forked child (e.g. the turn_tool_load instrument) read it here. Returns
+   * null when the session row is absent.
+   */
+  getSessionKind(id: string): SessionKind | null {
+    const row = getDatabase().prepare("SELECT kind FROM sessions WHERE id = ?").get(id) as
+      | { kind: SessionKind }
+      | undefined;
+    return row?.kind ?? null;
+  }
+
   getRequiredSession(id: string): SessionInfo {
     const session = this.getSessionById(id);
     if (!session) {

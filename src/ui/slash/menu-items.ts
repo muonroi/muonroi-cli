@@ -90,3 +90,14 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
 
 /** Items shown in the splash autocomplete + /help listing. */
 export const VISIBLE_SLASH_MENU_ITEMS: SlashMenuItem[] = SLASH_MENU_ITEMS.filter((m) => !m.hidden);
+
+/**
+ * Arrow-navigation order for the empty-query ("just /") dropdown: primary
+ * surface first, then the hidden commands. The dropdown renders a scrolling
+ * viewport, so listing the full set here makes every command reachable by
+ * arrow keys without cluttering the top of the list (primary stays on top).
+ */
+export const SLASH_MENU_ITEMS_ARROW_ORDER: SlashMenuItem[] = [
+  ...VISIBLE_SLASH_MENU_ITEMS,
+  ...SLASH_MENU_ITEMS.filter((m) => m.hidden),
+];
