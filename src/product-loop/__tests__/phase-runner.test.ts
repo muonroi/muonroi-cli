@@ -211,36 +211,68 @@ describe("runPhases orchestrator (subsystem E)", () => {
   });
 
   it("customer abort → returns immediately with user-aborted reason", async () => {
-    const args = baseArgs({ awaitCustomerVerdict: async (_args: unknown) => ({ verdict: "abort" }) });
-    // biome-ignore lint/suspicious/noExplicitAny: intentional cast for test stub typing
-    const gen = runPhases(args as any);
-    let res: OrchestratorResult | undefined;
-    while (true) {
-      const n = await gen.next();
-      if (n.done) {
-        res = n.value;
-        break;
+    // The customer-verdict gate is opt-in as of the plan-fidelity fix (default is
+    // autonomous auto-advance); force it on so this test still exercises the gate.
+    process.env.MUONROI_IDEAL_REQUIRE_VERDICT = "1";
+    try {
+      const args = baseArgs({ awaitCustomerVerdict: async (_args: unknown) => ({ verdict: "abort" }) });
+      // biome-ignore lint/suspicious/noExplicitAny: intentional cast for test stub typing
+      const gen = runPhases(args as any);
+      let res: OrchestratorResult | undefined;
+      while (true) {
+        const n = await gen.next();
+        if (n.done) {
+          res = n.value;
+          break;
+        }
       }
+      expect(res?.pass).toBe(false);
+      expect(res?.reason).toBe("user-aborted");
+    } finally {
+      delete process.env.MUONROI_IDEAL_REQUIRE_VERDICT;
     }
-    expect(res?.pass).toBe(false);
-    expect(res?.reason).toBe("user-aborted");
   });
 
   it("customer reject feedback persisted verbatim", async () => {
+    process.env.MUONROI_IDEAL_REQUIRE_VERDICT = "1";
+    try {
+      const args = baseArgs({
+        awaitCustomerVerdict: async (_args: unknown) => ({ verdict: "reject", feedback: "needs more polish" }),
+      });
+      // biome-ignore lint/suspicious/noExplicitAny: intentional cast for test stub typing
+      const gen = runPhases(args as any);
+      let count = 0;
+      while (true) {
+        const n = await gen.next();
+        if (n.done || count++ > 5) break;
+      }
+      const { readArtifact } = await import("../../flow/artifact-io.js");
+      const map = await readArtifact(path.join(flowDir, "runs", runId), "state.md");
+      const cd = JSON.parse(map!.sections.get("Customer Decisions")!);
+      expect(cd.items.some((d: { feedback?: string }) => d.feedback?.includes("needs more polish"))).toBe(true);
+    } finally {
+      delete process.env.MUONROI_IDEAL_REQUIRE_VERDICT;
+    }
+  });
+
+  it("autonomous default advances without a customer verdict", async () => {
+    // Default (no MUONROI_IDEAL_REQUIRE_VERDICT): the loop must NOT block on the
+    // human gate — awaitCustomerVerdict should never be called.
+    delete process.env.MUONROI_IDEAL_REQUIRE_VERDICT;
+    let verdictCalls = 0;
     const args = baseArgs({
-      awaitCustomerVerdict: async (_args: unknown) => ({ verdict: "reject", feedback: "needs more polish" }),
+      awaitCustomerVerdict: async (_args: unknown) => {
+        verdictCalls++;
+        return { verdict: "abort" as const };
+      },
     });
     // biome-ignore lint/suspicious/noExplicitAny: intentional cast for test stub typing
     const gen = runPhases(args as any);
-    let count = 0;
     while (true) {
       const n = await gen.next();
-      if (n.done || count++ > 5) break;
+      if (n.done) break;
     }
-    const { readArtifact } = await import("../../flow/artifact-io.js");
-    const map = await readArtifact(path.join(flowDir, "runs", runId), "state.md");
-    const cd = JSON.parse(map!.sections.get("Customer Decisions")!);
-    expect(cd.items.some((d: { feedback?: string }) => d.feedback?.includes("needs more polish"))).toBe(true);
+    expect(verdictCalls).toBe(0);
   });
 
   it("phase deadlock when phase-2 blocked because phase-1 never completed", async () => {
