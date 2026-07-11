@@ -232,6 +232,7 @@ import {
   buildUserEntry,
   formatAnswerForLog,
   formatScheduleDetails,
+  isCouncilStartPatch,
   mapCouncilCardKey,
 } from "./utils/format.js";
 import { isEscapeKey } from "./utils/modal.js";
@@ -1132,14 +1133,21 @@ export function useAppLogic(props: AppLogicProps) {
   }, [councilRounds, selectedRound]);
   const applyCouncilMetaPatch = useCallback((patch: CouncilMetaPatch) => {
     const newTopic = patch.topic;
-    // A topic that differs from the one we're tracking means a new council began.
-    // Only treat it as new when we already had a topic (first council of a turn
-    // sets it without a reset). Flush prior round records + replace meta so a
-    // previous council's Progress row / criteriaMet / leader / panel don't bleed
-    // into the new one. selectedRound follows via the councilRounds effect above.
-    const isNewCouncil = !!newTopic && !!councilTopicRef.current && newTopic !== councilTopicRef.current;
+    // The council entrypoint (index.ts) emits leader+panel+topic together exactly
+    // once, at the START of each debate; every later patch is partial (a lone
+    // roundBudget / researchMode / successCriteria / criteriaMet). That combo is
+    // the STRONGEST new-council signal — stronger than a topic change, which
+    // misses a re-run on the SAME topic (auto-council re-firing on a phase, or a
+    // fresh /council after an Esc that skipped clearLiveTurnUi) and leaks the
+    // prior council's pinned successCriteria into the rail as stale ○ rows (F5).
+    // Reset on it unconditionally; keep the topic-change check as a fallback.
+    const isCouncilStart = isCouncilStartPatch(patch);
+    const isNewTopic = !!newTopic && !!councilTopicRef.current && newTopic !== councilTopicRef.current;
     if (newTopic) councilTopicRef.current = newTopic;
-    if (isNewCouncil) {
+    if (isCouncilStart || isNewTopic) {
+      // Flush prior round records + replace meta so a previous council's Progress
+      // row / criteriaMet / successCriteria / leader / panel can't bleed into the
+      // new one. selectedRound follows via the councilRounds effect above.
       setCouncilRounds([]);
       setCouncilMeta({ ...patch });
       return;
@@ -6658,6 +6666,18 @@ export function useAppLogic(props: AppLogicProps) {
             const pid = pendingCouncilPreflight.preflightId;
             setPendingCouncilPreflight(null);
             setPreflightCardStateSync(null);
+            // F4 — Esc on the preflight card is a CLEAN CANCEL of the whole
+            // council, not a plan rejection. The council entrypoint loops
+            // `while (!approved)`, so respondToPreflight(false) ALONE just re-runs
+            // clarification (or, on auto-council with skipClarification, re-shows
+            // the same card) — there was no way out ("no clean cancel"). Its only
+            // real exit is a post-await userAborted() check. Abort FIRST so that
+            // check is true when the generator resumes, THEN resolve the preflight
+            // false to unblock the await. Safe here — preflight is pre-debate, so
+            // there is no live transcript to wipe (unlike the mid-debate question
+            // card the global Esc handler deliberately shields).
+            const activeAgent = activeTurnRef.current?.agent ?? agent;
+            activeAgent.abort();
             agent.respondToCouncilPreflight(pid, false);
           }
           return;

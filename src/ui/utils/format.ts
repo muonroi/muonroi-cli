@@ -125,6 +125,20 @@ export function buildPreflightQuestion(pf: {
   };
 }
 
+/**
+ * F5 — the council entrypoint (council/index.ts) emits `leader`+`panel`+`topic`
+ * together exactly once, at the START of each debate; every later `council_meta`
+ * patch is partial (a lone roundBudget / researchMode / successCriteria /
+ * criteriaMet). That combination is the strongest new-council signal — stronger
+ * than a topic change, which misses a re-run on the SAME topic (auto-council
+ * re-firing on a phase, or a fresh /council after an Esc that skipped
+ * clearLiveTurnUi) and leaks the prior council's pinned criteria into the rail as
+ * stale ○ rows. The rail resets its meta+rounds on this.
+ */
+export function isCouncilStartPatch(patch: { leader?: string; panel?: string[] }): boolean {
+  return !!patch.leader && !!patch.panel;
+}
+
 export function mapCouncilCardKey(key: KeyEvent): CouncilCardKey | null {
   if (key.name === "up") return { kind: "up" };
   if (key.name === "down") return { kind: "down" };
