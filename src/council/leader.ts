@@ -224,11 +224,14 @@ export async function resolveLeaderModelDetailed(sessionModelId: string): Promis
     };
   }
 
-  // No usable configured leader — use the session model itself. We intentionally
-  // do NOT silently promote to the highest-tier model on the provider: the
-  // user's account/key may not have access to that tier (e.g. SiliconFlow Pro),
-  // which would cause 401s on every leader call. Tier-upgrade is a deliberate
-  // choice — opt in by setting roleModels.leader in config.
+  // Fallback: no configured leader AND the provider tags no model with the
+  // "leader" role. Promoting the leader to the provider's highest tier IS the
+  // intended design, but only when there's an EXPLICIT signal for it — a catalog
+  // model tagged role:"leader" (handled at the top of this function) or a
+  // configured roleModels.leader (promoted up to the best tier above). With
+  // neither signal we do NOT guess a top-tier model here: an arbitrary *-pro the
+  // key isn't entitled to would 401 on every leader call. So we keep the session
+  // model itself.
   return { modelId: sessionModelId, defaulted: true };
 }
 
