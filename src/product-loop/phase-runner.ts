@@ -385,7 +385,11 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       totalSprints += 1;
 
       const review = await generateSprintReview({
-        sprintState: { sprintN, ...sprintResult },
+        sprintState: {
+          sprintN,
+          ...sprintResult,
+          verifyVerdict: (sprintResult as { lastVerifyResult?: string }).lastVerifyResult,
+        },
         phase,
         leader: args.leader,
         capUsd: args.capUsd,
@@ -395,16 +399,29 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       if (!args.suppressPush) {
         yield { type: "push_notification", content: review.summary };
       }
-      await markAwaitingCustomerReview(args.flowDir, args.runId, phase.id, sprintN);
 
-      const verdict = await args.awaitCustomerVerdict({
-        flowDir: args.flowDir,
-        runId: args.runId,
-        phaseId: phase.id,
-        sprintN,
-        reviewSummary: review.summary,
-      });
-      await clearAwaitingCustomerReview(args.flowDir, args.runId, phase.id, sprintN);
+      // Autonomy fix: by default /ideal advances between sprints WITHOUT a blocking
+      // human verdict (previously the loop parked in discordAwaitVerdict's poll and
+      // never reached sprint 2 unless a human replied). Set
+      // MUONROI_IDEAL_REQUIRE_VERDICT=1 to restore the human customer-review gate.
+      const requireVerdict = process.env.MUONROI_IDEAL_REQUIRE_VERDICT === "1";
+      let verdict: { verdict: "accept" | "reject" | "abort"; feedback?: string };
+      if (requireVerdict) {
+        await markAwaitingCustomerReview(args.flowDir, args.runId, phase.id, sprintN);
+        verdict = await args.awaitCustomerVerdict({
+          flowDir: args.flowDir,
+          runId: args.runId,
+          phaseId: phase.id,
+          sprintN,
+          reviewSummary: review.summary,
+        });
+        await clearAwaitingCustomerReview(args.flowDir, args.runId, phase.id, sprintN);
+      } else {
+        verdict = {
+          verdict: "accept",
+          feedback: "[auto-advance: autonomous mode (MUONROI_IDEAL_REQUIRE_VERDICT unset)]",
+        };
+      }
       await appendCustomerDecision(args.flowDir, args.runId, {
         phaseId: phase.id,
         sprintN,
@@ -433,7 +450,8 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       }
       await clearRetroPending(args.flowDir, args.runId, phase.id, sprintN);
 
-      const phaseRatio = sprintResult.criteriaMet / Math.max(1, sprintResult.totalCriteria);
+      const phaseTotal = sprintResult.totalCriteria ?? phase.successCriteria.length;
+      const phaseRatio = sprintResult.criteriaMet / Math.max(1, phaseTotal);
       if (phaseRatio >= phase.exitCondition.min) break;
     }
 

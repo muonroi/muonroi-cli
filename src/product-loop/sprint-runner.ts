@@ -27,6 +27,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { prependDecisionsLock, readDecisionsLock } from "../council/decisions-lock.js";
 import { runCouncil } from "../council/index.js";
+import { resolveLeaderModel } from "../council/leader.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
 import type { CouncilLLM } from "../council/types.js";
 import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
@@ -46,6 +47,12 @@ import { formatUnverifiedForSprintContext, readLedger } from "./assumption-ledge
 import { readBacklog } from "./backlog-store.js";
 import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "./circuit-breakers.js";
 import { reserveForProduct } from "./cost-scoper.js";
+import {
+  extractAcceptanceCriteria,
+  judgeCriteriaAgainstVerify,
+  planQualityIssues,
+  seedCriteriaFromPlan,
+} from "./criteria-seed.js";
 import { formatProjectContextForPrompt } from "./discovery-context-format.js";
 import { readProjectContext } from "./discovery-persistence.js";
 import { evaluateDoneGate } from "./done-gate.js";
@@ -53,6 +60,7 @@ import type { ContinueFeedback } from "./feedback-routing.js";
 import { buildContinueFeedback } from "./feedback-routing.js";
 import { idealTrace } from "./ideal-trace.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
+import { runPlanAdherenceReview } from "./plan-adherence-review.js";
 import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snapshot.js";
 import { appendRoleMemory } from "./role-memory.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
@@ -639,6 +647,36 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     await persistSprintPlan(planPath, planSynthesis);
   }
 
+  // Plan-fidelity fix: seed the plan's acceptance_criteria into the criteria store
+  // so the done-gate scores against REAL criteria (previously readCriteria returned
+  // [] → score always 0.00 → no gate on plan divergence). Idempotent + non-clobbering.
+  // Also run a NON-BLOCKING plan-quality check (per-sprint plans are auto-approved
+  // with no gate) and fold any issues into a corrective note for the impl prompt.
+  let planQualityNote = "";
+  try {
+    const planCriteria = extractAcceptanceCriteria(planSynthesis ?? "");
+    const seeded = await seedCriteriaFromPlan(ctx.flowDir, ctx.runId, planCriteria, sprintN);
+    if (seeded > 0) {
+      yield {
+        type: "content",
+        content: `\n> [criteria] Seeded ${seeded} acceptance criteria from the sprint plan (done-gate now scores against them).\n`,
+      };
+    }
+    const issues = planQualityIssues(planSynthesis ?? "", seeded);
+    if (issues.length > 0) {
+      planQualityNote =
+        `\n\n--- PLAN QUALITY WARNINGS (address these while implementing) ---\n` +
+        issues.map((i) => `- ${i}`).join("\n") +
+        `\nImplement to satisfy the phase goal and every acceptance criterion; do not stop at scaffolding.\n`;
+      yield {
+        type: "content",
+        content: `\n> [plan-check] ${issues.length} plan-quality warning(s): ${issues.join("; ")}\n`,
+      };
+    }
+  } catch {
+    /* non-critical — a missing criteria seed degrades to the prior empty-criteria behavior */
+  }
+
   // P4-C: close the planning phase row before opening implementation.
   yield phaseDone({
     phaseId: planPhaseId,
@@ -688,7 +726,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // implement/edit path, not the respond path.
   // C2: Pre-impl gate — read decisions.lock.md and prepend to implementation prompt.
   // When lock file is missing (greenfield / no council with runDir), pass-through unchanged.
-  let implPrompt = planSynthesis.trim() ? IMPL_EXECUTION_DIRECTIVE + planSynthesis : planSynthesis;
+  let implPrompt = planSynthesis.trim() ? IMPL_EXECUTION_DIRECTIVE + planSynthesis + planQualityNote : planSynthesis;
   try {
     const lockContent = await readDecisionsLock(runDir);
     if (lockContent) {
@@ -744,11 +782,22 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
             "\n> [isolated impl] Executing the sprint in a fresh sub-agent context " +
             "(anti-overflow: does not inherit the debate history).\n",
         };
+        // Plan-fidelity fix: allow the implementation turn to run on a stronger
+        // model than the cheap session tier (which failed to faithfully follow a
+        // rich plan). Opt-in via MUONROI_IDEAL_IMPL_MODEL; defaults to the session
+        // model so the cheap-model philosophy stays the default.
+        const implModelId = process.env.MUONROI_IDEAL_IMPL_MODEL?.trim() || ctx.sessionModelId;
+        if (implModelId !== ctx.sessionModelId) {
+          yield {
+            type: "content",
+            content: `\n> [impl-model] Running implementation on ${implModelId} (override of session model ${ctx.sessionModelId}).\n`,
+          };
+        }
         const result = await ctx.runIsolatedTask({
           agent: "general",
           description: `Sprint ${sprintN} implementation`,
           prompt: implPrompt,
-          modelId: ctx.sessionModelId,
+          modelId: implModelId,
         });
         if (!result.success) {
           implError = result.error?.trim() || "isolated implementation task failed";
@@ -874,6 +923,51 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
           content: `\n> [completeness] ${stillMissing.length} plan target(s) still missing after re-check — deferring to verify.\n`,
         };
       }
+    }
+  }
+
+  // ── Step 4c: Plan-adherence review gate (strong reviewer → cheap fixer) ────
+  // A high-tier reviewer checks the diff against the approved plan; deviations are
+  // handed to a lower-tier fixer and re-reviewed (bounded). Opt out with
+  // MUONROI_IDEAL_ADHERENCE_REVIEW=0. Never halts — verify + the criteria done-gate
+  // remain the hard gates; this tightens plan fidelity before verification so a
+  // cheap implementer's divergence is caught and corrected, not shipped.
+  if (ctx.runIsolatedTask && planSynthesis.trim() && process.env.MUONROI_IDEAL_ADHERENCE_REVIEW !== "0") {
+    const adhPhaseId = `sprint-${sprintN}-adherence`;
+    const adhStartedAt = Date.now();
+    yield phaseStart({
+      phaseId: adhPhaseId,
+      kind: "sprint_stage",
+      label: `Sprint ${sprintN} — Plan-adherence review`,
+      startedAt: adhStartedAt,
+    });
+    try {
+      const reviewModelId = process.env.MUONROI_IDEAL_REVIEW_MODEL?.trim() || resolveLeaderModel(ctx.sessionModelId);
+      const verdict = yield* runPlanAdherenceReview({
+        sprintN,
+        planSynthesis,
+        cwd,
+        reviewModelId,
+        fixModelId: ctx.sessionModelId,
+        runIsolatedTask: ctx.runIsolatedTask,
+        maxRounds: Number.parseInt(process.env.MUONROI_IDEAL_ADHERENCE_ROUNDS ?? "2", 10) || 2,
+      });
+      idealTrace("sprint.adherence.after", {
+        runId: ctx.runId,
+        sprintN,
+        rounds: verdict.rounds,
+        adherent: verdict.adherent,
+        deviations: verdict.deviations.length,
+      });
+    } catch (err) {
+      console.error(`[sprint-runner] plan-adherence review failed (sprint ${sprintN}): ${(err as Error).message}`);
+    } finally {
+      yield phaseDone({
+        phaseId: adhPhaseId,
+        kind: "sprint_stage",
+        label: `Sprint ${sprintN} — Plan-adherence review`,
+        startedAt: adhStartedAt,
+      });
     }
   }
 
@@ -1010,6 +1104,42 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     subtype: "sprint_stage",
     data: { sprintIndex: sprintN, stage: "judgment", runId: ctx.runId },
   });
+  // Plan-fidelity fix: judge the seeded acceptance criteria against what was
+  // actually built (verify output + diff) BEFORE the done-gate reads them.
+  // Without this the criteria stay "unmet" forever → score 0.00 and the gate can
+  // never distinguish an on-plan sprint from a divergent one. Only upgrades on a
+  // PASSing verify with concrete evidence (see judgeCriteriaAgainstVerify).
+  try {
+    const judgeModelId =
+      roleAssignments.get("Reviewer")?.modelId ?? roleAssignments.get("PO")?.modelId ?? ctx.sessionModelId;
+    let diffSummary = "";
+    try {
+      const { spawnSync } = await import("node:child_process");
+      const stat = spawnSync("git", ["diff", "--stat", "HEAD"], { cwd, encoding: "utf8", timeout: 15000 });
+      diffSummary = (stat.stdout ?? "").slice(0, 4000) || "(no diff detected)";
+    } catch {
+      diffSummary = "(diff unavailable)";
+    }
+    const verifyOutputForJudge = (verifyResult.error?.trim() ? verifyResult.error : (verifyResult.output ?? "")).trim();
+    const { judged, total } = await judgeCriteriaAgainstVerify({
+      flowDir: ctx.flowDir,
+      runId: ctx.runId,
+      llm: productLlm,
+      modelId: judgeModelId,
+      verifyVerdict,
+      verifyOutput: verifyOutputForJudge,
+      diffSummary,
+    });
+    if (total > 0) {
+      yield {
+        type: "content",
+        content: `\n> [criteria] Judged ${judged}/${total} acceptance criteria as met/partial against verify+diff.\n`,
+      };
+    }
+  } catch {
+    /* non-critical — judging failure leaves criteria unmet (conservative) */
+  }
+
   const currentCriteria = await readCriteria(ctx.flowDir, ctx.runId);
 
   // When a phaseScope is provided (subsystem E), evaluate the done-gate only
@@ -1100,6 +1230,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     criteriaMet: currentCriteria.filter((c) => c.status === "met").length,
     criteriaPartial: currentCriteria.filter((c) => c.status === "partial").length,
     criteriaUnmet: currentCriteria.filter((c) => c.status === "unmet").length,
+    totalCriteria: currentCriteria.length,
     costUsd: 0, // Per-sprint cost is observed via the per-product ledger; field kept for compat.
     actualCost: 0,
     score: verdict.score,

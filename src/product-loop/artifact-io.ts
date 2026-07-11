@@ -95,6 +95,8 @@ export async function appendIteration(flowDir: string, runId: string, entry: Ite
     `CriteriaUnmet: ${entry.criteriaUnmet}`,
   ];
 
+  if (entry.totalCriteria !== undefined) lines.push(`TotalCriteria: ${entry.totalCriteria}`);
+
   if (entry.crashed) lines.push("Crashed: true");
   if (entry.retryOf !== undefined) lines.push(`RetryOf: ${entry.retryOf}`);
 
@@ -139,6 +141,7 @@ export async function readIterations(flowDir: string, runId: string): Promise<It
 
     if (data.Crashed === "true") iter.crashed = true;
     if (data.RetryOf !== undefined) iter.retryOf = Number.parseInt(data.RetryOf, 10);
+    if (data.TotalCriteria !== undefined) iter.totalCriteria = Number.parseInt(data.TotalCriteria, 10);
 
     results.push(iter);
   }

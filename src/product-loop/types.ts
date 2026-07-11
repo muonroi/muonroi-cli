@@ -44,6 +44,10 @@ export interface IterationState {
   criteriaMet: number;
   criteriaPartial: number;
   criteriaUnmet: number;
+  /** Total criteria evaluated this sprint. Optional for back-compat with older
+   * persisted iterations; when present it fixes the phase-runner exit ratio + the
+   * sprint-review "met X/Y" count that previously read undefined. */
+  totalCriteria?: number;
   costUsd: number;
   lastVerifyResult: string;
   /** Alias of costUsd kept for circuit-breaker history adapters (CB-1 reads actualCost). */
