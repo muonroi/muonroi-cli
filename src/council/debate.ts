@@ -10,6 +10,7 @@ import {
   restoreExchangeLogs,
   writeDebateCheckpoint,
 } from "./debate-checkpoint.js";
+import { resolveDebateSummary } from "./debate-summary.js";
 import { pickCouncilTaskModel } from "./leader.js";
 import { tracedAsync, tracedGenerate } from "./llm.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
@@ -788,7 +789,17 @@ export async function* runDebate(
 
   if (active.length < 2) {
     yield { type: "content", content: "\nNot enough successful openings for discussion.\n" };
-    return { spec, exchangeLogs, runningSummary: "", roundCount: 0, researchFindings, active, archive };
+    // Even a single-opening debate is worth persisting (F9) — a deterministic
+    // synthesis of whatever position survived beats an empty research artifact.
+    return {
+      spec,
+      exchangeLogs,
+      runningSummary: resolveDebateSummary({ runningSummary: "", active, archive }),
+      roundCount: 0,
+      researchFindings,
+      active,
+      archive,
+    };
   }
 
   // ── Phase 2: Dynamic discussion rounds ─────────────────────────────────────
@@ -1863,6 +1874,54 @@ export async function* runDebate(
   // "measured 0% grounding" apart from "no tags emitted → not measurable"
   // (session de4bafe5ecb7: substantive debate, zero tags → misleading 0%).
   const finalTaggedClaims = countCitations(fullExchangeText) + countUnverified(fullExchangeText);
+
+  // F9 root fix — `runningSummary` is only produced as an INTER-round summary
+  // (`if (round < maxRounds)` above), so a debate that ends on its final/only
+  // round, or stops early after round 1, returns an empty summary — and the
+  // /ideal research artifacts (research.md, delegations.md) silently lose the
+  // whole debate. Generate a real closing summary from the full exchange when
+  // none exists; if there were no discussion rounds (openings-only) or the
+  // model call fails, fall back to a deterministic synthesis from the
+  // participants' positions so the returned state is never emptily summarized.
+  if (!runningSummary.trim()) {
+    const exchangeTurns = [...exchangeLogs.values()].flat();
+    if (exchangeTurns.length > 0) {
+      const closeId = "phase:summary-final";
+      const closeStart = Date.now();
+      yield phaseStart({ phaseId: closeId, kind: "summary", label: "Closing summary" });
+      try {
+        const { system, prompt } = buildRoundSummaryPrompt(
+          exchangeTurns.slice(-6).join("\n\n"),
+          spec.problemStatement,
+          roundCount,
+          debateLanguage,
+        );
+        const summaryModel = pickCouncilTaskModel("round_summary", leaderModelId, costAware);
+        runningSummary = yield* tracedGenerate(llm, {
+          phase: "summary",
+          label: "Summarizing the debate",
+          modelId: costAware ? summaryModel : active[0].model,
+          system,
+          prompt,
+          maxTokens: 512,
+        });
+        yield phaseDone({ phaseId: closeId, kind: "summary", label: "Closing summary", startedAt: closeStart });
+      } catch {
+        yield phaseDone({
+          phaseId: closeId,
+          kind: "summary",
+          label: "Closing summary",
+          startedAt: closeStart,
+          detail: "skipped",
+        });
+      }
+    }
+    // Deterministic backstop: openings-only debates (no exchange turns) or a
+    // failed/empty closing-summary call still yield a non-empty summary.
+    if (!runningSummary.trim()) {
+      runningSummary = resolveDebateSummary({ runningSummary, active, archive });
+    }
+  }
 
   // C — the debate reached synthesis (normal completion or user-cancel fall-
   // through), so the checkpoint is obsolete. A mid-round THROW never reaches
