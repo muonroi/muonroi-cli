@@ -20,7 +20,9 @@
       "description": "Native DeepSeek V4 Flash. Tool-call capable. Primary fast-tier model for the deepseek provider.",
       "aliases": ["deepseek-flash-native"],
       "supports_vision": false,
-      "roles": ["research", "implement", "verify"]
+      "roles": ["research", "implement", "verify"],
+      "native_web_research": false,
+      "web_research_kind": null
     },
     {
       "id": "deepseek-v4-pro",
@@ -39,7 +41,9 @@
       "description": "Native DeepSeek V4 Pro. Tool-call capable. Premium-tier default for the deepseek provider.",
       "aliases": ["deepseek-pro-native"],
       "supports_vision": false,
-      "roles": ["leader", "implement", "verify", "research"]
+      "roles": ["leader", "implement", "verify", "research"],
+      "native_web_research": false,
+      "web_research_kind": null
     },
     {
       "id": "gpt-5.4-mini",
@@ -57,7 +61,9 @@
       "description": "OpenAI GPT-5.4 mini via ChatGPT subscription OAuth (chatgpt.com/backend-api/codex, Responses API). Subscription-billed — per-token price N/A (0 placeholder). Added to local fallback catalog so OAuth-granted OpenAI models resolve when the CP catalog endpoint is unreachable.",
       "aliases": ["gpt-5.4-mini-oauth"],
       "supports_vision": false,
-      "roles": ["research", "implement", "verify"]
+      "roles": ["research", "implement", "verify"],
+      "native_web_research": true,
+      "web_research_kind": "web-tool"
     },
     {
       "id": "gpt-5.4",
@@ -75,7 +81,9 @@
       "description": "OpenAI GPT-5.4 via ChatGPT subscription OAuth (chatgpt.com/backend-api/codex, Responses API). Subscription-billed — per-token price N/A (0 placeholder). Added to local fallback catalog so OAuth-granted OpenAI models resolve when the CP catalog endpoint is unreachable.",
       "aliases": ["gpt-5.4-oauth"],
       "supports_vision": false,
-      "roles": ["leader", "implement", "verify"]
+      "roles": ["leader", "implement", "verify"],
+      "native_web_research": true,
+      "web_research_kind": "web-tool"
     },
     {
       "id": "gpt-5.3-codex",
@@ -93,7 +101,9 @@
       "description": "OpenAI GPT-5.3 Codex (coding-specialized) via ChatGPT subscription OAuth (chatgpt.com/backend-api/codex, Responses API). Subscription-billed — per-token price N/A (0 placeholder). Added to local fallback catalog so OAuth-granted OpenAI models resolve when the CP catalog endpoint is unreachable.",
       "aliases": ["gpt-5.3-codex-oauth", "codex"],
       "supports_vision": false,
-      "roles": ["implement", "verify"]
+      "roles": ["implement", "verify"],
+      "native_web_research": true,
+      "web_research_kind": "web-tool"
     },
     {
       "id": "grok-4.5",
@@ -102,8 +112,8 @@
       "tier": "premium",
       "context_window": 500000,
       "max_output_tokens": 65536,
-      "input_price_per_million": 2.0,
-      "output_price_per_million": 6.0,
+      "input_price_per_million": 2,
+      "output_price_per_million": 6,
       "cached_input_price_per_million": 0.5,
       "reasoning": true,
       "thinking_type": "enabled",
@@ -112,7 +122,9 @@
       "description": "xAI/SpaceXAI flagship (Jul 2026). Strongest model for coding, agentic tool-calling, and knowledge work. Configurable reasoning (default high). 500k context. Pricing verified from docs.x.ai 2026-07-09.",
       "aliases": ["grok-4.5", "grok-4.5-latest", "grok-latest", "grok-4"],
       "supports_vision": true,
-      "roles": ["leader", "implement", "verify", "research"]
+      "roles": ["leader", "implement", "verify", "research"],
+      "native_web_research": true,
+      "web_research_kind": "web-search"
     },
     {
       "id": "grok-composer-2.5-fast",
@@ -121,8 +133,8 @@
       "tier": "balanced",
       "context_window": 200000,
       "max_output_tokens": 65536,
-      "input_price_per_million": 3.0,
-      "output_price_per_million": 15.0,
+      "input_price_per_million": 3,
+      "output_price_per_million": 15,
       "reasoning": false,
       "thinking_type": null,
       "supports_effort": false,
@@ -130,7 +142,9 @@
       "description": "Cursor Composer 2.5 (fast) via Grok/xAI. Agentic coding model for long-horizon tasks and complex instructions. Text-only (no native vision). Model id used by Grok Build / Grok CLI integrations. Pricing: Cursor fast tier $3/$15 per 1M.",
       "aliases": ["composer-2.5", "composer-2.5-fast", "composer", "grok-composer-2.5", "grok-build-0.1"],
       "supports_vision": false,
-      "roles": ["implement", "research", "verify"]
+      "roles": ["implement", "research", "verify"],
+      "native_web_research": true,
+      "web_research_kind": "web-search"
     },
     {
       "id": "glm-4.6v-flash",
@@ -148,7 +162,9 @@
       "default_reasoning_effort": null,
       "description": "Z.ai vision model for screenshots, UI, diagrams. Primary backend for routing.vision_proxy (text-only models like DeepSeek). Explicit -m or proxy only — not tier routing.",
       "aliases": ["glm-4.6v-flashx"],
-      "supports_vision": true
+      "supports_vision": true,
+      "native_web_research": true,
+      "web_research_kind": "web-tool"
     },
     {
       "id": "glm-4.7-flash",
@@ -158,8 +174,8 @@
       "tier_routing": false,
       "context_window": 203000,
       "max_output_tokens": 8000,
-      "input_price_per_million": 0.0,
-      "output_price_per_million": 0.0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
       "reasoning": false,
       "thinking_type": null,
       "supports_effort": false,
@@ -167,7 +183,9 @@
       "description": "Z.ai free-tier model (separate rate-limit pool; NOT covered by GLM Coding Plan Pro/Lite/Max quota). Use glm-4.7 for subscription-backed coding. Explicit -m only — excluded from automatic tier routing and compaction.",
       "aliases": ["glm-4-flash", "glm-4-flashx", "glm-4.7-flashx"],
       "supports_vision": false,
-      "roles": ["research"]
+      "roles": ["research"],
+      "native_web_research": true,
+      "web_research_kind": "web-tool"
     },
     {
       "id": "glm-4.5-air",
@@ -186,7 +204,9 @@
       "description": "Z.ai pay-as-you-go API model (billed per token; NOT the GLM Coding Plan subscription pool). Explicit -m only.",
       "aliases": ["glm-4.5-airx"],
       "supports_vision": false,
-      "roles": ["research", "verify"]
+      "roles": ["research", "verify"],
+      "native_web_research": true,
+      "web_research_kind": "web-tool"
     },
     {
       "id": "glm-4.7",
@@ -205,7 +225,9 @@
       "description": "Recommended default for Z.ai GLM Coding Plan subscribers (Lite/Pro/Max). Primary balanced model; also routes as fast-tier for compaction/title (replaces glm-4.7-flash in auto-routing). Z.ai docs: use for routine tasks.",
       "aliases": [],
       "supports_vision": false,
-      "roles": ["leader", "implement"]
+      "roles": ["leader", "implement"],
+      "native_web_research": true,
+      "web_research_kind": "web-tool"
     },
     {
       "id": "glm-5-turbo",
@@ -223,7 +245,9 @@
       "description": "GLM Coding Plan model (Lite/Pro/Max). High-throughput agent tasks; consumes subscription quota (2-3x during peak for GLM-5 family per Z.ai policy).",
       "aliases": [],
       "supports_vision": false,
-      "roles": ["implement", "research", "verify"]
+      "roles": ["implement", "research", "verify"],
+      "native_web_research": true,
+      "web_research_kind": "web-tool"
     },
     {
       "id": "glm-5v-turbo",
@@ -241,7 +265,9 @@
       "default_reasoning_effort": null,
       "description": "Pay-as-you-go vision model — NOT included in GLM Coding Plan Pro (API returns 429). Use Z.ai Vision MCP on Coding Plan instead. Explicit -m only.",
       "aliases": [],
-      "supports_vision": true
+      "supports_vision": true,
+      "native_web_research": true,
+      "web_research_kind": "web-tool"
     },
     {
       "id": "glm-5",
@@ -251,7 +277,7 @@
       "tier_routing": false,
       "context_window": 203000,
       "max_output_tokens": 32000,
-      "input_price_per_million": 1.0,
+      "input_price_per_million": 1,
       "output_price_per_million": 3.2,
       "reasoning": true,
       "thinking_type": "enabled",
@@ -260,7 +286,9 @@
       "description": "Legacy GLM-5 base model (not in the official Coding Plan trio). Use glm-4.7 / glm-5-turbo / glm-5.2. Explicit -m only.",
       "aliases": [],
       "supports_vision": false,
-      "roles": ["leader", "implement", "verify"]
+      "roles": ["leader", "implement", "verify"],
+      "native_web_research": true,
+      "web_research_kind": "web-tool"
     },
     {
       "id": "glm-5.2",
@@ -278,7 +306,9 @@
       "description": "GLM Coding Plan flagship for complex reasoning and large engineering (Z.ai: Opus-level). Default premium route; 3x peak / 2x off-peak quota per Z.ai policy.",
       "aliases": ["glm-5.2[1m]"],
       "supports_vision": true,
-      "roles": ["leader", "implement", "verify"]
+      "roles": ["leader", "implement", "verify"],
+      "native_web_research": true,
+      "web_research_kind": "web-tool"
     },
     {
       "id": "glm-5.1",
@@ -297,7 +327,9 @@
       "description": "Superseded by glm-5.2 for Coding Plan premium routing. Still callable via -m on the coding endpoint.",
       "aliases": [],
       "supports_vision": false,
-      "roles": ["implement", "research"]
+      "roles": ["implement", "research"],
+      "native_web_research": true,
+      "web_research_kind": "web-tool"
     },
     {
       "id": "opencode/kimi-k2.7-code",
@@ -306,8 +338,8 @@
       "tier": "balanced",
       "context_window": 128000,
       "max_output_tokens": 8192,
-      "input_price_per_million": 0.0,
-      "output_price_per_million": 0.0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
       "reasoning": false,
       "thinking_type": null,
       "supports_effort": false,
@@ -316,7 +348,9 @@
       "description": "Subscription model specialized for coding from Moonshot/Kimi.",
       "aliases": ["kimi-k2.7-code-go"],
       "supports_vision": false,
-      "roles": ["implement", "verify"]
+      "roles": ["implement", "verify"],
+      "native_web_research": false,
+      "web_research_kind": null
     },
     {
       "id": "opencode/kimi-k2.6",
@@ -325,8 +359,8 @@
       "tier": "balanced",
       "context_window": 128000,
       "max_output_tokens": 8192,
-      "input_price_per_million": 0.0,
-      "output_price_per_million": 0.0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
       "reasoning": false,
       "thinking_type": null,
       "supports_effort": false,
@@ -335,7 +369,9 @@
       "description": "Subscription version of Moonshot's Kimi K2.6 model.",
       "aliases": ["kimi-k2.6-go"],
       "supports_vision": false,
-      "roles": ["research"]
+      "roles": ["research"],
+      "native_web_research": false,
+      "web_research_kind": null
     },
     {
       "id": "opencode/glm-5.2",
@@ -344,8 +380,8 @@
       "tier": "premium",
       "context_window": 1000000,
       "max_output_tokens": 131072,
-      "input_price_per_million": 0.0,
-      "output_price_per_million": 0.0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
       "reasoning": true,
       "thinking_type": "enabled",
       "supports_effort": true,
@@ -353,7 +389,9 @@
       "description": "Subscription version of GLM-5.2 MoE with 1M-token context window.",
       "aliases": ["glm-5.2-go"],
       "supports_vision": true,
-      "roles": ["leader", "implement", "verify"]
+      "roles": ["leader", "implement", "verify"],
+      "native_web_research": false,
+      "web_research_kind": null
     },
     {
       "id": "opencode/glm-5.1",
@@ -362,8 +400,8 @@
       "tier": "premium",
       "context_window": 203000,
       "max_output_tokens": 32000,
-      "input_price_per_million": 0.0,
-      "output_price_per_million": 0.0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
       "reasoning": true,
       "thinking_type": "enabled",
       "supports_effort": true,
@@ -371,7 +409,9 @@
       "description": "Subscription version of GLM-5.1 fifth-generation model.",
       "aliases": ["glm-5.1-go"],
       "supports_vision": false,
-      "roles": ["implement", "research"]
+      "roles": ["implement", "research"],
+      "native_web_research": false,
+      "web_research_kind": null
     },
     {
       "id": "opencode/minimax-m3",
@@ -380,15 +420,17 @@
       "tier": "balanced",
       "context_window": 128000,
       "max_output_tokens": 8192,
-      "input_price_per_million": 0.0,
-      "output_price_per_million": 0.0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
       "reasoning": false,
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "Subscription model specialized for high-quality structured generation.",
       "aliases": ["minimax-m3-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "native_web_research": false,
+      "web_research_kind": null
     },
     {
       "id": "opencode/minimax-m2.7",
@@ -397,15 +439,17 @@
       "tier": "balanced",
       "context_window": 128000,
       "max_output_tokens": 8192,
-      "input_price_per_million": 0.0,
-      "output_price_per_million": 0.0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
       "reasoning": false,
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "Subscription model for fast and cost-effective generation.",
       "aliases": ["minimax-m2.7-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "native_web_research": false,
+      "web_research_kind": null
     },
     {
       "id": "opencode/qwen-3.7-max",
@@ -414,8 +458,8 @@
       "tier": "premium",
       "context_window": 128000,
       "max_output_tokens": 8192,
-      "input_price_per_million": 0.0,
-      "output_price_per_million": 0.0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
       "reasoning": true,
       "thinking_type": "enabled",
       "supports_effort": true,
@@ -423,7 +467,9 @@
       "description": "Subscription version of Qwen's top-tier reasoning coding model.",
       "aliases": ["qwen-3.7-max-go"],
       "supports_vision": false,
-      "roles": ["leader", "implement", "verify"]
+      "roles": ["leader", "implement", "verify"],
+      "native_web_research": false,
+      "web_research_kind": null
     },
     {
       "id": "opencode/qwen-3.7-plus",
@@ -432,8 +478,8 @@
       "tier": "balanced",
       "context_window": 128000,
       "max_output_tokens": 8192,
-      "input_price_per_million": 0.0,
-      "output_price_per_million": 0.0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
       "reasoning": false,
       "thinking_type": null,
       "supports_effort": false,
@@ -441,7 +487,9 @@
       "description": "Subscription version of Qwen 3.7 Plus coding model.",
       "aliases": ["qwen-3.7-plus-go"],
       "supports_vision": false,
-      "roles": ["implement", "verify", "research"]
+      "roles": ["implement", "verify", "research"],
+      "native_web_research": false,
+      "web_research_kind": null
     },
     {
       "id": "opencode/qwen-3.6-plus",
@@ -450,15 +498,17 @@
       "tier": "balanced",
       "context_window": 128000,
       "max_output_tokens": 8192,
-      "input_price_per_million": 0.0,
-      "output_price_per_million": 0.0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
       "reasoning": false,
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "Subscription version of Qwen 3.6 Plus coding model.",
       "aliases": ["qwen-3.6-plus-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "native_web_research": false,
+      "web_research_kind": null
     },
     {
       "id": "opencode/deepseek-v4-pro",
@@ -467,8 +517,8 @@
       "tier": "premium",
       "context_window": 128000,
       "max_output_tokens": 16000,
-      "input_price_per_million": 0.0,
-      "output_price_per_million": 0.0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
       "reasoning": true,
       "thinking_type": "enabled",
       "supports_effort": true,
@@ -476,7 +526,9 @@
       "description": "Subscription version of DeepSeek's flagship coding model.",
       "aliases": ["deepseek-v4-pro-go"],
       "supports_vision": false,
-      "roles": ["leader", "implement", "verify", "research"]
+      "roles": ["leader", "implement", "verify", "research"],
+      "native_web_research": false,
+      "web_research_kind": null
     },
     {
       "id": "opencode/deepseek-v4-flash",
@@ -485,8 +537,8 @@
       "tier": "fast",
       "context_window": 128000,
       "max_output_tokens": 8000,
-      "input_price_per_million": 0.0,
-      "output_price_per_million": 0.0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
       "reasoning": true,
       "thinking_type": "enabled",
       "supports_effort": false,
@@ -494,7 +546,9 @@
       "description": "Subscription version of DeepSeek's fast reasoning model via OpenCode Go (Console Go proxy). Shares rate limits with other subscribers — heavy tool use or long sessions often hit 'Provider rate limit exceeded'. For sustained work prefer native `-m deepseek-v4-flash`.",
       "aliases": ["deepseek-v4-flash-go"],
       "supports_vision": false,
-      "roles": ["research", "implement", "verify"]
+      "roles": ["research", "implement", "verify"],
+      "native_web_research": false,
+      "web_research_kind": null
     },
     {
       "id": "opencode/mimo-v2.5",
@@ -503,15 +557,17 @@
       "tier": "fast",
       "context_window": 128000,
       "max_output_tokens": 8192,
-      "input_price_per_million": 0.0,
-      "output_price_per_million": 0.0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
       "reasoning": false,
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "Fast and lightweight coding model.",
       "aliases": ["mimo-v2.5-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "native_web_research": false,
+      "web_research_kind": null
     },
     {
       "id": "opencode/mimo-v2.5-pro",
@@ -520,24 +576,44 @@
       "tier": "balanced",
       "context_window": 128000,
       "max_output_tokens": 8192,
-      "input_price_per_million": 0.0,
-      "output_price_per_million": 0.0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
       "reasoning": false,
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "Subscription model specialized for multi-step structured coding.",
       "aliases": ["mimo-v2.5-pro-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "native_web_research": false,
+      "web_research_kind": null
     }
   ],
   "routing": {
     "switch_provider_order": ["deepseek", "zai", "opencode-go", "xai"],
     "vision_proxy": {
-      "default": { "provider": "zai", "model_id": "glm-4.6v-flash" },
-      "ocr": { "provider": "zai", "model_id": "glm-4.6v-flash" },
-      "design": { "provider": "zai", "model_id": "glm-5.2" },
-      "fallback_chain": [{ "provider": "xai", "model_id": "grok-4.5" }, { "provider": "zai", "model_id": "glm-5.2" }]
+      "default": {
+        "provider": "zai",
+        "model_id": "glm-4.6v-flash"
+      },
+      "ocr": {
+        "provider": "zai",
+        "model_id": "glm-4.6v-flash"
+      },
+      "design": {
+        "provider": "zai",
+        "model_id": "glm-5.2"
+      },
+      "fallback_chain": [
+        {
+          "provider": "xai",
+          "model_id": "grok-4.5"
+        },
+        {
+          "provider": "zai",
+          "model_id": "glm-5.2"
+        }
+      ]
     },
     "council": {
       "prefer_multi_provider": true,
@@ -585,7 +661,16 @@
         "timezone": "Asia/Shanghai",
         "policy_basis": "official",
         "policy_note": "Peak-valley pricing per DeepSeek Team announcement (mid-July V4 release). UTC: 01:00–04:00 and 06:00–10:00; UTC+8: 09:00–12:00 and 14:00–18:00. Peak prices 2x regular for v4-pro and v4-flash.",
-        "windows": [{ "start_hour": 9, "end_hour": 12 }, { "start_hour": 14, "end_hour": 18 }],
+        "windows": [
+          {
+            "start_hour": 9,
+            "end_hour": 12
+          },
+          {
+            "start_hour": 14,
+            "end_hour": 18
+          }
+        ],
         "sensitive_model_ids": ["deepseek-v4-pro"],
         "fallback_model_id": "deepseek-v4-flash",
         "switch_fallback_providers": ["zai", "opencode-go", "xai"]

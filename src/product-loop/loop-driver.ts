@@ -459,6 +459,9 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           return { runId: ctx.runId, stage: "error", success: false, reason: "missing_spec_for_research" };
         }
 
+        // Part E — web-research confidence for this run, filled when the
+        // Researcher stance is (re)assigned to a web-capable model below.
+        let researchWebConfidence: { confidence: "native" | "degraded"; model?: string } | undefined;
         const researchPhaseStartMs = Date.now();
         yield phaseStart({
           phaseId: "loop:research",
@@ -533,6 +536,37 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             stance: s,
           };
         });
+
+        // Part E — the Researcher stance MUST prefer a model with NATIVE online
+        // web research (its own web_search/browsing), so the research phase gets
+        // real online facts rather than codebase-only reasoning. If a web-capable
+        // model is reachable this session, route the Researcher to it; otherwise
+        // record degraded confidence into research.md (the fallback add-in path
+        // — Tavily/MCP — is untrusted per the owner's Part E principle).
+        const { modelHasNativeWebResearch, getWebResearchModel } = await import("../models/registry.js");
+        const reachableIds = new Set<string>(
+          [...councilParticipants.map((p) => p.model), leaderModelId].filter(Boolean),
+        );
+        const researcherIdx = participants.findIndex((p) => p.stance?.name === "Researcher");
+        if (researcherIdx >= 0) {
+          const current = participants[researcherIdx]!.model;
+          if (!modelHasNativeWebResearch(current)) {
+            const webModel = getWebResearchModel(reachableIds) ?? getWebResearchModel();
+            if (webModel) {
+              participants[researcherIdx]!.model = webModel.id;
+              researchWebConfidence = { confidence: "native", model: webModel.id };
+            } else {
+              researchWebConfidence = { confidence: "degraded" };
+              logLoopEvent(ctx, "research_web_degraded", {
+                phase: "research",
+                reason: "no native_web_research model reachable",
+                researcherModel: current,
+              });
+            }
+          } else {
+            researchWebConfidence = { confidence: "native", model: current };
+          }
+        }
 
         // CB-1 — BB-aware context injection. Runs before council debate fires so
         // the research stances have access to relevant BB recipes and rules.
@@ -744,6 +778,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           await writeResearchDoc(ctx.flowDir, ctx.runId, {
             summary: debateState.runningSummary ?? "",
             findings: debateState.researchFindings ?? undefined,
+            webResearch: researchWebConfidence,
           });
         } catch {
           /* non-critical — research.md is a review surface, never blocks the FSM */

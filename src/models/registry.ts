@@ -131,6 +131,26 @@ export function getModelsForProvider(providerId: string): ModelInfo[] {
   return MODELS.filter((m) => m.provider === providerId);
 }
 
+/**
+ * Part E — does this model have NATIVE online web research (its own
+ * web_search/browsing/Live-Search)? Missing flag → false (safe default per the
+ * Kill #6 rule: never infer web capability from the provider).
+ */
+export function modelHasNativeWebResearch(idOrAlias: string): boolean {
+  return getModelInfo(idOrAlias)?.nativeWebResearch === true;
+}
+
+/**
+ * First catalog model with native web research (optionally constrained to a set
+ * of reachable model ids). Used by the council research phase to route the
+ * Researcher stance to a web-capable model. Returns undefined when none exist.
+ */
+export function getWebResearchModel(reachableIds?: ReadonlySet<string>): ModelInfo | undefined {
+  return MODELS.find(
+    (m) => m.nativeWebResearch === true && isTierRoutable(m) && (!reachableIds || reachableIds.has(m.id)),
+  );
+}
+
 export function getFirstCatalogModel(): ModelInfo {
   const m = MODELS.find(() => true);
   if (!m) throw new Error("No models in catalog. Check src/models/catalog.json or catalog endpoint.");
