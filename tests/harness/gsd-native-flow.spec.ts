@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { planningArtifact } from "../../src/gsd/paths.js";
 import { type HarnessContext, spawnHarness } from "./helpers.js";
 
 /**
@@ -62,8 +63,12 @@ describe("gsd-native greenfield bootstrap", () => {
     // Wait for the turn to settle (mock-llm returns fast).
     await ctx.driver.wait_for({ idle: true, timeoutMs: 30_000 });
 
-    const statePath = join(greenfield, ".planning", "STATE.md");
-    const configPath = join(greenfield, ".planning", "config.json");
+    // Path is resolved via planningArtifact, not hardcoded ".planning/": the
+    // GSD state tree cut over to the folded `.muonroi-flow/planning/` location
+    // for fresh projects (src/gsd/paths.ts planningRoot). Using the helper keeps
+    // this spec tracking the canonical location instead of the legacy split dir.
+    const statePath = planningArtifact(greenfield, "STATE.md");
+    const configPath = planningArtifact(greenfield, "config.json");
     expect(existsSync(statePath)).toBe(true);
     expect(existsSync(configPath)).toBe(true);
 
@@ -83,7 +88,7 @@ describe("gsd-native greenfield bootstrap", () => {
   }, 60_000);
 
   it("second turn does not corrupt STATE.md (read path is stable)", async () => {
-    const statePath = join(greenfield, ".planning", "STATE.md");
+    const statePath = planningArtifact(greenfield, "STATE.md");
     const before = readFileSync(statePath, "utf8");
 
     ctx.driver.type("what does the counter do?");

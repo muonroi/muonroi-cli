@@ -3984,7 +3984,7 @@ export function useAppLogic(props: AppLogicProps) {
         openSandboxPicker();
         return true;
       }
-      if (c === "/sessions" || c === "/session") {
+      if (c === "/sessions" || c === "/session" || c === "/resume") {
         try {
           const { SessionStore } = require("../storage/sessions.js") as typeof import("../storage/sessions.js");
           const list = new SessionStore(agent.getCwd()).listRecentSessions(20);

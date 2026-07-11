@@ -61,7 +61,15 @@ describe("resume picker collapses conversation trees", () => {
   });
 
   it("shows one collapsed row for the tree, no (untitled)/{} noise", async () => {
-    harness.driver.type("/sessions");
+    // Type char-by-char so the slash-menu filter state commits through React
+    // between keystrokes (an uncontrolled composer does not re-render on a
+    // single bulk insert, leaving the menu's selectedIndex on a stale item —
+    // Enter then selects the wrong command). Settle before Enter.
+    for (const ch of "/resume") {
+      harness.driver.type(ch);
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    await harness.driver.wait_for({ idle: true, timeoutMs: 3_000 }).catch(() => undefined);
     harness.driver.press("Enter");
     await harness.driver.wait_for({ selector: "id=session-picker", timeoutMs: 8_000 });
 

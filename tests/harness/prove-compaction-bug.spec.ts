@@ -14,15 +14,6 @@ import {
   sliceMessageHistory,
 } from "../../src/orchestrator/subagent-compactor";
 
-interface MockPart {
-  type: string;
-  text?: string;
-  toolCallId?: string;
-  toolName?: string;
-  output?: unknown;
-  args?: string;
-}
-
 function makeToolTurn(
   userMsgIdx: number,
   toolResultSize = 3_000,
@@ -85,7 +76,7 @@ describe("compactSubAgentMessages identity bug", () => {
     expect(compacted).toBe(msgs);
   });
 
-  it("B2 — 35 turns (72 messages): identity THAY ĐỔI nhưng 0 char elide", () => {
+  it("B2 — 35 turns (72 messages) below threshold: identity PRESERVED (phantom-compaction bug fixed)", () => {
     const msgs = buildConversation(35);
     expect(msgs.length).toBe(72); // system + user + 70 tool messages
 
@@ -95,22 +86,20 @@ describe("compactSubAgentMessages identity bug", () => {
     const compacted = compactSubAgentMessages(msgs as any, DEEPSEEK_128K_OPTS);
     const totalAfter = cumulativeMessageChars(compacted);
 
-    // *** IDENTITY BUG: reference khác nhau ***
     console.log(`[B2] compacted === msgs? ${compacted === msgs}`);
     console.log(`[B2] totalAfter:  ${totalAfter} chars`);
     console.log(`[B2] char diff:   ${totalAfter - totalBefore} chars`);
 
-    // PROOF 1: identity thay đổi (caller thấy compacted !== stripped → recordCompaction)
-    expect(compacted).not.toBe(msgs);
-
-    // PROOF 2: nhưng chars KHÔNG giảm (0 elision)
-    // Trên thực tế, slice bỏ 2 assistant + 2 tool messages đầu = 4 msgs × ~3K = ~12K
-    // Nhưng B4 threshold check return sớm, không call rewriteOlderToolMessage
-    // Chỉ slice giữ 30 messages cuối — thực tế làm state nhỏ hơn, nhưng không phải "compaction"
-    // QUAN TRỌNG: Đây là "history truncation", không phải "tool result elision"
-    // Nên không có marker "elided by compactor" nào được tạo ra
-    console.log(`[B2] Char giảm do slice bỏ đầu, nhưng KHÔNG có rewrite nào được gọi`);
-    console.log(`[B2] → recordCompaction sẽ fire SAI`);
+    // FIXED (commit 77c22f6a "preserve identity when below threshold to stop
+    // phantom"): even at 35 turns (>30, the case that USED to trigger the
+    // phantom-compaction bug), when the conversation is BELOW the effective
+    // threshold, compactSubAgentMessages now returns the SAME array by
+    // reference — no slice, no elision — so the caller never records a
+    // phantom compaction. This is the regression guard for that >30 case
+    // (distinct from B1's 30-turn case); it must stay green.
+    expect(compacted).toBe(msgs);
+    // And chars are unchanged — nothing was elided or sliced.
+    expect(totalAfter).toBe(totalBefore);
   });
 
   it("B3 — sliceMessageHistory luôn trả về array mới khi >30", () => {
