@@ -24,6 +24,16 @@ export interface CouncilRoundGroupProps {
   theme: Theme;
 }
 
+/**
+ * F2 — header that frames a DONE round's persisted directive as its *opening*
+ * brief. Without it the directive's "Unmet (n/m)" line reads as current state and
+ * contradicts the "✓ Outcome: m/m met" line below on a converged round. When the
+ * round met everything, say so ("resolved below") so brief + outcome cohere.
+ */
+export function openingBriefHeader(allMet: boolean): string {
+  return `Opening brief${allMet ? " — resolved below" : ""}:`;
+}
+
 /** Color the leader's decision by whether the round landed well. */
 function decisionColor(decision: NonNullable<CouncilRoundRecord["leaderDecision"]>, theme: Theme): string {
   switch (decision) {
@@ -108,7 +118,12 @@ export function CouncilRoundGroup({ record, children, selected = false, theme }:
             {/* B5 — the leader's pre-round directive, persisted on the record so
                 the conductor's opening steer survives into this collapsed summary
                 (not just the ephemeral live bubble). Accent + ▶ so the leader
-                visibly opens the round. */}
+                visibly opens the round. F2 — on a DONE round the directive is the
+                round's *opening* brief; without a temporal label its "Unmet (n/m)"
+                line reads as current state and contradicts the "✓ Outcome: m/m met"
+                line below on a converged round. The muted header frames it as the
+                pre-round steer, so brief + outcome tell a coherent story. */}
+            {record.directive && <text fg={theme.textMuted}>{openingBriefHeader(allMet)}</text>}
             {record.directive &&
               record.directive.split("\n").map((line, i) => (
                 <text key={`dir-${i}`} fg={theme.accent} attributes={i === 0 ? 1 : 0}>

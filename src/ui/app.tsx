@@ -1193,9 +1193,15 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       </box>
                     )}
                     {/* Waiting indicator */}
-                    {isProcessing && !streamContent && activeToolCalls.length === 0 && (
-                      <ShimmerText t={t} text="Planning next moves" />
-                    )}
+                    {isProcessing &&
+                      !streamContent &&
+                      activeToolCalls.length === 0 &&
+                      // F3 — an ask/preflight card blocking for the user's answer is
+                      // NOT the model working; the "Planning next moves" shimmer above
+                      // a pending card misreads as progress while the run is parked on
+                      // input. Suppress it whenever a council card owns the turn.
+                      !pendingCouncilQuestion &&
+                      !pendingCouncilPreflight && <ShimmerText t={t} text="Planning next moves" />}
                     {/* Plan questions panel — inline, OpenCode-style */}
                     {showPlanPanel && <PlanQuestionsPanel t={t} questions={planQuestions} state={pqs} />}
                     {pendingPaymentApproval && <PaymentApprovalPanel t={t} payment={pendingPaymentApproval} />}

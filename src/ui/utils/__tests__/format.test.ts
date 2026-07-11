@@ -1,5 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { buildToolGroupEntry, formatAnswerForLog } from "../format.js";
+import { buildToolGroupEntry, formatAnswerForLog, isCouncilStartPatch } from "../format.js";
+
+describe("isCouncilStartPatch (F5 — reset stale rail criteria on a new council)", () => {
+  it("true when leader+panel arrive together (the entrypoint's once-per-debate patch)", () => {
+    expect(isCouncilStartPatch({ leader: "deepseek", panel: ["a", "b"] })).toBe(true);
+  });
+
+  it("true even with an empty panel array (participants may be empty)", () => {
+    expect(isCouncilStartPatch({ leader: "deepseek", panel: [] })).toBe(true);
+  });
+
+  it("false for the partial later patches that must MERGE, not reset", () => {
+    expect(isCouncilStartPatch({ successCriteria: ["x"] } as never)).toBe(false);
+    expect(isCouncilStartPatch({ criteriaMet: [true] } as never)).toBe(false);
+    expect(isCouncilStartPatch({ researchMode: true } as never)).toBe(false);
+    expect(isCouncilStartPatch({ roundBudget: 3 } as never)).toBe(false);
+    expect(isCouncilStartPatch({ leader: "deepseek" })).toBe(false); // leader alone
+    expect(isCouncilStartPatch({ panel: ["a"] })).toBe(false); // panel alone
+  });
+});
 
 describe("formatAnswerForLog", () => {
   it("freetext: returns text verbatim (or '(empty)' for blank)", () => {
