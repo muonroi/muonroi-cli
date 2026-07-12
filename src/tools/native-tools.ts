@@ -31,6 +31,9 @@ export const NATIVE_MUONROI_TOOL_NAMES = [
   "ee_write",
   "usage_forensics",
   "lsp_query",
+  "wait_for_diagnostics",
+  "impact_of_change",
+  "lsp_mutation_preview",
   "setup_guide",
   "selfverify_start",
   "selfverify_status",
@@ -229,6 +232,65 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
       } catch (e) {
         return errLine("lsp_error", e instanceof Error ? e.message : String(e));
       }
+    },
+  });
+
+  // ── Sprint 1: readiness contract tools ─────────────────────────────────────
+  tools.wait_for_diagnostics = dynamicTool({
+    description:
+      "Wait for LSP diagnostics on a file, with timeout clamping (default 1500ms, max 5000ms). " +
+      "Returns { diagnostics: LspDiagnostic[], readiness: 'ready'|'partial'|'timed_out', fallbackRecommended: boolean }. " +
+      "When fallbackRecommended is true, the caller may proceed with grep or other fallback analysis.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        filePath: { type: "string", description: "Absolute or workspace-relative path" },
+        timeout: { type: "number", description: "Timeout in ms (default 1500, max 5000)", optional: true },
+      },
+      required: ["filePath"],
+    }),
+    execute: async (input: any): Promise<string> => {
+      const cwd = opts.cwd ?? process.cwd();
+      const { getOrCreateManager } = await import("../lsp/runtime.js");
+      return json(await getOrCreateManager(cwd).waitForDiagnostics(input.filePath, input.timeout));
+    },
+  });
+
+  tools.impact_of_change = dynamicTool({
+    description:
+      "Analyse impact of a change: returns diagnostics, references, safeToRename flag, readiness state, " +
+      "and fallbackRecommended flag. Safe for use as lsp-before-grep gate: check fallbackRecommended before falling through to grep.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        filePath: { type: "string", description: "Absolute or workspace-relative path" },
+        query: { type: "string", description: "Optional symbol query", optional: true },
+      },
+      required: ["filePath"],
+    }),
+    execute: async (input: any): Promise<string> => {
+      const cwd = opts.cwd ?? process.cwd();
+      const { getOrCreateManager } = await import("../lsp/runtime.js");
+      return json(await getOrCreateManager(cwd).impactOfChange(input.filePath, input.query));
+    },
+  });
+
+  tools.lsp_mutation_preview = dynamicTool({
+    description:
+      "Preview a mutation (stub — no real edits). Returns { preview: [] }. MUTATION_TOOLS gating applies; " +
+      "no side-effects in Sprint 1.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        filePath: { type: "string", description: "File path" },
+        change: { type: "string", description: "Change specification (stub)" },
+      },
+      required: ["filePath", "change"],
+    }),
+    execute: async (input: any): Promise<string> => {
+      const cwd = opts.cwd ?? process.cwd();
+      const { getOrCreateManager } = await import("../lsp/runtime.js");
+      return json(await getOrCreateManager(cwd).lspMutationPreview(input.filePath, input.change));
     },
   });
 

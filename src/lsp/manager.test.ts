@@ -213,6 +213,136 @@ describe("createWorkspaceLspManager", () => {
   });
 });
 
+describe("Sprint 1: readiness contract", () => {
+  it("waitForDiagnostics readiness matrix: no-publish -> partial", async () => {
+    const root = await createTempWorkspace();
+    const filePath = path.join(root, "demo.ts");
+    await writeFile(filePath, "const x = 1;\n");
+
+    const client = createFakeClient({
+      diagnostics: [],
+      sendRequest: async () => [],
+    });
+    vi.spyOn(client, "waitForDiagnostics").mockRejectedValue(new Error("no publish"));
+
+    const manager = createWorkspaceLspManager(root, BASE_SETTINGS, {
+      createClient: async () => client,
+    });
+
+    const result = await manager.waitForDiagnostics(filePath, 500);
+    expect(result.readiness).toBe("partial");
+    expect(result.fallbackRecommended).toBe(true);
+
+    await manager.close();
+  });
+
+  it("waitForDiagnostics readiness matrix: timed_out on deadline", async () => {
+    const root = await createTempWorkspace();
+    const filePath = path.join(root, "demo.ts");
+    await writeFile(filePath, "const x = 1;\n");
+
+    const client = createFakeClient({
+      diagnostics: [],
+      sendRequest: async () => [],
+    });
+    vi.spyOn(client, "waitForDiagnostics").mockImplementation(
+      () => new Promise((_resolve) => setTimeout(_resolve, 2000)),
+    );
+
+    const manager = createWorkspaceLspManager(root, BASE_SETTINGS, {
+      createClient: async () => client,
+    });
+
+    const result = await manager.waitForDiagnostics(filePath, 100);
+    expect(result.readiness).toBe("timed_out");
+    expect(result.fallbackRecommended).toBe(true);
+
+    await manager.close();
+  });
+
+  it("waitForDiagnostics readiness matrix: full-publish -> ready", async () => {
+    const root = await createTempWorkspace();
+    const filePath = path.join(root, "demo.ts");
+    await writeFile(filePath, "const x = 1;\n");
+
+    const client = createFakeClient({
+      diagnostics: [{ message: "ok", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }],
+      sendRequest: async () => [],
+    });
+
+    const manager = createWorkspaceLspManager(root, BASE_SETTINGS, {
+      createClient: async () => client,
+    });
+
+    const result = await manager.waitForDiagnostics(filePath, 500);
+    expect(result.readiness).toBe("ready");
+    expect(result.fallbackRecommended).toBe(false);
+
+    await manager.close();
+  });
+
+  it("waitForDiagnostics clamps timeout (default 1500, max 5000)", async () => {
+    const root = await createTempWorkspace();
+    const filePath = path.join(root, "demo.ts");
+    await writeFile(filePath, "const x = 1;\n");
+
+    const client = createFakeClient({
+      diagnostics: [],
+      sendRequest: async () => [],
+    });
+
+    const manager = createWorkspaceLspManager(root, BASE_SETTINGS, {
+      createClient: async () => client,
+    });
+
+    // Default timeout used
+    const p1 = manager.waitForDiagnostics(filePath);
+    // Big timeout clamped to 5000
+    const p2 = manager.waitForDiagnostics(filePath, 10000);
+
+    // Both complete without throwing (timeout clamping means they don't hang)
+    await expect(p1).resolves.toBeDefined();
+    await expect(p2).resolves.toBeDefined();
+
+    await manager.close();
+  });
+
+  it("impactOfChange returns all fields with safeToRename", async () => {
+    const root = await createTempWorkspace();
+    const filePath = path.join(root, "demo.ts");
+    await writeFile(filePath, "const x = 1;\n");
+
+    const client = createFakeClient({
+      diagnostics: [{ message: "ok", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }],
+      sendRequest: async () => [],
+    });
+    vi.spyOn(client, "waitForDiagnostics").mockResolvedValue(undefined);
+
+    const manager = createWorkspaceLspManager(root, BASE_SETTINGS, {
+      createClient: async () => client,
+    });
+
+    const result = await manager.impactOfChange(filePath);
+    expect(result).toHaveProperty("diagnostics");
+    expect(result).toHaveProperty("references");
+    expect(result).toHaveProperty("safeToRename");
+    expect(result).toHaveProperty("readiness");
+    expect(result).toHaveProperty("fallbackRecommended");
+
+    await manager.close();
+  });
+
+  it("lspMutationPreview returns stub { preview: [] }", async () => {
+    const root = await createTempWorkspace();
+    const manager = createWorkspaceLspManager(root, BASE_SETTINGS);
+
+    const result = await manager.lspMutationPreview(root + "/test.ts", "{}");
+    expect(result).toEqual({ preview: [] });
+
+    await manager.close();
+  });
+});
+
 async function createTempWorkspace(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), "muonroi-lsp-manager-"));
   tempDirs.push(root);

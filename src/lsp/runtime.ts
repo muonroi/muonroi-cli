@@ -49,7 +49,7 @@ export async function shutdownWorkspaceLspManager(cwd: string): Promise<void> {
   await manager.close();
 }
 
-function getOrCreateManager(cwd: string): WorkspaceLspManager {
+export function getOrCreateManager(cwd: string): WorkspaceLspManager {
   const key = resolveManagerKey(cwd);
   const existing = managers.get(key);
   if (existing) return existing;

@@ -10,11 +10,21 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { LSP_TOOL_OPERATIONS, type LspQueryInput, type LspToolResponse } from "../lsp/types.js";
+import {
+  type ImpactOfChangeResult,
+  LSP_TOOL_OPERATIONS,
+  type LspQueryInput,
+  type LspQueryResult,
+  type LspToolResponse,
+  type MutationPreviewResult,
+} from "../lsp/types.js";
 
 export interface LspToolDeps {
   query?: (cwd: string, input: LspQueryInput) => Promise<LspToolResponse>;
   enabled?: (cwd: string) => boolean | Promise<boolean>;
+  waitForDiagnostics?: (cwd: string, filePath: string, timeout?: number) => Promise<LspQueryResult>;
+  impactOfChange?: (cwd: string, filePath: string, query?: string) => Promise<ImpactOfChangeResult>;
+  lspMutationPreview?: (cwd: string, filePath: string, change: string) => Promise<MutationPreviewResult>;
 }
 
 function ok(data: unknown) {
@@ -35,10 +45,25 @@ async function defaultEnabled(cwd: string): Promise<boolean> {
   const { isLspToolEnabled } = await import("../lsp/runtime.js");
   return isLspToolEnabled(cwd);
 }
+async function defaultWaitForDiagnostics(cwd: string, filePath: string, timeout?: number): Promise<LspQueryResult> {
+  const { getOrCreateManager } = await import("../lsp/runtime.js");
+  return getOrCreateManager(cwd).waitForDiagnostics(filePath, timeout);
+}
+async function defaultImpactOfChange(cwd: string, filePath: string, query?: string): Promise<ImpactOfChangeResult> {
+  const { getOrCreateManager } = await import("../lsp/runtime.js");
+  return getOrCreateManager(cwd).impactOfChange(filePath, query);
+}
+async function defaultMutationPreview(cwd: string, filePath: string, change: string): Promise<MutationPreviewResult> {
+  const { getOrCreateManager } = await import("../lsp/runtime.js");
+  return getOrCreateManager(cwd).lspMutationPreview(filePath, change);
+}
 
 export function registerLspTools(server: McpServer, deps: LspToolDeps = {}): void {
   const query = deps.query ?? defaultQuery;
   const enabled = deps.enabled ?? defaultEnabled;
+  const waitForDiagnostics = deps.waitForDiagnostics ?? defaultWaitForDiagnostics;
+  const impactOfChange = deps.impactOfChange ?? defaultImpactOfChange;
+  const mutationPreview = deps.lspMutationPreview ?? defaultMutationPreview;
 
   server.registerTool(
     "lsp_query",
@@ -73,6 +98,79 @@ export function registerLspTools(server: McpServer, deps: LspToolDeps = {}): voi
       } catch (e) {
         return fail("lsp_error", e instanceof Error ? e.message : String(e));
       }
+    },
+  );
+
+  server.registerTool(
+    "lsp_waitForDiagnostics",
+    {
+      description:
+        "Wait for LSP diagnostics for a file. Returns { diagnostics, readiness, fallbackRecommended }. " +
+        "readiness: 'ready'|'partial'|'timed_out'. fallbackRecommended: true unless readiness==='ready'. " +
+        "timeout defaults to 1500ms, max 5000ms. Used by the lsp-before-grep policy to determine if grep fallback is safe.",
+      inputSchema: {
+        operation: z.literal("waitForDiagnostics"),
+        filePath: z.string().min(1).max(1000),
+        timeout: z.number().int().min(0).optional(),
+      },
+    },
+    async (args) => {
+      const cwd = process.cwd();
+      let isEnabled: boolean;
+      try {
+        isEnabled = await enabled(cwd);
+      } catch (e) {
+        return fail("lsp_error", e instanceof Error ? e.message : String(e));
+      }
+      if (!isEnabled) {
+        return fail("lsp_disabled", "LSP tool is disabled in settings (lsp.enabled / lsp.tool)");
+      }
+      return ok(await waitForDiagnostics(cwd, args.filePath, args.timeout));
+    },
+  );
+
+  server.registerTool(
+    "lsp_impactOfChange",
+    {
+      description:
+        "Composite LSP analysis: returns { diagnostics, references, safeToRename, readiness, fallbackRecommended }. " +
+        "Fans in diagnostics + references + rename safety check. Uses readiness slice from waitForDiagnostics.",
+      inputSchema: {
+        operation: z.literal("impactOfChange"),
+        filePath: z.string().min(1).max(1000),
+        query: z.string().max(1000).optional(),
+      },
+    },
+    async (args) => {
+      const cwd = process.cwd();
+      let isEnabled: boolean;
+      try {
+        isEnabled = await enabled(cwd);
+      } catch (e) {
+        return fail("lsp_error", e instanceof Error ? e.message : String(e));
+      }
+      if (!isEnabled) {
+        return fail("lsp_disabled", "LSP tool is disabled in settings (lsp.enabled / lsp.tool)");
+      }
+      return ok(await impactOfChange(cwd, args.filePath, args.query));
+    },
+  );
+
+  server.registerTool(
+    "lsp_mutationPreview",
+    {
+      description:
+        "Preview an LSP code mutation (stub). Returns { preview: [] }. " +
+        "No side-effects in slice 1. Registered in MUTATION_TOOLS set for routing through the mutation gate.",
+      inputSchema: {
+        operation: z.literal("mutationPreview"),
+        filePath: z.string().min(1).max(1000),
+        change: z.string().min(1).max(10000),
+      },
+    },
+    async (args) => {
+      const cwd = process.cwd();
+      return ok(await mutationPreview(cwd, args.filePath, args.change));
     },
   );
 }

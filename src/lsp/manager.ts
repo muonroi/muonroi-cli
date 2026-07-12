@@ -3,7 +3,17 @@ import path from "path";
 import { pathToFileURL } from "url";
 import { createRuntimeLspDefinitions, type RuntimeLspServerDefinition } from "./builtins";
 import { createLspClientSession, type LspClientSession } from "./client";
-import type { LspDiagnosticFile, LspQueryInput, LspToolResponse, NormalizedLspSettings } from "./types";
+import type {
+  ImpactOfChangeResult,
+  LspDiagnostic,
+  LspDiagnosticFile,
+  LspLocation,
+  LspQueryInput,
+  LspQueryResult,
+  LspToolResponse,
+  MutationPreviewResult,
+  NormalizedLspSettings,
+} from "./types";
 
 interface ManagedClient {
   key: string;
@@ -31,6 +41,9 @@ export interface WorkspaceLspManager {
     diagnosticsTimeoutMs?: number,
   ): Promise<LspDiagnosticFile[]>;
   query(input: LspQueryInput): Promise<LspToolResponse>;
+  waitForDiagnostics(filePath: string, timeout?: number): Promise<LspQueryResult>;
+  impactOfChange(filePath: string, query?: string): Promise<ImpactOfChangeResult>;
+  lspMutationPreview(filePath: string, change: string): Promise<MutationPreviewResult>;
   close(): Promise<void>;
 }
 
@@ -239,11 +252,116 @@ export function createWorkspaceLspManager(
     clients.clear();
   }
 
+  // ── Sprint 1: readiness contract methods ──────────────────────────────────
+
+  async function waitForDiagnostics(filePath: string, timeout?: number): Promise<LspQueryResult> {
+    const clampedTimeout = Math.min(Math.max(timeout ?? 1500, 0), 5000);
+    const records = await getClientsForFile(filePath);
+    if (records.length === 0) {
+      return { diagnostics: [], readiness: "partial", fallbackRecommended: true };
+    }
+
+    let anyTimedOut = false;
+    let anyFailed = false;
+    const allDiagnostics: LspDiagnostic[] = [];
+
+    for (const record of records) {
+      try {
+        const diags = await withRequestTimeout(
+          record.client.waitForDiagnostics(filePath, clampedTimeout),
+          clampedTimeout,
+        );
+        allDiagnostics.push(...diags);
+      } catch (err) {
+        if (err instanceof LspRequestTimeoutError) {
+          anyTimedOut = true;
+          // Fall back to whatever diagnostics the client already has
+          const stale = record.client.getDiagnostics(filePath);
+          allDiagnostics.push(...stale);
+        } else {
+          anyFailed = true;
+        }
+      }
+    }
+
+    let readiness: LspQueryResult["readiness"];
+    if (anyTimedOut) {
+      readiness = "timed_out";
+    } else if (anyFailed || allDiagnostics.length === 0) {
+      readiness = "partial";
+    } else {
+      readiness = "ready";
+    }
+
+    return {
+      diagnostics: allDiagnostics,
+      readiness,
+      fallbackRecommended: readiness !== "ready",
+    };
+  }
+
+  async function impactOfChange(filePath: string, _query?: string): Promise<ImpactOfChangeResult> {
+    const diagnosticResult = await waitForDiagnostics(filePath);
+    const records = await getClientsForFile(filePath);
+    const references: LspLocation[] = [];
+
+    for (const record of records) {
+      try {
+        const uri = pathToFileURL(path.resolve(filePath)).href;
+        const params = {
+          textDocument: { uri },
+          position: { line: 0, character: 0 },
+          context: { includeDeclaration: true },
+        };
+        const refs = await record.client.sendRequest<unknown[]>("textDocument/references", params);
+        if (Array.isArray(refs)) {
+          for (const ref of refs) {
+            const r = ref as {
+              uri?: string;
+              range?: { start: { line: number; character: number }; end: { line: number; character: number } };
+            };
+            if (r?.uri && r?.range) {
+              references.push({
+                uri: r.uri,
+                range: {
+                  start: { line: r.range.start.line + 1, character: r.range.start.character + 1 },
+                  end: { line: r.range.end.line + 1, character: r.range.end.character + 1 },
+                },
+              });
+            }
+          }
+        }
+      } catch {
+        // Individual reference query failure: continue with partial results
+      }
+    }
+
+    // safeToRename: true when no conflicting references exist beyond the file itself
+    const selfUri = pathToFileURL(path.resolve(filePath)).href;
+    const externalRefs = references.filter((ref) => ref.uri !== selfUri);
+    const safeToRename = externalRefs.length === 0;
+
+    return {
+      diagnostics: diagnosticResult.diagnostics,
+      references,
+      safeToRename,
+      readiness: diagnosticResult.readiness,
+      fallbackRecommended: diagnosticResult.fallbackRecommended,
+    };
+  }
+
+  async function lspMutationPreview(_filePath: string, _change: unknown): Promise<MutationPreviewResult> {
+    return { preview: [] };
+  }
+
   return {
     touchFile,
     syncFile,
     query,
     close,
+    waitForDiagnostics,
+    impactOfChange,
+    lspMutationPreview,
   };
 }
 
@@ -289,6 +407,8 @@ function getOperationMethod(operation: LspQueryInput["operation"]): string {
     case "incomingCalls":
     case "outgoingCalls":
       return "textDocument/prepareCallHierarchy";
+    case "waitForDiagnostics":
+      return "textDocument/diagnostic";
   }
 }
 
@@ -323,6 +443,10 @@ function createOperationParams(input: LspQueryInput, absolutePath: string): Reco
     case "workspaceSymbol":
       return {
         query: input.query ?? "",
+      };
+    case "waitForDiagnostics":
+      return {
+        textDocument: { uri },
       };
   }
 }

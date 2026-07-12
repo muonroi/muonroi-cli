@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { describe, expect, it } from "vitest";
-import type { LspToolResponse } from "../../lsp/types.js";
+import type { ImpactOfChangeResult, LspQueryResult, LspToolResponse, MutationPreviewResult } from "../../lsp/types.js";
 import { registerLspTools } from "../lsp-tools.js";
 
 function collectTools(register: (s: McpServer) => void) {
@@ -68,5 +68,61 @@ describe("lsp-tools", () => {
     expect(out.isError).toBe(true);
     expect(out.json.error).toBe("lsp_error");
     expect(out.json.message).toContain("settings read failed");
+  });
+
+  // ── Sprint 1: pass-through identity tests ─────────────────────────────────
+
+  it("waitForDiagnostics passes through the LspQueryResult from deps", async () => {
+    const fixture: LspQueryResult = {
+      diagnostics: [
+        { message: "err", severity: 1, range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } } },
+      ],
+      readiness: "ready",
+      fallbackRecommended: false,
+    };
+    const handlers = collectTools((s) =>
+      registerLspTools(s, { enabled: () => true, waitForDiagnostics: async () => fixture }),
+    );
+    const out = parse(await handlers.lsp_waitForDiagnostics!({ filePath: "a.ts" }));
+    expect(out.isError).toBeFalsy();
+    expect(out.json).toEqual(fixture);
+  });
+
+  it("waitForDiagnostics returns lsp_disabled when LSP is off", async () => {
+    const handlers = collectTools((s) =>
+      registerLspTools(s, {
+        enabled: () => false,
+        waitForDiagnostics: async () => ({ diagnostics: [], readiness: "ready", fallbackRecommended: false }),
+      }),
+    );
+    const out = parse(await handlers.lsp_waitForDiagnostics!({ filePath: "a.ts" }));
+    expect(out.isError).toBe(true);
+    expect(out.json.error).toBe("lsp_disabled");
+  });
+
+  it("impactOfChange passes through the ImpactOfChangeResult from deps", async () => {
+    const fixture: ImpactOfChangeResult = {
+      diagnostics: [],
+      references: [],
+      safeToRename: true,
+      readiness: "ready",
+      fallbackRecommended: false,
+    };
+    const handlers = collectTools((s) =>
+      registerLspTools(s, { enabled: () => true, impactOfChange: async () => fixture }),
+    );
+    const out = parse(await handlers.lsp_impactOfChange!({ filePath: "a.ts" }));
+    expect(out.isError).toBeFalsy();
+    expect(out.json).toEqual(fixture);
+  });
+
+  it("lspMutationPreview passes through { preview: [] } from deps", async () => {
+    const fixture: MutationPreviewResult = { preview: [] };
+    const handlers = collectTools((s) =>
+      registerLspTools(s, { enabled: () => true, lspMutationPreview: async () => fixture }),
+    );
+    const out = parse(await handlers.lsp_mutationPreview!({ filePath: "a.ts", change: "add x;" }));
+    expect(out.isError).toBeFalsy();
+    expect(out.json).toEqual(fixture);
   });
 });

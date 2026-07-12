@@ -8,6 +8,7 @@ export const LSP_TOOL_OPERATIONS = [
   "prepareCallHierarchy",
   "incomingCalls",
   "outgoingCalls",
+  "waitForDiagnostics",
 ] as const;
 
 export type LspToolOperation = (typeof LSP_TOOL_OPERATIONS)[number];
@@ -110,6 +111,24 @@ export interface LspQueryInput {
   line?: number;
   character?: number;
   query?: string;
+}
+
+export interface LspQueryResult {
+  diagnostics: LspDiagnostic[];
+  readiness: "ready" | "partial" | "timed_out";
+  fallbackRecommended: boolean;
+}
+
+export interface ImpactOfChangeResult {
+  diagnostics: LspDiagnostic[];
+  references: LspLocation[];
+  safeToRename: boolean;
+  readiness: "ready" | "partial" | "timed_out";
+  fallbackRecommended: boolean;
+}
+
+export interface MutationPreviewResult {
+  preview: [];
 }
 
 export interface LspToolResponse {
