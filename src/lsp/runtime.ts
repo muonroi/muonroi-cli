@@ -21,9 +21,17 @@ export async function queryLsp(cwd: string, input: LspQueryInput): Promise<LspTo
   });
 }
 
+// Default timeout (ms) when a caller omits one. manager.waitForDiagnostics now
+// takes a REQUIRED timeout (Sprint-1 readiness contract, commit 4af6efb1) and no
+// longer defaults internally, so the public wrapper supplies the documented 1500ms.
+const DEFAULT_WAIT_DIAGNOSTICS_MS = 1500;
+
 export async function waitForDiagnosticsLsp(cwd: string, filePath: string, timeout?: number): Promise<LspQueryResult> {
   const manager = getOrCreateManager(cwd);
-  return manager.waitForDiagnostics(path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath), timeout);
+  return manager.waitForDiagnostics(
+    path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath),
+    timeout ?? DEFAULT_WAIT_DIAGNOSTICS_MS,
+  );
 }
 
 export async function impactOfChangeLsp(cwd: string, filePath: string, query?: string): Promise<ImpactOfChangeResult> {
