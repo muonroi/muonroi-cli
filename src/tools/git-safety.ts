@@ -25,6 +25,7 @@
  * Override the push gate with `MUONROI_ALLOW_PUSH_ON_RED=1`.
  */
 
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isVerificationCommand } from "../orchestrator/tool-args-hash.js";
@@ -262,6 +263,188 @@ export function checkSensitiveStaging(cwd: string): StagingBlockResult {
     "secrets or credentials. Ensure these paths are listed in .gitignore. " +
     "To bypass this gate (not recommended), set MUONROI_ALLOW_BROAD_STAGE=1.";
   return { blocked: true, sensitive, message };
+}
+
+// ── Destructive-op guard (2026-07-12) ──────────────────────────────────────
+//
+// Motivation: an autonomous /ideal plan-adherence fix sub-agent ran
+// `git checkout -- <files>` + committed the result, silently discarding the
+// user's UNCOMMITTED, unrelated working-tree changes (a whole set of harness
+// fixes). No existing guard caught it. This guard classifies commands that
+// irreversibly discard uncommitted work and blocks them PRE-EXECUTION when
+// there is actually work at risk. Routed as the `destructive-revert` safety
+// kind: interactive → askcard (allow-once/block, never auto-allow even in
+// yolo); headless/autonomous → hard-block. Escape hatch:
+// MUONROI_ALLOW_DESTRUCTIVE_REVERT=1 (user-set, logged like the other gates).
+
+// `git checkout … -- ` (discard paths) OR `git checkout .` (discard all).
+const CHECKOUT_DISCARD_RE = /\bgit\b[^|&;\n]*[ \t]checkout\b(?:[^|&;\n]*[ \t]--(?:[ \t]|$)|[ \t]+\.(?=[ \t]|$))/;
+// `git restore …` discards the working tree by default. `git restore --staged`
+// WITHOUT `--worktree`/`-W` only unstages (non-destructive) — exempt that.
+const RESTORE_RE = /\bgit\b[^|&;\n]*[ \t]restore\b/;
+const RESTORE_STAGED_RE = /[ \t]--staged\b/;
+const RESTORE_WORKTREE_RE = /[ \t](?:--worktree\b|-[a-z]*W)/;
+// `git reset --hard` throws away all uncommitted changes.
+const RESET_HARD_RE = /\bgit\b[^|&;\n]*[ \t]reset\b[^|&;\n]*[ \t]--hard\b/;
+// `git clean -f[d][x]` deletes untracked files.
+const CLEAN_FORCE_RE = /\bgit\b[^|&;\n]*[ \t]clean\b[^|&;\n]*[ \t]-[a-eg-wyz]*f/;
+// `git stash drop` / `git stash clear` destroy stashed work.
+const STASH_DROP_RE = /\bgit\b[^|&;\n]*[ \t]stash[ \t]+(?:drop|clear)\b/;
+// `rm` (not rmdir) — targets checked against git tracking below.
+const RM_RE = /(?:^|[|&;\n]|\s)rm\b(?!dir)/;
+
+export type DestructiveKind = "checkout-discard" | "restore" | "reset-hard" | "clean" | "stash-drop" | "rm-tracked";
+
+export interface DestructiveShape {
+  kind: DestructiveKind | null;
+  /** true when the risk is untracked files (clean) rather than tracked mods. */
+  untrackedRisk: boolean;
+}
+
+export function analyzeDestructiveGit(command: string): DestructiveShape {
+  const c = stripQuoted(command);
+  if (RESET_HARD_RE.test(c)) return { kind: "reset-hard", untrackedRisk: false };
+  if (CHECKOUT_DISCARD_RE.test(c)) return { kind: "checkout-discard", untrackedRisk: false };
+  if (RESTORE_RE.test(c)) {
+    const stagedOnly = RESTORE_STAGED_RE.test(c) && !RESTORE_WORKTREE_RE.test(c);
+    if (!stagedOnly) return { kind: "restore", untrackedRisk: false };
+  }
+  if (CLEAN_FORCE_RE.test(c)) return { kind: "clean", untrackedRisk: true };
+  if (STASH_DROP_RE.test(c)) return { kind: "stash-drop", untrackedRisk: false };
+  return { kind: null, untrackedRisk: false };
+}
+
+function git(cwd: string, args: string[]): string {
+  try {
+    const r = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 8000, maxBuffer: 8 * 1024 * 1024 });
+    return (r.stdout ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+/** Working-tree paths that a destructive command would discard (best-effort). */
+function atRiskPaths(cwd: string, untrackedRisk: boolean): string[] {
+  // NOTE: read raw stdout — do NOT trim the whole output. Porcelain v1 lines
+  // are "XY<space>PATH" where XY is 2 chars; a global trim would eat the leading
+  // space of a " M file" line and shift the path parse by one character.
+  let raw: string;
+  try {
+    const r = spawnSync("git", ["status", "--porcelain"], {
+      cwd,
+      encoding: "utf8",
+      timeout: 8000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    raw = r.stdout ?? "";
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const line of raw.split("\n")) {
+    if (line.length < 4) continue;
+    const xy = line.slice(0, 2);
+    const file = line.slice(3).trim();
+    const isUntracked = xy === "??";
+    if (untrackedRisk ? isUntracked : !isUntracked && xy !== "!!") out.push(file);
+  }
+  return out;
+}
+
+/** Extract rm target tokens (non-flag args) from a single-clause rm command. */
+function rmTargets(command: string): string[] {
+  const c = stripQuoted(command);
+  const m = c.match(/(?:^|[|&;\n]|\s)rm\b(?!dir)([^|&;\n]*)/);
+  if (!m) return [];
+  return m[1]
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0 && !t.startsWith("-") && t !== '""' && t !== "''");
+}
+
+/** rm targets that are git-tracked (file directly, or a dir containing tracked files). */
+function rmTrackedTargets(cwd: string, command: string): string[] {
+  const targets = rmTargets(command);
+  const tracked: string[] = [];
+  for (const t of targets) {
+    // Tracked file?
+    const asFile = spawnSync("git", ["ls-files", "--error-unmatch", t], {
+      cwd,
+      encoding: "utf8",
+      timeout: 6000,
+    });
+    if (asFile.status === 0) {
+      tracked.push(t);
+      continue;
+    }
+    // Directory containing tracked files?
+    const underDir = git(cwd, ["ls-files", "--", t]);
+    if (underDir) tracked.push(t);
+  }
+  return tracked;
+}
+
+export interface DestructiveBlockResult {
+  blocked: boolean;
+  kind: DestructiveKind | null;
+  message: string;
+}
+
+/**
+ * Pre-execution guard: block a working-tree-destroying command when it would
+ * actually discard uncommitted work. Returns blocked=false (no message) when
+ * the command is non-destructive, when nothing is at risk, or when the user set
+ * the escape hatch. Deterministic + cheap (a couple of git plumbing calls).
+ */
+export function checkDestructiveOp(command: string, cwd: string): DestructiveBlockResult {
+  if (process.env.MUONROI_ALLOW_DESTRUCTIVE_REVERT === "1") {
+    return { blocked: false, kind: null, message: "" };
+  }
+
+  const shape = analyzeDestructiveGit(command);
+  if (shape.kind) {
+    let atRisk: string[];
+    if (shape.kind === "stash-drop") {
+      atRisk = git(cwd, ["stash", "list"]).split("\n").filter(Boolean);
+    } else {
+      atRisk = atRiskPaths(cwd, shape.untrackedRisk);
+    }
+    if (atRisk.length === 0) return { blocked: false, kind: shape.kind, message: "" };
+    return { blocked: true, kind: shape.kind, message: destructiveMessage(shape.kind, atRisk) };
+  }
+
+  if (RM_RE.test(stripQuoted(command))) {
+    const tracked = rmTrackedTargets(cwd, command);
+    if (tracked.length > 0) {
+      return { blocked: true, kind: "rm-tracked", message: destructiveMessage("rm-tracked", tracked) };
+    }
+  }
+
+  return { blocked: false, kind: null, message: "" };
+}
+
+function destructiveMessage(kind: DestructiveKind, items: string[]): string {
+  const list = items
+    .slice(0, 30)
+    .map((n) => `  • ${n}`)
+    .join("\n");
+  const more = items.length > 30 ? `\n  … and ${items.length - 30} more` : "";
+  const verb: Record<DestructiveKind, string> = {
+    "checkout-discard": "`git checkout` discarding working-tree changes",
+    restore: "`git restore` discarding working-tree changes",
+    "reset-hard": "`git reset --hard` discarding ALL uncommitted changes",
+    clean: "`git clean` deleting untracked files",
+    "stash-drop": "`git stash drop/clear` destroying stashed work",
+    "rm-tracked": "`rm` deleting git-tracked file(s)",
+  };
+  return (
+    `BLOCKED: refusing ${verb[kind]} — this irreversibly discards uncommitted work:\n` +
+    `${list}${more}\n\n` +
+    "These changes are NOT committed and cannot be recovered once discarded. If you did " +
+    "not intend to destroy them, leave them alone (they may be the user's unrelated work). " +
+    "To keep them, `git add` + `git commit` (or `git stash`) FIRST, then retry. To bypass " +
+    "this guard for a genuine, intentional discard, set MUONROI_ALLOW_DESTRUCTIVE_REVERT=1."
+  );
 }
 
 /**
