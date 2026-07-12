@@ -286,6 +286,49 @@ export async function* withImplIdleWatchdog(
   }
 }
 
+/**
+ * Wall-clock deadline for the ISOLATED implementation path.
+ *
+ * The isolated path (`ctx.runIsolatedTask`) returns a single Promise, not a
+ * stream, so `withImplIdleWatchdog` (which guards the streamed non-isolated
+ * path) cannot wrap it. Its only protection was the sub-agent's INTERNAL
+ * per-chunk stall-watchdog — which does NOT fire once the sub-agent's LLM stream
+ * has finished but its orchestrator turn hangs on the JS side afterwards (the
+ * exact "wrote N files then went silent" wedge documented on
+ * `withImplIdleWatchdog`). Observed live 2026-07-12 (run mrhc43f0fb9b): the
+ * isolated impl wrote 2 files, emitted its final `llm-done`, then wedged for 30+
+ * min with zero events and an idle process — because this `await` had no outer
+ * ceiling.
+ *
+ * This races the isolated task against a hard total-elapsed deadline. On
+ * timeout it rejects so the caller's existing try/catch converts the wedge into
+ * a visible phaseError (the sprint surfaces + can recover), mirroring what
+ * `withImplIdleWatchdog` / `runVerifyWithWatchdog` do for the other stages. The
+ * suspended sub-agent promise may leak in the background, but the run recovers.
+ * `totalMs <= 0` disables the guard (returns the task unchanged).
+ */
+export async function withIsolatedImplDeadline<T>(task: Promise<T>, totalMs: number, sprintN: number): Promise<T> {
+  if (!(Number.isFinite(totalMs) && totalMs > 0)) return task;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(
+          `isolated implementation stage exceeded ${Math.round(totalMs / 1000)}s total watchdog and was ` +
+            `treated as stalled (sprint ${sprintN}) — the isolated sub-agent turn never completed ` +
+            `(hung on the JS side after its final response; the isolated path has no per-chunk stall guard)`,
+        ),
+      );
+    }, totalMs);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  try {
+    return await Promise.race([task, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export {
   computeFailureSignature,
   loadVerifyFailureSignatures,
@@ -793,12 +836,20 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
             content: `\n> [impl-model] Running implementation on ${implModelId} (override of session model ${ctx.sessionModelId}).\n`,
           };
         }
-        const result = await ctx.runIsolatedTask({
-          agent: "general",
-          description: `Sprint ${sprintN} implementation`,
-          prompt: implPrompt,
-          modelId: implModelId,
-        });
+        // Wall-clock deadline: the isolated path has no per-chunk stall guard,
+        // so a post-finish JS-side hang would wedge this await forever (observed
+        // live, run mrhc43f0fb9b). Racing the total-elapsed ceiling turns a wedge
+        // into a phaseError via the try/catch below. See withIsolatedImplDeadline.
+        const result = await withIsolatedImplDeadline(
+          ctx.runIsolatedTask({
+            agent: "general",
+            description: `Sprint ${sprintN} implementation`,
+            prompt: implPrompt,
+            modelId: implModelId,
+          }),
+          getImplTotalTimeoutMs(),
+          sprintN,
+        );
         if (!result.success) {
           implError = result.error?.trim() || "isolated implementation task failed";
         } else if (result.output?.trim()) {
