@@ -126,9 +126,9 @@ export function registerLspTools(server: McpServer, deps: LspToolDeps = {}): voi
     "lsp_waitForDiagnostics",
     {
       description:
-        "Wait for LSP diagnostics for a file. Returns { diagnostics, readiness, fallbackRecommended }. " +
-        "readiness: 'ready'|'partial'|'timed_out'. fallbackRecommended: true unless readiness==='ready'. " +
-        "timeout defaults to 1500ms, max 5000ms. Used by the lsp-before-grep policy to determine if grep fallback is safe.",
+        "Wait for LSP diagnostics for a file. Returns { diagnostics, lspStatus, clean, metadata }. " +
+        "lspStatus: 'ok'|'partial'|'unavailable'. clean: true when zero error-level diagnostics. " +
+        "timeout defaults to 1500ms, max 5000ms. The lsp-before-grep policy allows grep fallback when lspStatus !== 'ok'.",
       inputSchema: {
         operation: z.literal("waitForDiagnostics"),
         filePath: z.string().min(1).max(1000),
@@ -154,8 +154,9 @@ export function registerLspTools(server: McpServer, deps: LspToolDeps = {}): voi
     "lsp_impactOfChange",
     {
       description:
-        "Composite LSP analysis: returns { diagnostics, references, safeToRename, readiness, fallbackRecommended }. " +
-        "Fans in diagnostics + references + rename safety check. Uses readiness slice from waitForDiagnostics.",
+        "Composite LSP analysis: returns { references, diagnostics, referencesComplete, safeToRename, clean, " +
+        "suggestedGuard, degraded, lspStatus, metadata }. Fans in diagnostics + references + rename safety over the " +
+        "frozen union (symbol file + reference files). Grep fallback allowed when lspStatus !== 'ok'.",
       inputSchema: {
         operation: z.literal("impactOfChange"),
         filePath: z.string().min(1).max(1000),

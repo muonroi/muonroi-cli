@@ -77,8 +77,9 @@ describe("lsp-tools", () => {
       diagnostics: [
         { message: "err", severity: 1, range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } } },
       ],
-      readiness: "ready",
-      fallbackRecommended: false,
+      lspStatus: "ok",
+      clean: false,
+      metadata: { tokenBudgetUsed: 12 },
     };
     const handlers = collectTools((s) =>
       registerLspTools(s, { enabled: () => true, waitForDiagnostics: async () => fixture }),
@@ -92,7 +93,12 @@ describe("lsp-tools", () => {
     const handlers = collectTools((s) =>
       registerLspTools(s, {
         enabled: () => false,
-        waitForDiagnostics: async () => ({ diagnostics: [], readiness: "ready", fallbackRecommended: false }),
+        waitForDiagnostics: async () => ({
+          diagnostics: [],
+          lspStatus: "ok",
+          clean: true,
+          metadata: { tokenBudgetUsed: 0 },
+        }),
       }),
     );
     const out = parse(await handlers.lsp_waitForDiagnostics!({ filePath: "a.ts" }));
@@ -102,11 +108,15 @@ describe("lsp-tools", () => {
 
   it("impactOfChange passes through the ImpactOfChangeResult from deps", async () => {
     const fixture: ImpactOfChangeResult = {
-      diagnostics: [],
       references: [],
+      diagnostics: [],
+      referencesComplete: true,
       safeToRename: true,
-      readiness: "ready",
-      fallbackRecommended: false,
+      clean: true,
+      suggestedGuard: "none",
+      degraded: "none",
+      lspStatus: "ok",
+      metadata: { tokenBudgetUsed: 0 },
     };
     const handlers = collectTools((s) =>
       registerLspTools(s, { enabled: () => true, impactOfChange: async () => fixture }),
@@ -116,8 +126,12 @@ describe("lsp-tools", () => {
     expect(out.json).toEqual(fixture);
   });
 
-  it("lspMutationPreview passes through { preview: [] } from deps", async () => {
-    const fixture: MutationPreviewResult = { preview: [] };
+  it("lspMutationPreview passes through the fixed stub schema from deps", async () => {
+    const fixture: MutationPreviewResult = {
+      op: "allowlist",
+      dryRunResult: { proposedEdits: [], tokenEstimate: 0 },
+      schemaVersion: "1.0",
+    };
     const handlers = collectTools((s) =>
       registerLspTools(s, { enabled: () => true, lspMutationPreview: async () => fixture }),
     );
@@ -130,14 +144,14 @@ describe("lsp-tools", () => {
   // These assert that each MCP projection output equals the canonical fixture
   // from shared-fixtures.ts, mirroring the manager.test.ts coverage.
 
-  it("waitForDiagnostics ready fixture passes through", async () => {
-    const { QUERY_READY } = await import("../../lsp/__tests__/shared-fixtures.js");
+  it("waitForDiagnostics ok fixture passes through", async () => {
+    const { QUERY_OK } = await import("../../lsp/__tests__/shared-fixtures.js");
     const handlers = collectTools((s) =>
-      registerLspTools(s, { enabled: () => true, waitForDiagnostics: async () => QUERY_READY }),
+      registerLspTools(s, { enabled: () => true, waitForDiagnostics: async () => QUERY_OK }),
     );
     const out = parse(await handlers.lsp_waitForDiagnostics!({ filePath: "a.ts" }));
     expect(out.isError).toBeFalsy();
-    expect(out.json).toEqual(QUERY_READY);
+    expect(out.json).toEqual(QUERY_OK);
   });
 
   it("waitForDiagnostics partial fixture passes through", async () => {
@@ -150,14 +164,14 @@ describe("lsp-tools", () => {
     expect(out.json).toEqual(QUERY_PARTIAL);
   });
 
-  it("waitForDiagnostics timed_out fixture passes through", async () => {
-    const { QUERY_TIMED_OUT } = await import("../../lsp/__tests__/shared-fixtures.js");
+  it("waitForDiagnostics unavailable fixture passes through", async () => {
+    const { QUERY_UNAVAILABLE } = await import("../../lsp/__tests__/shared-fixtures.js");
     const handlers = collectTools((s) =>
-      registerLspTools(s, { enabled: () => true, waitForDiagnostics: async () => QUERY_TIMED_OUT }),
+      registerLspTools(s, { enabled: () => true, waitForDiagnostics: async () => QUERY_UNAVAILABLE }),
     );
     const out = parse(await handlers.lsp_waitForDiagnostics!({ filePath: "a.ts" }));
     expect(out.isError).toBeFalsy();
-    expect(out.json).toEqual(QUERY_TIMED_OUT);
+    expect(out.json).toEqual(QUERY_UNAVAILABLE);
   });
 
   it("impactOfChange rich fixture passes through with suggestedGuard and degraded", async () => {

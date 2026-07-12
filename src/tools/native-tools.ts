@@ -253,8 +253,8 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
   tools.wait_for_diagnostics = dynamicTool({
     description:
       "Wait for LSP diagnostics on a file, with timeout clamping (default 1500ms, max 5000ms). " +
-      "Returns { diagnostics: LspDiagnostic[], readiness: 'ready'|'partial'|'timed_out', fallbackRecommended: boolean }. " +
-      "When fallbackRecommended is true, the caller may proceed with grep or other fallback analysis.",
+      "Returns { diagnostics: LspDiagnostic[], lspStatus: 'ok'|'partial'|'unavailable', clean: boolean, metadata: { tokenBudgetUsed } }. " +
+      "clean=true means zero error-level diagnostics. Grep fallback is allowed when lspStatus !== 'ok'.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -267,7 +267,7 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
       const cwd = opts.cwd ?? process.cwd();
       try {
         const { getOrCreateManager } = await import("../lsp/runtime.js");
-        return json(await getOrCreateManager(cwd).waitForDiagnostics(input.filePath, input.timeout));
+        return json(await getOrCreateManager(cwd).waitForDiagnostics(input.filePath, input.timeout ?? 1500));
       } catch (e) {
         return lspErrLine(e);
       }
@@ -276,8 +276,9 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
 
   tools.impact_of_change = dynamicTool({
     description:
-      "Analyse impact of a change: returns diagnostics, references, safeToRename flag, readiness state, " +
-      "and fallbackRecommended flag. Safe for use as lsp-before-grep gate: check fallbackRecommended before falling through to grep.",
+      "Analyse impact of a change: returns { references, diagnostics, referencesComplete, safeToRename, clean, " +
+      "suggestedGuard, degraded, lspStatus, metadata }. Safe for use as lsp-before-grep gate: grep fallback is " +
+      "allowed when lspStatus !== 'ok'; safeToRename is true only when refs are complete and the union is clean.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -295,8 +296,8 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
 
   tools.lsp_mutation_preview = dynamicTool({
     description:
-      "Preview a mutation (stub — no real edits). Returns { preview: [] }. MUTATION_TOOLS gating applies; " +
-      "no side-effects in Sprint 1.",
+      "Preview a mutation (stub — no real edits). Returns { op: 'allowlist', dryRunResult: { proposedEdits: [], " +
+      "tokenEstimate: 0 }, schemaVersion: '1.0' }. MUTATION_TOOLS gating applies; no apply path in Sprint 1.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {

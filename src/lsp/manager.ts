@@ -1,15 +1,17 @@
 import { readFile } from "fs/promises";
 import path from "path";
-import { pathToFileURL } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { createRuntimeLspDefinitions, type RuntimeLspServerDefinition } from "./builtins";
 import { createLspClientSession, type LspClientSession } from "./client";
 import type {
+  DegradedReason,
   ImpactOfChangeResult,
   LspDiagnostic,
   LspDiagnosticFile,
   LspLocation,
   LspQueryInput,
   LspQueryResult,
+  LspStatus,
   LspToolResponse,
   MutationPreviewResult,
   NormalizedLspSettings,
@@ -254,13 +256,50 @@ export function createWorkspaceLspManager(
     clients.clear();
   }
 
-  // ── Sprint 1: readiness contract methods ──────────────────────────────────
+  // ── Sprint 1: impact/readiness contract (SLICE1-BUILD-NOTE.md) ─────────────
+
+  const TOKEN_BUDGET_CAP = 500; // hard cap (spec §49-54)
+  const REF_TOKEN_COST = 30; // per-reference estimate (spec §53)
+  const MAX_REFS = Math.floor(TOKEN_BUDGET_CAP / REF_TOKEN_COST); // 16 — truncation threshold
+
+  /** Error-level = severity ≤ 1 (Error). Warnings/infos ignored (spec §21-25). */
+  function errorLevel(diags: LspDiagnostic[]): LspDiagnostic[] {
+    return diags.filter((d) => (d.severity ?? 1) <= 1);
+  }
+
+  /** tokenBudgetUsed = elapsed estimate + refs×30, clamped ≤500 (spec §49-54). */
+  function tokenBudget(elapsedMs: number, refCount: number): number {
+    const elapsedTokens = Math.min(200, Math.round(elapsedMs / 25));
+    return Math.min(TOKEN_BUDGET_CAP, elapsedTokens + refCount * REF_TOKEN_COST);
+  }
+
+  /** Top-2 distinct error messages joined "; ", ≤120 chars; "none" when clean (spec §42-47). */
+  function suggestedGuardFrom(errs: LspDiagnostic[]): string {
+    if (errs.length === 0) return "none";
+    const seen = new Set<string>();
+    const messages: string[] = [];
+    for (const d of errs) {
+      const cat = (d.source ?? d.code ?? d.message.split(/[:.]/)[0] ?? "error").toString().trim();
+      const key = `${cat}:${d.message.trim()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      messages.push(d.message.trim());
+      if (messages.length === 2) break;
+    }
+    return messages.join("; ").slice(0, 120) || "none";
+  }
 
   async function waitForDiagnostics(filePath: string, timeout: number): Promise<LspQueryResult> {
     const clampedTimeout = Math.min(Math.max(timeout, 0), 5000);
+    const t0 = Date.now();
     const records = await getClientsForFile(filePath);
     if (records.length === 0) {
-      return { diagnostics: [], readiness: "partial", fallbackRecommended: true };
+      return {
+        diagnostics: [],
+        lspStatus: "unavailable",
+        clean: false,
+        metadata: { tokenBudgetUsed: tokenBudget(Date.now() - t0, 0) },
+      };
     }
 
     let anyTimedOut = false;
@@ -277,36 +316,50 @@ export function createWorkspaceLspManager(
       } catch (err) {
         if (err instanceof LspRequestTimeoutError) {
           anyTimedOut = true;
-          // Fall back to whatever diagnostics the client already has
-          const stale = record.client.getDiagnostics(filePath);
-          allDiagnostics.push(...stale);
+          allDiagnostics.push(...record.client.getDiagnostics(filePath));
         } else {
           anyFailed = true;
         }
       }
     }
 
-    let readiness: LspQueryResult["readiness"];
-    if (anyTimedOut) {
-      readiness = "timed_out";
-    } else if (anyFailed || allDiagnostics.length === 0) {
-      readiness = "partial";
-    } else {
-      readiness = "ready";
-    }
+    const lspStatus: LspStatus = anyTimedOut
+      ? "partial"
+      : anyFailed && allDiagnostics.length === 0
+        ? "unavailable"
+        : "ok";
+    // clean: true only when we actually have data and zero error-level diags (spec §85).
+    const clean = lspStatus !== "unavailable" && errorLevel(allDiagnostics).length === 0;
 
     return {
       diagnostics: allDiagnostics,
-      readiness,
-      fallbackRecommended: readiness !== "ready",
+      lspStatus,
+      clean,
+      metadata: { tokenBudgetUsed: tokenBudget(Date.now() - t0, 0) },
     };
   }
 
   async function impactOfChange(filePath: string, _query?: string, timeout?: number): Promise<ImpactOfChangeResult> {
-    const diagnosticResult = await waitForDiagnostics(filePath, timeout ?? 1500);
-    const records = await getClientsForFile(filePath);
-    const references: LspLocation[] = [];
+    const t0 = Date.now();
+    const diag = await waitForDiagnostics(filePath, timeout ?? 1500);
 
+    if (diag.lspStatus === "unavailable") {
+      const errs = errorLevel(diag.diagnostics);
+      return {
+        references: [],
+        diagnostics: diag.diagnostics,
+        referencesComplete: false,
+        safeToRename: false,
+        clean: false,
+        suggestedGuard: suggestedGuardFrom(errs),
+        degraded: "lsp_unavailable",
+        lspStatus: "unavailable",
+        metadata: { tokenBudgetUsed: tokenBudget(Date.now() - t0, 0) },
+      };
+    }
+
+    const records = await getClientsForFile(filePath);
+    const rawReferences: LspLocation[] = [];
     for (const record of records) {
       try {
         const uri = pathToFileURL(path.resolve(filePath)).href;
@@ -323,7 +376,7 @@ export function createWorkspaceLspManager(
               range?: { start: { line: number; character: number }; end: { line: number; character: number } };
             };
             if (r?.uri && r?.range) {
-              references.push({
+              rawReferences.push({
                 uri: r.uri,
                 range: {
                   start: { line: r.range.start.line + 1, character: r.range.start.character + 1 },
@@ -338,31 +391,62 @@ export function createWorkspaceLspManager(
       }
     }
 
-    // safeToRename: true when no conflicting references exist beyond the file itself
-    const selfUri = pathToFileURL(path.resolve(filePath)).href;
-    const externalRefs = references.filter((ref) => ref.uri !== selfUri);
-    const safeToRename = externalRefs.length === 0;
+    // Truncate so references×30 stays within budget headroom (spec §38, §53).
+    const truncated = rawReferences.length > MAX_REFS;
+    const references = truncated ? rawReferences.slice(0, MAX_REFS) : rawReferences;
+    const referencesComplete = !truncated;
+
+    // Frozen union: the symbol file's waited diagnostics + each unique referenced
+    // file's already-published diagnostics (cheap getDiagnostics, no extra waits).
+    // clean is computed over this union of error-level diagnostics (spec §19-25).
+    const unionDiags: LspDiagnostic[] = [...diag.diagnostics];
+    const seenFiles = new Set<string>([path.resolve(filePath)]);
+    for (const ref of references) {
+      let refPath: string;
+      try {
+        refPath = fileURLToPath(ref.uri);
+      } catch {
+        continue;
+      }
+      if (seenFiles.has(refPath)) continue;
+      seenFiles.add(refPath);
+      for (const record of records) unionDiags.push(...record.client.getDiagnostics(refPath));
+    }
+    const unionErrors = errorLevel(unionDiags);
+    const clean = unionErrors.length === 0;
+
+    // Precedence: lsp_unavailable (handled above) > diagnostics_timeout > refs_truncated > none.
+    const degraded: DegradedReason =
+      diag.lspStatus === "partial" ? "diagnostics_timeout" : truncated ? "refs_truncated" : "none";
+    // safeToRename only when refs are complete, the union is clean, and nothing degraded (spec §27-31).
+    const safeToRename = referencesComplete && clean && degraded === "none" && diag.lspStatus === "ok";
 
     return {
-      diagnostics: diagnosticResult.diagnostics,
       references,
+      diagnostics: diag.diagnostics,
+      referencesComplete,
       safeToRename,
-      readiness: diagnosticResult.readiness,
-      fallbackRecommended: diagnosticResult.fallbackRecommended,
+      clean,
+      suggestedGuard: suggestedGuardFrom(unionErrors),
+      degraded,
+      lspStatus: diag.lspStatus,
+      metadata: { tokenBudgetUsed: tokenBudget(Date.now() - t0, references.length) },
     };
   }
 
   async function lspMutationPreview(_filePath: string, _change: unknown): Promise<MutationPreviewResult> {
-    return { preview: [] };
+    // Fixed stub schema — no workspaceEdit, no apply path (spec §55-71).
+    return { op: "allowlist", dryRunResult: { proposedEdits: [], tokenEstimate: 0 }, schemaVersion: "1.0" };
   }
 
   async function lspBeforeGrep(filePath: string, query?: string): Promise<PolicyAction> {
     const result = await impactOfChange(filePath, query);
-    if (result.fallbackRecommended) {
-      return { kind: "allow", reason: "LSP not ready; fall back to grep" };
+    // Policy keys on lspStatus: grep fallback allowed unless the LSP was fully ok (spec §73-77).
+    if (result.lspStatus !== "ok") {
+      return { kind: "allow", reason: `LSP ${result.lspStatus}; fall back to grep` };
     }
     if (result.safeToRename) {
-      return { kind: "allow", reason: "LSP ready and safe" };
+      return { kind: "allow", reason: "LSP ok and rename is safe" };
     }
     return { kind: "enrich", enrichWith: result };
   }

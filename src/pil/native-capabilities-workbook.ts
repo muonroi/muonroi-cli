@@ -36,13 +36,13 @@ TOOLS (call directly):
 - selfverify_start, selfverify_status, selfverify_result, selfverify_list, selfverify_cancel — NATIVE tools for the self-QA harness. ALWAYS use them to self-verify your work when finishing a task. Start with \`selfverify_start(mode="tier1" | "agentic")\`. This drives the live TUI like a real user to catch regressions that unit tests can't. You DO NOT need muonroi-tools MCP for this.
 - usage_forensics, lsp_query, setup_guide — NATIVE diagnostics tools to reach for when something went wrong or to query code intel. You DO NOT need muonroi-tools MCP for this.
 - gsd_status, gsd_discuss, gsd_plan, gsd_plan_review, gsd_execute, gsd_verify, gsd_ship — NATIVE GSD workflow (default on). Use for multi-step code deliverables: orient → plan → council review → implement → verify → ship. Agent-first — skip for quick one-shot fixes.
-- lsp_waitForDiagnostics, lsp_impactOfChange, lsp_mutationPreview — Sprint 1 LSP readiness tools. See LSP-BEFORE-GREP policy below.
+- lsp_waitForDiagnostics, lsp_impactOfChange, lsp_mutationPreview — Sprint 1 LSP impact tools. See LSP-BEFORE-GREP policy below.
 
 LSP-BEFORE-GREP POLICY — MANDATORY:
-Before you run a broad grep, you MUST first call lsp_waitForDiagnostics or lsp_impactOfChange on the relevant file. Read the returned \`fallbackRecommended\` field:
-- If \`fallbackRecommended === true\` (i.e. readiness is 'partial' or 'timed_out'): you ARE allowed to fall back to grep — the LSP was not fully ready.
-- If \`fallbackRecommended === false\` (i.e. readiness is 'ready'): you MUST NOT fall back to grep — the LSP returned full results; use them.
-NEVER read \`diagnostics.length\` to decide whether grep is safe. The \`fallbackRecommended\` flag is the single source of truth, computed by the manager based on timeout/publish state. Violating this policy causes the self-verify harness to fail.
+Before you run a broad grep, you MUST first call lsp_waitForDiagnostics or lsp_impactOfChange on the relevant file. Read the returned \`lspStatus\` field:
+- If \`lspStatus !== 'ok'\` (i.e. 'partial' or 'unavailable'): you ARE allowed to fall back to grep — the LSP was not fully available.
+- If \`lspStatus === 'ok'\`: you MUST NOT fall back to grep — the LSP returned full results; use them.
+NEVER read \`diagnostics.length\` to decide whether grep is safe. The \`lspStatus\` field is the single source of truth, computed by the manager based on timeout/publish state. Violating this policy causes the self-verify harness to fail.
 
 EXPERIENCE ENGINE — record / recall / feedback (HIGHEST priority for learning; all NATIVE in-process tools):
 - BEFORE an unfamiliar or risky step, recall with ee_query — prior decisions, gotchas, and recipes for THIS codebase + ecosystem. Cheaper than re-deriving or repeating a past mistake.
