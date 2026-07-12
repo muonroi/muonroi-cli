@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import {
+  buildChildEnv,
   sanitizeEnv,
   validateCwd,
   validateMockLlmPath,
@@ -37,6 +38,30 @@ describe("sanitizeEnv", () => {
   it("rejects keys with bad chars", () => {
     const e = sanitizeEnv({ "ok=A": "x", "BAD-KEY": "y", GOOD: "z" });
     expect(e).toEqual({ GOOD: "z" });
+  });
+});
+
+describe("buildChildEnv (tui.start child env)", () => {
+  // Regression: a child spawned with a partial env that lacks PATH makes bun
+  // drop the fd 3/4 stdio channels → null inWrite → driver spawn crash. The
+  // child env MUST retain PATH from the driver's process env even when the
+  // caller passes only its own keys.
+  it("retains PATH from the base env when the caller passes a partial env", () => {
+    const base = { PATH: "/usr/bin:/bin", HOME: "/home/x" };
+    const e = buildChildEnv({ MUONROI_HARNESS_EVENT_LOG: "/tmp/e.jsonl" }, base);
+    expect(e.PATH).toBe("/usr/bin:/bin");
+    expect(e.MUONROI_HARNESS_EVENT_LOG).toBe("/tmp/e.jsonl");
+  });
+  it("still strips dangerous vars inherited from the base env", () => {
+    const base = { PATH: "/bin", NODE_OPTIONS: "--require evil", LD_PRELOAD: "x.so" };
+    const e = buildChildEnv({}, base);
+    expect(e.PATH).toBe("/bin");
+    expect(e.NODE_OPTIONS).toBeUndefined();
+    expect(e.LD_PRELOAD).toBeUndefined();
+  });
+  it("lets the caller override a base key", () => {
+    const e = buildChildEnv({ FOO: "caller" }, { PATH: "/bin", FOO: "base" });
+    expect(e.FOO).toBe("caller");
   });
 });
 
