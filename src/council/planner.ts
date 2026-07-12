@@ -2,6 +2,7 @@ import type { StreamChunk } from "../types/index.js";
 import { getCouncilLanguage } from "../utils/settings.js";
 import { tracedGenerate } from "./llm.js";
 import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
+import { emitPreflightHarnessEvent } from "./preflight.js";
 import { buildSynthesisPrompt } from "./prompts.js";
 import type {
   ActionPlan,
@@ -188,6 +189,15 @@ export async function* runPlanning(
     }
 
     const preflightId = crypto.randomUUID();
+    emitPreflightHarnessEvent({
+      t: "event",
+      kind: "askcard-open",
+      questionId: preflightId,
+      question: `Approve action plan for: ${spec.problemStatement}`,
+      phase: "plan-confirm",
+      optionCount: 2,
+      defaultIndex: 0,
+    });
     yield {
       type: "council_preflight" as StreamChunk["type"],
       content: "Review the action plan above. Approve to proceed with execution, or reject.",
@@ -203,6 +213,13 @@ export async function* runPlanning(
     };
 
     const approved = await respondToPreflight(preflightId);
+    emitPreflightHarnessEvent({
+      t: "event",
+      kind: "askcard-answered",
+      questionId: preflightId,
+      answerKind: "choice",
+      answerText: approved ? "approve" : "reject",
+    });
     yield phaseDone({
       phaseId: "phase:action-plan",
       kind: "action_plan",

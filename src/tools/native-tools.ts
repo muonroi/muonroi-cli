@@ -20,9 +20,23 @@
  */
 
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
-import { LSP_TOOL_OPERATIONS } from "../lsp/types.js";
+import { LSP_TOOL_OPERATIONS, LspError } from "../lsp/types.js";
 import { getSelfVerifyJobManager } from "../mcp/self-verify-runner.js";
 import { SETUP_GUIDE_TEXT } from "../mcp/setup-guide-text.js";
+
+/** Map a thrown error to the LspError tagged-union shape. */
+function mapLspError(e: unknown): LspError {
+  if (e instanceof LspError) return e;
+  if (e && typeof e === "object" && "kind" in e && "message" in e) {
+    return new LspError((e as any).kind, (e as any).message);
+  }
+  return new LspError("unknown", e instanceof Error ? e.message : String(e));
+}
+
+function lspErrLine(e: unknown): string {
+  const err = mapLspError(e);
+  return JSON.stringify({ error: err.kind, message: err.message });
+}
 
 /** The native tool names this module registers — used by the MCP-twin dedup. */
 export const NATIVE_MUONROI_TOOL_NAMES = [
@@ -251,8 +265,12 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
     }),
     execute: async (input: any): Promise<string> => {
       const cwd = opts.cwd ?? process.cwd();
-      const { getOrCreateManager } = await import("../lsp/runtime.js");
-      return json(await getOrCreateManager(cwd).waitForDiagnostics(input.filePath, input.timeout));
+      try {
+        const { getOrCreateManager } = await import("../lsp/runtime.js");
+        return json(await getOrCreateManager(cwd).waitForDiagnostics(input.filePath, input.timeout));
+      } catch (e) {
+        return lspErrLine(e);
+      }
     },
   });
 

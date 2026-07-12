@@ -17,6 +17,7 @@ import {
   type LspQueryResult,
   type LspToolResponse,
   type MutationPreviewResult,
+  type PolicyAction,
 } from "../lsp/types.js";
 
 export interface LspToolDeps {
@@ -25,6 +26,7 @@ export interface LspToolDeps {
   waitForDiagnostics?: (cwd: string, filePath: string, timeout?: number) => Promise<LspQueryResult>;
   impactOfChange?: (cwd: string, filePath: string, query?: string) => Promise<ImpactOfChangeResult>;
   lspMutationPreview?: (cwd: string, filePath: string, change: string) => Promise<MutationPreviewResult>;
+  lspBeforeGrep?: (cwd: string, filePath: string, query?: string) => Promise<PolicyAction>;
 }
 
 function ok(data: unknown) {
@@ -37,6 +39,18 @@ function fail(error: string, message: string) {
   };
 }
 
+/** Map a thrown error to the LspError tagged-union shape. */
+function mapLspError(e: unknown): { error: string; message: string } {
+  if (e && typeof e === "object" && "kind" in e && "message" in e) {
+    const lspErr = e as { kind: string; message: string };
+    return { error: lspErr.kind, message: lspErr.message };
+  }
+  return {
+    error: "lsp_error",
+    message: e instanceof Error ? e.message : String(e),
+  };
+}
+
 async function defaultQuery(cwd: string, input: LspQueryInput): Promise<LspToolResponse> {
   const { queryLsp } = await import("../lsp/runtime.js");
   return queryLsp(cwd, input);
@@ -45,7 +59,7 @@ async function defaultEnabled(cwd: string): Promise<boolean> {
   const { isLspToolEnabled } = await import("../lsp/runtime.js");
   return isLspToolEnabled(cwd);
 }
-async function defaultWaitForDiagnostics(cwd: string, filePath: string, timeout?: number): Promise<LspQueryResult> {
+async function defaultWaitForDiagnostics(cwd: string, filePath: string, timeout = 1500): Promise<LspQueryResult> {
   const { getOrCreateManager } = await import("../lsp/runtime.js");
   return getOrCreateManager(cwd).waitForDiagnostics(filePath, timeout);
 }
@@ -57,6 +71,10 @@ async function defaultMutationPreview(cwd: string, filePath: string, change: str
   const { getOrCreateManager } = await import("../lsp/runtime.js");
   return getOrCreateManager(cwd).lspMutationPreview(filePath, change);
 }
+async function defaultBeforeGrep(cwd: string, filePath: string, query?: string): Promise<PolicyAction> {
+  const { getOrCreateManager } = await import("../lsp/runtime.js");
+  return getOrCreateManager(cwd).lspBeforeGrep(filePath, query);
+}
 
 export function registerLspTools(server: McpServer, deps: LspToolDeps = {}): void {
   const query = deps.query ?? defaultQuery;
@@ -64,6 +82,7 @@ export function registerLspTools(server: McpServer, deps: LspToolDeps = {}): voi
   const waitForDiagnostics = deps.waitForDiagnostics ?? defaultWaitForDiagnostics;
   const impactOfChange = deps.impactOfChange ?? defaultImpactOfChange;
   const mutationPreview = deps.lspMutationPreview ?? defaultMutationPreview;
+  const lspBeforeGrep = deps.lspBeforeGrep ?? defaultBeforeGrep;
 
   server.registerTool(
     "lsp_query",
@@ -87,7 +106,8 @@ export function registerLspTools(server: McpServer, deps: LspToolDeps = {}): voi
       try {
         isEnabled = await enabled(cwd);
       } catch (e) {
-        return fail("lsp_error", e instanceof Error ? e.message : String(e));
+        const m = mapLspError(e);
+        return fail(m.error, m.message);
       }
       if (!isEnabled) {
         return fail("lsp_disabled", "LSP tool is disabled in settings (lsp.enabled / lsp.tool)");
@@ -96,7 +116,8 @@ export function registerLspTools(server: McpServer, deps: LspToolDeps = {}): voi
         const resp = await query(cwd, args as LspQueryInput);
         return ok(resp);
       } catch (e) {
-        return fail("lsp_error", e instanceof Error ? e.message : String(e));
+        const m = mapLspError(e);
+        return fail(m.error, m.message);
       }
     },
   );

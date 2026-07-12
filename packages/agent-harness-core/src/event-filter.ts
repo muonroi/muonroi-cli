@@ -34,9 +34,20 @@ export const LIFECYCLE_PRESET: ReadonlySet<EventKind> = new Set<EventKind>([
   "askcard-cancel",
   "sprint-stage",
   "sprint-halt",
+  // Emitted at product-loop/index.ts on plan commit; a wake-at-milestone monitor
+  // must see it. Was previously dropped by this preset despite being emitted.
+  "sprint-plan-committed",
   "route-decision",
   "steer-inject",
   "usage",
+  // Ephemeral kinds carry a visualText snapshot for wake-at-milestone monitors
+  // (event-tee.ts EPHEMERAL_KINDS). The default preset must not drop them, or a
+  // monitor on MUONROI_HARNESS_EVENT_LOG misses errors/timeouts/disconnects.
+  "ee-timeout",
+  "ee-error",
+  "grounding-flag",
+  "stream-retry",
+  "disconnect",
 ]);
 
 /**

@@ -2,7 +2,14 @@ import { existsSync } from "fs";
 import path from "path";
 import { getCurrentLspSettings } from "../utils/settings";
 import { createWorkspaceLspManager, summarizeLspDiagnostics, type WorkspaceLspManager } from "./manager";
-import type { LspDiagnosticFile, LspQueryInput, LspToolResponse } from "./types";
+import type {
+  ImpactOfChangeResult,
+  LspDiagnosticFile,
+  LspQueryInput,
+  LspQueryResult,
+  LspToolResponse,
+  MutationPreviewResult,
+} from "./types";
 
 const managers = new Map<string, WorkspaceLspManager>();
 
@@ -12,6 +19,25 @@ export async function queryLsp(cwd: string, input: LspQueryInput): Promise<LspTo
     ...input,
     filePath: path.isAbsolute(input.filePath) ? input.filePath : path.resolve(cwd, input.filePath),
   });
+}
+
+export async function waitForDiagnosticsLsp(cwd: string, filePath: string, timeout?: number): Promise<LspQueryResult> {
+  const manager = getOrCreateManager(cwd);
+  return manager.waitForDiagnostics(path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath), timeout);
+}
+
+export async function impactOfChangeLsp(cwd: string, filePath: string, query?: string): Promise<ImpactOfChangeResult> {
+  const manager = getOrCreateManager(cwd);
+  return manager.impactOfChange(path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath), query);
+}
+
+export async function lspMutationPreview(
+  cwd: string,
+  filePath: string,
+  change: string,
+): Promise<MutationPreviewResult> {
+  const manager = getOrCreateManager(cwd);
+  return manager.lspMutationPreview(path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath), change);
 }
 
 export async function syncFileWithLsp(

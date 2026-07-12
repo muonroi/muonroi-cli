@@ -28,6 +28,27 @@ describe("createEventFilter — default (env unset)", () => {
   it("blocks unknown kinds", () => {
     expect(filter("some-future-event")).toBe(false);
   });
+
+  // Regression: these lifecycle/ephemeral milestones were silently dropped by the
+  // default preset even though they are emitted (sprint-plan-committed) or carry a
+  // visualText snapshot for wake-at-milestone monitors (ephemeral kinds). A monitor
+  // on MUONROI_HARNESS_EVENT_LOG must wake on all of them without opting into "*".
+  it("allows sprint-plan-committed (human-gate milestone, was dropped)", () => {
+    expect(filter("sprint-plan-committed")).toBe(true);
+  });
+
+  it("allows ephemeral kinds that carry a visualText snapshot", () => {
+    for (const kind of ["ee-error", "ee-timeout", "grounding-flag", "stream-retry", "disconnect"]) {
+      expect(filter(kind)).toBe(true);
+    }
+  });
+
+  it("preset covers every non-token kind implicitly (all except llm-token)", () => {
+    // The documented contract: default = lifecycle preset = all kinds except the
+    // high-volume token stream. Guard against a new kind being added to protocol.ts
+    // without being wired into the preset.
+    expect(filter("llm-token")).toBe(false);
+  });
 });
 
 describe("createEventFilter — empty string (treated as unset)", () => {
