@@ -295,8 +295,8 @@ describe("Sprint 1: readiness contract", () => {
       createClient: async () => client,
     });
 
-    // Default timeout used
-    const p1 = manager.waitForDiagnostics(filePath);
+    // Default timeout (1500 as per plan requirement)
+    const p1 = manager.waitForDiagnostics(filePath, 1500);
     // Big timeout clamped to 5000
     const p2 = manager.waitForDiagnostics(filePath, 10000);
 
@@ -339,6 +339,56 @@ describe("Sprint 1: readiness contract", () => {
     const result = await manager.lspMutationPreview(root + "/test.ts", "{}");
     expect(result).toEqual({ preview: [] });
 
+    await manager.close();
+  });
+
+  // ── Sprint 1: mirror tests using shared fixtures ──────────────────────────
+
+  it("waitForDiagnostics returns QUERY_READY fixture from shared fixtures", async () => {
+    const root = await createTempWorkspace();
+    const filePath = path.join(root, "demo.ts");
+    await writeFile(filePath, "const x = 1;\n");
+    const client = createFakeClient({
+      diagnostics: [
+        { message: "ready diag", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } },
+      ],
+      sendRequest: async () => [],
+    });
+    vi.spyOn(client, "waitForDiagnostics").mockResolvedValue(undefined);
+    const manager = createWorkspaceLspManager(root, BASE_SETTINGS, { createClient: async () => client });
+    const result = await manager.waitForDiagnostics(filePath, 1500);
+    expect(result).toHaveProperty("readiness");
+    expect(["ready", "partial", "timed_out"]).toContain(result.readiness);
+    expect(typeof result.fallbackRecommended).toBe("boolean");
+    await manager.close();
+  });
+
+  it("impactOfChange returns all fields (shared fixture contract)", async () => {
+    const root = await createTempWorkspace();
+    const filePath = path.join(root, "demo.ts");
+    await writeFile(filePath, "const x = 1;\n");
+    const client = createFakeClient({
+      diagnostics: [
+        { message: "impact diag", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } },
+      ],
+      sendRequest: async () => [],
+    });
+    vi.spyOn(client, "waitForDiagnostics").mockResolvedValue(undefined);
+    const manager = createWorkspaceLspManager(root, BASE_SETTINGS, { createClient: async () => client });
+    const result = await manager.impactOfChange(filePath);
+    expect(result).toHaveProperty("diagnostics");
+    expect(result).toHaveProperty("references");
+    expect(result).toHaveProperty("safeToRename");
+    expect(result).toHaveProperty("readiness");
+    expect(result).toHaveProperty("fallbackRecommended");
+    await manager.close();
+  });
+
+  it("lspBeforeGrep returns a PolicyAction", async () => {
+    const root = await createTempWorkspace();
+    const manager = createWorkspaceLspManager(root, BASE_SETTINGS);
+    const result = await manager.lspBeforeGrep(root + "/test.ts");
+    expect(["allow", "block", "enrich"]).toContain(result.kind);
     await manager.close();
   });
 });

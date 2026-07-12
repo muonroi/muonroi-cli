@@ -13,6 +13,7 @@ import type {
   LspToolResponse,
   MutationPreviewResult,
   NormalizedLspSettings,
+  PolicyAction,
 } from "./types";
 
 interface ManagedClient {
@@ -41,9 +42,10 @@ export interface WorkspaceLspManager {
     diagnosticsTimeoutMs?: number,
   ): Promise<LspDiagnosticFile[]>;
   query(input: LspQueryInput): Promise<LspToolResponse>;
-  waitForDiagnostics(filePath: string, timeout?: number): Promise<LspQueryResult>;
-  impactOfChange(filePath: string, query?: string): Promise<ImpactOfChangeResult>;
+  waitForDiagnostics(filePath: string, timeout: number): Promise<LspQueryResult>;
+  impactOfChange(filePath: string, query?: string, timeout?: number): Promise<ImpactOfChangeResult>;
   lspMutationPreview(filePath: string, change: string): Promise<MutationPreviewResult>;
+  lspBeforeGrep(filePath: string, query?: string): Promise<PolicyAction>;
   close(): Promise<void>;
 }
 
@@ -254,8 +256,8 @@ export function createWorkspaceLspManager(
 
   // ── Sprint 1: readiness contract methods ──────────────────────────────────
 
-  async function waitForDiagnostics(filePath: string, timeout?: number): Promise<LspQueryResult> {
-    const clampedTimeout = Math.min(Math.max(timeout ?? 1500, 0), 5000);
+  async function waitForDiagnostics(filePath: string, timeout: number): Promise<LspQueryResult> {
+    const clampedTimeout = Math.min(Math.max(timeout, 0), 5000);
     const records = await getClientsForFile(filePath);
     if (records.length === 0) {
       return { diagnostics: [], readiness: "partial", fallbackRecommended: true };
@@ -300,8 +302,8 @@ export function createWorkspaceLspManager(
     };
   }
 
-  async function impactOfChange(filePath: string, _query?: string): Promise<ImpactOfChangeResult> {
-    const diagnosticResult = await waitForDiagnostics(filePath);
+  async function impactOfChange(filePath: string, _query?: string, timeout?: number): Promise<ImpactOfChangeResult> {
+    const diagnosticResult = await waitForDiagnostics(filePath, timeout ?? 1500);
     const records = await getClientsForFile(filePath);
     const references: LspLocation[] = [];
 
@@ -354,6 +356,17 @@ export function createWorkspaceLspManager(
     return { preview: [] };
   }
 
+  async function lspBeforeGrep(filePath: string, query?: string): Promise<PolicyAction> {
+    const result = await impactOfChange(filePath, query);
+    if (result.fallbackRecommended) {
+      return { kind: "allow", reason: "LSP not ready; fall back to grep" };
+    }
+    if (result.safeToRename) {
+      return { kind: "allow", reason: "LSP ready and safe" };
+    }
+    return { kind: "enrich", enrichWith: result };
+  }
+
   return {
     touchFile,
     syncFile,
@@ -362,6 +375,7 @@ export function createWorkspaceLspManager(
     waitForDiagnostics,
     impactOfChange,
     lspMutationPreview,
+    lspBeforeGrep,
   };
 }
 
