@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { TaskRequest, ToolResult } from "../../types/index.js";
 import { runPlanAdherenceReview } from "../plan-adherence-review.js";
 
@@ -35,6 +35,39 @@ describe("runPlanAdherenceReview", () => {
     expect(verdict.rounds).toBe(1);
     expect(calls).toHaveLength(1); // review only, no fix
     expect(calls[0].modelId).toBe("leader-pro");
+  });
+
+  it("does not hang when the reviewer sub-agent never returns (deadline backstop)", async () => {
+    vi.useFakeTimers();
+    const prev = process.env.MUONROI_IDEAL_ISOLATED_TASK_MS;
+    process.env.MUONROI_IDEAL_ISOLATED_TASK_MS = "60000"; // floor, keeps the test fast under fake timers
+    try {
+      // A reviewer sub-agent whose promise never settles — the post-finish JS
+      // wedge that hung run mrhc43f0fb9b. The deadline backstop must convert it
+      // into a no-verdict outcome, NOT block the gate forever.
+      const runIsolatedTask = () => new Promise<ToolResult>(() => {});
+      const p = drain(
+        runPlanAdherenceReview({
+          sprintN: 9,
+          planSynthesis: "plan",
+          cwd: "/tmp",
+          reviewModelId: "leader-pro",
+          fixModelId: "cheap-flash",
+          runIsolatedTask,
+          diffProvider: okDiff,
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(61_000);
+      const verdict = await p;
+      // Hung reviewer → treated as no parseable verdict → leave the verify +
+      // criteria gate to decide, instead of wedging the sprint.
+      expect(verdict.adherent).toBe(true);
+      expect(verdict.rounds).toBe(1);
+    } finally {
+      if (prev === undefined) delete process.env.MUONROI_IDEAL_ISOLATED_TASK_MS;
+      else process.env.MUONROI_IDEAL_ISOLATED_TASK_MS = prev;
+      vi.useRealTimers();
+    }
   });
 
   it("dispatches a fix to the lower tier then re-reviews to adherent", async () => {

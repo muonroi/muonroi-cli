@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
+import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
 import { getCouncilLanguage } from "../utils/settings.js";
 import {
   buildDebateCheckpoint,
@@ -369,13 +370,18 @@ async function runResearchIsolated(
     `Return a compact "## Research Findings" section: only the concrete facts that bear on the question, each with its source (file:line or URL). ` +
     `Be terse and factual — no opinions, no recommendations. If you cannot find solid evidence, say so in one line.`;
   try {
-    const result = await runIsolatedTask({
-      agent: "explore",
-      description: `Council research: ${topic.slice(0, 60)}`,
-      prompt,
-      // Pin the research-role model; bypasses the parent-tier cap in StreamRunner.
-      modelId: model,
-    });
+    const result = await withDeadlineRace(
+      () =>
+        runIsolatedTask({
+          agent: "explore",
+          description: `Council research: ${topic.slice(0, 60)}`,
+          prompt,
+          // Pin the research-role model; bypasses the parent-tier cap in StreamRunner.
+          modelId: model,
+        }),
+      getIsolatedTaskDeadlineMs(),
+      "council-research",
+    );
     if (result.success && result.output?.trim()) return result.output.trim();
     traceCb(`[research] isolated sub-agent produced nothing: ${result.error ?? "no output"}`);
     return `[Research failed: ${result.error ?? "isolated sub-agent produced no output"}]`;
@@ -2205,12 +2211,17 @@ export async function runGroundingVerify(
     `words followed by its tag. Do NOT restate the whole debate or add opinions. Prefer [CONFIRMED]/[REFUTED] ` +
     `with a real citation over [UNVERIFIED].`;
   try {
-    const result = await runIsolatedTask({
-      agent: "explore",
-      description: `Council grounding-verify: ${problemStatement.slice(0, 50)}`,
-      prompt,
-      modelId: model,
-    });
+    const result = await withDeadlineRace(
+      () =>
+        runIsolatedTask({
+          agent: "explore",
+          description: `Council grounding-verify: ${problemStatement.slice(0, 50)}`,
+          prompt,
+          modelId: model,
+        }),
+      getIsolatedTaskDeadlineMs(),
+      "council-grounding-verify",
+    );
     if (result.success && result.output?.trim()) return result.output.trim();
     traceCb(`[grounding-verify] produced nothing: ${result.error ?? "no output"}`);
     return "";

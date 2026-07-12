@@ -109,3 +109,22 @@ export async function withDeadlineRace<T>(
     if (abortListener && abortSignal) abortSignal.removeEventListener("abort", abortListener);
   }
 }
+
+/**
+ * Wall-clock backstop (ms) for an isolated sub-agent task (`runIsolatedTask`).
+ *
+ * The council `generate()` chokepoint and the sprint impl/verify stages already
+ * have deadlines, but the *other* `runIsolatedTask` await points — plan-adherence
+ * review + fix, council research, grounding-verify — were bare `await`s. A
+ * provider that hangs on the JS side after the sub-agent's stream finishes wedges
+ * the whole pipeline with no error (observed live: run mrhc43f0fb9b impl, and the
+ * scoping stall). Wrap those calls in `withDeadlineRace(fn, getIsolatedTaskDeadlineMs(), ...)`
+ * so a hang surfaces as a rejection the caller already handles. Generous by
+ * default so a legitimately long tool-using sub-agent is not cut short; override
+ * with MUONROI_IDEAL_ISOLATED_TASK_MS. Clamped to [60s, 30min].
+ */
+export function getIsolatedTaskDeadlineMs(): number {
+  const raw = Number.parseInt(process.env.MUONROI_IDEAL_ISOLATED_TASK_MS ?? "", 10);
+  if (Number.isFinite(raw) && raw >= 60_000 && raw <= 1_800_000) return raw;
+  return 900_000; // 15 min backstop
+}

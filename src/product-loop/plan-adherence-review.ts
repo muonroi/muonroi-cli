@@ -1,5 +1,25 @@
 import { spawnSync } from "node:child_process";
 import type { StreamChunk, TaskRequest, ToolResult } from "../types/index.js";
+import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
+
+/**
+ * Run an isolated sub-agent with a wall-clock backstop. The review/fix agents
+ * were bare `await`s — a provider that hangs post-stream would wedge the whole
+ * sprint (same class as the impl stall, run mrhc43f0fb9b). On timeout the race
+ * rejects; we convert it into a failure ToolResult so the existing `.success`
+ * paths handle it (review → leave gate; fix → stop the loop) instead of hanging.
+ */
+async function runIsolatedGuarded(
+  run: (req: TaskRequest) => Promise<ToolResult>,
+  req: TaskRequest,
+  label: string,
+): Promise<ToolResult> {
+  try {
+    return await withDeadlineRace(() => run(req), getIsolatedTaskDeadlineMs(), label);
+  } catch (err) {
+    return { success: false, output: "", error: err instanceof Error ? err.message : String(err) };
+  }
+}
 
 /**
  * Plan-adherence review gate (requested 2026-07-12): after implementation, spawn a
@@ -94,13 +114,17 @@ export async function* runPlanAdherenceReview(args: {
       `"issue":"<what diverges from the plan>","fix":"<concrete instruction to conform>"}]}. ` +
       `adherent=true ONLY if there are no material deviations.`;
 
-    const review = await args.runIsolatedTask({
-      agent: "general",
-      description: `Sprint ${args.sprintN} plan-adherence review (round ${round})`,
-      prompt: reviewPrompt,
-      modelId: args.reviewModelId,
-      maxToolRounds: 12,
-    });
+    const review = await runIsolatedGuarded(
+      args.runIsolatedTask,
+      {
+        agent: "general",
+        description: `Sprint ${args.sprintN} plan-adherence review (round ${round})`,
+        prompt: reviewPrompt,
+        modelId: args.reviewModelId,
+        maxToolRounds: 12,
+      },
+      `adherence-review-s${args.sprintN}-r${round}`,
+    );
 
     const parsed = review.success ? parseReview(review.output ?? "") : null;
     if (!parsed) {
@@ -149,12 +173,16 @@ export async function* runPlanAdherenceReview(args: {
       type: "content",
       content: `\n> [adherence] Dispatching fix task to ${args.fixModelId} (round ${round})…\n`,
     };
-    const fix = await args.runIsolatedTask({
-      agent: "general",
-      description: `Sprint ${args.sprintN} plan-adherence fix (round ${round})`,
-      prompt: fixPrompt,
-      modelId: args.fixModelId,
-    });
+    const fix = await runIsolatedGuarded(
+      args.runIsolatedTask,
+      {
+        agent: "general",
+        description: `Sprint ${args.sprintN} plan-adherence fix (round ${round})`,
+        prompt: fixPrompt,
+        modelId: args.fixModelId,
+      },
+      `adherence-fix-s${args.sprintN}-r${round}`,
+    );
     if (!fix.success) {
       yield {
         type: "content",
