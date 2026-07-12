@@ -7,10 +7,19 @@ vi.mock("./checkpoint", () => ({
   ensureVerifyCheckpoint: vi.fn(async () => ({ created: false })),
 }));
 
+// Sandbox mode gates the shuru checkpoint. Default to "shuru" so the existing
+// checkpoint-wiring coverage still exercises that path; the off-mode test flips it.
+vi.mock("../utils/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../utils/settings")>();
+  return { ...actual, getCurrentSandboxMode: vi.fn(() => "shuru") };
+});
+
+import { getCurrentSandboxMode } from "../utils/settings";
 import { ensureVerifyCheckpoint } from "./checkpoint";
 import { prepareVerifyRun, runVerifyOrchestration } from "./orchestrator";
 
 const ensureVerifyCheckpointMock = vi.mocked(ensureVerifyCheckpoint);
+const sandboxModeMock = vi.mocked(getCurrentSandboxMode);
 const tempDirs: string[] = [];
 
 function makeTempDir(prefix: string): string {
@@ -22,6 +31,8 @@ function makeTempDir(prefix: string): string {
 afterEach(() => {
   ensureVerifyCheckpointMock.mockReset();
   ensureVerifyCheckpointMock.mockResolvedValue({ created: false });
+  sandboxModeMock.mockReset();
+  sandboxModeMock.mockReturnValue("shuru");
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
@@ -155,5 +166,32 @@ describe("verify orchestrator", () => {
       allowNet: true,
     });
     expect(agent.setSandboxSettings.mock.calls[1]?.[0]).toBe(originalSettings);
+  });
+
+  it("skips the shuru checkpoint entirely when sandbox mode is off (runs on host)", async () => {
+    sandboxModeMock.mockReturnValue("off");
+    const dir = makeTempDir("muonroi-verify-orch-off-");
+    fs.writeFileSync(
+      path.join(dir, "package.json"),
+      JSON.stringify({ dependencies: { next: "15.0.0" }, scripts: { dev: "next dev", build: "next build" } }, null, 2),
+    );
+    fs.writeFileSync(path.join(dir, "package-lock.json"), "");
+
+    // If this were called on a host without shuru it would throw — the gate must
+    // prevent the call, not merely swallow the error.
+    ensureVerifyCheckpointMock.mockRejectedValue(new Error('Executable not found in $PATH: "shuru"'));
+
+    const agent = {
+      getCwd: () => dir,
+      getSandboxSettings: () => ({}),
+      setSandboxSettings: vi.fn(),
+      detectVerifyRecipe: vi.fn(async () => null),
+      runTaskRequest: vi.fn(async () => ({ success: true, output: "verified" })),
+    };
+
+    const prepared = await prepareVerifyRun(agent, {});
+    expect(ensureVerifyCheckpointMock).not.toHaveBeenCalled();
+    expect(prepared.checkpoint).toEqual({ created: false });
+    expect(prepared.sandboxSettings.from).toBeUndefined();
   });
 });

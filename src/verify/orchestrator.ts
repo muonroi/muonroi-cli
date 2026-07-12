@@ -1,5 +1,5 @@
 import type { TaskRequest, ToolResult, VerifyRecipe } from "../types/index";
-import type { SandboxSettings } from "../utils/settings";
+import { getCurrentSandboxMode, type SandboxSettings } from "../utils/settings";
 import { ensureVerifyCheckpoint, type PreparedVerifyCheckpoint } from "./checkpoint";
 import { buildVerifyTaskPrompt } from "./entrypoint";
 import { loadVerifyEnvironment, saveVerifyEnvironment } from "./environment";
@@ -76,8 +76,22 @@ export async function prepareVerifyRun(
   }
 
   const sandboxSettings = buildRuntimeSandboxSettings(profile);
-  options.onProgress?.("Preparing verify checkpoint");
-  const checkpoint = await ensureVerifyCheckpoint(cwd, profile, sandboxSettings);
+  // Sandbox "off" → run the recipe directly on the host; do NOT bootstrap a
+  // `shuru` checkpoint. ensureVerifyCheckpoint spawns `shuru checkpoint …`
+  // whenever the recipe has installCommands, regardless of mode — on a host
+  // without shuru installed that throws "Executable not found in $PATH: shuru",
+  // which parseVerifyResult maps to ERROR (never PASS), pinning the sprint score
+  // at 0.00. Skip it when the sole source of truth (getCurrentSandboxMode) is off.
+  const checkpoint: PreparedVerifyCheckpoint =
+    getCurrentSandboxMode() === "off"
+      ? { created: false }
+      : await (async () => {
+          options.onProgress?.("Preparing verify checkpoint");
+          return ensureVerifyCheckpoint(cwd, profile, sandboxSettings);
+        })();
+  if (getCurrentSandboxMode() === "off") {
+    options.onProgress?.("Sandbox off — running verify on host (no shuru checkpoint)");
+  }
   if (checkpoint.checkpointName) {
     sandboxSettings.from = checkpoint.checkpointName;
     if (checkpoint.guestWorkdir) {
@@ -96,7 +110,10 @@ export async function prepareVerifyRun(
   const taskRequest: TaskRequest = {
     agent: "verify",
     description: "Run local verification",
-    prompt: buildVerifyTaskPrompt(cwd, sandboxSettings, profile.recipe),
+    // Thread the resolved mode so the prompt tells the sub-agent to run "on the
+    // host" instead of "inside the active Shuru sandbox" when sandbox is off
+    // (the param defaults to "shuru", which was wrong for an off host).
+    prompt: buildVerifyTaskPrompt(cwd, sandboxSettings, profile.recipe, getCurrentSandboxMode()),
   };
 
   return {
