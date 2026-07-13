@@ -20,9 +20,23 @@
  */
 
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
-import { LSP_TOOL_OPERATIONS } from "../lsp/types.js";
+import { LSP_TOOL_OPERATIONS, LspError } from "../lsp/types.js";
 import { getSelfVerifyJobManager } from "../mcp/self-verify-runner.js";
 import { SETUP_GUIDE_TEXT } from "../mcp/setup-guide-text.js";
+
+/** Map a thrown error to the LspError tagged-union shape. */
+function mapLspError(e: unknown): LspError {
+  if (e instanceof LspError) return e;
+  if (e && typeof e === "object" && "kind" in e && "message" in e) {
+    return new LspError((e as any).kind, (e as any).message);
+  }
+  return new LspError("unknown", e instanceof Error ? e.message : String(e));
+}
+
+function lspErrLine(e: unknown): string {
+  const err = mapLspError(e);
+  return JSON.stringify({ error: err.kind, message: err.message });
+}
 
 /** The native tool names this module registers — used by the MCP-twin dedup. */
 export const NATIVE_MUONROI_TOOL_NAMES = [
@@ -31,6 +45,9 @@ export const NATIVE_MUONROI_TOOL_NAMES = [
   "ee_write",
   "usage_forensics",
   "lsp_query",
+  "wait_for_diagnostics",
+  "impact_of_change",
+  "lsp_mutation_preview",
   "setup_guide",
   "selfverify_start",
   "selfverify_status",
@@ -229,6 +246,70 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
       } catch (e) {
         return errLine("lsp_error", e instanceof Error ? e.message : String(e));
       }
+    },
+  });
+
+  // ── Sprint 1: readiness contract tools ─────────────────────────────────────
+  tools.wait_for_diagnostics = dynamicTool({
+    description:
+      "Wait for LSP diagnostics on a file, with timeout clamping (default 1500ms, max 5000ms). " +
+      "Returns { diagnostics: LspDiagnostic[], lspStatus: 'ok'|'partial'|'unavailable', clean: boolean, metadata: { tokenBudgetUsed } }. " +
+      "clean=true means zero error-level diagnostics. Grep fallback is allowed when lspStatus !== 'ok'.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        filePath: { type: "string", description: "Absolute or workspace-relative path" },
+        timeout: { type: "number", description: "Timeout in ms (default 1500, max 5000)", optional: true },
+      },
+      required: ["filePath"],
+    }),
+    execute: async (input: any): Promise<string> => {
+      const cwd = opts.cwd ?? process.cwd();
+      try {
+        const { getOrCreateManager } = await import("../lsp/runtime.js");
+        return json(await getOrCreateManager(cwd).waitForDiagnostics(input.filePath, input.timeout ?? 1500));
+      } catch (e) {
+        return lspErrLine(e);
+      }
+    },
+  });
+
+  tools.impact_of_change = dynamicTool({
+    description:
+      "Analyse impact of a change: returns { references, diagnostics, referencesComplete, safeToRename, clean, " +
+      "suggestedGuard, degraded, lspStatus, metadata }. Safe for use as lsp-before-grep gate: grep fallback is " +
+      "allowed when lspStatus !== 'ok'; safeToRename is true only when refs are complete and the union is clean.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        filePath: { type: "string", description: "Absolute or workspace-relative path" },
+        query: { type: "string", description: "Optional symbol query", optional: true },
+      },
+      required: ["filePath"],
+    }),
+    execute: async (input: any): Promise<string> => {
+      const cwd = opts.cwd ?? process.cwd();
+      const { getOrCreateManager } = await import("../lsp/runtime.js");
+      return json(await getOrCreateManager(cwd).impactOfChange(input.filePath, input.query));
+    },
+  });
+
+  tools.lsp_mutation_preview = dynamicTool({
+    description:
+      "Preview a mutation (stub — no real edits). Returns { op: 'allowlist', dryRunResult: { proposedEdits: [], " +
+      "tokenEstimate: 0 }, schemaVersion: '1.0' }. MUTATION_TOOLS gating applies; no apply path in Sprint 1.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        filePath: { type: "string", description: "File path" },
+        change: { type: "string", description: "Change specification (stub)" },
+      },
+      required: ["filePath", "change"],
+    }),
+    execute: async (input: any): Promise<string> => {
+      const cwd = opts.cwd ?? process.cwd();
+      const { getOrCreateManager } = await import("../lsp/runtime.js");
+      return json(await getOrCreateManager(cwd).lspMutationPreview(input.filePath, input.change));
     },
   });
 

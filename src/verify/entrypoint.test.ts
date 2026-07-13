@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { VERIFY_FAIL_MARKER, VERIFY_PASS_MARKER } from "../product-loop/verify-result";
 import type { VerifyRecipe } from "../types/index";
 import {
   buildVerifyDetectPrompt,
@@ -215,6 +216,11 @@ describe("verify entrypoint helpers", () => {
     expect(prompt).toContain(".muonroi-cli/verify-artifacts");
     expect(prompt).toContain("Keep the report compact");
     expect(prompt).toContain("Evidence is mandatory even on failure");
+    // The verdict marker parseVerifyResult keys on MUST be requested, or verify
+    // can never return PASS (falls through to UNKNOWN → score pinned 0.00).
+    expect(prompt).toContain(VERIFY_PASS_MARKER);
+    expect(prompt).toContain(VERIFY_FAIL_MARKER);
+    expect(prompt).toContain("Verdict marker (MANDATORY");
   });
 
   it("builds a detector prompt that requests JSON output", () => {

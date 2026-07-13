@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { withDeadlineRace, withTimeoutSignal } from "../llm-deadline.js";
+import { getIsolatedTaskDeadlineMs, withDeadlineRace, withTimeoutSignal } from "../llm-deadline.js";
 
 async function advanceTimersAsync(ms: number) {
   if (typeof (vi as any).advanceTimersByTimeAsync === "function") {
@@ -31,6 +31,34 @@ describe("withDeadlineRace", () => {
     const assertion = expect(p).rejects.toThrow(/plan_debate exceeded 500ms deadline/);
     await advanceTimersAsync(600);
     await assertion;
+  });
+});
+
+describe("getIsolatedTaskDeadlineMs", () => {
+  const prev = process.env.MUONROI_IDEAL_ISOLATED_TASK_MS;
+  afterEach(() => {
+    if (prev === undefined) delete process.env.MUONROI_IDEAL_ISOLATED_TASK_MS;
+    else process.env.MUONROI_IDEAL_ISOLATED_TASK_MS = prev;
+  });
+
+  it("defaults to a 15-minute backstop", () => {
+    delete process.env.MUONROI_IDEAL_ISOLATED_TASK_MS;
+    expect(getIsolatedTaskDeadlineMs()).toBe(900_000);
+  });
+
+  it("honours a valid override", () => {
+    process.env.MUONROI_IDEAL_ISOLATED_TASK_MS = "300000";
+    expect(getIsolatedTaskDeadlineMs()).toBe(300_000);
+  });
+
+  it("ignores an out-of-range override (below floor) and falls back to default", () => {
+    process.env.MUONROI_IDEAL_ISOLATED_TASK_MS = "1000";
+    expect(getIsolatedTaskDeadlineMs()).toBe(900_000);
+  });
+
+  it("ignores a non-numeric override", () => {
+    process.env.MUONROI_IDEAL_ISOLATED_TASK_MS = "nope";
+    expect(getIsolatedTaskDeadlineMs()).toBe(900_000);
   });
 });
 

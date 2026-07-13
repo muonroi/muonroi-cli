@@ -39,6 +39,36 @@
         "pre_push_hook": ".husky/pre-push",
         "vision_doc": "docs/self-qa/README.md"
       }
+    },
+    {
+      "id": "lsp-before-grep",
+      "title": "Prefer LSP impact queries before grep",
+      "confidence": "high",
+      "kind": "behavioral",
+      "trigger": {
+        "tool": ["Bash", "Grep"]
+      },
+      "scope": {
+        "project_include": ["muonroi-cli"],
+        "lang_include": ["typescript", "tsx", "csharp"]
+      },
+      "message": "Before running a broad grep/ripgrep for a symbol, prefer the LSP impact tools — `impact_of_change`, `lsp_query` (findReferences/hover), `wait_for_diagnostics`. They return structured references + diagnostics + rename safety instead of raw text hits.\n\nGrep-fallback rule: call `wait_for_diagnostics` or `impact_of_change` first and read `lspStatus`:\n- `lspStatus === 'ok'` → use the LSP results; do NOT grep-as-fallback.\n- `lspStatus !== 'ok'` ('partial' or 'unavailable') → grep fallback is allowed; the LSP was not fully available.\n\nNever decide grep-safety from `diagnostics.length`. `lspStatus` is the single source of truth, computed by the manager from timeout/publish state (SLICE1-BUILD-NOTE.md §73-86).",
+      "why": "Slice 1 of the semantic workbench adds composite LSP impact analysis so in-runtime agents work semantically instead of by blind text search. Grepping a symbol on a non-ready buffer yields false confidence (missed structural refs, stale results); the lspStatus gate makes the fallback decision explicit and testable (self-verify harness src/lsp/__tests__/slice1-self-verify.test.ts).",
+      "how_to_apply": "When about to grep for a symbol/definition/references: first call impact_of_change (or wait_for_diagnostics) on the file. If lspStatus is 'ok', trust the structured result and skip grep. If lspStatus is 'partial'/'unavailable', fall back to grep. For pure text/string searches unrelated to code symbols, grep directly.",
+      "evidence": [
+        {
+          "kind": "spec",
+          "ref": "docs/semantic-workbench/SLICE1-BUILD-NOTE.md",
+          "summary": "Authoritative Slice 1 contract: lspStatus 'ok'|'partial'|'unavailable'; grep fallback allowed only when lspStatus !== 'ok'."
+        }
+      ],
+      "links": {
+        "manager": "src/lsp/manager.ts",
+        "native_tools": "src/tools/native-tools.ts",
+        "mcp_tools": "src/mcp/lsp-tools.ts",
+        "workbook": "src/pil/native-capabilities-workbook.ts",
+        "self_verify": "src/lsp/__tests__/slice1-self-verify.test.ts"
+      }
     }
   ],
   "ingestion": {

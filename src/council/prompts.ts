@@ -7,6 +7,14 @@ export function buildClarificationPrompt(
   topic: string,
   conversationContext: string,
   previousQA?: Array<{ question: string; answer: string }>,
+  /**
+   * Interview language, already resolved by the caller (runClarification): a
+   * concrete language name ("vietnamese", "english", a pinned locale) or "auto".
+   * Feeds the shared `buildLanguageRule` so the cards follow the SAME language
+   * policy as the debate — the user's conversation language, not English-by-
+   * default. Defaults to "auto" so existing no-arg callers keep auto-detection.
+   */
+  lang: string = "auto",
 ): {
   system: string;
   prompt: string;
@@ -24,6 +32,16 @@ export function buildClarificationPrompt(
       `- SCOPE: what is in/out of scope for THIS change?\n` +
       `- CONSTRAINTS: hard technical/time/business constraints not already implied by the context.\n` +
       `- SUCCESS CRITERIA: how "done" is judged, when it isn't already obvious.\n\n` +
+      `## Ground your questions in the research (IMPORTANT)\n` +
+      `If a "## Scope Research" section is present, it is evidence gathered about THIS topic before you ` +
+      `were asked to clarify. Read it first, then use it to ask SHARPER, better-grounded questions — ` +
+      `research makes your questions more pointed, it does NOT reduce the need to ask. Treat the research's ` +
+      `own guesses/speculation as UNVERIFIED, never as the user's answer: if the research had to assume ` +
+      `what the user actually wants (their real goal, the concrete task, the system of record, the target ` +
+      `user), that assumption IS the gray area you must confirm with them — do not adopt it silently. ` +
+      `In particular, when the request is vague and the research could only speculate about the core goal, ` +
+      `asking the user to name that goal/pain concretely is the single highest-value question — ask it. ` +
+      `Only skip a question when the research (or the topic/context) settles it with real evidence, not a guess.\n\n` +
       `## How many questions\n` +
       `Ask the minimum that unblocks a focused discussion — typically 0-2. A well-scoped topic, or one ` +
       `whose context already answers the gaps, needs ZERO questions: return []. Do NOT pad to a quota, ` +
@@ -48,11 +66,10 @@ export function buildClarificationPrompt(
       `the project IS the one described in the "## Current Project" section of the context. DO NOT ask which project.\n` +
       `- Only ask about project identity when the topic mentions multiple distinct projects or external products.\n` +
       `- Use the project's package.json name and description as implicit context for follow-up questions.\n\n` +
-      `## Language Rule (mandatory)\n` +
-      `Write the "question", "why", and every option "label"/"description" in the SAME ` +
-      `language the user used in the Topic below — detect it; if the user wrote Vietnamese, write ` +
-      `Vietnamese; if English, English. The user reads and answers these on a card, so they must ` +
-      `NOT default to English. Keep code identifiers, file paths, tech/product names, and JSON keys in English.\n\n` +
+      buildLanguageRule(lang) +
+      `The user reads and answers these on a card, so the "question", "why", and every option ` +
+      `"label"/"description" MUST be in that language — never default to English for card text, and ` +
+      `do NOT mirror the language of any "## Scope Research"/context block; follow the user's language.\n\n` +
       `Output ONLY a JSON array (no markdown, no preamble):\n` +
       `[{"question": "...", "why": "why this matters for a focused discussion", "options": [` +
       `{"label": "option A", "description": "what picking this means and its trade-off — one line", "recommended": true}, ` +

@@ -47,6 +47,11 @@ export function parseSafetyBlock(outputText: string): ParsedSafetyBlock | null {
  *     the "don't ask me" mode actually stops asking for routine guardrails.
  *   - `catastrophic` ALWAYS shows the askcard, even in yolo — an irreversible
  *     destroyer (rm -rf /dev, mkfs, sudo …) must never run unattended.
+ *   - `destructive-revert` ALWAYS shows the askcard, even in yolo — discarding
+ *     uncommitted work (git checkout --/restore/reset --hard/clean, rm of a
+ *     tracked file) is irreversible; headless it hard-blocks. This is the guard
+ *     that stops an autonomous /ideal sub-agent from silently reverting the
+ *     user's unrelated working-tree changes.
  *   - `empty-bash` is handled separately (auto-block, no card) and never
  *     reaches this policy.
  *   - `safe` / `auto-edit` always show the card for any real block.
@@ -54,6 +59,7 @@ export function parseSafetyBlock(outputText: string): ParsedSafetyBlock | null {
 export function shouldAutoAllowYolo(kind: SafetyBlockKind, mode: PermissionMode): boolean {
   if (mode !== "yolo") return false;
   if (kind === "catastrophic") return false;
+  if (kind === "destructive-revert") return false;
   if (kind === "empty-bash") return false;
   return true;
 }

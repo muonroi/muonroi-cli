@@ -10,6 +10,9 @@ export interface SprintState {
   scoreAfter: number;
   criteriaMet: number;
   totalCriteria: number;
+  /** Verify verdict for this sprint (PASS/FAIL/ERROR) — grounds the review so it
+   * describes what actually happened instead of confabulating an agile narrative. */
+  verifyVerdict?: string;
 }
 
 const REVIEW_FLOOR_FRACTION = 0.01;
@@ -36,10 +39,15 @@ export async function generateSprintReview(args: {
   if (args.remainingUsd < reviewFloor(args.capUsd)) {
     return { summary: deterministicReview(args.sprintState), usedFallback: true };
   }
+  const s = args.sprintState;
+  const verifyLine = s.verifyVerdict ? ` Verify: ${s.verifyVerdict}.` : "";
+  const goal = args.phase.goal ? ` Phase goal: ${args.phase.goal}.` : "";
   const prompt =
-    `Sprint ${args.sprintState.sprintN} of phase ${args.phase.id}: score ${args.sprintState.scoreBefore.toFixed(2)} → ${args.sprintState.scoreAfter.toFixed(2)}, ` +
-    `met ${args.sprintState.criteriaMet}/${args.sprintState.totalCriteria} criteria. ` +
-    `Write a ≤500-char demo summary for the customer.`;
+    `Sprint ${s.sprintN} of phase ${args.phase.id}: score ${s.scoreBefore.toFixed(2)} → ${s.scoreAfter.toFixed(2)}, ` +
+    `met ${s.criteriaMet}/${s.totalCriteria} acceptance criteria.${verifyLine}${goal} ` +
+    `Write a ≤500-char demo summary describing ONLY what these numbers show — the concrete progress on criteria and verify status. ` +
+    `Do NOT invent activities (e.g. "team alignment", "environment setup") that the metrics do not evidence. ` +
+    `If 0/${s.totalCriteria} criteria are met, say plainly that no criteria passed yet and why (verify status), not that setup was done.`;
   try {
     const res = await withRateLimitBackoff(
       () => args.leader.generate({ system: "You write concise sprint demo summaries.", prompt, maxTokens: 250 }),

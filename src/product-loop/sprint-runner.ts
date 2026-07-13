@@ -27,6 +27,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { prependDecisionsLock, readDecisionsLock } from "../council/decisions-lock.js";
 import { runCouncil } from "../council/index.js";
+import { resolveLeaderModel } from "../council/leader.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
 import type { CouncilLLM } from "../council/types.js";
 import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
@@ -39,6 +40,7 @@ import { logUIInteraction } from "../storage/index.js";
 import type { StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
 import { commitToProduct, release } from "../usage/ledger.js";
 import { CapBreachError } from "../usage/types.js";
+import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
 import type { SandboxSettings } from "../utils/settings.js";
 import { runVerifyOrchestration, type VerifyAgentLike } from "../verify/orchestrator.js";
 import { appendIteration, readCriteria } from "./artifact-io.js";
@@ -46,6 +48,12 @@ import { formatUnverifiedForSprintContext, readLedger } from "./assumption-ledge
 import { readBacklog } from "./backlog-store.js";
 import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "./circuit-breakers.js";
 import { reserveForProduct } from "./cost-scoper.js";
+import {
+  extractAcceptanceCriteria,
+  judgeCriteriaAgainstVerify,
+  planQualityIssues,
+  seedCriteriaFromPlan,
+} from "./criteria-seed.js";
 import { formatProjectContextForPrompt } from "./discovery-context-format.js";
 import { readProjectContext } from "./discovery-persistence.js";
 import { evaluateDoneGate } from "./done-gate.js";
@@ -53,6 +61,7 @@ import type { ContinueFeedback } from "./feedback-routing.js";
 import { buildContinueFeedback } from "./feedback-routing.js";
 import { idealTrace } from "./ideal-trace.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
+import { runPlanAdherenceReview } from "./plan-adherence-review.js";
 import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snapshot.js";
 import { appendRoleMemory } from "./role-memory.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
@@ -278,6 +287,49 @@ export async function* withImplIdleWatchdog(
   }
 }
 
+/**
+ * Wall-clock deadline for the ISOLATED implementation path.
+ *
+ * The isolated path (`ctx.runIsolatedTask`) returns a single Promise, not a
+ * stream, so `withImplIdleWatchdog` (which guards the streamed non-isolated
+ * path) cannot wrap it. Its only protection was the sub-agent's INTERNAL
+ * per-chunk stall-watchdog — which does NOT fire once the sub-agent's LLM stream
+ * has finished but its orchestrator turn hangs on the JS side afterwards (the
+ * exact "wrote N files then went silent" wedge documented on
+ * `withImplIdleWatchdog`). Observed live 2026-07-12 (run mrhc43f0fb9b): the
+ * isolated impl wrote 2 files, emitted its final `llm-done`, then wedged for 30+
+ * min with zero events and an idle process — because this `await` had no outer
+ * ceiling.
+ *
+ * This races the isolated task against a hard total-elapsed deadline. On
+ * timeout it rejects so the caller's existing try/catch converts the wedge into
+ * a visible phaseError (the sprint surfaces + can recover), mirroring what
+ * `withImplIdleWatchdog` / `runVerifyWithWatchdog` do for the other stages. The
+ * suspended sub-agent promise may leak in the background, but the run recovers.
+ * `totalMs <= 0` disables the guard (returns the task unchanged).
+ */
+export async function withIsolatedImplDeadline<T>(task: Promise<T>, totalMs: number, sprintN: number): Promise<T> {
+  if (!(Number.isFinite(totalMs) && totalMs > 0)) return task;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(
+          `isolated implementation stage exceeded ${Math.round(totalMs / 1000)}s total watchdog and was ` +
+            `treated as stalled (sprint ${sprintN}) — the isolated sub-agent turn never completed ` +
+            `(hung on the JS side after its final response; the isolated path has no per-chunk stall guard)`,
+        ),
+      );
+    }, totalMs);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  try {
+    return await Promise.race([task, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export {
   computeFailureSignature,
   loadVerifyFailureSignatures,
@@ -428,9 +480,61 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // ── Step 2: Detect verify recipe BEFORE the planner spends any token ──────
   // CB-3 fires deterministically on sprint 1 if recipe is null or coverage === 0.
   const verifyAgent = buildVerifyAgent(ctx, cwd);
-  const verifyRecipe = await verifyAgent.detectVerifyRecipe(verifyAgent.getSandboxSettings());
+  // Wall-clock backstop: `detectVerifyRecipe` runs a `verify-detect` LLM
+  // sub-agent turn (orchestrator.detectVerifyRecipe → runTaskRequest). Like the
+  // impl/verify stages, that turn can finish its stream then wedge on the JS side
+  // afterward — and this call site had NO deadline, so a single hung verify-detect
+  // turn bricked the entire /ideal run silently, right after "Committed: N sprints
+  // planned" and BEFORE the "Sprint N — Planning" yield (observed live 2026-07-13:
+  // 8+ min frozen frame, no forward progress). Race it against the shared isolated-
+  // task deadline; a timeout falls through to `null` → CB-3 emits the actionable
+  // recovery card instead of hanging. (The bridge signature does not thread an
+  // abortSignal, so this caller-side race is the guarantee.)
+  let verifyRecipe: VerifyRecipe | null;
+  try {
+    verifyRecipe = await withDeadlineRace(
+      () => verifyAgent.detectVerifyRecipe(verifyAgent.getSandboxSettings()),
+      getIsolatedTaskDeadlineMs(),
+      `sprint-${sprintN}-detect-verify`,
+    );
+  } catch (err) {
+    console.error(
+      `[sprint-runner] detectVerifyRecipe timed out/failed (sprint ${sprintN}, run ${ctx.runId}): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    verifyRecipe = null;
+  }
   const cb3 = CB3_verifyBlank(sprintN, verifyRecipe);
-  if (cb3.halt) {
+  // Greenfield build-first (Task #8): on a fresh greenfield /ideal run the first
+  // sprint has nothing to verify yet — detectVerifyRecipe legitimately returns
+  // null / zero-coverage because the code and tests do not exist until THIS sprint
+  // builds them. Halting here (CB-3) would trap every greenfield idea before a
+  // single line is written. So for sprint 1 of a greenfield run, bypass the halt
+  // and let the implement stage scaffold the first increment; the verify stage
+  // re-detects the recipe from the code it creates (Step 5 reads
+  // verifyResult.verifyRecipe, not this one). The halt is preserved for EXISTING
+  // projects, where a missing recipe is a real "I can't tell how to test this"
+  // signal that warrants the recovery card. Opt out with
+  // MUONROI_IDEAL_GREENFIELD_BUILD_FIRST=0.
+  let greenfieldBuildFirst = false;
+  if (cb3.halt && sprintN === 1 && process.env.MUONROI_IDEAL_GREENFIELD_BUILD_FIRST !== "0") {
+    try {
+      const pc = await readProjectContext(ctx.flowDir, ctx.runId);
+      greenfieldBuildFirst = pc?.detection?.classification === "greenfield";
+    } catch {
+      greenfieldBuildFirst = false;
+    }
+  }
+  if (greenfieldBuildFirst) {
+    yield {
+      type: "content",
+      content:
+        `\n> Greenfield: no verify recipe exists yet (nothing is built). Proceeding to build the ` +
+        `first increment — it will be verified against the code and tests this sprint creates.\n`,
+    } as StreamChunk;
+  }
+  if (cb3.halt && !greenfieldBuildFirst) {
     // Yield a structured halt chunk so the TUI can render an actionable recovery
     // card (Task 5.2). Do NOT throw — callers must discriminate on chunk.type.
     const haltChunk: HaltChunk = {
@@ -639,6 +743,36 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     await persistSprintPlan(planPath, planSynthesis);
   }
 
+  // Plan-fidelity fix: seed the plan's acceptance_criteria into the criteria store
+  // so the done-gate scores against REAL criteria (previously readCriteria returned
+  // [] → score always 0.00 → no gate on plan divergence). Idempotent + non-clobbering.
+  // Also run a NON-BLOCKING plan-quality check (per-sprint plans are auto-approved
+  // with no gate) and fold any issues into a corrective note for the impl prompt.
+  let planQualityNote = "";
+  try {
+    const planCriteria = extractAcceptanceCriteria(planSynthesis ?? "");
+    const seeded = await seedCriteriaFromPlan(ctx.flowDir, ctx.runId, planCriteria, sprintN);
+    if (seeded > 0) {
+      yield {
+        type: "content",
+        content: `\n> [criteria] Seeded ${seeded} acceptance criteria from the sprint plan (done-gate now scores against them).\n`,
+      };
+    }
+    const issues = planQualityIssues(planSynthesis ?? "", seeded);
+    if (issues.length > 0) {
+      planQualityNote =
+        `\n\n--- PLAN QUALITY WARNINGS (address these while implementing) ---\n` +
+        issues.map((i) => `- ${i}`).join("\n") +
+        `\nImplement to satisfy the phase goal and every acceptance criterion; do not stop at scaffolding.\n`;
+      yield {
+        type: "content",
+        content: `\n> [plan-check] ${issues.length} plan-quality warning(s): ${issues.join("; ")}\n`,
+      };
+    }
+  } catch {
+    /* non-critical — a missing criteria seed degrades to the prior empty-criteria behavior */
+  }
+
   // P4-C: close the planning phase row before opening implementation.
   yield phaseDone({
     phaseId: planPhaseId,
@@ -688,7 +822,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // implement/edit path, not the respond path.
   // C2: Pre-impl gate — read decisions.lock.md and prepend to implementation prompt.
   // When lock file is missing (greenfield / no council with runDir), pass-through unchanged.
-  let implPrompt = planSynthesis.trim() ? IMPL_EXECUTION_DIRECTIVE + planSynthesis : planSynthesis;
+  let implPrompt = planSynthesis.trim() ? IMPL_EXECUTION_DIRECTIVE + planSynthesis + planQualityNote : planSynthesis;
   try {
     const lockContent = await readDecisionsLock(runDir);
     if (lockContent) {
@@ -744,12 +878,31 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
             "\n> [isolated impl] Executing the sprint in a fresh sub-agent context " +
             "(anti-overflow: does not inherit the debate history).\n",
         };
-        const result = await ctx.runIsolatedTask({
-          agent: "general",
-          description: `Sprint ${sprintN} implementation`,
-          prompt: implPrompt,
-          modelId: ctx.sessionModelId,
-        });
+        // Plan-fidelity fix: allow the implementation turn to run on a stronger
+        // model than the cheap session tier (which failed to faithfully follow a
+        // rich plan). Opt-in via MUONROI_IDEAL_IMPL_MODEL; defaults to the session
+        // model so the cheap-model philosophy stays the default.
+        const implModelId = process.env.MUONROI_IDEAL_IMPL_MODEL?.trim() || ctx.sessionModelId;
+        if (implModelId !== ctx.sessionModelId) {
+          yield {
+            type: "content",
+            content: `\n> [impl-model] Running implementation on ${implModelId} (override of session model ${ctx.sessionModelId}).\n`,
+          };
+        }
+        // Wall-clock deadline: the isolated path has no per-chunk stall guard,
+        // so a post-finish JS-side hang would wedge this await forever (observed
+        // live, run mrhc43f0fb9b). Racing the total-elapsed ceiling turns a wedge
+        // into a phaseError via the try/catch below. See withIsolatedImplDeadline.
+        const result = await withIsolatedImplDeadline(
+          ctx.runIsolatedTask({
+            agent: "general",
+            description: `Sprint ${sprintN} implementation`,
+            prompt: implPrompt,
+            modelId: implModelId,
+          }),
+          getImplTotalTimeoutMs(),
+          sprintN,
+        );
         if (!result.success) {
           implError = result.error?.trim() || "isolated implementation task failed";
         } else if (result.output?.trim()) {
@@ -874,6 +1027,56 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
           content: `\n> [completeness] ${stillMissing.length} plan target(s) still missing after re-check — deferring to verify.\n`,
         };
       }
+    }
+  }
+
+  // ── Step 4c: Plan-adherence review gate (strong reviewer → cheap fixer) ────
+  // A high-tier reviewer checks the diff against the approved plan; deviations are
+  // handed to a lower-tier fixer and re-reviewed (bounded). Opt out with
+  // MUONROI_IDEAL_ADHERENCE_REVIEW=0. Never halts — verify + the criteria done-gate
+  // remain the hard gates; this tightens plan fidelity before verification so a
+  // cheap implementer's divergence is caught and corrected, not shipped.
+  // Plan deviations that survive the bounded fixer rounds — carried into the next
+  // sprint's focus (Step 9) so "chưa tuân thủ" work continues rather than being
+  // silently dropped after the review.
+  let residualPlanDeviations: string[] = [];
+  if (ctx.runIsolatedTask && planSynthesis.trim() && process.env.MUONROI_IDEAL_ADHERENCE_REVIEW !== "0") {
+    const adhPhaseId = `sprint-${sprintN}-adherence`;
+    const adhStartedAt = Date.now();
+    yield phaseStart({
+      phaseId: adhPhaseId,
+      kind: "sprint_stage",
+      label: `Sprint ${sprintN} — Plan-adherence review`,
+      startedAt: adhStartedAt,
+    });
+    try {
+      const reviewModelId = process.env.MUONROI_IDEAL_REVIEW_MODEL?.trim() || resolveLeaderModel(ctx.sessionModelId);
+      const verdict = yield* runPlanAdherenceReview({
+        sprintN,
+        planSynthesis,
+        cwd,
+        reviewModelId,
+        fixModelId: ctx.sessionModelId,
+        runIsolatedTask: ctx.runIsolatedTask,
+        maxRounds: Number.parseInt(process.env.MUONROI_IDEAL_ADHERENCE_ROUNDS ?? "2", 10) || 2,
+      });
+      idealTrace("sprint.adherence.after", {
+        runId: ctx.runId,
+        sprintN,
+        rounds: verdict.rounds,
+        adherent: verdict.adherent,
+        deviations: verdict.deviations.length,
+      });
+      if (!verdict.adherent) residualPlanDeviations = verdict.deviations;
+    } catch (err) {
+      console.error(`[sprint-runner] plan-adherence review failed (sprint ${sprintN}): ${(err as Error).message}`);
+    } finally {
+      yield phaseDone({
+        phaseId: adhPhaseId,
+        kind: "sprint_stage",
+        label: `Sprint ${sprintN} — Plan-adherence review`,
+        startedAt: adhStartedAt,
+      });
     }
   }
 
@@ -1010,6 +1213,42 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     subtype: "sprint_stage",
     data: { sprintIndex: sprintN, stage: "judgment", runId: ctx.runId },
   });
+  // Plan-fidelity fix: judge the seeded acceptance criteria against what was
+  // actually built (verify output + diff) BEFORE the done-gate reads them.
+  // Without this the criteria stay "unmet" forever → score 0.00 and the gate can
+  // never distinguish an on-plan sprint from a divergent one. Only upgrades on a
+  // PASSing verify with concrete evidence (see judgeCriteriaAgainstVerify).
+  try {
+    const judgeModelId =
+      roleAssignments.get("Reviewer")?.modelId ?? roleAssignments.get("PO")?.modelId ?? ctx.sessionModelId;
+    let diffSummary = "";
+    try {
+      const { spawnSync } = await import("node:child_process");
+      const stat = spawnSync("git", ["diff", "--stat", "HEAD"], { cwd, encoding: "utf8", timeout: 15000 });
+      diffSummary = (stat.stdout ?? "").slice(0, 4000) || "(no diff detected)";
+    } catch {
+      diffSummary = "(diff unavailable)";
+    }
+    const verifyOutputForJudge = (verifyResult.error?.trim() ? verifyResult.error : (verifyResult.output ?? "")).trim();
+    const { judged, total } = await judgeCriteriaAgainstVerify({
+      flowDir: ctx.flowDir,
+      runId: ctx.runId,
+      llm: productLlm,
+      modelId: judgeModelId,
+      verifyVerdict,
+      verifyOutput: verifyOutputForJudge,
+      diffSummary,
+    });
+    if (total > 0) {
+      yield {
+        type: "content",
+        content: `\n> [criteria] Judged ${judged}/${total} acceptance criteria as met/partial against verify+diff.\n`,
+      };
+    }
+  } catch {
+    /* non-critical — judging failure leaves criteria unmet (conservative) */
+  }
+
   const currentCriteria = await readCriteria(ctx.flowDir, ctx.runId);
 
   // When a phaseScope is provided (subsystem E), evaluate the done-gate only
@@ -1100,6 +1339,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     criteriaMet: currentCriteria.filter((c) => c.status === "met").length,
     criteriaPartial: currentCriteria.filter((c) => c.status === "partial").length,
     criteriaUnmet: currentCriteria.filter((c) => c.status === "unmet").length,
+    totalCriteria: currentCriteria.length,
     costUsd: 0, // Per-sprint cost is observed via the per-product ledger; field kept for compat.
     actualCost: 0,
     score: verdict.score,
@@ -1213,6 +1453,15 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // ── Step 9: If not done, surface continue-feedback to the user ───────────
   if (!verdict.pass) {
     const fb = buildContinueFeedback(verdict, verifyResult, currentCriteria);
+    // Fold any residual plan deviations (surviving the adherence fixer) into the
+    // carry-over focus so the next sprint continues the non-adherent/risky parts.
+    const deviationNote =
+      residualPlanDeviations.length > 0
+        ? `\n\nPlan deviations still open (address these next):\n${residualPlanDeviations
+            .map((d) => `- ${d}`)
+            .join("\n")}`
+        : "";
+    iter.nextFocus = `${fb.focus}${deviationNote}`;
     yield {
       type: "content",
       content: `\n> Sprint ${sprintN} did not satisfy Definition-of-Done (${verdict.failedCondition ?? "unknown"}). Next focus: ${fb.focus}\n`,

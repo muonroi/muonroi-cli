@@ -1155,6 +1155,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           "ee_write",
         ]);
 
+        /**
+         * Tools that perform mutations (writes, edits, side-effects).
+         * MUTATION_TOOLS are read from this set to route them through the mutation
+         * gate and prevent accidental execution when GSD hard gate is active.
+         * Registration: add the tool name string to this set and ensure the tool
+         * itself is wired in the tool assembly step.
+         */
+        const MUTATION_TOOLS = new Set(["lsp_mutation_preview"]);
+
         // Task 8: native GSD mutation gate. Read once per turn (not per call) since
         // hardGateEnabled/directAnswer don't change mid-turn; the gate itself
         // re-reads STATE.md per call (cheap fs read) so it stays live if the

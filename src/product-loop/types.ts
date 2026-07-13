@@ -44,6 +44,10 @@ export interface IterationState {
   criteriaMet: number;
   criteriaPartial: number;
   criteriaUnmet: number;
+  /** Total criteria evaluated this sprint. Optional for back-compat with older
+   * persisted iterations; when present it fixes the phase-runner exit ratio + the
+   * sprint-review "met X/Y" count that previously read undefined. */
+  totalCriteria?: number;
   costUsd: number;
   lastVerifyResult: string;
   /** Alias of costUsd kept for circuit-breaker history adapters (CB-1 reads actualCost). */
@@ -52,6 +56,16 @@ export interface IterationState {
   score?: number;
   crashed?: boolean;
   retryOf?: number;
+  /**
+   * Carry-over focus for the NEXT sprint when this one did not satisfy the
+   * done-gate: the failed-condition focus (feedback-routing) plus any plan
+   * deviations that survived the adherence review. The phase-runner adapter
+   * threads this into the next sprint's `carryOver` so each iteration continues
+   * the specific unmet / risky parts instead of restarting blind — the mechanism
+   * behind "spawn to continue the risk parts → finished product after N sprints".
+   * Absent when the sprint passed.
+   */
+  nextFocus?: string;
 }
 
 export interface DoneVerdict {
@@ -319,6 +333,17 @@ export interface ProjectContext {
   idea: string;
   detection: ExistingProjectSignals;
   context: DiscoveryContext;
+  /**
+   * Agent-driven interview output. When the gather phase runs the unified
+   * clarifier (the same LLM-generates-its-own-questions engine `/council`
+   * uses — see runGatherPhase), it produces a rich `ClarifiedSpec` directly
+   * instead of the fixed-question `DiscoveryContext`. Stashed here (plain data,
+   * JSON round-trips through project-context.md) so `clarifiedSpecFromContext`
+   * can return the real LLM-synthesized successCriteria/constraints/scope
+   * verbatim rather than re-deriving a thin 2-item spec from persona+scale.
+   * Absent on the legacy fixed-question path (MUONROI_IDEAL_AGENT_INTERVIEW=0).
+   */
+  clarified?: import("../council/types.js").ClarifiedSpec;
   recommendations: {
     byField: Record<string, RecommendationEntry>;
     constraints: {

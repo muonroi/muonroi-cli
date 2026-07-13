@@ -20,6 +20,7 @@ import { editFile, readFile, readFiles, writeFile } from "./file.js";
 import { FileTracker } from "./file-tracker.js";
 import {
   analyzeGitCommand,
+  checkDestructiveOp,
   checkPushGate,
   checkSensitiveStaging,
   commitBlockedMessage,
@@ -362,6 +363,18 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       // motivation (session 18285908637a). gitSafetyKey is STABLE per process
       // (or the real sessionId) — unlike repeatKey, whose anon fallback changes
       // on every registry rebuild and would silently drop the gate across turns.
+      // Destructive-op guard (pre-execution, any permission mode): block a
+      // command that would irreversibly discard uncommitted work (git
+      // checkout --/restore/reset --hard/clean, git stash drop/clear, or rm of
+      // a tracked file) when there is actually work at risk. Routed as
+      // `destructive-revert` so the tool-engine shows the safety askcard
+      // interactively and hard-blocks headless (autonomous sub-agents) — the
+      // fix for the /ideal plan-adherence agent silently reverting user files.
+      const destructive = checkDestructiveOp(cmd, bash.getCwd());
+      if (destructive.blocked) {
+        return _prefixBlock("destructive-revert", destructive.message);
+      }
+
       const gitShape = analyzeGitCommand(cmd);
       // Hard-block broad staging when sensitive files are present.
       // This runs PRE-EXECUTION (before bash.execute) regardless of permission mode.

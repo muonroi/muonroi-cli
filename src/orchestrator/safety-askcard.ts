@@ -9,7 +9,7 @@
  * Pure — no React, no side effects. Unit-testable in isolation.
  */
 
-export type SafetyBlockKind = "catastrophic" | "dangerous" | "git-safety" | "empty-bash";
+export type SafetyBlockKind = "catastrophic" | "destructive-revert" | "dangerous" | "git-safety" | "empty-bash";
 
 export interface SafetyBlockInfo {
   kind: SafetyBlockKind;
@@ -42,6 +42,7 @@ export type SafetyAskResult = "allow-once" | "allow-session" | "block";
 
 const CATEGORY_LABELS: Record<SafetyBlockKind, string> = {
   catastrophic: "Lỗi bảo mật nghiêm trọng",
+  "destructive-revert": "Hủy thay đổi chưa lưu (không thể hoàn tác)",
   dangerous: "Lệnh nguy hiểm",
   "git-safety": "Git safety gate",
   "empty-bash": "Bash call trống",
@@ -75,8 +76,10 @@ export function planSafetyAskcard(info: SafetyBlockInfo): SafetyAskcardLayout {
     },
   ];
 
-  // Allow-session only for less severe blocks
-  if (info.kind !== "catastrophic") {
+  // Allow-session only for less severe blocks. A destructive-revert (discards
+  // uncommitted work irreversibly) is treated like catastrophic: allow-once
+  // only, never a blanket session allow.
+  if (info.kind !== "catastrophic" && info.kind !== "destructive-revert") {
     options.splice(1, 0, {
       label: "Cho phép cả phiên (Allow session)",
       value: "allow-session",

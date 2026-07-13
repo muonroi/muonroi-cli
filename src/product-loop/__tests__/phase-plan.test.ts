@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ClarifiedSpec } from "../../council/types.js";
 import {
+  clampMaxSprints,
   fallbackSinglePhase,
   generatePhasePlan,
   PHASE_PLAN_MIGRATORS,
@@ -17,6 +18,59 @@ const spec: ClarifiedSpec = {
 };
 
 const manifest = { idea: "X", capUsd: 10, maxSprints: 6, doneThreshold: 0.8, createdAt: new Date() } as any;
+
+describe("clampMaxSprints — fractional-budget regression (implement-never-runs)", () => {
+  it("rounds a fractional per-phase budget up to an executable integer >= 1", () => {
+    // The live wedge: `--max-sprints 1` split across 3 phases as 0.3/0.2/0.5.
+    // `for (sprintN=1; sprintN <= 0.3)` never runs → implement skipped.
+    expect(clampMaxSprints(0.3)).toBe(1);
+    expect(clampMaxSprints(0.2)).toBe(1);
+    expect(clampMaxSprints(0.5)).toBe(1);
+  });
+  it("keeps whole integers and rounds nearby fractions", () => {
+    expect(clampMaxSprints(1)).toBe(1);
+    expect(clampMaxSprints(3)).toBe(3);
+    expect(clampMaxSprints(2.4)).toBe(2);
+    expect(clampMaxSprints(2.6)).toBe(3);
+  });
+  it("clamps zero / negative / non-numeric to 1 and caps at 20", () => {
+    expect(clampMaxSprints(0)).toBe(1);
+    expect(clampMaxSprints(-5)).toBe(1);
+    expect(clampMaxSprints("nope")).toBe(1);
+    expect(clampMaxSprints(undefined)).toBe(1);
+    expect(clampMaxSprints(999)).toBe(20);
+  });
+  it("parsePhasePlanJson normalizes fractional maxSprints so every phase runs >= 1 sprint", () => {
+    const raw = JSON.stringify({
+      version: 1,
+      generatedAt: "2026-07-13T00:00:00Z",
+      phases: [
+        {
+          id: "phase-0",
+          name: "A",
+          goal: "g",
+          successCriteria: [],
+          scope: "",
+          exitCondition: { type: "criteria-threshold", min: 0.9 },
+          dependsOn: [],
+          maxSprints: 0.5,
+        },
+        {
+          id: "phase-1",
+          name: "B",
+          goal: "g",
+          successCriteria: [],
+          scope: "",
+          exitCondition: { type: "criteria-threshold", min: 0.9 },
+          dependsOn: [],
+          maxSprints: 0.3,
+        },
+      ],
+    });
+    const out = parsePhasePlanJson(raw);
+    expect(out.phases.map((p) => p.maxSprints)).toEqual([1, 1]);
+  });
+});
 
 describe("phase-plan schema/parse/validate (subsystem E)", () => {
   it("parsePhasePlanJson strips code fences and parses", () => {
@@ -249,6 +303,40 @@ describe("generatePhasePlan (subsystem E)", () => {
     const leader = { generate: vi.fn().mockRejectedValue(err) };
     const result = await generatePhasePlan({ ...baseArgs, leader });
     expect(result.phases).toHaveLength(1);
+  });
+
+  it("prompts the PO to size sprints by difficulty, NOT by dividing a budget (Task #6)", async () => {
+    const validPlan = {
+      version: 1,
+      generatedAt: "2026-05-13T00:00:00Z",
+      phases: [
+        {
+          id: "phase-1",
+          name: "All",
+          goal: "g",
+          successCriteria: spec.successCriteria,
+          scope: "s",
+          exitCondition: { type: "criteria-threshold", min: 0.8 },
+          dependsOn: [],
+          maxSprints: 3,
+        },
+      ],
+    };
+    const leader = { generate: vi.fn().mockResolvedValue({ content: JSON.stringify(validPlan), costUsd: 0.1 }) };
+    await generatePhasePlan({ ...baseArgs, leader });
+
+    const call = leader.generate.mock.calls[0][0] as { system: string; prompt: string };
+    // The PO decides per-phase sprint counts from difficulty (agile), never an even split.
+    expect(call.system).toMatch(/difficulty/i);
+    expect(call.system).toMatch(/maxSprints/);
+    // The old allocator framing ("N total sprints across all phases" + "give the
+    // highest-priority phases 1 sprint each") must be gone.
+    expect(call.prompt).not.toMatch(/total sprints across all phases/i);
+    expect(call.prompt).not.toMatch(/highest-priority phases 1 sprint each/i);
+    // The user's --max-sprints is now only a SOFT guide, not a budget to divide.
+    expect(call.prompt).toMatch(/soft guide/i);
+    // maxSprints stays a whole integer >= 1 (validity floor lives in the parser).
+    expect(call.prompt).toMatch(/integer >= 1/i);
   });
 });
 

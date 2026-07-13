@@ -85,6 +85,28 @@ export function sanitizeEnv(env: Record<string, string>): Record<string, string>
   return out;
 }
 
+/**
+ * Build the child TUI's environment for tui.start.
+ *
+ * Starts from the driver's own env so PATH/HOME survive, overlays the
+ * caller-supplied keys, THEN strips the dangerous ones. The merge-before-strip
+ * order keeps the security posture (NODE_OPTIONS/LD_PRELOAD/… still removed)
+ * while guaranteeing PATH is present: bun drops the fd 3/4 stdio channels when a
+ * child is spawned with a partial env that lacks PATH, which yields a null
+ * inWrite and crashes the whole driver on spawn. `base` defaults to process.env
+ * and is injectable for tests.
+ */
+export function buildChildEnv(
+  callerEnv: Record<string, string> = {},
+  base: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+  const merged: Record<string, string> = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (v !== undefined) merged[k] = v;
+  }
+  return sanitizeEnv({ ...merged, ...callerEnv });
+}
+
 const REPO_ROOT = process.cwd();
 
 /**
@@ -597,7 +619,9 @@ export function createMcpHarnessServer({ spawn }: { spawn: HarnessSpawn }): McpS
           isError: true,
         };
       }
-      const sanitizedEnv = sanitizeEnv(input.env ?? {});
+      // See buildChildEnv: merge process.env (keeps PATH so bun allocates the
+      // fd 3/4 transport) with caller keys, then strip dangerous vars.
+      const sanitizedEnv = buildChildEnv(input.env ?? {});
 
       // Build final arg list.
       const finalArgs = [...input.args];

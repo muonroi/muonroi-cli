@@ -1,3 +1,4 @@
+import { VERIFY_FAIL_MARKER, VERIFY_PASS_MARKER } from "../product-loop/verify-result";
 import type { TaskRequest, VerifyRecipe } from "../types/index";
 import type { SandboxMode, SandboxSettings } from "../utils/settings";
 import { ensureVerifyCheckpoint, type PreparedVerifyCheckpoint } from "./checkpoint";
@@ -161,6 +162,11 @@ export function buildVerifyTaskPrompt(
     "- The Summary must say what recipe/source of truth you used and whether you changed the inferred/default one.",
     "- Evidence is mandatory even on failure. If you captured screenshots, video, or logs, include their exact workspace-relative file paths in the Evidence section.",
     "- Use markdown links for artifact paths when practical, otherwise include the plain relative paths.",
+    "",
+    "Verdict marker (MANDATORY — the loop parses this, an absent marker scores the sprint 0.00):",
+    `- After the report, emit the verdict on its own final line: exactly \`${VERIFY_PASS_MARKER}\` if install/build/test and the smoke/QA phases all succeeded, otherwise exactly \`${VERIFY_FAIL_MARKER}\`.`,
+    `- Emit \`${VERIFY_FAIL_MARKER}\` on ANY failed or skipped required phase (build error, failing test, app did not start, blocking console error). Do NOT emit \`${VERIFY_PASS_MARKER}\` if you could not actually run the recipe.`,
+    "- The marker is the last line, nothing after it.",
   ].join("\n");
 }
 

@@ -2,6 +2,27 @@ import type { StreamChunk } from "../types/index.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
 import type { ClarifiedSpec, PreflightResponder } from "./types.js";
 
+/**
+ * Emit a harness LiveEvent for a preflight/plan-confirm approval gate.
+ *
+ * These gates are surfaced as `council_preflight` StreamChunks (a UI render path),
+ * NOT as LiveEvents — so a monitor on MUONROI_HARNESS_EVENT_LOG is structurally
+ * blind to them, unlike the clarify gate which flows through askcard-open. Emitting
+ * askcard-open/answered here lets a wake-at-milestone monitor react to the
+ * human-approval pause. Observe-only: never throws, no-op when no agent runtime.
+ */
+export function emitPreflightHarnessEvent(event: Record<string, unknown>): void {
+  try {
+    const ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    if (!ar || typeof ar.emitEvent !== "function") return;
+    ar.emitEvent(event);
+  } catch {
+    /* observe-only */
+  }
+}
+
 export interface RunPreflightOptions {
   repoEmpty?: boolean;
   researchOverridable?: boolean;
@@ -76,6 +97,16 @@ export async function* runPreflight(
     return true;
   }
 
+  emitPreflightHarnessEvent({
+    t: "event",
+    kind: "askcard-open",
+    questionId: preflightId,
+    question: `Approve discussion plan for: ${spec.problemStatement}`,
+    phase: "preflight",
+    optionCount: 2,
+    defaultIndex: 0,
+  });
+
   yield {
     type: "council_preflight" as StreamChunk["type"],
     content: "Review the discussion brief above. Approve to start debate, or reject to revise.",
@@ -93,6 +124,14 @@ export async function* runPreflight(
   };
 
   const approved = await respondToPreflight(preflightId);
+
+  emitPreflightHarnessEvent({
+    t: "event",
+    kind: "askcard-answered",
+    questionId: preflightId,
+    answerKind: "choice",
+    answerText: approved ? "approve" : "reject",
+  });
 
   yield phaseDone({
     phaseId: "phase:preflight",

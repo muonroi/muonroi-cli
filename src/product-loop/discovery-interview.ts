@@ -23,6 +23,7 @@ import {
   REQUIRED_QUESTION_IDS,
   validateAnswer,
 } from "./discovery-schema.js";
+import type { ComplexityTier, InterviewTriage } from "./discovery-triage.js";
 import { buildRepoBrief, type RepoBrief } from "./repo-brief.js";
 import type { ExistingProjectSignals, PlatformT, ProjectContext } from "./types.js";
 
@@ -85,6 +86,14 @@ export interface IterateOpts {
    * sandboxed temp dir to exercise existing-project paths deterministically.
    */
   cwd?: string;
+  /**
+   * Model-decided interview triage (see discovery-triage.ts). When present it is
+   * the PRIMARY signal for how deep to interview — replacing the legacy keyword
+   * `computePromptSpecificity` heuristic (kept only as the graceful-degrade
+   * fallback inside `triageInterview`). Absent → the old specificity behaviour is
+   * used verbatim, so existing callers/tests are unaffected.
+   */
+  triage?: InterviewTriage;
 }
 
 export async function iterateInterview(opts: IterateOpts): Promise<ProjectContext> {
@@ -104,6 +113,12 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
   // but optional ones (baStatus, designStatus, deployment, frontendApproach when
   // not web) are deferred unless the user explicitly re-runs with more context.
   const specificity = computePromptSpecificity(opts.idea);
+  // Interview-depth tier. PRIMARY signal is the model-decided triage
+  // (opts.triage); the legacy keyword specificity is used ONLY when no triage was
+  // supplied (older callers / tests), mapped: minimal→trivial, else→standard.
+  // "detailed" no longer force-collapses on the heuristic alone — a precise-but-
+  // complex idea should be triaged as complex by the model, not auto-filled blind.
+  const tier: ComplexityTier = opts.triage?.complexity ?? (specificity === "minimal" ? "trivial" : "standard");
   // Existing-codebase work (refactor / migration / feature-add on a repo that
   // already has source) should NOT re-run the full greenfield product-scoping
   // questionnaire. productType/audience/targetPlatform/frontend/design/deployment
@@ -116,20 +131,33 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
   // MUONROI_DISCOVERY_EXISTING_COLLAPSE=0 restores the full per-field interview.
   const collapseForExisting =
     detection.classification !== "greenfield" && process.env.MUONROI_DISCOVERY_EXISTING_COLLAPSE !== "0";
-  const skipOptionalForMinimal = specificity === "minimal" || collapseForExisting;
+  const skipOptionalForMinimal = tier === "trivial" || collapseForExisting;
 
-  // G2-b: for a minimal OR well-specified ("detailed") prompt the recommender's
-  // primary is high-confidence — minimal picks smallest-scope defaults, detailed
-  // respects the stated context. In both cases surfacing a card for EVERY
-  // required question (productType/targetPlatform/audience/…) is over-asking the
-  // user already complained about: they accept by reflex. Instead auto-accept
-  // the recommender primary for required questions and surface ONE summary card
-  // (the user gate) listing the assumptions so the user can proceed or adjust.
-  // "moderate" prompts keep the per-question cards (genuinely ambiguous). Escape
-  // hatch: MUONROI_DISCOVERY_AUTOFILL=0 restores per-question cards everywhere.
+  // Which REQUIRED questions stay as interactive per-question cards. Everything
+  // else auto-fills the recommender primary and is surfaced together on the ONE
+  // summary confirm card (__user_gate__). This is the crux of the "sharper, less
+  // hardcoded" interview:
+  //   - existing-repo collapse → only the decision-relevant field(s)
+  //   - trivial → NONE (e.g. a hello-world script: don't interrogate audience
+  //     scale / backend architecture / db strategy — just confirm the defaults)
+  //   - complex → ONLY the questions the model flagged as genuinely shaping this
+  //     build (triage.relevant); auto-fill the rest
+  //   - standard (or model unavailable) → ALL required stay cards (unchanged UX)
+  const interactiveRequired: Set<string> = collapseForExisting
+    ? new Set(KEEP_CARD_FOR_EXISTING)
+    : tier === "trivial"
+      ? new Set<string>()
+      : tier === "complex" && opts.triage
+        ? new Set(opts.triage.relevant)
+        : new Set(REQUIRED_QUESTION_IDS);
+
+  // Auto-accept the recommender primary for required questions NOT kept interactive
+  // above, and surface ONE summary card listing the assumptions so the user can
+  // proceed or adjust. Enabled whenever ANY required question is being auto-filled
+  // (i.e. the interactive set is a strict subset of the required set). Escape hatch:
+  // MUONROI_DISCOVERY_AUTOFILL=0 restores per-question cards everywhere.
   const autoFillRequired =
-    (specificity === "minimal" || specificity === "detailed" || collapseForExisting) &&
-    process.env.MUONROI_DISCOVERY_AUTOFILL !== "0";
+    process.env.MUONROI_DISCOVERY_AUTOFILL !== "0" && REQUIRED_QUESTION_IDS.some((id) => !interactiveRequired.has(id));
   const assumed: Array<{ id: string; value: any }> = [];
   // G1 follow-up: keep the recommendation behind each auto-filled assumption so
   // the user-gate "edit: <field>" path can re-render the SAME per-question card
@@ -199,12 +227,13 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
     // policy) so a malformed recommendation falls back to the normal card flow.
     // The assumed answers are surfaced together on the single user-gate card.
     let autoAccepted = false;
-    // Keep backendArchitecture interactive under existing-repo collapse (the one
-    // field whose answer shapes the technical work), and NEVER silently auto-accept
-    // a weakly-grounded recommendation (synthFailed = the rationale failed the
-    // repo-brief citation check twice) — fall through to a per-question card so the
-    // user can catch a hallucinated value instead of it being assumed.
-    const keepInteractive = collapseForExisting && KEEP_CARD_FOR_EXISTING.has(question.id);
+    // Keep the interview-relevant fields interactive (existing-repo →
+    // backendArchitecture; complex → the model-flagged `triage.relevant`), and
+    // NEVER silently auto-accept a weakly-grounded recommendation (synthFailed =
+    // the rationale failed the repo-brief citation check twice) — fall through to a
+    // per-question card so the user can catch a hallucinated value instead of it
+    // being assumed.
+    const keepInteractive = interactiveRequired.has(question.id);
     if (
       autoFillRequired &&
       effectivelyRequired &&

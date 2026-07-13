@@ -3,9 +3,11 @@
 // buildDiscoveryDebateRunner ← Task 16
 // buildGatherUserPrompt      ← Task 17
 
-import { resolveLeaderModelDetailed } from "../council/leader.js";
-import type { ClarifiedSpec } from "../council/types.js";
+import { runClarification } from "../council/clarifier.js";
+import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
+import type { ClarifiedSpec, CouncilLLM } from "../council/types.js";
 import type { StreamChunk } from "../types/index.js";
+import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
 import { detectExistingProject } from "./discovery-detection.js";
 import {
   iterateInterview,
@@ -16,15 +18,21 @@ import {
 import {
   acquireRunLock,
   initDiscoveryState,
+  markDone,
   readDiscoveryState,
   readProjectContext,
   releaseRunLock,
   resumeArtifactWriteIfNeeded,
+  writeProjectContext,
 } from "./discovery-persistence.js";
 import type { LeaderLike } from "./discovery-prompt-parser.js";
 import { parsePromptForContext } from "./discovery-prompt-parser.js";
 import type { CouncilDebateRunner } from "./discovery-recommender.js";
 import { councilRecommend, leaderRecommend, shouldFallbackToLeader } from "./discovery-recommender.js";
+import { DISCOVERY_QUESTIONS } from "./discovery-schema.js";
+import { triageInterview } from "./discovery-triage.js";
+import { buildRepoBrief } from "./repo-brief.js";
+import { SEED_DIMENSIONS } from "./seed-questions.js";
 import type { BackendStackCtx, DiscoveryContext, ExistingProjectSignals, ProjectContext } from "./types.js";
 
 /**
@@ -303,6 +311,31 @@ export async function runGatherPhase(
       prefillAnswers: { ...prefillFromDetection, ...prompted },
     });
 
+    // Unified agent-driven interview (default). The LLM leader generates every
+    // clarification question itself from the idea + injected context and emits
+    // its own askcards — the same engine `/council` uses (runClarification) —
+    // instead of walking the fixed DISCOVERY_QUESTIONS list. The CLI only
+    // injects context (repo brief / prompt-extracted hints); it hardcodes no
+    // questions. Requires a wired driver (emit + respondToQuestion); pure-unit
+    // callers without io fall through to the legacy fixed-question path below.
+    // Opt out with MUONROI_IDEAL_AGENT_INTERVIEW=0.
+    if (process.env.MUONROI_IDEAL_AGENT_INTERVIEW !== "0" && io?.emit && io?.respondToQuestion) {
+      return await runAgentDrivenGather({
+        flowDir,
+        runId,
+        idea,
+        cwd,
+        detection,
+        leaderModelId,
+        sessionModelId,
+        llm: llm as CouncilLLM,
+        prompted,
+        prefillFromDetection,
+        emit: io.emit,
+        respondToQuestion: io.respondToQuestion,
+      });
+    }
+
     // Recommender: always leader-only. The council debate runner (Task 16) is
     // a stub that throws; until it is wired we delegate council asks to the
     // leader so the gather phase doesn't crash on greenfield projects with
@@ -324,6 +357,25 @@ export async function runGatherPhase(
     const tuiAsk = io?.emit && io?.respondToQuestion ? buildLiveTuiAsk(io.emit, io.respondToQuestion) : async () => "";
     const userPrompt: UserPromptFn = buildGatherUserPrompt(tuiAsk);
 
+    // Model-decided interview triage — the PRIMARY signal for how deep to
+    // interview (replaces the keyword `computePromptSpecificity` heuristic as the
+    // lead). A trivial idea (e.g. a hello-world script) collapses to ONE confirm
+    // card instead of 6 generic productType/audience/architecture/db cards; a
+    // complex idea keeps only the questions the model flags as decision-shaping.
+    // Only the required questions are triaged (optional ones are gated separately).
+    // Never throws — degrades to the specificity fallback (see discovery-triage.ts).
+    const requiredQuestions = DISCOVERY_QUESTIONS.filter((q) => q.required);
+    const triage = await triageInterview(idea, leader, requiredQuestions);
+    if (process.env.MUONROI_DEBUG_LEADER === "1") {
+      process.stderr.write(
+        `[interview-triage] ${JSON.stringify({
+          complexity: triage.complexity,
+          relevant: triage.relevant,
+          source: triage.source,
+        })}\n`,
+      );
+    }
+
     return await iterateInterview({
       flowDir,
       runId,
@@ -332,10 +384,117 @@ export async function runGatherPhase(
       detection,
       userPrompt,
       recommender,
+      triage,
     });
   } finally {
     await releaseRunLock(flowDir, runId);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Agent-driven interview (unified clarifier engine)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the gather interview by delegating to the SAME agent-driven clarifier the
+ * council uses (`runClarification`): the LLM leader generates its own
+ * clarification questions from the idea + injected context, emits its own
+ * `council_question` askcards, self-judges readiness, and synthesizes a
+ * `ClarifiedSpec`. The CLI contributes only context (repo brief for existing
+ * repos, prompt-extracted hints) and the askcard plumbing — it hardcodes no
+ * questions and no answer enums.
+ *
+ * Output is a `ProjectContext` that carries the clarifier's `ClarifiedSpec`
+ * verbatim (`clarified`), so `clarifiedSpecFromContext` returns the real
+ * LLM-synthesized successCriteria/constraints/scope instead of re-deriving a
+ * thin persona+scale spec. `context` is populated best-effort from detection +
+ * prompt hints purely as a supplement for the (fully-guarded) downstream
+ * `formatProjectContextForPrompt`.
+ */
+async function runAgentDrivenGather(args: {
+  flowDir: string;
+  runId: string;
+  idea: string;
+  cwd: string;
+  detection: ExistingProjectSignals;
+  leaderModelId: string;
+  sessionModelId: string;
+  llm: CouncilLLM;
+  prompted: Partial<DiscoveryContext>;
+  prefillFromDetection: Partial<DiscoveryContext>;
+  emit: (chunk: StreamChunk) => void;
+  respondToQuestion: (questionId: string) => Promise<string>;
+}): Promise<ProjectContext> {
+  // Context the CLI injects for the agent to interview AGAINST — never questions.
+  let conversationContext = "";
+  if (args.detection.classification !== "greenfield") {
+    try {
+      const brief = await buildRepoBrief(args.cwd, args.detection);
+      // The "## Current Project" header switches the clarifier into existing-repo
+      // mode (drops generic greenfield questions, grounds rationales in real files).
+      conversationContext += `## Current Project\n${brief.markdown}\n\n`;
+    } catch {
+      // Brief failure must NEVER block the interview — fall through context-light.
+    }
+  }
+  if (Object.keys(args.prompted).length > 0) {
+    conversationContext += `## Extracted from the request\n${JSON.stringify(args.prompted, null, 2)}\n`;
+  }
+
+  // Reachable panel models — passed as the clarifier's fallbackModels so its
+  // research-first step can prefer a native-web-research model on any reachable
+  // provider (and spec-synth can fall back off a flaky leader proxy). Never
+  // blocks gather: resolution failure degrades to leader-only.
+  let panelModels: string[] = [];
+  try {
+    const participants = await resolveParticipants(args.sessionModelId, isCouncilMultiProviderPreferred());
+    panelModels = participants.map((p) => p.model).filter(Boolean);
+  } catch {
+    // leader-only reachability is fine — research-first still runs on the leader.
+  }
+
+  // Drive the clarifier generator; forward each emitted chunk to the driver so
+  // the TUI renders each dynamically-generated askcard, then capture the spec.
+  // seedQuestions is intentionally empty — the clarifier's own research-first
+  // step (runClarification) now grounds the questions; no CLI-owned seed list.
+  const gen = runClarification(
+    args.idea,
+    args.leaderModelId,
+    conversationContext,
+    args.respondToQuestion,
+    args.llm,
+    undefined, // signal — no abort wired through gather today
+    undefined, // seedQuestions
+    undefined, // maxRounds → clarifier default
+    undefined, // prefillAnswers
+    false, // costAware
+    panelModels, // fallbackModels → reachable panel for native-web research pref
+  );
+  let result: IteratorResult<StreamChunk, ClarifiedSpec>;
+  do {
+    result = await gen.next();
+    if (!result.done && result.value) args.emit(result.value);
+  } while (!result.done);
+  const clarified = result.value;
+
+  const context = { ...args.prefillFromDetection, ...args.prompted } as ProjectContext["context"];
+  const projectContext: ProjectContext = {
+    version: 1,
+    schemaName: "project-context",
+    generatedAt: new Date().toISOString(),
+    idea: args.idea,
+    detection: args.detection,
+    context,
+    clarified,
+    recommendations: {
+      byField: {},
+      constraints: { fePolicy: "headless-ui-only", feEnforced: true },
+    },
+    userOverrides: [],
+  };
+  await writeProjectContext(args.flowDir, args.runId, projectContext);
+  await markDone(args.flowDir, args.runId);
+  return projectContext;
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +508,23 @@ export async function runGatherPhase(
  * has passed (or all required questions are answered).
  */
 export function clarifiedSpecFromContext(pc: ProjectContext): ClarifiedSpec {
+  // Agent-driven path: the clarifier already synthesized a full ClarifiedSpec
+  // (real LLM-derived successCriteria/constraints/scope + rawQA). Return it
+  // verbatim, deriving the loop-driver resolution gate from the agent's OWN
+  // readiness judgment rather than the hardcoded 6-dimension answered-check:
+  // when the clarifier declared the spec ready (or didn't flag it not-ready),
+  // mark every SEED_DIMENSION resolved so the gate passes; otherwise leave them
+  // unspecified so the existing insufficient_resolution safety net still fires.
+  if (pc.clarified) {
+    const ready = pc.clarified.ready !== false;
+    const status: "answered" | "unspecified" = ready ? "answered" : "unspecified";
+    const resolved: Record<string, "answered" | "unspecified" | "skipped"> = {
+      ...(pc.clarified.resolved ?? {}),
+    };
+    for (const d of SEED_DIMENSIONS) resolved[d.id] = status;
+    return { ...pc.clarified, resolved };
+  }
+
   const ctx: DiscoveryContext = pc.context;
 
   const problemStatement = pc.idea;
