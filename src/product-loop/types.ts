@@ -323,6 +323,17 @@ export interface ProjectContext {
   idea: string;
   detection: ExistingProjectSignals;
   context: DiscoveryContext;
+  /**
+   * Agent-driven interview output. When the gather phase runs the unified
+   * clarifier (the same LLM-generates-its-own-questions engine `/council`
+   * uses — see runGatherPhase), it produces a rich `ClarifiedSpec` directly
+   * instead of the fixed-question `DiscoveryContext`. Stashed here (plain data,
+   * JSON round-trips through project-context.md) so `clarifiedSpecFromContext`
+   * can return the real LLM-synthesized successCriteria/constraints/scope
+   * verbatim rather than re-deriving a thin 2-item spec from persona+scale.
+   * Absent on the legacy fixed-question path (MUONROI_IDEAL_AGENT_INTERVIEW=0).
+   */
+  clarified?: import("../council/types.js").ClarifiedSpec;
   recommendations: {
     byField: Record<string, RecommendationEntry>;
     constraints: {
