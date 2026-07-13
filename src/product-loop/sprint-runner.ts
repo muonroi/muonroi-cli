@@ -506,7 +506,35 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     verifyRecipe = null;
   }
   const cb3 = CB3_verifyBlank(sprintN, verifyRecipe);
-  if (cb3.halt) {
+  // Greenfield build-first (Task #8): on a fresh greenfield /ideal run the first
+  // sprint has nothing to verify yet — detectVerifyRecipe legitimately returns
+  // null / zero-coverage because the code and tests do not exist until THIS sprint
+  // builds them. Halting here (CB-3) would trap every greenfield idea before a
+  // single line is written. So for sprint 1 of a greenfield run, bypass the halt
+  // and let the implement stage scaffold the first increment; the verify stage
+  // re-detects the recipe from the code it creates (Step 5 reads
+  // verifyResult.verifyRecipe, not this one). The halt is preserved for EXISTING
+  // projects, where a missing recipe is a real "I can't tell how to test this"
+  // signal that warrants the recovery card. Opt out with
+  // MUONROI_IDEAL_GREENFIELD_BUILD_FIRST=0.
+  let greenfieldBuildFirst = false;
+  if (cb3.halt && sprintN === 1 && process.env.MUONROI_IDEAL_GREENFIELD_BUILD_FIRST !== "0") {
+    try {
+      const pc = await readProjectContext(ctx.flowDir, ctx.runId);
+      greenfieldBuildFirst = pc?.detection?.classification === "greenfield";
+    } catch {
+      greenfieldBuildFirst = false;
+    }
+  }
+  if (greenfieldBuildFirst) {
+    yield {
+      type: "content",
+      content:
+        `\n> Greenfield: no verify recipe exists yet (nothing is built). Proceeding to build the ` +
+        `first increment — it will be verified against the code and tests this sprint creates.\n`,
+    } as StreamChunk;
+  }
+  if (cb3.halt && !greenfieldBuildFirst) {
     // Yield a structured halt chunk so the TUI can render an actionable recovery
     // card (Task 5.2). Do NOT throw — callers must discriminate on chunk.type.
     const haltChunk: HaltChunk = {
