@@ -24,6 +24,16 @@ export function buildClarificationPrompt(
       `- SCOPE: what is in/out of scope for THIS change?\n` +
       `- CONSTRAINTS: hard technical/time/business constraints not already implied by the context.\n` +
       `- SUCCESS CRITERIA: how "done" is judged, when it isn't already obvious.\n\n` +
+      `## Ground your questions in the research (IMPORTANT)\n` +
+      `If a "## Scope Research" section is present, it is evidence gathered about THIS topic before you ` +
+      `were asked to clarify. Read it first, then use it to ask SHARPER, better-grounded questions — ` +
+      `research makes your questions more pointed, it does NOT reduce the need to ask. Treat the research's ` +
+      `own guesses/speculation as UNVERIFIED, never as the user's answer: if the research had to assume ` +
+      `what the user actually wants (their real goal, the concrete task, the system of record, the target ` +
+      `user), that assumption IS the gray area you must confirm with them — do not adopt it silently. ` +
+      `In particular, when the request is vague and the research could only speculate about the core goal, ` +
+      `asking the user to name that goal/pain concretely is the single highest-value question — ask it. ` +
+      `Only skip a question when the research (or the topic/context) settles it with real evidence, not a guess.\n\n` +
       `## How many questions\n` +
       `Ask the minimum that unblocks a focused discussion — typically 0-2. A well-scoped topic, or one ` +
       `whose context already answers the gaps, needs ZERO questions: return []. Do NOT pad to a quota, ` +

@@ -4,9 +4,10 @@
 // buildGatherUserPrompt      ← Task 17
 
 import { runClarification } from "../council/clarifier.js";
-import { resolveLeaderModelDetailed } from "../council/leader.js";
+import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
 import type { ClarifiedSpec, CouncilLLM } from "../council/types.js";
 import type { StreamChunk } from "../types/index.js";
+import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
 import { detectExistingProject } from "./discovery-detection.js";
 import {
   iterateInterview,
@@ -326,6 +327,7 @@ export async function runGatherPhase(
         cwd,
         detection,
         leaderModelId,
+        sessionModelId,
         llm: llm as CouncilLLM,
         prompted,
         prefillFromDetection,
@@ -416,6 +418,7 @@ async function runAgentDrivenGather(args: {
   cwd: string;
   detection: ExistingProjectSignals;
   leaderModelId: string;
+  sessionModelId: string;
   llm: CouncilLLM;
   prompted: Partial<DiscoveryContext>;
   prefillFromDetection: Partial<DiscoveryContext>;
@@ -438,10 +441,22 @@ async function runAgentDrivenGather(args: {
     conversationContext += `## Extracted from the request\n${JSON.stringify(args.prompted, null, 2)}\n`;
   }
 
+  // Reachable panel models — passed as the clarifier's fallbackModels so its
+  // research-first step can prefer a native-web-research model on any reachable
+  // provider (and spec-synth can fall back off a flaky leader proxy). Never
+  // blocks gather: resolution failure degrades to leader-only.
+  let panelModels: string[] = [];
+  try {
+    const participants = await resolveParticipants(args.sessionModelId, isCouncilMultiProviderPreferred());
+    panelModels = participants.map((p) => p.model).filter(Boolean);
+  } catch {
+    // leader-only reachability is fine — research-first still runs on the leader.
+  }
+
   // Drive the clarifier generator; forward each emitted chunk to the driver so
   // the TUI renders each dynamically-generated askcard, then capture the spec.
-  // seedQuestions is intentionally empty here — pure agent-driven. Research-first
-  // scope narrowing (Task #9) will later pass gray-area seeds into this slot.
+  // seedQuestions is intentionally empty — the clarifier's own research-first
+  // step (runClarification) now grounds the questions; no CLI-owned seed list.
   const gen = runClarification(
     args.idea,
     args.leaderModelId,
@@ -453,7 +468,7 @@ async function runAgentDrivenGather(args: {
     undefined, // maxRounds → clarifier default
     undefined, // prefillAnswers
     false, // costAware
-    [], // fallbackModels
+    panelModels, // fallbackModels → reachable panel for native-web research pref
   );
   let result: IteratorResult<StreamChunk, ClarifiedSpec>;
   do {

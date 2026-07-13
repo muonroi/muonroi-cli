@@ -1,4 +1,6 @@
 import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
+import { getMcpKey } from "../mcp/mcp-keychain.js";
+import { getWebResearchModel } from "../models/registry.js";
 import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
 import { pickCouncilTaskModel } from "./leader.js";
 import { tracedGenerate, tracedGenerateWithFallback } from "./llm.js";
@@ -240,6 +242,107 @@ export function buildClarifyOptionsRich(specs: ClarifyOptionSpec[] | undefined):
   return { options, defaultIndex };
 }
 
+/**
+ * Pre-clarify scope research (research-first grounding).
+ *
+ * Before asking ANY clarification question, research the topic — codebase for an
+ * existing repo (the research method reads the tree) plus web — so the
+ * question-generator surfaces the REAL gray areas the evidence exposes instead
+ * of guessing blind ("hỏi tào lao"). The returned brief is appended to the
+ * `conversationContext` that `buildClarificationPrompt` already reads, so both
+ * `/council` and `/ideal` (which reuses this clarifier as its gather engine)
+ * inherit evidence-grounded questions from one shared code path.
+ *
+ * Web-capability policy (owner's Part E rule): PREFER a model with native web
+ * research integrated (catalog `nativeWebResearch`), switching the research call
+ * to it when one is reachable. Only when no native-web model is reachable fall
+ * back to Tavily (via the research method's builtin web tools). When NEITHER a
+ * native-web model NOR a Tavily key exists, warn the user before continuing —
+ * research proceeds on the codebase + model knowledge only, never silently blind.
+ * (Codebase evidence is always gathered by the research tool regardless of the
+ * web tier, so an existing repo is still grounded.)
+ *
+ * Never throws and never blocks the interview: if the flag is off, the llm has
+ * no `research` method (most unit-test mocks), the run is aborted, or the call
+ * fails, it yields nothing and returns "". Default ON; opt out with
+ * MUONROI_CLARIFY_RESEARCH_FIRST=0.
+ */
+async function hasTavilyKey(): Promise<boolean> {
+  try {
+    const k = ((await getMcpKey("tavily")) || process.env.TAVILY_API_KEY || "").trim();
+    return k.length >= 10;
+  } catch {
+    return (process.env.TAVILY_API_KEY ?? "").trim().length >= 10;
+  }
+}
+
+async function* researchScopeForClarification(
+  topic: string,
+  conversationContext: string,
+  leaderModelId: string,
+  llm: CouncilLLM,
+  signal: AbortSignal | undefined,
+  reachableModels: string[],
+): AsyncGenerator<StreamChunk, string, unknown> {
+  if (process.env.MUONROI_CLARIFY_RESEARCH_FIRST === "0") return "";
+  if (signal?.aborted) return "";
+  // Skip cleanly when the injected llm can't research (generate-only test mocks)
+  // — keeps every existing clarifier test on its current, research-free path.
+  if (typeof (llm as { research?: unknown }).research !== "function") return "";
+
+  // Choose the research model + web tier. Prefer a reachable native-web model.
+  const reachable = new Set([leaderModelId, ...reachableModels].filter(Boolean));
+  const nativeModel = getWebResearchModel(reachable);
+  let researchModel = leaderModelId;
+  let webTier: "native" | "tavily" | "none";
+  if (nativeModel) {
+    researchModel = nativeModel.id;
+    webTier = "native";
+  } else {
+    webTier = (await hasTavilyKey()) ? "tavily" : "none";
+  }
+
+  const phaseId = "phase:clarification-scope-research";
+  const startedAt = Date.now();
+  yield phaseStart({ phaseId, kind: "clarification", label: "Scope research" });
+
+  // Owner's Part E principle: never research the web fully blind without telling
+  // the user. Codebase + model-knowledge research still runs, but web findings
+  // will be absent — surface that so they can wire a native-web model or Tavily.
+  if (webTier === "none") {
+    yield {
+      type: "content",
+      content:
+        `\n> ⚠ Scope research: no web-research-native model is reachable and no Tavily key is configured. ` +
+        `Researching from the codebase + model knowledge only — no live web findings. ` +
+        `Configure a native-web model or a Tavily API key for grounded web research.\n`,
+    } as StreamChunk;
+  }
+
+  try {
+    const goal =
+      `${topic}\n\n(Research goal: narrow the scope of this request. Report verified findings, and — ` +
+      `critically — END with an explicit "## Open Questions / Assumptions" section listing what you could ` +
+      `NOT verify and had to ASSUME (the real goal/pain, the concrete task, the system of record, the ` +
+      `target user, hard constraints). Those unresolved items are exactly what the user must clarify next, ` +
+      `so name them plainly rather than papering over them with a plausible guess.)`;
+    const brief = await llm.research(researchModel, goal, conversationContext, signal, undefined, {
+      internetFirst: webTier !== "none",
+    });
+    yield phaseDone({ phaseId, kind: "clarification", label: "Scope research", startedAt });
+    return typeof brief === "string" ? brief.trim() : "";
+  } catch (err) {
+    yield phaseError({
+      phaseId,
+      kind: "clarification",
+      label: "Scope research",
+      startedAt,
+      errorMessage: err instanceof Error ? err.message : String(err),
+    });
+    return "";
+  }
+}
+
 export async function* runClarification(
   topic: string,
   leaderModelId: string,
@@ -281,6 +384,21 @@ export async function* runClarification(
   yield phaseStart({ phaseId: "phase:clarification", kind: "clarification", label: "Clarification" });
 
   const seeded = (seedQuestions ?? []).map(grayAreaToRoundQuestion);
+
+  // Research-first: ground the interview in evidence BEFORE asking anything, so
+  // the question-generator targets the real gray areas the research surfaced
+  // rather than guessing. Appended to the context every round's prompt reads.
+  const scopeBrief = yield* researchScopeForClarification(
+    topic,
+    conversationContext,
+    leaderModelId,
+    llm,
+    signal,
+    fallbackModels,
+  );
+  if (scopeBrief) {
+    conversationContext = `${conversationContext}${conversationContext ? "\n\n" : ""}## Scope Research\n${scopeBrief}`;
+  }
 
   // P5: track ready-gate state across rounds
   let gateReady = false;
