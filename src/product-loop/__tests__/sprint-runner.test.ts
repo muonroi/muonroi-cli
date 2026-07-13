@@ -291,6 +291,10 @@ describe("sprint-runner", () => {
     expect(result!.lastVerifyResult).toBe("FAIL");
     const continueChunk = chunks.find((c: any) => typeof c.content === "string" && c.content.includes("Next focus"));
     expect(continueChunk).toBeDefined();
+    // Task #10: the not-done sprint returns a carry-over focus so the phase-runner
+    // adapter can thread it into the next sprint (continue the risky/failing parts).
+    expect(result!.nextFocus).toBeDefined();
+    expect(result!.nextFocus).toContain("fix verify failures");
   });
 
   it("releases reservation when council generate throws (no leaked reservations)", async () => {

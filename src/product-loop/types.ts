@@ -56,6 +56,16 @@ export interface IterationState {
   score?: number;
   crashed?: boolean;
   retryOf?: number;
+  /**
+   * Carry-over focus for the NEXT sprint when this one did not satisfy the
+   * done-gate: the failed-condition focus (feedback-routing) plus any plan
+   * deviations that survived the adherence review. The phase-runner adapter
+   * threads this into the next sprint's `carryOver` so each iteration continues
+   * the specific unmet / risky parts instead of restarting blind — the mechanism
+   * behind "spawn to continue the risk parts → finished product after N sprints".
+   * Absent when the sprint passed.
+   */
+  nextFocus?: string;
 }
 
 export interface DoneVerdict {

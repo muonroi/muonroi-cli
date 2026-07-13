@@ -1401,6 +1401,12 @@ async function* runPhasesPath(args: {
       sprintHistory = [];
     }
 
+    // Carry the previous sprint's failure focus (unmet criteria / verify failures
+    // / residual plan deviations) into this sprint so each iteration continues the
+    // specific risky parts instead of restarting blind — parity with the legacy
+    // drainSprints path. Without this the phase-orchestrated loop dropped the
+    // feedback-routing focus between sprints.
+    const prevSprint = sprintHistory[sprintHistory.length - 1];
     const inner = runSprint({
       sprintN: sc.sprintN,
       ctx,
@@ -1408,6 +1414,7 @@ async function* runPhasesPath(args: {
       roleAssignments,
       history: [...sprintHistory],
       phaseScope: sc.phaseScope,
+      carryOver: prevSprint?.nextFocus ? { focus: prevSprint.nextFocus } : undefined,
     });
 
     let result: IterationState | undefined;

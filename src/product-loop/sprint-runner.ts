@@ -1036,6 +1036,10 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // MUONROI_IDEAL_ADHERENCE_REVIEW=0. Never halts — verify + the criteria done-gate
   // remain the hard gates; this tightens plan fidelity before verification so a
   // cheap implementer's divergence is caught and corrected, not shipped.
+  // Plan deviations that survive the bounded fixer rounds — carried into the next
+  // sprint's focus (Step 9) so "chưa tuân thủ" work continues rather than being
+  // silently dropped after the review.
+  let residualPlanDeviations: string[] = [];
   if (ctx.runIsolatedTask && planSynthesis.trim() && process.env.MUONROI_IDEAL_ADHERENCE_REVIEW !== "0") {
     const adhPhaseId = `sprint-${sprintN}-adherence`;
     const adhStartedAt = Date.now();
@@ -1063,6 +1067,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         adherent: verdict.adherent,
         deviations: verdict.deviations.length,
       });
+      if (!verdict.adherent) residualPlanDeviations = verdict.deviations;
     } catch (err) {
       console.error(`[sprint-runner] plan-adherence review failed (sprint ${sprintN}): ${(err as Error).message}`);
     } finally {
@@ -1448,6 +1453,15 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // ── Step 9: If not done, surface continue-feedback to the user ───────────
   if (!verdict.pass) {
     const fb = buildContinueFeedback(verdict, verifyResult, currentCriteria);
+    // Fold any residual plan deviations (surviving the adherence fixer) into the
+    // carry-over focus so the next sprint continues the non-adherent/risky parts.
+    const deviationNote =
+      residualPlanDeviations.length > 0
+        ? `\n\nPlan deviations still open (address these next):\n${residualPlanDeviations
+            .map((d) => `- ${d}`)
+            .join("\n")}`
+        : "";
+    iter.nextFocus = `${fb.focus}${deviationNote}`;
     yield {
       type: "content",
       content: `\n> Sprint ${sprintN} did not satisfy Definition-of-Done (${verdict.failedCondition ?? "unknown"}). Next focus: ${fb.focus}\n`,
