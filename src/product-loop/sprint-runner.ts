@@ -40,6 +40,7 @@ import { logUIInteraction } from "../storage/index.js";
 import type { StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
 import { commitToProduct, release } from "../usage/ledger.js";
 import { CapBreachError } from "../usage/types.js";
+import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
 import type { SandboxSettings } from "../utils/settings.js";
 import { runVerifyOrchestration, type VerifyAgentLike } from "../verify/orchestrator.js";
 import { appendIteration, readCriteria } from "./artifact-io.js";
@@ -479,7 +480,31 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // ── Step 2: Detect verify recipe BEFORE the planner spends any token ──────
   // CB-3 fires deterministically on sprint 1 if recipe is null or coverage === 0.
   const verifyAgent = buildVerifyAgent(ctx, cwd);
-  const verifyRecipe = await verifyAgent.detectVerifyRecipe(verifyAgent.getSandboxSettings());
+  // Wall-clock backstop: `detectVerifyRecipe` runs a `verify-detect` LLM
+  // sub-agent turn (orchestrator.detectVerifyRecipe → runTaskRequest). Like the
+  // impl/verify stages, that turn can finish its stream then wedge on the JS side
+  // afterward — and this call site had NO deadline, so a single hung verify-detect
+  // turn bricked the entire /ideal run silently, right after "Committed: N sprints
+  // planned" and BEFORE the "Sprint N — Planning" yield (observed live 2026-07-13:
+  // 8+ min frozen frame, no forward progress). Race it against the shared isolated-
+  // task deadline; a timeout falls through to `null` → CB-3 emits the actionable
+  // recovery card instead of hanging. (The bridge signature does not thread an
+  // abortSignal, so this caller-side race is the guarantee.)
+  let verifyRecipe: VerifyRecipe | null;
+  try {
+    verifyRecipe = await withDeadlineRace(
+      () => verifyAgent.detectVerifyRecipe(verifyAgent.getSandboxSettings()),
+      getIsolatedTaskDeadlineMs(),
+      `sprint-${sprintN}-detect-verify`,
+    );
+  } catch (err) {
+    console.error(
+      `[sprint-runner] detectVerifyRecipe timed out/failed (sprint ${sprintN}, run ${ctx.runId}): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    verifyRecipe = null;
+  }
   const cb3 = CB3_verifyBlank(sprintN, verifyRecipe);
   if (cb3.halt) {
     // Yield a structured halt chunk so the TUI can render an actionable recovery

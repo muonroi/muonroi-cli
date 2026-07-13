@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ClarifiedSpec } from "../../council/types.js";
 import {
+  clampMaxSprints,
   fallbackSinglePhase,
   generatePhasePlan,
   PHASE_PLAN_MIGRATORS,
@@ -17,6 +18,59 @@ const spec: ClarifiedSpec = {
 };
 
 const manifest = { idea: "X", capUsd: 10, maxSprints: 6, doneThreshold: 0.8, createdAt: new Date() } as any;
+
+describe("clampMaxSprints — fractional-budget regression (implement-never-runs)", () => {
+  it("rounds a fractional per-phase budget up to an executable integer >= 1", () => {
+    // The live wedge: `--max-sprints 1` split across 3 phases as 0.3/0.2/0.5.
+    // `for (sprintN=1; sprintN <= 0.3)` never runs → implement skipped.
+    expect(clampMaxSprints(0.3)).toBe(1);
+    expect(clampMaxSprints(0.2)).toBe(1);
+    expect(clampMaxSprints(0.5)).toBe(1);
+  });
+  it("keeps whole integers and rounds nearby fractions", () => {
+    expect(clampMaxSprints(1)).toBe(1);
+    expect(clampMaxSprints(3)).toBe(3);
+    expect(clampMaxSprints(2.4)).toBe(2);
+    expect(clampMaxSprints(2.6)).toBe(3);
+  });
+  it("clamps zero / negative / non-numeric to 1 and caps at 20", () => {
+    expect(clampMaxSprints(0)).toBe(1);
+    expect(clampMaxSprints(-5)).toBe(1);
+    expect(clampMaxSprints("nope")).toBe(1);
+    expect(clampMaxSprints(undefined)).toBe(1);
+    expect(clampMaxSprints(999)).toBe(20);
+  });
+  it("parsePhasePlanJson normalizes fractional maxSprints so every phase runs >= 1 sprint", () => {
+    const raw = JSON.stringify({
+      version: 1,
+      generatedAt: "2026-07-13T00:00:00Z",
+      phases: [
+        {
+          id: "phase-0",
+          name: "A",
+          goal: "g",
+          successCriteria: [],
+          scope: "",
+          exitCondition: { type: "criteria-threshold", min: 0.9 },
+          dependsOn: [],
+          maxSprints: 0.5,
+        },
+        {
+          id: "phase-1",
+          name: "B",
+          goal: "g",
+          successCriteria: [],
+          scope: "",
+          exitCondition: { type: "criteria-threshold", min: 0.9 },
+          dependsOn: [],
+          maxSprints: 0.3,
+        },
+      ],
+    });
+    const out = parsePhasePlanJson(raw);
+    expect(out.phases.map((p) => p.maxSprints)).toEqual([1, 1]);
+  });
+});
 
 describe("phase-plan schema/parse/validate (subsystem E)", () => {
   it("parsePhasePlanJson strips code fences and parses", () => {

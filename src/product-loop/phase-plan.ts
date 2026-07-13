@@ -39,11 +39,33 @@ function normalizePhaseRef(ref: unknown): string {
  * Normalise `id` + `dependsOn` on every phase to the canonical string form.
  * Mutates and returns the same plan object. Safe on already-normalised plans.
  */
+/**
+ * Coerce a plan's per-phase `maxSprints` to a usable sprint COUNT: an integer
+ * in [1, 20].
+ *
+ * The phase-planner prompt tells the leader to "divide the MaxSprints budget
+ * across phases", so a small budget (e.g. `--max-sprints 1`) makes the model
+ * emit FRACTIONS that sum to the budget — observed live 2026-07-13:
+ * `maxSprints: 0.3 / 0.2 / 0.5` across three phases. The sprint loop is
+ * `for (sprintN = 1; sprintN <= phase.maxSprints; sprintN++)`, so any value < 1
+ * makes `1 <= 0.3` false → the loop body NEVER runs → `runSprint` is never called
+ * → the implementation stage is silently skipped and the run stalls after the
+ * phase-exit handoffs with nothing built (the "plan is great but implement never
+ * starts / hangs" report). Rounding up to ≥1 guarantees every planned phase
+ * executes at least one sprint.
+ */
+export function clampMaxSprints(raw: unknown): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.min(20, Math.round(n));
+}
+
 export function normalizePhasePlan(plan: PhasePlanArtifact): PhasePlanArtifact {
   if (Array.isArray(plan?.phases)) {
     for (const phase of plan.phases) {
       phase.id = normalizePhaseRef(phase.id);
       phase.dependsOn = Array.isArray(phase.dependsOn) ? phase.dependsOn.map(normalizePhaseRef) : [];
+      phase.maxSprints = clampMaxSprints(phase.maxSprints);
     }
   }
   return plan;
@@ -151,7 +173,10 @@ function buildPhasePlannerPrompt(args: {
     `Scope: ${args.clarifiedSpec.scope}`,
     `SuccessCriteria (return these verbatim, distributed across 3-5 phases):`,
     ...args.clarifiedSpec.successCriteria.map((c, i) => `  ${i + 1}. ${c}`),
-    `MaxSprints budget: ${args.manifest.maxSprints} (divide across phases).`,
+    `MaxSprints budget: ${args.manifest.maxSprints} total sprints across all phases. ` +
+      `Each phase's "maxSprints" MUST be a whole integer >= 1 (never a fraction). ` +
+      `If the budget is smaller than the phase count, give the highest-priority phases 1 sprint each; ` +
+      `do NOT split a single sprint into fractions.`,
     `Output JSON shape: { version:1, generatedAt:<ISO>, phases:[{id,name,goal,successCriteria,scope,exitCondition:{type:"criteria-threshold",min:${args.manifest.doneThreshold}},dependsOn,maxSprints}] }`,
   ].join("\n");
 }
