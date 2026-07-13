@@ -304,6 +304,40 @@ describe("generatePhasePlan (subsystem E)", () => {
     const result = await generatePhasePlan({ ...baseArgs, leader });
     expect(result.phases).toHaveLength(1);
   });
+
+  it("prompts the PO to size sprints by difficulty, NOT by dividing a budget (Task #6)", async () => {
+    const validPlan = {
+      version: 1,
+      generatedAt: "2026-05-13T00:00:00Z",
+      phases: [
+        {
+          id: "phase-1",
+          name: "All",
+          goal: "g",
+          successCriteria: spec.successCriteria,
+          scope: "s",
+          exitCondition: { type: "criteria-threshold", min: 0.8 },
+          dependsOn: [],
+          maxSprints: 3,
+        },
+      ],
+    };
+    const leader = { generate: vi.fn().mockResolvedValue({ content: JSON.stringify(validPlan), costUsd: 0.1 }) };
+    await generatePhasePlan({ ...baseArgs, leader });
+
+    const call = leader.generate.mock.calls[0][0] as { system: string; prompt: string };
+    // The PO decides per-phase sprint counts from difficulty (agile), never an even split.
+    expect(call.system).toMatch(/difficulty/i);
+    expect(call.system).toMatch(/maxSprints/);
+    // The old allocator framing ("N total sprints across all phases" + "give the
+    // highest-priority phases 1 sprint each") must be gone.
+    expect(call.prompt).not.toMatch(/total sprints across all phases/i);
+    expect(call.prompt).not.toMatch(/highest-priority phases 1 sprint each/i);
+    // The user's --max-sprints is now only a SOFT guide, not a budget to divide.
+    expect(call.prompt).toMatch(/soft guide/i);
+    // maxSprints stays a whole integer >= 1 (validity floor lives in the parser).
+    expect(call.prompt).toMatch(/integer >= 1/i);
+  });
 });
 
 describe("schema migration (subsystem E)", () => {
