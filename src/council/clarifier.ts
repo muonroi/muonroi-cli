@@ -2,6 +2,7 @@ import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
 import { getMcpKey } from "../mcp/mcp-keychain.js";
 import { getWebResearchModel } from "../models/registry.js";
 import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
+import { getCouncilLanguage } from "../utils/settings.js";
 import { pickCouncilTaskModel } from "./leader.js";
 import { tracedGenerate, tracedGenerateWithFallback } from "./llm.js";
 import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
@@ -132,6 +133,51 @@ function grayAreaToRoundQuestion(g: GrayAreaQuestion): {
   };
 }
 
+/**
+ * Resolve the concrete interview language from the council language setting +
+ * the topic. Pinned locale → that locale; "english" → English; "auto" (default)
+ * → detect from the topic (Vietnamese diacritics, mirroring
+ * `detectReplyLanguageHint`). Returned as a concrete name so the clarify prompt
+ * FORCES it (immune to an English "## Scope Research" block) and the escape-hatch
+ * labels can be localized.
+ */
+const VI_DIACRITIC_RE = /[à-ỹÀ-Ỹ]/;
+export function resolveInterviewLanguage(topic: string): string {
+  const setting = getCouncilLanguage();
+  if (setting && setting !== "auto" && setting !== "english") return setting;
+  if (setting === "english") return "english";
+  return VI_DIACRITIC_RE.test(topic ?? "") ? "vietnamese" : "english";
+}
+
+/**
+ * The two escape-hatch options appended to every clarification card, localized to
+ * the interview language so a Vietnamese interview doesn't show English buttons.
+ * `lang` is a concrete language name; anything not recognized as Vietnamese falls
+ * back to English labels (the LLM-authored question itself is still localized).
+ * When `lang` is undefined the historical English-label pair is kept byte-
+ * identical so existing callers/tests are unaffected.
+ */
+function escapeHatchOptions(lang?: string): CouncilQuestionOption[] {
+  const isVi = typeof lang === "string" && /vietnamese|tiếng việt/i.test(lang.trim());
+  if (isVi) {
+    return [
+      { label: "Nhập câu trả lời", description: "Nhập câu trả lời tự do", value: "", kind: "freetext" as const },
+      { label: "Thảo luận thêm", description: "Thảo luận thêm trước khi trả lời", value: "", kind: "chat" as const },
+    ];
+  }
+  if (lang === undefined) {
+    // Historical default preserved byte-identical (EN label + VN description).
+    return [
+      { label: "Type something", description: "Nhập câu trả lời tự do", value: "", kind: "freetext" as const },
+      { label: "Chat about this", description: "Thảo luận thêm trước khi trả lời", value: "", kind: "chat" as const },
+    ];
+  }
+  return [
+    { label: "Type something", description: "Type a free-form answer", value: "", kind: "freetext" as const },
+    { label: "Chat about this", description: "Discuss before answering", value: "", kind: "chat" as const },
+  ];
+}
+
 export interface ClarifyOptionsResult {
   options: CouncilQuestionOption[];
   /**
@@ -155,26 +201,16 @@ export interface ClarifyOptionsResult {
  * returned `defaultIndex` points to it. Otherwise `defaultIndex` is omitted
  * so the UI knows to suppress the "(Recommended)" tag.
  */
-export function buildClarifyOptions(suggestions: string[] | undefined, recommended?: string): ClarifyOptionsResult {
+export function buildClarifyOptions(
+  suggestions: string[] | undefined,
+  recommended?: string,
+  lang?: string,
+): ClarifyOptionsResult {
   const choices: CouncilQuestionOption[] = (suggestions ?? [])
     .filter((s) => typeof s === "string" && s.trim().length > 0)
     .map((s) => ({ label: s.trim(), value: s.trim(), kind: "choice" as const }));
 
-  const options: CouncilQuestionOption[] = [
-    ...choices,
-    {
-      label: "Type something",
-      description: "Nhập câu trả lời tự do",
-      value: "",
-      kind: "freetext" as const,
-    },
-    {
-      label: "Chat about this",
-      description: "Thảo luận thêm trước khi trả lời",
-      value: "",
-      kind: "chat" as const,
-    },
-  ];
+  const options: CouncilQuestionOption[] = [...choices, ...escapeHatchOptions(lang)];
 
   let defaultIndex: number | undefined;
   if (typeof recommended === "string" && recommended.trim().length > 0) {
@@ -206,7 +242,7 @@ export interface ClarifyOptionSpec {
  * "Chat about this" escape-hatches are appended as in `buildClarifyOptions`.
  * Pure + exported for unit testing.
  */
-export function buildClarifyOptionsRich(specs: ClarifyOptionSpec[] | undefined): ClarifyOptionsResult {
+export function buildClarifyOptionsRich(specs: ClarifyOptionSpec[] | undefined, lang?: string): ClarifyOptionsResult {
   const cleaned = (specs ?? []).filter(
     (s): s is ClarifyOptionSpec => !!s && typeof s.label === "string" && s.label.trim().length > 0,
   );
@@ -219,21 +255,7 @@ export function buildClarifyOptionsRich(specs: ClarifyOptionSpec[] | undefined):
       : {}),
   }));
 
-  const options: CouncilQuestionOption[] = [
-    ...choices,
-    {
-      label: "Type something",
-      description: "Nhập câu trả lời tự do",
-      value: "",
-      kind: "freetext" as const,
-    },
-    {
-      label: "Chat about this",
-      description: "Thảo luận thêm trước khi trả lời",
-      value: "",
-      kind: "chat" as const,
-    },
-  ];
+  const options: CouncilQuestionOption[] = [...choices, ...escapeHatchOptions(lang)];
 
   let defaultIndex: number | undefined;
   const recIdx = cleaned.findIndex((s) => s.recommended === true);
@@ -376,6 +398,9 @@ export async function* runClarification(
   // P5: use MAX_CLARIFY_ROUNDS (12) as the hard cap; respect explicit override
   // from callers that pass maxRounds (e.g. tests that want old 3-round behavior).
   const max = typeof maxRounds === "number" && maxRounds > 0 ? maxRounds : MAX_CLARIFY_ROUNDS;
+  // Interview language (the user's conversation language, not English-by-default).
+  // Resolved once and forced into the clarify prompt + escape-hatch labels.
+  const uiLang = resolveInterviewLanguage(topic);
   const allQA: Array<{ id?: string; question: string; answer: string }> = [];
   // P5: full Q&A history with timestamps for clarifyHistory field
   const clarifyHistory: Array<{ question: string; answer: string; ts: string }> = [];
@@ -448,6 +473,7 @@ export async function* runClarification(
         topic,
         conversationContext,
         allQA.length > 0 ? allQA : undefined,
+        uiLang,
       );
 
       let questionsRaw: string;
@@ -548,8 +574,8 @@ export async function* runClarification(
       // gray-area seeds and any model still emitting the old format).
       const { options, defaultIndex } =
         q.options && q.options.length > 0
-          ? buildClarifyOptionsRich(q.options)
-          : buildClarifyOptions(q.suggestions, q.recommended);
+          ? buildClarifyOptionsRich(q.options, uiLang)
+          : buildClarifyOptions(q.suggestions, q.recommended, uiLang);
       // Keep the deprecated `suggestions` mirror populated for consumers that
       // still read it (audit/replay), deriving labels from rich options.
       const suggestionLabels =

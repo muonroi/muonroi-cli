@@ -7,6 +7,14 @@ export function buildClarificationPrompt(
   topic: string,
   conversationContext: string,
   previousQA?: Array<{ question: string; answer: string }>,
+  /**
+   * Interview language, already resolved by the caller (runClarification): a
+   * concrete language name ("vietnamese", "english", a pinned locale) or "auto".
+   * Feeds the shared `buildLanguageRule` so the cards follow the SAME language
+   * policy as the debate — the user's conversation language, not English-by-
+   * default. Defaults to "auto" so existing no-arg callers keep auto-detection.
+   */
+  lang: string = "auto",
 ): {
   system: string;
   prompt: string;
@@ -58,11 +66,10 @@ export function buildClarificationPrompt(
       `the project IS the one described in the "## Current Project" section of the context. DO NOT ask which project.\n` +
       `- Only ask about project identity when the topic mentions multiple distinct projects or external products.\n` +
       `- Use the project's package.json name and description as implicit context for follow-up questions.\n\n` +
-      `## Language Rule (mandatory)\n` +
-      `Write the "question", "why", and every option "label"/"description" in the SAME ` +
-      `language the user used in the Topic below — detect it; if the user wrote Vietnamese, write ` +
-      `Vietnamese; if English, English. The user reads and answers these on a card, so they must ` +
-      `NOT default to English. Keep code identifiers, file paths, tech/product names, and JSON keys in English.\n\n` +
+      buildLanguageRule(lang) +
+      `The user reads and answers these on a card, so the "question", "why", and every option ` +
+      `"label"/"description" MUST be in that language — never default to English for card text, and ` +
+      `do NOT mirror the language of any "## Scope Research"/context block; follow the user's language.\n\n` +
       `Output ONLY a JSON array (no markdown, no preamble):\n` +
       `[{"question": "...", "why": "why this matters for a focused discussion", "options": [` +
       `{"label": "option A", "description": "what picking this means and its trade-off — one line", "recommended": true}, ` +
