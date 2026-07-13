@@ -68,7 +68,20 @@ export function isRequiredForPlatform(questionId: string, platforms: PlatformT[]
   return false;
 }
 
-const PRODUCT_TYPES = new Set(["saas", "internal-tool", "consumer-app", "b2b-platform", "marketplace", "other"]);
+const PRODUCT_TYPES = new Set([
+  "saas",
+  "internal-tool",
+  "consumer-app",
+  "b2b-platform",
+  "marketplace",
+  // Small-scope builds that previously had no home in the enum and so were
+  // forced to "other" — the exact "recommend other" bad UX users hit for a
+  // hello-world script. A trivial CLI/script/library now maps cleanly.
+  "cli-tool",
+  "script",
+  "library",
+  "other",
+]);
 const SCALES = new Set(["1-100", "100-1k", "1k-100k", "100k-1M", "1M+"]);
 
 /**

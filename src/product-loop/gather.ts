@@ -25,6 +25,8 @@ import type { LeaderLike } from "./discovery-prompt-parser.js";
 import { parsePromptForContext } from "./discovery-prompt-parser.js";
 import type { CouncilDebateRunner } from "./discovery-recommender.js";
 import { councilRecommend, leaderRecommend, shouldFallbackToLeader } from "./discovery-recommender.js";
+import { DISCOVERY_QUESTIONS } from "./discovery-schema.js";
+import { triageInterview } from "./discovery-triage.js";
 import type { BackendStackCtx, DiscoveryContext, ExistingProjectSignals, ProjectContext } from "./types.js";
 
 /**
@@ -324,6 +326,25 @@ export async function runGatherPhase(
     const tuiAsk = io?.emit && io?.respondToQuestion ? buildLiveTuiAsk(io.emit, io.respondToQuestion) : async () => "";
     const userPrompt: UserPromptFn = buildGatherUserPrompt(tuiAsk);
 
+    // Model-decided interview triage — the PRIMARY signal for how deep to
+    // interview (replaces the keyword `computePromptSpecificity` heuristic as the
+    // lead). A trivial idea (e.g. a hello-world script) collapses to ONE confirm
+    // card instead of 6 generic productType/audience/architecture/db cards; a
+    // complex idea keeps only the questions the model flags as decision-shaping.
+    // Only the required questions are triaged (optional ones are gated separately).
+    // Never throws — degrades to the specificity fallback (see discovery-triage.ts).
+    const requiredQuestions = DISCOVERY_QUESTIONS.filter((q) => q.required);
+    const triage = await triageInterview(idea, leader, requiredQuestions);
+    if (process.env.MUONROI_DEBUG_LEADER === "1") {
+      process.stderr.write(
+        `[interview-triage] ${JSON.stringify({
+          complexity: triage.complexity,
+          relevant: triage.relevant,
+          source: triage.source,
+        })}\n`,
+      );
+    }
+
     return await iterateInterview({
       flowDir,
       runId,
@@ -332,6 +353,7 @@ export async function runGatherPhase(
       detection,
       userPrompt,
       recommender,
+      triage,
     });
   } finally {
     await releaseRunLock(flowDir, runId);

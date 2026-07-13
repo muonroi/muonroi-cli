@@ -128,7 +128,8 @@ const LEADER_SYSTEM =
   "## Scope-sizing discipline\n" +
   "You will be told the user's original prompt and its specificity bucket (minimal/moderate/detailed).\n" +
   '- When specificity is "minimal" (e.g. user typed "build a todo app" or "tạo wiki"), pick the SMALLEST-SCOPE primary that still works: ' +
-  'productType="other" or "consumer-app" (NOT "saas"), audience scale="1-100" (NOT "100-1k" or above), ' +
+  'productType="consumer-app" for a small app, or "cli-tool"/"script"/"library" for a stand-alone tool/snippet ' +
+  '(prefer these over the catch-all "other" — a hello-world script is a "script", not "other"), audience scale="1-100" (NOT "100-1k" or above), ' +
   "single-user / no auth / web-only / simplest stack. Put richer multi-tenant/team-scale alternatives in `alternatives`, NOT primary. " +
   "Rationale: short prompts mean the user has NOT asked for enterprise complexity. Inflating scope here cascades into wasted debate and over-built code.\n" +
   '- When specificity is "moderate", pick pragmatic defaults grounded in any stated context; surface ONE richer alternative.\n' +
