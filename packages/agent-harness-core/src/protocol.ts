@@ -163,12 +163,19 @@ export type LiveEvent =
       kind: "council-speaker";
       /** The council role label (e.g. "architect", "security", "qa"). */
       role: string;
-      /** "start" — speaker began their turn; "done" — speaker finished. */
-      status: "start" | "done";
+      /**
+       * "start" — speaker began; "tick" — 1s progress heartbeat (long phases
+       * like research emit these with an advancing `elapsedMs`); "done" —
+       * speaker finished. A harness poller distinguishes ALIVE (tick with
+       * advancing elapsedMs) from HUNG (elapsedMs frozen) via `tui_last_event`.
+       */
+      status: "start" | "tick" | "done";
       /** Round number if available from the status chunk. */
       round?: number;
       /** Correlation ID linking this speaker event to the enclosing council run. */
       correlationId: string;
+      /** Milliseconds elapsed in this speaker's turn/phase; advances on ticks. */
+      elapsedMs?: number;
     }
   // Thrift measurability — emitted when a council speaker's turn output is fully
   // assembled (opening statement or discussion turn). Observe-only: NO truncation,

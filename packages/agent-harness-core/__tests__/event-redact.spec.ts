@@ -68,6 +68,27 @@ describe("redactEvent — askcard-answered (API key redaction)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// council-speaker tick heartbeat (elapsedMs must survive for progress polling)
+// ---------------------------------------------------------------------------
+
+describe("redactEvent — council-speaker (tick + elapsedMs)", () => {
+  it("passes status:tick and elapsedMs through so a poller can measure liveness", () => {
+    const e: Extract<LiveEvent, { kind: "council-speaker" }> = {
+      t: "event",
+      kind: "council-speaker",
+      role: "researcher",
+      status: "tick",
+      correlationId: "run-1",
+      elapsedMs: 42_000,
+    };
+    const out = asRecord(redactEvent(e));
+    expect(out.status).toBe("tick");
+    expect(out.elapsedMs).toBe(42_000);
+    expect(out.correlationId).toBe("run-1");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // toast.text length cap
 // ---------------------------------------------------------------------------
 

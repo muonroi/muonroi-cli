@@ -71,6 +71,7 @@ const ALLOWED_FIELDS: Partial<Record<EventKind, Record<string, FieldSpec>>> = {
     status: "pass",
     round: "pass",
     correlationId: "pass",
+    elapsedMs: "pass",
   },
   "council-turn-length": {
     role: "pass",

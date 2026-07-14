@@ -148,6 +148,7 @@ import {
   SubagentTaskLine,
 } from "./components/tool-result-views.js";
 import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
+import { mapCouncilStatusToSpeakerEvent } from "./council-harness-event.js";
 import { useAgentEditor } from "./hooks/use-agent-editor.js";
 import { useMcpEditor } from "./hooks/use-mcp-editor.js";
 import { useModelPicker } from "./hooks/use-model-picker.js";
@@ -3570,14 +3571,10 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   setCouncilStatuses((prev) => upsertStatus(prev, cs));
                   // Task 2.2b — emit council-speaker harness event (agent-mode only).
+                  // Carries state:"tick" + elapsedMs so a harness poller can tell
+                  // a long-running research phase (alive) from a hung one.
                   try {
-                    agentRuntime?.emitEvent({
-                      t: "event",
-                      kind: "council-speaker",
-                      role: cs.role ?? cs.label ?? "unknown",
-                      status: cs.state === "start" ? "start" : "done",
-                      correlationId: cs.statusId,
-                    });
+                    agentRuntime?.emitEvent(mapCouncilStatusToSpeakerEvent(cs));
                   } catch {
                     /* best-effort */
                   }
@@ -4435,13 +4432,7 @@ export function useAppLogic(props: AppLogicProps) {
                     setCouncilStatuses((prev) => upsertStatus(prev, cs));
                     // Task 2.2b — emit council-speaker in branch 2 (agent-mode only).
                     try {
-                      agentRuntime?.emitEvent({
-                        t: "event",
-                        kind: "council-speaker",
-                        role: cs.role ?? cs.label ?? "unknown",
-                        status: cs.state === "start" ? "start" : "done",
-                        correlationId: cs.statusId,
-                      });
+                      agentRuntime?.emitEvent(mapCouncilStatusToSpeakerEvent(cs));
                     } catch {
                       /* best-effort */
                     }
@@ -4725,13 +4716,7 @@ export function useAppLogic(props: AppLogicProps) {
                     setCouncilStatuses((prev) => upsertStatus(prev, cs));
                     // Task 2.2b — emit council-speaker in branch 3 (agent-mode only).
                     try {
-                      agentRuntime?.emitEvent({
-                        t: "event",
-                        kind: "council-speaker",
-                        role: cs.role ?? cs.label ?? "unknown",
-                        status: cs.state === "start" ? "start" : "done",
-                        correlationId: cs.statusId,
-                      });
+                      agentRuntime?.emitEvent(mapCouncilStatusToSpeakerEvent(cs));
                     } catch {
                       /* best-effort */
                     }
