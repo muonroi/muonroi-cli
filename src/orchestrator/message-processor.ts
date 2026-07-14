@@ -385,7 +385,15 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   askUser?: (info: AskUserAskInfo) => Promise<string>;
   runCouncilV2(
     userMessage: string,
-    opts: { skipClarification: boolean; observer?: ProcessMessageObserver; userModelMessage: ModelMessage },
+    opts: {
+      skipClarification: boolean;
+      observer?: ProcessMessageObserver;
+      userModelMessage: ModelMessage;
+      // Agent-driven post-council: suppress the hardcoded post-debate card so the
+      // synthesis returns to the agent, which decides the follow-up. Threaded from
+      // the auto-council + runDebate call sites in tool-engine.
+      convenePath?: boolean;
+    },
   ): AsyncGenerator<StreamChunk, void, unknown>;
   processMessage(
     userMessage: string,

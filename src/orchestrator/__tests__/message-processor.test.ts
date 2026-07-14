@@ -210,15 +210,14 @@ describe("MessageProcessor — DI surface invariants", () => {
     // and assert convenePath is threaded through.
     const processor = new MessageProcessor(deps);
     expect(processor).toBeInstanceOf(MessageProcessor);
-    // convenePath is not yet part of MessageProcessorDeps.runCouncilV2's opts
-    // type (tool-engine.ts's own deps param is untyped `any`, so production
-    // code passes it through without a type error); cast here to exercise the
-    // same runtime shape tool-engine.ts sends.
+    // convenePath is declared on MessageProcessorDeps.runCouncilV2's opts type,
+    // so the same options tool-engine.ts's auto-council branch passes type-check
+    // directly here (no cast needed).
     const iter = deps.runCouncilV2("topic", {
       skipClarification: true,
       userModelMessage: { role: "user", content: "topic" },
       convenePath: true,
-    } as unknown as Parameters<typeof deps.runCouncilV2>[1]);
+    });
     for await (const _ of iter) {
       /* drain */
     }
