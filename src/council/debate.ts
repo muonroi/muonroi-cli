@@ -898,6 +898,14 @@ export async function* runDebate(
     openList: string[],
   ): AsyncGenerator<StreamChunk, "extend" | "stop", unknown> {
     escalated = true;
+    // convene_council path: no interactive user is answering mid-tool-call, so a
+    // blocking escalation card would hang the council. Auto-accept (= conclude
+    // with the best synthesis so far) without emitting the card. Mirrors the
+    // "empty/failed answer → accept" fallback runEscalationPrompt already uses.
+    if (config.convenePath) {
+      escalation = { action: "accept" };
+      return "stop";
+    }
     const dec = yield* runEscalationPrompt({
       respondToQuestion: config.respondToQuestion!,
       openCriteria: openList,

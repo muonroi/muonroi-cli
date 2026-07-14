@@ -2038,6 +2038,12 @@ export class Agent {
       skipClarification?: boolean;
       observer?: ProcessMessageObserver;
       userModelMessage?: ModelMessage;
+      /**
+       * convene_council path — forwarded into runCouncil so the post-debate
+       * decision surface is suppressed and the synthesis is returned to the
+       * calling agent (no CLI-hardcoded post-council branch).
+       */
+      convenePath?: boolean;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const { runCouncil, postDebateContinuation } = await import("../council/index.js");
@@ -2103,6 +2109,9 @@ export class Agent {
           cwd: this.bash.getCwd(),
           councilStats, // NEW — share orchestrator's stats object with runCouncil (Phase 14 CQ-01)
           signal,
+          // convene_council path — suppress ALL hardcoded post-debate decision
+          // surface; the agent decides what happens after the synthesis.
+          convenePath: options?.convenePath,
           // When the Context Rail is active it carries leader/panel/cost as
           // ambient sidebar rows, so suppress the duplicate inline summary.
           suppressInlineMeta: isContextRailEnabled(),

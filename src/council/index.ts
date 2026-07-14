@@ -142,6 +142,19 @@ export interface RunCouncilOptions {
    */
   sprintPlanningMode?: boolean;
   /**
+   * Convene-tool path (the `convene_council` builtin). When true, render
+   * clarify(optional)+debate+synthesis exactly as normal, then RETURN the
+   * synthesis string WITHOUT any post-debate decision surface: NO
+   * `pickPostDebateRecommendation`, NO option set, NO `council_question`
+   * post-debate card, NO `onPostDebateAction`, NO `postDebateContinuation`
+   * routing. The calling AGENT decides what happens next (continue silently,
+   * ask the user via `ask_user`, or hand off to `/ideal`) — the CLI hardcodes
+   * none of it (user directive: no CLI-hardcoded post-council branch). The
+   * persistence block (decisions.lock, judge, council record) still runs — it
+   * is an audit trail, not a decision.
+   */
+  convenePath?: boolean;
+  /**
    * #2 — isolated sub-agent bridge (orchestrator.runTaskRequest). When wired,
    * the debate's research phase runs in a budget-capped explore sub-agent
    * instead of an in-process 15-step generateText. Forwarded onto CouncilConfig
@@ -684,6 +697,9 @@ export async function* runCouncil(
       // unmet, runDebate asks the user (extend / accept / rescope) instead of
       // silently synthesizing a partial outcome.
       respondToQuestion,
+      // convene_council path — auto-accept escalation (no blocking card) since
+      // the council runs autonomously mid-agent-turn with no interactive user.
+      convenePath: options?.convenePath,
     },
     llm,
   );
@@ -777,7 +793,13 @@ export async function* runCouncil(
   });
 
   // ── Post-Debate AskCard: What next? ─────────────────────────────────────────
-  if (sessionId) {
+  // convenePath skips this ENTIRE interactive block (recommendation, option set,
+  // card, respondToQuestion, postDebateAction, onPostDebateAction, and the whole
+  // routing tree). On that path the agent that called `convene_council` decides
+  // what happens next — the CLI must not hardcode a post-council pick. The
+  // persistence block below still runs (audit trail, not a decision), and the
+  // function returns synthesisText as usual.
+  if (sessionId && !options?.convenePath) {
     try {
       const { randomUUID } = await import("crypto");
       const refinementTopics: string[] = [];
