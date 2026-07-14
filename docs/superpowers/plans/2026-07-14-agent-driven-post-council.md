@@ -12,7 +12,7 @@
 
 - **Zero Hardcode Rule:** no literal model/provider IDs — council models resolve via `pickCouncilTaskModel` / catalog (unaffected here; do not introduce any).
 - **No Silent Catch Rule:** every `try/catch` logs module + operation + `err.message`.
-- **Scope lock:** change ONLY auto-council (`tool-engine.ts`) and `/council` slash (`use-app-logic.tsx` + `orchestrator.runCouncilV2` continuation). Do NOT touch `/ideal` (`runProductLoopV1`, `sprint-runner.ts`) or `convene_council` (`tool-engine.ts:3509` consumption).
+- **Scope lock:** change ONLY auto-council (`tool-engine.ts:813`), the `runDebate` builtin (`tool-engine.ts:1019`), and `/council` slash (`use-app-logic.tsx` + `orchestrator.runCouncilV2` continuation). Do NOT touch `/ideal` (`runProductLoopV1`, `sprint-runner.ts`) or the `convene_council` consumption (`tool-engine.ts:3509`).
 - **Pre-Push Test Gate:** `bunx tsc --noEmit` (0 errors) + `bunx vitest run` (0 failures) before any push. UI/harness surfaces additionally need harness E2E.
 - **Language:** code, comments, commit messages in English.
 - `postDebateContinuation` (`src/council/index.ts:280`) STAYS in place (its comment claims `/ideal` build-flow reliance; grep shows only these two callers today, but keep it + its test rather than delete — the two redesigned sites simply stop calling it).
@@ -213,18 +213,52 @@ with:
 > `null` (card suppressed) — leave the two `deps.councilManager` reads/resets at
 > 818-821 as-is; they are harmless and keep the manager state clean.
 
-- [ ] **Step 5: Run typecheck + the targeted test**
+- [ ] **Step 5: Suppress the card in the `runDebate` builtin too**
+
+The `runDebate` builtin (`tool-engine.ts:1018-1027`) is a model-callable debate that drains `runCouncilV2` and returns `lastSynthesis` to the model as the tool result — the same "agent gets the synthesis, agent decides" shape as `convene_council`. It currently runs WITHOUT `convenePath`, so the hardcoded card still fires. Add `convenePath: true`. The call currently reads:
+
+```ts
+          runDebate: async (topic: string) => {
+            const gen = deps.runCouncilV2(topic, {
+              skipClarification: true,
+              userModelMessage: { role: "user", content: `/council ${topic}` },
+            });
+```
+
+Change to:
+
+```ts
+          runDebate: async (topic: string) => {
+            const gen = deps.runCouncilV2(topic, {
+              skipClarification: true,
+              userModelMessage: { role: "user", content: `/council ${topic}` },
+              // Model-callable debate: the synthesis is returned to the model as
+              // the tool result and the model decides the follow-up — so suppress
+              // the CLI-hardcoded post-debate card, same as convene_council.
+              convenePath: true,
+            });
+```
+
+Verify: `rg -n "convenePath: true" src/orchestrator/tool-engine.ts` — expected THREE matches now (auto-council ~813, runDebate ~1022, and the pre-existing convene consumption ~3510).
+
+> No dedicated unit test for this closure (it is an inline builtin captured by
+> `createBuiltinTools`). Its behavior is identical to the already-tested
+> `convenePath` suppression at the `runCouncil` layer
+> (`convene-path.test.ts`) — passing the flag is a one-line forward. Task 5's
+> `bunx tsc --noEmit` + full suite cover the wiring.
+
+- [ ] **Step 6: Run typecheck + the targeted test**
 
 Run: `bunx tsc --noEmit`
 Expected: 0 errors.
 Run: `bunx vitest run src/orchestrator/__tests__/message-processor.test.ts`
 Expected: PASS (existing tests + the new convenePath test).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/orchestrator/tool-engine.ts src/orchestrator/__tests__/message-processor.test.ts
-git commit -m "feat(council): auto-council uses convenePath + neutral continuation"
+git commit -m "feat(council): auto-council + runDebate use convenePath, neutral continuation"
 ```
 
 ---
@@ -499,8 +533,7 @@ Expected: pre-push hook (Tier 1 self-verify on watched surfaces) passes; push su
 
 ## Follow-ups (out of scope — flag, do not implement here)
 
-- **`runDebate` builtin tool** (`tool-engine.ts:1018-1027`): a model-callable path that drains `runCouncilV2` WITHOUT `convenePath`, so it still shows the hardcoded card. It uses `userModelMessage: /council ${topic}`. Whether it should also adopt `convenePath:true` (same principle) is a separate decision — surface to the user; do not change it in this plan.
-- **Delete `postDebateContinuation`**: grep shows the two redesigned sites were its only callers; after this plan only its own test references it. A future cleanup can remove it + its test once `/ideal` independence is confirmed by running the `/ideal` suite (its inline comment claims reliance the current grep does not corroborate).
+- **Delete `postDebateContinuation`**: grep shows the redesigned sites were its only callers; after this plan only its own test references it. A future cleanup can remove it + its test once `/ideal` independence is confirmed by running the `/ideal` suite (its inline comment claims reliance the current grep does not corroborate).
 
 ## Self-Review
 
