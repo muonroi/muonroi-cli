@@ -2274,6 +2274,16 @@ export function useAppLogic(props: AppLogicProps) {
     setCouncilRounds([]);
     setSelectedRound(null);
     setCouncilPlaceholders(new Map());
+    // The auto-council path drives councilPhases through the MAIN stream loop,
+    // which — unlike the nested /council and /ideal loops — never reset it on
+    // turn end. On a hung/watchdog-aborted council turn the running phase never
+    // emits its `state:"done"` event, so <CouncilPhaseTimeline> stays frozen at
+    // "Council working… elapsed Ns" forever and the session LOOKS hung even after
+    // the turn actually finalized (live: reasoning-model hang c1d461439618).
+    // Clearing here (called at both beginLiveTurn and finalizeActiveTurn) tears
+    // the timeline down on every turn boundary. The completed phases were already
+    // rendered live; the persisted [Council Decision] message is the durable record.
+    setCouncilPhases([]);
     councilTopicRef.current = undefined;
   }, []);
 
