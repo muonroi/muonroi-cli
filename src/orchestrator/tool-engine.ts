@@ -959,6 +959,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           sessionId: deps.session?.id,
           includeVisionTools,
           consultParentSession: deps.consultParentSession,
+          // Register convene_council only when the council is actually usable
+          // for this session (enough configured roles) — else the model could
+          // call a council that can't convene.
+          councilConfigured: configuredRoleCount >= autoCouncilMinRoles,
           runDebate: async (topic: string) => {
             const gen = deps.runCouncilV2(topic, {
               skipClarification: true,
