@@ -54,6 +54,69 @@ Non-goals:
 | Pipeline scope | Full `runCouncilV2` (clarify + debate + synthesis + post-debate) |
 | Availability | Always registered when council is configured (≥ `autoCouncilMinRoles` roles) |
 | Turn handling | Council runs, synthesis becomes the tool's `tool_result`, the model continues the SAME turn |
+| Post-council decision | **Agent-driven, ZERO CLI hardcode** (see below) |
+
+## Post-council decision: agent intent only, no CLI hardcode (HARD RULE)
+
+**Non-negotiable principle (user directive 2026-07-14):** what happens AFTER the
+council concludes must originate from the **CLI agent's own intent**, never from
+a CLI-hardcoded branch. The CLI is permitted to do exactly two things:
+
+1. **Inject context** — hand the council synthesis back to the agent.
+2. **Inject a suggestion prompt** — non-binding guidance describing what the
+   agent *might* do next.
+
+The CLI MUST NOT: hardcode an option set for the agent/user to PICK, hardcode a
+"continue vs ask" branch, or hardcode an implement-vs-stop decision tree. If such
+hardcoding exists on the path this feature touches, **delete it** and replace it
+with the agent-driven strategy.
+
+Two outcomes, both chosen BY THE AGENT (not the CLI):
+
+- **Autonomous work context** → the agent silently reads the synthesis as the
+  `convene_council` tool result and keeps working. No card, no interruption.
+- **Interactive implementation-discussion context** → if the synthesis gives
+  enough to proceed, the agent decides to ask the user "proceed with
+  implementation now?" — by CALLING an **`ask_user` askcard tool** itself. The
+  question text and options are the agent's, generated at call time — not a
+  hardcoded CLI option set.
+
+### Implementation hand-off reuses `/ideal` and inherits council context
+
+When the agent (after council, and after any `ask_user` confirmation) decides to
+**implement**, it does NOT invent its own build flow — it routes into the
+existing native `/ideal` product loop. Critically:
+
+- `/ideal` uses council as its **core** step (CB-1 debate). But if council
+  **already ran** via `convene_council` this turn, `/ideal` MUST **inherit the
+  existing council synthesis/debate context and SKIP re-running council** — no
+  double debate, no double cost.
+- Mechanism: the convene_council synthesis (and enough debate context) is
+  persisted where `/ideal`'s existing resume/inheritance plumbing already reads
+  it (the `debate-inputs.json` / debate-checkpoint / layer3 council-marker path
+  used by `/ideal --resume` and cross-session debate resume). `/ideal` detects a
+  fresh council artifact for this session/topic and enters at the
+  post-council stage (planning/sprints) instead of CB-1 debate.
+- This inheritance is context injection (allowed), not a hardcoded decision —
+  the agent chose to implement; `/ideal` is merely the native executor it hands
+  off to, primed with the council it already paid for.
+
+The exact `/ideal` inheritance hook (which artifact `/ideal` reads to skip
+council, and how convene_council writes it) is a key item for the plan and for
+the sub-agent design debate.
+
+This requires a **model-callable `ask_user` tool** (an askcard the AGENT raises,
+whose selected option returns as the tool result). Whether such a tool already
+exists is under investigation; if absent it is built as part of this feature
+(see Task breakdown). The existing council post-debate askcard
+(`pickPostDebateRecommendation` + `postDebateContinuation` + the CLI-presented
+save_exit/generate_plan/refine option set in `src/council/index.ts`) is exactly
+the hardcoded pattern this rule forbids **on the convene_council path** — that
+path runs the debate+synthesis but SUPPRESSES the hardcoded post-debate card and
+continuation, deferring the next-step decision to the agent. (Whether to also
+retire the hardcoded card on the auto-council / `/council` paths is a separate
+scope decision to confirm — this feature only guarantees the convene_council
+path is hardcode-free.)
 
 ## Architecture
 
