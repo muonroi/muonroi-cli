@@ -166,6 +166,7 @@ import { foldDynamicTailIntoUserMessage, splitFrontAndDynamicTail } from "./cach
 import { consumeProactiveCompact } from "./compact-request.js";
 import { relaxCompactionSettings } from "./compaction";
 import type { CouncilManager } from "./council-manager.js";
+import { consumeCouncilConvene, hasPendingCouncilConvene, peekCouncilConveneToolCallId } from "./council-request.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
 import { humanizeApiError, isAuthenticationError, isContextLimitError, summarizeApiErrorForLog } from "./error-utils";
@@ -492,6 +493,41 @@ export function rewriteSafetyApprovedToolResults<T extends { role: string; conte
     });
     return changed ? ({ ...m, content: newContent } as T) : m;
   });
+}
+
+/**
+ * Replace the `result` value of a single tool-result part (matched by
+ * toolCallId) in an AI-SDK message history, in place, preserving the
+ * tool-call/tool-result pairing. Used by the convene_council path to splice the
+ * council synthesis into the placeholder tool_result the model saw, so on the
+ * restarted step the model reads the conclusion as that tool's result. Pure +
+ * exported for unit testing. Returns the same array reference untouched when the
+ * toolCallId is absent (with a caller-visible `replaced` flag).
+ */
+export function spliceConveneToolResult<T extends { role: string; content?: any }>(
+  messages: T[],
+  toolCallId: string | null,
+  value: string,
+): { messages: T[]; replaced: boolean } {
+  if (!toolCallId) return { messages, replaced: false };
+  let replaced = false;
+  const out = messages.map((m) => {
+    if (m.role !== "tool" || !Array.isArray(m.content)) return m;
+    let changed = false;
+    const newContent = m.content.map((part: any) => {
+      if (part?.type === "tool-result" && part?.toolCallId === toolCallId) {
+        changed = true;
+        replaced = true;
+        // AI SDK v6 tool-result parts carry the value under `output` (typed) or
+        // `result` (legacy). Set both so whichever the provider serializer reads
+        // sees the synthesis, and clear any error flag.
+        return { ...part, isError: false, output: value, result: value };
+      }
+      return part;
+    });
+    return changed ? ({ ...m, content: newContent } as T) : m;
+  });
+  return { messages: replaced ? out : messages, replaced };
 }
 
 export class SimpleMutex {
@@ -1637,6 +1673,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             _hardCapHit = true;
             return true;
           }
+          // convene_council fast-path: if the model queued a council convening
+          // during this step, STOP now so the outer loop runs the council and
+          // splices the synthesis BEFORE the model consumes the placeholder
+          // tool_result. This is a fast-path only — the authoritative
+          // consumption is the outer-loop check after the stream drains (a
+          // phase-1 SAMR step ends on stepCountIs(1) and never reaches here).
+          if (hasPendingCouncilConvene()) return true;
           // Terminal response tool: a `respond_*` call IS the model's final
           // structured answer (its `execute` is identity — the payload lives
           // in the tool-call args). `shouldHaltOnResponseTool` decides if the
@@ -3366,6 +3409,83 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           }
         }
         stall.dispose(); // stream drained normally — stop the stall watchdog
+
+        // ─── convene_council consumption ───────────────────────────────
+        // The convene_council tool queued a request during THIS step's execute().
+        // Consume it here in the OUTER loop after every stream drain — NOT solely
+        // via dynamicStopWhen, because a phase-1 SAMR step ends on stepCountIs(1)
+        // and never evaluates the stop hook (design-debate BUG 2). Runs the
+        // council autonomously (convenePath suppresses ALL post-debate decision
+        // surface — no card, no continuation), splices the synthesis into the
+        // convene tool_result, grafts into deps.messages, and restarts the step
+        // so the model reads the conclusion as the tool result and continues.
+        if (hasPendingCouncilConvene()) {
+          if (responseToolCalled) {
+            // The same step also emitted a terminal respond_* answer — the model
+            // is done; discard the convene request rather than override the
+            // answer (design-debate BUG 1: never let the flag leak across turns).
+            consumeCouncilConvene();
+            logger.warn("orchestrator", "convene: discarded — step also emitted a terminal response tool");
+          } else {
+            const pendingId = peekCouncilConveneToolCallId();
+            let conveneResponse: Awaited<typeof result.response> | null = null;
+            try {
+              conveneResponse = await result.response;
+            } catch (err) {
+              logger.error("orchestrator", "convene: failed to read response.messages", {
+                error: (err as Error)?.message,
+              });
+            }
+            // BUG 3 guard: only run council when the pending convene toolCallId is
+            // a recorded tool-result in THIS drain's messages — else a nested
+            // frame's convene call would be wrongly consumed by this loop.
+            const belongsHere =
+              !!conveneResponse &&
+              !!pendingId &&
+              conveneResponse.messages.some(
+                (m: { role?: string; content?: unknown }) =>
+                  m?.role === "tool" &&
+                  Array.isArray(m.content) &&
+                  (m.content as Array<{ type?: string; toolCallId?: string }>).some(
+                    (p) => p?.type === "tool-result" && p?.toolCallId === pendingId,
+                  ),
+              );
+            if (belongsHere && conveneResponse) {
+              const req = consumeCouncilConvene();
+              yield { type: "content", content: "\n[Convening the council…]\n" };
+              yield* deps.runCouncilV2(userMessage, {
+                convenePath: true,
+                skipClarification: true,
+                observer,
+                userModelMessage,
+              });
+              const synthesis = deps.councilManager.lastSynthesis;
+              const spliceValue =
+                synthesis && synthesis.trim().length > 0
+                  ? synthesis
+                  : `[Council could not produce a conclusion${req?.reason ? ` for: ${req.reason}` : ""}. Proceed using your own judgment.]`;
+              if (!synthesis || synthesis.trim().length === 0) {
+                logger.warn("orchestrator", "convene: council returned no synthesis", { reason: req?.reason ?? null });
+              }
+              const { messages: spliced, replaced } = spliceConveneToolResult(
+                conveneResponse.messages as Array<{ role: string; content?: unknown }>,
+                req?.toolCallId ?? null,
+                spliceValue,
+              );
+              if (!replaced) {
+                logger.warn("orchestrator", "convene: tool_result splice found no matching toolCallId", {
+                  toolCallId: req?.toolCallId ?? null,
+                });
+              }
+              // Graft the new messages (assistant tool-call + spliced tool-result)
+              // into deps.messages, then restart the step so the model reads the
+              // synthesis as the convene tool's result (SAMR restart precedent).
+              const newMsgs = spliced.slice(deps.messages.length);
+              for (const msg of newMsgs) deps.messages.push(msg as ModelMessage);
+              continue; // re-enter the loop with the spliced history
+            }
+          }
+        }
 
         // ─── SAMR Phase 1 → Phase 2 transition ─────────────────────────
         // Phase 1 (premium model) produced tool calls but the SDK stopped
