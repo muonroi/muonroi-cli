@@ -162,6 +162,7 @@ import { isAutoCouncilSkipReasoning } from "../utils/settings.js";
 import { resolveShell } from "../utils/shell.js";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
+import type { AskUserAskInfo } from "./ask-user.js";
 import { foldDynamicTailIntoUserMessage, splitFrontAndDynamicTail } from "./cache-prefix.js";
 import { consumeProactiveCompact } from "./compact-request.js";
 import { relaxCompactionSettings } from "./compaction";
@@ -171,6 +172,7 @@ import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
 import { humanizeApiError, isAuthenticationError, isContextLimitError, summarizeApiErrorForLog } from "./error-utils";
 import { buildGroundingFootnote, findUnverifiedClaims } from "./grounding-check.js";
+import { isInteractivePaused } from "./interactive-pause.js";
 import { buildInterruptedTurnNote } from "./interrupted-turn.js";
 import type { PendingCallsLog } from "./pending-calls.js";
 import { stableCallId } from "./pending-calls.js";
@@ -417,6 +419,8 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   askToolLoopContinue?: ToolLoopCapAsk;
   /** Safety override handler — invoked when a tool call is blocked by the safety filter. */
   askSafetyOverride?: (info: SafetyOverrideAskInfo) => Promise<SafetyOverrideVerdict>;
+  /** ask_user handler — invoked when the model calls the `ask_user` tool; resolves the human's answer. */
+  askUser?: (info: AskUserAskInfo) => Promise<string>;
   runCouncilV2(
     userMessage: string,
     opts: { skipClarification: boolean; observer?: ProcessMessageObserver; userModelMessage: ModelMessage },
@@ -643,6 +647,17 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // (default 6, env MUONROI_TOOL_LIMIT_AUTO_RECOVER_CAP).
   let toolLimitAutoRecoverCount = 0;
   const TOOL_LIMIT_AUTO_RECOVER_CAP = getToolLimitAutoRecoverCap();
+  // Convene-council loop guard. The agent may convene the council at most once
+  // per turn — a second convene_council call in the SAME turn does NOT re-run a
+  // full (5-10min) council; instead its tool-result is a non-binding suggestion
+  // to USE the synthesis already above (respond, or ask_user). Turn-scoped (not
+  // per-stream-attempt) so a `continue` restart cannot reset it. Live-caught:
+  // the model looped convene→synthesis→convene, burning a second council.
+  let conveneRunsThisTurn = 0;
+  const COUNCIL_MAX_CONVENES_PER_TURN = (() => {
+    const raw = Number.parseInt(process.env.MUONROI_MAX_CONVENES_PER_TURN ?? "", 10);
+    return Number.isFinite(raw) && raw >= 1 ? raw : 1;
+  })();
   let stallTriggered = false;
   // Time-to-first-byte stall RE-PROMPT: some providers (observed:
   // xai/grok-build-0.1) accept the request then never send the first byte —
@@ -999,6 +1014,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // for this session (enough configured roles) — else the model could
           // call a council that can't convene.
           councilConfigured: configuredRoleCount >= autoCouncilMinRoles,
+          askUser: deps.askUser,
           runDebate: async (topic: string) => {
             const gen = deps.runCouncilV2(topic, {
               skipClarification: true,
@@ -1794,6 +1810,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               );
             },
           },
+          // Hold the stream open while a blocking `ask_user` card awaits a human.
+          isInteractivePaused,
         );
         // F3c — hard-cap LLM calls per turn before this streamText()
         if (++llmCallsThisTurn > MAX_LLM_CALLS_PER_TURN) {
@@ -3452,6 +3470,34 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               );
             if (belongsHere && conveneResponse) {
               const req = consumeCouncilConvene();
+              // Loop guard: a second convene in the SAME turn short-circuits —
+              // do NOT pay for another council. Splice a non-binding suggestion
+              // pointing the model at the synthesis already in the transcript so
+              // it responds (or asks the user) instead of re-convening forever.
+              if (conveneRunsThisTurn >= COUNCIL_MAX_CONVENES_PER_TURN) {
+                logger.warn("orchestrator", "convene: loop guard hit — suppressing re-convene", {
+                  conveneRunsThisTurn,
+                  cap: COUNCIL_MAX_CONVENES_PER_TURN,
+                });
+                const suggestion =
+                  "[The council already convened this turn — its synthesis is in the transcript above. " +
+                  "Do NOT convene again for the same question. Use that synthesis now: give the user your " +
+                  "recommendation, or call ask_user if you need their go-ahead before implementing.]";
+                const { messages: guardSpliced, replaced: guardReplaced } = spliceConveneToolResult(
+                  conveneResponse.messages as Array<{ role: string; content?: unknown }>,
+                  req?.toolCallId ?? null,
+                  suggestion,
+                );
+                if (!guardReplaced) {
+                  logger.warn("orchestrator", "convene: loop-guard splice found no matching toolCallId", {
+                    toolCallId: req?.toolCallId ?? null,
+                  });
+                }
+                const guardNewMsgs = guardSpliced.slice(deps.messages.length);
+                for (const msg of guardNewMsgs) deps.messages.push(msg as ModelMessage);
+                continue; // re-enter with the suggestion as the tool result
+              }
+              conveneRunsThisTurn++;
               yield { type: "content", content: "\n[Convening the council…]\n" };
               // Filter the terminal `done` runCouncilV2 emits on its
               // non-continuation path (orchestrator.ts ~2274): letting it through
