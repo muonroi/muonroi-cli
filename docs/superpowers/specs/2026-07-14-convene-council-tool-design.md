@@ -4,6 +4,58 @@
 **Status:** Approved (pending spec review)
 **Author:** agent session
 
+## Resolved open items (codebase mapping 2026-07-14)
+
+Two open items in the design below were resolved by mapping the codebase:
+
+**1. `ask_user` tool — must be BUILT NEW (no existing model-callable ask tool).**
+The full registered ToolSet (builtin `src/tools/registry.ts`, native
+`src/tools/native-tools.ts`, GSD `src/gsd/workflow-tools.ts`) has no tool that
+raises an interactive askcard to the human. `respond_*` are the final structured
+answer; the tool-loop-cap / safety-override cards are CLI-triggered, not
+model-triggered. The exact BLOCKING pattern to mirror already exists —
+`askSafetyOverride` / `askToolLoopContinue`:
+- Tool `execute()` awaits a deps callback: `await deps.askSafetyOverride({...})`
+  (`tool-engine.ts:2582`); loop-cap `await deps.askToolLoopContinue(info)`
+  (`tool-engine.ts:1585`).
+- Callback forwards to an `Agent` handler registered via
+  `setSafetyOverrideHandler` (`orchestrator.ts:889-892`, dispatch `:3614-3629`).
+- The TUI registers the handler in a `useEffect` (`use-app-logic.tsx:2574-2617`):
+  builds a `CouncilQuestionData` (phase `"safety-override"`), stores the Promise
+  `resolve` in a ref-map, sets `pendingCouncilQuestion` to render the card, and
+  returns the unresolved Promise. User picks → key handler drains the resolver
+  (`use-app-logic.tsx:5800-5827`) → `execute()` unblocks.
+- The `council_question` chunk + `CouncilQuestionCard` component are reused
+  verbatim; add one `CouncilQuestionPhase` value `"ask-user"`
+  (`src/types/index.ts:253-261`). Headless needs an auto-answer path in
+  `src/headless/council-answers.ts` to avoid hanging.
+
+**2. `/ideal` council inheritance — the seam is the `runResume` no-checkpoint
+branch, and it needs a synthesis→ProductSpec transform.**
+- `/ideal` runs council via the LOWER-LEVEL `runDebate` in its `research` FSM case
+  (`src/product-loop/loop-driver.ts:680`), NOT `runCouncilV2`. Its planning stage
+  consumes a structured **`ProductSpec`** JSON read from `roadmap.md` §"Product
+  Specification" (`loadProductSpec`, `src/product-loop/index.ts:1610-1613`).
+- The skip-council seam: `runResume` (`src/product-loop/index.ts:1891`) reads
+  `readDebateCheckpoint(runDir)` at `:1990`; when NO checkpoint is present it
+  BYPASSES the council loop entirely and goes straight to `loadProductSpec` →
+  sprint planning (`:2033-2049`). So a run dir containing a `manifest.json` +
+  `roadmap.md`(ProductSpec) + NO `debate-checkpoint.json` makes
+  `agent.runProductLoopV1({subcommand:"resume", runId})` enter at planning,
+  council-free.
+- Programmatic entry exists: `runProductLoopV1` is an Agent method
+  (`orchestrator.ts:2278`); the `__PRODUCT_LOOP__` sentinel is only the UI's
+  serialization convention — a tool/orchestrator can call it directly.
+- **The one genuinely new piece:** convene_council's output is
+  `councilManager.lastSynthesis` (a free-form STRING); `/ideal` planning needs a
+  `ProductSpec` JSON. No existing code converts one to the other. The handoff
+  must run the same synthesis→ProductSpec transform that
+  `loop-driver.ts:940-1011` does (an LLM prompt: debate summary → ProductSpec
+  JSON) and persist it to `roadmap.md` before triggering resume. This transform
+  + persistence is the highest-effort task in the plan.
+
+Both resolutions feed the Task breakdown and the sub-agent design debate below.
+
 ## Problem
 
 Auto-council currently **skips reasoning models** with a hardcoded rule:
