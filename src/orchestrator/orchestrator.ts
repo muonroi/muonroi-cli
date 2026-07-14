@@ -2391,7 +2391,7 @@ export class Agent {
       let depth: import("../pil/llm-classify.js").DepthTier = "standard";
       try {
         const { createLlmClassifier } = await import("../pil/llm-classify.js");
-        const classify = createLlmClassifier(this.requireProvider(), this.modelId);
+        const classify = createLlmClassifier(this.requireProvider(), this.modelId, { routeFastTier: true });
         const res = await classify(payload.idea);
         if (res?.depthTier) {
           depth = res.depthTier;

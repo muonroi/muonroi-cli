@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { installMockModel, textOnlyStream } from "../../agent-harness/mock-model.js";
 import { loadCatalog } from "../../models/registry.js";
-import { classifySubSessionAction, createLlmClassifier } from "../llm-classify.js";
+import { classifierBudget, classifySubSessionAction, createLlmClassifier } from "../llm-classify.js";
 
 describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
   beforeAll(async () => {
@@ -315,6 +315,47 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     cleanup = bareHandle.uninstall;
     const bareClassify = createLlmClassifier((() => bareHandle.model) as never, "deepseek-v4-flash");
     expect((await bareClassify("fix it"))?.deliverableKind).toBeNull();
+  });
+});
+
+describe("classifierBudget (tier-scaled timeout — grok-composer starvation fix)", () => {
+  // Root cause of /ideal over-engineering (2026-07-14): grok-composer-2.5-fast is
+  // a balanced-tier agentic model with reasoning:false, so the legacy
+  // reasoning-only branch gave it the tight 2.5s ceiling. It answers slower than
+  // a flash model, so the abort fired before its 8-word verdict streamed back →
+  // null → fail-open "standard" → full council on a trivial task. Timeout must
+  // scale with WEIGHT (tier), not just the reasoning flag.
+  it("gives a balanced non-reasoning agentic model the generous timeout (grok-composer)", () => {
+    const b = classifierBudget({ reasoning: false, tier: "balanced" });
+    expect(b.heavyweight).toBe(true);
+    expect(b.timeoutMs).toBe(8000);
+    // max-output stays tiny — a non-reasoning model emits the 8 words directly.
+    expect(b.maxOutputTokens).toBe(56);
+  });
+
+  it("keeps the tight 2.5s timeout for a fast-tier model", () => {
+    const b = classifierBudget({ reasoning: false, tier: "fast" });
+    expect(b.heavyweight).toBe(false);
+    expect(b.timeoutMs).toBe(2500);
+    expect(b.maxOutputTokens).toBe(56);
+  });
+
+  it("gives any reasoning model the generous timeout AND budget regardless of tier", () => {
+    const b = classifierBudget({ reasoning: true, tier: "fast" });
+    expect(b.heavyweight).toBe(true);
+    expect(b.timeoutMs).toBe(8000);
+    expect(b.maxOutputTokens).toBe(2048);
+  });
+
+  it("premium non-reasoning also earns the generous ceiling", () => {
+    expect(classifierBudget({ reasoning: false, tier: "premium" }).timeoutMs).toBe(8000);
+  });
+
+  it("treats an unknown (non-catalog) model as light — no tier, not reasoning", () => {
+    const b = classifierBudget(undefined);
+    expect(b.heavyweight).toBe(false);
+    expect(b.timeoutMs).toBe(2500);
+    expect(b.maxOutputTokens).toBe(56);
   });
 });
 

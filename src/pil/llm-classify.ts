@@ -117,6 +117,22 @@ export interface LlmClassifyOptions {
 
 export type LlmClassifyFn = (prompt: string, opts?: LlmClassifyOptions) => Promise<LlmClassifyResult | null>;
 
+/**
+ * Factory-level options for `createLlmClassifier` (distinct from the per-call
+ * `LlmClassifyOptions`). Chosen once when the closure is built.
+ */
+export interface CreateClassifierOptions {
+  /**
+   * Route the throwaway classify to the provider's fast tier when one exists
+   * (mirrors `classifySubSessionAction`). Same-provider only, so the already-
+   * bound factory/key still works. A no-op when the provider exposes no
+   * routable fast model (e.g. xai) — the tier-scaled timeout inside the closure
+   * covers that case, so a heavy session model never starves the verdict.
+   * Zero-hardcode: the fast id comes from `getRoutedModelByTier`, not a literal.
+   */
+  routeFastTier?: boolean;
+}
+
 const LLM_CLASSIFY_TIMEOUT_MS = 2500;
 
 // Reasoning models (grok-4.5, deepseek-v4-flash, gpt-5.x) spend their output
@@ -133,6 +149,41 @@ const REASONING_CLASSIFY_TIMEOUT_MS = 8000;
 // 56 keeps headroom without padding (the model still stops after eight words).
 const NONREASONING_MAX_OUTPUT_TOKENS = 56;
 const REASONING_MAX_OUTPUT_TOKENS = 2048;
+
+/**
+ * Compute the classify call budget from the resolved model's catalog metadata.
+ *
+ * TIMEOUT scales with model WEIGHT, not just the reasoning flag: a balanced/
+ * premium agentic model (e.g. grok-composer — balanced, reasoning:false)
+ * answers far slower than a fast-tier flash model, so the tight 2.5s ceiling
+ * aborted before its 8-word verdict streamed back — collapsing every classify
+ * to the null→"standard" fail-open (the /ideal over-engineering root cause
+ * observed 2026-07-14). `tier` comes from the catalog, so this is data-driven,
+ * NOT a per-model literal. The generous ceiling is a cap not padding: a healthy
+ * fast model still returns in <1s, so there is no added latency — only a
+ * genuinely slow model uses the headroom.
+ *
+ * MAX-OUTPUT scales with REASONING only: a reasoning model burns its output
+ * budget on reasoning tokens before any visible text, so it needs the room in
+ * tokens; a non-reasoning model (even a heavy one) emits the 8 words directly.
+ * The two knobs are intentionally decoupled.
+ */
+export function classifierBudget(modelInfo: { reasoning?: boolean; tier?: string } | undefined): {
+  isReasoning: boolean;
+  heavyweight: boolean;
+  timeoutMs: number;
+  maxOutputTokens: number;
+} {
+  const isReasoning = modelInfo?.reasoning === true;
+  const tier = modelInfo?.tier;
+  const heavyweight = isReasoning || (tier !== undefined && tier !== "fast");
+  return {
+    isReasoning,
+    heavyweight,
+    timeoutMs: heavyweight ? REASONING_CLASSIFY_TIMEOUT_MS : LLM_CLASSIFY_TIMEOUT_MS,
+    maxOutputTokens: isReasoning ? REASONING_MAX_OUTPUT_TOKENS : NONREASONING_MAX_OUTPUT_TOKENS,
+  };
+}
 
 /**
  * Per-namespace shallow merge of providerOptions. The base already carries
@@ -337,23 +388,32 @@ function parseResponse(raw: string): LlmClassifyResult | null {
  * Returns null if the call fails / times out / parses to garbage. Callers must
  * fail-open (keep prior taskType, do not block the turn).
  */
-export function createLlmClassifier(factory: ProviderFactory, modelId: string): LlmClassifyFn {
+export function createLlmClassifier(
+  factory: ProviderFactory,
+  modelId: string,
+  classifyOpts?: CreateClassifierOptions,
+): LlmClassifyFn {
   return async function classify(prompt: string, opts?: LlmClassifyOptions): Promise<LlmClassifyResult | null> {
     const signal = opts?.signal;
     const recentTurns = opts?.recentTurns;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const runtime = resolveModelRuntime(factory, modelId);
-      const isReasoning = runtime.modelInfo?.reasoning === true;
+      // Optional fast-tier route (same provider): a 2-word verdict does not need
+      // the (possibly heavy, agentic) session model. No-op when the provider has
+      // no routable fast tier — the tier-scaled timeout below then covers it.
+      let classifyModelId = modelId;
+      if (classifyOpts?.routeFastTier) {
+        const provider = getModelInfo(modelId)?.provider;
+        const fast = provider ? getRoutedModelByTier("fast", provider) : undefined;
+        if (fast && fast.id !== modelId) classifyModelId = fast.id;
+      }
+      const runtime = resolveModelRuntime(factory, classifyModelId);
+      // Timeout scales with model WEIGHT; max-output with reasoning. See
+      // classifierBudget() for the rationale (grok-composer starvation fix).
+      const { isReasoning, heavyweight, timeoutMs } = classifierBudget(runtime.modelInfo);
 
-      // Budget + timeout scale with reasoning: a reasoning model needs room and
-      // time to emit reasoning THEN the answer; a plain model answers in <16
-      // tokens almost instantly.
-      timer = setTimeout(
-        () => controller.abort(),
-        isReasoning ? REASONING_CLASSIFY_TIMEOUT_MS : LLM_CLASSIFY_TIMEOUT_MS,
-      );
+      timer = setTimeout(() => controller.abort(), timeoutMs);
       const combinedSignal = signal
         ? (AbortSignal.any?.([signal, controller.signal]) ?? controller.signal)
         : controller.signal;
@@ -402,7 +462,8 @@ export function createLlmClassifier(factory: ProviderFactory, modelId: string): 
       }
       if (debug) {
         console.error(
-          `[pil.llm-classify] raw(${modelId}) maxOut=${dropMaxTokens ? "dropped" : maxOut} ` +
+          `[pil.llm-classify] raw(${classifyModelId}${classifyModelId !== modelId ? `←${modelId}` : ""}) ` +
+            `heavyweight=${heavyweight} maxOut=${dropMaxTokens ? "dropped" : maxOut} ` +
             `parts=${JSON.stringify(partCounts)} text<<<${text}>>> reasoning<<<${reasoningText.slice(0, 200)}>>>`,
         );
       }
@@ -420,10 +481,7 @@ export function createLlmClassifier(factory: ProviderFactory, modelId: string): 
       // UNKNOWN classification, never a keyword-regex guess.
       if (timer) clearTimeout(timer);
       const repairController = new AbortController();
-      const repairTimer = setTimeout(
-        () => repairController.abort(),
-        isReasoning ? REASONING_CLASSIFY_TIMEOUT_MS : LLM_CLASSIFY_TIMEOUT_MS,
-      );
+      const repairTimer = setTimeout(() => repairController.abort(), timeoutMs);
       const repairSignal = signal
         ? (AbortSignal.any?.([signal, repairController.signal]) ?? repairController.signal)
         : repairController.signal;
