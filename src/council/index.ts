@@ -322,6 +322,30 @@ export function postDebateContinuation(
   return null;
 }
 
+/**
+ * Neutral post-council continuation. Used by the auto-council path (tool-engine)
+ * and the `/council` slash path (runCouncilV2) once they run with
+ * `convenePath: true` — the hardcoded post-debate option card is suppressed, so
+ * there is no `chosenAction` to branch on. Instead of the CLI deciding the next
+ * step, we hand the synthesis back to a normal agent turn with a NON-BINDING
+ * nudge and let the agent's own intent drive the follow-up (respond / ask_user /
+ * implement). Returns "" for an empty synthesis so the caller skips re-entry.
+ */
+export function buildNeutralPostCouncilContinuation(synthesis: string): string {
+  if (!synthesis || !synthesis.trim()) return "";
+  return (
+    `Council debate completed. Conclusion:\n\n${synthesis}\n\n` +
+    `You now decide the next step based on the user's original request — do not ` +
+    `stop without doing one of these:\n` +
+    `  • If the conclusion IS the deliverable (analysis/evaluation/decision), ` +
+    `respond to the user with it.\n` +
+    `  • If a choice genuinely needs the human before proceeding, call ask_user.\n` +
+    `  • If the task calls for building and the conclusion is a sufficient spec, ` +
+    `implement it now through your normal workflow — do NOT re-litigate the ` +
+    `decision or expand scope beyond it.`
+  );
+}
+
 export async function* runCouncil(
   topic: string,
   sessionModelId: string,
