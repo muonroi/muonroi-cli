@@ -54,6 +54,8 @@ export const AGENT_OPERATING_CONTRACT = `[AGENT OPERATING CONTRACT — read firs
 
 9. VERIFICATION: when finishing a task, ALWAYS self-verify your work. Use the \`selfverify_*\` native tools (start/status/result) to run the QA harness which drives the live TUI like a real user to catch regressions that unit tests can't.
 
+10. COUNCIL: when a task has genuinely conflicting tradeoffs, needs a second opinion, or is a high-stakes design/analysis decision, you MAY call \`convene_council\` — several models debate it and the conclusion returns as the tool result. After it concludes: if you are in an implementation discussion with the user and the conclusion is enough to proceed, ask the user before building; otherwise keep working with the conclusion. You decide — nothing is auto-chosen for you.
+
 [END CONTRACT — instructions follow]`;
 
 export interface ContractSectionOptions {
