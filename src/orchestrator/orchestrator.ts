@@ -2060,7 +2060,7 @@ export class Agent {
       convenePath?: boolean;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
-    const { runCouncil, postDebateContinuation } = await import("../council/index.js");
+    const { runCouncil, buildNeutralPostCouncilContinuation } = await import("../council/index.js");
     const { createCouncilLLM } = await import("../council/llm.js");
     const councilStats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
     const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, councilStats);
@@ -2182,7 +2182,13 @@ export class Agent {
       // fires ONLY on the top-level slash path, never when nested inside
       // processMessage (auto-council) or drained by the runDebate tool — those
       // callers manage their own continuation.
-      const continuationPrompt = ownsController && synthesis ? postDebateContinuation(chosenAction, synthesis) : null;
+      // convenePath suppresses the hardcoded card (chosenAction stays undefined),
+      // so always hand the synthesis to a normal agent turn via the neutral
+      // continuation and let the agent decide. ownsController scopes this to the
+      // top-level /council slash path (auto-council nests with ownsController
+      // false and continues in tool-engine instead).
+      const continuationPrompt =
+        ownsController && synthesis ? buildNeutralPostCouncilContinuation(synthesis) || null : null;
       const isBuildContinuation = chosenAction === "implement" || chosenAction === "generate_plan";
       if (continuationPrompt && isBuildContinuation && process.env.MUONROI_COUNCIL_ISOLATE_IMPL !== "0") {
         // #1 — build the council decision in an ISOLATED sub-agent instead of

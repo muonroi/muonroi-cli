@@ -4637,7 +4637,7 @@ export function useAppLogic(props: AppLogicProps) {
               isProcessingRef.current = true;
               setIsProcessing(true);
               try {
-                const gen = agent.runCouncilV2(topic);
+                const gen = agent.runCouncilV2(topic, { convenePath: true });
                 for await (const chunk of gen) {
                   // Council emitted a chunk — clear the "Waiting for next phase"
                   // inter-card heartbeat started after the last askcard answer.

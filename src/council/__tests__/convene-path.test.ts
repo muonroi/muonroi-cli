@@ -8,6 +8,7 @@
  * returns the synthesis; convenePath:false still shows it (no over-suppression).
  */
 import { describe, expect, it, vi } from "vitest";
+import { buildNeutralPostCouncilContinuation, postDebateContinuation } from "../index.js";
 
 vi.mock("../../storage/index", () => ({
   appendSystemMessage: vi.fn(),
@@ -140,5 +141,15 @@ describe("convenePath post-debate suppression", () => {
     );
     expect(chunks.some(isPostDebateCard)).toBe(true);
     expect(respondToQuestion).toHaveBeenCalled();
+  });
+});
+
+describe("/council convenePath continuation source", () => {
+  const SYNTH = '```json\n{"type":"analysis","conclusion":"x"}\n```';
+  it("neutral builder returns a prompt where postDebateContinuation(undefined) returns null", () => {
+    // Card suppressed → chosenAction undefined → the OLD path stopped (null).
+    expect(postDebateContinuation(undefined, SYNTH)).toBeNull();
+    // New path always hands the synthesis to the agent.
+    expect(buildNeutralPostCouncilContinuation(SYNTH)).toContain(SYNTH);
   });
 });
