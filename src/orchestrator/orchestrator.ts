@@ -2338,13 +2338,42 @@ export class Agent {
       phases: [] as Array<{ name: string; durationMs: number }>,
     };
     const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, productStats);
-    const processMessageFn = (m: string) => this.processMessage(m, options?.observer);
+    // Autonomous-execution permission for the product loop. /ideal's consent
+    // boundary is the preflight plan-approval askcard; once the PO approves the
+    // plan, the sprint IMPLEMENT turn must apply its own file-op mutations without
+    // a per-tool approval prompt. In `safe` mode a Write/Edit surfaces a
+    // tool_approval_request and awaits respondToToolApproval — but in the driven
+    // product-loop context nothing answers it and no approval askcard renders, so
+    // the impl turn wedges forever right after finishReason:tool-calls (observed
+    // live 2026-07-14: 0 files written across grok/opencode/deepseek + isolated &
+    // streamed paths — tool-engine.ts:2997). Elevating safe→auto-edit for the turn
+    // auto-approves file ops (yolo stays yolo); catastrophic bash stays hard-blocked
+    // by permission-mode's CATASTROPHIC_PATTERNS regardless of mode.
+    const self = this;
+    const processMessageFn = (m: string): AsyncGenerator<StreamChunk, void, unknown> =>
+      (async function* () {
+        const prev = self.permissionMode;
+        if (self.permissionMode === "safe") self.permissionMode = "auto-edit";
+        try {
+          yield* self.processMessage(m, options?.observer);
+        } finally {
+          self.permissionMode = prev;
+        }
+      })();
     // Isolated bounded task-runner bridge for the sprint implement stage: a fresh
     // child context (getSubAgentBudgetChars cap, independent compaction) that does
     // NOT inherit this turn's council-debate history — the root fix for the live
     // ctx-overflow wedge. Returns a compact ToolResult (absorbed, no parent bloat).
-    const runIsolatedTask = (request: import("../types/index.js").TaskRequest) =>
-      this.runTaskRequest(request, undefined, this.abortController?.signal);
+    // Same autonomous-permission elevation as the streamed path above.
+    const runIsolatedTask = async (request: import("../types/index.js").TaskRequest) => {
+      const prev = self.permissionMode;
+      if (self.permissionMode === "safe") self.permissionMode = "auto-edit";
+      try {
+        return await this.runTaskRequest(request, undefined, this.abortController?.signal);
+      } finally {
+        self.permissionMode = prev;
+      }
+    };
     const flowDir = nodePath.join(this.bash.getCwd(), ".muonroi-flow");
 
     // P2.7 (LLM-first — no-regex routing): the work-depth tier that decides
