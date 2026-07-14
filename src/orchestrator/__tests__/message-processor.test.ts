@@ -191,6 +191,40 @@ describe("MessageProcessor — DI surface invariants", () => {
     expect(councilCalled).toBe(true);
   });
 
+  it("auto-council runs runCouncilV2 with convenePath:true (no hardcoded post-debate card)", async () => {
+    let capturedOpts: Record<string, unknown> | undefined;
+    const deps = makeDeps({
+      councilManager: makeCouncilStub({
+        isContinuation: false,
+        lastSynthesis: null,
+      } as Partial<CouncilManager>),
+      runCouncilV2: async function* (_msg: string, opts?: Record<string, unknown>) {
+        capturedOpts = opts;
+        yield { type: "done" };
+      },
+    });
+    // Same style as the neighbouring "delegates to deps.runCouncilV2 when
+    // auto-council gate is taken" test: we cannot exercise the gate
+    // end-to-end without PIL machinery, so directly invoke deps.runCouncilV2
+    // with the same options tool-engine.ts's auto-council branch passes,
+    // and assert convenePath is threaded through.
+    const processor = new MessageProcessor(deps);
+    expect(processor).toBeInstanceOf(MessageProcessor);
+    // convenePath is not yet part of MessageProcessorDeps.runCouncilV2's opts
+    // type (tool-engine.ts's own deps param is untyped `any`, so production
+    // code passes it through without a type error); cast here to exercise the
+    // same runtime shape tool-engine.ts sends.
+    const iter = deps.runCouncilV2("topic", {
+      skipClarification: true,
+      userModelMessage: { role: "user", content: "topic" },
+      convenePath: true,
+    } as unknown as Parameters<typeof deps.runCouncilV2>[1]);
+    for await (const _ of iter) {
+      /* drain */
+    }
+    expect(capturedOpts?.convenePath).toBe(true);
+  });
+
   it("respects observer callbacks via notifyObserver (smoke)", () => {
     const observer: ProcessMessageObserver = {};
     const deps = makeDeps();

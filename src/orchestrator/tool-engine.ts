@@ -814,18 +814,23 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       skipClarification: !isAutoCouncilClarifyEnabled(),
       observer,
       userModelMessage,
+      // Suppress the CLI-hardcoded post-debate option card. The follow-up is
+      // decided by the agent's own intent via the neutral continuation below,
+      // not a fixed CLI menu. (Pre-debate clarification is orthogonal and still
+      // runs per skipClarification.)
+      convenePath: true,
     });
     const synthesis = deps.councilManager.lastSynthesis;
     const chosenAction = deps.councilManager.lastPostDebateAction;
     deps.councilManager.setLastSynthesis(null);
     deps.councilManager.setLastPostDebateAction(null);
-    // Honor the user's post-debate choice instead of always continuing: an
-    // evaluation/decision debate whose deliverable is the conclusion (default
-    // save_exit) now returns to the composer rather than being force-fed a
-    // meaningless "proceed with the action items" turn. postDebateContinuation
-    // is shared with the /council slash path (orchestrator.runCouncilV2).
-    const { postDebateContinuation } = await import("../council/index.js");
-    const continuationPrompt = synthesis ? postDebateContinuation(chosenAction ?? undefined, synthesis) : null;
+    // convenePath suppressed the hardcoded card, so there is no chosenAction to
+    // branch on. Hand the synthesis to a normal agent turn with a non-binding
+    // nudge and let the agent decide the next step (respond / ask_user /
+    // implement). Re-entry is guarded by setContinuation(true) below so
+    // shouldAutoCouncil (which checks !isContinuation) can't re-fire into a loop.
+    const { buildNeutralPostCouncilContinuation } = await import("../council/index.js");
+    const continuationPrompt = synthesis ? buildNeutralPostCouncilContinuation(synthesis) || null : null;
     if (continuationPrompt) {
       yield { type: "content", content: "\n[Auto-continuing with council recommendations...]\n" };
       deps.councilManager.setContinuation(true);
@@ -1019,6 +1024,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             const gen = deps.runCouncilV2(topic, {
               skipClarification: true,
               userModelMessage: { role: "user", content: `/council ${topic}` },
+              // Model-callable debate: the synthesis is returned to the model as
+              // the tool result and the model decides the follow-up — so suppress
+              // the CLI-hardcoded post-debate card, same as convene_council.
+              convenePath: true,
             });
             for await (const chunk of gen) {
               // Drain the generator
