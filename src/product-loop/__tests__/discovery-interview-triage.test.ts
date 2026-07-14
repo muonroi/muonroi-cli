@@ -77,7 +77,10 @@ describe("iterateInterview — triage-driven card collapse", () => {
   afterEach(async () => {
     if (prev === undefined) delete process.env.MUONROI_DISCOVERY_AUTOFILL;
     else process.env.MUONROI_DISCOVERY_AUTOFILL = prev;
-    await fs.rm(flowDir, { recursive: true, force: true });
+    // Windows can briefly hold a handle on a just-written file under runs/,
+    // making a plain recursive rm throw ENOTEMPTY when the full suite runs in
+    // parallel. maxRetries/retryDelay make teardown wait out that race.
+    await fs.rm(flowDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("trivial → auto-fills ALL required questions (no per-question card, just the gate)", async () => {
