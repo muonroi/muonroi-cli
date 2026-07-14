@@ -3453,12 +3453,22 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             if (belongsHere && conveneResponse) {
               const req = consumeCouncilConvene();
               yield { type: "content", content: "\n[Convening the council…]\n" };
-              yield* deps.runCouncilV2(userMessage, {
+              // Filter the terminal `done` runCouncilV2 emits on its
+              // non-continuation path (orchestrator.ts ~2274): letting it through
+              // would finalize the UI turn BEFORE we restart streamText below, so
+              // the model's post-council continuation would be orphaned/invisible
+              // (live-caught: council ran, synthesis produced, but no final answer
+              // rendered). We continue the SAME turn ourselves via the splice +
+              // `continue` restart, so the council's `done` must not propagate.
+              for await (const chunk of deps.runCouncilV2(userMessage, {
                 convenePath: true,
                 skipClarification: true,
                 observer,
                 userModelMessage,
-              });
+              })) {
+                if ((chunk as { type?: string }).type === "done") continue;
+                yield chunk;
+              }
               const synthesis = deps.councilManager.lastSynthesis;
               const spliceValue =
                 synthesis && synthesis.trim().length > 0

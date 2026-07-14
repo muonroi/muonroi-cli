@@ -527,7 +527,11 @@ export async function* runCouncil(
     const preflightGen = runPreflight(spec, participants, researchNeeded, respondToPreflight, {
       repoEmpty: internetFirst,
       researchOverridable: true,
-      autoApprove: spec.ready === true || options?.autoApprovePreflight === true,
+      // convenePath auto-approves the pre-debate plan card too: the agent
+      // already decided to convene, so re-gating the discussion plan is a
+      // redundant interruption of the autonomous tool call (same rationale as
+      // sprintPlanningMode). The brief is still shown; it just isn't blocking.
+      autoApprove: spec.ready === true || options?.autoApprovePreflight === true || options?.convenePath === true,
     });
     let preflightResult: IteratorResult<StreamChunk, boolean>;
     do {
