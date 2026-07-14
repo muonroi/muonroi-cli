@@ -11,6 +11,7 @@ const PHASE_LABEL: Record<CouncilQuestionPhase, string> = {
   "pil-acceptance": "Confirm the goal",
   "tool-loop-cap": "Tool-loop checkpoint",
   "safety-override": "Safety check",
+  "ask-user": "The agent is asking",
 };
 
 export interface CouncilQuestionAnswer {

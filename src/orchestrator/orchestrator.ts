@@ -121,6 +121,8 @@ import {
   type ProcessMessageUsage,
   type ResolvedModelRuntime,
 } from "./agent-options";
+import type { AskUserAskInfo } from "./ask-user.js";
+import { ASK_USER_DISMISSED } from "./ask-user.js";
 import {
   AUTO_COMMIT_ATTRIBUTION,
   type AutoCommitResult,
@@ -161,6 +163,7 @@ import { CouncilManager } from "./council-manager.js";
 import { CrossTurnDedup, isCrossTurnDedupEnabled } from "./cross-turn-dedup.js";
 import { DelegationManager } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
+import { beginInteractivePause, endInteractivePause, isInteractivePaused } from "./interactive-pause.js";
 import { MessageProcessor, type MessageProcessorDeps } from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
 import { buildSystemPrompt, HARD_MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS } from "./prompts";
@@ -890,6 +893,17 @@ export class Agent {
 
   setSafetyOverrideHandler(fn: ((block: SafetyOverrideAskInfo) => Promise<SafetyOverrideVerdict>) | null): void {
     this._safetyOverrideHandler = fn;
+  }
+
+  // ask_user handler — set by the UI (app.tsx). Invoked when the model calls the
+  // `ask_user` tool: the UI surfaces an agent-authored card and resolves with the
+  // human's answer string, which becomes the tool result. When unset (headless
+  // without an answerer), the tool returns the dismissed sentinel so the agent
+  // still continues from its own judgment.
+  private _askUserHandler: ((info: AskUserAskInfo) => Promise<string>) | null = null;
+
+  setAskUserHandler(fn: ((info: AskUserAskInfo) => Promise<string>) | null): void {
+    this._askUserHandler = fn;
   }
 
   respondToToolApproval(approvalId: string, approved: boolean): void {
@@ -2255,6 +2269,7 @@ export class Agent {
               idleMs,
               totalMs,
               label: "council continuation turn",
+              shouldSuppressFire: isInteractivePaused,
             });
           } catch (err) {
             if (err instanceof TurnStallError) {
@@ -3288,6 +3303,7 @@ export class Agent {
               idleMs: turnIdleMs,
               totalMs: turnTotalMs,
               label: "assistant turn",
+              shouldSuppressFire: isInteractivePaused,
             });
           } catch (stallErr) {
             // A hung turn is NOT a transient error — retrying it (below) would
@@ -3634,6 +3650,23 @@ export class Agent {
         } catch (err) {
           logger.error("orchestrator", "askSafetyOverride crashed", { error: err });
           return { action: "block" };
+        }
+      },
+      askUser: async (info) => {
+        const h = self._askUserHandler;
+        if (!h) {
+          logger.warn("orchestrator", "askUser called but no handler registered — returning dismissed sentinel");
+          return ASK_USER_DISMISSED;
+        }
+        // Hold both watchdogs open while the human answers (see interactive-pause.ts).
+        beginInteractivePause();
+        try {
+          return await h(info);
+        } catch (err) {
+          logger.error("orchestrator", "askUser crashed", { error: err });
+          return ASK_USER_DISMISSED;
+        } finally {
+          endInteractivePause();
         }
       },
       runCouncilV2: (msg, opts) => self.runCouncilV2(msg, opts),

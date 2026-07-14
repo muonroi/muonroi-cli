@@ -13,6 +13,16 @@ describe("agent-operating-contract — council line", () => {
     expect(AGENT_OPERATING_CONTRACT.toLowerCase()).toMatch(/you decide|your call|decide/);
   });
 
+  it("points the agent at ask_user for a human go/no-go, framed as optional (MAY)", () => {
+    expect(AGENT_OPERATING_CONTRACT).toContain("ask_user");
+    // Optional, agent-driven — never a forced CLI branch.
+    expect(AGENT_OPERATING_CONTRACT).toMatch(/MAY/);
+  });
+
+  it("stays within the front-loaded primacy budget (<2000 chars)", () => {
+    expect(AGENT_OPERATING_CONTRACT.length).toBeLessThan(2000);
+  });
+
   it("does NOT hardcode a post-council option set or a forced continue/implement branch", () => {
     const line = AGENT_OPERATING_CONTRACT.split("\n").find((l) => l.includes("convene_council")) ?? "";
     // No enumerated CLI option set (e.g. "1) save 2) implement 3) refine").

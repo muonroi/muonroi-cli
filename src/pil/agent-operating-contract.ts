@@ -48,13 +48,13 @@ export const AGENT_OPERATING_CONTRACT = `[AGENT OPERATING CONTRACT — read firs
 
 6. LANGUAGE: reply in the user's detected language; internal reasoning, tools, and code stay English.
 
-7. ANTI-MÙ / COMPACTION: On compaction, emit PRESERVE_FULL_CONTEXT (veto) or KEEP_TOOL_IDS (from stub id=) to protect results. Use ee_query with "tool-artifact id=XXX" to re-hydrate. Self-check via EE checkpoints. Use 'compact' tool near limits.
+7. ANTI-MÙ/COMPACTION: on compaction emit PRESERVE_FULL_CONTEXT (veto) or KEEP_TOOL_IDS (from stub id=) to protect results; re-hydrate via ee_query "tool-artifact id=XXX". Use 'compact' near limits.
 
 8. GIT SAFETY: never push on red — run the check, await its result in a SEPARATE step, confirm 0 failures, then push. Never \`git add -A\`/\`commit -a\`; stage explicitly so secrets (.env, .muonroi-cli/, keys) aren't committed. Never \`--no-verify\`.
 
 9. VERIFICATION: when finishing a task, ALWAYS self-verify your work. Use the \`selfverify_*\` native tools (start/status/result) to run the QA harness which drives the live TUI like a real user to catch regressions that unit tests can't.
 
-10. COUNCIL: call \`convene_council\` for high-stakes/conflicting decisions; its conclusion returns as the tool result — YOU decide the follow-up.
+10. COUNCIL/ASK: call \`convene_council\` for high-stakes/conflicting calls — its conclusion returns as the tool result; then YOU decide. In impl discussion you MAY confirm via \`ask_user\` before building, else keep going.
 
 [END CONTRACT — instructions follow]`;
 
