@@ -88,6 +88,19 @@ export async function* withTurnWatchdog(
       let res: IteratorResult<StreamChunk, void>;
       try {
         res = await Promise.race(racers);
+      } catch (err) {
+        // Stall (idle/total) fired while `it.next()` is still pending: the inner
+        // generator is suspended at an `await` and, unless told to unwind, its
+        // finally blocks (write-mutex release, in-flight council/tool cleanup)
+        // NEVER run — the turn "ends" for the UI but leaks a wedged generator
+        // that can block the NEXT turn (observed live: council reasoning-model
+        // hang, session c1d461439618 — user had to Ctrl+C and relaunch).
+        // Signal it to return. Fire-and-forget on purpose: the queued return
+        // only settles once the CALLER aborts its controller (in its catch,
+        // AFTER we rethrow), which settles the hung provider call — awaiting the
+        // return here would deadlock against that ordering.
+        void it.return?.(undefined).catch(() => {});
+        throw err;
       } finally {
         if (idleTimer) clearTimeout(idleTimer);
       }
