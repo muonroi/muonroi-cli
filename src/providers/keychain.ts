@@ -117,8 +117,8 @@ export async function loadKeyForProvider(provider: ProviderId): Promise<string> 
 }
 
 /**
- * Return the list of providers that currently have credentials available — checked across
- * OS keychain, environment variables, and user-settings.json. `ollama` is always included
+ * Return the list of providers that currently have credentials available —
+ * either an env API key or a stored OAuth token. `ollama` is always included
  * because it is keyless. Order is stable for UI rendering.
  */
 export async function getConfiguredProviders(): Promise<ProviderId[]> {
