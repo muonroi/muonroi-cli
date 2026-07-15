@@ -55,7 +55,7 @@ import { getApiKey, getBaseURL, getCurrentModel, saveUserSettings } from "./util
 import { runUpdate } from "./utils/update-checker";
 import { buildVerifyPrompt, getVerifyCliError } from "./verify/entrypoint";
 
-// Hydrate chat secrets from OS keychain before CLI bootstrap
+// Hydrate chat secrets (no-op now: secrets live in the environment/env-store)
 await hydrateChatEnvFromKeychain();
 
 const exitCleanlyOnSigterm = () => {
@@ -143,7 +143,7 @@ setRenderSink((lineOrChunk) => {
 
 /**
  * Try to find an API key for the model the CLI is about to run with.
- * Resolution: env (legacy MUONROI_API_KEY) → OS keychain → settings.json.
+ * Resolution: per-provider env var (env-store), else OAuth sentinel.
  * Returns null if nothing usable is configured anywhere.
  */
 async function resolveKeyForModel(modelId: string): Promise<string | null> {
@@ -646,7 +646,7 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
 
     // Resolve API key: explicit flag > legacy env/settings.apiKey > per-provider keychain
     // (matches the foreground flow — delegations were previously broken when the user
-    // only had a per-provider key in the OS keychain, e.g. deepseek.)
+    // only had a per-provider key in the environment, e.g. deepseek.)
     let apiKey = stringOption(options.apiKey) || getApiKey();
     if (!apiKey) {
       const modelForResolve = model ?? delegation.model ?? getCurrentModel("agent");
@@ -719,8 +719,8 @@ function resolveConfig(options: CliOptions) {
   const maxToolRounds = parseInt(stringOption(options.maxToolRounds) || "100", 10) || 100;
 
   if (typeof options.apiKey === "string" && process.env.MUONROI_TEST_NO_PERSIST !== "1") {
-    // Persist to OS keychain (per-provider) instead of plaintext settings.json.
-    // Fire-and-forget: keychain write is async; if it fails (no keytar), the key still
+    // Persist to the env-store (per-provider) instead of plaintext settings.json.
+    // Fire-and-forget: env-store write is sync; the key is also set in process.env so it
     // works for this run via `apiKey` above and the user can re-supply it next invocation.
     void persistApiKeyToKeychain(options.apiKey, stringOption(options.model)).catch(() => {});
   }
@@ -1234,21 +1234,19 @@ program
 
 const keys = program
   .command("keys")
-  .description("Manage provider API keys via the OS keychain (set, list, delete, import-bw)");
+  .description("Manage provider API keys as environment variables (set, list, delete)");
 
 keys
   .command("set <provider>")
-  .description("Prompt for a provider API key and store it in the OS keychain")
-  .option("--bw", "Also write the key to a Bitwarden vault Secure Note (requires bw CLI + BW_SESSION)")
-  .option("--prefix <prefix>", "Bitwarden item name prefix when --bw is set (default: 'muonroi-cli/')", "muonroi-cli/")
-  .action(async (provider: string, opts: { bw?: boolean; prefix: string }) => {
+  .description("Prompt for a provider API key and store it as an environment variable")
+  .action(async (provider: string) => {
     const { runKeysSet } = await import("./cli/keys.js");
-    await runKeysSet(provider, { bw: opts.bw, itemPrefix: opts.prefix });
+    await runKeysSet(provider);
   });
 
 keys
   .command("list")
-  .description("Show provider keys currently stored in the OS keychain (masked)")
+  .description("Show provider keys currently set in the environment (masked)")
   .action(async () => {
     const { runKeysList } = await import("./cli/keys.js");
     await runKeysList();
@@ -1256,19 +1254,10 @@ keys
 
 keys
   .command("delete <provider>")
-  .description("Delete a stored provider key from the OS keychain")
+  .description("Delete a stored provider key from the environment")
   .action(async (provider: string) => {
     const { runKeysDelete } = await import("./cli/keys.js");
     await runKeysDelete(provider);
-  });
-
-keys
-  .command("import-bw [providers...]")
-  .description("Import keys from a Bitwarden vault into the OS keychain (requires bw CLI + BW_SESSION)")
-  .option("--prefix <prefix>", "Vault item name prefix (default: 'muonroi-cli/')", "muonroi-cli/")
-  .action(async (providers: string[], opts: { prefix: string }) => {
-    const { runKeysImportBw } = await import("./cli/keys.js");
-    await runKeysImportBw({ providers, itemPrefix: opts.prefix });
   });
 
 keys
@@ -1289,7 +1278,7 @@ keys
 
 keys
   .command("export <file>")
-  .description("Export all keychain keys to an encrypted portable bundle (move between devices)")
+  .description("Export all provider keys to an encrypted portable bundle (move between devices)")
   .action(async (file: string) => {
     const { runKeysExport } = await import("./cli/keys.js");
     await runKeysExport(file);
@@ -1297,24 +1286,16 @@ keys
 
 keys
   .command("import <file>")
-  .description("Import an encrypted bundle into the OS keychain (created by 'keys export')")
+  .description("Import an encrypted bundle of provider keys (created by 'keys export')")
   .action(async (file: string) => {
     const { runKeysImport } = await import("./cli/keys.js");
     await runKeysImport(file);
   });
 
 keys
-  .command("cleanup-settings")
-  .description("Strip plaintext API keys out of ~/.muonroi-cli/user-settings.json after migrating to keychain")
-  .action(async () => {
-    const { runKeysCleanupSettings } = await import("./cli/keys.js");
-    await runKeysCleanupSettings();
-  });
-
-keys
   .command("set-chat <id>")
   .description(
-    "Set a chat-service secret (discord-token, discord-guild-id, slack-token, slack-team-id) in the OS keychain",
+    "Set a chat-service secret (discord-token, discord-guild-id, slack-token, slack-team-id) in the environment",
   )
   .action(async (id: string) => {
     const { runChatKeySet } = await import("./cli/keys.js");
@@ -1336,15 +1317,6 @@ keys
       process.exit(1);
     }
     await runChatKeySet(id as any, value);
-  });
-
-keys
-  .command("import-bw-chat [ids...]")
-  .option("--prefix <prefix>", "BW item name prefix", "muonroi-cli/chat-")
-  .description("Import chat-service secrets from Bitwarden vault into OS keychain")
-  .action(async (ids: string[], opts: { prefix?: string }) => {
-    const { runChatImportBw } = await import("./cli/keys.js");
-    await runChatImportBw({ ids: ids.length > 0 ? (ids as any) : undefined, itemPrefix: opts.prefix });
   });
 
 const usage = program.command("usage").description("Inspect cost ledger and find spend bloat");
@@ -1456,23 +1428,10 @@ mcp
 
 mcp
   .command("set <id>")
-  .description("Prompt for an MCP API key (e.g. tavily) and store it in the OS keychain")
-  .option("--bw", "Also write the key to a Bitwarden vault Secure Note (requires bw CLI + BW_SESSION)")
-  .option("--prefix <prefix>", "Bitwarden item name prefix when --bw is set (default: 'muonroi-cli/')", "muonroi-cli/")
-  .action(async (id: string, opts: { bw?: boolean; prefix: string }) => {
+  .description("Prompt for an MCP API key (e.g. tavily) and store it as an environment variable")
+  .action(async (id: string) => {
     const { runMcpKeysSet } = await import("./cli/keys.js");
-    await runMcpKeysSet(id, { bw: opts.bw, itemPrefix: opts.prefix });
-  });
-
-mcp
-  .command("import-bw [keys...]")
-  .description(
-    "Import MCP secrets (e.g. tavily) from a Bitwarden vault into the OS keychain (requires bw CLI + BW_SESSION)",
-  )
-  .option("--prefix <prefix>", "Vault item name prefix (default: 'muonroi-cli/')", "muonroi-cli/")
-  .action(async (keys: string[], opts: { prefix: string }) => {
-    const { runMcpImportBw } = await import("./cli/keys.js");
-    await runMcpImportBw({ keys, itemPrefix: opts.prefix });
+    await runMcpKeysSet(id);
   });
 
 program
