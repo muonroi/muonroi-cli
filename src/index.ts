@@ -41,8 +41,7 @@ import { createAbortContext } from "./orchestrator/abort.js";
 import { completeDelegation, failDelegation, loadDelegation } from "./orchestrator/delegations";
 import { Agent } from "./orchestrator/orchestrator";
 import { createPendingCallsLog } from "./orchestrator/pending-calls.js";
-import { getProviderCapabilities } from "./providers/capabilities.js";
-import { listStoredProviders, loadKeyForProvider, setKeyForProvider } from "./providers/keychain.js";
+import { loadKeyForProvider, setKeyForProvider } from "./providers/keychain.js";
 import { detectProviderForModel } from "./providers/runtime.js";
 import type { ProviderId } from "./providers/types.js";
 import { loadConfig } from "./storage/config.js";
@@ -180,198 +179,6 @@ async function hasOAuthForModel(modelId: string): Promise<boolean> {
     return !!tokens?.accessToken;
   } catch {
     return false;
-  }
-}
-
-/**
- * First-run wizard. If the keychain already has keys, prints a hint
- * (model probably doesn't match any stored provider). Otherwise prompts
- * for provider + key and persists to the OS keychain.
- */
-/**
- * Supported splash providers — mirrors SPLASH_PROVIDERS in ui/app.tsx.
- * The wizard only surfaces these; other providers still work programmatically.
- */
-const WIZARD_PROVIDERS: readonly ProviderId[] = ["deepseek", "zai", "opencode-go", "xai"];
-
-async function firstRunWizard(currentModel?: string): Promise<string | null> {
-  let rl: ReturnType<typeof createInterface> | undefined;
-  try {
-    rl = createInterface({ input: process.stdin, output: process.stderr });
-    const ask = (q: string): Promise<string> => new Promise((resolve) => rl!.question(q, (answer) => resolve(answer)));
-
-    process.stderr.write("\nWelcome to muonroi-cli!\n\n");
-
-    const stored = await listStoredProviders();
-    if (stored.length > 0) {
-      process.stderr.write(`Keys already in keychain for: ${stored.join(", ")}\n`);
-      if (currentModel) {
-        const provider = detectProviderForModel(currentModel);
-        process.stderr.write(`Current model '${currentModel}' uses provider '${provider}', which has no stored key.\n`);
-      }
-      process.stderr.write(
-        "\nOptions:\n" +
-          "  1. Run with a model that matches a stored provider:\n" +
-          "       muonroi-cli --model <model-id>\n" +
-          "  2. Open /providers inside the TUI to add another key.\n" +
-          "  3. muonroi-cli keys set <provider>\n\n",
-      );
-      rl.close();
-      return null;
-    }
-
-    process.stderr.write("Pick how you want to add credentials:\n\n");
-    process.stderr.write("  1. Paste an API key (most common)\n");
-    process.stderr.write("  2. Import an encrypted bundle file (from another device)\n");
-    process.stderr.write("  3. Sync from a Bitwarden vault\n");
-    process.stderr.write("  4. Skip — set up later via /providers inside the TUI\n\n");
-    const actionChoice = (await ask("Choice [1-4, default 1]: ")).trim() || "1";
-
-    if (actionChoice === "4") {
-      process.stderr.write("\nSkipped. Open /providers inside the TUI to add a key any time.\n");
-      rl.close();
-      return null;
-    }
-
-    if (actionChoice === "2") {
-      const file = (await ask("Path to bundle file: ")).trim();
-      if (!file) {
-        process.stderr.write("No file provided. Aborted.\n");
-        rl.close();
-        return null;
-      }
-      const passphrase = await ask("Bundle passphrase: ");
-      try {
-        const { readFileSync: readFile } = await import("node:fs");
-        const { decryptBundle } = await import("./cli/keys-bundle.js");
-        const raw = readFile(file, "utf8");
-        const bundle = JSON.parse(raw);
-        const payload = decryptBundle(bundle, passphrase);
-        let imported = 0;
-        for (const [prov, key] of Object.entries(payload.providers)) {
-          if (!(WIZARD_PROVIDERS as readonly string[]).includes(prov)) continue;
-          if (typeof key !== "string" || key.length < 20) continue;
-          const ok = await setKeyForProvider(prov as ProviderId, key);
-          if (ok) {
-            imported++;
-            process.stderr.write(`  ✓ ${prov} → keychain\n`);
-          }
-        }
-        process.stderr.write(`\nImported ${imported} key(s). Launch the TUI to start.\n`);
-        rl.close();
-        // Return any imported key just so caller treats setup as done.
-        return imported > 0 ? "imported" : null;
-      } catch (err) {
-        process.stderr.write(`\nImport failed: ${(err as Error).message}\n`);
-        rl.close();
-        return null;
-      }
-    }
-
-    if (actionChoice === "3") {
-      const password = await ask("Bitwarden master password: ");
-      try {
-        const { unlockWithPassword, listSecureNotesByPrefix } = await import("./cli/bw-vault.js");
-        const unlock = await unlockWithPassword(password);
-        if (!unlock.ok || !unlock.session) {
-          process.stderr.write(`\nBitwarden unlock failed: ${unlock.error ?? "unknown error"}\n`);
-          rl.close();
-          return null;
-        }
-        const list = await listSecureNotesByPrefix(unlock.session, "muonroi-cli/");
-        if (!list.ok) {
-          process.stderr.write(`\nBitwarden list failed: ${list.error}\n`);
-          rl.close();
-          return null;
-        }
-        let imported = 0;
-        for (const item of list.items) {
-          const prov = item.name.slice("muonroi-cli/".length);
-          if (!(WIZARD_PROVIDERS as readonly string[]).includes(prov)) continue;
-          if (item.notes.length < 20) continue;
-          const ok = await setKeyForProvider(prov as ProviderId, item.notes);
-          if (ok) {
-            imported++;
-            process.stderr.write(`  ✓ ${prov} → keychain\n`);
-          }
-        }
-        process.stderr.write(`\nImported ${imported} key(s) from Bitwarden. Launch the TUI to start.\n`);
-        rl.close();
-        return imported > 0 ? "imported" : null;
-      } catch (err) {
-        process.stderr.write(`\nBitwarden sync failed: ${(err as Error).message}\n`);
-        rl.close();
-        return null;
-      }
-    }
-
-    // Default path: paste an API key for one of WIZARD_PROVIDERS.
-    process.stderr.write("\nSupported providers:\n\n");
-    WIZARD_PROVIDERS.forEach((p, i) => {
-      process.stderr.write(`  ${i + 1}. ${p.padEnd(12)}  ${getProviderCapabilities(p).consoleSignupURL()}\n`);
-    });
-    process.stderr.write("\n");
-
-    const choice = (await ask(`Provider [1-${WIZARD_PROVIDERS.length}, default 1]: `)).trim();
-    const idx = choice ? Number.parseInt(choice, 10) - 1 : 0;
-    if (!Number.isFinite(idx) || idx < 0 || idx >= WIZARD_PROVIDERS.length) {
-      process.stderr.write("Invalid choice — aborted.\n");
-      rl.close();
-      return null;
-    }
-    const provider = WIZARD_PROVIDERS[idx];
-    if (!provider) {
-      process.stderr.write("Invalid choice — aborted.\n");
-      rl.close();
-      return null;
-    }
-
-    process.stderr.write(`\nGet a key here: ${getProviderCapabilities(provider).consoleSignupURL()}\n`);
-    const raw = await ask(`Paste your ${provider} API key: `);
-
-    const trimmed = raw.trim();
-    if (!trimmed) {
-      process.stderr.write("No key provided. Aborted.\n");
-      rl.close();
-      return null;
-    }
-    if (trimmed.length < 20) {
-      process.stderr.write("Key looks too short (< 20 chars). Aborted.\n");
-      rl.close();
-      return null;
-    }
-
-    try {
-      const ok = await setKeyForProvider(provider, trimmed);
-      if (ok) {
-        process.stderr.write(`\nStored ${provider} key in OS keychain.\n`);
-        process.stderr.write("Tip: run 'muonroi-cli keys export ~/keys.json' to back up + move to other devices.\n");
-        if (currentModel) {
-          const currentProvider = detectProviderForModel(currentModel);
-          if (currentProvider !== provider) {
-            process.stderr.write(
-              `\nNote: defaultModel '${currentModel}' is on '${currentProvider}'. ` +
-                `Edit ~/.muonroi-cli/user-settings.json or rerun with --model to use ${provider}.\n`,
-            );
-          }
-        }
-      } else {
-        process.stderr.write(
-          "\nOS keychain unavailable (keytar or secret service backend).\n" +
-            "Linux: sudo dnf install libsecret (Fedora) or sudo apt-get install libsecret-1-0 (Ubuntu).\n" +
-            "Key will be used for this session only. For persistence across runs:\n" +
-            `  export ${provider.toUpperCase()}_API_KEY=...\n`,
-        );
-      }
-    } catch (err) {
-      process.stderr.write(`\nWarning: failed to store key in keychain: ${(err as Error).message}\n`);
-    }
-
-    rl.close();
-    return trimmed;
-  } catch {
-    rl?.close();
-    return null;
   }
 }
 
@@ -1156,20 +963,10 @@ program
       }
     }
 
-    // First-run wizard (interactive only, before any TUI code)
+    // First run with no credentials does NOT block: boot straight into the TUI.
+    // The in-chat provider picker (/providers, /login) handles auth on demand.
+    // Headless (`--prompt`/`--verify`) with no key still fails via requireApiKey.
     const isInteractive = !options.prompt && !options.verify && process.stdin.isTTY;
-    if (!config.apiKey && isInteractive) {
-      const modelForWizard = config.model ?? getCurrentModel("agent");
-      const wizardKey = await firstRunWizard(modelForWizard);
-      if (wizardKey) {
-        // Key is already persisted to the OS keychain by the wizard. We DO NOT
-        // write it back to settings.json (avoids resurrecting plaintext that
-        // 'keys cleanup-settings' just removed).
-        config.apiKey = wizardKey;
-      } else {
-        process.exit(1);
-      }
-    }
 
     // Bootstrap EE auth (loads serverBaseUrl + token from ~/.experience/config.json)
     const { loadEEAuthToken, getCachedServerBaseUrl } = await import("./ee/auth.js");
