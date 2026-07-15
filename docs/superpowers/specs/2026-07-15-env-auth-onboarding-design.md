@@ -53,6 +53,26 @@ Two coupled problems, discovered while diagnosing a live auth failure.
 - Encrypting keys at rest with a passphrase (explicitly rejected — conflicts
   with "straight to chat").
 
+## Core invariant — one auth mode per provider (mutually exclusive)
+
+A provider is authenticated by **exactly one** method at a time: **OAuth OR
+API key, never both**. Mixing the two is what caused the shadowing bug, so the
+two paths are kept fully independent:
+
+- **Resolution**: if an OAuth token exists for a provider, the API-key path for
+  that provider is **not consulted at all** (the env var is ignored, not merely
+  out-ranked). The API key is read **only** when no OAuth token exists.
+- **Setting OAuth** for a provider (`keys login` / picker) **clears** that
+  provider's stored API key (env var removed) as part of the same operation.
+- **Setting an API key** for a provider (picker / `keys set`) **logs out** any
+  OAuth token for that provider (`deleteTokens`) as part of the same operation.
+- The picker shows a single current mode per provider (`OAuth` | `API key` |
+  `none`) — never both — so the state is unambiguous.
+
+This makes Piece 1 a consequence of the invariant rather than a precedence
+tweak: there is no ranking to get wrong because only one credential ever exists
+per provider.
+
 ## Storage model
 
 ### API keys → environment variables (single source of truth)
@@ -122,8 +142,13 @@ Three fix sites:
    (OAuth-aware — loads tokens, injects codex headers + baseURL). Pass the env
    key only as a fallback for non-OAuth providers.
 
-Precedence after fix, per provider: **OAuth token (if present, for
-OAuth-capable providers) → env API key → wizard/picker**.
+Per the core invariant, this is single-mode selection, not a precedence chain:
+for a provider with an OAuth token, the env API key is **never read** (even if
+set); the env key is consulted **only** when no OAuth token exists. The boot fix
+at `index.ts:1134-1145` must therefore also override a real `config.apiKey`
+(from `MUONROI_API_KEY` / `settings.apiKey`) with the `"oauth"` sentinel when an
+OAuth token exists for the provider — otherwise a stored key set before the
+block still shadows OAuth.
 
 ## Piece 2 — Provider picker (on-demand auth)
 
@@ -136,13 +161,15 @@ Unified picker, reachable as `/providers` (existing screen extended) and alias
   - **OAuth-capable** (`openai`, `xai`): OAuth (open browser) is the primary
     action; "paste API key instead" is a secondary action.
   - **Others**: API-key input.
-- On success:
-  - API key → `persistEnvKey(provider, value)`.
-  - OAuth → existing `login()` flow → `saveTokens(provider, …)` (file store).
+- On success (enforcing the mutual-exclusivity invariant):
+  - API key → `persistEnvKey(provider, value)` **and** `deleteTokens(provider)`
+    (log out any OAuth for this provider).
+  - OAuth → existing `login()` flow → `saveTokens(provider, …)` (file store)
+    **and** `clearEnvKey(provider)` (remove any stored API key for this
+    provider).
   - The active session picks up the credential immediately (in-memory
     `process.env` / provider re-init).
-- `keys login` clears any conflicting env API key for that provider after a
-  successful OAuth (so OAuth can't be re-shadowed).
+- Status shown per provider is exactly one of `OAuth` | `API key` | `none`.
 
 ## Piece 3 — Frictionless first run
 
