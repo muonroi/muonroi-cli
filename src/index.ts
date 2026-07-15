@@ -1140,18 +1140,19 @@ program
 
     const config = resolveConfig(options);
 
-    // No legacy key in env / settings — try the OS keychain for the resolved
-    // model's provider before falling back to the wizard.
-    if (!config.apiKey) {
+    // One auth mode per provider (OAuth XOR API key): if the resolved model's
+    // provider has an OAuth token, OAuth wins OUTRIGHT — a stored API key
+    // (env/flag/settings) is ignored, never blended. Only when there is no
+    // OAuth token do we fall back to the provider's env API key. The "oauth"
+    // sentinel satisfies downstream gating (which only checks for a truthy
+    // apiKey); the runtime injects Bearer headers.
+    {
       const modelForResolve = config.model ?? getCurrentModel("agent");
-      const keychainKey = await resolveKeyForModel(modelForResolve);
-      if (keychainKey) {
-        config.apiKey = keychainKey;
-      } else if (await hasOAuthForModel(modelForResolve)) {
-        // OAuth-authenticated provider — runtime will inject Bearer headers.
-        // Set placeholder so downstream gating code (which only checks for
-        // a truthy apiKey) is satisfied.
+      if (await hasOAuthForModel(modelForResolve)) {
         config.apiKey = "oauth";
+      } else if (!config.apiKey) {
+        const envKey = await resolveKeyForModel(modelForResolve);
+        if (envKey) config.apiKey = envKey;
       }
     }
 
