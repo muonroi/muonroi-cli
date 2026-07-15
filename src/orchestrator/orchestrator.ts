@@ -121,6 +121,8 @@ import {
   type ProcessMessageUsage,
   type ResolvedModelRuntime,
 } from "./agent-options";
+import type { AskUserAskInfo } from "./ask-user.js";
+import { ASK_USER_DISMISSED } from "./ask-user.js";
 import {
   AUTO_COMMIT_ATTRIBUTION,
   type AutoCommitResult,
@@ -161,6 +163,7 @@ import { CouncilManager } from "./council-manager.js";
 import { CrossTurnDedup, isCrossTurnDedupEnabled } from "./cross-turn-dedup.js";
 import { DelegationManager } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
+import { beginInteractivePause, endInteractivePause, isInteractivePaused } from "./interactive-pause.js";
 import { MessageProcessor, type MessageProcessorDeps } from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
 import { buildSystemPrompt, HARD_MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS } from "./prompts";
@@ -890,6 +893,17 @@ export class Agent {
 
   setSafetyOverrideHandler(fn: ((block: SafetyOverrideAskInfo) => Promise<SafetyOverrideVerdict>) | null): void {
     this._safetyOverrideHandler = fn;
+  }
+
+  // ask_user handler — set by the UI (app.tsx). Invoked when the model calls the
+  // `ask_user` tool: the UI surfaces an agent-authored card and resolves with the
+  // human's answer string, which becomes the tool result. When unset (headless
+  // without an answerer), the tool returns the dismissed sentinel so the agent
+  // still continues from its own judgment.
+  private _askUserHandler: ((info: AskUserAskInfo) => Promise<string>) | null = null;
+
+  setAskUserHandler(fn: ((info: AskUserAskInfo) => Promise<string>) | null): void {
+    this._askUserHandler = fn;
   }
 
   respondToToolApproval(approvalId: string, approved: boolean): void {
@@ -2038,9 +2052,15 @@ export class Agent {
       skipClarification?: boolean;
       observer?: ProcessMessageObserver;
       userModelMessage?: ModelMessage;
+      /**
+       * convene_council path — forwarded into runCouncil so the post-debate
+       * decision surface is suppressed and the synthesis is returned to the
+       * calling agent (no CLI-hardcoded post-council branch).
+       */
+      convenePath?: boolean;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
-    const { runCouncil, postDebateContinuation } = await import("../council/index.js");
+    const { runCouncil, buildNeutralPostCouncilContinuation } = await import("../council/index.js");
     const { createCouncilLLM } = await import("../council/llm.js");
     const councilStats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
     const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, councilStats);
@@ -2103,6 +2123,9 @@ export class Agent {
           cwd: this.bash.getCwd(),
           councilStats, // NEW — share orchestrator's stats object with runCouncil (Phase 14 CQ-01)
           signal,
+          // convene_council path — suppress ALL hardcoded post-debate decision
+          // surface; the agent decides what happens after the synthesis.
+          convenePath: options?.convenePath,
           // When the Context Rail is active it carries leader/panel/cost as
           // ambient sidebar rows, so suppress the duplicate inline summary.
           suppressInlineMeta: isContextRailEnabled(),
@@ -2159,7 +2182,13 @@ export class Agent {
       // fires ONLY on the top-level slash path, never when nested inside
       // processMessage (auto-council) or drained by the runDebate tool — those
       // callers manage their own continuation.
-      const continuationPrompt = ownsController && synthesis ? postDebateContinuation(chosenAction, synthesis) : null;
+      // convenePath suppresses the hardcoded card (chosenAction stays undefined),
+      // so always hand the synthesis to a normal agent turn via the neutral
+      // continuation and let the agent decide. ownsController scopes this to the
+      // top-level /council slash path (auto-council nests with ownsController
+      // false and continues in tool-engine instead).
+      const continuationPrompt =
+        ownsController && synthesis ? buildNeutralPostCouncilContinuation(synthesis) || null : null;
       const isBuildContinuation = chosenAction === "implement" || chosenAction === "generate_plan";
       if (continuationPrompt && isBuildContinuation && process.env.MUONROI_COUNCIL_ISOLATE_IMPL !== "0") {
         // #1 — build the council decision in an ISOLATED sub-agent instead of
@@ -2246,6 +2275,7 @@ export class Agent {
               idleMs,
               totalMs,
               label: "council continuation turn",
+              shouldSuppressFire: isInteractivePaused,
             });
           } catch (err) {
             if (err instanceof TurnStallError) {
@@ -2308,13 +2338,42 @@ export class Agent {
       phases: [] as Array<{ name: string; durationMs: number }>,
     };
     const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, productStats);
-    const processMessageFn = (m: string) => this.processMessage(m, options?.observer);
+    // Autonomous-execution permission for the product loop. /ideal's consent
+    // boundary is the preflight plan-approval askcard; once the PO approves the
+    // plan, the sprint IMPLEMENT turn must apply its own file-op mutations without
+    // a per-tool approval prompt. In `safe` mode a Write/Edit surfaces a
+    // tool_approval_request and awaits respondToToolApproval — but in the driven
+    // product-loop context nothing answers it and no approval askcard renders, so
+    // the impl turn wedges forever right after finishReason:tool-calls (observed
+    // live 2026-07-14: 0 files written across grok/opencode/deepseek + isolated &
+    // streamed paths — tool-engine.ts:2997). Elevating safe→auto-edit for the turn
+    // auto-approves file ops (yolo stays yolo); catastrophic bash stays hard-blocked
+    // by permission-mode's CATASTROPHIC_PATTERNS regardless of mode.
+    const self = this;
+    const processMessageFn = (m: string): AsyncGenerator<StreamChunk, void, unknown> =>
+      (async function* () {
+        const prev = self.permissionMode;
+        if (self.permissionMode === "safe") self.permissionMode = "auto-edit";
+        try {
+          yield* self.processMessage(m, options?.observer);
+        } finally {
+          self.permissionMode = prev;
+        }
+      })();
     // Isolated bounded task-runner bridge for the sprint implement stage: a fresh
     // child context (getSubAgentBudgetChars cap, independent compaction) that does
     // NOT inherit this turn's council-debate history — the root fix for the live
     // ctx-overflow wedge. Returns a compact ToolResult (absorbed, no parent bloat).
-    const runIsolatedTask = (request: import("../types/index.js").TaskRequest) =>
-      this.runTaskRequest(request, undefined, this.abortController?.signal);
+    // Same autonomous-permission elevation as the streamed path above.
+    const runIsolatedTask = async (request: import("../types/index.js").TaskRequest) => {
+      const prev = self.permissionMode;
+      if (self.permissionMode === "safe") self.permissionMode = "auto-edit";
+      try {
+        return await this.runTaskRequest(request, undefined, this.abortController?.signal);
+      } finally {
+        self.permissionMode = prev;
+      }
+    };
     const flowDir = nodePath.join(this.bash.getCwd(), ".muonroi-flow");
 
     // P2.7 (LLM-first — no-regex routing): the work-depth tier that decides
@@ -2332,7 +2391,13 @@ export class Agent {
       let depth: import("../pil/llm-classify.js").DepthTier = "standard";
       try {
         const { createLlmClassifier } = await import("../pil/llm-classify.js");
-        const classify = createLlmClassifier(this.requireProvider(), this.modelId);
+        const classify = createLlmClassifier(this.requireProvider(), this.modelId, {
+          routeFastTier: true,
+          // /ideal routing needs a reliable depth verdict; allow cross-provider
+          // fallback so an agentic/no-fast-tier session model (e.g. xai) doesn't
+          // strand the classify at fail-open. Bounded by CLASSIFY_TOTAL_BUDGET_MS.
+          crossProviderFallback: true,
+        });
         const res = await classify(payload.idea);
         if (res?.depthTier) {
           depth = res.depthTier;
@@ -2350,27 +2415,32 @@ export class Agent {
         console.error(`[ideal/route] depth classify failed, defaulting to "standard": ${(err as Error)?.message}`);
       }
 
-      // The cheap 8-word classify above is only a HINT for the downstream GSD
-      // depth pipeline — it is NOT a routing gate. It was too noisy to gate the
-      // council decision: the SAME architectural prompt scored `heavy` on one run
-      // and `standard` the next, so routing flip-flopped between full Council and
-      // a straight-to-Edit maint-edit that skipped the debate. /ideal is the
-      // DELIBERATE path — it must ALWAYS run the full Council/loop-driver
-      // pipeline, in this order:
-      //   1. scan the source (discovery/scoping) to understand what the user's
-      //      request actually touches,
-      //   2. interview the user (AskCard — adaptive: only asks what the source
-      //      can't answer, so an existing repo isn't dragged through 6 questions),
-      //   3. leader-tier complexity assessment + debate INSIDE that flow, AFTER
-      //      scope is understood — never a "no debate" verdict from a bare-prompt
-      //      guess.
-      // So we force Council for every /ideal start; the fast classify only
-      // seeds depth/clarity hints for that flow. Explicit `--maintain` still opts
-      // out of Council (handled at the top of runProductLoop dispatch).
+      // Council routing gate (model-signal, no hardcoded depth→council table).
+      //
+      // History: /ideal used to force Council UNCONDITIONALLY because the cheap
+      // classify was too noisy to gate on — the SAME architectural prompt scored
+      // `heavy` on one run and `standard` the next, so routing flip-flopped. That
+      // noise was root-caused (2026-07-15, harness-measured): the session model
+      // could be an agentic model (e.g. grok-composer) that ignores the terse
+      // 8-word classify contract and emits task-planning prose → null → fail-open
+      // "standard"; and stream errors were swallowed into the same null. Both are
+      // now fixed in llm-classify.ts (cross-provider route to a keyed instruction-
+      // follower + No-Silent-Catch error surfacing), so the depth/clarity signal
+      // is reliable enough to gate on.
+      //
+      // Gate: only a genuinely TRIVIAL /ideal — the model says depth=quick AND
+      // not-underspecified — skips Council and takes the product-loop hot-path
+      // (single sprint, no debate; index.ts complexity==="low" branch). Anything
+      // else (standard, heavy, or any underspecified request) still runs the full
+      // Council/loop-driver pipeline: scan source → adaptive interview → leader-
+      // tier assessment + debate AFTER scope is understood. When the model is
+      // uncertain (null depth → "medium") it routes INTO Council, the arbiter —
+      // never a hardcoded default. Explicit `--maintain` still opts out entirely.
       complexity = depth === "heavy" ? "high" : depth === "quick" ? "low" : "medium";
       sufficiencyMissing = undefined;
       if (payload.flags.mode !== "maintain") {
-        routeForceCouncil = true;
+        const trivial = depth === "quick" && needsClarification !== true;
+        if (!trivial) routeForceCouncil = true;
       }
     }
 
@@ -3279,6 +3349,7 @@ export class Agent {
               idleMs: turnIdleMs,
               totalMs: turnTotalMs,
               label: "assistant turn",
+              shouldSuppressFire: isInteractivePaused,
             });
           } catch (stallErr) {
             // A hung turn is NOT a transient error — retrying it (below) would
@@ -3625,6 +3696,23 @@ export class Agent {
         } catch (err) {
           logger.error("orchestrator", "askSafetyOverride crashed", { error: err });
           return { action: "block" };
+        }
+      },
+      askUser: async (info) => {
+        const h = self._askUserHandler;
+        if (!h) {
+          logger.warn("orchestrator", "askUser called but no handler registered — returning dismissed sentinel");
+          return ASK_USER_DISMISSED;
+        }
+        // Hold both watchdogs open while the human answers (see interactive-pause.ts).
+        beginInteractivePause();
+        try {
+          return await h(info);
+        } catch (err) {
+          logger.error("orchestrator", "askUser crashed", { error: err });
+          return ASK_USER_DISMISSED;
+        } finally {
+          endInteractivePause();
         }
       },
       runCouncilV2: (msg, opts) => self.runCouncilV2(msg, opts),

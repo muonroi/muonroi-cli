@@ -40,28 +40,43 @@ export interface TurnWatchdogOptions {
   totalMs: number;
   /** Human label used in the thrown error (e.g. "council continuation turn"). */
   label: string;
+  /**
+   * Optional gate consulted the instant a timer would fire. When it returns
+   * true the timer RE-ARMS instead of throwing — used to hold the turn open
+   * while a blocking `ask_user` card awaits a human (no chunks flow, but the
+   * turn is not hung). See interactive-pause.ts.
+   */
+  shouldSuppressFire?: () => boolean;
 }
 
 export async function* withTurnWatchdog(
   gen: AsyncGenerator<StreamChunk, void, unknown>,
   opts: TurnWatchdogOptions,
 ): AsyncGenerator<StreamChunk, void, unknown> {
-  const { idleMs, totalMs, label } = opts;
+  const { idleMs, totalMs, label, shouldSuppressFire } = opts;
   const it = gen[Symbol.asyncIterator]();
 
   let totalTimer: ReturnType<typeof setTimeout> | undefined;
   const total =
     totalMs > 0
       ? new Promise<never>((_, reject) => {
-          totalTimer = setTimeout(() => {
-            reject(
-              new TurnStallError(
-                "total",
-                `${label} exceeded ${Math.round(totalMs / 1000)}s total watchdog — treated as hung`,
-              ),
-            );
-          }, totalMs);
-          (totalTimer as { unref?: () => void }).unref?.();
+          const armTotal = () => {
+            totalTimer = setTimeout(() => {
+              // Hold open while an interactive card blocks the turn.
+              if (shouldSuppressFire?.()) {
+                armTotal();
+                return;
+              }
+              reject(
+                new TurnStallError(
+                  "total",
+                  `${label} exceeded ${Math.round(totalMs / 1000)}s total watchdog — treated as hung`,
+                ),
+              );
+            }, totalMs);
+            (totalTimer as { unref?: () => void }).unref?.();
+          };
+          armTotal();
         })
       : null;
 
@@ -71,15 +86,22 @@ export async function* withTurnWatchdog(
       const idle =
         idleMs > 0
           ? new Promise<never>((_, reject) => {
-              idleTimer = setTimeout(() => {
-                reject(
-                  new TurnStallError(
-                    "idle",
-                    `${label} produced no output for ${Math.round(idleMs / 1000)}s — treated as hung`,
-                  ),
-                );
-              }, idleMs);
-              (idleTimer as { unref?: () => void }).unref?.();
+              const armIdle = () => {
+                idleTimer = setTimeout(() => {
+                  if (shouldSuppressFire?.()) {
+                    armIdle();
+                    return;
+                  }
+                  reject(
+                    new TurnStallError(
+                      "idle",
+                      `${label} produced no output for ${Math.round(idleMs / 1000)}s — treated as hung`,
+                    ),
+                  );
+                }, idleMs);
+                (idleTimer as { unref?: () => void }).unref?.();
+              };
+              armIdle();
             })
           : null;
       const racers: Array<Promise<IteratorResult<StreamChunk, void>>> = [it.next()];
@@ -88,6 +110,19 @@ export async function* withTurnWatchdog(
       let res: IteratorResult<StreamChunk, void>;
       try {
         res = await Promise.race(racers);
+      } catch (err) {
+        // Stall (idle/total) fired while `it.next()` is still pending: the inner
+        // generator is suspended at an `await` and, unless told to unwind, its
+        // finally blocks (write-mutex release, in-flight council/tool cleanup)
+        // NEVER run — the turn "ends" for the UI but leaks a wedged generator
+        // that can block the NEXT turn (observed live: council reasoning-model
+        // hang, session c1d461439618 — user had to Ctrl+C and relaunch).
+        // Signal it to return. Fire-and-forget on purpose: the queued return
+        // only settles once the CALLER aborts its controller (in its catch,
+        // AFTER we rethrow), which settles the hung provider call — awaiting the
+        // return here would deadlock against that ordering.
+        void it.return?.(undefined).catch(() => {});
+        throw err;
       } finally {
         if (idleTimer) clearTimeout(idleTimer);
       }

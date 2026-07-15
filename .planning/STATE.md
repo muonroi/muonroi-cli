@@ -86,7 +86,7 @@ muonroi-cli: an interactive agentic CLI built around the Experience Engine (EE) 
 | Compactor (B3/B4) | `src/orchestrator/subagent-compactor.ts` |
 | Cross-turn dedup | `src/orchestrator/cross-turn-dedup.ts` |
 | Harness E2E template | `tests/harness/bash-output-get-tui.spec.ts` |
-| Depth | standard |
+| Depth | heavy |
 | Workflow Kind | product |
 | Ideal Run | mrbm6se2762f |
 | Phase | plan |

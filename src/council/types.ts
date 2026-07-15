@@ -328,6 +328,16 @@ export interface CouncilConfig {
    */
   respondToQuestion?: QuestionResponder;
   /**
+   * convene_council path — when true, the mid-debate escalation askcard
+   * (runEscalationPrompt) is auto-accepted WITHOUT emitting a blocking
+   * council_question card. The convene tool runs the council autonomously
+   * mid-agent-turn: there is no interactive user answering the escalation, so a
+   * card would hang the tool call. Auto-accept = conclude with the best
+   * synthesis so far. No decision is hardcoded post-synthesis — the calling
+   * agent decides what to do with the returned conclusion.
+   */
+  convenePath?: boolean;
+  /**
    * C (mid-debate checkpoint) — directory to persist the per-round debate
    * checkpoint (`debate-checkpoint.json`), normally the run dir
    * `.muonroi-flow/runs/<runId>`. When set, runDebate snapshots its state after

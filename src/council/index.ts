@@ -142,6 +142,19 @@ export interface RunCouncilOptions {
    */
   sprintPlanningMode?: boolean;
   /**
+   * Convene-tool path (the `convene_council` builtin). When true, render
+   * clarify(optional)+debate+synthesis exactly as normal, then RETURN the
+   * synthesis string WITHOUT any post-debate decision surface: NO
+   * `pickPostDebateRecommendation`, NO option set, NO `council_question`
+   * post-debate card, NO `onPostDebateAction`, NO `postDebateContinuation`
+   * routing. The calling AGENT decides what happens next (continue silently,
+   * ask the user via `ask_user`, or hand off to `/ideal`) — the CLI hardcodes
+   * none of it (user directive: no CLI-hardcoded post-council branch). The
+   * persistence block (decisions.lock, judge, council record) still runs — it
+   * is an audit trail, not a decision.
+   */
+  convenePath?: boolean;
+  /**
    * #2 — isolated sub-agent bridge (orchestrator.runTaskRequest). When wired,
    * the debate's research phase runs in a budget-capped explore sub-agent
    * instead of an in-process 15-step generateText. Forwarded onto CouncilConfig
@@ -307,6 +320,30 @@ export function postDebateContinuation(
     return null;
   }
   return null;
+}
+
+/**
+ * Neutral post-council continuation. Used by the auto-council path (tool-engine)
+ * and the `/council` slash path (runCouncilV2) once they run with
+ * `convenePath: true` — the hardcoded post-debate option card is suppressed, so
+ * there is no `chosenAction` to branch on. Instead of the CLI deciding the next
+ * step, we hand the synthesis back to a normal agent turn with a NON-BINDING
+ * nudge and let the agent's own intent drive the follow-up (respond / ask_user /
+ * implement). Returns "" for an empty synthesis so the caller skips re-entry.
+ */
+export function buildNeutralPostCouncilContinuation(synthesis: string): string {
+  if (!synthesis || !synthesis.trim()) return "";
+  return (
+    `Council debate completed. Conclusion:\n\n${synthesis}\n\n` +
+    `You now decide the next step based on the user's original request — do not ` +
+    `stop without doing one of these:\n` +
+    `  • If the conclusion IS the deliverable (analysis/evaluation/decision), ` +
+    `respond to the user with it.\n` +
+    `  • If a choice genuinely needs the human before proceeding, call ask_user.\n` +
+    `  • If the task calls for building and the conclusion is a sufficient spec, ` +
+    `implement it now through your normal workflow — do NOT re-litigate the ` +
+    `decision or expand scope beyond it.`
+  );
 }
 
 export async function* runCouncil(
@@ -514,7 +551,11 @@ export async function* runCouncil(
     const preflightGen = runPreflight(spec, participants, researchNeeded, respondToPreflight, {
       repoEmpty: internetFirst,
       researchOverridable: true,
-      autoApprove: spec.ready === true || options?.autoApprovePreflight === true,
+      // convenePath auto-approves the pre-debate plan card too: the agent
+      // already decided to convene, so re-gating the discussion plan is a
+      // redundant interruption of the autonomous tool call (same rationale as
+      // sprintPlanningMode). The brief is still shown; it just isn't blocking.
+      autoApprove: spec.ready === true || options?.autoApprovePreflight === true || options?.convenePath === true,
     });
     let preflightResult: IteratorResult<StreamChunk, boolean>;
     do {
@@ -684,6 +725,9 @@ export async function* runCouncil(
       // unmet, runDebate asks the user (extend / accept / rescope) instead of
       // silently synthesizing a partial outcome.
       respondToQuestion,
+      // convene_council path — auto-accept escalation (no blocking card) since
+      // the council runs autonomously mid-agent-turn with no interactive user.
+      convenePath: options?.convenePath,
     },
     llm,
   );
@@ -777,7 +821,13 @@ export async function* runCouncil(
   });
 
   // ── Post-Debate AskCard: What next? ─────────────────────────────────────────
-  if (sessionId) {
+  // convenePath skips this ENTIRE interactive block (recommendation, option set,
+  // card, respondToQuestion, postDebateAction, onPostDebateAction, and the whole
+  // routing tree). On that path the agent that called `convene_council` decides
+  // what happens next — the CLI must not hardcode a post-council pick. The
+  // persistence block below still runs (audit trail, not a decision), and the
+  // function returns synthesisText as usual.
+  if (sessionId && !options?.convenePath) {
     try {
       const { randomUUID } = await import("crypto");
       const refinementTopics: string[] = [];

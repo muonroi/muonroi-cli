@@ -164,6 +164,7 @@ import {
 import { resolveShell } from "../utils/shell.js";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
+import type { AskUserAskInfo } from "./ask-user.js";
 import { relaxCompactionSettings } from "./compaction";
 import type { CouncilManager } from "./council-manager.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
@@ -380,9 +381,19 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   askToolLoopContinue?: ToolLoopCapAsk;
   /** Safety override handler — invoked when a tool call is blocked by the safety filter. */
   askSafetyOverride?: (info: SafetyOverrideAskInfo) => Promise<SafetyOverrideVerdict>;
+  /** ask_user handler — invoked when the model calls the `ask_user` tool; resolves the human's answer. */
+  askUser?: (info: AskUserAskInfo) => Promise<string>;
   runCouncilV2(
     userMessage: string,
-    opts: { skipClarification: boolean; observer?: ProcessMessageObserver; userModelMessage: ModelMessage },
+    opts: {
+      skipClarification: boolean;
+      observer?: ProcessMessageObserver;
+      userModelMessage: ModelMessage;
+      // Agent-driven post-council: suppress the hardcoded post-debate card so the
+      // synthesis returns to the agent, which decides the follow-up. Threaded from
+      // the auto-council + runDebate call sites in tool-engine.
+      convenePath?: boolean;
+    },
   ): AsyncGenerator<StreamChunk, void, unknown>;
   processMessage(
     userMessage: string,

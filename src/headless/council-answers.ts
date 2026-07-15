@@ -43,6 +43,10 @@ export function createCouncilAutoAnswerer(opts: {
     "pil-acceptance": [],
     "tool-loop-cap": [],
     "safety-override": [],
+    // ask_user: no file queue — fall through to defaultAnswerFor, which returns
+    // the agent's FIRST option (index 0) or "" for a free-text ask. Index 0 is
+    // NOT a CLI recommendation, just first-listed; headless has no human.
+    "ask-user": [],
   };
   const preflightApprove = opts.file?.preflightApprove ?? true;
 

@@ -14,6 +14,8 @@ import { appendCrashLog, setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
+import type { AskUserAskInfo } from "../orchestrator/ask-user.js";
+import { ASK_USER_DISMISSED, buildAskUserQuestion } from "../orchestrator/ask-user.js";
 import { createCompactionSummaryMessage } from "../orchestrator/compaction.js";
 import { Agent } from "../orchestrator/orchestrator";
 import {
@@ -148,6 +150,7 @@ import {
   SubagentTaskLine,
 } from "./components/tool-result-views.js";
 import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
+import { mapCouncilStatusToSpeakerEvent } from "./council-harness-event.js";
 import { useAgentEditor } from "./hooks/use-agent-editor.js";
 import { useMcpEditor } from "./hooks/use-mcp-editor.js";
 import { useModelPicker } from "./hooks/use-model-picker.js";
@@ -1324,6 +1327,10 @@ export function useAppLogic(props: AppLogicProps) {
   // Pending resolvers for safety-override askcards. Keyed by questionId; populated
   // by setSafetyOverrideHandler, drained by the askcard answer/cancel branches.
   const safetyOverrideResolversRef = useRef<Map<string, (verdict: SafetyOverrideVerdict) => void>>(new Map());
+  // Pending resolvers for ask_user askcards (the model-callable ask_user tool).
+  // Keyed by questionId; populated by setAskUserHandler, drained by the askcard
+  // answer/cancel branches. Resolve value = the human's answer string.
+  const askUserResolversRef = useRef<Map<string, (answer: string) => void>>(new Map());
   // Current todo snapshot (Claude-style sticky checklist). Updated by
   // `task_list_update` chunks emitted after every `todo_write` tool call.
   // Auto-hides ~2s after 100% completion so the panel doesn't linger.
@@ -2274,6 +2281,16 @@ export function useAppLogic(props: AppLogicProps) {
     setCouncilRounds([]);
     setSelectedRound(null);
     setCouncilPlaceholders(new Map());
+    // The auto-council path drives councilPhases through the MAIN stream loop,
+    // which — unlike the nested /council and /ideal loops — never reset it on
+    // turn end. On a hung/watchdog-aborted council turn the running phase never
+    // emits its `state:"done"` event, so <CouncilPhaseTimeline> stays frozen at
+    // "Council working… elapsed Ns" forever and the session LOOKS hung even after
+    // the turn actually finalized (live: reasoning-model hang c1d461439618).
+    // Clearing here (called at both beginLiveTurn and finalizeActiveTurn) tears
+    // the timeline down on every turn boundary. The completed phases were already
+    // rendered live; the persisted [Council Decision] message is the durable record.
+    setCouncilPhases([]);
     councilTopicRef.current = undefined;
   }, []);
 
@@ -2614,6 +2631,39 @@ export function useAppLogic(props: AppLogicProps) {
     return () => {
       agent.setSafetyOverrideHandler(null);
       safetyOverrideResolversRef.current.clear();
+    };
+  }, [agent, setPendingCouncilQuestionSync, setCouncilCardStateSync]);
+
+  // ask_user handler — surfaces an AGENT-authored card (question + options come
+  // ONLY from the model's tool input; the CLI synthesises nothing) and blocks
+  // until the human answers or dismisses. The resolved string becomes the tool
+  // result the agent reads to decide its next step.
+  useEffect(() => {
+    agent.setAskUserHandler(async (info: AskUserAskInfo) => {
+      return new Promise<string>((resolve) => {
+        const qid = `ask-user-${Date.now()}`;
+        askUserResolversRef.current.set(qid, resolve);
+        const question = buildAskUserQuestion(info, qid);
+        setPendingCouncilQuestionSync(question);
+        setCouncilCardStateSync(initialCardState(question));
+        try {
+          agentRuntime?.emitEvent({
+            t: "event",
+            kind: "askcard-open",
+            questionId: qid,
+            question: question.question,
+            phase: "ask-user",
+            optionCount: question.options?.length ?? 0,
+            defaultIndex: question.defaultIndex ?? 0,
+          });
+        } catch {
+          /* best-effort */
+        }
+      });
+    });
+    return () => {
+      agent.setAskUserHandler(null);
+      askUserResolversRef.current.clear();
     };
   }, [agent, setPendingCouncilQuestionSync, setCouncilCardStateSync]);
 
@@ -3560,14 +3610,10 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   setCouncilStatuses((prev) => upsertStatus(prev, cs));
                   // Task 2.2b — emit council-speaker harness event (agent-mode only).
+                  // Carries state:"tick" + elapsedMs so a harness poller can tell
+                  // a long-running research phase (alive) from a hung one.
                   try {
-                    agentRuntime?.emitEvent({
-                      t: "event",
-                      kind: "council-speaker",
-                      role: cs.role ?? cs.label ?? "unknown",
-                      status: cs.state === "start" ? "start" : "done",
-                      correlationId: cs.statusId,
-                    });
+                    agentRuntime?.emitEvent(mapCouncilStatusToSpeakerEvent(cs));
                   } catch {
                     /* best-effort */
                   }
@@ -4425,13 +4471,7 @@ export function useAppLogic(props: AppLogicProps) {
                     setCouncilStatuses((prev) => upsertStatus(prev, cs));
                     // Task 2.2b — emit council-speaker in branch 2 (agent-mode only).
                     try {
-                      agentRuntime?.emitEvent({
-                        t: "event",
-                        kind: "council-speaker",
-                        role: cs.role ?? cs.label ?? "unknown",
-                        status: cs.state === "start" ? "start" : "done",
-                        correlationId: cs.statusId,
-                      });
+                      agentRuntime?.emitEvent(mapCouncilStatusToSpeakerEvent(cs));
                     } catch {
                       /* best-effort */
                     }
@@ -4597,7 +4637,7 @@ export function useAppLogic(props: AppLogicProps) {
               isProcessingRef.current = true;
               setIsProcessing(true);
               try {
-                const gen = agent.runCouncilV2(topic);
+                const gen = agent.runCouncilV2(topic, { convenePath: true });
                 for await (const chunk of gen) {
                   // Council emitted a chunk — clear the "Waiting for next phase"
                   // inter-card heartbeat started after the last askcard answer.
@@ -4715,13 +4755,7 @@ export function useAppLogic(props: AppLogicProps) {
                     setCouncilStatuses((prev) => upsertStatus(prev, cs));
                     // Task 2.2b — emit council-speaker in branch 3 (agent-mode only).
                     try {
-                      agentRuntime?.emitEvent({
-                        t: "event",
-                        kind: "council-speaker",
-                        role: cs.role ?? cs.label ?? "unknown",
-                        status: cs.state === "start" ? "start" : "done",
-                        correlationId: cs.statusId,
-                      });
+                      agentRuntime?.emitEvent(mapCouncilStatusToSpeakerEvent(cs));
                     } catch {
                       /* best-effort */
                     }
@@ -5827,6 +5861,31 @@ export function useAppLogic(props: AppLogicProps) {
               });
               return;
             }
+            // ask_user askcard: resolve the stored promise with the user's
+            // answer string (option value or free text) — becomes the tool result.
+            if (pendingQuestion.phase === "ask-user") {
+              const resolver = askUserResolversRef.current.get(qid);
+              askUserResolversRef.current.delete(qid);
+              setPendingCouncilQuestionSync(null);
+              setCouncilCardStateSync(null);
+              resolver?.(ans.text);
+              try {
+                agentRuntime?.emitEvent({
+                  t: "event",
+                  kind: "askcard-answered",
+                  questionId: qid,
+                  answerKind: ans.kind ?? "choice",
+                  answerText: ans.text,
+                });
+              } catch {
+                /* best-effort */
+              }
+              logUIInteraction(agent.getSessionId() ?? undefined, {
+                subtype: "askcard_answered",
+                data: { questionId: qid, answerKind: ans.kind ?? "choice", answerText: ans.text },
+              });
+              return;
+            }
             // Resolve the label of the option that was selected. For "choice"
             // and "freetext" the option index lives on the card state; for
             // "chat" the user typed a free reply and there is no option to
@@ -5906,6 +5965,22 @@ export function useAppLogic(props: AppLogicProps) {
               setCouncilCardStateSync(null);
               clearInterCardHeartbeat();
               resolver?.({ action: "block" });
+              try {
+                agentRuntime?.emitEvent({ t: "event", kind: "askcard-cancel", questionId: qid });
+              } catch {
+                /* best-effort */
+              }
+              return;
+            }
+            // ask_user cancel (Esc) → resolve with the dismissed sentinel; the
+            // agent reads it and decides its own follow-up (never CLI-forced).
+            if (pendingQuestion.phase === "ask-user") {
+              const resolver = askUserResolversRef.current.get(qid);
+              askUserResolversRef.current.delete(qid);
+              setPendingCouncilQuestionSync(null);
+              setCouncilCardStateSync(null);
+              clearInterCardHeartbeat();
+              resolver?.(ASK_USER_DISMISSED);
               try {
                 agentRuntime?.emitEvent({ t: "event", kind: "askcard-cancel", questionId: qid });
               } catch {

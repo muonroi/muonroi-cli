@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { installMockModel, textOnlyStream } from "../../agent-harness/mock-model.js";
 import { loadCatalog } from "../../models/registry.js";
-import { classifySubSessionAction, createLlmClassifier } from "../llm-classify.js";
+import { classifierBudget, classifySubSessionAction, createLlmClassifier } from "../llm-classify.js";
 
 describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
   beforeAll(async () => {
@@ -315,6 +315,46 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     cleanup = bareHandle.uninstall;
     const bareClassify = createLlmClassifier((() => bareHandle.model) as never, "deepseek-v4-flash");
     expect((await bareClassify("fix it"))?.deliverableKind).toBeNull();
+  });
+});
+
+describe("classifierBudget (flat timeout ceiling; max-output scales with reasoning)", () => {
+  // Harness-measured 2026-07-15 (grok-composer via OAuth, 7 samples): classify
+  // latency is 1045–1277ms — provider-independent and well under any ceiling. The
+  // /ideal over-engineering root cause was NOT a timeout abort but grok-composer
+  // ignoring the terse 8-word contract (it emits task-planning prose → null →
+  // fail-open "standard"). So the timeout is a flat safety net for ALL models;
+  // only max-output stays coupled to the reasoning flag (a reasoning model burns
+  // its output budget on reasoning tokens before any visible text).
+  it("gives every model the same flat timeout — balanced non-reasoning (grok-composer)", () => {
+    const b = classifierBudget({ reasoning: false, tier: "balanced" });
+    expect(b.timeoutMs).toBe(8000);
+    // max-output stays tiny — a non-reasoning model emits the 8 words directly.
+    expect(b.maxOutputTokens).toBe(56);
+  });
+
+  it("same flat timeout for a fast-tier model", () => {
+    const b = classifierBudget({ reasoning: false, tier: "fast" });
+    expect(b.timeoutMs).toBe(8000);
+    expect(b.maxOutputTokens).toBe(56);
+  });
+
+  it("reasoning model earns the larger max-output budget (still flat timeout)", () => {
+    const b = classifierBudget({ reasoning: true, tier: "fast" });
+    expect(b.timeoutMs).toBe(8000);
+    expect(b.maxOutputTokens).toBe(2048);
+  });
+
+  it("premium non-reasoning also gets the flat timeout and small budget", () => {
+    const b = classifierBudget({ reasoning: false, tier: "premium" });
+    expect(b.timeoutMs).toBe(8000);
+    expect(b.maxOutputTokens).toBe(56);
+  });
+
+  it("treats an unknown (non-catalog) model as non-reasoning with the flat timeout", () => {
+    const b = classifierBudget(undefined);
+    expect(b.timeoutMs).toBe(8000);
+    expect(b.maxOutputTokens).toBe(56);
   });
 });
 
