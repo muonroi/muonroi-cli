@@ -37,17 +37,11 @@ export interface ApiKeyPromptState {
   reveal?: boolean;
 }
 
-export type BwSyncState =
-  | { phase: "password"; value: string; error: string | null; loading: boolean }
-  | {
-      phase: "picker";
-      session: string;
-      items: Array<{ provider: ProviderId; key: string }>;
-      selected: Set<ProviderId>;
-      focusIndex: number;
-      loading: boolean;
-      error: string | null;
-    };
+/** In-progress OAuth login overlay state (browser-based subscription sign-in). */
+export interface OAuthLoginState {
+  provider: ProviderId;
+  error: string | null;
+}
 
 export function ModelPickerModal({
   t,
@@ -59,7 +53,8 @@ export function ModelPickerModal({
   providerChipIndex,
   providersWithKey,
   apiKeyPrompt,
-  bwSync,
+  oauthProviders,
+  oauthLogin,
 }: {
   t: Theme;
   currentModel?: string;
@@ -77,10 +72,13 @@ export function ModelPickerModal({
   providerChipIndex: number;
   providersWithKey?: ReadonlySet<ProviderId>;
   apiKeyPrompt?: ApiKeyPromptState | null;
-  bwSync?: BwSyncState | null;
+  /** Providers that support OAuth subscription login (openai, xai). */
+  oauthProviders?: ReadonlySet<ProviderId>;
+  oauthLogin?: OAuthLoginState | null;
 }) {
   const disabledSet = new Set(disabledProviders);
   const keyedSet = providersWithKey ?? new Set<ProviderId>();
+  const oauthSet = oauthProviders ?? new Set<ProviderId>();
   const panelWidth = Math.min(64, width - 6);
 
   const rowCount = Math.max(configuredProviders.length, 1);
@@ -117,7 +115,7 @@ export function ModelPickerModal({
           </text>
           <box paddingTop={1}>
             <text fg={t.textMuted}>
-              {"Key is saved to the OS keychain (keytar). Bitwarden sync via `muonroi-cli keys import-bw`."}
+              {"Key is stored as an environment variable (~/.muonroi-cli/.env, mirrored to your OS env)."}
             </text>
           </box>
           <Semantic
@@ -162,9 +160,9 @@ export function ModelPickerModal({
     </Semantic>
   ) : null;
 
-  // Sub-modal: Bitwarden sync (Option A) — password phase, then provider picker.
-  const bwModal = bwSync ? (
-    <Semantic id="provider-bw-sync" role="dialog" isModal name="Bitwarden sync">
+  // Sub-modal: OAuth subscription login (browser-based) for openai / xai.
+  const oauthModal = oauthLogin ? (
+    <Semantic id="provider-oauth-login" role="dialog" isModal name={`Sign in to ${oauthLogin.provider}`}>
       <box
         position="absolute"
         left={0}
@@ -172,11 +170,11 @@ export function ModelPickerModal({
         width={width}
         height={height}
         alignItems="center"
-        paddingTop={Math.floor(height / 4)}
+        paddingTop={Math.floor(height / 3)}
         backgroundColor="#000000dd"
       >
         <box
-          width={Math.min(64, width - 8)}
+          width={Math.min(60, width - 8)}
           backgroundColor={t.backgroundPanel}
           paddingTop={1}
           paddingBottom={1}
@@ -184,82 +182,22 @@ export function ModelPickerModal({
           paddingRight={2}
           flexDirection="column"
         >
-          {bwSync.phase === "password" ? (
-            <>
-              <text fg={t.primary}>
-                <b>{"Sync from Bitwarden"}</b>
-              </text>
-              <box paddingTop={1}>
-                <text fg={t.textMuted}>
-                  {"Unlocks vault with master password, finds items named 'muonroi-cli/<provider>', imports keys."}
-                </text>
-              </box>
-              <Semantic
-                id="bw-password-input"
-                role="textbox"
-                name="Bitwarden master password"
-                focus
-                value={bwSync.value}
-              >
-                <box
-                  paddingTop={1}
-                  backgroundColor={t.backgroundElement}
-                  paddingLeft={1}
-                  paddingRight={1}
-                  flexDirection="row"
-                  justifyContent="space-between"
-                >
-                  {bwSync.value.length > 0 ? (
-                    <text fg={t.text}>{`${"•".repeat(Math.min(bwSync.value.length, 40))}▏`}</text>
-                  ) : (
-                    <text fg={t.textDim}>{"▏(master password)"}</text>
-                  )}
-                  {bwSync.value.length > 0 ? <text fg={t.textMuted}>{`${bwSync.value.length} chars`}</text> : null}
-                </box>
-              </Semantic>
-              {bwSync.error ? (
-                <box paddingTop={1}>
-                  <text fg={t.initFormError}>{bwSync.error}</text>
-                </box>
-              ) : null}
-              <box paddingTop={1}>
-                <text fg={t.textMuted}>{bwSync.loading ? "unlocking..." : "Enter unlock  Esc cancel"}</text>
-              </box>
-            </>
+          <text fg={t.primary}>
+            <b>{`Sign in to ${oauthLogin.provider} (OAuth)`}</b>
+          </text>
+          <box paddingTop={1}>
+            <text fg={t.textMuted}>
+              {"A browser window is opening. Complete the sign-in there; this returns automatically."}
+            </text>
+          </box>
+          {oauthLogin.error ? (
+            <box paddingTop={1}>
+              <text fg={t.initFormError}>{oauthLogin.error}</text>
+            </box>
           ) : (
-            <>
-              <text fg={t.primary}>
-                <b>{`Import from Bitwarden (${bwSync.items.length} found)`}</b>
-              </text>
-              <box paddingTop={1} flexDirection="column">
-                {bwSync.items.map((item, i) => {
-                  const focused = i === bwSync.focusIndex;
-                  const checked = bwSync.selected.has(item.provider);
-                  return (
-                    <box
-                      key={item.provider}
-                      paddingLeft={1}
-                      paddingRight={1}
-                      backgroundColor={focused ? t.selectedBg : undefined}
-                    >
-                      <text fg={focused ? t.accent : t.text}>
-                        {`${focused ? "›" : " "} [${checked ? "x" : " "}] ${item.provider}`}
-                      </text>
-                    </box>
-                  );
-                })}
-              </box>
-              {bwSync.error ? (
-                <box paddingTop={1}>
-                  <text fg={t.initFormError}>{bwSync.error}</text>
-                </box>
-              ) : null}
-              <box paddingTop={1}>
-                <text fg={t.textMuted}>
-                  {bwSync.loading ? "importing..." : "↑↓ nav  Space toggle  Enter import  Esc cancel"}
-                </text>
-              </box>
-            </>
+            <box paddingTop={1}>
+              <text fg={t.textMuted}>{"Waiting for authorization…  Esc cancel"}</text>
+            </box>
           )}
         </box>
       </box>
@@ -306,7 +244,8 @@ export function ModelPickerModal({
                   const star = isDefault ? "★" : " ";
                   const fg = focused ? t.accent : enabled ? t.text : t.textMuted;
                   const starFg = isDefault ? t.primary : t.textDim;
-                  const suffix = !hasKey ? "  (no key — press K)" : "";
+                  const canOAuth = oauthSet.has(p);
+                  const suffix = !hasKey ? (canOAuth ? "  (O sign in · K key)" : "  (no key — press K)") : "";
                   return (
                     <Semantic
                       key={p}
@@ -335,13 +274,13 @@ export function ModelPickerModal({
             </box>
             <box flexGrow={1} minHeight={0} />
             <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
-              <text fg={t.textMuted}>{"↑↓ nav  Space toggle  D default  K set key  B sync BW  Esc close"}</text>
+              <text fg={t.textMuted}>{"↑↓ nav  Space toggle  D default  O sign in  K set key  Esc close"}</text>
             </box>
           </box>
         </box>
       </Semantic>
       {subModal}
-      {bwModal}
+      {oauthModal}
     </>
   );
 }

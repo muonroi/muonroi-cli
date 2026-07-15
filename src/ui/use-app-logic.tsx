@@ -895,7 +895,7 @@ export function useAppLogic(props: AppLogicProps) {
     try {
       const ok = await setKeyForProvider(apiKeyPrompt.provider, key);
       if (!ok) {
-        setApiKeyPrompt({ ...apiKeyPrompt, error: "Keychain unavailable — set env var instead" });
+        setApiKeyPrompt({ ...apiKeyPrompt, error: "Could not store key. Try `export <PROVIDER>_API_KEY=…`." });
         return;
       }
       await refreshProvidersWithKey();
@@ -905,94 +905,68 @@ export function useAppLogic(props: AppLogicProps) {
     }
   }, [apiKeyPrompt, refreshProvidersWithKey]);
 
-  // ── BW sync flow (Option A) ────────────────────────────────────────────
-  // Two phases: password → picker. Lives entirely in TUI memory; we never
-  // export BW_SESSION or persist the master password.
-  type BwSyncState =
-    | { phase: "password"; value: string; error: string | null; loading: boolean }
-    | {
-        phase: "picker";
-        session: string;
-        items: Array<{ provider: ProviderId; key: string }>;
-        selected: Set<ProviderId>;
-        focusIndex: number;
-        loading: boolean;
-        error: string | null;
-      };
-  const [bwSync, setBwSync] = useState<BwSyncState | null>(null);
+  // ── OAuth subscription login (browser-based) for openai / xai ───────────
+  // One auth mode per provider: a successful OAuth login clears any stored API
+  // key for that provider (exclusivity). Runs the registry login() flow, which
+  // opens the browser and resolves when the loopback callback completes.
+  const [oauthProviders, setOAuthProviders] = useState<ReadonlySet<ProviderId>>(() => new Set());
+  const [oauthLogin, setOAuthLogin] = useState<{ provider: ProviderId; error: string | null } | null>(null);
+  const oauthCancelRef = useRef(false);
 
-  const submitBwPassword = useCallback(async () => {
-    if (!bwSync || bwSync.phase !== "password") return;
-    const password = bwSync.value;
-    if (password.length < 4) {
-      setBwSync({ ...bwSync, error: "Master password too short" });
-      return;
-    }
-    setBwSync({ ...bwSync, loading: true, error: null });
-    try {
-      const { unlockWithPassword, listSecureNotesByPrefix } = await import("../cli/bw-vault.js");
-      const unlock = await unlockWithPassword(password);
-      if (!unlock.ok || !unlock.session) {
-        setBwSync({ ...bwSync, loading: false, error: unlock.error ?? "bw unlock failed" });
-        return;
-      }
-      const prefix = "muonroi-cli/";
-      const list = await listSecureNotesByPrefix(unlock.session, prefix);
-      if (!list.ok) {
-        setBwSync({ ...bwSync, loading: false, error: list.error });
-        return;
-      }
-      const matched: Array<{ provider: ProviderId; key: string }> = [];
-      for (const it of list.items) {
-        const providerName = it.name.slice(prefix.length);
-        if ((SPLASH_PROVIDERS as readonly string[]).includes(providerName) && it.notes.length >= 20) {
-          matched.push({ provider: providerName as ProviderId, key: it.notes });
-        }
-      }
-      if (matched.length === 0) {
-        setBwSync({
-          ...bwSync,
-          loading: false,
-          error: `No items found in vault with prefix '${prefix}<provider>'`,
-        });
-        return;
-      }
-      setBwSync({
-        phase: "picker",
-        session: unlock.session,
-        items: matched,
-        selected: new Set(matched.map((m) => m.provider)),
-        focusIndex: 0,
-        loading: false,
-        error: null,
-      });
-    } catch (e) {
-      setBwSync({ ...bwSync, loading: false, error: (e as Error).message });
-    }
-  }, [bwSync]);
-
-  const commitBwImport = useCallback(async () => {
-    if (!bwSync || bwSync.phase !== "picker") return;
-    setBwSync({ ...bwSync, loading: true, error: null });
-    let imported = 0;
-    let failed = 0;
-    for (const item of bwSync.items) {
-      if (!bwSync.selected.has(item.provider)) continue;
+  // Populate the OAuth-capable provider set once, from the OAuth registry.
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
       try {
-        const ok = await setKeyForProvider(item.provider, item.key);
-        if (ok) imported++;
-        else failed++;
+        const { listOAuthProviderIds } = await import("../providers/auth/registry.js");
+        const ids = await listOAuthProviderIds();
+        if (alive) setOAuthProviders(new Set(ids as ProviderId[]));
       } catch {
-        failed++;
+        /* registry unavailable — no OAuth affordance */
       }
-    }
-    await refreshProvidersWithKey();
-    if (failed > 0 && imported === 0) {
-      setBwSync({ ...bwSync, loading: false, error: `Imported 0; ${failed} failed (keychain unavailable?)` });
-      return;
-    }
-    setBwSync(null);
-  }, [bwSync, refreshProvidersWithKey]);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const startProviderOAuth = useCallback(
+    async (provider: ProviderId) => {
+      oauthCancelRef.current = false;
+      setOAuthLogin({ provider, error: null });
+      try {
+        const { getOAuthProviderConfig } = await import("../providers/auth/registry.js");
+        const cfg = await getOAuthProviderConfig(provider);
+        if (!cfg) {
+          setOAuthLogin({ provider, error: "OAuth is not available for this provider." });
+          return;
+        }
+        const tokens = await cfg.provider.login({});
+        if (oauthCancelRef.current) return;
+        const { saveTokens } = await import("../providers/auth/token-store.js");
+        await saveTokens(provider, tokens);
+        // Exclusivity: OAuth login clears any stored API key for this provider.
+        try {
+          const { clearEnvVar } = await import("../providers/env-store.js");
+          const { ENV_BY_PROVIDER } = await import("../providers/keychain.js");
+          clearEnvVar(ENV_BY_PROVIDER[provider]);
+        } catch {
+          /* best-effort */
+        }
+        await refreshProvidersWithKey();
+        setOAuthLogin(null);
+      } catch (e) {
+        if (oauthCancelRef.current) return;
+        setOAuthLogin({ provider, error: (e as Error).message });
+      }
+    },
+    [refreshProvidersWithKey],
+  );
+
+  const cancelProviderOAuth = useCallback(() => {
+    oauthCancelRef.current = true;
+    setOAuthLogin(null);
+  }, []);
 
   // Sync React model state with status bar store so chat input reflects
   // per-turn router upgrades (brain EE upgrade, warm/cold routing, etc.)
@@ -6575,60 +6549,11 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
       if (showModelPicker) {
-        // Sub-modal: BW sync (password + provider picker phases).
-        if (bwSync) {
+        // Sub-modal: OAuth login in progress (browser-based). Only Esc (cancel)
+        // is actionable — the flow completes via the browser/loopback callback.
+        if (oauthLogin) {
           if (isEscapeKey(key)) {
-            setBwSync(null);
-            return;
-          }
-          if (bwSync.phase === "password") {
-            if (bwSync.loading) return;
-            if (key.name === "return") {
-              void submitBwPassword();
-              return;
-            }
-            if (key.name === "backspace") {
-              // Functional updater — burst-safe (see API-key prompt above).
-              setBwSync((bw) =>
-                bw && bw.phase === "password" ? { ...bw, value: bw.value.slice(0, -1), error: null } : bw,
-              );
-              return;
-            }
-            if (key.sequence && !key.ctrl && !key.meta) {
-              // Keep spaces: a master password may legitimately contain them.
-              const cleaned = stripControlBytes(key.sequence);
-              if (cleaned.length === 0) return;
-              setBwSync((bw) =>
-                bw && bw.phase === "password" ? { ...bw, value: bw.value + cleaned, error: null } : bw,
-              );
-              return;
-            }
-            return;
-          }
-          if (bwSync.phase === "picker") {
-            if (bwSync.loading) return;
-            if (key.name === "up") {
-              setBwSync({ ...bwSync, focusIndex: Math.max(0, bwSync.focusIndex - 1) });
-              return;
-            }
-            if (key.name === "down") {
-              setBwSync({ ...bwSync, focusIndex: Math.min(bwSync.items.length - 1, bwSync.focusIndex + 1) });
-              return;
-            }
-            if (key.name === "space" || key.sequence === " ") {
-              const item = bwSync.items[bwSync.focusIndex];
-              if (item) {
-                const next = new Set(bwSync.selected);
-                if (next.has(item.provider)) next.delete(item.provider);
-                else next.add(item.provider);
-                setBwSync({ ...bwSync, selected: next });
-              }
-              return;
-            }
-            if (key.name === "return") {
-              void commitBwImport();
-              return;
-            }
+            cancelProviderOAuth();
             return;
           }
           return;
@@ -6686,8 +6611,9 @@ export function useAppLogic(props: AppLogicProps) {
           if (p) setApiKeyPrompt({ provider: p, value: "", error: null });
           return;
         }
-        if (key.name === "b") {
-          setBwSync({ phase: "password", value: "", error: null, loading: false });
+        if (key.name === "o") {
+          const p = configuredProviders[providerChipIndex];
+          if (p && oauthProviders.has(p)) void startProviderOAuth(p);
           return;
         }
         if (key.name === "space" || key.sequence === " ") {
@@ -7133,10 +7059,11 @@ export function useAppLogic(props: AppLogicProps) {
       // these directly; omitting them froze the closure on a stale `null`, which
       // is why typing/pasting into the per-provider key prompt did nothing.
       apiKeyPrompt,
-      bwSync,
+      oauthLogin,
+      oauthProviders,
       submitProviderKey,
-      submitBwPassword,
-      commitBwImport,
+      startProviderOAuth,
+      cancelProviderOAuth,
       openApiKeyModal,
       openCatalogMcp,
       openMcpEditor,
@@ -7188,7 +7115,6 @@ export function useAppLogic(props: AppLogicProps) {
       toggleModelDisabled,
       pointToExistingForm,
       setApiKeyPrompt,
-      setBwSync,
       setCouncilCardStateSync,
       setPendingCouncilQuestionSync,
       setShowSlashMenuSync,
@@ -7221,17 +7147,6 @@ export function useAppLogic(props: AppLogicProps) {
         if (pasted) setApiKeyPrompt((s) => (s ? { ...s, value: s.value + pasted, error: null } : s));
         return;
       }
-      if (bwSync && bwSync.phase === "password") {
-        event.preventDefault();
-        // Master passwords may contain spaces — keep them; only drop guards,
-        // control bytes and line breaks (which a trailing paste newline adds).
-        const pasted = stripControlBytes(decodePasteBytes(event.bytes)).replace(/[\r\n]+/g, "");
-        if (pasted) {
-          setBwSync((s) => (s && s.phase === "password" ? { ...s, value: s.value + pasted, error: null } : s));
-        }
-        return;
-      }
-
       if (!hasApiKeyRef.current) {
         event.preventDefault();
         openApiKeyModal();
@@ -7257,7 +7172,7 @@ export function useAppLogic(props: AppLogicProps) {
       replacePasteBlocks([...pasteBlocksRef.current, block]);
       inputRef.current?.insertText(getPasteBlockToken(block));
     },
-    [apiKeyPrompt, bwSync, openApiKeyModal, replacePasteBlocks],
+    [apiKeyPrompt, openApiKeyModal, replacePasteBlocks],
   );
 
   const handleSubmit = useCallback(() => {
@@ -7433,7 +7348,8 @@ export function useAppLogic(props: AppLogicProps) {
     apiKeyPrompt,
     blockPrompt,
     btwState,
-    bwSync,
+    oauthLogin,
+    oauthProviders,
     configuredProviders,
     connectModalIndex,
     contextStats,

@@ -592,7 +592,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     apiKeyPrompt,
     blockPrompt,
     btwState,
-    bwSync,
+    oauthLogin,
+    oauthProviders,
     configuredProviders,
     connectModalIndex,
     contextStats,
@@ -1516,7 +1517,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             providerChipIndex={providerChipIndex}
             providersWithKey={providersWithKey}
             apiKeyPrompt={apiKeyPrompt}
-            bwSync={bwSync}
+            oauthProviders={oauthProviders}
+            oauthLogin={oauthLogin}
           />
         )}
         {showSessionPicker && (
