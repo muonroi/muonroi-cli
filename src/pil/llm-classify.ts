@@ -158,17 +158,19 @@ export interface CreateClassifierOptions {
 // returns in <1.5s, so the headroom only bites a genuinely stuck call. Data-
 // driven off measurement, not an identity/tier proxy string.
 const CLASSIFY_TIMEOUT_MS = 8000;
-// Wall-clock cap for the WHOLE candidate chain (cross-provider fallbacks +
-// last-resort session model). The loop stops once too little remains for a
-// useful attempt — so a run of dead/hanging keys degrades to fail-open in
-// bounded time instead of chaining full-length aborts.
-const CLASSIFY_TOTAL_BUDGET_MS = 9000;
-// Per-attempt ceiling for a CHAIN candidate (more than one candidate to try).
-// Tighter than the lone-model ceiling so a single slow/hanging fallback
-// (measured 2026-07-15: glm-4.7 took 2–12s and sits AHEAD of a usable opencode
-// model in the vendor switch order) can't monopolise the budget and starve the
-// candidates behind it. A healthy fast model answers in ~1–2s, so 3s is ample.
-const CLASSIFY_CHAIN_ATTEMPT_MS = 3000;
+// Absolute wall-clock cap for the WHOLE classify (every candidate AND its
+// self-repair). Enforced via a shared deadline passed into attemptClassify, so
+// a run of dead/hanging keys — or one legitimately slow reasoning model —
+// degrades to fail-open in bounded time. Sized to fit a healthy reasoning fast
+// model twice over: deepseek-v4-flash measured 2026-07-15 answers a classify in
+// ~2–5s (with a valid key), so 10s leaves room for one candidate + a self-repair
+// before the deadline. A dead key ahead of it (auth-fails in ~0.2s) barely eats
+// the budget; only a genuinely hanging candidate consumes it.
+const CLASSIFY_TOTAL_BUDGET_MS = 10_000;
+// Floor for any single streamText attempt's own timeout, so a nearly-exhausted
+// deadline still gives a final candidate a real (if short) chance rather than an
+// instant abort.
+const CLASSIFY_MIN_ATTEMPT_MS = 1200;
 // Eight comma-separated words now (added <clarity>) — ~20-30 tokens worst case
 // ("documentation,balanced,task,report,standard,ecosystem,vietnamese,underspecified").
 // 56 keeps headroom without padding (the model still stops after eight words).
@@ -511,12 +513,13 @@ export function createLlmClassifier(
     const attemptClassify = async (
       runtime: ReturnType<typeof resolveModelRuntime>,
       cmId: string,
-      ceilingMs: number,
+      deadlineMs: number,
     ): Promise<LlmClassifyResult | null> => {
-      // Max-output scales with reasoning; the timeout ceiling is supplied by the
-      // caller (min of the flat ceiling and the remaining chain budget).
+      // Max-output scales with reasoning; each streamText timeout is bounded by
+      // the shared deadline (min of the flat ceiling and the time left), so the
+      // whole classify — this attempt AND its repair — never overruns the budget.
       const { isReasoning } = classifierBudget(runtime.modelInfo);
-      const timeoutMs = ceilingMs;
+      const timeoutMs = Math.max(CLASSIFY_MIN_ATTEMPT_MS, Math.min(CLASSIFY_TIMEOUT_MS, deadlineMs - Date.now()));
       const dropMaxTokens = runtime.unsupportedParams?.includes("maxOutputTokens") === true;
       const maxOut = isReasoning ? REASONING_MAX_OUTPUT_TOKENS : NONREASONING_MAX_OUTPUT_TOKENS;
 
@@ -614,10 +617,15 @@ export function createLlmClassifier(
 
         // Self-repair (agent-first recovery — NOT a regex fallback): the reply
         // did not parse. Call the SAME model once more with the full prompt + an
-        // explicit format-repair instruction on a doubled budget.
+        // explicit format-repair instruction on a doubled budget. Skip it when
+        // too little of the shared deadline remains (the caller then falls
+        // through to the next candidate / fails open).
         clearTimeout(timer);
+        const repairBudget = deadlineMs - Date.now();
+        if (repairBudget < 1500) return null;
+        const repairTimeout = Math.max(CLASSIFY_MIN_ATTEMPT_MS, Math.min(CLASSIFY_TIMEOUT_MS, repairBudget));
         const repairController = new AbortController();
-        const repairTimer = setTimeout(() => repairController.abort(), timeoutMs);
+        const repairTimer = setTimeout(() => repairController.abort(), repairTimeout);
         const repairSignal = signal
           ? (AbortSignal.any?.([signal, repairController.signal]) ?? repairController.signal)
           : repairController.signal;
@@ -684,14 +692,12 @@ export function createLlmClassifier(
         candidates.push({ modelId: primaryModelId, providerId: null });
       }
 
-      // A lone candidate (the common same-provider case) gets the full flat
-      // ceiling; a multi-candidate chain gives each attempt the tighter
-      // per-attempt ceiling so one slow fallback can't starve the rest.
-      const perAttemptCeil = candidates.length > 1 ? CLASSIFY_CHAIN_ATTEMPT_MS : CLASSIFY_TIMEOUT_MS;
+      // Shared absolute deadline bounds the whole chain (each attempt + its
+      // repair). A lone same-provider candidate (the common case) simply gets
+      // the full flat ceiling within it.
       const chainDeadline = Date.now() + CLASSIFY_TOTAL_BUDGET_MS;
       for (const cand of candidates) {
-        const remaining = chainDeadline - Date.now();
-        if (remaining < 750) break; // too little left for a useful attempt → fail-open
+        if (chainDeadline - Date.now() < 750) break; // too little left → fail-open
         const f = cand.providerId ? await resolveCrossProviderClassifyFactory(cand.providerId) : factory;
         if (!f) continue;
         let runtime: ReturnType<typeof resolveModelRuntime>;
@@ -701,7 +707,7 @@ export function createLlmClassifier(
           console.error(`[pil.llm-classify] resolveModelRuntime failed for ${cand.modelId}: ${(e as Error)?.message}`);
           continue;
         }
-        const res = await attemptClassify(runtime, cand.modelId, Math.min(perAttemptCeil, remaining));
+        const res = await attemptClassify(runtime, cand.modelId, chainDeadline);
         if (res) return res;
       }
       console.error(
