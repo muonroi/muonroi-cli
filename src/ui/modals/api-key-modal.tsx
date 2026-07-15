@@ -56,7 +56,7 @@ export function ApiKeyModal({
             <text fg={t.textMuted}>{"esc"}</text>
           </box>
           <box paddingLeft={2} paddingRight={2} paddingTop={1}>
-            <text fg={t.text}>{"Paste your DeepSeek API key to unlock chat. Esc hides this prompt."}</text>
+            <text fg={t.text}>{"Paste a provider API key, or press Esc and use /providers to sign in (OAuth)."}</text>
           </box>
           <box paddingLeft={2} paddingRight={2} paddingTop={1}>
             <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1} width="100%">

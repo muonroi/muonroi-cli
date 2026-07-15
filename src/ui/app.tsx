@@ -476,6 +476,7 @@ Follow the repository's commit and pull request workflows. Inspect the current c
 const BUILTIN_TYPED_SLASH_COMMANDS = new Set([
   "/clear",
   "/providers",
+  "/login",
   "/model",
   "/models",
   "/sandbox",

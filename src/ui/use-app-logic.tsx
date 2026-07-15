@@ -1319,7 +1319,9 @@ export function useAppLogic(props: AppLogicProps) {
   // throws (internal try/catch → []).
   // biome-ignore lint/correctness/useExhaustiveDependencies: sessionId + messages.length are intentional recompute signals (getSessionTree reads the current session internally)
   const sessionTree = useMemo(() => agent.getSessionTree(), [agent, sessionId, messages.length]);
-  const [showApiKeyModal, setShowApiKeyModal] = useState(() => !initialHasApiKey);
+  // Boot straight to chat: no forced API-key modal on start. Auth is on-demand
+  // via the provider picker (opens on a no-auth send, or via /providers /login).
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   // Ref stays current synchronously so keyboard-burst handlers read the right value
@@ -1441,7 +1443,7 @@ export function useAppLogic(props: AppLogicProps) {
   const originalIdealPromptRef = useRef<string | null>(null);
   const isProcessingRef = useRef(false);
   const hasApiKeyRef = useRef(initialHasApiKey);
-  const showApiKeyModalRef = useRef(!initialHasApiKey);
+  const showApiKeyModalRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const processMessageRef = useRef<(text: string, displayText?: string) => Promise<void> | void>(() => {});
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
@@ -4864,6 +4866,7 @@ export function useAppLogic(props: AppLogicProps) {
           break;
         case "providers":
         case "models":
+        case "login":
           setShowModelPicker(true);
           setModelPickerIndex(0);
           setModelSearchQuery("");
@@ -6840,10 +6843,8 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
 
-      if (!hasApiKeyRef.current && shouldOpenApiKeyModalForKey(key)) {
-        openApiKeyModal();
-        return;
-      }
+      // No forced modal on keystroke when unauthenticated — the user can type
+      // freely; the provider picker opens on send instead (see handleSubmit).
       if (key.sequence === "/" && !isProcessing) {
         const text = inputRef.current?.plainText || "";
         if (!text.trim()) {
@@ -7147,11 +7148,6 @@ export function useAppLogic(props: AppLogicProps) {
         if (pasted) setApiKeyPrompt((s) => (s ? { ...s, value: s.value + pasted, error: null } : s));
         return;
       }
-      if (!hasApiKeyRef.current) {
-        event.preventDefault();
-        openApiKeyModal();
-        return;
-      }
 
       const text = decodePasteBytes(event.bytes);
       const trimmed = text.trim();
@@ -7172,7 +7168,7 @@ export function useAppLogic(props: AppLogicProps) {
       replacePasteBlocks([...pasteBlocksRef.current, block]);
       inputRef.current?.insertText(getPasteBlockToken(block));
     },
-    [apiKeyPrompt, openApiKeyModal, replacePasteBlocks],
+    [apiKeyPrompt, replacePasteBlocks],
   );
 
   const handleSubmit = useCallback(() => {
@@ -7194,6 +7190,14 @@ export function useAppLogic(props: AppLogicProps) {
         clearLiveTurnUi();
         activeAgent.abort();
       }
+      return;
+    }
+    // No provider configured yet: open the picker so the user can sign in
+    // (OAuth) or add a key. Keep the composer text so the same message can be
+    // resent as soon as a provider is connected.
+    if (!hasApiKeyRef.current) {
+      setShowModelPicker(true);
+      setModelPickerIndex(0);
       return;
     }
     inputRef.current?.clear();
@@ -7254,10 +7258,6 @@ export function useAppLogic(props: AppLogicProps) {
       message = message.replace(getFileMentionToken(block), `@${block.path}`);
     }
     if (!message.trim()) return;
-    if (!hasApiKeyRef.current) {
-      openApiKeyModal();
-      return;
-    }
     // Council question response — route answer back to council generator.
     // The card now owns keyboard input; this branch survives only for the
     // legacy code path where the user typed an answer in the main prompt
@@ -7297,7 +7297,6 @@ export function useAppLogic(props: AppLogicProps) {
     agent,
     clearLiveTurnUi,
     handleCommand,
-    openApiKeyModal,
     processMessage,
     replacePasteBlocks,
     scrollToBottom,
@@ -7307,6 +7306,8 @@ export function useAppLogic(props: AppLogicProps) {
     setShowSlashMenuSync,
     setPendingCouncilQuestionSync,
     setCouncilCardStateSync,
+    setShowModelPicker,
+    setModelPickerIndex,
   ]);
 
   // Switch to the "messages" branch (which renders log + halt-card + init-new-form +
