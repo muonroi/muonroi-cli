@@ -217,10 +217,14 @@ export async function migrateLegacyKeysToEnv(): Promise<void> {
   }
   if (settings.keysMigratedToEnv) return;
 
-  // Legacy keytar reader — the module is being removed, so absence is normal.
+  // Legacy keytar reader — the dependency has been removed, so absence is the
+  // normal case. The specifier is assembled at runtime so the bundler
+  // (`bun build --compile`) does not try to statically resolve the missing
+  // module; when keytar isn't installed this import simply throws → null.
   let keytar: LegacyKeytar | null = null;
   try {
-    keytar = (await import("keytar")) as unknown as LegacyKeytar;
+    const legacyKeytarSpecifier = ["key", "tar"].join("");
+    keytar = (await import(legacyKeytarSpecifier)) as unknown as LegacyKeytar;
   } catch {
     keytar = null;
   }
