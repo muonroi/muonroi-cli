@@ -48,15 +48,33 @@ function parseLine(line: string): { key: string; value: string } | null {
   return { key: line.slice(0, eq).trim(), value: line.slice(eq + 1) };
 }
 
+/** Env-var names we will ever mirror are plain identifiers; reject anything else. */
+function isValidEnvName(name: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+}
+
 function mirrorToWindowsRegistry(name: string, value: string | null): void {
   if (process.platform !== "win32") return;
+  if (!isValidEnvName(name)) {
+    // Defense-in-depth: never let a non-identifier name reach the shell.
+    if (process.env.MUONROI_DEBUG_ENVSTORE) {
+      console.error(`[env-store] refusing to mirror invalid env name: ${name}`);
+    }
+    return;
+  }
   try {
+    // Neither name nor value is interpolated into the script — both are read
+    // from the child's environment as literal strings, so no PowerShell
+    // metacharacters in either can be interpreted as commands (injection-safe).
     const script =
       value === null
-        ? `[Environment]::SetEnvironmentVariable('${name}', $null, 'User')`
-        : `[Environment]::SetEnvironmentVariable('${name}', $env:MUONROI_ENVSTORE_VALUE, 'User')`;
+        ? "[Environment]::SetEnvironmentVariable($env:MUONROI_ENVSTORE_NAME, $null, 'User')"
+        : "[Environment]::SetEnvironmentVariable($env:MUONROI_ENVSTORE_NAME, $env:MUONROI_ENVSTORE_VALUE, 'User')";
     execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
-      env: value === null ? process.env : { ...process.env, MUONROI_ENVSTORE_VALUE: value },
+      env:
+        value === null
+          ? { ...process.env, MUONROI_ENVSTORE_NAME: name }
+          : { ...process.env, MUONROI_ENVSTORE_NAME: name, MUONROI_ENVSTORE_VALUE: value },
       stdio: "ignore",
     });
   } catch (err) {
