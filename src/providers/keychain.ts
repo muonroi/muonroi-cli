@@ -20,7 +20,7 @@ function normalizeKeychainProvider(p: string): ProviderId | null {
   return null;
 }
 
-const ENV_BY_PROVIDER: Record<ProviderId, string> = {
+export const ENV_BY_PROVIDER: Record<ProviderId, string> = {
   anthropic: "ANTHROPIC_API_KEY",
   openai: "OPENAI_API_KEY",
   deepseek: "DEEPSEEK_API_KEY",
@@ -56,6 +56,24 @@ export async function setKeyForProvider(provider: string | ProviderId, key: stri
     throw new Error(`Key for '${provider}' is too short (< 20 chars).`);
   }
   persistEnvVar(ENV_BY_PROVIDER[norm], key);
+  // One auth mode per provider (OAuth XOR API key): setting an API key logs out
+  // any OAuth session for this provider so the two can never coexist.
+  try {
+    const { listOAuthProviderIds } = await import("./auth/registry.js");
+    if ((await listOAuthProviderIds()).includes(norm)) {
+      const { deleteTokens } = await import("./auth/token-store.js");
+      await deleteTokens(norm);
+    }
+  } catch (err) {
+    // Best-effort: the key is already persisted; failing to clear tokens is
+    // non-fatal (resolution still prefers the freshly-set key path only if no
+    // token — but we log so a lingering token is diagnosable).
+    if (process.env.MUONROI_DEBUG_ENVSTORE) {
+      console.error(
+        `[keychain] failed to clear OAuth for ${norm}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
   return true;
 }
 

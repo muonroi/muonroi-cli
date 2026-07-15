@@ -739,6 +739,18 @@ export async function runKeysLogin(provider: string): Promise<void> {
 
   await saveTokens(norm, tokens);
 
+  // One auth mode per provider (OAuth XOR API key): logging in via OAuth clears
+  // any stored API key for this provider so a stale key can never shadow OAuth.
+  try {
+    const { clearEnvVar } = await import("../providers/env-store.js");
+    const { ENV_BY_PROVIDER } = await import("../providers/keychain.js");
+    clearEnvVar(ENV_BY_PROVIDER[norm as ProviderId]);
+  } catch (err) {
+    console.error(
+      `[keys] failed to clear API key after OAuth login for ${norm}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   const emailDisplay = tokens.email ? ` (${tokens.email})` : "";
   const expiry = new Date(tokens.expiresAt).toLocaleString();
   console.log(`\nLogged in to ${name}${emailDisplay}. Token expires: ${expiry}`);
