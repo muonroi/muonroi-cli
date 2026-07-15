@@ -3834,15 +3834,36 @@ export class Agent {
     //      and must be re-resolved from the NEW provider's own credentials.
     const providerDeferred = this.provider === null;
     const keyIsSentinelOrEmpty = !this.apiKey || this.apiKey === "oauth";
-    if (!providerDeferred && !keyIsSentinelOrEmpty) return;
 
     try {
-      const { listOAuthProviderIds } = await import("../providers/auth/registry.js");
+      const { listOAuthProviderIds, getOAuthProviderConfig } = await import("../providers/auth/registry.js");
       const ids = await listOAuthProviderIds();
+      const oauthCapable = ids.includes(this.providerId);
 
-      // OAuth path: the provider supports OAuth AND we don't hold a real API
-      // key, so inject subscription tokens as Bearer headers.
-      if (ids.includes(this.providerId) && keyIsSentinelOrEmpty) {
+      // One auth mode per provider (OAuth XOR API key): if this OAuth-capable
+      // provider has a live token, OAuth wins OUTRIGHT — even over a real held
+      // API key. This is the shadowing-bug fix: a stale sk-proj key must not
+      // beat a valid ChatGPT OAuth login. Check token presence BEFORE the
+      // early-out so a held key can no longer suppress OAuth.
+      let hasOAuthTokens = false;
+      if (oauthCapable) {
+        try {
+          const cfg = await getOAuthProviderConfig(this.providerId);
+          const tokens = cfg ? await cfg.loadTokensWithRefresh().catch(() => null) : null;
+          hasOAuthTokens = !!tokens?.accessToken;
+        } catch {
+          hasOAuthTokens = false;
+        }
+      }
+
+      // Nothing to do only when: no OAuth token, a real key is held, and the
+      // provider was not deferred by a model switch.
+      if (!hasOAuthTokens && !providerDeferred && !keyIsSentinelOrEmpty) return;
+
+      // OAuth path: inject subscription tokens as Bearer headers. Taken when a
+      // token exists (override a held key), OR when no real key is held for an
+      // OAuth-capable provider.
+      if (oauthCapable && (hasOAuthTokens || keyIsSentinelOrEmpty)) {
         const effectiveBaseURL =
           this.baseURL &&
           this.baseURL !== (await import("../providers/endpoints.js").then((m) => m.apiBaseFor("anthropic")))
