@@ -10,6 +10,7 @@
  */
 
 import { redactor } from "../utils/redactor.js";
+import { clearEnvVar, persistEnvVar } from "./env-store.js";
 import type { ProviderId } from "./types.js";
 import { ALL_PROVIDER_IDS } from "./types.js";
 
@@ -18,27 +19,6 @@ function normalizeKeychainProvider(p: string): ProviderId | null {
   if ((ALL_PROVIDER_IDS as readonly string[]).includes(lower)) return lower as ProviderId;
   return null;
 }
-
-const SETTINGS_KEY_MAP: Partial<Record<ProviderId, string>> = {
-  anthropic: "anthropic",
-  openai: "openai",
-  deepseek: "deepseek",
-  xai: "xai",
-  zai: "zai",
-  "opencode-go": "opencode-go",
-};
-
-const KEYCHAIN_SERVICE = "muonroi-cli";
-
-const ACCOUNT_BY_PROVIDER: Record<ProviderId, string> = {
-  anthropic: "anthropic",
-  openai: "openai",
-  deepseek: "deepseek",
-  xai: "xai",
-  ollama: "ollama",
-  zai: "zai",
-  "opencode-go": "opencode-go",
-};
 
 const ENV_BY_PROVIDER: Record<ProviderId, string> = {
   anthropic: "ANTHROPIC_API_KEY",
@@ -61,90 +41,42 @@ export class ProviderKeyMissingError extends Error {
 }
 
 /**
- * Dynamic keytar loader — B-2 mitigation.
- * Missing/broken keytar never crashes the process.
- */
-interface KeytarLike {
-  getPassword(service: string, account: string): Promise<string | null>;
-  setPassword?(service: string, account: string, password: string): Promise<void>;
-  deletePassword?(service: string, account: string): Promise<boolean>;
-  findCredentials?(service: string): Promise<Array<{ account: string; password: string }>>;
-}
-
-async function loadKeytar(): Promise<KeytarLike | null> {
-  try {
-    return (await import("keytar")) as KeytarLike;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Providers that store an API key in the OS keychain.
- * Phase 12.2-G5: derived from `ALL_PROVIDER_IDS` by excluding ollama
- * (keyless local server). Preserves the original ordering.
+ * Providers that store an API key (all except keyless ollama). Derived from
+ * `ALL_PROVIDER_IDS`; preserves the original ordering.
  */
 export const KEYCHAIN_PROVIDER_IDS: readonly ProviderId[] = ALL_PROVIDER_IDS.filter((p) => p !== "ollama");
 
 /**
- * Store a provider API key in the OS keychain. Returns true on success.
- * Falls back to false (silent) if keytar is unavailable on this platform.
+ * Store a provider API key in the OS environment (via the env-store: `.env`
+ * file + process.env + Windows registry mirror). Returns true on success.
  */
 export async function setKeyForProvider(provider: string | ProviderId, key: string): Promise<boolean> {
   const norm = normalizeKeychainProvider(provider as string) ?? (provider as ProviderId);
   if (!key || key.length < 20) {
     throw new Error(`Key for '${provider}' is too short (< 20 chars).`);
   }
-  const kt = await loadKeytar();
-  if (!kt?.setPassword) return false;
-  redactor.enrollSecret(key);
-  try {
-    await kt.setPassword(KEYCHAIN_SERVICE, ACCOUNT_BY_PROVIDER[norm], key);
-    return true;
-  } catch (err: any) {
-    // Runtime backend failure is common on Linux when libsecret / secret service
-    // (gnome-keyring, kwallet/ksecretd, etc.) is not installed, the collection is
-    // locked, or no D-Bus session/keyring is active for this user.
-    // The caller (e.g. keys import-bw / keys set) will print the friendly message.
-    if (process.env.DEBUG || process.env.MUONROI_DEBUG_KEYCHAIN) {
-      console.error(`[keychain] setPassword backend error for ${provider}:`, err?.message || err);
-    }
-    return false;
-  }
+  persistEnvVar(ENV_BY_PROVIDER[norm], key);
+  return true;
 }
 
 /**
- * Delete a stored key. Returns true if a key was deleted, false if none was
- * present or keytar is unavailable.
+ * Delete a stored key from the env-store. Returns true if a key was present.
  */
 export async function deleteKeyForProvider(provider: string | ProviderId): Promise<boolean> {
   const norm = normalizeKeychainProvider(provider as string) ?? (provider as ProviderId);
-  const kt = await loadKeytar();
-  if (!kt?.deletePassword) return false;
-  try {
-    return await kt.deletePassword(KEYCHAIN_SERVICE, ACCOUNT_BY_PROVIDER[norm]);
-  } catch (err: any) {
-    if (process.env.DEBUG || process.env.MUONROI_DEBUG_KEYCHAIN) {
-      console.error(`[keychain] deletePassword backend error for ${provider}:`, err?.message || err);
-    }
-    return false;
-  }
+  const had = !!process.env[ENV_BY_PROVIDER[norm]];
+  clearEnvVar(ENV_BY_PROVIDER[norm]);
+  return had;
 }
 
 /**
- * List provider IDs that currently have a key stored in the keychain.
- * Empty array if keytar is unavailable.
+ * List provider IDs that currently have a key set in the environment.
  */
 export async function listStoredProviders(): Promise<ProviderId[]> {
-  const kt = await loadKeytar();
-  if (!kt?.findCredentials) return [];
-  try {
-    const creds = await kt.findCredentials(KEYCHAIN_SERVICE);
-    const validAccounts = new Set(Object.values(ACCOUNT_BY_PROVIDER));
-    return creds.filter((c) => validAccounts.has(c.account)).map((c) => c.account as ProviderId);
-  } catch {
-    return [];
-  }
+  return KEYCHAIN_PROVIDER_IDS.filter((p) => {
+    const v = process.env[ENV_BY_PROVIDER[p]];
+    return !!v && v.length >= 20;
+  });
 }
 
 /**
@@ -155,39 +87,10 @@ export async function listStoredProviders(): Promise<ProviderId[]> {
  * @throws {ProviderKeyMissingError} when no key found for non-ollama providers.
  */
 export async function loadKeyForProvider(provider: ProviderId): Promise<string> {
-  const kt = await loadKeytar();
-  if (kt) {
-    try {
-      const k = await kt.getPassword(KEYCHAIN_SERVICE, ACCOUNT_BY_PROVIDER[provider]);
-      if (k && k.length >= 20) {
-        redactor.enrollSecret(k);
-        return k;
-      }
-    } catch {
-      /* ignore keytar backend failures */
-    }
-  }
-
   const envKey = process.env[ENV_BY_PROVIDER[provider]];
   if (envKey && envKey.length >= 20) {
     redactor.enrollSecret(envKey);
     return envKey;
-  }
-
-  // Fallback: check user-settings.json providers config (lazy import to avoid circular deps)
-  const settingsField = SETTINGS_KEY_MAP[provider];
-  if (settingsField) {
-    try {
-      const { loadUserSettings } = await import("../utils/settings.js");
-      const providers = loadUserSettings().providers as Record<string, { apiKey?: string }> | undefined;
-      const settingsKey = providers?.[settingsField]?.apiKey;
-      if (settingsKey && settingsKey.length >= 20) {
-        redactor.enrollSecret(settingsKey);
-        return settingsKey;
-      }
-    } catch {
-      /* settings load failed — continue to error */
-    }
   }
 
   // Ollama may be keyless
@@ -204,14 +107,6 @@ export async function loadKeyForProvider(provider: ProviderId): Promise<string> 
 export async function getConfiguredProviders(): Promise<ProviderId[]> {
   const order: readonly ProviderId[] = ALL_PROVIDER_IDS;
   const stored = new Set(await listStoredProviders());
-
-  let settingsProviders: Record<string, { apiKey?: string }> = {};
-  try {
-    const { loadUserSettings } = await import("../utils/settings.js");
-    settingsProviders = (loadUserSettings().providers ?? {}) as Record<string, { apiKey?: string }>;
-  } catch {
-    /* settings unreadable — keychain + env still work */
-  }
 
   // OAuth-authenticated providers (no API key, but tokens stored via `keys
   // login`) need to count as configured — otherwise the model picker silently
@@ -231,25 +126,8 @@ export async function getConfiguredProviders(): Promise<ProviderId[]> {
 
   const configured: ProviderId[] = [];
   for (const p of order) {
-    if (p === "ollama") {
+    if (p === "ollama" || stored.has(p) || oauthAuthenticated.has(p)) {
       configured.push(p);
-      continue;
-    }
-    if (stored.has(p) || oauthAuthenticated.has(p)) {
-      configured.push(p);
-      continue;
-    }
-    const envKey = process.env[ENV_BY_PROVIDER[p]];
-    if (envKey && envKey.length >= 20) {
-      configured.push(p);
-      continue;
-    }
-    const settingsField = SETTINGS_KEY_MAP[p];
-    if (settingsField) {
-      const k = settingsProviders[settingsField]?.apiKey;
-      if (k && k.length >= 20) {
-        configured.push(p);
-      }
     }
   }
   return configured;
