@@ -12,12 +12,16 @@
  * Cost target: <200 input tokens, <10 output tokens per call (~$0.0001 on
  * DeepSeek Flash). Timeout 2500ms — bails fast if the model stalls.
  */
+import { appendFileSync } from "node:fs";
 import { streamText } from "ai";
-import { getModelInfo } from "../models/registry.js";
+import { getModelInfo, SWITCH_PROVIDER_ORDER } from "../models/registry.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
+import { getConfiguredProviders, loadKeyForProvider, ProviderKeyMissingError } from "../providers/keychain.js";
 import type { ProviderFactory } from "../providers/runtime.js";
-import { resolveModelRuntime } from "../providers/runtime.js";
+import { createProviderFactoryAsync, resolveModelRuntime } from "../providers/runtime.js";
+import type { ProviderId } from "../providers/types.js";
 import { getRoutedModelByTier } from "../router/peak-hour.js";
+import { isProviderDisabled } from "../utils/settings.js";
 import type { OutputStyle, TaskType } from "./types.js";
 
 /**
@@ -126,24 +130,45 @@ export interface CreateClassifierOptions {
    * Route the throwaway classify to the provider's fast tier when one exists
    * (mirrors `classifySubSessionAction`). Same-provider only, so the already-
    * bound factory/key still works. A no-op when the provider exposes no
-   * routable fast model (e.g. xai) — the tier-scaled timeout inside the closure
-   * covers that case, so a heavy session model never starves the verdict.
-   * Zero-hardcode: the fast id comes from `getRoutedModelByTier`, not a literal.
+   * routable fast model (e.g. xai). Zero-hardcode: the fast id comes from
+   * `getRoutedModelByTier`, not a literal. Cheap — safe on every turn.
    */
   routeFastTier?: boolean;
+  /**
+   * When the session provider has NO same-provider fast tier (e.g. xai, whose
+   * session model may be an agentic model that ignores the terse classify
+   * contract — measured 2026-07-15 for grok-composer), also try keyed fast
+   * models from OTHER configured providers, in catalog switch order, until one
+   * parses. Bounded by CLASSIFY_TOTAL_BUDGET_MS so a chain of dead/slow keys
+   * can't stall the turn. This adds latency ONLY on that fallback path, so it is
+   * opt-in per call-site: enable it for the high-value /ideal routing classify,
+   * NOT for the per-turn PIL classify (there a fast fail-open "standard" is fine
+   * and cheaper than chaining providers on every message).
+   */
+  crossProviderFallback?: boolean;
 }
 
-const LLM_CLASSIFY_TIMEOUT_MS = 2500;
-
-// Reasoning models (grok-4.5, deepseek-v4-flash, gpt-5.x) spend their output
-// budget on reasoning tokens BEFORE any visible text. The legacy 16-token cap
-// was consumed entirely by reasoning → zero text-delta → parseResponse("") →
-// null → `llm=fail` on every borderline turn (observed 5/5 live grok sessions).
-// Give reasoning models a real ceiling so the 2-word answer streams back, and a
-// longer timeout because reasoning round-trips take seconds, not ~200ms.
-// The ceiling is a cap, not padding: the model still stops after two words, so a
-// generous headroom costs nothing when reasoning is short.
-const REASONING_CLASSIFY_TIMEOUT_MS = 8000;
+// Single flat classify ceiling for EVERY model. Harness-measured latency
+// (2026-07-15, grok-composer via OAuth, 7 samples) is 1045–1277ms — no tested
+// model (agentic balanced OR fast flash) approaches even the legacy 2.5s cap,
+// so a tier-scaled timeout was solving a non-existent latency problem: the
+// /ideal over-engineering root cause was NOT a timeout abort but grok-composer
+// ignoring the terse contract (it emits task-planning prose, never the 8-word
+// line → null → fail-open). The ceiling is a pure safety net: a healthy model
+// returns in <1.5s, so the headroom only bites a genuinely stuck call. Data-
+// driven off measurement, not an identity/tier proxy string.
+const CLASSIFY_TIMEOUT_MS = 8000;
+// Wall-clock cap for the WHOLE candidate chain (cross-provider fallbacks +
+// last-resort session model). The loop stops once too little remains for a
+// useful attempt — so a run of dead/hanging keys degrades to fail-open in
+// bounded time instead of chaining full-length aborts.
+const CLASSIFY_TOTAL_BUDGET_MS = 9000;
+// Per-attempt ceiling for a CHAIN candidate (more than one candidate to try).
+// Tighter than the lone-model ceiling so a single slow/hanging fallback
+// (measured 2026-07-15: glm-4.7 took 2–12s and sits AHEAD of a usable opencode
+// model in the vendor switch order) can't monopolise the budget and starve the
+// candidates behind it. A healthy fast model answers in ~1–2s, so 3s is ample.
+const CLASSIFY_CHAIN_ATTEMPT_MS = 3000;
 // Eight comma-separated words now (added <clarity>) — ~20-30 tokens worst case
 // ("documentation,balanced,task,report,standard,ecosystem,vietnamese,underspecified").
 // 56 keeps headroom without padding (the model still stops after eight words).
@@ -153,36 +178,103 @@ const REASONING_MAX_OUTPUT_TOKENS = 2048;
 /**
  * Compute the classify call budget from the resolved model's catalog metadata.
  *
- * TIMEOUT scales with model WEIGHT, not just the reasoning flag: a balanced/
- * premium agentic model (e.g. grok-composer — balanced, reasoning:false)
- * answers far slower than a fast-tier flash model, so the tight 2.5s ceiling
- * aborted before its 8-word verdict streamed back — collapsing every classify
- * to the null→"standard" fail-open (the /ideal over-engineering root cause
- * observed 2026-07-14). `tier` comes from the catalog, so this is data-driven,
- * NOT a per-model literal. The generous ceiling is a cap not padding: a healthy
- * fast model still returns in <1s, so there is no added latency — only a
- * genuinely slow model uses the headroom.
+ * TIMEOUT is a flat safety-net ceiling for all models — see CLASSIFY_TIMEOUT_MS.
+ * Measurement showed classify latency is provider-independent and well under
+ * the ceiling, so keying the timeout off `tier`/`reasoning` added no value and
+ * amounted to an identity-proxy soft-hardcode.
  *
  * MAX-OUTPUT scales with REASONING only: a reasoning model burns its output
  * budget on reasoning tokens before any visible text, so it needs the room in
- * tokens; a non-reasoning model (even a heavy one) emits the 8 words directly.
- * The two knobs are intentionally decoupled.
+ * tokens; a non-reasoning model emits the 8 words directly. This knob is real —
+ * it is the fix for reasoning models routing the verdict into the reasoning
+ * channel — and stays decoupled from the (now flat) timeout.
  */
 export function classifierBudget(modelInfo: { reasoning?: boolean; tier?: string } | undefined): {
   isReasoning: boolean;
-  heavyweight: boolean;
   timeoutMs: number;
   maxOutputTokens: number;
 } {
   const isReasoning = modelInfo?.reasoning === true;
-  const tier = modelInfo?.tier;
-  const heavyweight = isReasoning || (tier !== undefined && tier !== "fast");
   return {
     isReasoning,
-    heavyweight,
-    timeoutMs: heavyweight ? REASONING_CLASSIFY_TIMEOUT_MS : LLM_CLASSIFY_TIMEOUT_MS,
+    timeoutMs: CLASSIFY_TIMEOUT_MS,
     maxOutputTokens: isReasoning ? REASONING_MAX_OUTPUT_TOKENS : NONREASONING_MAX_OUTPUT_TOKENS,
   };
+}
+
+/**
+ * Session-scoped cache of cross-provider factories built for the throwaway
+ * classify. Keyed by provider so the OAuth-aware build (keychain read + token
+ * refresh) happens at most once per provider per process, not per turn.
+ */
+const crossFactoryCache = new Map<ProviderId, ProviderFactory>();
+
+/** Test seam — clear the cross-provider factory cache between specs. */
+export function __resetClassifyFactoryCache(): void {
+  crossFactoryCache.clear();
+}
+
+/**
+ * Build (or reuse) a real factory for a DIFFERENT provider than the session's,
+ * so the throwaway classify can run on a keyed instruction-following model when
+ * the session provider has none. Mirrors the council's `resolveCouncilFactory`:
+ * `loadKeyForProvider` for API-key providers, falling back to
+ * `createProviderFactoryAsync` for OAuth-only providers (injects the bearer
+ * token). Failures degrade gracefully (logged, returns undefined → caller keeps
+ * the session model). Never throws.
+ */
+async function resolveCrossProviderClassifyFactory(providerId: ProviderId): Promise<ProviderFactory | undefined> {
+  const cached = crossFactoryCache.get(providerId);
+  if (cached) return cached;
+  try {
+    let apiKey: string | undefined;
+    try {
+      apiKey = await loadKeyForProvider(providerId);
+    } catch (err) {
+      if (!(err instanceof ProviderKeyMissingError)) throw err;
+      // OAuth-only provider — createProviderFactoryAsync injects the bearer token.
+    }
+    const { factory } = await createProviderFactoryAsync(providerId, apiKey ? { apiKey } : {});
+    crossFactoryCache.set(providerId, factory);
+    return factory;
+  } catch (err) {
+    console.error(
+      `[pil.llm-classify] cross-provider classify factory build failed for ${providerId}: ${(err as Error)?.message}`,
+    );
+    return undefined;
+  }
+}
+
+/**
+ * Ordered list of keyed fast-tier models from providers OTHER than the session's,
+ * for the throwaway classify. Candidate order is the catalog's vendor-defined
+ * `switch_provider_order` (zero-hardcode), gated by `getConfiguredProviders`
+ * (the authoritative credential check — unifies API key / env / OAuth) and the
+ * user's disabled-provider setting. The caller tries them in order and falls
+ * through to the next on an auth/stream failure — so a configured-but-DEAD key
+ * (e.g. an expired deepseek key) doesn't strand the classify at fail-open.
+ * Empty when no other provider is configured with a fast tier → caller keeps the
+ * session model (status quo).
+ */
+async function pickCrossProviderClassifyModels(
+  excludeProvider: ProviderId | undefined,
+): Promise<Array<{ modelId: string; providerId: ProviderId }>> {
+  let configured: Set<ProviderId>;
+  try {
+    configured = new Set(await getConfiguredProviders());
+  } catch (err) {
+    console.error(`[pil.llm-classify] getConfiguredProviders failed for classify route: ${(err as Error)?.message}`);
+    return [];
+  }
+  const out: Array<{ modelId: string; providerId: ProviderId }> = [];
+  for (const p of SWITCH_PROVIDER_ORDER as readonly ProviderId[]) {
+    if (p === excludeProvider) continue;
+    if (isProviderDisabled(p)) continue;
+    if (!configured.has(p)) continue;
+    const m = getRoutedModelByTier("fast", p);
+    if (m && m.provider === p) out.push({ modelId: m.id, providerId: p });
+  }
+  return out;
 }
 
 /**
@@ -396,35 +488,39 @@ export function createLlmClassifier(
   return async function classify(prompt: string, opts?: LlmClassifyOptions): Promise<LlmClassifyResult | null> {
     const signal = opts?.signal;
     const recentTurns = opts?.recentTurns;
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      // Optional fast-tier route (same provider): a 2-word verdict does not need
-      // the (possibly heavy, agentic) session model. No-op when the provider has
-      // no routable fast tier — the tier-scaled timeout below then covers it.
-      let classifyModelId = modelId;
-      if (classifyOpts?.routeFastTier) {
-        const provider = getModelInfo(modelId)?.provider;
-        const fast = provider ? getRoutedModelByTier("fast", provider) : undefined;
-        if (fast && fast.id !== modelId) classifyModelId = fast.id;
-      }
-      const runtime = resolveModelRuntime(factory, classifyModelId);
-      // Timeout scales with model WEIGHT; max-output with reasoning. See
-      // classifierBudget() for the rationale (grok-composer starvation fix).
-      const { isReasoning, heavyweight, timeoutMs } = classifierBudget(runtime.modelInfo);
+    const debug = process.env.MUONROI_DEBUG_PIL_CLASSIFY === "1";
 
-      timer = setTimeout(() => controller.abort(), timeoutMs);
-      const combinedSignal = signal
-        ? (AbortSignal.any?.([signal, controller.signal]) ?? controller.signal)
-        : controller.signal;
+    // Bounded recent-conversation block so the classifier can resolve back-
+    // references in a terse follow-up ("từ các phần đó", "làm tiếp", "this")
+    // instead of scoring the isolated sentence. Same for every candidate.
+    const trimmedRecent = recentTurns?.trim();
+    const promptWithContext = trimmedRecent
+      ? `[RECENT CONVERSATION — reference only, do NOT classify this]\n${trimmedRecent.slice(0, 800)}\n\n` +
+        `[NEW USER MESSAGE — classify THIS; if it refers back to the conversation above, judge the depth of the work it actually entails]\n${prompt.slice(0, 600)}`
+      : prompt.slice(0, 600);
+    const fullRecent = recentTurns?.trim();
+    const repairPrompt =
+      (fullRecent
+        ? `[RECENT CONVERSATION — reference only, do NOT classify this]\n${fullRecent.slice(0, 1500)}\n\n`
+        : "") + `[NEW USER MESSAGE — classify THIS]\n${prompt.slice(0, 1500)}`;
 
+    // One classify attempt against a single resolved model, including the
+    // self-repair retry on that same model. Returns the parsed verdict, or null
+    // (unparseable OR provider/stream error) so the caller can fall through to
+    // the next candidate. Each attempt owns its AbortController/timer.
+    const attemptClassify = async (
+      runtime: ReturnType<typeof resolveModelRuntime>,
+      cmId: string,
+      ceilingMs: number,
+    ): Promise<LlmClassifyResult | null> => {
+      // Max-output scales with reasoning; the timeout ceiling is supplied by the
+      // caller (min of the flat ceiling and the remaining chain budget).
+      const { isReasoning } = classifierBudget(runtime.modelInfo);
+      const timeoutMs = ceilingMs;
       const dropMaxTokens = runtime.unsupportedParams?.includes("maxOutputTokens") === true;
       const maxOut = isReasoning ? REASONING_MAX_OUTPUT_TOKENS : NONREASONING_MAX_OUTPUT_TOKENS;
 
-      // Minimize reasoning cost: force the lowest effort the provider exposes for
-      // this throwaway 2-word classification. Only providers with
-      // `supportsReasoningEffort` (openai, xai) honor it; deepseek has no per-call
-      // knob (disable via MUONROI_DEEPSEEK_DISABLE_THINKING at the factory).
+      // Minimize reasoning cost: force the lowest effort the provider exposes.
       let providerOptions = runtime.providerOptions;
       if (isReasoning && runtime.modelInfo?.supportsReasoningEffort && runtime.modelInfo.provider) {
         const lowEffort = getProviderCapabilities(runtime.modelInfo.provider).buildProviderOptions({
@@ -433,99 +529,192 @@ export function createLlmClassifier(
         });
         providerOptions = mergeProviderOptions(runtime.providerOptions, lowEffort);
       }
-      // Prepend a bounded recent-conversation block so the classifier can
-      // resolve back-references in a terse follow-up ("từ các phần đó",
-      // "làm tiếp", "this") instead of scoring the isolated sentence. The
-      // framing makes clear the depth still reflects the NEW message's actual
-      // work — including work it points back at — not the whole transcript.
-      const trimmedRecent = recentTurns?.trim();
-      const promptWithContext = trimmedRecent
-        ? `[RECENT CONVERSATION — reference only, do NOT classify this]\n${trimmedRecent.slice(0, 800)}\n\n` +
-          `[NEW USER MESSAGE — classify THIS; if it refers back to the conversation above, judge the depth of the work it actually entails]\n${prompt.slice(0, 600)}`
-        : prompt.slice(0, 600);
-      const result = streamText({
-        model: runtime.model,
-        abortSignal: combinedSignal,
-        system: SYSTEM_PROMPT,
-        prompt: promptWithContext,
-        ...(dropMaxTokens ? {} : { maxOutputTokens: maxOut }),
-        ...(providerOptions ? { providerOptions } : {}),
-      });
-      let text = "";
-      let reasoningText = "";
-      const partCounts: Record<string, number> = {};
-      const debug = process.env.MUONROI_DEBUG_PIL_CLASSIFY === "1";
-      for await (const part of result.fullStream) {
-        if (debug) partCounts[part.type] = (partCounts[part.type] ?? 0) + 1;
-        if (part.type === "text-delta") text += (part as any).textDelta ?? (part as any).text ?? "";
-        else if (part.type === "reasoning-delta") reasoningText += (part as any).textDelta ?? (part as any).text ?? "";
-      }
-      if (debug) {
-        console.error(
-          `[pil.llm-classify] raw(${classifyModelId}${classifyModelId !== modelId ? `←${modelId}` : ""}) ` +
-            `heavyweight=${heavyweight} maxOut=${dropMaxTokens ? "dropped" : maxOut} ` +
-            `parts=${JSON.stringify(partCounts)} text<<<${text}>>> reasoning<<<${reasoningText.slice(0, 200)}>>>`,
-        );
-      }
-      // Reasoning models occasionally route the entire answer into reasoning
-      // parts (no committed text). Fall back to the reasoning channel so the
-      // 2-word verdict is still recoverable.
-      const primary = parseResponse(text) ?? (reasoningText ? parseResponse(reasoningText) : null);
-      if (primary) return primary;
 
-      // Self-repair (agent-first recovery — NOT a regex fallback): the model's
-      // first reply did not parse into the eight-word contract. Call the model
-      // ONCE more with the FULL prompt + recent context (no 600-char trim) and
-      // an explicit format-repair instruction on a doubled budget. Only if this
-      // ALSO fails do we return null — and the caller then surfaces an honest
-      // UNKNOWN classification, never a keyword-regex guess.
-      if (timer) clearTimeout(timer);
-      const repairController = new AbortController();
-      const repairTimer = setTimeout(() => repairController.abort(), timeoutMs);
-      const repairSignal = signal
-        ? (AbortSignal.any?.([signal, repairController.signal]) ?? repairController.signal)
-        : repairController.signal;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const combinedSignal = signal
+        ? (AbortSignal.any?.([signal, controller.signal]) ?? controller.signal)
+        : controller.signal;
       try {
-        const fullRecent = recentTurns?.trim();
-        const repairPrompt =
-          (fullRecent
-            ? `[RECENT CONVERSATION — reference only, do NOT classify this]\n${fullRecent.slice(0, 1500)}\n\n`
-            : "") + `[NEW USER MESSAGE — classify THIS]\n${prompt.slice(0, 1500)}`;
-        const repairRun = streamText({
+        const t0 = Date.now();
+        const result = streamText({
           model: runtime.model,
-          abortSignal: repairSignal,
-          system: `${SYSTEM_PROMPT}\n\n${CLASSIFY_REPAIR_INSTRUCTION}`,
-          prompt: repairPrompt,
-          ...(dropMaxTokens ? {} : { maxOutputTokens: maxOut * 2 }),
+          abortSignal: combinedSignal,
+          system: SYSTEM_PROMPT,
+          prompt: promptWithContext,
+          ...(dropMaxTokens ? {} : { maxOutputTokens: maxOut }),
           ...(providerOptions ? { providerOptions } : {}),
         });
-        let rt = "";
-        let rr = "";
-        for await (const part of repairRun.fullStream) {
-          if (part.type === "text-delta") rt += (part as any).textDelta ?? (part as any).text ?? "";
-          else if (part.type === "reasoning-delta") rr += (part as any).textDelta ?? (part as any).text ?? "";
+        let text = "";
+        let reasoningText = "";
+        let streamError = "";
+        const partCounts: Record<string, number> = {};
+        for await (const part of result.fullStream) {
+          if (debug) partCounts[part.type] = (partCounts[part.type] ?? 0) + 1;
+          if (part.type === "text-delta") text += (part as any).textDelta ?? (part as any).text ?? "";
+          else if (part.type === "reasoning-delta")
+            reasoningText += (part as any).textDelta ?? (part as any).text ?? "";
+          else if (part.type === "error") {
+            const e = (part as any).error;
+            streamError = e instanceof Error ? e.message : String(e ?? "unknown");
+          }
         }
-        const repaired = parseResponse(rt) ?? (rr ? parseResponse(rr) : null);
-        if (repaired) {
-          console.error(`[pil.llm-classify] self-repair recovered classification (${modelId})`);
-        } else {
+        const elapsedMs = Date.now() - t0;
+        if (debug) {
           console.error(
-            `[pil.llm-classify] self-repair FAILED (${modelId}) — surfacing UNKNOWN, NO regex fallback. ` +
-              `rawPreview=${JSON.stringify(prompt.slice(0, 120))}`,
+            `[pil.llm-classify] raw(${cmId}${cmId !== modelId ? `←${modelId}` : ""}) ` +
+              `maxOut=${dropMaxTokens ? "dropped" : maxOut} streamError=${JSON.stringify(streamError)} ` +
+              `parts=${JSON.stringify(partCounts)} text<<<${text}>>> reasoning<<<${reasoningText.slice(0, 200)}>>>`,
           );
         }
-        return repaired;
+        // Reasoning models occasionally route the entire answer into reasoning
+        // parts (no committed text). Fall back to the reasoning channel.
+        let parsed = parseResponse(text) ?? (reasoningText ? parseResponse(reasoningText) : null);
+
+        // Metrics-only probe sink (env-gated): latency + parsed depth + any
+        // stream error. NO prompt/response content — safe to leave wired.
+        const probeLog = process.env.MUONROI_CLASSIFY_LATENCY_LOG;
+        if (probeLog) {
+          try {
+            appendFileSync(
+              probeLog,
+              `${JSON.stringify({
+                model: cmId,
+                from: modelId === cmId ? undefined : modelId,
+                tier: runtime.modelInfo?.tier,
+                reasoning: isReasoning,
+                timeoutMs,
+                elapsedMs,
+                textLen: text.length,
+                reasoningLen: reasoningText.length,
+                parsed: parsed != null,
+                depth: parsed?.depthTier ?? null,
+                streamError: streamError || undefined,
+              })}\n`,
+            );
+          } catch (e) {
+            console.error(`[pil.llm-classify] probe-log write failed: ${(e as Error)?.message}`);
+          }
+        }
+
+        if (parsed) return parsed;
+
+        // Surface a swallowed provider/transport error (No-Silent-Catch): a
+        // stream `error` part means the call FAILED (auth/key/rate-limit), which
+        // is categorically different from unparseable text. Before this fix such
+        // errors vanished into a silent null → fail-open "standard". On error we
+        // skip the same-model self-repair (it would fail identically) and let the
+        // caller fall through to the next provider candidate.
+        if (streamError) {
+          console.error(
+            `[pil.llm-classify] stream error on ${cmId} (from ${modelId}): ${streamError} — trying next candidate`,
+          );
+          return null;
+        }
+
+        // Self-repair (agent-first recovery — NOT a regex fallback): the reply
+        // did not parse. Call the SAME model once more with the full prompt + an
+        // explicit format-repair instruction on a doubled budget.
+        clearTimeout(timer);
+        const repairController = new AbortController();
+        const repairTimer = setTimeout(() => repairController.abort(), timeoutMs);
+        const repairSignal = signal
+          ? (AbortSignal.any?.([signal, repairController.signal]) ?? repairController.signal)
+          : repairController.signal;
+        try {
+          const repairRun = streamText({
+            model: runtime.model,
+            abortSignal: repairSignal,
+            system: `${SYSTEM_PROMPT}\n\n${CLASSIFY_REPAIR_INSTRUCTION}`,
+            prompt: repairPrompt,
+            ...(dropMaxTokens ? {} : { maxOutputTokens: maxOut * 2 }),
+            ...(providerOptions ? { providerOptions } : {}),
+          });
+          let rt = "";
+          let rr = "";
+          for await (const part of repairRun.fullStream) {
+            if (part.type === "text-delta") rt += (part as any).textDelta ?? (part as any).text ?? "";
+            else if (part.type === "reasoning-delta") rr += (part as any).textDelta ?? (part as any).text ?? "";
+          }
+          parsed = parseResponse(rt) ?? (rr ? parseResponse(rr) : null);
+          if (parsed) console.error(`[pil.llm-classify] self-repair recovered classification (${cmId})`);
+          return parsed;
+        } finally {
+          clearTimeout(repairTimer);
+        }
+      } catch (err) {
+        console.error(`[pil.llm-classify] classify attempt failed on ${cmId}: ${(err as Error)?.message}`, {
+          stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+        });
+        return null;
       } finally {
-        clearTimeout(repairTimer);
+        clearTimeout(timer);
       }
+    };
+
+    try {
+      // Build the ordered candidate list. Primary = same-provider fast tier (or
+      // the session model); on NO same-provider fast tier (e.g. xai) append keyed
+      // cross-provider fast models. Measured 2026-07-15: an agentic session model
+      // (grok-composer) ignores the terse contract and emits task-planning prose
+      // → null → fail-open "standard" (the /ideal over-engineering root cause);
+      // and a configured-but-dead key (expired deepseek) errors. Trying
+      // candidates in order until one parses fixes both.
+      const candidates: Array<{ modelId: string; providerId: ProviderId | null }> = [];
+      const provider = getModelInfo(modelId)?.provider as ProviderId | undefined;
+      let primaryModelId = modelId;
+      if (classifyOpts?.routeFastTier) {
+        const sameFast = provider ? getRoutedModelByTier("fast", provider) : undefined;
+        if (sameFast && sameFast.id !== modelId) primaryModelId = sameFast.id;
+        if (classifyOpts?.crossProviderFallback && !sameFast && provider) {
+          // No same-provider fast tier → the session model is presumed unsuited
+          // to the terse classify (e.g. an agentic xai model that plans instead
+          // of answering — measured 2026-07-15). Try keyed cross-provider FAST
+          // instruction-followers FIRST (same principle as routeFastTier: prefer
+          // a fast-tier model over a no-fast-tier session model), and keep the
+          // session model only as the last-resort candidate.
+          for (const c of await pickCrossProviderClassifyModels(provider)) {
+            candidates.push({ modelId: c.modelId, providerId: c.providerId });
+          }
+          candidates.push({ modelId: primaryModelId, providerId: null });
+        } else {
+          candidates.push({ modelId: primaryModelId, providerId: null });
+        }
+      } else {
+        candidates.push({ modelId: primaryModelId, providerId: null });
+      }
+
+      // A lone candidate (the common same-provider case) gets the full flat
+      // ceiling; a multi-candidate chain gives each attempt the tighter
+      // per-attempt ceiling so one slow fallback can't starve the rest.
+      const perAttemptCeil = candidates.length > 1 ? CLASSIFY_CHAIN_ATTEMPT_MS : CLASSIFY_TIMEOUT_MS;
+      const chainDeadline = Date.now() + CLASSIFY_TOTAL_BUDGET_MS;
+      for (const cand of candidates) {
+        const remaining = chainDeadline - Date.now();
+        if (remaining < 750) break; // too little left for a useful attempt → fail-open
+        const f = cand.providerId ? await resolveCrossProviderClassifyFactory(cand.providerId) : factory;
+        if (!f) continue;
+        let runtime: ReturnType<typeof resolveModelRuntime>;
+        try {
+          runtime = resolveModelRuntime(f, cand.modelId);
+        } catch (e) {
+          console.error(`[pil.llm-classify] resolveModelRuntime failed for ${cand.modelId}: ${(e as Error)?.message}`);
+          continue;
+        }
+        const res = await attemptClassify(runtime, cand.modelId, Math.min(perAttemptCeil, remaining));
+        if (res) return res;
+      }
+      console.error(
+        `[pil.llm-classify] all ${candidates.length} candidate(s) failed — surfacing UNKNOWN, NO regex fallback. ` +
+          `rawPreview=${JSON.stringify(prompt.slice(0, 120))}`,
+      );
+      return null;
     } catch (err) {
       console.error(`[pil.llm-classify] classify failed: ${(err as Error)?.message}`, {
         modelId,
         stack: (err as Error)?.stack?.split("\n").slice(0, 3),
       });
       return null;
-    } finally {
-      if (timer) clearTimeout(timer);
     }
   };
 }
@@ -590,7 +779,8 @@ export async function classifySubSessionAction(
 
     const runtime = resolveModelRuntime(factory, classificationModelId);
     const isReasoning = runtime.modelInfo?.reasoning === true;
-    timer = setTimeout(() => controller.abort(), isReasoning ? REASONING_CLASSIFY_TIMEOUT_MS : LLM_CLASSIFY_TIMEOUT_MS);
+    // Same flat safety-net ceiling as the main classifier (see CLASSIFY_TIMEOUT_MS).
+    timer = setTimeout(() => controller.abort(), CLASSIFY_TIMEOUT_MS);
     const combinedSignal = signal
       ? (AbortSignal.any?.([signal, controller.signal]) ?? controller.signal)
       : controller.signal;

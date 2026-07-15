@@ -2391,7 +2391,13 @@ export class Agent {
       let depth: import("../pil/llm-classify.js").DepthTier = "standard";
       try {
         const { createLlmClassifier } = await import("../pil/llm-classify.js");
-        const classify = createLlmClassifier(this.requireProvider(), this.modelId, { routeFastTier: true });
+        const classify = createLlmClassifier(this.requireProvider(), this.modelId, {
+          routeFastTier: true,
+          // /ideal routing needs a reliable depth verdict; allow cross-provider
+          // fallback so an agentic/no-fast-tier session model (e.g. xai) doesn't
+          // strand the classify at fail-open. Bounded by CLASSIFY_TOTAL_BUDGET_MS.
+          crossProviderFallback: true,
+        });
         const res = await classify(payload.idea);
         if (res?.depthTier) {
           depth = res.depthTier;
@@ -2409,27 +2415,32 @@ export class Agent {
         console.error(`[ideal/route] depth classify failed, defaulting to "standard": ${(err as Error)?.message}`);
       }
 
-      // The cheap 8-word classify above is only a HINT for the downstream GSD
-      // depth pipeline — it is NOT a routing gate. It was too noisy to gate the
-      // council decision: the SAME architectural prompt scored `heavy` on one run
-      // and `standard` the next, so routing flip-flopped between full Council and
-      // a straight-to-Edit maint-edit that skipped the debate. /ideal is the
-      // DELIBERATE path — it must ALWAYS run the full Council/loop-driver
-      // pipeline, in this order:
-      //   1. scan the source (discovery/scoping) to understand what the user's
-      //      request actually touches,
-      //   2. interview the user (AskCard — adaptive: only asks what the source
-      //      can't answer, so an existing repo isn't dragged through 6 questions),
-      //   3. leader-tier complexity assessment + debate INSIDE that flow, AFTER
-      //      scope is understood — never a "no debate" verdict from a bare-prompt
-      //      guess.
-      // So we force Council for every /ideal start; the fast classify only
-      // seeds depth/clarity hints for that flow. Explicit `--maintain` still opts
-      // out of Council (handled at the top of runProductLoop dispatch).
+      // Council routing gate (model-signal, no hardcoded depth→council table).
+      //
+      // History: /ideal used to force Council UNCONDITIONALLY because the cheap
+      // classify was too noisy to gate on — the SAME architectural prompt scored
+      // `heavy` on one run and `standard` the next, so routing flip-flopped. That
+      // noise was root-caused (2026-07-15, harness-measured): the session model
+      // could be an agentic model (e.g. grok-composer) that ignores the terse
+      // 8-word classify contract and emits task-planning prose → null → fail-open
+      // "standard"; and stream errors were swallowed into the same null. Both are
+      // now fixed in llm-classify.ts (cross-provider route to a keyed instruction-
+      // follower + No-Silent-Catch error surfacing), so the depth/clarity signal
+      // is reliable enough to gate on.
+      //
+      // Gate: only a genuinely TRIVIAL /ideal — the model says depth=quick AND
+      // not-underspecified — skips Council and takes the product-loop hot-path
+      // (single sprint, no debate; index.ts complexity==="low" branch). Anything
+      // else (standard, heavy, or any underspecified request) still runs the full
+      // Council/loop-driver pipeline: scan source → adaptive interview → leader-
+      // tier assessment + debate AFTER scope is understood. When the model is
+      // uncertain (null depth → "medium") it routes INTO Council, the arbiter —
+      // never a hardcoded default. Explicit `--maintain` still opts out entirely.
       complexity = depth === "heavy" ? "high" : depth === "quick" ? "low" : "medium";
       sufficiencyMissing = undefined;
       if (payload.flags.mode !== "maintain") {
-        routeForceCouncil = true;
+        const trivial = depth === "quick" && needsClarification !== true;
+        if (!trivial) routeForceCouncil = true;
       }
     }
 
