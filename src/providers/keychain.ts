@@ -1,11 +1,11 @@
 /**
  * src/providers/keychain.ts
  *
- * Per-provider keychain loader with env-var fallback.
- * Extends the Phase 0 loadAnthropicKey pattern to all 6 providers.
- * PROV-02 / PROV-03 requirements.
+ * Per-provider key store. Backed by the env-store (`.env` file + process.env +
+ * Windows registry mirror) — the OS keychain (keytar) has been removed.
  *
- * Priority: OS keychain (keytar) > environment variable > settings.json > ProviderKeyMissingError.
+ * Source of truth: `process.env[ENV_BY_PROVIDER[provider]]`. Writes go through
+ * the env-store; reads come straight from process.env.
  * Exception: ollama is keyless by default.
  */
 
@@ -80,8 +80,7 @@ export async function listStoredProviders(): Promise<ProviderId[]> {
 }
 
 /**
- * Load the API key for a given provider.
- * Priority: OS keychain (keytar) > environment variable.
+ * Load the API key for a given provider from the environment.
  * Ollama returns '' when no key is found (keyless).
  *
  * @throws {ProviderKeyMissingError} when no key found for non-ollama providers.
