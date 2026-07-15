@@ -187,6 +187,12 @@ export interface ProviderKeyConfig {
 
 export interface UserSettings {
   apiKey?: string;
+  /**
+   * One-time guard: true once legacy keychain/settings API keys have been
+   * migrated into the env-store (`~/.muonroi-cli/.env`). See
+   * `migrateLegacyKeysToEnv` in src/providers/keychain.ts.
+   */
+  keysMigratedToEnv?: boolean;
   defaultModel?: string;
   /**
    * Preferred provider. When set, the splash/config UI hides the model
@@ -618,9 +624,11 @@ export function saveProjectSettings(partial: Partial<ProjectSettings>): void {
 
 export function getApiKey(): string | undefined {
   // Test escape hatch (api-key harness spec): suppress all key sources so the
-  // boot flow reaches the API-key modal. See src/index.ts resolveKeyForModel.
+  // boot flow reaches the provider picker. See src/index.ts resolveKeyForModel.
   if (process.env.MUONROI_TEST_NO_KEYCHAIN === "1") return undefined;
-  return process.env.MUONROI_API_KEY || loadUserSettings().apiKey;
+  // Env-only: the legacy plaintext `settings.apiKey` is migrated to the
+  // env-store on first run (migrateLegacyKeysToEnv) and no longer read here.
+  return process.env.MUONROI_API_KEY || undefined;
 }
 
 export function getBaseURL(provider?: string): string {

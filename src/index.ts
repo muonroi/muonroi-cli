@@ -1122,6 +1122,17 @@ program
       catalogLoadFailed = true;
     });
 
+    // Load the env-store (~/.muonroi-cli/.env) into process.env and migrate any
+    // legacy keychain/settings keys BEFORE any key resolution. Best-effort.
+    try {
+      const { loadEnvFileIntoProcess } = await import("./providers/env-store.js");
+      loadEnvFileIntoProcess();
+      const { migrateLegacyKeysToEnv } = await import("./providers/keychain.js");
+      await migrateLegacyKeysToEnv();
+    } catch (err) {
+      console.error(`[muonroi-cli] env-store init failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     if (options.backgroundTaskFile) {
       await runBackgroundDelegation(options.backgroundTaskFile, options);
       return;

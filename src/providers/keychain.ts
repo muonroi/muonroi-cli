@@ -168,3 +168,88 @@ export async function firstAvailableProvider(): Promise<ProviderId | null> {
   }
   return null;
 }
+
+/** Minimal shape of the legacy keytar module, loaded best-effort. */
+interface LegacyKeytar {
+  getPassword(service: string, account: string): Promise<string | null>;
+  deletePassword(service: string, account: string): Promise<boolean>;
+}
+
+/**
+ * One-time migration: move any legacy API keys — OS keychain (keytar) or
+ * `settings.json` (`providers.<p>.apiKey`) — into the env-store, then remove
+ * the legacy copies. Best-effort, idempotent, and never throws. Guarded by
+ * `settings.keysMigratedToEnv`. Runs once at startup before key resolution.
+ */
+export async function migrateLegacyKeysToEnv(): Promise<void> {
+  let settingsMod: typeof import("../utils/settings.js");
+  try {
+    settingsMod = await import("../utils/settings.js");
+  } catch (err) {
+    if (process.env.MUONROI_DEBUG_ENVSTORE) {
+      console.error(`[keychain] migration: settings unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return;
+  }
+  let settings: import("../utils/settings.js").UserSettings;
+  try {
+    settings = settingsMod.loadUserSettings();
+  } catch {
+    return;
+  }
+  if (settings.keysMigratedToEnv) return;
+
+  // Legacy keytar reader — the module is being removed, so absence is normal.
+  let keytar: LegacyKeytar | null = null;
+  try {
+    keytar = (await import("keytar")) as unknown as LegacyKeytar;
+  } catch {
+    keytar = null;
+  }
+
+  const providersPatch = { ...(settings.providers ?? {}) } as Record<string, { apiKey?: string; baseURL?: string }>;
+  let providersDirty = false;
+
+  for (const p of KEYCHAIN_PROVIDER_IDS) {
+    const envName = ENV_BY_PROVIDER[p];
+    if (process.env[envName]) continue; // already in env
+
+    let legacy: string | null = null;
+    if (keytar?.getPassword) {
+      try {
+        legacy = await keytar.getPassword("muonroi-cli", p);
+      } catch {
+        legacy = null;
+      }
+    }
+    if (!legacy) legacy = providersPatch[p]?.apiKey ?? null;
+
+    if (legacy && legacy.length >= 20) {
+      persistEnvVar(envName, legacy);
+      if (keytar?.deletePassword) {
+        try {
+          await keytar.deletePassword("muonroi-cli", p);
+        } catch {
+          /* best-effort keychain cleanup */
+        }
+      }
+      if (providersPatch[p]?.apiKey) {
+        delete providersPatch[p].apiKey;
+        providersDirty = true;
+      }
+    }
+  }
+
+  const patch: Partial<import("../utils/settings.js").UserSettings> = { keysMigratedToEnv: true };
+  // Strip the legacy plaintext main key — it is no longer read (getApiKey is
+  // env-only). Passing undefined drops it from the persisted JSON.
+  if (settings.apiKey) patch.apiKey = undefined;
+  if (providersDirty) patch.providers = providersPatch as import("../utils/settings.js").UserSettings["providers"];
+  try {
+    settingsMod.saveUserSettings(patch);
+  } catch (err) {
+    if (process.env.MUONROI_DEBUG_ENVSTORE) {
+      console.error(`[keychain] migration: save failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
