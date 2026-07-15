@@ -1045,13 +1045,30 @@ export class MessageProcessor {
     const turnProviderId = detectProviderForModel(turnModelId);
     let turnProvider: LegacyProvider;
     if (turnProviderId !== deps.providerId) {
+      const disabled = isProviderDisabled(turnProviderId as ProviderId);
       // Even if the key is reachable, skip disabled providers
-      const turnKey = !isProviderDisabled(turnProviderId as ProviderId)
-        ? await loadKeyForProvider(turnProviderId).catch(() => null)
-        : null;
-      if (turnKey) {
-        const { createProviderFactory } = await import("../providers/runtime.js");
-        turnProvider = createProviderFactory(turnProviderId, { apiKey: turnKey }).factory;
+      const turnKey = !disabled ? await loadKeyForProvider(turnProviderId).catch(() => null) : null;
+      // An OAuth-capable provider may be authenticated by subscription tokens
+      // (no env API key). Detect that so the turn can still run over OAuth.
+      let hasOAuth = false;
+      if (!disabled) {
+        try {
+          const { getOAuthProviderConfig } = await import("../providers/auth/registry.js");
+          const cfg = await getOAuthProviderConfig(turnProviderId as ProviderId);
+          const tokens = cfg ? await cfg.loadTokensWithRefresh().catch(() => null) : null;
+          hasOAuth = !!tokens?.accessToken;
+        } catch {
+          hasOAuth = false;
+        }
+      }
+      if (turnKey || hasOAuth) {
+        // OAuth XOR API key: the ASYNC factory injects OAuth (codex baseURL +
+        // Bearer headers) when tokens exist for this provider, otherwise it
+        // uses the env key. Using the sync factory here was the cross-provider
+        // shadowing bug (it shipped a stale sk-proj key to api.openai.com).
+        const { createProviderFactoryAsync } = await import("../providers/runtime.js");
+        const built = await createProviderFactoryAsync(turnProviderId, turnKey ? { apiKey: turnKey } : {});
+        turnProvider = built.factory;
       } else {
         // Router's provider unreachable or disabled — fall back to a non-disabled provider
         const fallback = await deps.councilManager.resolveNonDisabledFallback();
