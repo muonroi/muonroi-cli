@@ -297,7 +297,14 @@ export function registerReadTools(server: McpServer, getDriver: () => Driver | n
 
   server.registerTool(
     "tui.render_text",
-    { description: "ASCII debug render of the current frame.", inputSchema: {} },
+    {
+      // "debug render" undersold it: this is the primary way to see what is on
+      // screen right now — every node, modal and message in the semantic tree.
+      description:
+        "See the current screen as a semantic tree (every node, modal, message, and focus state). " +
+        "Use tui.render_visual instead for the literal characters a human reads.",
+      inputSchema: {},
+    },
     async () => {
       const d = getDriver();
       if (!d) return noDriver();
@@ -524,7 +531,18 @@ export function registerAsyncTools(server: McpServer, getDriver: () => Driver | 
   server.registerTool(
     "tui.last_event",
     {
-      description: "Return the most recent event of the given kind (null if none).",
+      // Keyword-loaded on purpose: deferred-tool search matches this text, and
+      // the terse original ("Return the most recent event of the given kind")
+      // did not rank for "is the TUI waiting for input or hung" — the exact
+      // question it answers. An unfindable tool is an absent one.
+      description:
+        "Check what a live run is doing: is it waiting on a human (kind='askcard-open' — the " +
+        "modal/prompt/approval question), what stage it reached (kind='sprint-stage'), did it " +
+        "fail or hang (kind='sprint-halt' / 'toast'), how the council progressed " +
+        "(kind='council-step'). Returns the most recent event of that kind with its FULL payload " +
+        "(null if none) — including the complete askcard question text, which tui.query truncates. " +
+        "Use this instead of polling a database or log file: modal pauses write no DB row, so a " +
+        "poller cannot tell 'waiting for a human' from 'hung'. Pair with tui.wait_for to block.",
       // Full protocol event set (minus the idle sentinel) so an external agent can
       // observe lifecycle events — council/sprint/route/askcard, not just toasts.
       // The Driver accepts any kind; this enum is the MCP-boundary validation.
