@@ -309,6 +309,24 @@ export async function* withImplIdleWatchdog(
  * `totalMs <= 0` disables the guard (returns the task unchanged).
  */
 /**
+ * Extract why an isolated implementation task failed, from its ToolResult.
+ *
+ * `output` is checked because StreamRunner reports EVERY sub-agent failure
+ * there — "Task failed: …" (stream-runner.ts:1061), "[Cancelled]" (:982), a
+ * provider stall (:988), an unknown-agent message (:265) — and never assigns
+ * `error`; grep stream-runner.ts for `error:` and there are no hits. Reading
+ * `error` alone made `result.error?.trim()` permanently undefined, so every
+ * distinct failure collapsed into the contentless fallback and two /ideal runs
+ * halted 1s into implementation with the cause already erased.
+ *
+ * `error` still wins when a caller does populate it — ToolResult declares the
+ * field, so a future non-StreamRunner producer may be more specific.
+ */
+export function resolveImplFailureReason(result: { output?: string; error?: string }): string {
+  return result.error?.trim() || result.output?.trim() || "isolated implementation task failed";
+}
+
+/**
  * Persist an implementation-stage failure to `interaction_logs`.
  *
  * The implementation stage is where /ideal either ships code or does not, so its
@@ -908,6 +926,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   }
 
   let implError: string | null = null;
+  let implErrorStack: string | undefined;
   if (ctx.processMessageFn && implPrompt.trim()) {
     const useIsolated = shouldUseIsolatedImpl(!!ctx.runIsolatedTask);
     try {
@@ -951,7 +970,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
           sprintN,
         );
         if (!result.success) {
-          implError = result.error?.trim() || "isolated implementation task failed";
+          implError = resolveImplFailureReason(result);
         } else if (result.output?.trim()) {
           yield { type: "content", content: `\n${result.output.trim()}\n` };
         }
@@ -965,23 +984,12 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       }
     } catch (e) {
       implError = e instanceof Error ? e.message : String(e);
+      implErrorStack = e instanceof Error ? e.stack?.split("\n").slice(0, 4).join(" | ") : undefined;
       // No-Silent-Catch: the finally below surfaces a phaseError chunk, but log
       // here too so the hang/failure is diagnosable from stderr / MUONROI logs.
+      // Persisting happens at the single convergence point below — a thrown
+      // error and a `!result.success` return must not log differently.
       console.error(`[sprint-runner] implementation stage failed (sprint ${sprintN}, run ${ctx.runId}): ${implError}`);
-      // ...and PERSIST it. stderr belongs to the TUI child, which the harness
-      // does not capture, and the /ideal council path writes no `messages` rows,
-      // so an unpersisted message survives only in TUI scrollback. Run
-      // mrn9yfle9801 halted here with `trigger:"loop_throw"` and the exception
-      // text was unrecoverable afterwards — this is the failure that decides
-      // whether /ideal ever ships code, so it must outlive the process.
-      logSprintImplError(ctx, {
-        sprintN,
-        message: implError,
-        stack: e instanceof Error ? e.stack?.split("\n").slice(0, 4).join(" | ") : undefined,
-        implModelId: process.env.MUONROI_IDEAL_IMPL_MODEL?.trim() || ctx.sessionModelId,
-        elapsedMs: Date.now() - implStartedAt,
-        isolated: useIsolated,
-      });
     } finally {
       // A3 FIX: phaseDone for implementation MUST always fire, even when
       // processMessageFn throws mid-stream (e.g. /gsd executor fails after
@@ -1017,6 +1025,21 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     });
   }
   if (implError) {
+    // The ONE place both failure shapes converge. The catch above handles a
+    // thrown error; a `!result.success` return never reaches it and instead
+    // falls through to here — which is why persisting from inside the catch
+    // recorded nothing for the two runs that actually failed. This throw
+    // escapes to the UI's loop-level catch (use-app-logic.tsx), which renders
+    // the message but persists only {reason, trigger, sprintN} — no text. So
+    // this is the last point at which the reason still exists.
+    logSprintImplError(ctx, {
+      sprintN,
+      message: implError,
+      stack: implErrorStack,
+      implModelId: process.env.MUONROI_IDEAL_IMPL_MODEL?.trim() || ctx.sessionModelId,
+      elapsedMs: Date.now() - implStartedAt,
+      isolated: shouldUseIsolatedImpl(!!ctx.runIsolatedTask),
+    });
     throw new Error(implError);
   }
 
