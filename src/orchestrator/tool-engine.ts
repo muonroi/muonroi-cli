@@ -1021,6 +1021,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           councilConfigured: configuredRoleCount >= autoCouncilMinRoles,
           askUser: deps.askUser,
           runDebate: async (topic: string) => {
+            // Reset before draining so a generator that throws BEFORE setting
+            // synthesis (orchestrator.setLastSynthesis) cannot return a STALE
+            // synthesis from a prior council run.
+            deps.councilManager.setLastSynthesis(null);
             const gen = deps.runCouncilV2(topic, {
               skipClarification: true,
               userModelMessage: { role: "user", content: `/council ${topic}` },
@@ -1029,10 +1033,28 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // the CLI-hardcoded post-debate card, same as convene_council.
               convenePath: true,
             });
+            // Capture a tail of content chunks so an empty-synthesis failure
+            // (provider unreachable / sub-phase fail-open / abort — all of which
+            // yield a content hint then `return null`) surfaces a real reason in
+            // the log instead of a silent "".
+            let lastContentHint = "";
             for await (const chunk of gen) {
-              // Drain the generator
+              const text = (chunk as { type?: string; content?: string })?.content;
+              if ((chunk as { type?: string })?.type === "content" && typeof text === "string" && text.trim()) {
+                lastContentHint = text.trim().slice(-200);
+              }
             }
-            return deps.councilManager.lastSynthesis ?? "";
+            const synthesis = deps.councilManager.lastSynthesis ?? "";
+            if (!synthesis.trim()) {
+              // No-Silent-Catch: the debate produced no synthesis. plan-council
+              // will retry then fall back to the perspective path — log why here
+              // so the failure is diagnosable remotely.
+              console.error(
+                `[tool-engine] plan-review runDebate returned empty synthesis` +
+                  `${lastContentHint ? ` (last council chunk: ${lastContentHint})` : ""}`,
+              );
+            }
+            return synthesis;
           },
         });
         // Top-level cumulative cap state. We accumulate the raw tool set

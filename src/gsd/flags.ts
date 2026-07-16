@@ -84,3 +84,21 @@ export function isTaskAwarePanelEnabled(): boolean {
   const raw = process.env.MUONROI_TASK_AWARE_PANEL;
   return raw !== "0" && raw?.toLowerCase() !== "false";
 }
+
+/**
+ * Plan-review debate retry budget. The council debate can return an EMPTY
+ * synthesis on any of its fail-open paths (provider unreachable, sub-phase
+ * catch, user/watchdog abort) — a silent null that plan-council previously
+ * collapsed into a permanent forced-`revise`, bricking an autonomous /ideal
+ * heavy run (0 code, no human to re-trigger plan-review). On empty synthesis
+ * we retry the debate up to this many times before falling back to the
+ * perspective path. Default 1 (up to 2 debate attempts). Env override:
+ * MUONROI_PLAN_REVIEW_DEBATE_RETRIES. Clamped to [0, 5].
+ */
+export function getPlanReviewDebateRetries(): number {
+  const raw = process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES;
+  if (raw === undefined) return 1;
+  const n = Number.parseInt(raw, 10);
+  if (Number.isNaN(n) || n < 0) return 1;
+  return Math.min(n, 5);
+}
