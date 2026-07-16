@@ -53,6 +53,37 @@ function isValidEnvName(name: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
 }
 
+/**
+ * Credentials this CLI owns: it writes them itself (`/login`, `keys set` →
+ * persistEnvVar) so its own store is the user's latest intent. Matched by the
+ * `*_API_KEY` naming convention shared by ENV_BY_PROVIDER / ENV_BY_CHAT /
+ * ENV_BY_MCP — a structural test, not a provider-id list, and importing
+ * keychain.ts here would be circular (keychain imports this module).
+ */
+function isCliOwnedSecret(name: string): boolean {
+  return /_API_KEY$/.test(name);
+}
+
+/** Last 4 chars + length — enough to tell two keys apart, never enough to use one. */
+function maskSecret(value: string): string {
+  return `len=${value.length} …${value.slice(-4)}`;
+}
+
+/**
+ * Which side wins when `.env` and the ambient OS environment disagree.
+ *
+ * Default `store`: for `*_API_KEY` only, `.env` wins. A stale Windows User-scope
+ * var silently beating the key the user just set through the CLI cost a full
+ * session of debugging — two council panelists died on a forgotten placeholder
+ * key while `.env` held the working one, and nothing said so.
+ *
+ * `MUONROI_ENV_PRECEDENCE=ambient` restores the old behaviour for CI and
+ * scripts that intentionally inject a key for one run.
+ */
+function ambientWinsForSecrets(): boolean {
+  return process.env.MUONROI_ENV_PRECEDENCE === "ambient";
+}
+
 function mirrorToWindowsRegistry(name: string, value: string | null): void {
   if (process.platform !== "win32") return;
   if (!isValidEnvName(name)) {
@@ -123,17 +154,46 @@ export function clearEnvVar(name: string): void {
 }
 
 /**
- * Load the `.env` store into `process.env` at startup. A variable already
- * present in the real OS environment at launch is authoritative and is NOT
- * overwritten — `.env` only fills gaps.
+ * Load the `.env` store into `process.env` at startup.
+ *
+ * For ordinary variables the ambient OS environment stays authoritative and
+ * `.env` only fills gaps. For `*_API_KEY` credentials the CLI writes itself,
+ * `.env` wins and the conflict is logged — see {@link ambientWinsForSecrets}
+ * for why, and `MUONROI_ENV_PRECEDENCE=ambient` to opt out.
  */
 export function loadEnvFileIntoProcess(): void {
   for (const line of readLines()) {
     const parsed = parseLine(line);
     if (!parsed) continue;
-    if (process.env[parsed.key] === undefined) {
+    const ambient = process.env[parsed.key];
+
+    if (ambient === undefined) {
       process.env[parsed.key] = parsed.value;
       redactor.enrollSecret(parsed.value);
+      continue;
     }
+    if (ambient === parsed.value) continue;
+
+    // The two disagree. For non-secrets the ambient stays authoritative, as
+    // before. For a CLI-owned credential a silent divergence is exactly the
+    // failure that must never happen again, so it is always reported.
+    if (!isCliOwnedSecret(parsed.key)) continue;
+
+    redactor.enrollSecret(ambient);
+    if (ambientWinsForSecrets()) {
+      console.error(
+        `[env-store] ${parsed.key}: OS environment (${maskSecret(ambient)}) overrides the CLI store ` +
+          `(${maskSecret(parsed.value)}) — MUONROI_ENV_PRECEDENCE=ambient is set. If auth fails, the ` +
+          `OS variable is the one being used.`,
+      );
+      continue;
+    }
+    console.error(
+      `[env-store] ${parsed.key}: the CLI store (${maskSecret(parsed.value)}) takes precedence over a ` +
+        `conflicting OS environment variable (${maskSecret(ambient)}). Remove the OS variable to silence ` +
+        `this, or set MUONROI_ENV_PRECEDENCE=ambient to let it win.`,
+    );
+    process.env[parsed.key] = parsed.value;
+    redactor.enrollSecret(parsed.value);
   }
 }
