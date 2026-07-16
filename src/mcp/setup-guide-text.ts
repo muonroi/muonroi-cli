@@ -27,7 +27,7 @@ The installers fetch a pre-compiled single binary from GitHub Releases.
 ## First run
 - Wizard appears automatically.
 - Lists supported providers (DeepSeek + SiliconFlow ready; others via BYOK).
-- Four credential options: paste key, Bitwarden sync (B in /providers), keys export/import (encrypted bundle), or skip for later.
+- Four credential options: paste key, Bitwarden sync (bw in /providers), keys export/import (encrypted bundle), or skip for later.
 - Keys land in OS keychain (keytar). Settings written to ~/.muonroi-cli/user-settings.json.
 - Role routing (leader/implement/verify/research) is configured for you.
 
