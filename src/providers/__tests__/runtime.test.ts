@@ -4,7 +4,9 @@ import {
   __resetProviderFactoryRegistry,
   createProviderFactory,
   detectProviderForModel,
+  isWireCompatible,
   type ProviderFactory,
+  ProviderModelMismatchError,
   resolveModelRuntime,
 } from "../runtime.js";
 
@@ -99,15 +101,59 @@ describe("resolveModelRuntime factory/model provider guard", () => {
     expect(runtime.model).toBeDefined();
   });
 
-  test("falls back to the passed factory (no crash) when no factory for the model's provider exists", () => {
+  test("falls back to the passed factory (no crash) when the wire id is native to it", () => {
     __resetProviderFactoryRegistry();
     // Only a deepseek factory was built; none for opencode-go.
     const ds = createProviderFactory("deepseek", { apiKey: MOCK_KEY });
-    // Mismatch with no registered substitute → keep the passed factory. Part 3's
-    // wire-id normalization keeps the request valid; the call must not throw.
+    // Mismatch with no registered substitute, but the difference is only the
+    // gateway ROUTING prefix: toWireModelId strips it, so deepseek's upstream
+    // receives "deepseek-v4-flash" and accepts it. Must not throw.
     const runtime = resolveModelRuntime(ds.factory, "opencode/deepseek-v4-flash");
     expect(runtime.modelId).toBe("opencode/deepseek-v4-flash");
     expect(runtime.model).toBeDefined();
+  });
+
+  // Regression: the cross-provider case the old "always fall back" branch let
+  // through. Measured live 2026-07-16 (session 0c6728ba1a25): an xai session
+  // POSTed model "gpt-5.4" to api.x.ai, which answered 404 "The model gpt-5.4
+  // does not exist" — a wiring bug surfacing as a bogus model-name error.
+  test("throws when the model is foreign to the factory and no substitute exists", () => {
+    __resetProviderFactoryRegistry();
+    const xai = createProviderFactory("xai", { apiKey: MOCK_KEY });
+    expect(() => resolveModelRuntime(xai.factory, "gpt-5.4")).toThrow(ProviderModelMismatchError);
+  });
+
+  test("the mismatch error names both providers so the mispairing is actionable", () => {
+    __resetProviderFactoryRegistry();
+    const xai = createProviderFactory("xai", { apiKey: MOCK_KEY });
+    try {
+      resolveModelRuntime(xai.factory, "gpt-5.4");
+      throw new Error("expected resolveModelRuntime to throw");
+    } catch (e) {
+      const err = e as ProviderModelMismatchError;
+      expect(err).toBeInstanceOf(ProviderModelMismatchError);
+      expect(err.modelId).toBe("gpt-5.4");
+      expect(err.modelProvider).toBe("openai");
+      expect(err.factoryProvider).toBe("xai");
+      expect(err.message).toContain("gpt-5.4");
+      expect(err.message).toContain("openai");
+      expect(err.message).toContain("xai");
+    }
+  });
+});
+
+describe("isWireCompatible", () => {
+  test("gateway-prefixed model is compatible with the native provider it resolves to", () => {
+    expect(isWireCompatible("opencode/deepseek-v4-flash", "deepseek")).toBe(true);
+  });
+
+  test("gateway-prefixed model is NOT compatible with an unrelated provider", () => {
+    expect(isWireCompatible("opencode/deepseek-v4-flash", "xai")).toBe(false);
+  });
+
+  test("an unprefixed foreign model is never compatible — nothing normalizes it", () => {
+    expect(isWireCompatible("gpt-5.4", "xai")).toBe(false);
+    expect(isWireCompatible("deepseek-v4-pro", "openai")).toBe(false);
   });
 
   test("no redirect when the passed factory already matches the model's provider", () => {
