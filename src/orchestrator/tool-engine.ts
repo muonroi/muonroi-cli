@@ -137,6 +137,7 @@ import { snapshotFromTodoWriteArgs } from "../tools/todo-write-snapshot.js";
 import { visionToolsNeeded } from "../tools/vision-gate.js";
 import type { SessionInfo, StreamChunk, SubagentStatus, ToolCall } from "../types/index";
 import { appendDecisionLog } from "../usage/decision-log.js";
+import { setLoopBreadcrumb } from "../utils/event-loop-monitor.js";
 import { logger } from "../utils/logger.js";
 import { openUrl } from "../utils/open-url.js";
 import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
@@ -1260,14 +1261,21 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
 
         for (const name of Object.keys(tools)) {
           const tool = tools[name];
-          if (
-            tool &&
-            typeof tool.execute === "function" &&
-            !READ_ONLY_TOOLS.has(name) &&
-            !name.startsWith("respond_")
-          ) {
-            const originalExecute = tool.execute;
-            tool.execute = async (input: any, context: any) => {
+          if (!tool || typeof tool.execute !== "function") continue;
+          const originalExecute = tool.execute;
+          // Read-only tools skip the mutation gate and the write mutex, but ALL
+          // tools get a breadcrumb: a freeze can start under any of them, and a
+          // block report that cannot name a suspect is much weaker evidence.
+          const guarded = !READ_ONLY_TOOLS.has(name) && !name.startsWith("respond_");
+          tool.execute = async (input: any, context: any) => {
+            // Never cleared, only overwritten — a block often starts just AFTER
+            // a tool returns (the 2026-07-16 freeze began on the tick after a
+            // bash result), so "after:bash" is exactly the clue we want. Also
+            // why this is not a stack: with parallel tool calls, last-writer-
+            // wins is the honest summary; the CPU profile is the real evidence.
+            setLoopBreadcrumb(`tool:${name}`);
+            try {
+              if (!guarded) return await originalExecute(input, context);
               const gate = evaluateMutationGate(deps.bash.getCwd(), {
                 toolName: name,
                 hardGateEnabled: gsdHardGateEnabled,
@@ -1276,9 +1284,11 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               if (gate.blocked) {
                 return { success: false, output: gate.reason, error: gate.reason };
               }
-              return writeMutex.run(() => originalExecute(input, context));
-            };
-          }
+              return await writeMutex.run(() => originalExecute(input, context));
+            } finally {
+              setLoopBreadcrumb(`after-tool:${name}`);
+            }
+          };
         }
 
         captureToolSchemas(tools);
@@ -2328,6 +2338,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         const _wireProviderIdTop = runtime.modelInfo?.provider ?? "unknown";
         for await (const part of result.fullStream) {
           stall.pet(); // chunk arrived — reset the stall watchdog
+          // Breadcrumb the chunk type: if the loop blocks while draining the
+          // stream, this says which part kind we were handling when it froze.
+          setLoopBreadcrumb(`stream:${String(part.type ?? "unknown")}`);
           // Count only real content parts. The watchdog abort itself surfaces
           // as an "abort" part — counting it would defeat the TTFB-stall gate
           // (a frozen-before-first-byte stall yields ONLY the abort part).

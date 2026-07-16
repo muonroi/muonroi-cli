@@ -1066,6 +1066,40 @@ export function getProviderProgressTimeoutMs(): number {
 }
 
 /**
+ * Event-loop block reporting threshold (ms). The monitor
+ * (`src/utils/event-loop-monitor.ts`) reports a block when its own tick runs at
+ * least this late — evidence that the JS thread was stuck and NO timer could
+ * fire, which is why the provider stall watchdogs above cannot see this class
+ * of freeze (measured live 2026-07-16: a 304.5s TUI freeze that the 120s stall
+ * watchdog only rescued 6.7s AFTER the loop recovered).
+ *
+ * 2s is well clear of ordinary GC pauses and heavy renders while still catching
+ * anything a user would call a freeze. Range 250–60_000; 0 disables.
+ * Default 2_000. Env override: MUONROI_LOOP_BLOCK_THRESHOLD_MS.
+ */
+export function getLoopBlockThresholdMs(): number {
+  const envRaw = process.env.MUONROI_LOOP_BLOCK_THRESHOLD_MS;
+  if (envRaw !== undefined && envRaw !== "") {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n === 0) return 0; // explicit disable
+    if (Number.isFinite(n) && n >= 250 && n <= 60_000) return Math.floor(n);
+  }
+  return 2_000;
+}
+
+/**
+ * Whether to run the rolling CPU profiler (`src/utils/loop-profiler.ts`) so a
+ * reported event-loop block comes with the culprit's stack rather than just a
+ * duration. OFF by default: continuous V8 sampling costs a little on every
+ * session, and this is a diagnostic for a sporadic bug, not a feature. Arm it
+ * when hunting a freeze. Env: MUONROI_LOOP_PROFILE=1 (0/unset disables).
+ */
+export function isLoopProfileEnabled(): boolean {
+  const raw = process.env.MUONROI_LOOP_PROFILE?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+/**
  * Number of times to AUTOMATICALLY re-issue a streaming model call after the
  * stall watchdog fires WITHOUT any chunk having arrived (a time-to-first-byte
  * "frozen" stall). Some providers (observed: xai/grok-build-0.1) accept a
