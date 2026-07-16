@@ -87,7 +87,7 @@ function effectiveLen(rawText: string, taskType: string): number {
 // Path token counter — counts DISTINCT path-like tokens.
 // ---------------------------------------------------------------------------
 
-function collectDistinctPaths(rawText: string): string[] {
+export function extractPathTokens(rawText: string): string[] {
   const matches = rawText.match(PATH_TOKEN_RE);
   if (!matches) return [];
   const set = new Set<string>();
@@ -95,7 +95,7 @@ function collectDistinctPaths(rawText: string): string[] {
   return [...set];
 }
 
-function scoreRepoGrounding(paths: string[], hints: RepoStructureHint[]): { score: number; hits: number } {
+export function scoreRepoGrounding(paths: string[], hints: RepoStructureHint[]): { score: number; hits: number } {
   if (paths.length === 0 || hints.length === 0) return { score: 0, hits: 0 };
   const hinted = new Map(hints.map((hint) => [hint.path.toLowerCase(), hint]));
   let score = 0;
@@ -145,7 +145,7 @@ export function scoreComplexitySize(input: ComplexitySizeInput): ComplexitySizeR
   //     baseline-2 "đổi default ... trong src/orchestrator/cli-args.ts")
   //   - zero paths is neutral (vagueness is handled by `vaguenessAmplifier`)
   //   - ≥3 paths is multi-file work, push toward large
-  const distinctPaths = collectDistinctPaths(rawText);
+  const distinctPaths = extractPathTokens(rawText);
   const pathCount = distinctPaths.length;
   let pathScore = 0;
   if (pathCount === 1) pathScore = -1;
