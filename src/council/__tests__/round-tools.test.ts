@@ -53,6 +53,7 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
     vi.doMock("../prompts.js", () => ({
       buildResearchSystemPrompt: vi.fn().mockReturnValue("research system prompt"),
@@ -87,6 +88,7 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
     // Builtin tools — must contain grep+read_file so the filter keeps something
     vi.doMock("../../tools/registry.js", () => ({
@@ -141,6 +143,7 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
     vi.doMock("../../tools/registry.js", () => ({
       createBuiltinTools: vi.fn().mockReturnValue({}),
@@ -204,6 +207,7 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
     vi.doMock("../../tools/registry.js", () => ({
       createBuiltinTools: vi.fn().mockReturnValue({}),
@@ -249,6 +253,7 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
     vi.doMock("../../tools/registry.js", () => ({
       createBuiltinTools: vi.fn().mockReturnValue({}),
@@ -287,6 +292,7 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
     vi.doMock("../../tools/registry.js", () => ({
       createBuiltinTools: vi.fn().mockReturnValue({}),
