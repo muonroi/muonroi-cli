@@ -482,6 +482,36 @@ function parseResponse(raw: string): LlmClassifyResult | null {
  * Returns null if the call fails / times out / parses to garbage. Callers must
  * fail-open (keep prior taskType, do not block the turn).
  */
+/**
+ * Order the classify candidate list.
+ *
+ * - `hasSameFast` (e.g. openai → gpt-5.4-mini): the same-provider fast tier is a
+ *   real fast model, so try it FIRST, then keyed cross-provider models as a
+ *   FALLBACK. This is the fix for the failure-not-just-absence case: an
+ *   openai-OAuth session's fast tier can 401 on the api-key path — previously
+ *   the chain stopped there and fail-opened to "standard" (so /ideal
+ *   over-councilled trivial tasks). Appending the cross-provider models lets a
+ *   working alternative (a keyed deepseek/opencode fast model) rescue it.
+ * - No same-provider fast tier (e.g. xai, whose session model is agentic and
+ *   ignores the terse contract): try keyed cross-provider fast models FIRST and
+ *   keep the session model as the last-resort candidate.
+ */
+export function orderClassifyCandidates(args: {
+  primaryModelId: string;
+  hasSameFast: boolean;
+  crossModels: ReadonlyArray<{ modelId: string; providerId: ProviderId }>;
+}): Array<{ modelId: string; providerId: ProviderId | null }> {
+  const candidates: Array<{ modelId: string; providerId: ProviderId | null }> = [];
+  if (args.hasSameFast) {
+    candidates.push({ modelId: args.primaryModelId, providerId: null });
+    for (const m of args.crossModels) candidates.push({ modelId: m.modelId, providerId: m.providerId });
+  } else {
+    for (const m of args.crossModels) candidates.push({ modelId: m.modelId, providerId: m.providerId });
+    candidates.push({ modelId: args.primaryModelId, providerId: null });
+  }
+  return candidates;
+}
+
 export function createLlmClassifier(
   factory: ProviderFactory,
   modelId: string,
@@ -668,26 +698,21 @@ export function createLlmClassifier(
       // → null → fail-open "standard" (the /ideal over-engineering root cause);
       // and a configured-but-dead key (expired deepseek) errors. Trying
       // candidates in order until one parses fixes both.
-      const candidates: Array<{ modelId: string; providerId: ProviderId | null }> = [];
+      let candidates: Array<{ modelId: string; providerId: ProviderId | null }> = [];
       const provider = getModelInfo(modelId)?.provider as ProviderId | undefined;
       let primaryModelId = modelId;
       if (classifyOpts?.routeFastTier) {
         const sameFast = provider ? getRoutedModelByTier("fast", provider) : undefined;
         if (sameFast && sameFast.id !== modelId) primaryModelId = sameFast.id;
-        if (classifyOpts?.crossProviderFallback && !sameFast && provider) {
-          // No same-provider fast tier → the session model is presumed unsuited
-          // to the terse classify (e.g. an agentic xai model that plans instead
-          // of answering — measured 2026-07-15). Try keyed cross-provider FAST
-          // instruction-followers FIRST (same principle as routeFastTier: prefer
-          // a fast-tier model over a no-fast-tier session model), and keep the
-          // session model only as the last-resort candidate.
-          for (const c of await pickCrossProviderClassifyModels(provider)) {
-            candidates.push({ modelId: c.modelId, providerId: c.providerId });
-          }
-          candidates.push({ modelId: primaryModelId, providerId: null });
-        } else {
-          candidates.push({ modelId: primaryModelId, providerId: null });
-        }
+        // Cross-provider models are a FALLBACK appended whenever crossProviderFallback
+        // is set — NOT only when the session provider lacks a fast tier. Measured
+        // 2026-07-16: an openai-OAuth session's fast tier (gpt-5.4-mini) 401s on the
+        // api-key path; with the old absence-only gate the chain had no fallback and
+        // fail-opened to "standard", so /ideal over-councilled trivial tasks. Ordering
+        // (same-fast-first vs cross-first) is decided by orderClassifyCandidates.
+        const crossModels =
+          classifyOpts?.crossProviderFallback && provider ? await pickCrossProviderClassifyModels(provider) : [];
+        candidates = orderClassifyCandidates({ primaryModelId, hasSameFast: !!sameFast, crossModels });
       } else {
         candidates.push({ modelId: primaryModelId, providerId: null });
       }

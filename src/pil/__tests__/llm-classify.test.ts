@@ -1,7 +1,12 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { installMockModel, textOnlyStream } from "../../agent-harness/mock-model.js";
 import { loadCatalog } from "../../models/registry.js";
-import { classifierBudget, classifySubSessionAction, createLlmClassifier } from "../llm-classify.js";
+import {
+  classifierBudget,
+  classifySubSessionAction,
+  createLlmClassifier,
+  orderClassifyCandidates,
+} from "../llm-classify.js";
 
 describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
   beforeAll(async () => {
@@ -421,5 +426,46 @@ describe("classifySubSessionAction", () => {
     const factory = (() => handle.model) as never;
     const result = await classifySubSessionAction(factory, "deepseek-v4-flash", "test");
     expect(result).toBeNull();
+  });
+});
+
+describe("orderClassifyCandidates — cross-provider fallback ordering", () => {
+  const cross = [
+    { modelId: "deepseek-v4-flash", providerId: "deepseek" as const },
+    { modelId: "opencode/deepseek-v4-flash", providerId: "opencode-go" as const },
+  ];
+
+  it("same-provider fast tier goes FIRST, cross-provider appended as fallback", () => {
+    // Regression: an openai-OAuth session routes to gpt-5.4-mini (a real fast
+    // tier); if that primary ERRORS (401 on the api-key path), the chain must
+    // still fall through to keyed cross-provider models — previously it did not,
+    // because cross-provider was only added when NO same-provider fast tier
+    // existed, so the classify fail-opened to "standard" and /ideal over-councilled.
+    const out = orderClassifyCandidates({ primaryModelId: "gpt-5.4-mini", hasSameFast: true, crossModels: cross });
+    expect(out).toEqual([
+      { modelId: "gpt-5.4-mini", providerId: null },
+      { modelId: "deepseek-v4-flash", providerId: "deepseek" },
+      { modelId: "opencode/deepseek-v4-flash", providerId: "opencode-go" },
+    ]);
+  });
+
+  it("no same-provider fast tier: cross-provider FIRST, session model LAST", () => {
+    // xai has no fast tier and its session model is agentic (ignores the terse
+    // contract) — so keyed cross-provider fast models are tried before it.
+    const out = orderClassifyCandidates({ primaryModelId: "grok-composer", hasSameFast: false, crossModels: cross });
+    expect(out).toEqual([
+      { modelId: "deepseek-v4-flash", providerId: "deepseek" },
+      { modelId: "opencode/deepseek-v4-flash", providerId: "opencode-go" },
+      { modelId: "grok-composer", providerId: null },
+    ]);
+  });
+
+  it("no cross models: just the primary candidate (both hasSameFast values)", () => {
+    expect(orderClassifyCandidates({ primaryModelId: "m", hasSameFast: true, crossModels: [] })).toEqual([
+      { modelId: "m", providerId: null },
+    ]);
+    expect(orderClassifyCandidates({ primaryModelId: "m", hasSameFast: false, crossModels: [] })).toEqual([
+      { modelId: "m", providerId: null },
+    ]);
   });
 });
