@@ -30,6 +30,8 @@ export interface CouncilStatusLike {
   role?: string;
   label?: string;
   elapsedMs?: number;
+  streamedChars?: number;
+  lastDeltaAgeMs?: number;
 }
 
 export interface CouncilSpeakerEvent {
@@ -39,12 +41,23 @@ export interface CouncilSpeakerEvent {
   status: CouncilSpeakerStatus;
   correlationId: string;
   elapsedMs?: number;
+  /** Chars (text + reasoning deltas) streamed since this phase began. */
+  streamedChars?: number;
+  /** Age of the most recent stream delta, in ms. */
+  lastDeltaAgeMs?: number;
 }
 
 /**
  * Map a council status chunk to the `council-speaker` harness event payload.
  * `start`→"start", `tick`→"tick" (progress heartbeat), `done`/`error`→"done".
  * `elapsedMs` is passed through unchanged so a poller can measure progress.
+ *
+ * `streamedChars` / `lastDeltaAgeMs` ride along when the council emitted them.
+ * `elapsedMs` can freeze even on a healthy call — the tick generator only
+ * advances when its consumer pulls, and a round awaiting pairs via Promise.all
+ * does not pull. These two are pushed from the token stream itself, so they
+ * separate SLOW-BUT-ALIVE (chars growing, small delta age) from STUCK (chars
+ * static, delta age growing) without depending on generator pumping.
  */
 export function mapCouncilStatusToSpeakerEvent(cs: CouncilStatusLike): CouncilSpeakerEvent {
   const status: CouncilSpeakerStatus = cs.state === "start" ? "start" : cs.state === "tick" ? "tick" : "done";
@@ -55,5 +68,7 @@ export function mapCouncilStatusToSpeakerEvent(cs: CouncilStatusLike): CouncilSp
     status,
     correlationId: cs.statusId,
     ...(typeof cs.elapsedMs === "number" ? { elapsedMs: cs.elapsedMs } : {}),
+    ...(typeof cs.streamedChars === "number" ? { streamedChars: cs.streamedChars } : {}),
+    ...(typeof cs.lastDeltaAgeMs === "number" ? { lastDeltaAgeMs: cs.lastDeltaAgeMs } : {}),
   };
 }

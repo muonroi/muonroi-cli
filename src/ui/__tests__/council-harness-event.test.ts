@@ -44,4 +44,66 @@ describe("mapCouncilStatusToSpeakerEvent", () => {
     const ev = mapCouncilStatusToSpeakerEvent({ state: "done", statusId: "s5" });
     expect("elapsedMs" in ev).toBe(false);
   });
+
+  it("passes through streamedChars/lastDeltaAgeMs — push liveness when elapsedMs is frozen", () => {
+    // The freeze case: tracedAsync's tick only advances when its consumer pulls,
+    // so a round awaiting pairs via Promise.all pins elapsedMs. Identical
+    // elapsedMs across polls + GROWING streamedChars = slow but alive.
+    const a = mapCouncilStatusToSpeakerEvent({
+      state: "tick",
+      statusId: "s6",
+      role: "architect",
+      elapsedMs: 33142,
+      streamedChars: 1200,
+      lastDeltaAgeMs: 300,
+    });
+    const b = mapCouncilStatusToSpeakerEvent({
+      state: "tick",
+      statusId: "s6",
+      role: "architect",
+      elapsedMs: 33142,
+      streamedChars: 4800,
+      lastDeltaAgeMs: 120,
+    });
+
+    expect(a.streamedChars).toBe(1200);
+    expect(a.lastDeltaAgeMs).toBe(300);
+    expect(b.elapsedMs).toBe(a.elapsedMs);
+    expect(b.streamedChars!).toBeGreaterThan(a.streamedChars!);
+  });
+
+  it("carries liveness on done as well as tick", () => {
+    const ev = mapCouncilStatusToSpeakerEvent({
+      state: "done",
+      statusId: "s7",
+      streamedChars: 9001,
+      lastDeltaAgeMs: 5,
+    });
+    expect(ev.status).toBe("done");
+    expect(ev.streamedChars).toBe(9001);
+    expect(ev.lastDeltaAgeMs).toBe(5);
+  });
+
+  it("omits streamedChars/lastDeltaAgeMs when absent (additive, no wire leak)", () => {
+    const ev = mapCouncilStatusToSpeakerEvent({ state: "tick", statusId: "s8", elapsedMs: 10 });
+    expect("streamedChars" in ev).toBe(false);
+    expect("lastDeltaAgeMs" in ev).toBe(false);
+  });
+
+  it("distinguishes STUCK: chars static while delta age grows", () => {
+    const a = mapCouncilStatusToSpeakerEvent({
+      state: "tick",
+      statusId: "s9",
+      streamedChars: 500,
+      lastDeltaAgeMs: 1_000,
+    });
+    const b = mapCouncilStatusToSpeakerEvent({
+      state: "tick",
+      statusId: "s9",
+      streamedChars: 500,
+      lastDeltaAgeMs: 240_000,
+    });
+    expect(b.streamedChars).toBe(a.streamedChars);
+    expect(b.lastDeltaAgeMs!).toBeGreaterThan(a.lastDeltaAgeMs!);
+  });
 });

@@ -386,6 +386,47 @@ function maxOutSpread(runtime: ResolvedModelRuntime, n: number): { maxOutputToke
   return shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: n };
 }
 
+/**
+ * Push-based stream liveness — module-level because the only readers
+ * (`tracedAsync` wrappers in debate.ts) sit OUTSIDE the `CouncilLLM` interface
+ * and cannot reach the in-flight `collectStreamText` any other way.
+ *
+ * Why it exists. `tracedAsync`'s 1s tick only materializes when the CONSUMER
+ * pulls `.next()`; a round that awaits its pairs via `Promise.all` stops
+ * pumping the tick generator, so `elapsedMs` FREEZES and a slow-but-alive run
+ * is indistinguishable from a hung one (observed: tick frozen at 33142ms for
+ * 8+ minutes while status was still "tick"). Token deltas are PUSHED here as
+ * they arrive, so liveness survives any back-pressure on the generator.
+ */
+let councilStreamedCharsTotal = 0;
+let councilLastDeltaAt = 0;
+
+/** Record `chars` of streamed output (text OR reasoning) against the live window. */
+export function noteCouncilStreamDelta(chars: number): void {
+  if (chars <= 0) return;
+  councilStreamedCharsTotal += chars;
+  councilLastDeltaAt = Date.now();
+}
+
+/**
+ * Open a liveness window and return a reader for it.
+ *
+ * `streamedChars` counts only what streamed SINCE the window opened, and
+ * `lastDeltaAgeMs` is measured from the window's own start until the first
+ * delta lands — so a cold stall reads as an age growing from 0, never as a
+ * bogus epoch-sized number. Reasoning-delta counts toward both: a reasoning
+ * model emits reasoning tokens for minutes before any text, and that is
+ * exactly the window an operator must not mistake for a hang.
+ */
+export function councilStreamLivenessReader(): () => { streamedChars: number; lastDeltaAgeMs: number } {
+  const baseChars = councilStreamedCharsTotal;
+  const windowStart = Date.now();
+  return () => ({
+    streamedChars: councilStreamedCharsTotal - baseChars,
+    lastDeltaAgeMs: Date.now() - (councilLastDeltaAt > windowStart ? councilLastDeltaAt : windowStart),
+  });
+}
+
 async function collectStreamText(args: {
   model: LanguageModel;
   system: string;
@@ -397,6 +438,8 @@ async function collectStreamText(args: {
   tools?: ToolSet;
   stopWhen?: ReturnType<typeof stepCountIs>;
   prepareStep?: (opts: { stepNumber: number; messages: readonly unknown[] }) => unknown;
+  /** Called with the char length of every text/reasoning delta as it arrives. */
+  onDelta?: (chars: number) => void;
 }): Promise<{
   text: string;
   usage?: unknown;
@@ -424,12 +467,21 @@ async function collectStreamText(args: {
   const byId = new Map<string, { toolName: string; input?: unknown; result?: unknown }>();
   for await (const part of result.fullStream) {
     switch (part.type) {
-      case "text-delta":
-        text += (part as { text?: string }).text ?? "";
+      case "text-delta": {
+        const d = (part as { text?: string }).text ?? "";
+        text += d;
+        args.onDelta?.(d.length);
         break;
-      case "reasoning-delta":
-        reasoningText += (part as { text?: string }).text ?? "";
+      }
+      case "reasoning-delta": {
+        // Reasoning deltas count as liveness: a reasoning model streams these
+        // for minutes before its first text-delta, and that silent-on-text
+        // window is precisely what gets misread as a hang.
+        const d = (part as { text?: string }).text ?? "";
+        reasoningText += d;
+        args.onDelta?.(d.length);
         break;
+      }
       case "tool-call": {
         const p = part as { toolCallId: string; toolName: string; input?: unknown };
         const tc = { toolName: p.toolName, input: p.input };
@@ -457,6 +509,14 @@ async function collectStreamText(args: {
   }
   return { text, usage, finishReason, reasoningText: reasoningText || undefined, toolCalls };
 }
+
+/**
+ * Test-only handle on the private stream collector, so `onDelta` (the liveness
+ * signal that tells a slow reasoning call from a hung one) is directly
+ * assertable without standing up a full council run. Not for production use.
+ * @internal
+ */
+export const __testCollectStreamText = collectStreamText;
 
 export function createCouncilLLM(
   bash: BashTool,
@@ -510,6 +570,7 @@ export function createCouncilLLM(
                   temperature: resolveTemperature(providerId, runtime.modelInfo, 0.7),
                   providerOptions: runtime.providerOptions as Record<string, unknown> | undefined,
                   abortSignal: timedSignal,
+                  onDelta: noteCouncilStreamDelta,
                 }),
               { label: "council.generate" },
             ),
@@ -624,12 +685,21 @@ export function createCouncilLLM(
                 }
               }
             }
-          } catch {
-            /* MCP optional — debate continues with builtins only */
+          } catch (err) {
+            // MCP is optional here — debate continues with builtins only — but a
+            // silent swallow hid which server failed and why. (No-Silent-Catch.)
+            console.error(
+              `[council/llm] debate MCP tool discovery failed, continuing with builtins only: ${err instanceof Error ? err.message : String(err)}`,
+              { modelId, provider: providerId },
+            );
           }
           verificationTools = wrapToolsWithEeCheck(filtered, sessionId ?? "council-debate");
-        } catch {
-          /* fail-open: no tools */
+        } catch (err) {
+          // fail-open: the debate turn still runs, just without verification tools.
+          console.error(
+            `[council/llm] debate verification toolset build failed, running without tools: ${err instanceof Error ? err.message : String(err)}`,
+            { modelId, provider: providerId },
+          );
         }
       }
 
@@ -664,6 +734,10 @@ export function createCouncilLLM(
                   temperature: resolveTemperature(providerId, runtime.modelInfo, 0.7),
                   providerOptions: runtime.providerOptions as Record<string, unknown> | undefined,
                   abortSignal: timedSignal,
+                  // Push liveness for the round wrapper: a debate turn on a
+                  // reasoning model runs near the 5-min ceiling, and the tick
+                  // generator is not being pumped while Promise.all awaits.
+                  onDelta: noteCouncilStreamDelta,
                   ...(verificationTools && Object.keys(verificationTools).length > 0
                     ? {
                         tools: verificationTools,
@@ -1108,6 +1182,13 @@ interface TracedAsyncArgs {
   detail?: string;
   role?: string;
   tickIntervalMs?: number;
+  /**
+   * Optional push-based stream liveness reader (see {@link councilStreamLivenessReader}).
+   * When supplied, every tick/done carries the chars streamed inside this window
+   * and the age of the last delta — so a frozen `elapsedMs` (generator not being
+   * pumped) can still be told apart from a genuinely stuck call.
+   */
+  liveness?: () => { streamedChars: number; lastDeltaAgeMs: number };
 }
 
 /**
@@ -1124,6 +1205,21 @@ export async function* tracedAsync<T>(
       : `status-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const start = Date.now();
   const tickInterval = args.tickIntervalMs ?? 1000;
+
+  /** Never let a liveness read break the heartbeat it is meant to enrich. */
+  const livenessFields = (): { streamedChars?: number; lastDeltaAgeMs?: number } => {
+    if (!args.liveness) return {};
+    try {
+      const l = args.liveness();
+      return { streamedChars: l.streamedChars, lastDeltaAgeMs: l.lastDeltaAgeMs };
+    } catch (err) {
+      console.error(
+        `[council/llm] tracedAsync liveness read failed: ${err instanceof Error ? err.message : String(err)}`,
+        { phase: args.phase, label: args.label },
+      );
+      return {};
+    }
+  };
 
   yield {
     type: "council_status",
@@ -1170,6 +1266,7 @@ export async function* tracedAsync<T>(
         detail: args.detail,
         role: args.role,
         elapsedMs: Date.now() - start,
+        ...livenessFields(),
       },
     };
   }
@@ -1204,6 +1301,7 @@ export async function* tracedAsync<T>(
       detail: args.detail,
       role: args.role,
       elapsedMs: Date.now() - start,
+      ...livenessFields(),
     },
   };
 
