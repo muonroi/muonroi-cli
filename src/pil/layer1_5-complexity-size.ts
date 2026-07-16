@@ -12,9 +12,12 @@
  * baseline harness regression.
  */
 
+import type { RepoStructureHint } from "./repo-structure-hints.js";
+
 export interface ComplexitySizeInput {
   rawText: string;
   taskType: string;
+  repoHints?: RepoStructureHint[];
 }
 
 export interface ComplexitySizeResult {
@@ -84,12 +87,27 @@ function effectiveLen(rawText: string, taskType: string): number {
 // Path token counter — counts DISTINCT path-like tokens.
 // ---------------------------------------------------------------------------
 
-function countDistinctPaths(rawText: string): number {
+function collectDistinctPaths(rawText: string): string[] {
   const matches = rawText.match(PATH_TOKEN_RE);
-  if (!matches) return 0;
+  if (!matches) return [];
   const set = new Set<string>();
   for (const m of matches) set.add(m.toLowerCase());
-  return set.size;
+  return [...set];
+}
+
+function scoreRepoGrounding(paths: string[], hints: RepoStructureHint[]): { score: number; hits: number } {
+  if (paths.length === 0 || hints.length === 0) return { score: 0, hits: 0 };
+  const hinted = new Map(hints.map((hint) => [hint.path.toLowerCase(), hint]));
+  let score = 0;
+  let hits = 0;
+  for (const path of paths) {
+    const hint = hinted.get(path);
+    if (!hint) continue;
+    hits += 1;
+    if (hint.lineCount >= 5000) score = Math.max(score, 4);
+    else if (hint.lineCount >= 2000) score = Math.max(score, 2);
+  }
+  return { score, hits };
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +117,7 @@ function countDistinctPaths(rawText: string): number {
 export function scoreComplexitySize(input: ComplexitySizeInput): ComplexitySizeResult {
   const rawText = input.rawText ?? "";
   const taskType = input.taskType ?? "general";
+  const repoHints = input.repoHints ?? [];
 
   // 1. Length score (debug + stack-trace gets mitigation).
   // CONTEXT-locked thresholds are <60 / >240. We use <80 for the "small" knee
@@ -126,11 +145,17 @@ export function scoreComplexitySize(input: ComplexitySizeInput): ComplexitySizeR
   //     baseline-2 "đổi default ... trong src/orchestrator/cli-args.ts")
   //   - zero paths is neutral (vagueness is handled by `vaguenessAmplifier`)
   //   - ≥3 paths is multi-file work, push toward large
-  const pathCount = countDistinctPaths(rawText);
+  const distinctPaths = collectDistinctPaths(rawText);
+  const pathCount = distinctPaths.length;
   let pathScore = 0;
   if (pathCount === 1) pathScore = -1;
   else if (pathCount >= 3) pathScore = 2;
   // 0 or 2 → 0 (neutral)
+
+  // 4.5 Repo-structure grounding probe. Cheap deterministic lookup against the
+  // checked-in REPO_DEEP_MAP index: monolith roots like src/ui/app.tsx should
+  // not size the same as a narrow leaf module when both appear as one-path asks.
+  const repoGrounding = scoreRepoGrounding(distinctPaths, repoHints);
 
   // 5. Question form score.
   const trimmed = rawText.trim();
@@ -149,7 +174,8 @@ export function scoreComplexitySize(input: ComplexitySizeInput): ComplexitySizeR
   const vaguenessAmplifier = sweepCount > 0 && pathCount === 0 ? 4 : 0;
 
   // Total score → bucket.
-  const score = lenScore + sweepScore + heavyScore + pathScore + questionScore + vaguenessAmplifier;
+  const score =
+    lenScore + sweepScore + heavyScore + pathScore + repoGrounding.score + questionScore + vaguenessAmplifier;
 
   let size: "small" | "medium" | "large";
   if (score <= -1) size = "small";
@@ -167,6 +193,8 @@ export function scoreComplexitySize(input: ComplexitySizeInput): ComplexitySizeR
       heavyScore,
       pathCount,
       pathScore,
+      repoGroundingHits: repoGrounding.hits,
+      repoGroundingScore: repoGrounding.score,
       isQuestion,
       questionScore,
       isImperative,

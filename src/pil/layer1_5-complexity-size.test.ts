@@ -277,3 +277,27 @@ describe("scoreComplexitySize — heavy score composition", () => {
     expect(r.size).toBe("large");
   });
 });
+
+describe("scoreComplexitySize — repo grounding probe", () => {
+  it("bumps a huge indexed root file out of the small bucket", () => {
+    const r = scoreComplexitySize({
+      rawText: "giải thích đoạn code ở src/ui/app.tsx",
+      taskType: "analyze",
+      repoHints: [{ path: "src/ui/app.tsx", lineCount: 6200 }],
+    });
+    expect(r.features.repoGroundingHits).toBe(1);
+    expect(r.features.repoGroundingScore).toBe(4);
+    expect(r.size).toBe("medium");
+  });
+
+  it("stays small for the same prompt when the repo index has no matching hint", () => {
+    const r = scoreComplexitySize({
+      rawText: "giải thích đoạn code ở src/ui/app.tsx",
+      taskType: "analyze",
+      repoHints: [],
+    });
+    expect(r.features.repoGroundingHits).toBe(0);
+    expect(r.features.repoGroundingScore).toBe(0);
+    expect(r.size).toBe("small");
+  });
+});
