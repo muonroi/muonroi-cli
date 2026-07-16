@@ -24,7 +24,8 @@ export interface ModalsLayerProps {
   apiKeyError: any;
   apiKeyInputRef: any;
   apiKeyPrompt: any;
-  bwSync: any;
+  oauthProviders: any;
+  oauthLogin: any;
   configuredProviders: any;
   connectModalIndex: any;
   defaultProvider: any;
@@ -112,7 +113,8 @@ export function ModalsLayer(props: ModalsLayerProps) {
     apiKeyError,
     apiKeyInputRef,
     apiKeyPrompt,
-    bwSync,
+    oauthProviders,
+    oauthLogin,
     configuredProviders,
     connectModalIndex,
     defaultProvider,
@@ -293,7 +295,8 @@ export function ModalsLayer(props: ModalsLayerProps) {
           providerChipIndex={providerChipIndex}
           providersWithKey={providersWithKey}
           apiKeyPrompt={apiKeyPrompt}
-          bwSync={bwSync}
+          oauthProviders={oauthProviders}
+          oauthLogin={oauthLogin}
         />
       )}
       {showSessionPicker && (

@@ -4,7 +4,7 @@ import { getWebResearchModel } from "../models/registry.js";
 import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
 import { getCouncilLanguage } from "../utils/settings.js";
 import { pickCouncilTaskModel } from "./leader.js";
-import { tracedGenerate, tracedGenerateWithFallback } from "./llm.js";
+import { tracedAsync, tracedGenerate, tracedGenerateWithFallback } from "./llm.js";
 import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
 import { buildClarificationPrompt, buildReadinessJudgePrompt, buildSpecSynthesisPrompt } from "./prompts.js";
 import type { ClarifiedSpec, CouncilLLM, QuestionResponder } from "./types.js";
@@ -298,7 +298,7 @@ async function hasTavilyKey(): Promise<boolean> {
   }
 }
 
-async function* researchScopeForClarification(
+export async function* researchScopeForClarification(
   topic: string,
   conversationContext: string,
   leaderModelId: string,
@@ -348,9 +348,13 @@ async function* researchScopeForClarification(
       `NOT verify and had to ASSUME (the real goal/pain, the concrete task, the system of record, the ` +
       `target user, hard constraints). Those unresolved items are exactly what the user must clarify next, ` +
       `so name them plainly rather than papering over them with a plausible guess.)`;
-    const brief = await llm.research(researchModel, goal, conversationContext, signal, undefined, {
-      internetFirst: webTier !== "none",
-    });
+    const brief = yield* tracedAsync(
+      () =>
+        llm.research(researchModel, goal, conversationContext, signal, undefined, {
+          internetFirst: webTier !== "none",
+        }),
+      { phase: "clarify", label: "Scope research" },
+    );
     yield phaseDone({ phaseId, kind: "clarification", label: "Scope research", startedAt });
     return typeof brief === "string" ? brief.trim() : "";
   } catch (err) {

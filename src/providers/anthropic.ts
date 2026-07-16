@@ -2,16 +2,15 @@
  * src/providers/anthropic.ts
  *
  * Anthropic-only provider shell for Phase 0.
- * Implements TUI-02 (stub conversation), PROV-03 (BYOK keychain), PROV-07 (log redaction).
+ * Implements TUI-02 (stub conversation), PROV-03 (BYOK), PROV-07 (log redaction).
  *
- * Key loading priority:
- *   1. OS keychain via keytar (service="muonroi-cli", account="anthropic") — B-2: dynamic import
- *   2. ANTHROPIC_API_KEY env var — fallback with redacted warning
- *   3. AnthropicKeyMissingError — user-facing error with remediation instructions
+ * Key loading:
+ *   1. ANTHROPIC_API_KEY env var (the env-store loads ~/.muonroi-cli/.env into
+ *      process.env at startup; the real OS env also applies)
+ *   2. AnthropicKeyMissingError — user-facing error with remediation instructions
  *
  * Security invariants:
  *   - redactor.enrollSecret(key) is called BEFORE any log line that might contain the key.
- *   - keytar is loaded via dynamic import() so a missing/broken native module cannot crash boot.
  *   - Keys shorter than 20 characters are rejected early.
  *
  * Streaming (AI SDK v6 with @ai-sdk/anthropic):
@@ -55,68 +54,21 @@ export class AnthropicKeyMissingError extends Error {
 // ---------------------------------------------------------------------------
 
 /**
- * Minimal keytar interface for getPassword — only what we need in Phase 0.
- */
-interface KeytarLike {
-  getPassword(service: string, account: string): Promise<string | null>;
-}
-
-/**
- * Dynamic keytar loader — B-2 mitigation.
- * A missing or broken keytar native module (common on minimal Linux environments)
- * must NOT crash process boot. The env-var fallback path is always available.
- */
-async function loadKeytar(): Promise<KeytarLike | null> {
-  try {
-    // keytar exports named functions directly (no default export)
-    const mod = await import("keytar");
-    return mod as KeytarLike;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Load the Anthropic API key from the OS keychain first, then env var fallback.
+ * Load the Anthropic API key from the environment (the env-store loads
+ * `~/.muonroi-cli/.env` into process.env at startup; the real OS env also
+ * applies).
  *
  * Security contract:
  *   - redactor.enrollSecret(key) is called BEFORE any subsequent log line.
  *   - Keys < 20 chars are rejected (T-00.05-05: truncated key guard).
  *
- * @throws {AnthropicKeyMissingError} when both keychain and env var are absent.
+ * @throws {AnthropicKeyMissingError} when no ANTHROPIC_API_KEY is present.
  */
 export async function loadAnthropicKey(): Promise<string> {
-  // --- Primary: OS keychain via dynamic import (B-2) ---
-  const keytarMod = await loadKeytar();
-
-  if (keytarMod) {
-    try {
-      const key = await keytarMod.getPassword("muonroi-cli", "anthropic");
-      if (key && key.length >= 20) {
-        // Enroll BEFORE any log that might emit the key
-        redactor.enrollSecret(key);
-        return key;
-      }
-    } catch (err) {
-      // keytar present but backend unavailable (e.g. Linux without libsecret/dbus)
-      console.warn("[muonroi-cli] keytar backend unavailable, falling back to env var:", redactor.redactError(err));
-    }
-  } else {
-    console.warn(
-      "[muonroi-cli] keytar module not installed — using env-var path. " +
-        "Install keytar to enable OS keychain key storage.",
-    );
-  }
-
-  // --- Fallback: ANTHROPIC_API_KEY environment variable ---
   const envKey = process.env.ANTHROPIC_API_KEY;
   if (envKey && envKey.length >= 20) {
-    // Enroll BEFORE the warning that mentions we're using env path
+    // Enroll BEFORE any log that might mention the key path.
     redactor.enrollSecret(envKey);
-    console.warn(
-      "[muonroi-cli] Using ANTHROPIC_API_KEY from environment. " +
-        "Prefer storing the key in your OS keychain (Phase 1 `muonroi-cli login` helper).",
-    );
     return envKey;
   }
 

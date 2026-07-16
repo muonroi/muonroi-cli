@@ -223,6 +223,36 @@ describe("verify entrypoint helpers", () => {
     expect(prompt).toContain("Verdict marker (MANDATORY");
   });
 
+  it("does not force app-start / browser QA on a CLI/pytest project (no runtime smoke)", () => {
+    const dir = makeTempDir("muonroi-verify-cli-prompt-");
+    fs.writeFileSync(path.join(dir, "pyproject.toml"), "[project]\nname = 'demo'\n");
+    fs.mkdirSync(path.join(dir, "tests"));
+
+    const profile = inferVerifyProjectProfile(dir);
+    // Guard the precondition: this recipe genuinely has no http smoke target.
+    expect(profile.recipe.smokeKind).toBe("none");
+    expect(profile.recipe.testCommands[0]).toBe("pytest");
+
+    const prompt = buildVerifyTaskPrompt(dir);
+
+    // The contradictory "REQUIRED, do not skip" app/browser phases must be gone —
+    // they were the cause of the UNKNOWN verdict → engineering-floor retry-churn.
+    expect(prompt).not.toContain("Start the app (REQUIRED, do not skip)");
+    expect(prompt).not.toContain("Browser QA testing (REQUIRED, do not skip)");
+    expect(prompt).not.toContain("app did not start");
+    // The verdict rule must explicitly tell the sub-agent the browser/app phases
+    // are N/A (not failures) so it emits VERIFY_PASS on a passing pytest run.
+    expect(prompt).toContain("Runtime smoke (CLI / library / script");
+    expect(prompt).toContain("NOT APPLICABLE");
+    expect(prompt).toContain("N/A, NOT failures");
+    // Verdict markers must still be requested (parseVerifyResult keys on them).
+    expect(prompt).toContain(VERIFY_PASS_MARKER);
+    expect(prompt).toContain(VERIFY_FAIL_MARKER);
+    expect(prompt).toContain("Verdict marker (MANDATORY");
+    // Build + test phase is still mandatory.
+    expect(prompt).toContain("Phase 2 — Build and test:");
+  });
+
   it("builds a detector prompt that requests JSON output", () => {
     const dir = makeTempDir("muonroi-verify-detect-");
     fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { dev: "next dev" } }, null, 2));

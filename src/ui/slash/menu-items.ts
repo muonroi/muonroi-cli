@@ -43,6 +43,7 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   // ── Primary surface ────────────────────────────────────────────────────
   { id: "exit", label: "exit", description: "Quit the CLI" },
   { id: "providers", label: "providers", description: "Manage providers + API keys (enable/disable, set default)" },
+  { id: "login", label: "login", description: "Sign in to a provider (OAuth) or add an API key" },
   { id: "compact", label: "compact", description: "Compact conversation context" },
   { id: "clear", label: "clear", description: "Clear conversation and start fresh" },
   { id: "ideal", label: "ideal", description: "Product Ideal Loop — from idea to shipped product, autonomously" },

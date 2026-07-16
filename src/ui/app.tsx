@@ -476,6 +476,7 @@ Follow the repository's commit and pull request workflows. Inspect the current c
 const BUILTIN_TYPED_SLASH_COMMANDS = new Set([
   "/clear",
   "/providers",
+  "/login",
   "/model",
   "/models",
   "/sandbox",
@@ -592,7 +593,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     apiKeyPrompt,
     blockPrompt,
     btwState,
-    bwSync,
+    oauthLogin,
+    oauthProviders,
     configuredProviders,
     connectModalIndex,
     contextStats,
@@ -1516,7 +1518,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             providerChipIndex={providerChipIndex}
             providersWithKey={providersWithKey}
             apiKeyPrompt={apiKeyPrompt}
-            bwSync={bwSync}
+            oauthProviders={oauthProviders}
+            oauthLogin={oauthLogin}
           />
         )}
         {showSessionPicker && (

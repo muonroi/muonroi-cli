@@ -259,7 +259,15 @@ export function sanitizeToolCallArguments(messages: WireMessage[]): WireMessage[
           repaired = "{}";
         } else {
           try {
-            JSON.parse(trimmed);
+            const parsed = JSON.parse(trimmed);
+            // Tool arguments MUST be a JSON object. grok-composer (and some other
+            // models) occasionally emit a bare string / number / array / null —
+            // valid JSON but the wrong shape — which xAI rejects with 400
+            // "expected JSON object for tool arguments" (a non-transient error
+            // that wedges the retry loop). Normalize any non-object to {}.
+            if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+              repaired = "{}";
+            }
           } catch {
             repaired = "{}";
           }

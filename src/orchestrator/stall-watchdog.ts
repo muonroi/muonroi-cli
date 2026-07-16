@@ -161,6 +161,13 @@ export function createStallWatchdog(
   timeoutMs: number,
   onFire?: () => void,
   progressOpts?: StallWatchdogProgressOpts,
+  /**
+   * Optional gate consulted the instant a timer would fire. When it returns
+   * true the watchdog RE-ARMS instead of aborting — used to hold the stream
+   * open while a blocking interactive card (`ask_user`) awaits a human, without
+   * counting that wait as a provider stall.
+   */
+  shouldSuppressFire?: () => boolean,
 ): StallWatchdog {
   const controller = new AbortController();
   let firedFlag = false;
@@ -190,14 +197,28 @@ export function createStallWatchdog(
 
   const arm = () => {
     if (!enabled) return;
-    timer = setTimeout(() => fire(onFire), timeoutMs);
+    timer = setTimeout(() => {
+      // Hold open (re-arm) while an interactive card blocks the turn — the
+      // human is thinking, not a stalled provider.
+      if (shouldSuppressFire?.()) {
+        arm();
+        return;
+      }
+      fire(onFire);
+    }, timeoutMs);
     // Don't keep the event loop alive solely for the watchdog (Node).
     (timer as { unref?: () => void }).unref?.();
   };
 
   const armProgress = () => {
     if (!progressEnabled) return;
-    progressTimer = setTimeout(() => fire(progressOpts?.onProgressFire), progressTimeoutMs);
+    progressTimer = setTimeout(() => {
+      if (shouldSuppressFire?.()) {
+        armProgress();
+        return;
+      }
+      fire(progressOpts?.onProgressFire);
+    }, progressTimeoutMs);
     (progressTimer as { unref?: () => void }).unref?.();
   };
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { CouncilPhaseEvent } from "../../types/index.js";
+import { heartbeatDebug } from "../heartbeat-debug.js";
 import type { Theme } from "../theme.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -20,7 +21,10 @@ export interface CouncilPhaseTimelineProps {
 function Spinner() {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
-    const id = setInterval(() => setFrame((n) => (n + 1) % SPINNER_FRAMES.length), 100);
+    const id = setInterval(() => {
+      heartbeatDebug("phase-timeline-spinner", "timer");
+      setFrame((n) => (n + 1) % SPINNER_FRAMES.length);
+    }, 100);
     return () => clearInterval(id);
   }, []);
   return <>{SPINNER_FRAMES[frame]}</>;
@@ -46,7 +50,10 @@ function formatElapsed(ms?: number): string {
 function useHeartbeat(tickMs = 1000): number {
   const [, force] = useState(0);
   useEffect(() => {
-    const id = setInterval(() => force((n) => n + 1), tickMs);
+    const id = setInterval(() => {
+      heartbeatDebug("phase-timeline-heartbeat", "timer");
+      force((n) => n + 1);
+    }, tickMs);
     return () => clearInterval(id);
   }, [tickMs]);
   return Date.now();
@@ -93,6 +100,14 @@ export function CouncilPhaseTimeline({ phases, theme: t, expanded = false }: Cou
     const labelColor = isDone ? t.textMuted : t.text;
     const liveElapsedMs =
       p.state === "active" && typeof p.startedAt === "number" ? Math.max(0, now - p.startedAt) : p.elapsedMs;
+    if (p.state === "active") {
+      heartbeatDebug("phase-timeline", "render", {
+        label: p.label,
+        liveElapsedMs,
+        startedAt: p.startedAt,
+        now,
+      });
+    }
     const elapsed = formatElapsed(liveElapsedMs);
     const meta = elapsed ? ` (${elapsed})` : isDone ? "" : " …";
     return (

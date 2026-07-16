@@ -109,6 +109,54 @@ export function buildVerifyTaskPrompt(
           "- Probe the host for runtimes. If missing, attempt to install them or report as blockers.",
         ];
 
+  // Does this project actually expose a long-running app to start + smoke-test in
+  // a browser? Only then are Phase 3 (start app) / Phase 4 (browser QA) applicable.
+  // A CLI/library/script project (pytest-only Python, a Go/Rust binary, a plain
+  // script) has smokeKind "cli"/"none" and no startCommand — forcing "Start the
+  // app (REQUIRED)" + "browser QA (REQUIRED)" there is contradictory: the sub-agent
+  // cannot satisfy them, so it emits NEITHER verdict marker → parseVerifyResult →
+  // UNKNOWN → engineering-floor fails → the sprint retries forever on a passing
+  // build. Gate the runtime/browser phases and the verdict rule on this flag.
+  const hasRuntimeSmoke = profile.recipe.smokeKind === "http" && Boolean(profile.recipe.startCommand);
+
+  const runtimePhases = hasRuntimeSmoke
+    ? [
+        "Phase 3 — Start the app (REQUIRED, do not skip):",
+        "- Start the app using startCommand from the recipe, running it in the background.",
+        "- Wait for the app to be ready: use a curl readiness loop or `agent-browser wait --load networkidle`.",
+        "- If the app fails to start, report the error but still attempt to capture evidence (logs, screenshots).",
+        "",
+        "Phase 4 — Browser QA testing (REQUIRED, do not skip):",
+        "- You are a QA tester. Open the app in the browser and test it like a human would.",
+        `- agent-browser commands run on the HOST${sandboxMode === "shuru" ? ", not the sandbox" : ""}. They WILL work. Do not skip them.`,
+        "- Record a video of the entire browser session.",
+        "- Navigate the app: click links, buttons, menus. Verify pages load correctly.",
+        "- Check for JavaScript console errors.",
+        "- Spend 3-5 interactions testing the critical path. Take screenshots after each.",
+        "- This is the most important phase. Build/lint passing means nothing if the app doesn't actually work.",
+        "",
+        "Phase 5 — Teardown:",
+        "- Stop recording, close browser, THEN stop the dev server.",
+      ]
+    : [
+        "Phase 3 — Runtime smoke (CLI / library / script — there is NO long-running app to start):",
+        '- This project exposes no HTTP server or startable app (smokeKind is not "http"), so there is NOTHING to start in the background and NO browser QA to run.',
+        "- Do the equivalent CLI smoke instead: run the built binary / script (or the recipe's smoke command) once and confirm it produces the expected output and a zero exit code.",
+        "- Capture the exact command and its output as evidence.",
+        "- Browser and app-start phases are NOT APPLICABLE here — skipping them is CORRECT and is NOT a failure. Do NOT treat their absence as a blocker.",
+      ];
+
+  const verdictRule = hasRuntimeSmoke
+    ? [
+        `- After the report, emit the verdict on its own final line: exactly \`${VERIFY_PASS_MARKER}\` if install/build/test and the smoke/QA phases all succeeded, otherwise exactly \`${VERIFY_FAIL_MARKER}\`.`,
+        `- Emit \`${VERIFY_FAIL_MARKER}\` on ANY failed or skipped required phase (build error, failing test, app did not start, blocking console error). Do NOT emit \`${VERIFY_PASS_MARKER}\` if you could not actually run the recipe.`,
+      ]
+    : [
+        `- After the report, emit the verdict on its own final line: exactly \`${VERIFY_PASS_MARKER}\` if install/build/test (and the CLI smoke, if any) all succeeded, otherwise exactly \`${VERIFY_FAIL_MARKER}\`.`,
+        `- This is a CLI/library/script project with no app to start: the browser and app-start phases are N/A, NOT failures. Do NOT withhold \`${VERIFY_PASS_MARKER}\` merely because they were not run.`,
+        `- Emit \`${VERIFY_FAIL_MARKER}\` ONLY on a real failure: an install/build error, a failing test, or a CLI smoke that produced the wrong result. Do NOT emit \`${VERIFY_PASS_MARKER}\` if you could not actually run the recipe's tests.`,
+      ];
+
   return [
     "Run a local verification pass for the current workspace.",
     "",
@@ -130,22 +178,7 @@ export function buildVerifyTaskPrompt(
     "Phase 2 — Build and test:",
     "- Run installCommands, buildCommands, and testCommands from the recipe.",
     "",
-    "Phase 3 — Start the app (REQUIRED, do not skip):",
-    "- Start the app using startCommand from the recipe, running it in the background.",
-    "- Wait for the app to be ready: use a curl readiness loop or `agent-browser wait --load networkidle`.",
-    "- If the app fails to start, report the error but still attempt to capture evidence (logs, screenshots).",
-    "",
-    "Phase 4 — Browser QA testing (REQUIRED, do not skip):",
-    "- You are a QA tester. Open the app in the browser and test it like a human would.",
-    `- agent-browser commands run on the HOST${sandboxMode === "shuru" ? ", not the sandbox" : ""}. They WILL work. Do not skip them.`,
-    "- Record a video of the entire browser session.",
-    "- Navigate the app: click links, buttons, menus. Verify pages load correctly.",
-    "- Check for JavaScript console errors.",
-    "- Spend 3-5 interactions testing the critical path. Take screenshots after each.",
-    "- This is the most important phase. Build/lint passing means nothing if the app doesn't actually work.",
-    "",
-    "Phase 5 — Teardown:",
-    "- Stop recording, close browser, THEN stop the dev server.",
+    ...runtimePhases,
     ...buildReadinessGuidance(profile),
     ...buildBrowserGuidance(profile),
     ...buildRetryGuidance(profile),
@@ -164,8 +197,7 @@ export function buildVerifyTaskPrompt(
     "- Use markdown links for artifact paths when practical, otherwise include the plain relative paths.",
     "",
     "Verdict marker (MANDATORY — the loop parses this, an absent marker scores the sprint 0.00):",
-    `- After the report, emit the verdict on its own final line: exactly \`${VERIFY_PASS_MARKER}\` if install/build/test and the smoke/QA phases all succeeded, otherwise exactly \`${VERIFY_FAIL_MARKER}\`.`,
-    `- Emit \`${VERIFY_FAIL_MARKER}\` on ANY failed or skipped required phase (build error, failing test, app did not start, blocking console error). Do NOT emit \`${VERIFY_PASS_MARKER}\` if you could not actually run the recipe.`,
+    ...verdictRule,
     "- The marker is the last line, nothing after it.",
   ].join("\n");
 }

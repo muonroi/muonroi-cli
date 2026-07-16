@@ -55,6 +55,37 @@ describe("withTurnWatchdog", () => {
     expect(out).toHaveLength(1);
   });
 
+  it("returns the stalled inner generator so its finally (cleanup) runs once the hung await settles", async () => {
+    // Reproduces the council reasoning-model hang (session c1d461439618): the
+    // watchdog throws while the inner generator is parked at an `await` on a
+    // provider call that keeps yielding afterwards. WITHOUT an explicit
+    // it.return(), when the await settles the abandoned generator resumes one
+    // step and then PARKS at its next `yield` forever (no consumer) — so its
+    // finally (write-mutex release, in-flight cleanup) NEVER runs and the next
+    // turn stays blocked. The fix queues a return, so when the await settles the
+    // generator unwinds through its finally instead of parking. This test fails
+    // (finally never pushed) if the it.return() in withTurnWatchdog is removed.
+    const events: string[] = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    async function* stalls(): AsyncGenerator<StreamChunk, void, unknown> {
+      try {
+        yield chunk("a");
+        await gate; // hung provider call — settles when we release() below (mirrors caller abort)
+        yield chunk("b"); // post-await yield: without a queued return the generator parks here forever
+      } finally {
+        events.push("finally"); // cleanup / mutex release — must run for the next turn to proceed
+      }
+    }
+    const gen = withTurnWatchdog(stalls(), { idleMs: 40, totalMs: 5000, label: "t" });
+    await expect(drain(gen)).rejects.toMatchObject({ name: "TurnStallError", kind: "idle" });
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events).toContain("finally"); // unwound → cleanup ran (would be absent without the fix)
+  });
+
   it("TurnStallError carries the kind and a descriptive message", () => {
     const e = new TurnStallError("total", "x exceeded 10s total watchdog — treated as hung");
     expect(e.kind).toBe("total");

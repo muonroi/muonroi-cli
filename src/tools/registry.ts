@@ -8,7 +8,9 @@
 
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
 import { registerGsdWorkflowTools } from "../gsd/workflow-tools.js";
+import type { AskUserAskInfo, AskUserOption } from "../orchestrator/ask-user.js";
 import { requestProactiveCompact } from "../orchestrator/compact-request.js";
+import { requestCouncilConvene } from "../orchestrator/council-request.js";
 import { canonicalizeBashCommand } from "../orchestrator/tool-args-hash.js";
 import { analyzeImageFromSource, askVisionProxy, listCachedImages } from "../providers/mcp-vision-bridge.js";
 import { needsVisionProxy } from "../providers/vision-proxy.js";
@@ -59,6 +61,22 @@ interface ToolRegistryOpts {
    */
   sessionId?: string;
   runDebate?: (topic: string) => Promise<string>;
+  /**
+   * When true, the `convene_council` tool is registered so the agent can
+   * convene the multi-model council on demand mid-turn. Set by the tool-engine
+   * only when the council is actually usable for this session
+   * (`configuredRoleCount >= getAutoCouncilMinRoles()`); omitted/false → the
+   * tool is absent so the model never calls a council that cannot convene.
+   */
+  councilConfigured?: boolean;
+  /**
+   * When provided, the `ask_user` tool is registered so the agent can ask the
+   * human a question mid-turn and receive their answer AS the tool result. The
+   * handler blocks until the human responds (or dismisses). Omitted (headless
+   * with no answerer) → the tool is absent, so the model never calls a card
+   * that can never be answered.
+   */
+  askUser?: (info: AskUserAskInfo) => Promise<string>;
 }
 
 /**
@@ -254,6 +272,116 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       });
     },
   });
+
+  // convene_council — agent-initiated multi-model council. The model calls this
+  // when THIS request genuinely warrants a cross-provider debate (conflicting
+  // design tradeoffs, high-stakes decision). The request is queued here; the
+  // tool-engine consumes it from the outer restart loop, runs runCouncilV2 with
+  // convenePath:true (which suppresses ALL hardcoded post-debate decision
+  // surface — no card, no continuation), splices the synthesis into THIS tool's
+  // tool_result, and restarts the step so the model reads the conclusion as the
+  // result and continues. Registered only when the council is usable so the
+  // model never calls a council that cannot convene.
+  if (opts?.councilConfigured) {
+    tools.convene_council = dynamicTool({
+      description:
+        "Convene the multi-model council to debate THIS request. Use ONLY when the task has genuinely conflicting design tradeoffs, needs a cross-provider/second-opinion review, or is a high-stakes architecture/analysis decision where a single model's view is insufficient. It runs a real multi-role debate across several models and returns a synthesized conclusion AS THIS TOOL'S RESULT. Do NOT use it for routine or low-ambiguity work — it is expensive. After calling, read the returned conclusion and continue; nothing is auto-decided for you.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          reason: {
+            type: "string",
+            description: "Why this task needs a multi-model debate (the specific tradeoff or decision at stake).",
+          },
+        },
+      }),
+      execute: async (input: unknown, execOpts?: { toolCallId?: string }) => {
+        const reason =
+          input && typeof input === "object" && typeof (input as { reason?: unknown }).reason === "string"
+            ? (input as { reason: string }).reason
+            : null;
+        requestCouncilConvene(reason, execOpts?.toolCallId ?? null);
+        return formatResult({
+          success: true,
+          output:
+            "Council convening — the multi-model debate runs now and its conclusion replaces this result before your next step. Read the conclusion, then continue.",
+        });
+      },
+    });
+  }
+
+  // ask_user — agent-initiated question to the human. The model calls this from
+  // its OWN judgment (e.g. after a convene_council conclusion, when it wants a
+  // go/no-go before implementing). The CLI does NOT synthesise options or decide
+  // the branch: question, options, and default all come from the model's input.
+  // execute() BLOCKS until the human answers; the answer becomes the tool result.
+  // Registered only when a UI answerer is wired (opts.askUser present).
+  if (opts?.askUser) {
+    const askUser = opts.askUser;
+    tools.ask_user = dynamicTool({
+      description:
+        "Ask the human user a question and receive their answer AS THIS TOOL'S RESULT. Use when you need a decision, confirmation (e.g. 'proceed with implementation?'), or missing detail that only the user can provide — typically in an interactive discussion, or after a convene_council conclusion when you want a go/no-go before building. Supply the exact `question` and, optionally, `options` the user picks from (omit for a free-text answer). This BLOCKS until the user responds. Nothing is auto-decided: read their answer and continue from your own judgment. Do NOT use it to narrate or for rhetorical questions — only when you genuinely need input to proceed.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          question: {
+            type: "string",
+            description: "The exact question to put to the user.",
+          },
+          context: {
+            type: "string",
+            description: "Optional short context shown under the question.",
+          },
+          options: {
+            type: "array",
+            description:
+              "Optional choices the user picks from. Omit for a free-text answer. These are YOUR options — the CLI adds none.",
+            items: {
+              type: "object",
+              properties: {
+                label: { type: "string", description: "The choice shown to the user." },
+                description: { type: "string", description: "Optional one-line explanation of the choice." },
+                value: { type: "string", description: "Optional value returned when picked (defaults to the label)." },
+              },
+              required: ["label"],
+            },
+          },
+          defaultIndex: {
+            type: "number",
+            description: "Optional index into options for the pre-selected choice (defaults to 0 = first).",
+          },
+        },
+        required: ["question"],
+      }),
+      execute: async (input: unknown) => {
+        const obj = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+        const question = typeof obj.question === "string" ? obj.question : "";
+        if (question.trim().length === 0) {
+          return formatResult({
+            success: false,
+            output: "ask_user requires a non-empty `question`.",
+          });
+        }
+        const rawOptions = Array.isArray(obj.options) ? obj.options : [];
+        const options: AskUserOption[] = rawOptions
+          .filter((o): o is Record<string, unknown> => !!o && typeof o === "object")
+          .map((o) => ({
+            label: typeof o.label === "string" ? o.label : String(o.label ?? ""),
+            description: typeof o.description === "string" ? o.description : undefined,
+            value: typeof o.value === "string" ? o.value : undefined,
+          }))
+          .filter((o) => o.label.length > 0);
+        const info: AskUserAskInfo = {
+          question,
+          context: typeof obj.context === "string" ? obj.context : undefined,
+          options: options.length > 0 ? options : undefined,
+          defaultIndex: typeof obj.defaultIndex === "number" ? obj.defaultIndex : undefined,
+        };
+        const answer = await askUser(info);
+        return formatResult({ success: true, output: answer });
+      },
+    });
+  }
 
   // bash — every foreground call goes through here. We track the LAST
   // canonical command + runId in SESSION-SCOPED state so we can inject a

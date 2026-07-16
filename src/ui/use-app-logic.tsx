@@ -14,6 +14,8 @@ import { appendCrashLog, setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
+import type { AskUserAskInfo } from "../orchestrator/ask-user.js";
+import { ASK_USER_DISMISSED, buildAskUserQuestion } from "../orchestrator/ask-user.js";
 import { createCompactionSummaryMessage } from "../orchestrator/compaction.js";
 import { Agent } from "../orchestrator/orchestrator";
 import {
@@ -148,6 +150,7 @@ import {
   SubagentTaskLine,
 } from "./components/tool-result-views.js";
 import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
+import { mapCouncilStatusToSpeakerEvent } from "./council-harness-event.js";
 import { useAgentEditor } from "./hooks/use-agent-editor.js";
 import { useMcpEditor } from "./hooks/use-mcp-editor.js";
 import { useModelPicker } from "./hooks/use-model-picker.js";
@@ -892,7 +895,7 @@ export function useAppLogic(props: AppLogicProps) {
     try {
       const ok = await setKeyForProvider(apiKeyPrompt.provider, key);
       if (!ok) {
-        setApiKeyPrompt({ ...apiKeyPrompt, error: "Keychain unavailable — set env var instead" });
+        setApiKeyPrompt({ ...apiKeyPrompt, error: "Could not store key. Try `export <PROVIDER>_API_KEY=…`." });
         return;
       }
       await refreshProvidersWithKey();
@@ -902,94 +905,68 @@ export function useAppLogic(props: AppLogicProps) {
     }
   }, [apiKeyPrompt, refreshProvidersWithKey]);
 
-  // ── BW sync flow (Option A) ────────────────────────────────────────────
-  // Two phases: password → picker. Lives entirely in TUI memory; we never
-  // export BW_SESSION or persist the master password.
-  type BwSyncState =
-    | { phase: "password"; value: string; error: string | null; loading: boolean }
-    | {
-        phase: "picker";
-        session: string;
-        items: Array<{ provider: ProviderId; key: string }>;
-        selected: Set<ProviderId>;
-        focusIndex: number;
-        loading: boolean;
-        error: string | null;
-      };
-  const [bwSync, setBwSync] = useState<BwSyncState | null>(null);
+  // ── OAuth subscription login (browser-based) for openai / xai ───────────
+  // One auth mode per provider: a successful OAuth login clears any stored API
+  // key for that provider (exclusivity). Runs the registry login() flow, which
+  // opens the browser and resolves when the loopback callback completes.
+  const [oauthProviders, setOAuthProviders] = useState<ReadonlySet<ProviderId>>(() => new Set());
+  const [oauthLogin, setOAuthLogin] = useState<{ provider: ProviderId; error: string | null } | null>(null);
+  const oauthCancelRef = useRef(false);
 
-  const submitBwPassword = useCallback(async () => {
-    if (!bwSync || bwSync.phase !== "password") return;
-    const password = bwSync.value;
-    if (password.length < 4) {
-      setBwSync({ ...bwSync, error: "Master password too short" });
-      return;
-    }
-    setBwSync({ ...bwSync, loading: true, error: null });
-    try {
-      const { unlockWithPassword, listSecureNotesByPrefix } = await import("../cli/bw-vault.js");
-      const unlock = await unlockWithPassword(password);
-      if (!unlock.ok || !unlock.session) {
-        setBwSync({ ...bwSync, loading: false, error: unlock.error ?? "bw unlock failed" });
-        return;
-      }
-      const prefix = "muonroi-cli/";
-      const list = await listSecureNotesByPrefix(unlock.session, prefix);
-      if (!list.ok) {
-        setBwSync({ ...bwSync, loading: false, error: list.error });
-        return;
-      }
-      const matched: Array<{ provider: ProviderId; key: string }> = [];
-      for (const it of list.items) {
-        const providerName = it.name.slice(prefix.length);
-        if ((SPLASH_PROVIDERS as readonly string[]).includes(providerName) && it.notes.length >= 20) {
-          matched.push({ provider: providerName as ProviderId, key: it.notes });
-        }
-      }
-      if (matched.length === 0) {
-        setBwSync({
-          ...bwSync,
-          loading: false,
-          error: `No items found in vault with prefix '${prefix}<provider>'`,
-        });
-        return;
-      }
-      setBwSync({
-        phase: "picker",
-        session: unlock.session,
-        items: matched,
-        selected: new Set(matched.map((m) => m.provider)),
-        focusIndex: 0,
-        loading: false,
-        error: null,
-      });
-    } catch (e) {
-      setBwSync({ ...bwSync, loading: false, error: (e as Error).message });
-    }
-  }, [bwSync]);
-
-  const commitBwImport = useCallback(async () => {
-    if (!bwSync || bwSync.phase !== "picker") return;
-    setBwSync({ ...bwSync, loading: true, error: null });
-    let imported = 0;
-    let failed = 0;
-    for (const item of bwSync.items) {
-      if (!bwSync.selected.has(item.provider)) continue;
+  // Populate the OAuth-capable provider set once, from the OAuth registry.
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
       try {
-        const ok = await setKeyForProvider(item.provider, item.key);
-        if (ok) imported++;
-        else failed++;
+        const { listOAuthProviderIds } = await import("../providers/auth/registry.js");
+        const ids = await listOAuthProviderIds();
+        if (alive) setOAuthProviders(new Set(ids as ProviderId[]));
       } catch {
-        failed++;
+        /* registry unavailable — no OAuth affordance */
       }
-    }
-    await refreshProvidersWithKey();
-    if (failed > 0 && imported === 0) {
-      setBwSync({ ...bwSync, loading: false, error: `Imported 0; ${failed} failed (keychain unavailable?)` });
-      return;
-    }
-    setBwSync(null);
-  }, [bwSync, refreshProvidersWithKey]);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const startProviderOAuth = useCallback(
+    async (provider: ProviderId) => {
+      oauthCancelRef.current = false;
+      setOAuthLogin({ provider, error: null });
+      try {
+        const { getOAuthProviderConfig } = await import("../providers/auth/registry.js");
+        const cfg = await getOAuthProviderConfig(provider);
+        if (!cfg) {
+          setOAuthLogin({ provider, error: "OAuth is not available for this provider." });
+          return;
+        }
+        const tokens = await cfg.provider.login({});
+        if (oauthCancelRef.current) return;
+        const { saveTokens } = await import("../providers/auth/token-store.js");
+        await saveTokens(provider, tokens);
+        // Exclusivity: OAuth login clears any stored API key for this provider.
+        try {
+          const { clearEnvVar } = await import("../providers/env-store.js");
+          const { ENV_BY_PROVIDER } = await import("../providers/keychain.js");
+          clearEnvVar(ENV_BY_PROVIDER[provider]);
+        } catch {
+          /* best-effort */
+        }
+        await refreshProvidersWithKey();
+        setOAuthLogin(null);
+      } catch (e) {
+        if (oauthCancelRef.current) return;
+        setOAuthLogin({ provider, error: (e as Error).message });
+      }
+    },
+    [refreshProvidersWithKey],
+  );
+
+  const cancelProviderOAuth = useCallback(() => {
+    oauthCancelRef.current = true;
+    setOAuthLogin(null);
+  }, []);
 
   // Sync React model state with status bar store so chat input reflects
   // per-turn router upgrades (brain EE upgrade, warm/cold routing, etc.)
@@ -1324,6 +1301,10 @@ export function useAppLogic(props: AppLogicProps) {
   // Pending resolvers for safety-override askcards. Keyed by questionId; populated
   // by setSafetyOverrideHandler, drained by the askcard answer/cancel branches.
   const safetyOverrideResolversRef = useRef<Map<string, (verdict: SafetyOverrideVerdict) => void>>(new Map());
+  // Pending resolvers for ask_user askcards (the model-callable ask_user tool).
+  // Keyed by questionId; populated by setAskUserHandler, drained by the askcard
+  // answer/cancel branches. Resolve value = the human's answer string.
+  const askUserResolversRef = useRef<Map<string, (answer: string) => void>>(new Map());
   // Current todo snapshot (Claude-style sticky checklist). Updated by
   // `task_list_update` chunks emitted after every `todo_write` tool call.
   // Auto-hides ~2s after 100% completion so the panel doesn't linger.
@@ -1338,7 +1319,9 @@ export function useAppLogic(props: AppLogicProps) {
   // throws (internal try/catch → []).
   // biome-ignore lint/correctness/useExhaustiveDependencies: sessionId + messages.length are intentional recompute signals (getSessionTree reads the current session internally)
   const sessionTree = useMemo(() => agent.getSessionTree(), [agent, sessionId, messages.length]);
-  const [showApiKeyModal, setShowApiKeyModal] = useState(() => !initialHasApiKey);
+  // Boot straight to chat: no forced API-key modal on start. Auth is on-demand
+  // via the provider picker (opens on a no-auth send, or via /providers /login).
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   // Ref stays current synchronously so keyboard-burst handlers read the right value
@@ -1460,7 +1443,7 @@ export function useAppLogic(props: AppLogicProps) {
   const originalIdealPromptRef = useRef<string | null>(null);
   const isProcessingRef = useRef(false);
   const hasApiKeyRef = useRef(initialHasApiKey);
-  const showApiKeyModalRef = useRef(!initialHasApiKey);
+  const showApiKeyModalRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const processMessageRef = useRef<(text: string, displayText?: string) => Promise<void> | void>(() => {});
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
@@ -2274,6 +2257,16 @@ export function useAppLogic(props: AppLogicProps) {
     setCouncilRounds([]);
     setSelectedRound(null);
     setCouncilPlaceholders(new Map());
+    // The auto-council path drives councilPhases through the MAIN stream loop,
+    // which — unlike the nested /council and /ideal loops — never reset it on
+    // turn end. On a hung/watchdog-aborted council turn the running phase never
+    // emits its `state:"done"` event, so <CouncilPhaseTimeline> stays frozen at
+    // "Council working… elapsed Ns" forever and the session LOOKS hung even after
+    // the turn actually finalized (live: reasoning-model hang c1d461439618).
+    // Clearing here (called at both beginLiveTurn and finalizeActiveTurn) tears
+    // the timeline down on every turn boundary. The completed phases were already
+    // rendered live; the persisted [Council Decision] message is the durable record.
+    setCouncilPhases([]);
     councilTopicRef.current = undefined;
   }, []);
 
@@ -2614,6 +2607,39 @@ export function useAppLogic(props: AppLogicProps) {
     return () => {
       agent.setSafetyOverrideHandler(null);
       safetyOverrideResolversRef.current.clear();
+    };
+  }, [agent, setPendingCouncilQuestionSync, setCouncilCardStateSync]);
+
+  // ask_user handler — surfaces an AGENT-authored card (question + options come
+  // ONLY from the model's tool input; the CLI synthesises nothing) and blocks
+  // until the human answers or dismisses. The resolved string becomes the tool
+  // result the agent reads to decide its next step.
+  useEffect(() => {
+    agent.setAskUserHandler(async (info: AskUserAskInfo) => {
+      return new Promise<string>((resolve) => {
+        const qid = `ask-user-${Date.now()}`;
+        askUserResolversRef.current.set(qid, resolve);
+        const question = buildAskUserQuestion(info, qid);
+        setPendingCouncilQuestionSync(question);
+        setCouncilCardStateSync(initialCardState(question));
+        try {
+          agentRuntime?.emitEvent({
+            t: "event",
+            kind: "askcard-open",
+            questionId: qid,
+            question: question.question,
+            phase: "ask-user",
+            optionCount: question.options?.length ?? 0,
+            defaultIndex: question.defaultIndex ?? 0,
+          });
+        } catch {
+          /* best-effort */
+        }
+      });
+    });
+    return () => {
+      agent.setAskUserHandler(null);
+      askUserResolversRef.current.clear();
     };
   }, [agent, setPendingCouncilQuestionSync, setCouncilCardStateSync]);
 
@@ -3560,14 +3586,10 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   setCouncilStatuses((prev) => upsertStatus(prev, cs));
                   // Task 2.2b — emit council-speaker harness event (agent-mode only).
+                  // Carries state:"tick" + elapsedMs so a harness poller can tell
+                  // a long-running research phase (alive) from a hung one.
                   try {
-                    agentRuntime?.emitEvent({
-                      t: "event",
-                      kind: "council-speaker",
-                      role: cs.role ?? cs.label ?? "unknown",
-                      status: cs.state === "start" ? "start" : "done",
-                      correlationId: cs.statusId,
-                    });
+                    agentRuntime?.emitEvent(mapCouncilStatusToSpeakerEvent(cs));
                   } catch {
                     /* best-effort */
                   }
@@ -4425,13 +4447,7 @@ export function useAppLogic(props: AppLogicProps) {
                     setCouncilStatuses((prev) => upsertStatus(prev, cs));
                     // Task 2.2b — emit council-speaker in branch 2 (agent-mode only).
                     try {
-                      agentRuntime?.emitEvent({
-                        t: "event",
-                        kind: "council-speaker",
-                        role: cs.role ?? cs.label ?? "unknown",
-                        status: cs.state === "start" ? "start" : "done",
-                        correlationId: cs.statusId,
-                      });
+                      agentRuntime?.emitEvent(mapCouncilStatusToSpeakerEvent(cs));
                     } catch {
                       /* best-effort */
                     }
@@ -4597,7 +4613,7 @@ export function useAppLogic(props: AppLogicProps) {
               isProcessingRef.current = true;
               setIsProcessing(true);
               try {
-                const gen = agent.runCouncilV2(topic);
+                const gen = agent.runCouncilV2(topic, { convenePath: true });
                 for await (const chunk of gen) {
                   // Council emitted a chunk — clear the "Waiting for next phase"
                   // inter-card heartbeat started after the last askcard answer.
@@ -4715,13 +4731,7 @@ export function useAppLogic(props: AppLogicProps) {
                     setCouncilStatuses((prev) => upsertStatus(prev, cs));
                     // Task 2.2b — emit council-speaker in branch 3 (agent-mode only).
                     try {
-                      agentRuntime?.emitEvent({
-                        t: "event",
-                        kind: "council-speaker",
-                        role: cs.role ?? cs.label ?? "unknown",
-                        status: cs.state === "start" ? "start" : "done",
-                        correlationId: cs.statusId,
-                      });
+                      agentRuntime?.emitEvent(mapCouncilStatusToSpeakerEvent(cs));
                     } catch {
                       /* best-effort */
                     }
@@ -4856,6 +4866,7 @@ export function useAppLogic(props: AppLogicProps) {
           break;
         case "providers":
         case "models":
+        case "login":
           setShowModelPicker(true);
           setModelPickerIndex(0);
           setModelSearchQuery("");
@@ -5827,6 +5838,31 @@ export function useAppLogic(props: AppLogicProps) {
               });
               return;
             }
+            // ask_user askcard: resolve the stored promise with the user's
+            // answer string (option value or free text) — becomes the tool result.
+            if (pendingQuestion.phase === "ask-user") {
+              const resolver = askUserResolversRef.current.get(qid);
+              askUserResolversRef.current.delete(qid);
+              setPendingCouncilQuestionSync(null);
+              setCouncilCardStateSync(null);
+              resolver?.(ans.text);
+              try {
+                agentRuntime?.emitEvent({
+                  t: "event",
+                  kind: "askcard-answered",
+                  questionId: qid,
+                  answerKind: ans.kind ?? "choice",
+                  answerText: ans.text,
+                });
+              } catch {
+                /* best-effort */
+              }
+              logUIInteraction(agent.getSessionId() ?? undefined, {
+                subtype: "askcard_answered",
+                data: { questionId: qid, answerKind: ans.kind ?? "choice", answerText: ans.text },
+              });
+              return;
+            }
             // Resolve the label of the option that was selected. For "choice"
             // and "freetext" the option index lives on the card state; for
             // "chat" the user typed a free reply and there is no option to
@@ -5906,6 +5942,22 @@ export function useAppLogic(props: AppLogicProps) {
               setCouncilCardStateSync(null);
               clearInterCardHeartbeat();
               resolver?.({ action: "block" });
+              try {
+                agentRuntime?.emitEvent({ t: "event", kind: "askcard-cancel", questionId: qid });
+              } catch {
+                /* best-effort */
+              }
+              return;
+            }
+            // ask_user cancel (Esc) → resolve with the dismissed sentinel; the
+            // agent reads it and decides its own follow-up (never CLI-forced).
+            if (pendingQuestion.phase === "ask-user") {
+              const resolver = askUserResolversRef.current.get(qid);
+              askUserResolversRef.current.delete(qid);
+              setPendingCouncilQuestionSync(null);
+              setCouncilCardStateSync(null);
+              clearInterCardHeartbeat();
+              resolver?.(ASK_USER_DISMISSED);
               try {
                 agentRuntime?.emitEvent({ t: "event", kind: "askcard-cancel", questionId: qid });
               } catch {
@@ -6500,60 +6552,11 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
       if (showModelPicker) {
-        // Sub-modal: BW sync (password + provider picker phases).
-        if (bwSync) {
+        // Sub-modal: OAuth login in progress (browser-based). Only Esc (cancel)
+        // is actionable — the flow completes via the browser/loopback callback.
+        if (oauthLogin) {
           if (isEscapeKey(key)) {
-            setBwSync(null);
-            return;
-          }
-          if (bwSync.phase === "password") {
-            if (bwSync.loading) return;
-            if (key.name === "return") {
-              void submitBwPassword();
-              return;
-            }
-            if (key.name === "backspace") {
-              // Functional updater — burst-safe (see API-key prompt above).
-              setBwSync((bw) =>
-                bw && bw.phase === "password" ? { ...bw, value: bw.value.slice(0, -1), error: null } : bw,
-              );
-              return;
-            }
-            if (key.sequence && !key.ctrl && !key.meta) {
-              // Keep spaces: a master password may legitimately contain them.
-              const cleaned = stripControlBytes(key.sequence);
-              if (cleaned.length === 0) return;
-              setBwSync((bw) =>
-                bw && bw.phase === "password" ? { ...bw, value: bw.value + cleaned, error: null } : bw,
-              );
-              return;
-            }
-            return;
-          }
-          if (bwSync.phase === "picker") {
-            if (bwSync.loading) return;
-            if (key.name === "up") {
-              setBwSync({ ...bwSync, focusIndex: Math.max(0, bwSync.focusIndex - 1) });
-              return;
-            }
-            if (key.name === "down") {
-              setBwSync({ ...bwSync, focusIndex: Math.min(bwSync.items.length - 1, bwSync.focusIndex + 1) });
-              return;
-            }
-            if (key.name === "space" || key.sequence === " ") {
-              const item = bwSync.items[bwSync.focusIndex];
-              if (item) {
-                const next = new Set(bwSync.selected);
-                if (next.has(item.provider)) next.delete(item.provider);
-                else next.add(item.provider);
-                setBwSync({ ...bwSync, selected: next });
-              }
-              return;
-            }
-            if (key.name === "return") {
-              void commitBwImport();
-              return;
-            }
+            cancelProviderOAuth();
             return;
           }
           return;
@@ -6611,8 +6614,9 @@ export function useAppLogic(props: AppLogicProps) {
           if (p) setApiKeyPrompt({ provider: p, value: "", error: null });
           return;
         }
-        if (key.name === "b") {
-          setBwSync({ phase: "password", value: "", error: null, loading: false });
+        if (key.name === "o") {
+          const p = configuredProviders[providerChipIndex];
+          if (p && oauthProviders.has(p)) void startProviderOAuth(p);
           return;
         }
         if (key.name === "space" || key.sequence === " ") {
@@ -6839,10 +6843,8 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
 
-      if (!hasApiKeyRef.current && shouldOpenApiKeyModalForKey(key)) {
-        openApiKeyModal();
-        return;
-      }
+      // No forced modal on keystroke when unauthenticated — the user can type
+      // freely; the provider picker opens on send instead (see handleSubmit).
       if (key.sequence === "/" && !isProcessing) {
         const text = inputRef.current?.plainText || "";
         if (!text.trim()) {
@@ -7058,10 +7060,11 @@ export function useAppLogic(props: AppLogicProps) {
       // these directly; omitting them froze the closure on a stale `null`, which
       // is why typing/pasting into the per-provider key prompt did nothing.
       apiKeyPrompt,
-      bwSync,
+      oauthLogin,
+      oauthProviders,
       submitProviderKey,
-      submitBwPassword,
-      commitBwImport,
+      startProviderOAuth,
+      cancelProviderOAuth,
       openApiKeyModal,
       openCatalogMcp,
       openMcpEditor,
@@ -7113,7 +7116,6 @@ export function useAppLogic(props: AppLogicProps) {
       toggleModelDisabled,
       pointToExistingForm,
       setApiKeyPrompt,
-      setBwSync,
       setCouncilCardStateSync,
       setPendingCouncilQuestionSync,
       setShowSlashMenuSync,
@@ -7146,22 +7148,6 @@ export function useAppLogic(props: AppLogicProps) {
         if (pasted) setApiKeyPrompt((s) => (s ? { ...s, value: s.value + pasted, error: null } : s));
         return;
       }
-      if (bwSync && bwSync.phase === "password") {
-        event.preventDefault();
-        // Master passwords may contain spaces — keep them; only drop guards,
-        // control bytes and line breaks (which a trailing paste newline adds).
-        const pasted = stripControlBytes(decodePasteBytes(event.bytes)).replace(/[\r\n]+/g, "");
-        if (pasted) {
-          setBwSync((s) => (s && s.phase === "password" ? { ...s, value: s.value + pasted, error: null } : s));
-        }
-        return;
-      }
-
-      if (!hasApiKeyRef.current) {
-        event.preventDefault();
-        openApiKeyModal();
-        return;
-      }
 
       const text = decodePasteBytes(event.bytes);
       const trimmed = text.trim();
@@ -7182,7 +7168,7 @@ export function useAppLogic(props: AppLogicProps) {
       replacePasteBlocks([...pasteBlocksRef.current, block]);
       inputRef.current?.insertText(getPasteBlockToken(block));
     },
-    [apiKeyPrompt, bwSync, openApiKeyModal, replacePasteBlocks],
+    [apiKeyPrompt, replacePasteBlocks],
   );
 
   const handleSubmit = useCallback(() => {
@@ -7204,6 +7190,14 @@ export function useAppLogic(props: AppLogicProps) {
         clearLiveTurnUi();
         activeAgent.abort();
       }
+      return;
+    }
+    // No provider configured yet: open the picker so the user can sign in
+    // (OAuth) or add a key. Keep the composer text so the same message can be
+    // resent as soon as a provider is connected.
+    if (!hasApiKeyRef.current) {
+      setShowModelPicker(true);
+      setModelPickerIndex(0);
       return;
     }
     inputRef.current?.clear();
@@ -7264,10 +7258,6 @@ export function useAppLogic(props: AppLogicProps) {
       message = message.replace(getFileMentionToken(block), `@${block.path}`);
     }
     if (!message.trim()) return;
-    if (!hasApiKeyRef.current) {
-      openApiKeyModal();
-      return;
-    }
     // Council question response — route answer back to council generator.
     // The card now owns keyboard input; this branch survives only for the
     // legacy code path where the user typed an answer in the main prompt
@@ -7307,7 +7297,6 @@ export function useAppLogic(props: AppLogicProps) {
     agent,
     clearLiveTurnUi,
     handleCommand,
-    openApiKeyModal,
     processMessage,
     replacePasteBlocks,
     scrollToBottom,
@@ -7317,6 +7306,8 @@ export function useAppLogic(props: AppLogicProps) {
     setShowSlashMenuSync,
     setPendingCouncilQuestionSync,
     setCouncilCardStateSync,
+    setShowModelPicker,
+    setModelPickerIndex,
   ]);
 
   // Switch to the "messages" branch (which renders log + halt-card + init-new-form +
@@ -7358,7 +7349,8 @@ export function useAppLogic(props: AppLogicProps) {
     apiKeyPrompt,
     blockPrompt,
     btwState,
-    bwSync,
+    oauthLogin,
+    oauthProviders,
     configuredProviders,
     connectModalIndex,
     contextStats,
