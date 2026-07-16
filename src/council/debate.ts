@@ -653,6 +653,7 @@ export async function* runDebate(
     });
 
     const researchTraces: string[] = [];
+    const researchStartedAt = Date.now();
     researchFindings = yield* tracedAsync(
       () =>
         researchWithFallback(
@@ -671,6 +672,10 @@ export async function* runDebate(
         label: internetFirst ? "Researching (internet-first)" : "Researching codebase",
         detail: spec.problemStatement.slice(0, 80),
         role: "research",
+        // Research is a single long generateText (up to ~10 min / 15 tool steps)
+        // with a quiet main stream — the phase most easily misread as hung, and
+        // the one whose cost the per-round numbers could not account for.
+        liveness: councilStreamLivenessReader(),
       },
     );
     // CQ-22: emit research tool traces as council_status
@@ -698,6 +703,10 @@ export async function* runDebate(
         text: researchFailed
           ? "⚠ Research unavailable — both providers failed. The council proceeds on the panel's own knowledge (no external findings injected)."
           : (researchFindings ?? ""),
+        // Spans researchWithFallback including any fallback provider attempt.
+        // Measured per-speaker debate turns summed to only ~3.7 min against a
+        // ~507s historical `debate_complete`, so the balance is here.
+        durationMs: Date.now() - researchStartedAt,
       },
     };
   }

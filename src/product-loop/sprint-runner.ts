@@ -36,7 +36,7 @@ import { renderResumeDigest, writeSprintOutcome, writeSprintVerify } from "../fl
 import { isContextRailEnabled } from "../gsd/flags.js";
 import { SPRINT_EXECUTION_MARKER } from "../pil/layer6-output.js";
 import { detectProviderForModel } from "../providers/runtime.js";
-import { logUIInteraction } from "../storage/index.js";
+import { logInteraction, logUIInteraction } from "../storage/index.js";
 import type { StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
 import { commitToProduct, release } from "../usage/ledger.js";
 import { CapBreachError } from "../usage/types.js";
@@ -308,6 +308,53 @@ export async function* withImplIdleWatchdog(
  * suspended sub-agent promise may leak in the background, but the run recovers.
  * `totalMs <= 0` disables the guard (returns the task unchanged).
  */
+/**
+ * Persist an implementation-stage failure to `interaction_logs`.
+ *
+ * The implementation stage is where /ideal either ships code or does not, so its
+ * exception is the single most valuable line in a post-mortem — yet run
+ * mrn9yfle9801 halted with only `halt_card_open {trigger:"loop_throw"}` on
+ * record and the message itself unrecoverable: stderr belongs to the TUI child
+ * (the harness never captures it) and the council path writes no `messages`
+ * rows. `elapsedMs` is what separates the two indistinguishable causes — an
+ * immediate `!result.success` from a `withIsolatedImplDeadline` watchdog trip.
+ *
+ * Never throws: a broken audit trail must not take down the sprint it is
+ * describing.
+ */
+export function logSprintImplError(
+  ctx: DriverContext,
+  info: {
+    sprintN: number;
+    message: string;
+    stack?: string;
+    implModelId?: string;
+    elapsedMs: number;
+    isolated: boolean;
+  },
+): void {
+  try {
+    logInteraction(ctx.sessionId ?? ctx.runId, "council", {
+      eventSubtype: "sprint_impl_error",
+      ...(info.implModelId ? { model: info.implModelId } : {}),
+      durationMs: info.elapsedMs,
+      data: {
+        runId: ctx.runId,
+        sprintN: info.sprintN,
+        isolated: info.isolated,
+        message: info.message.slice(0, 2000),
+        stack: info.stack,
+      },
+    });
+  } catch (err) {
+    console.error(
+      `[sprint-runner] failed to persist implementation error (sprint ${info.sprintN}): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
 export async function withIsolatedImplDeadline<T>(task: Promise<T>, totalMs: number, sprintN: number): Promise<T> {
   if (!(Number.isFinite(totalMs) && totalMs > 0)) return task;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -921,6 +968,20 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       // No-Silent-Catch: the finally below surfaces a phaseError chunk, but log
       // here too so the hang/failure is diagnosable from stderr / MUONROI logs.
       console.error(`[sprint-runner] implementation stage failed (sprint ${sprintN}, run ${ctx.runId}): ${implError}`);
+      // ...and PERSIST it. stderr belongs to the TUI child, which the harness
+      // does not capture, and the /ideal council path writes no `messages` rows,
+      // so an unpersisted message survives only in TUI scrollback. Run
+      // mrn9yfle9801 halted here with `trigger:"loop_throw"` and the exception
+      // text was unrecoverable afterwards — this is the failure that decides
+      // whether /ideal ever ships code, so it must outlive the process.
+      logSprintImplError(ctx, {
+        sprintN,
+        message: implError,
+        stack: e instanceof Error ? e.stack?.split("\n").slice(0, 4).join(" | ") : undefined,
+        implModelId: process.env.MUONROI_IDEAL_IMPL_MODEL?.trim() || ctx.sessionModelId,
+        elapsedMs: Date.now() - implStartedAt,
+        isolated: useIsolated,
+      });
     } finally {
       // A3 FIX: phaseDone for implementation MUST always fire, even when
       // processMessageFn throws mid-stream (e.g. /gsd executor fails after
