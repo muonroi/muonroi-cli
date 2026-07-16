@@ -343,6 +343,15 @@ async function startInteractive(
   const { loadMcpServers } = await import("./utils/settings.js");
   await warmMcpClients(loadMcpServers(), !session);
 
+  // Register a factory for every credentialed provider, not just the session's.
+  // A model resolved for another provider (compaction, classify, a sub-agent,
+  // a mode-specific model) can then be routed to ITS OWN endpoint instead of
+  // being POSTed to the session provider's — the 404 in session 0c6728ba1a25
+  // (`gpt-5.4` → api.x.ai) existed only because the openai factory this
+  // redirect needs had never been built. Best-effort: never blocks boot.
+  const { warmProviderFactories } = await import("./providers/warm.js");
+  await warmProviderFactories();
+
   const agent = new Agent(apiKey, baseURL, model, maxToolRounds, {
     session,
     batchApi,

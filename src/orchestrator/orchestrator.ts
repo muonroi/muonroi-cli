@@ -590,7 +590,22 @@ export class Agent {
     return this._activeRunId;
   }
 
-  setModel(model: string): void {
+  /**
+   * Point the agent at `model`, re-resolving the provider when the new model
+   * belongs to a different one.
+   *
+   * EVERY path that changes `this.modelId` must go through here. Changing the
+   * id alone leaves `providerId` / `provider` / `baseURL` / `apiKey` describing
+   * the PREVIOUS provider, so the next turn POSTs the new model to the old
+   * provider's endpoint — which rejects it as unknown (session 0c6728ba1a25:
+   * `gpt-5.4` sent to api.x.ai → 404 "The model gpt-5.4 does not exist", a
+   * wiring bug that reads like a bad model name). `setMode` used to do exactly
+   * that; it now calls this too.
+   *
+   * Session persistence is NOT done here — callers own that, because setMode
+   * writes mode+model together.
+   */
+  private _applyModelId(model: string): void {
     this.modelId = normalizeModelId(model);
     const newProviderId = detectProviderForModel(this.modelId);
     if (newProviderId !== this.providerId) {
@@ -623,6 +638,10 @@ export class Agent {
       this.provider = null;
       this._oauthInitDone = false;
     }
+  }
+
+  setModel(model: string): void {
+    this._applyModelId(model);
     if (this.sessionStore && this.session) {
       this.sessionStore.setModel(this.session.id, this.modelId);
       this.session = this.sessionStore.getRequiredSession(this.session.id);
@@ -656,7 +675,11 @@ export class Agent {
       this.mode = mode;
       const modeModel = getModeSpecificModel(mode);
       if (modeModel) {
-        this.modelId = normalizeModelId(modeModel);
+        // Via _applyModelId, NOT a bare `this.modelId = ...`: a mode-specific
+        // model can belong to a different provider than the session's, and
+        // assigning the id alone would leave provider/baseURL/apiKey pointing at
+        // the old one — the cross-wire class in _applyModelId's docstring.
+        this._applyModelId(modeModel);
       }
       if (this.sessionStore && this.session) {
         this.sessionStore.setMode(this.session.id, mode);

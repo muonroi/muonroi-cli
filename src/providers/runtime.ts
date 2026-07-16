@@ -61,6 +61,21 @@ export function __resetProviderFactoryRegistry(): void {
 }
 
 /**
+ * Whether a factory for `id` was already built this session.
+ *
+ * Used by the boot warm-up to avoid CLOBBERING a factory that was built with
+ * session-specific options (custom baseURL, OAuth headers) with a plainer one.
+ */
+export function hasProviderFactory(id: ProviderId): boolean {
+  return providerFactoryRegistry.has(id);
+}
+
+/** The providers that have a factory this session. */
+export function registeredProviderIds(): ProviderId[] {
+  return [...providerFactoryRegistry.keys()];
+}
+
+/**
  * Phase 12.2-G4: thin dispatcher delegating to the provider strategy registry.
  * Each provider's SDK wiring + `factory.responses` + `defaultProviderOptions`
  * baseline lives in `src/providers/strategies/<provider>.strategy.ts`.
