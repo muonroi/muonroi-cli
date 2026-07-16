@@ -84,8 +84,31 @@ function ambientWinsForSecrets(): boolean {
   return process.env.MUONROI_ENV_PRECEDENCE === "ambient";
 }
 
+/**
+ * True while a test runner is driving. Vitest sets both `VITEST` and
+ * `NODE_ENV=test`; either is enough.
+ */
+function isTestRunner(): boolean {
+  return process.env.VITEST !== undefined || process.env.NODE_ENV === "test";
+}
+
 function mirrorToWindowsRegistry(name: string, value: string | null): void {
   if (process.platform !== "win32") return;
+  // A unit test must never write the developer's OS-global environment. It did:
+  // `bunx vitest run` on Windows left the fixture values from env-store.test.ts,
+  // migrate-legacy-keys.test.ts and auth-exclusivity.test.ts sitting in
+  // HKCU:\Environment. Those tests point MUONROI_ENV_FILE at a temp dir and
+  // clean it up, so they look hermetic — but persistEnvVar also mirrors here,
+  // none of them mocks child_process, and nothing cleaned the registry.
+  //
+  // The credential fixtures then outlived the suite and shadowed the real
+  // provider credentials for every NEW process: sub-agents 401'd, the AI SDK
+  // reported the resulting empty stream as AI_NoOutputGeneratedError, and
+  // /ideal's implementation stage died in 0.6s across three runs — bug "G1",
+  // whose own comment blames "gpt-5.4 reasoning models". The model was never
+  // involved. Guarding here rather than mocking per-test: the next test to call
+  // persistEnvVar would reintroduce the leak, and this is invisible on POSIX.
+  if (isTestRunner()) return;
   if (!isValidEnvName(name)) {
     // Defense-in-depth: never let a non-identifier name reach the shell.
     if (process.env.MUONROI_DEBUG_ENVSTORE) {
