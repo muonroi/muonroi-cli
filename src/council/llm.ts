@@ -9,8 +9,15 @@ import { buildMcpToolSet } from "../mcp/runtime.js";
 import { getModelInfo } from "../models/registry.js";
 import { getProviderCapabilities, resolveTemperature } from "../providers/capabilities.js";
 import { loadKeyForProvider, ProviderKeyMissingError } from "../providers/keychain.js";
-import { createProviderFactoryAsync, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
+import {
+  createProviderFactoryAsync,
+  detectProviderForModel,
+  type ResolvedModelRuntime,
+  resolveModelRuntime,
+  shouldDropParam,
+} from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
+import { wireDebug } from "../providers/wire-debug.js";
 import { statusBarStore } from "../state/status-bar-store.js";
 import { recordUsageEvent } from "../storage/index.js";
 import type { BashTool } from "../tools/bash.js";
@@ -366,11 +373,24 @@ const COUNCIL_LLM_TIMEOUT_MS = (() => {
  * `generateText` result exposed. A debater on the codex/oauth endpoint hit the
  * exact same non-stream 400 as the eval path — streaming fixes it uniformly.
  */
+/**
+ * Spread for the `maxOutputTokens` param, omitted when the resolved runtime
+ * rejects it. The ChatGPT Codex OAuth endpoint (chatgpt.com/backend-api/codex/
+ * responses) 400s with `{"detail":"Unsupported parameter: max_output_tokens"}`
+ * on EVERY council sub-call (clarify / debate / research) — every council
+ * generate on a Codex-OAuth session was failing wholesale. Mirrors the
+ * orchestrator + classify paths, which already gate this param via
+ * `shouldDropParam`.
+ */
+function maxOutSpread(runtime: ResolvedModelRuntime, n: number): { maxOutputTokens?: number } {
+  return shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: n };
+}
+
 async function collectStreamText(args: {
   model: LanguageModel;
   system: string;
   prompt: string;
-  maxOutputTokens: number;
+  maxOutputTokens?: number;
   temperature?: number;
   providerOptions?: Record<string, unknown>;
   abortSignal?: AbortSignal;
@@ -389,7 +409,7 @@ async function collectStreamText(args: {
     model: args.model,
     system: args.system,
     prompt: args.prompt,
-    maxOutputTokens: args.maxOutputTokens,
+    ...(args.maxOutputTokens === undefined ? {} : { maxOutputTokens: args.maxOutputTokens }),
     maxRetries: 0,
     ...(args.temperature === undefined ? {} : { temperature: args.temperature }),
     ...(args.providerOptions ? { providerOptions: args.providerOptions as never } : {}),
@@ -482,7 +502,7 @@ export function createCouncilLLM(
                   model: runtime.model,
                   system,
                   prompt,
-                  maxOutputTokens: maxTokens,
+                  ...maxOutSpread(runtime, maxTokens),
                   // Never hardcode temperature: some upstreams (Moonshot/Kimi via
                   // opencode-go) reject any value but their pinned one, which
                   // failed every clarify/spec call on a Kimi session. resolveTemperature
@@ -532,6 +552,12 @@ export function createCouncilLLM(
         return stripThinkBlocks(result.text);
       } catch (err) {
         cleanupTimeout();
+        // Capture the provider-side detail (status code + response body +
+        // request param shape) that `err.message` alone drops — a generic
+        // "Bad Request" on the council path was previously undiagnosable
+        // because collectStreamText re-throws only the message. PII-safe,
+        // no-op unless MUONROI_DEBUG_LLM_WIRE=1. (No-Silent-Catch.)
+        wireDebug.logError(providerId, err);
         writeDebugRecord({
           ts: new Date().toISOString(),
           kind: "generate",
@@ -633,7 +659,7 @@ export function createCouncilLLM(
                   // text. E2E showed 2048 caused finishReason=length on 3KB debate
                   // prompts. 6144 leaves ~4000 tokens for text after typical reasoning
                   // overhead and avoids cuts mid-thought.
-                  maxOutputTokens: 6144,
+                  ...maxOutSpread(runtime, 6144),
                   // See generate(): capability-aware temperature (omit / clamp).
                   temperature: resolveTemperature(providerId, runtime.modelInfo, 0.7),
                   providerOptions: runtime.providerOptions as Record<string, unknown> | undefined,
@@ -816,7 +842,7 @@ export function createCouncilLLM(
                     const stripped = researchCaps.sanitizeHistory(messages) as typeof messages;
                     return stripped === messages ? {} : { messages: stripped };
                   },
-                  maxOutputTokens: 4096,
+                  ...maxOutSpread(runtime, 4096),
                   // See generate(): capability-aware temperature (omit / clamp).
                   ...(() => {
                     const t = resolveTemperature(providerId, runtime.modelInfo, 0.3);
