@@ -14,7 +14,39 @@ vi.mock("../utils/settings.js", () => ({
   loadUserSettings: () => ({ providers: {} }),
 }));
 
-import { firstAvailableProvider, loadKeyForProvider, ProviderKeyMissingError } from "./keychain.js";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  deleteKeyForProvider,
+  firstAvailableProvider,
+  loadKeyForProvider,
+  ProviderKeyMissingError,
+  setKeyForProvider,
+} from "./keychain.js";
+
+describe("setKeyForProvider / deleteKeyForProvider (env-store)", () => {
+  beforeEach(() => {
+    process.env.MUONROI_ENV_FILE = join(tmpdir(), `kc-${Date.now()}-${Math.random().toString(36).slice(2)}.env`);
+    // Isolate the OAuth token dir — setKeyForProvider clears OAuth for the
+    // provider (exclusivity), which must not touch the real user's tokens.
+    process.env.MUONROI_AUTH_DIR = join(tmpdir(), `kc-auth-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    delete process.env.OPENAI_API_KEY;
+  });
+  afterEach(() => {
+    delete process.env.MUONROI_ENV_FILE;
+    delete process.env.MUONROI_AUTH_DIR;
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  it("writes env; loads it back; delete clears", async () => {
+    await setKeyForProvider("openai", "sk-openai-abcdefghijklmnop");
+    expect(process.env.OPENAI_API_KEY).toBe("sk-openai-abcdefghijklmnop");
+    expect(await loadKeyForProvider("openai")).toBe("sk-openai-abcdefghijklmnop");
+    const had = await deleteKeyForProvider("openai");
+    expect(had).toBe(true);
+    expect(process.env.OPENAI_API_KEY).toBeUndefined();
+  });
+});
 
 describe("loadKeyForProvider", () => {
   const originalEnv = { ...process.env };

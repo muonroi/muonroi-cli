@@ -1,27 +1,20 @@
 /**
  * `muonroi-cli keys` subcommand group.
  *
- * Manages provider API keys via the OS keychain (Windows Credential Manager,
- * macOS Keychain, libsecret on Linux via keytar). Keys are read by the CLI through the
- * keychain → env → settings.json priority chain in providers/keychain.ts.
- *
- * On Linux without libsecret + an active secret service (gnome-keyring etc.),
- * or in headless sessions, keychain writes return false and callers fall back
- * to advising environment variables (which are still honored at runtime).
+ * Manages provider API keys via the env-store. Keys are read by the CLI through
+ * the env-store → env → settings.json priority chain in providers/keychain.ts.
  *
  * Subcommands:
- *   keys set <provider>           — interactive prompt, stores in keychain
+ *   keys set <provider>           — interactive prompt, stores the key
  *   keys list                     — show masked keys currently stored
  *   keys delete <provider>        — remove a stored key
- *   keys import-bw [providers]    — pull from Bitwarden vault, store in keychain
- *   keys cleanup-settings         — strip plaintext keys from user-settings.json
+ *   keys export <file>            — export keys to an encrypted portable bundle
+ *   keys import <file>            — import an encrypted bundle
  *   keys login <provider>         — OAuth login (openai, xai)
  *   keys logout <provider>        — OAuth logout (openai, xai)
  */
 
-import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { type ChatSecretId, getChatSecret, listChatSecrets, setChatSecret } from "../chat/chat-keychain.js";
 import { type McpKeyId, setMcpKey } from "../mcp/mcp-keychain.js";
@@ -51,12 +44,6 @@ function isMcpKeyId(value: string): value is McpKeyId {
   return (MCP_KEY_IDS as readonly string[]).includes(value);
 }
 
-const CHAT_SECRET_IDS: readonly ChatSecretId[] = ["discord-token", "discord-guild-id", "slack-token", "slack-team-id"];
-
-function isChatSecretId(value: string): value is ChatSecretId {
-  return (CHAT_SECRET_IDS as readonly string[]).includes(value);
-}
-const getSettingsPath = () => path.join(os.homedir(), ".muonroi-cli", "user-settings.json");
 function maskKey(key: string): string {
   if (key.length <= 10) return "***";
   return `${key.slice(0, 6)}…${key.slice(-4)}`;
@@ -127,12 +114,9 @@ async function promptHidden(question: string): Promise<string> {
   });
 }
 
-export interface KeysSetOptions {
-  bw?: boolean;
-  itemPrefix?: string;
-}
+export type KeysSetOptions = Record<string, never>;
 
-export async function runKeysSet(provider: string, options: KeysSetOptions = {}): Promise<void> {
+export async function runKeysSet(provider: string, _options: KeysSetOptions = {}): Promise<void> {
   const norm = normalizeProvider(provider);
   if (!norm) {
     console.error(`Unknown provider '${provider}'. Valid: ${KEYCHAIN_PROVIDER_IDS.join(", ")}`);
@@ -142,17 +126,6 @@ export async function runKeysSet(provider: string, options: KeysSetOptions = {})
   if (!key) {
     console.error("Aborted (empty key).");
     process.exit(1);
-  }
-
-  if (options.bw) {
-    const { writeBwSecureNote } = await import("./bw-vault.js");
-    const itemName = `${options.itemPrefix ?? "muonroi-cli/"}${provider}`;
-    const res = await writeBwSecureNote(itemName, key);
-    if (!res.ok) {
-      console.error(`Bitwarden write failed: ${res.error}`);
-      process.exit(2);
-    }
-    console.log(`Bitwarden vault: ${res.action} '${itemName}'.`);
   }
 
   try {
@@ -174,7 +147,7 @@ export async function runKeysSet(provider: string, options: KeysSetOptions = {})
   }
 }
 
-export async function runMcpKeysSet(id: string, options: KeysSetOptions = {}): Promise<void> {
+export async function runMcpKeysSet(id: string, _options: KeysSetOptions = {}): Promise<void> {
   if (!isMcpKeyId(id)) {
     console.error(`Unknown MCP key '${id}'. Valid: ${MCP_KEY_IDS.join(", ")}`);
     process.exit(1);
@@ -183,17 +156,6 @@ export async function runMcpKeysSet(id: string, options: KeysSetOptions = {}): P
   if (!key) {
     console.error("Aborted (empty key).");
     process.exit(1);
-  }
-
-  if (options.bw) {
-    const { writeBwSecureNote } = await import("./bw-vault.js");
-    const itemName = `${options.itemPrefix ?? "muonroi-cli/"}${id}`;
-    const res = await writeBwSecureNote(itemName, key);
-    if (!res.ok) {
-      console.error(`Bitwarden write failed: ${res.error}`);
-      process.exit(2);
-    }
-    console.log(`Bitwarden vault: ${res.action} '${itemName}'.`);
   }
 
   try {
@@ -238,7 +200,7 @@ export async function runKeysList(): Promise<void> {
   const hasAnything = stored.length > 0 || chatStored.length > 0 || oauthRows.length > 0;
   if (!hasAnything) {
     console.log("No keys stored in OS keychain.");
-    console.log("Run 'muonroi-cli keys set <provider>' or 'muonroi-cli keys import-bw' to add some.");
+    console.log("Run 'muonroi-cli keys set <provider>' to add some.");
     console.log("Run 'muonroi-cli keys login openai' to log in with your OpenAI subscription.");
     console.log("Run 'muonroi-cli keys login xai' to log in with your SuperGrok / X Premium+ subscription.");
     return;
@@ -395,179 +357,6 @@ export async function runKeysImport(filePath: string): Promise<void> {
   console.log(`\nImported ${imported} key(s); ${skipped} skipped.`);
 }
 
-interface BwImportOptions {
-  providers?: string[];
-  itemPrefix?: string;
-}
-
-export async function runKeysImportBw(opts: BwImportOptions = {}): Promise<void> {
-  const which = spawnSync("bw", ["--version"], { encoding: "utf8" });
-  if (which.status !== 0) {
-    console.error("Bitwarden CLI ('bw') not found in PATH.");
-    console.error("Install: https://bitwarden.com/help/cli/");
-    process.exit(2);
-  }
-
-  const session = process.env.BW_SESSION;
-  if (!session) {
-    console.error("BW_SESSION not set. Run:");
-    console.error("  export BW_SESSION=$(bw unlock --raw)");
-    process.exit(2);
-  }
-
-  const status = spawnSync("bw", ["status", "--session", session], { encoding: "utf8" });
-  if (status.status !== 0) {
-    console.error(`bw status failed: ${status.stderr || status.stdout}`);
-    process.exit(2);
-  }
-  let parsed: { status?: string };
-  try {
-    parsed = JSON.parse(status.stdout);
-  } catch {
-    parsed = {};
-  }
-  if (parsed.status !== "unlocked") {
-    console.error(`Bitwarden vault is not unlocked (status: ${parsed.status ?? "unknown"}).`);
-    console.error("Run: export BW_SESSION=$(bw unlock --raw)");
-    process.exit(2);
-  }
-
-  const requested = opts.providers && opts.providers.length > 0 ? opts.providers : KEYCHAIN_PROVIDER_IDS.slice();
-  const prefix = opts.itemPrefix ?? "muonroi-cli/";
-
-  let imported = 0;
-  let skipped = 0;
-  for (const provider of requested) {
-    const norm = normalizeProvider(provider);
-    if (!norm) {
-      console.warn(`Skip unknown provider: ${provider}`);
-      skipped++;
-      continue;
-    }
-    const itemName = `${prefix}${provider}`;
-    const got = spawnSync("bw", ["get", "notes", itemName, "--session", session], { encoding: "utf8" });
-    if (got.status !== 0) {
-      // bw prints "Not found." on stderr when the item is missing — treat as skip.
-      skipped++;
-      continue;
-    }
-    const key = got.stdout.trim();
-    if (!key || key.length < 20) {
-      console.warn(`Skip ${provider}: vault item '${itemName}' empty or too short.`);
-      skipped++;
-      continue;
-    }
-    try {
-      const ok = await setKeyForProvider(norm, key);
-      if (!ok) {
-        console.warn(`! ${provider} — OS keychain unavailable (keytar or secret service backend).`);
-        console.warn(
-          "  Linux fix: sudo dnf install libsecret   (Fedora)  or  sudo apt-get install libsecret-1-0 (Ubuntu)",
-        );
-        console.warn(`  Fallback (works at runtime): export ${provider.toUpperCase()}_API_KEY=...`);
-        skipped++;
-      } else {
-        console.log(`Imported ${provider} → keychain.`);
-        imported++;
-      }
-    } catch (e) {
-      console.warn(`Failed ${provider}: ${(e as Error).message}`);
-      skipped++;
-    }
-  }
-  console.log(`\nDone. Imported: ${imported}, skipped: ${skipped}.`);
-  if (imported > 0) {
-    console.log("Run 'muonroi-cli keys cleanup-settings' to strip any plaintext keys from settings.json.");
-  }
-}
-
-interface McpBwImportOptions {
-  keys?: string[];
-  itemPrefix?: string;
-}
-
-/**
- * Import MCP secrets (e.g. Tavily) from a Bitwarden vault into the OS
- * keychain via mcp-keychain. Vault items are expected at `<prefix><id>` —
- * default prefix `muonroi-cli/`. The key value is read from the item's
- * notes field, mirroring the provider import-bw flow.
- */
-export async function runMcpImportBw(opts: McpBwImportOptions = {}): Promise<void> {
-  const which = spawnSync("bw", ["--version"], { encoding: "utf8" });
-  if (which.status !== 0) {
-    console.error("Bitwarden CLI ('bw') not found in PATH.");
-    console.error("Install: https://bitwarden.com/help/cli/");
-    process.exit(2);
-  }
-
-  const session = process.env.BW_SESSION;
-  if (!session) {
-    console.error("BW_SESSION not set. Run:");
-    console.error("  export BW_SESSION=$(bw unlock --raw)");
-    process.exit(2);
-  }
-
-  const status = spawnSync("bw", ["status", "--session", session], { encoding: "utf8" });
-  if (status.status !== 0) {
-    console.error(`bw status failed: ${status.stderr || status.stdout}`);
-    process.exit(2);
-  }
-  let parsed: { status?: string };
-  try {
-    parsed = JSON.parse(status.stdout);
-  } catch {
-    parsed = {};
-  }
-  if (parsed.status !== "unlocked") {
-    console.error(`Bitwarden vault is not unlocked (status: ${parsed.status ?? "unknown"}).`);
-    console.error("Run: export BW_SESSION=$(bw unlock --raw)");
-    process.exit(2);
-  }
-
-  const requested = opts.keys && opts.keys.length > 0 ? opts.keys : MCP_KEY_IDS.slice();
-  const prefix = opts.itemPrefix ?? "muonroi-cli/";
-
-  let imported = 0;
-  let skipped = 0;
-  for (const id of requested) {
-    if (!isMcpKeyId(id)) {
-      console.warn(`Skip unknown MCP key: ${id}`);
-      skipped++;
-      continue;
-    }
-    const itemName = `${prefix}${id}`;
-    const got = spawnSync("bw", ["get", "notes", itemName, "--session", session], { encoding: "utf8" });
-    if (got.status !== 0) {
-      skipped++;
-      continue;
-    }
-    const key = got.stdout.trim();
-    if (!key || key.length < 16) {
-      console.warn(`Skip ${id}: vault item '${itemName}' empty or too short.`);
-      skipped++;
-      continue;
-    }
-    try {
-      const ok = await setMcpKey(id, key);
-      if (!ok) {
-        console.warn(`! ${id} — OS keychain unavailable (keytar or secret service backend).`);
-        console.warn(
-          "  Linux fix: sudo dnf install libsecret   (Fedora)  or  sudo apt-get install libsecret-1-0 (Ubuntu)",
-        );
-        console.warn(`  Fallback (works at runtime): export ${id.toUpperCase()}_API_KEY=...`);
-        skipped++;
-      } else {
-        console.log(`Imported MCP key '${id}' → keychain.`);
-        imported++;
-      }
-    } catch (e) {
-      console.warn(`Failed ${id}: ${(e as Error).message}`);
-      skipped++;
-    }
-  }
-  console.log(`\nDone. Imported: ${imported}, skipped: ${skipped}.`);
-}
-
 export async function runChatKeySet(id: ChatSecretId, value: string): Promise<void> {
   if (!value || value.length < 8) {
     console.error(`Value for chat secret '${id}' is too short (< 8 chars).`);
@@ -591,96 +380,6 @@ export async function runChatKeySet(id: ChatSecretId, value: string): Promise<vo
     console.error(`Failed: ${(e as Error).message}`);
     process.exit(1);
   }
-}
-
-interface ChatBwImportOptions {
-  ids?: ChatSecretId[];
-  itemPrefix?: string;
-}
-
-/**
- * Import chat secrets (discord-token, discord-guild-id, slack-token, slack-team-id)
- * from a Bitwarden vault into the OS keychain. Vault items are expected at
- * `<prefix><id>` — default prefix `muonroi-cli/chat-`. The value is read from
- * the item's notes field, mirroring the provider/MCP import-bw flow.
- */
-export async function runChatImportBw(opts: ChatBwImportOptions = {}): Promise<void> {
-  const which = spawnSync("bw", ["--version"], { encoding: "utf8" });
-  if (which.status !== 0) {
-    console.error("Bitwarden CLI ('bw') not found in PATH.");
-    console.error("Install: https://bitwarden.com/help/cli/");
-    process.exit(2);
-  }
-
-  const session = process.env.BW_SESSION;
-  if (!session) {
-    console.error("BW_SESSION not set. Run:");
-    console.error("  export BW_SESSION=$(bw unlock --raw)");
-    process.exit(2);
-  }
-
-  const status = spawnSync("bw", ["status", "--session", session], { encoding: "utf8" });
-  if (status.status !== 0) {
-    console.error(`bw status failed: ${status.stderr || status.stdout}`);
-    process.exit(2);
-  }
-  let parsed: { status?: string };
-  try {
-    parsed = JSON.parse(status.stdout);
-  } catch {
-    parsed = {};
-  }
-  if (parsed.status !== "unlocked") {
-    console.error(`Bitwarden vault is not unlocked (status: ${parsed.status ?? "unknown"}).`);
-    console.error("Run: export BW_SESSION=$(bw unlock --raw)");
-    process.exit(2);
-  }
-
-  const requested = opts.ids && opts.ids.length > 0 ? opts.ids : CHAT_SECRET_IDS.slice();
-  const prefix = opts.itemPrefix ?? "muonroi-cli/chat-";
-
-  let imported = 0;
-  let skipped = 0;
-  for (const id of requested) {
-    if (!isChatSecretId(id)) {
-      console.warn(`Skip unknown chat secret: ${id}`);
-      skipped++;
-      continue;
-    }
-    const itemName = `${prefix}${id}`;
-    const got = spawnSync("bw", ["get", "notes", itemName, "--session", session], { encoding: "utf8" });
-    if (got.status !== 0) {
-      // bw prints "Not found." on stderr when the item is missing — treat as skip.
-      skipped++;
-      continue;
-    }
-    const value = got.stdout.trim();
-    if (!value || value.length < 8) {
-      console.warn(`Skip ${id}: vault item '${itemName}' empty or too short.`);
-      skipped++;
-      continue;
-    }
-    try {
-      const ok = await setChatSecret(id, value);
-      if (!ok) {
-        console.warn(`! ${id} — OS keychain unavailable (keytar or secret service backend).`);
-        console.warn(
-          "  Linux fix: sudo dnf install libsecret   (Fedora)  or  sudo apt-get install libsecret-1-0 (Ubuntu)",
-        );
-        console.warn(
-          `  Fallback (works at runtime): export ${id.includes("token") ? "MUONROI_" : "MUONROI_"}${id.replace("-", "_").toUpperCase()}=...`,
-        );
-        skipped++;
-      } else {
-        console.log(`Imported chat secret '${id}' → keychain.`);
-        imported++;
-      }
-    } catch (e) {
-      console.warn(`Failed ${id}: ${(e as Error).message}`);
-      skipped++;
-    }
-  }
-  console.log(`\nDone. Imported: ${imported}, skipped: ${skipped}.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -739,6 +438,18 @@ export async function runKeysLogin(provider: string): Promise<void> {
 
   await saveTokens(norm, tokens);
 
+  // One auth mode per provider (OAuth XOR API key): logging in via OAuth clears
+  // any stored API key for this provider so a stale key can never shadow OAuth.
+  try {
+    const { clearEnvVar } = await import("../providers/env-store.js");
+    const { ENV_BY_PROVIDER } = await import("../providers/keychain.js");
+    clearEnvVar(ENV_BY_PROVIDER[norm as ProviderId]);
+  } catch (err) {
+    console.error(
+      `[keys] failed to clear API key after OAuth login for ${norm}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   const emailDisplay = tokens.email ? ` (${tokens.email})` : "";
   const expiry = new Date(tokens.expiresAt).toLocaleString();
   console.log(`\nLogged in to ${name}${emailDisplay}. Token expires: ${expiry}`);
@@ -777,57 +488,4 @@ export async function runKeysLogout(provider: string): Promise<void> {
   await deleteTokens(norm);
   const name = cfg?.displayName ?? provider;
   console.log(`Logged out of ${name}. OAuth tokens revoked and deleted.`);
-}
-
-export async function runKeysCleanupSettings(): Promise<void> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(getSettingsPath(), "utf8");
-  } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
-      console.log("No user-settings.json found — nothing to clean.");
-      return;
-    }
-    throw e;
-  }
-
-  let json: Record<string, unknown>;
-  try {
-    json = JSON.parse(raw);
-  } catch {
-    console.error(`Settings file is not valid JSON: ${getSettingsPath()}`);
-    process.exit(1);
-  }
-
-  const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  const backup = `${getSettingsPath()}.bak.${ts}`;
-  await fs.writeFile(backup, raw, "utf8");
-
-  let removed = 0;
-  if ("apiKey" in json) {
-    delete json.apiKey;
-    removed++;
-  }
-  if (json.providers && typeof json.providers === "object") {
-    const providers = json.providers as Record<string, Record<string, unknown>>;
-    for (const [name, block] of Object.entries(providers)) {
-      if (block && "apiKey" in block) {
-        delete block.apiKey;
-        removed++;
-        if (Object.keys(block).length === 0) {
-          delete providers[name];
-        }
-      }
-    }
-    if (Object.keys(providers).length === 0) {
-      delete json.providers;
-    }
-  }
-
-  await fs.writeFile(getSettingsPath(), `${JSON.stringify(json, null, 2)}\n`, "utf8");
-  console.log(`Backed up to: ${backup}`);
-  console.log(`Removed ${removed} plaintext key field(s) from: ${getSettingsPath()}`);
-  if (removed === 0) {
-    console.log("(File was already clean.)");
-  }
 }

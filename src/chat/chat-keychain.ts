@@ -1,27 +1,15 @@
 /**
  * src/chat/chat-keychain.ts
  *
- * Chat-service keychain loader with env-var fallback.
- * Parallel module to src/mcp/mcp-keychain.ts but keyed by ChatSecretId
- * (chat services like Discord, Slack) instead of MCP servers.
- *
- * Priority: OS keychain (keytar) > environment variable > null.
- * On CLI startup, hydrateChatEnvFromKeychain() populates process.env from
- * keychain for any chat secret not already set in env.
+ * Chat-service secret store, keyed by ChatSecretId (Discord, Slack). Backed by
+ * the env-store (`.env` file + process.env + Windows registry mirror) — the OS
+ * keychain (keytar) has been removed. Reads come straight from process.env.
  */
 
+import { clearEnvVar, persistEnvVar } from "../providers/env-store.js";
 import { redactor } from "../utils/redactor.js";
 
 export type ChatSecretId = "discord-token" | "discord-guild-id" | "slack-token" | "slack-team-id";
-
-const KEYCHAIN_SERVICE = "muonroi-cli";
-
-const ACCOUNT_BY_CHAT: Record<ChatSecretId, string> = {
-  "discord-token": "chat-discord-token",
-  "discord-guild-id": "chat-discord-guild-id",
-  "slack-token": "chat-slack-token",
-  "slack-team-id": "chat-slack-team-id",
-};
 
 const ENV_BY_CHAT: Record<ChatSecretId, string> = {
   "discord-token": "MUONROI_DISCORD_TOKEN",
@@ -32,113 +20,51 @@ const ENV_BY_CHAT: Record<ChatSecretId, string> = {
 
 const MIN_LEN = 8; // guild IDs are short (18-19 digits); tokens ~70 chars. Use 8 as floor.
 
-interface KeytarLike {
-  getPassword(service: string, account: string): Promise<string | null>;
-  setPassword?(service: string, account: string, password: string): Promise<void>;
-  deletePassword?(service: string, account: string): Promise<boolean>;
-}
-
-async function loadKeytar(): Promise<KeytarLike | null> {
-  try {
-    return (await import("keytar")) as KeytarLike;
-  } catch {
-    return null;
-  }
+function isTokenSecret(id: ChatSecretId): boolean {
+  return id === "discord-token" || id === "slack-token";
 }
 
 export async function setChatSecret(id: ChatSecretId, value: string): Promise<boolean> {
   if (!value || value.length < MIN_LEN) {
     throw new Error(`Value for chat secret '${id}' is too short (< ${MIN_LEN} chars).`);
   }
-  const kt = await loadKeytar();
-  if (!kt?.setPassword) return false;
-
-  // Enroll token values in redactor, but not IDs (they are not secrets)
-  if (id === "discord-token" || id === "slack-token") {
-    redactor.enrollSecret(value);
-  }
-
-  try {
-    await kt.setPassword(KEYCHAIN_SERVICE, ACCOUNT_BY_CHAT[id], value);
-    return true;
-  } catch (err: any) {
-    // Runtime backend failure (e.g. Linux without libsecret or no active secret service).
-    if (process.env.DEBUG || process.env.MUONROI_DEBUG_KEYCHAIN) {
-      console.error(`[chat-keychain] setPassword backend error for ${id}:`, err?.message || err);
-    }
-    return false;
-  }
+  if (isTokenSecret(id)) redactor.enrollSecret(value);
+  persistEnvVar(ENV_BY_CHAT[id], value);
+  return true;
 }
 
 export async function getChatSecret(id: ChatSecretId): Promise<string | null> {
-  const kt = await loadKeytar();
-  if (kt) {
-    try {
-      const v = await kt.getPassword(KEYCHAIN_SERVICE, ACCOUNT_BY_CHAT[id]);
-      if (v && v.length >= MIN_LEN) {
-        // Enroll in redactor only for token values
-        if (id === "discord-token" || id === "slack-token") {
-          redactor.enrollSecret(v);
-        }
-        return v;
-      }
-    } catch {
-      /* keytar backend failure → fall through to env */
-    }
-  }
   const envKey = process.env[ENV_BY_CHAT[id]];
   if (envKey && envKey.length >= MIN_LEN) {
-    // Enroll in redactor only for token values
-    if (id === "discord-token" || id === "slack-token") {
-      redactor.enrollSecret(envKey);
-    }
+    if (isTokenSecret(id)) redactor.enrollSecret(envKey);
     return envKey;
   }
   return null;
 }
 
 export async function deleteChatSecret(id: ChatSecretId): Promise<boolean> {
-  const kt = await loadKeytar();
-  if (!kt?.deletePassword) return false;
-  try {
-    return await kt.deletePassword(KEYCHAIN_SERVICE, ACCOUNT_BY_CHAT[id]);
-  } catch (err: any) {
-    if (process.env.DEBUG || process.env.MUONROI_DEBUG_KEYCHAIN) {
-      console.error(`[chat-keychain] deletePassword backend error for ${id}:`, err?.message || err);
-    }
-    return false;
-  }
+  const had = !!process.env[ENV_BY_CHAT[id]];
+  clearEnvVar(ENV_BY_CHAT[id]);
+  return had;
 }
 
 /**
- * List all stored chat secret IDs.
- * Note: This only returns secrets stored in OS keychain, not those in env.
+ * List all stored chat secret IDs (those present in the environment).
  */
 export async function listChatSecrets(): Promise<ChatSecretId[]> {
   const ids: ChatSecretId[] = ["discord-token", "discord-guild-id", "slack-token", "slack-team-id"];
   const stored: ChatSecretId[] = [];
-
   for (const id of ids) {
-    const v = await getChatSecret(id);
-    if (v) {
-      stored.push(id);
-    }
+    if (await getChatSecret(id)) stored.push(id);
   }
-
   return stored;
 }
 
 /**
- * On CLI startup, populate process.env from keychain for any chat secret
- * not already set in env. Allows downstream code (chat/factory.ts) to
- * remain env-based without code changes.
+ * Retained for boot compatibility (index.ts). Chat secrets now live in the
+ * environment (loaded from the env-store at startup), so there is nothing to
+ * hydrate — this is a no-op.
  */
 export async function hydrateChatEnvFromKeychain(): Promise<void> {
-  const ids: ChatSecretId[] = ["discord-token", "discord-guild-id", "slack-token", "slack-team-id"];
-  for (const id of ids) {
-    const envName = ENV_BY_CHAT[id];
-    if (process.env[envName]) continue; // env wins
-    const v = await getChatSecret(id);
-    if (v) process.env[envName] = v;
-  }
+  // Intentional no-op: env-store already populated process.env at startup.
 }

@@ -8,7 +8,7 @@
 import { mkdir, readFile, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OAuthTokens } from "../types.js";
 
 // Token-store uses process.env.MUONROI_AUTH_DIR for test overrides.
@@ -30,67 +30,10 @@ const SAMPLE_TOKENS: OAuthTokens = {
 };
 
 // ---------------------------------------------------------------------------
-// Mock keytar store
+// Tests: file store (0600 file at ~/.muonroi-cli/auth/<provider>.json)
 // ---------------------------------------------------------------------------
 
-function makeKeytarMock() {
-  const store = new Map<string, string>();
-  return {
-    getPassword: vi.fn(async (_svc: string, account: string) => store.get(account) ?? null),
-    setPassword: vi.fn(async (_svc: string, account: string, password: string) => {
-      store.set(account, password);
-    }),
-    deletePassword: vi.fn(async (_svc: string, account: string) => {
-      if (store.has(account)) {
-        store.delete(account);
-        return true;
-      }
-      return false;
-    }),
-    _store: store,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Tests: keychain path
-// ---------------------------------------------------------------------------
-
-describe("token-store — keychain path", () => {
-  it("saves and loads tokens via keychain", async () => {
-    const kt = makeKeytarMock();
-    // Inject mock keytar via module mock
-    vi.doMock("keytar", () => kt);
-
-    // Isolate file fallback path — without this, deleteTokens() at the end
-    // of the test would unlink() the real user's ~/.muonroi-cli/auth/openai.json.
-    const tmp = path.join(os.tmpdir(), `muonroi-test-token-store-keychain-${Date.now()}`);
-    process.env.MUONROI_AUTH_DIR = tmp;
-
-    try {
-      const { saveTokens, loadTokens, deleteTokens } = await import("../token-store.js");
-
-      await saveTokens("openai", SAMPLE_TOKENS);
-      expect(kt.setPassword).toHaveBeenCalledOnce();
-
-      const loaded = await loadTokens("openai");
-      expect(loaded).not.toBeNull();
-      expect(loaded!.accessToken).toBe(SAMPLE_TOKENS.accessToken);
-      expect(loaded!.email).toBe("user@example.com");
-
-      await deleteTokens("openai");
-      expect(kt.deletePassword).toHaveBeenCalledOnce();
-    } finally {
-      delete process.env.MUONROI_AUTH_DIR;
-      vi.doUnmock("keytar");
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Tests: file fallback path
-// ---------------------------------------------------------------------------
-
-describe("token-store — file fallback", () => {
+describe("token-store — file store", () => {
   let tempDir: string;
 
   beforeEach(async () => {
@@ -105,13 +48,8 @@ describe("token-store — file fallback", () => {
     await rm(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
-  it("saves tokens to file when keytar unavailable", async () => {
-    // Make keytar unavailable
-    vi.doMock("keytar", () => {
-      throw new Error("keytar not available");
-    });
-
-    const { saveTokens, loadTokens } = await import("../token-store.js");
+  it("saves, loads, and deletes tokens on disk", async () => {
+    const { saveTokens, loadTokens, deleteTokens } = await import("../token-store.js");
 
     await saveTokens("openai", SAMPLE_TOKENS);
 
@@ -122,9 +60,12 @@ describe("token-store — file fallback", () => {
 
     const loaded = await loadTokens("openai");
     expect(loaded).not.toBeNull();
+    expect(loaded!.accessToken).toBe(SAMPLE_TOKENS.accessToken);
     expect(loaded!.refreshToken).toBe(SAMPLE_TOKENS.refreshToken);
+    expect(loaded!.email).toBe("user@example.com");
 
-    vi.doUnmock("keytar");
+    await deleteTokens("openai");
+    expect(await loadTokens("openai")).toBeNull();
   });
 });
 
@@ -134,19 +75,12 @@ describe("token-store — file fallback", () => {
 
 describe("token-store — deleteTokens no-op", () => {
   it("does not throw when nothing is stored", async () => {
-    // Point at a non-existent dir so file fallback also has nothing
+    // Point at a non-existent dir so there is no file to remove.
     process.env.MUONROI_AUTH_DIR = path.join(os.tmpdir(), `muonroi-nonexistent-${Date.now()}`);
-
-    vi.doMock("keytar", () => ({
-      getPassword: vi.fn(async () => null),
-      setPassword: vi.fn(async () => {}),
-      deletePassword: vi.fn(async () => false),
-    }));
 
     const { deleteTokens } = await import("../token-store.js");
     await expect(deleteTokens("openai")).resolves.not.toThrow();
 
     delete process.env.MUONROI_AUTH_DIR;
-    vi.doUnmock("keytar");
   });
 });
