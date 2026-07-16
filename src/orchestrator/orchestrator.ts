@@ -2391,6 +2391,8 @@ export class Agent {
       let depth: import("../pil/llm-classify.js").DepthTier = "standard";
       try {
         const { createLlmClassifier } = await import("../pil/llm-classify.js");
+        const { probeRepoGrounding } = await import("../pil/repo-grounding-probe.js");
+        const { getRepoStructureHints } = await import("../pil/repo-structure-hints.js");
         const classify = createLlmClassifier(this.requireProvider(), this.modelId, {
           routeFastTier: true,
           // /ideal routing needs a reliable depth verdict; allow cross-provider
@@ -2410,6 +2412,41 @@ export class Agent {
         }
         // LLM-first clarity signal — feeds the downstream interview as a hint.
         if (res?.needsClarification === true) needsClarification = true;
+
+        // Design B — deterministic repo-grounding probe. Trigger on Layer-1
+        // OUTPUT (ambiguity), NOT a prompt regex: run only when the verdict is
+        // non-trivial (depth !== "quick") OR low-confidence, so a well-specified
+        // trivial task still hot-paths on one cheap call. The probe itself is
+        // deterministic (REPO_DEEP_MAP index + bounded on-disk reads, no LLM).
+        // Once it runs its MEASURED facts drive routing — confidence is
+        // trigger-only and can no longer override grounding.
+        const lowConfidence = (res?.confidence ?? 1) < 0.7;
+        if (depth !== "quick" || lowConfidence) {
+          try {
+            const hints = getRepoStructureHints(process.cwd());
+            const probe = probeRepoGrounding(payload.idea, hints, { cwd: process.cwd() });
+            if (probe.ran) {
+              // Invariant: probe ran AND zero matched files, or a symbol
+              // collision → route INTO Council (the arbiter). Never direct-
+              // dispatch from weak grounding.
+              if (probe.groundingUncertainty) {
+                needsClarification = true;
+                depth = depth === "quick" ? "standard" : depth;
+              }
+              // Measured size escalation: a large grounded surface routes heavy
+              // regardless of the sentence-level classify verdict.
+              if (probe.bucket === "large") depth = "heavy";
+              console.error(
+                `[ideal/route] grounding probe: files=${probe.matchedFiles} loc=${probe.totalLoc} ` +
+                  `dirs=${probe.matchedDirs} collision=${probe.collision} bucket=${probe.bucket} ` +
+                  `uncertainty=${probe.groundingUncertainty} → depth=${depth}`,
+              );
+            }
+          } catch (err) {
+            // Fail-open: a probe hiccup must never block /ideal (No-Silent-Catch).
+            console.error(`[ideal/route] grounding probe failed, ignoring: ${(err as Error)?.message}`);
+          }
+        }
       } catch (err) {
         // Fail-open: never block /ideal on a classify hiccup (No-Silent-Catch).
         console.error(`[ideal/route] depth classify failed, defaulting to "standard": ${(err as Error)?.message}`);
