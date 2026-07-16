@@ -19,11 +19,16 @@
  * card) stay put, so the agent renders them fresh on demand; embedding a stale
  * snapshot for those would be worse, not better.
  *
- * Gated entirely behind MUONROI_HARNESS_EVENT_LOG — unset means zero behavior
- * change (clean checkouts are byte-identical to before this file existed).
+ * ON BY DEFAULT (see {@link resolveEventLogPath}): an opt-in sink is one nobody
+ * remembers to opt into, and the cost of the log missing is an agent that
+ * cannot tell "waiting for a human" from "hung" — the exact confusion this file
+ * exists to prevent. Set MUONROI_HARNESS_EVENT_LOG=0 (or "off"/"false") to
+ * disable, or to a path to choose your own.
  */
 
 import { appendFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { LiveEvent } from "./protocol.js";
 
 /**
@@ -48,9 +53,31 @@ export interface TeedEventLine {
   visualText?: string;
 }
 
+/** Values that turn the sink off. Anything else is treated as a path. */
+const DISABLE_VALUES: ReadonlySet<string> = new Set(["0", "off", "false", "no"]);
+
 /**
- * Build an event-tee sink. Returns null when MUONROI_HARNESS_EVENT_LOG is unset
- * or blank (no-op path — caller skips it entirely).
+ * Resolve where events are teed, from the MUONROI_HARNESS_EVENT_LOG value.
+ *
+ * - unset/blank → a per-pid file in the OS temp dir (the default-on path)
+ * - "0" / "off" / "false" / "no" → null, sink disabled
+ * - anything else → that literal path
+ *
+ * Per-pid keeps concurrent harness servers from interleaving into one file, and
+ * puts the log where the OS already reclaims it — no rotation to maintain.
+ *
+ * @param pid - process id (injectable for tests).
+ */
+export function resolveEventLogPath(envValue?: string, pid: number = process.pid): string | null {
+  const raw = (envValue ?? "").trim();
+  if (DISABLE_VALUES.has(raw.toLowerCase())) return null;
+  if (raw) return raw;
+  return join(tmpdir(), `muonroi-harness-events-${pid}.jsonl`);
+}
+
+/**
+ * Build an event-tee sink. Returns null only when the sink is explicitly
+ * disabled — see {@link resolveEventLogPath}.
  *
  * @param getVisualText - lazily renders the current visual frame to plain text
  *   (driver.render_visual). Called ONLY for ephemeral kinds, so persistent
@@ -61,7 +88,7 @@ export function createEventTee(
   getVisualText: () => string | null,
   envValue?: string,
 ): ((event: LiveEvent) => void) | null {
-  const path = (envValue ?? "").trim();
+  const path = resolveEventLogPath(envValue);
   if (!path) return null;
 
   return (event: LiveEvent): void => {

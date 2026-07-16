@@ -404,22 +404,43 @@ Controls which event kinds are emitted on the sidechannel.
 opt in with `MUONROI_HARNESS_EVENTS=llm-token` only when you need token-level
 correlation.
 
+### Waiting on a milestone — DO NOT hand-roll a poller
+
+**`tui.wait_for` blocks server-side. Use it.** It accepts `selector`, `idle`, or
+`event` (any `LiveEvent` kind), plus `all: [...]`, with `timeoutMs` up to
+600_000. Waiting on an askcard is one call:
+
+```
+tui.wait_for {event: "askcard-open", timeoutMs: 600000}
+tui.wait_for {selector: "id=askcard", timeoutMs: 600000}   # equivalent here
+```
+
+A DB poller CANNOT do this: `askcard-open` writes no `interaction_logs` row, so
+"waiting for a human" and "hung" look identical — a `/ideal` run once sat on an
+approve card for 17 minutes while a poller reported nothing. If you find
+yourself writing a `while` loop over the DB, you are working around this tool.
+
 ### `MUONROI_HARNESS_EVENT_LOG` — event JSONL sink (wake-at-milestone)
 
-Set on the **MCP server process** to a file path and the harness appends every
-`LiveEvent` as one JSONL line (`{ts, kind, event}`). Ephemeral kinds
-(`toast`, `disconnect`, `stream-retry`, `ee-timeout`, `ee-error`,
-`grounding-flag`) additionally carry a `visualText` snapshot captured at emit
-time, so flash events aren't lost before an agent wakes. Unset → zero behavior
-change. Wiring: `event-tee.ts` + `makeLineHandler` in `mcp-server.ts`.
+**On by default.** The harness appends every `LiveEvent` as one JSONL line
+(`{ts, kind, event}`) to `<tmpdir>/muonroi-harness-events-<pid>.jsonl`. Set the
+var on the **MCP server process** to a path to choose your own, or to `0` /
+`off` / `false` / `no` to disable. `tui.capabilities` reports the resolved path
+as `eventLogPath` — read it rather than recomputing the rule.
 
-Pair it with the generic milestone watcher so an agent driving the TUI never
-blocks on a long synchronous wait (and never rewrites a bespoke monitor):
+Ephemeral kinds (`toast`, `disconnect`, `stream-retry`, `ee-timeout`,
+`ee-error`, `grounding-flag`) additionally carry a `visualText` snapshot
+captured at emit time, so flash events aren't lost before an agent wakes.
+Wiring: `event-tee.ts` + `makeLineHandler` in `mcp-server.ts`.
+
+The log exists for watchers in a SEPARATE process (they can't reach the
+in-process driver). Prefer `tui.wait_for` when you are the one driving; reach
+for the watcher for unattended long runs:
 
 ```bash
 # Wakes on ANY of the requested kinds — including modal pauses (askcard-open)
 # that never write a DB row, which a DB-poll monitor is blind to.
-bun scripts/harness-watch.mjs "$MUONROI_HARNESS_EVENT_LOG" \
+bun scripts/harness-watch.mjs "$(<path from tui.capabilities>)" \
     --kinds askcard-open,council-step,sprint-halt --max-polls 30 --poll-ms 10000
 ```
 
