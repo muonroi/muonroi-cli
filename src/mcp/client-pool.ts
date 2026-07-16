@@ -283,29 +283,65 @@ export async function acquireMcpTools(servers: McpServerConfig[], opts?: McpBuil
  */
 export async function warmMcpClients(servers: McpServerConfig[], syncAndLog = false): Promise<void> {
   const validServers = servers.filter((s) => s.enabled && validateMcpServerConfig(s).ok);
-  if (syncAndLog && validServers.length > 0) {
-    console.log(`[MCP] Warming up ${validServers.length} server(s)...`);
+
+  // Fire-and-forget background warmup — no user-facing output.
+  if (!syncAndLog) {
+    void Promise.all(
+      validServers.map((s) =>
+        getOrConnect(s).catch((e) => {
+          // Intentionally non-fatal: getOrConnect evicts the failed entry so a
+          // real turn retries. Surface at debug level only (No Silent Catch).
+          if (process.env.MUONROI_DEBUG_MCP) {
+            console.error(
+              `[mcp:warm] background warmup failed for ${s.id}: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+        }),
+      ),
+    );
+    return;
   }
 
-  const promises = validServers.map(async (s) => {
-    try {
-      await getOrConnect(s);
-      if (syncAndLog) {
-        console.log(`[MCP] ✅ ${s.id}: healthy`);
-      }
-    } catch (e) {
-      if (syncAndLog) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.log(`[MCP] ❌ ${s.id}: failed - ${msg}`);
-      }
-    }
-  });
+  if (validServers.length === 0) return;
 
-  if (syncAndLog) {
-    await Promise.all(promises);
+  // Synchronous warmup (fresh start): render ONE compact in-place progress line
+  // instead of a line per server — e.g. "⏳ Starting MCP servers (0/4): a, b, c".
+  const total = validServers.length;
+  const names = validServers.map((s) => s.id).join(", ");
+  const isTTY = Boolean(process.stdout.isTTY);
+  let done = 0;
+  const failures: string[] = [];
+
+  const render = (): void => {
+    // \r + clear-line (\x1b[2K) rewrites the same terminal row each tick.
+    process.stdout.write(`\r\x1b[2K⏳ Starting MCP servers (${done}/${total}): ${names}`);
+  };
+
+  if (isTTY) render();
+  else console.log(`[MCP] Starting ${total} server(s): ${names}`);
+
+  await Promise.all(
+    validServers.map(async (s) => {
+      try {
+        await getOrConnect(s);
+      } catch (e) {
+        failures.push(`${s.id}: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        done += 1;
+        if (isTTY) render();
+      }
+    }),
+  );
+
+  const ok = total - failures.length;
+  if (isTTY) {
+    process.stdout.write(`\r\x1b[2K✅ MCP servers ready (${ok}/${total})\n`);
   } else {
-    // Fire-and-forget for background warmup
-    void Promise.all(promises);
+    console.log(`[MCP] ${ok}/${total} server(s) ready`);
+  }
+  // Compact failure summary (one line, not per-server spam) — keeps errors visible.
+  if (failures.length > 0) {
+    console.warn(`[MCP] ⚠️ ${failures.length} unavailable: ${failures.join(" | ")}`);
   }
 }
 
