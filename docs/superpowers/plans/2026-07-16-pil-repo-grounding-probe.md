@@ -556,11 +556,13 @@ Drive the TUI via the harness (`tui_start --agent-mode` in a small temp repo cwd
 
 Expected: route-decision resolves to the product-loop hot-path; `tui_last_event("council-speaker")` is null.
 
-- [ ] **Step 2: Repo-heavy /ideal routes to Council**
+- [ ] **Step 2: Repo-heavy /ideal routes to Council with a `large` bucket**
 
-In the `muonroi-cli` repo cwd (its `REPO_DEEP_MAP.md` indexes large files such as `src/ui/app.tsx`), send `/ideal refactor src/ui/app.tsx` and assert the `[ideal/route] grounding probe` log shows `bucket=large` (or `uncertainty=true`) and a `council-speaker` event fires.
+In the `muonroi-cli` repo cwd, send a prompt spanning several source areas — e.g. `/ideal refactor src/ui/app.tsx src/orchestrator/orchestrator.ts src/council/llm.ts src/pil/pipeline.ts src/gsd/mutation-gate.ts` — and assert the `[ideal/route] grounding probe` log shows `bucket=large` (≥4 matched dirs / ≥8 files / ≥4000 LOC via the on-disk fallback) and a `council-speaker` event fires.
 
 Expected: `depth=heavy` in the route log; `tui_last_event("council-speaker")` is non-null.
+
+> Note (verified 2026-07-16): a single moderate file such as `src/ui/app.tsx` is now ~1600 lines → `bucket=medium`, NOT large — it still routes to Council via the `standard`-depth gate, but does not escalate depth to `heavy`. Use a multi-area prompt to exercise the `large ⇒ heavy` escalation. The static `REPO_DEEP_MAP.md` index resolves only ~1 hint under `MAP_LINE_RE`, so grounding here comes almost entirely from the on-disk fallback read.
 
 - [ ] **Step 3: Ghost target escalates to Council (grounding beats confidence)**
 
