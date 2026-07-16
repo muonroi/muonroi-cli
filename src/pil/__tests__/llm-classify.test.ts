@@ -23,9 +23,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise") } });
     cleanup = handle.uninstall;
 
-    // Build a stub factory — installMockModel routes everything through the mock anyway.
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const classify = createLlmClassifier("deepseek-v4-flash");
     const result = await classify("ci action github fail, fix giúp tôi");
 
     expect(result).not.toBeNull();
@@ -37,8 +35,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
   it("parses the three-word reply and marks chitchat from the intent word", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("general,concise,chat") } });
     cleanup = handle.uninstall;
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const classify = createLlmClassifier("deepseek-v4-flash");
     const result = await classify("cảm ơn bạn nhé");
     expect(result?.taskType).toBe("general");
     expect(result?.intentKind).toBe("chitchat");
@@ -47,8 +44,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
   it("treats a general QUESTION as task, not chitchat (keep-tools)", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("general,concise,task") } });
     cleanup = handle.uninstall;
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const classify = createLlmClassifier("deepseek-v4-flash");
     const result = await classify("bạn thử call tool setup_guide xem được không");
     expect(result?.intentKind).toBe("task");
   });
@@ -56,8 +52,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
   it("defaults intentKind to task when the model omits the third word (backward compatible)", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise") } });
     cleanup = handle.uninstall;
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const classify = createLlmClassifier("deepseek-v4-flash");
     const result = await classify("fix the failing build");
     expect(result?.taskType).toBe("debug");
     expect(result?.intentKind).toBe("task");
@@ -66,8 +61,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
   it("injects the recent-conversation digest so a terse follow-up is classified in context", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("plan,concise,task,report,heavy") } });
     cleanup = handle.uninstall;
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const classify = createLlmClassifier("deepseek-v4-flash");
 
     const digest = "[user]: phân tích PIL pipeline nặng | [assistant]: đã phân tích 5 tầng chi tiết";
     const result = await classify("ok từ các phần đó debate mode lên plan", { recentTurns: digest });
@@ -85,8 +79,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
   it("omits the conversation block entirely when no recentTurns is provided", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise") } });
     cleanup = handle.uninstall;
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const classify = createLlmClassifier("deepseek-v4-flash");
     await classify("fix the failing build");
     const sent = JSON.stringify(handle.calls);
     // The injected-block marker must be absent; the system prompt's mention of a
@@ -98,8 +91,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("¯\\_(ツ)_/¯") } });
     cleanup = handle.uninstall;
 
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const classify = createLlmClassifier("deepseek-v4-flash");
     const result = await classify("hello");
 
     expect(result).toBeNull();
@@ -119,8 +111,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
       },
     });
     cleanup = handle.uninstall;
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const classify = createLlmClassifier("deepseek-v4-flash");
     const result = await classify("vendor the gsd subset natively and rename across the repo");
     expect(result?.taskType).toBe("refactor");
     expect(result?.depthTier).toBe("heavy");
@@ -131,8 +122,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("plan") } });
     cleanup = handle.uninstall;
 
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const classify = createLlmClassifier("deepseek-v4-flash");
     const result = await classify("design a sharded queue");
 
     expect(result?.taskType).toBe("plan");
@@ -145,8 +135,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     });
     cleanup = handle.uninstall;
 
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const classify = createLlmClassifier("deepseek-v4-flash");
     const result = await classify("tái cấu trúc auth module");
 
     expect(result?.taskType).toBe("refactor");
@@ -162,8 +151,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise") } });
     cleanup = handle.uninstall;
 
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "grok-4.5"); // reasoning:true
+    const classify = createLlmClassifier("grok-4.5"); // reasoning:true
     const result = await classify("fix the failing CI build");
 
     expect(result?.taskType).toBe("debug");
@@ -175,8 +163,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise") } });
     cleanup = handle.uninstall;
 
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "grok-4.5"); // xai, supports_effort:true
+    const classify = createLlmClassifier("grok-4.5"); // xai, supports_effort:true
     await classify("fix the failing CI build");
 
     const call = handle.calls[0] as {
@@ -205,8 +192,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     const handle = installMockModel({ fixture: { stream: reasoningOnly } });
     cleanup = handle.uninstall;
 
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "grok-4.5");
+    const classify = createLlmClassifier("grok-4.5");
     const result = await classify("fix the failing CI build");
 
     expect(result?.taskType).toBe("debug");
@@ -217,8 +203,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("generate,concise") } });
     cleanup = handle.uninstall;
 
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "deepseek-chat-lite"); // non-catalog, reasoning:false
+    const classify = createLlmClassifier("deepseek-chat-lite"); // non-catalog, reasoning:false
     await classify("add a new endpoint");
 
     const call = handle.calls[0] as { maxOutputTokens?: number };
@@ -230,7 +215,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
       fixture: { stream: textOnlyStream("analyze,balanced,task,answer,standard,ecosystem,vietnamese") },
     });
     cleanup = eco.uninstall;
-    const ecoClassify = createLlmClassifier((() => eco.model) as never, "deepseek-v4-flash");
+    const ecoClassify = createLlmClassifier("deepseek-v4-flash");
     const r = await ecoClassify("hệ sinh thái muonroi gồm những gì");
     expect(r?.ecosystemScope).toBe(true);
     expect(r?.replyLanguage).toBe("Vietnamese");
@@ -241,7 +226,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
       fixture: { stream: textOnlyStream("debug,concise,task,code,standard,local,english") },
     });
     cleanup = plain.uninstall;
-    const plainClassify = createLlmClassifier((() => plain.model) as never, "deepseek-v4-flash");
+    const plainClassify = createLlmClassifier("deepseek-v4-flash");
     const p = await plainClassify("fix the crash");
     expect(p?.ecosystemScope).toBe(false);
     expect(p?.replyLanguage).toBeNull();
@@ -250,8 +235,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
   it("parses the fourth word as the output deliverable (Phase 2b)", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise,task,code,standard") } });
     cleanup = handle.uninstall;
-    const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const classify = createLlmClassifier("deepseek-v4-flash");
     const result = await classify("fix the crash in src/auth/login.ts");
     expect(result?.taskType).toBe("debug");
     expect(result?.deliverableKind).toBe("code");
@@ -260,20 +244,20 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
   it("parses the fifth word as the model-decided work depth (agent-first tier)", async () => {
     const heavy = installMockModel({ fixture: { stream: textOnlyStream("refactor,concise,task,code,heavy") } });
     cleanup = heavy.uninstall;
-    const heavyClassify = createLlmClassifier((() => heavy.model) as never, "deepseek-v4-flash");
+    const heavyClassify = createLlmClassifier("deepseek-v4-flash");
     expect((await heavyClassify("rework the auth system"))?.depthTier).toBe("heavy");
     heavy.uninstall();
 
     // Position-independent recovery (taskType still leads; depth appears early).
     const reordered = installMockModel({ fixture: { stream: textOnlyStream("debug,quick,concise,task,code") } });
     cleanup = reordered.uninstall;
-    const reorderedClassify = createLlmClassifier((() => reordered.model) as never, "deepseek-v4-flash");
+    const reorderedClassify = createLlmClassifier("deepseek-v4-flash");
     expect((await reorderedClassify("fix typo"))?.depthTier).toBe("quick");
     reordered.uninstall();
 
     const noDepth = installMockModel({ fixture: { stream: textOnlyStream("debug,concise,task,code") } });
     cleanup = noDepth.uninstall;
-    const noDepthClassify = createLlmClassifier((() => noDepth.model) as never, "deepseek-v4-flash");
+    const noDepthClassify = createLlmClassifier("deepseek-v4-flash");
     expect((await noDepthClassify("fix the bug"))?.depthTier).toBeNull();
   });
 
@@ -283,7 +267,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
       fixture: { stream: textOnlyStream("generate,concise,task,code,standard,local,english,underspecified") },
     });
     cleanup = vague.uninstall;
-    const vagueClassify = createLlmClassifier((() => vague.model) as never, "deepseek-v4-flash");
+    const vagueClassify = createLlmClassifier("deepseek-v4-flash");
     expect((await vagueClassify("add auth"))?.needsClarification).toBe(true);
     vague.uninstall();
 
@@ -292,7 +276,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
       fixture: { stream: textOnlyStream("refactor,concise,task,code,heavy,local,english,clear") },
     });
     cleanup = clear.uninstall;
-    const clearClassify = createLlmClassifier((() => clear.model) as never, "deepseek-v4-flash");
+    const clearClassify = createLlmClassifier("deepseek-v4-flash");
     const cr = await clearClassify("vendor the gsd subset natively and rename to workflow, keep tests green");
     expect(cr?.needsClarification).toBe(false);
     expect(cr?.depthTier).toBe("heavy");
@@ -302,7 +286,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     // must NOT be mistaken for the open-vocabulary language word.
     const noClarity = installMockModel({ fixture: { stream: textOnlyStream("debug,concise,task,code,standard") } });
     cleanup = noClarity.uninstall;
-    const noClarityClassify = createLlmClassifier((() => noClarity.model) as never, "deepseek-v4-flash");
+    const noClarityClassify = createLlmClassifier("deepseek-v4-flash");
     const nr = await noClarityClassify("fix the bug");
     expect(nr?.needsClarification).toBeNull();
     expect(nr?.replyLanguage).toBeNull();
@@ -311,14 +295,14 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
   it("recovers the deliverable position-independently and defaults to null when absent", async () => {
     const reportHandle = installMockModel({ fixture: { stream: textOnlyStream("analyze,concise,task,report") } });
     cleanup = reportHandle.uninstall;
-    const reportClassify = createLlmClassifier((() => reportHandle.model) as never, "deepseek-v4-flash");
+    const reportClassify = createLlmClassifier("deepseek-v4-flash");
     expect((await reportClassify("list every env var the CLI reads"))?.deliverableKind).toBe("report");
     reportHandle.uninstall();
 
     // Model omits the 4th word → deliverableKind null (consumers fall back to regex).
     const bareHandle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise") } });
     cleanup = bareHandle.uninstall;
-    const bareClassify = createLlmClassifier((() => bareHandle.model) as never, "deepseek-v4-flash");
+    const bareClassify = createLlmClassifier("deepseek-v4-flash");
     expect((await bareClassify("fix it"))?.deliverableKind).toBeNull();
   });
 });
@@ -375,8 +359,7 @@ describe("classifySubSessionAction", () => {
       fixture: { stream: textOnlyStream("SPAWN_SUB_SESSION,0.98,Requires writing a test suite") },
     });
     cleanup = handle.uninstall;
-    const factory = (() => handle.model) as never;
-    const result = await classifySubSessionAction(factory, "deepseek-v4-flash", "fix all compile errors");
+    const result = await classifySubSessionAction("deepseek-v4-flash", "fix all compile errors");
     expect(result).not.toBeNull();
     expect(result?.action).toBe("SPAWN_SUB_SESSION");
     expect(result?.confidence).toBe(0.98);
@@ -386,8 +369,7 @@ describe("classifySubSessionAction", () => {
   it("correctly parses DIRECT_ANSWER from model response", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("DIRECT_ANSWER,0.95,Simple query") } });
     cleanup = handle.uninstall;
-    const factory = (() => handle.model) as never;
-    const result = await classifySubSessionAction(factory, "deepseek-v4-flash", "explain database index");
+    const result = await classifySubSessionAction("deepseek-v4-flash", "explain database index");
     expect(result?.action).toBe("DIRECT_ANSWER");
     expect(result?.confidence).toBe(0.95);
   });
@@ -398,8 +380,7 @@ describe("classifySubSessionAction", () => {
     // would surface if any short-circuit remained.
     const handle = installMockModel({ fixture: { stream: textOnlyStream("DIRECT_ANSWER,0.9,greeting") } });
     cleanup = handle.uninstall;
-    const factory = (() => handle.model) as never;
-    const result = await classifySubSessionAction(factory, "deepseek-v4-flash", "hello");
+    const result = await classifySubSessionAction("deepseek-v4-flash", "hello");
     expect(result?.action).toBe("DIRECT_ANSWER");
     expect(result?.confidence).toBe(0.9);
   });
@@ -407,24 +388,21 @@ describe("classifySubSessionAction", () => {
   it("does not route greetings/thanks via heuristic if they contain other text (fuzzy bypass prevention)", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("SPAWN_SUB_SESSION,0.95,Delete file task") } });
     cleanup = handle.uninstall;
-    const factory = (() => handle.model) as never;
-    const result = await classifySubSessionAction(factory, "deepseek-v4-flash", "hello, delete file X");
+    const result = await classifySubSessionAction("deepseek-v4-flash", "hello, delete file X");
     expect(result?.action).toBe("SPAWN_SUB_SESSION");
   });
 
   it("correctly parses ROTATE_SESSION from model response", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("ROTATE_SESSION,0.90,New topic") } });
     cleanup = handle.uninstall;
-    const factory = (() => handle.model) as never;
-    const result = await classifySubSessionAction(factory, "deepseek-v4-flash", "switch topic");
+    const result = await classifySubSessionAction("deepseek-v4-flash", "switch topic");
     expect(result?.action).toBe("ROTATE_SESSION");
   });
 
   it("returns null when the reply cannot be parsed", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("bad response") } });
     cleanup = handle.uninstall;
-    const factory = (() => handle.model) as never;
-    const result = await classifySubSessionAction(factory, "deepseek-v4-flash", "test");
+    const result = await classifySubSessionAction("deepseek-v4-flash", "test");
     expect(result).toBeNull();
   });
 });

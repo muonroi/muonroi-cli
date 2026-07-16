@@ -201,8 +201,9 @@ export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrai
   if (!provider) throw new Error(`No provider detected for model '${opts.modelId}'`);
   const apiKey = await loadKeyForProvider(provider);
   if (!apiKey) throw new Error(`No API key found for provider '${provider}'`);
-  const { factory } = createProviderFactory(provider, { apiKey });
-  const runtime = resolveModelRuntime(factory, opts.modelId);
+  // Registers the factory so resolveModelRuntime can derive it from the model.
+  createProviderFactory(provider, { apiKey });
+  const runtime = resolveModelRuntime(opts.modelId);
   const systemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   const maxTokens = opts.maxTokens ?? 1024;
   const retryOnEmpty = opts.retryOnEmpty !== false;

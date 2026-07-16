@@ -249,7 +249,7 @@ describe("runDiscovery()", () => {
 
 describe("createModelClarificationProposer() prompt", () => {
   it("does NOT inject the scoreSufficiency regex hint for a vague/underspecified prompt", async () => {
-    const proposer = createModelClarificationProposer({} as any, "test-model");
+    const proposer = createModelClarificationProposer("test-model");
     await proposer({ raw: "todo app", l1: { taskType: "generate", confidence: 0.5 } });
     expect(capturedPrompt).not.toContain("local heuristic flags this prompt as underspecified");
   });

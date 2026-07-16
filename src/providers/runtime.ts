@@ -1,10 +1,8 @@
 import { createHash } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
 import type { ModelInfo } from "../types/index.js";
-import { logger } from "../utils/logger.js";
 import { getReasoningEffortForModel } from "../utils/settings.js";
 import { getProviderCapabilities } from "./capabilities.js";
-import { toWireModelId } from "./strategies/base.strategy.js";
 import { getProviderStrategy } from "./strategies/registry.js";
 import type { ProviderId } from "./types.js";
 
@@ -16,14 +14,7 @@ export type ProviderFactory = ((modelId: string) => any) & {
   defaultProviderOptions?: Record<string, unknown>;
   /** AI SDK top-level call params to strip (backend doesn't accept them). */
   unsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
-  /**
-   * The provider this factory talks to. Stamped by createProviderFactory so a
-   * caller that blindly reuses one provider's factory with a model from a
-   * DIFFERENT provider can be detected and auto-corrected in resolveModelRuntime
-   * (see the factory registry below) — otherwise the request would hit the wrong
-   * endpoint (e.g. a gateway-routed model POSTed straight to a native API,
-   * bypassing the configured gateway).
-   */
+  /** The provider this factory talks to. Stamped by createProviderFactory. */
   providerId?: ProviderId;
 };
 
@@ -45,13 +36,13 @@ export interface ResolvedModelRuntime {
 
 /**
  * Session-scoped registry of the most-recently-built factory per provider.
- * resolveModelRuntime consults this to auto-correct a factory/model provider
- * mismatch: when a caller reuses provider A's factory to run a model that
- * belongs to provider B (a real hazard in sub-task paths like compaction that
- * inherit the parent session's factory), we substitute B's real factory if one
- * was built this session. Single-orchestrator invariant (v1, see CQ-16a) makes
- * a module-level map safe. Last-built wins, so a /model key change that rebuilds
- * a provider's factory transparently refreshes the entry.
+ * It is the ONLY way a model reaches a factory: `factoryForModel` derives the
+ * factory from the model's own provider, so provider A's factory can never be
+ * paired with provider B's model (a real hazard in sub-task paths like
+ * compaction that used to inherit the parent session's factory). Boot warms an
+ * entry for every credentialed provider (see ./warm.ts). Single-orchestrator
+ * invariant (v1, see CQ-16a) makes a module-level map safe. Last-built wins, so
+ * a /model key change that rebuilds a provider's factory refreshes the entry.
  */
 const providerFactoryRegistry = new Map<ProviderId, ProviderFactory>();
 
@@ -161,47 +152,33 @@ interface MockRuntimeGlobals {
 }
 
 /**
- * Thrown when a provider factory is asked to run a model that belongs to a
- * DIFFERENT provider and nothing can make the request valid.
+ * The factory for `modelId`'s OWN provider.
  *
- * This is a wiring bug in the CALLER (it paired provider A's factory with
- * provider B's model), never a user error — so the message names both sides and
- * the stack points at the mispairing.
+ * Deriving the factory from the model is what makes a cross-wire structurally
+ * impossible: callers pass only a model id, so there is no second, independent
+ * value that can disagree with it. Previously the factory and the model id
+ * travelled separately and every sub-task path (compaction, classify,
+ * sub-agents) silently borrowed whatever factory its parent held — measured
+ * live 2026-07-16 (session 0c6728ba1a25): model `gpt-5.4` (openai) went out
+ * through an `xai` factory, and api.x.ai answered "The model gpt-5.4 does not
+ * exist", sending the user hunting a model-name problem that did not exist.
  */
-export class ProviderModelMismatchError extends Error {
-  constructor(
-    readonly modelId: string,
-    readonly modelProvider: ProviderId,
-    readonly factoryProvider: ProviderId,
-  ) {
-    super(
-      `Model "${modelId}" belongs to provider "${modelProvider}", but the only available factory is for "${factoryProvider}". ` +
-        `Sending it would POST "${modelId}" to the ${factoryProvider} endpoint, which will reject it as unknown. ` +
-        `No "${modelProvider}" factory was built this session — authenticate that provider, or pick a "${factoryProvider}" model.`,
-    );
-    this.name = "ProviderModelMismatchError";
+export function factoryForModel(modelId: string): ProviderFactory {
+  const providerId = getModelInfo(modelId)?.provider as ProviderId | undefined;
+  if (!providerId) {
+    throw new Error(`Model "${modelId}" not found in catalog — cannot determine provider.`);
   }
+  const factory = providerFactoryRegistry.get(providerId);
+  if (!factory) {
+    throw new Error(
+      `No provider factory for "${providerId}" (model "${modelId}") — that provider is not authenticated this session. ` +
+        `Run /login for it, or pick a model from an authenticated provider.`,
+    );
+  }
+  return factory;
 }
 
-/**
- * Whether `modelId` can be sent through a factory stamped for `factoryProvider`
- * despite the catalog assigning it elsewhere.
- *
- * True only when the difference is the OpenCode gateway's ROUTING prefix, which
- * `toWireModelId` strips before the id reaches the upstream: catalog
- * `opencode/deepseek-v4-flash` (provider opencode-go) goes out as
- * `deepseek-v4-flash`, which a native deepseek factory's upstream accepts. Any
- * other cross-provider pairing has no such rescue.
- *
- * Pure — unit-testable without building a factory.
- */
-export function isWireCompatible(modelId: string, factoryProvider: ProviderId): boolean {
-  const wireId = toWireModelId(modelId);
-  if (wireId === modelId) return false; // nothing was normalized — nothing to rescue
-  return getModelInfo(wireId)?.provider === factoryProvider;
-}
-
-export function resolveModelRuntime(factory: ProviderFactory, modelId: string): ResolvedModelRuntime {
+export function resolveModelRuntime(modelId: string): ResolvedModelRuntime {
   // Resolve aliases (e.g. "deepseek-v4-flash") to the provider-native id
   // (e.g. "deepseek-v4-flash") BEFORE invoking the factory.
   // Without this, DeepSeek / xAI reject the request because
@@ -212,49 +189,6 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   const providerId = modelInfo?.provider as ProviderId | undefined;
   if (!providerId && !mockGlobals.__muonroiMockModel) {
     throw new Error(`Model "${modelId}" not found in catalog — cannot determine provider.`);
-  }
-
-  // Factory/model provider guard (Layer 2). A caller that reuses one provider's
-  // factory to run a model from another provider (e.g. compaction inheriting the
-  // parent session's native factory for a gateway-routed model) would otherwise
-  // POST to the wrong endpoint. If the passed factory is stamped for a different
-  // provider AND we built the correct one this session, substitute it so the
-  // request lands on the right backend.
-  let effectiveFactory = factory;
-  if (providerId && factory.providerId && factory.providerId !== providerId) {
-    const correct = providerFactoryRegistry.get(providerId);
-    if (correct) {
-      effectiveFactory = correct;
-      logger.debug("orchestrator", "Redirected model to its own provider factory", {
-        modelId: canonicalId,
-        modelProvider: providerId,
-        factoryProvider: factory.providerId,
-      });
-    } else if (isWireCompatible(canonicalId, factory.providerId)) {
-      // No substitute, but the request is still valid: the mismatch is only the
-      // catalog's ROUTING prefix, and `toWireModelId` strips it to a native id
-      // this factory's upstream accepts (e.g. catalog `opencode/deepseek-v4-flash`
-      // run through a native deepseek factory POSTs `deepseek-v4-flash`). This is
-      // the intended gateway path — proceed.
-      logger.debug("orchestrator", "Factory/model provider differ but wire id is native to the factory", {
-        modelId: canonicalId,
-        modelProvider: providerId,
-        factoryProvider: factory.providerId,
-      });
-    } else {
-      // No substitute AND the wire id is foreign to this factory's upstream —
-      // the request CANNOT succeed, it can only reach the wrong host and be
-      // rejected there. Previously this logged a warning and proceeded, on the
-      // assumption that wire-id normalization would keep it valid; that holds
-      // ONLY for the gateway-prefix case above. Across genuinely different
-      // providers it produced a confusing 404 from the wrong vendor, far from
-      // the call site that mispaired them — measured live 2026-07-16 (session
-      // 0c6728ba1a25): model `gpt-5.4` (openai) + factory `xai` POSTed to
-      // api.x.ai, which answered "The model gpt-5.4 does not exist", sending
-      // the user hunting a model-name problem that did not exist. Fail here
-      // instead, naming both sides, so the mispairing surfaces at its source.
-      throw new ProviderModelMismatchError(canonicalId, providerId, factory.providerId);
-    }
   }
 
   const userEffort = getReasoningEffortForModel(modelId);
@@ -286,14 +220,15 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
     };
     providerLevelDefaults = mockGlobals.__muonroiMockDefaultProviderOptions;
   } else {
+    const factory = factoryForModel(canonicalId);
     const strategy = getProviderStrategy(providerId!);
     resolved = strategy.resolve({
-      factory: effectiveFactory,
+      factory,
       modelId: canonicalId,
       modelInfo,
       reasoningEffort: userEffort,
     });
-    providerLevelDefaults = effectiveFactory.defaultProviderOptions;
+    providerLevelDefaults = factory.defaultProviderOptions;
   }
 
   // Merge provider-level defaults from the factory (e.g. OAuth backends inject

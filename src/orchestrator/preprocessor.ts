@@ -49,7 +49,7 @@ export async function* prepareTurnContext(
       let llmFallback: import("../pil/llm-classify.js").LlmClassifyFn | undefined;
       try {
         const { createLlmClassifier } = await import("../pil/llm-classify.js");
-        llmFallback = createLlmClassifier(deps.requireProvider(), deps.modelId, { routeFastTier: true });
+        llmFallback = createLlmClassifier(deps.modelId, { routeFastTier: true });
       } catch (err) {
         logger.error("pil", "LLM fallback wiring failed", { error: err });
       }
@@ -60,7 +60,7 @@ export async function* prepareTurnContext(
       let clarificationProposer: import("../pil/discovery-types.js").ModelClarificationProposer | undefined;
       try {
         const { createModelClarificationProposer } = await import("../pil/discovery.js");
-        clarificationProposer = createModelClarificationProposer(deps.requireProvider(), deps.modelId);
+        clarificationProposer = createModelClarificationProposer(deps.modelId);
       } catch (err) {
         logger.error("pil", "clarification proposer wiring failed", { error: err });
       }

@@ -7,11 +7,7 @@
 
 import { generateText, type ModelMessage } from "ai";
 import { serializeConversation } from "../../orchestrator/compaction.js";
-import {
-  type ProviderFactory as LegacyProvider,
-  resolveModelRuntime,
-  resolveTemperatureParam,
-} from "../../providers/runtime.js";
+import { resolveModelRuntime, resolveTemperatureParam } from "../../providers/runtime.js";
 import { logger } from "../../utils/logger.js";
 import { capCompactionInput } from "./input-guard.js";
 import { extractPreservedBlocks, type PreservedBlock, restorePreservedBlocks } from "./preserve.js";
@@ -28,13 +24,12 @@ export interface CompressResult {
  * 1. Serialize messages via serializeConversation().
  * 2. Extract preserved blocks.
  * 3. If under budget, return as-is (with preserved blocks restored).
- * 4. If over budget, compress via LLM (if provider given) or truncate, and restore blocks.
+ * 4. If over budget, compress via LLM (if modelId given) or truncate, and restore blocks.
  */
 export async function compressChat(
   messages: ModelMessage[],
   _systemPrompt: string,
   tokenBudget: number,
-  provider?: unknown,
   modelId?: string,
   customInstructions?: string,
 ): Promise<CompressResult> {
@@ -62,9 +57,9 @@ export async function compressChat(
   let compressedContent = cleaned;
   let usedLLM = false;
 
-  if (provider && modelId) {
+  if (modelId) {
     try {
-      const runtime = resolveModelRuntime(provider as LegacyProvider, modelId);
+      const runtime = resolveModelRuntime(modelId);
       const extraPrompt = customInstructions ? `\n\nUSER FOCUS/INSTRUCTIONS:\n${customInstructions}\n` : "";
       // Guard the compaction INPUT against the model's own context window —
       // compaction fires when history is large, which is exactly when the full

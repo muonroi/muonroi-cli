@@ -1,5 +1,4 @@
 import { generateText } from "ai";
-import type { ProviderFactory as LegacyProvider } from "../providers/runtime.js";
 import { resolveModelRuntime } from "../providers/runtime.js";
 
 export interface SideQuestionResult {
@@ -13,12 +12,11 @@ If conversation context is provided below, use it to give a more relevant answer
 
 export async function runSideQuestion(
   question: string,
-  provider: LegacyProvider,
   modelId: string,
   conversationContext: string,
   signal?: AbortSignal,
 ): Promise<SideQuestionResult> {
-  const runtime = resolveModelRuntime(provider, modelId);
+  const runtime = resolveModelRuntime(modelId);
   const system = conversationContext
     ? `${SIDE_QUESTION_SYSTEM}\n\n<conversation_context>\n${conversationContext}\n</conversation_context>`
     : SIDE_QUESTION_SYSTEM;

@@ -35,7 +35,7 @@ import {
   createProviderFactoryAsync,
   detectProviderForModel,
   requireRuntimeProvider,
-  resolveModelRuntime as resolveRuntime,
+  resolveModelRuntime,
   resolveTemperatureParam,
 } from "../providers/runtime.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
@@ -240,13 +240,12 @@ function sanitizeTitle(raw: string): string {
  * session model. Falls back to a truncated first-message title on any failure.
  */
 async function genTitle(
-  provider: LegacyProvider,
   userMessage: string,
   modelId: string,
 ): Promise<{ title: string; modelId: string; usage?: { totalTokens?: number } }> {
   try {
     const { generateText } = await import("ai");
-    const runtime = resolveModelRuntime(provider, modelId);
+    const runtime = resolveModelRuntime(modelId);
     const snippet = userMessage.length > 1500 ? `${userMessage.slice(0, 1500)}…` : userMessage;
 
     const { text, usage } = await generateText({
@@ -269,14 +268,6 @@ async function genTitle(
     );
   }
   return { title: fallbackTitle(userMessage), modelId };
-}
-
-/**
- * Resolve a model ID to a runnable AI SDK LanguageModel.
- * Uses the Anthropic provider factory created by createProvider().
- */
-function resolveModelRuntime(provider: LegacyProvider, modelId: string): ResolvedModelRuntime {
-  return resolveRuntime(provider, modelId);
 }
 
 async function toolSetToBatchTools(_tools: ToolSet): Promise<BatchFunctionTool[]> {
@@ -814,7 +805,7 @@ export class Agent {
       return "New session";
     }
 
-    const generated = await genTitle(provider, userMessage, this.modelId);
+    const generated = await genTitle(userMessage, this.modelId);
     this.recordUsage(generated.usage, "title", generated.modelId);
     if (this.sessionStore && this.session && !this.session.title && generated.title) {
       this.sessionStore.setTitle(this.session.id, generated.title);
@@ -849,7 +840,7 @@ export class Agent {
     }
     const conversationContext = contextParts.join("\n\n");
 
-    const result = await runSideQuestion(question, this.provider, this.modelId, conversationContext, signal);
+    const result = await runSideQuestion(question, this.modelId, conversationContext, signal);
     this.recordUsage(result.usage, "other");
     return result;
   }
@@ -1534,7 +1525,6 @@ export class Agent {
   ): Promise<ToolResult> {
     const provider = this.requireProvider();
     const deps: StreamRunnerDeps = {
-      getProvider: () => provider,
       resolveModelForTask: (task) => this._resolveModelForTask(task),
       getModelId: () => this.modelId,
       getProviderId: () => this.providerId,
@@ -1797,7 +1787,7 @@ export class Agent {
     // Phase 1: ask the compaction proposer model whether to compact and what to keep/drop.
     // Only compact if the model says yes. On error/skip, fall back to heuristic.
     const compactModelId = this._resolveCompactModel();
-    const proposal = await proposeCompaction(provider, compactModelId, this.messages, signal);
+    const proposal = await proposeCompaction(compactModelId, this.messages, signal);
 
     if (proposal !== null) {
       // Model decided — compact only if model says shouldCompact
@@ -1866,7 +1856,6 @@ export class Agent {
       : undefined;
 
     const { summary, usage: compactUsage } = await generateCompactionSummary(
-      provider,
       compactModelId,
       preparation,
       customInstructions,
@@ -2416,7 +2405,7 @@ export class Agent {
         const { createLlmClassifier } = await import("../pil/llm-classify.js");
         const { probeRepoGrounding } = await import("../pil/repo-grounding-probe.js");
         const { getRepoStructureHints } = await import("../pil/repo-structure-hints.js");
-        const classify = createLlmClassifier(this.requireProvider(), this.modelId, {
+        const classify = createLlmClassifier(this.modelId, {
           routeFastTier: true,
           // /ideal routing needs a reliable depth verdict; allow cross-provider
           // fallback so an agentic/no-fast-tier session model (e.g. xai) doesn't
@@ -3184,7 +3173,7 @@ export class Agent {
         // continuation ("ok làm phần đó đi") is judged in isolation and can be
         // mis-routed as a fresh/unrelated task. Passing contextInfo also turns
         // on the session-size metadata block the ROTATE_SESSION rule relies on.
-        const routeResult = await classifySubSessionAction(this.requireProvider(), this.modelId, userMessage, {
+        const routeResult = await classifySubSessionAction(this.modelId, userMessage, {
           currentChars,
           threshold,
           recentTurns: this._buildRecentTurnsSummary(),
@@ -3231,7 +3220,7 @@ export class Agent {
         const { getDatabase } = await import("../storage/db.js");
         const { appendCompaction, getNextMessageSequence } = await import("../storage/transcript.js");
 
-        const cr = await deliberateCompact(flowDir, this.messages, "", 4096, this.requireProvider(), this.modelId);
+        const cr = await deliberateCompact(flowDir, this.messages, "", 4096, this.modelId);
 
         const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
         const db = getDatabase();
@@ -3693,9 +3682,8 @@ export class Agent {
           `Provide clear, actionable guidance to resolve the child's query.`;
 
         const { generateText } = await import("ai");
-        const provider = self.requireProvider();
         const modelId = self.modelId;
-        const runtime = resolveModelRuntime(provider, modelId);
+        const runtime = resolveModelRuntime(modelId);
 
         const result = await generateText({
           model: runtime.model,

@@ -34,7 +34,11 @@ import { stripThinkBlocks } from "./strip-think.js";
 import type { CouncilLLM, CouncilStats, ToolTraceEmitter, UsageCallback } from "./types.js";
 
 /**
- * Resolve a provider factory for a council sub-call, OAuth-aware.
+ * Register a provider factory for a council sub-call, OAuth-aware.
+ *
+ * A council roster routes stances to providers the session itself never built,
+ * so their factory must exist in the registry before `resolveModelRuntime` can
+ * derive it from the model id.
  *
  * The council reachability gate (`isProviderReachable` in leader.ts) counts
  * OAuth-authenticated providers as usable (via `getConfiguredProviders`), so a
@@ -47,7 +51,7 @@ import type { CouncilLLM, CouncilStats, ToolTraceEmitter, UsageCallback } from "
  * refreshes the stored OAuth bearer token. Only the expected missing-key case
  * is swallowed; unexpected errors propagate.
  */
-async function resolveCouncilFactory(providerId: ProviderId) {
+async function ensureCouncilFactory(providerId: ProviderId): Promise<void> {
   let apiKey: string | undefined;
   try {
     apiKey = await loadKeyForProvider(providerId);
@@ -55,8 +59,7 @@ async function resolveCouncilFactory(providerId: ProviderId) {
     if (!(err instanceof ProviderKeyMissingError)) throw err;
     // OAuth-only provider — createProviderFactoryAsync injects the bearer token.
   }
-  const { factory } = await createProviderFactoryAsync(providerId, apiKey ? { apiKey } : {});
-  return factory;
+  await createProviderFactoryAsync(providerId, apiKey ? { apiKey } : {});
 }
 
 // ── Debug logging (off unless MUONROI_COUNCIL_DEBUG_LOG points at a writable file) ──
@@ -540,8 +543,8 @@ export function createCouncilLLM(
         return stripThinkBlocks(result.text);
       }
       const providerId = detectProviderForModel(modelId);
-      const factory = await resolveCouncilFactory(providerId);
-      const runtime = resolveModelRuntime(factory, modelId);
+      await ensureCouncilFactory(providerId);
+      const runtime = resolveModelRuntime(modelId);
       const t0 = Date.now();
       // Combine the user-abort signal (when threaded from runCouncil) with the
       // per-call wall-clock deadline. Without the parent signal, an Esc/Ctrl-C
@@ -654,8 +657,8 @@ export function createCouncilLLM(
         return { text: stripThinkBlocks(result.text), toolCalls: [] };
       }
       const providerId = detectProviderForModel(modelId);
-      const factory = await resolveCouncilFactory(providerId);
-      const runtime = resolveModelRuntime(factory, modelId);
+      await ensureCouncilFactory(providerId);
+      const runtime = resolveModelRuntime(modelId);
 
       // Verification tools — re-introduced after the no-tools fix (session
       // a7a5690d2049). The original failure was stepCountIs(4) + full toolset
@@ -846,8 +849,8 @@ export function createCouncilLLM(
         return stripThinkBlocks(result.text);
       }
       const providerId = detectProviderForModel(modelId);
-      const factory = await resolveCouncilFactory(providerId);
-      const runtime = resolveModelRuntime(factory, modelId);
+      await ensureCouncilFactory(providerId);
+      const runtime = resolveModelRuntime(modelId);
 
       const builtinTools = createTools(bash, mode);
 

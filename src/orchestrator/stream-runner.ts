@@ -49,6 +49,7 @@ import { getVisionGuidanceForTextOnly } from "../providers/mcp-vision-bridge.js"
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
   buildTurnProviderOptions,
+  factoryForModel,
   type ResolvedModelRuntime,
   requireRuntimeProvider,
   resolveModelRuntime,
@@ -76,7 +77,6 @@ import {
 } from "../utils/settings";
 import { resolveShell } from "../utils/shell.js";
 import { prepareVerifySandbox } from "../verify/entrypoint";
-import type { LegacyProvider } from "./agent-options";
 import { asNumber } from "./batch-utils";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
@@ -112,8 +112,6 @@ import { combineAbortSignals, firstLine, formatSubagentActivity } from "./tool-u
  * without holding a circular reference. Mirrors the CouncilManager DI pattern.
  */
 export interface StreamRunnerDeps {
-  /** Current top-level provider instance (already validated). */
-  getProvider(): LegacyProvider;
   /** Resolve a specific task tier's model id (uses Agent's role config). */
   resolveModelForTask(task: "compact" | "explore" | "general" | "title" | "verify"): string;
   /** Top-level model id (for routed_from telemetry). */
@@ -267,7 +265,6 @@ export class StreamRunner {
     onActivity?: (detail: string) => void,
     signal?: AbortSignal,
   ): Promise<SetupOutcome> {
-    const provider = this.deps.getProvider();
     const agentKey = String(request.agent);
     const isExplore = agentKey === "explore";
     const isGeneral = agentKey === "general";
@@ -394,12 +391,18 @@ export class StreamRunner {
     if (childModelId !== topModelId) {
       statusBarStore.setState({ routed_from: topModelId, model: childModelId });
     }
+    // The vision branch must build its model from the CHILD model's own factory.
+    // It previously called the PARENT session's factory directly, so a sub-agent
+    // routed to another provider had its id POSTed to the parent's endpoint.
     const childRuntime = isVision
-      ? {
-          ...resolveModelRuntime(provider, childModelId),
-          model: provider.responses?.(childModelId) ?? provider(childModelId),
-        }
-      : resolveModelRuntime(provider, childModelId);
+      ? (() => {
+          const childFactory = factoryForModel(childModelId);
+          return {
+            ...resolveModelRuntime(childModelId),
+            model: childFactory.responses?.(childModelId) ?? childFactory(childModelId),
+          };
+        })()
+      : resolveModelRuntime(childModelId);
     const taskCaps = getProviderCapabilities(requireRuntimeProvider(childRuntime));
     if (isComputer && !taskCaps.supportsClientTools(childRuntime.modelInfo)) {
       return {

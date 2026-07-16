@@ -28,13 +28,7 @@ import type { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import type { AgentMode, StreamChunk } from "../types/index";
 import { isProviderDisabled, type ModelRole } from "../utils/settings";
-import {
-  COUNCIL_COLOR_BG,
-  COUNCIL_COLOR_RESET,
-  COUNCIL_ROLE_COLORS,
-  type CouncilOutcome,
-  type LegacyProvider,
-} from "./agent-options";
+import { COUNCIL_COLOR_BG, COUNCIL_COLOR_RESET, COUNCIL_ROLE_COLORS, type CouncilOutcome } from "./agent-options";
 import { extractUserContent, getCompactionSummaryText, isCompactionSummaryMessage } from "./compaction";
 
 /**
@@ -195,8 +189,8 @@ export class CouncilManager {
   async generate(modelId: string, system: string, prompt: string, maxTokens = 2048): Promise<string> {
     const providerId = detectProviderForModel(modelId);
     const key = await loadKeyForProvider(providerId);
-    const provider = createCouncilProvider(providerId, key);
-    const runtime = resolveModelRuntime(provider, modelId);
+    ensureCouncilProvider(providerId, key);
+    const runtime = resolveModelRuntime(modelId);
     const { text } = await generateText({
       model: runtime.model,
       system,
@@ -217,8 +211,8 @@ export class CouncilManager {
   async research(modelId: string, topic: string, conversationContext: string, signal?: AbortSignal): Promise<string> {
     const providerId = detectProviderForModel(modelId);
     const key = await loadKeyForProvider(providerId);
-    const provider = createCouncilProvider(providerId, key);
-    const runtime = resolveModelRuntime(provider, modelId);
+    ensureCouncilProvider(providerId, key);
+    const runtime = resolveModelRuntime(modelId);
 
     // Build tool set with bash, grep, read_file for codebase research
     const researchTools = createBuiltinTools(this.deps.getBash(), this.deps.getMode(), {
@@ -605,10 +599,11 @@ export class CouncilManager {
 }
 
 /**
- * Internal: build a provider factory using the shared runtime factory.
+ * Internal: register a provider factory using the shared runtime factory, so a
+ * council sub-call on a provider the session never built can still resolve.
  * Mirrors `createProvider` in orchestrator.ts to keep council sub-calls
  * decoupled from Agent state.
  */
-function createCouncilProvider(providerId: ProviderId, apiKey: string, baseURL?: string): LegacyProvider {
-  return createProviderFactory(providerId, { apiKey, baseURL }).factory;
+function ensureCouncilProvider(providerId: ProviderId, apiKey: string, baseURL?: string): void {
+  createProviderFactory(providerId, { apiKey, baseURL });
 }
