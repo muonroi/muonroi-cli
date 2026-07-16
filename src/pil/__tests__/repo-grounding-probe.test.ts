@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterAll, describe, expect, it } from "vitest";
 import { probeRepoGrounding } from "../repo-grounding-probe.js";
 
 const AUTH_SMALL = [
@@ -67,5 +70,49 @@ describe("probeRepoGrounding", () => {
     ]);
     const rank = { none: 0, small: 1, medium: 2, large: 3 } as const;
     expect(rank[bigger.bucket]).toBeGreaterThanOrEqual(rank[small.bucket]);
+  });
+});
+
+describe("on-disk fallback (opts.cwd with unindexed slash-path)", () => {
+  const tmpDirs: string[] = [];
+
+  afterAll(() => {
+    for (const dir of tmpDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("confirms and counts an unindexed slash-path target on disk", () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "probe-ondisk-"));
+    tmpDirs.push(tmpDir);
+
+    const testFile = "src/test-module.ts";
+    const testContent = "line1\nline2\nline3"; // 3 lines (no trailing newline)
+    const testPath = join(tmpDir, testFile);
+    mkdirSync(dirname(testPath), { recursive: true });
+    writeFileSync(testPath, testContent);
+
+    const r = probeRepoGrounding(`refactor ${testFile}`, [], { cwd: tmpDir });
+    expect(r.ran).toBe(true);
+    expect(r.matchedFiles).toBe(1);
+    expect(r.totalLoc).toBe(3);
+    expect(r.groundingUncertainty).toBe(false);
+  });
+
+  it("sets uncertainty when an unindexed slash-path target is absent on disk", () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "probe-ondisk-"));
+    tmpDirs.push(tmpDir);
+
+    const r = probeRepoGrounding("refactor src/ghost.ts", [], { cwd: tmpDir });
+    expect(r.ran).toBe(true);
+    expect(r.matchedFiles).toBe(0);
+    expect(r.groundingUncertainty).toBe(true);
+  });
+
+  it("skips on-disk fallback when opts.cwd is not provided", () => {
+    const r = probeRepoGrounding("refactor src/auth/ghost.ts", []);
+    expect(r.ran).toBe(true);
+    expect(r.matchedFiles).toBe(0);
+    expect(r.groundingUncertainty).toBe(true);
   });
 });
