@@ -227,6 +227,42 @@ describe("Sprint 1: impact/readiness contract (SLICE1-BUILD-NOTE.md)", () => {
     range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
   };
 
+  // A server publishes diagnostics only for files it was told about. Without a
+  // didOpen first, waiting on an unopened file waits out the timeout, sees
+  // nothing, and calls it clean — a green verdict on an unanalysed file. Real
+  // repro before the fix: a file with two tsc type errors reported clean:true.
+  it("waitForDiagnostics: opens the file on the server before waiting on it", async () => {
+    const root = await createTempWorkspace();
+    const filePath = path.join(root, "demo.ts");
+    await writeFile(filePath, "const x = 1;\n");
+    const client = createFakeClient({ diagnostics: [] });
+    const manager = createWorkspaceLspManager(root, BASE_SETTINGS, { createClient: async () => client });
+
+    await manager.waitForDiagnostics(filePath, 500);
+
+    expect(client.openOrChangeFile).toHaveBeenCalledWith(filePath, "typescript", "const x = 1;\n");
+    const openOrder = client.openOrChangeFile.mock.invocationCallOrder[0];
+    const waitOrder = client.waitForDiagnostics.mock.invocationCallOrder[0];
+    expect(openOrder).toBeLessThan(waitOrder);
+
+    await manager.close();
+  });
+
+  // "clean" on a path that does not exist is a lie the rename/edit gates trust.
+  it("waitForDiagnostics: unreadable file -> unavailable, never clean", async () => {
+    const root = await createTempWorkspace();
+    const client = createFakeClient({ diagnostics: [] });
+    const manager = createWorkspaceLspManager(root, BASE_SETTINGS, { createClient: async () => client });
+
+    const result = await manager.waitForDiagnostics(path.join(root, "gone.ts"), 500);
+
+    expect(result.lspStatus).toBe("unavailable");
+    expect(result.clean).toBe(false);
+    expect(client.waitForDiagnostics).not.toHaveBeenCalled();
+
+    await manager.close();
+  });
+
   it("waitForDiagnostics: non-timeout failure with no diagnostics -> unavailable", async () => {
     const root = await createTempWorkspace();
     const filePath = path.join(root, "demo.ts");

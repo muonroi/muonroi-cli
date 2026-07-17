@@ -14,13 +14,26 @@ function packageDir(pkg: string): string {
   return path.join(CACHE_ROOT, sanitized);
 }
 
-export async function lspNpmWhich(pkg: string): Promise<string | null> {
+/**
+ * Absolute path to a language-server binary in the cache, installing the package
+ * on first use.
+ *
+ * `preferredBin` is the binary the CALLER needs, which is not always the one
+ * named after the package: `pyright` ships both `pyright` (the batch CLI) and
+ * `pyright-langserver` (the LSP server). Choosing by package name alone launched
+ * the CLI with `--stdio`, which exits 4 with "pyright --help for usage" — so
+ * Python LSP never started for anyone relying on auto-install.
+ */
+export async function lspNpmWhich(pkg: string, preferredBin?: string): Promise<string | null> {
   const dir = packageDir(pkg);
   const binDir = path.join(dir, "node_modules", ".bin");
 
   const pick = async (): Promise<string | undefined> => {
-    const files = await readdir(binDir).catch(() => []);
+    const files = await readdir(binDir).catch((): string[] => []);
     if (files.length === 0) return undefined;
+    // The caller's choice wins whenever the package actually ships it. Match the
+    // extension-less shim: Windows also lists .cmd/.ps1 wrappers for each bin.
+    if (preferredBin && files.includes(preferredBin)) return preferredBin;
     if (files.length === 1) return files[0];
 
     const pkgJsonPath = path.join(dir, "node_modules", pkg, "package.json");
@@ -31,6 +44,7 @@ export async function lspNpmWhich(pkg: string): Promise<string | null> {
       if (typeof bin === "string") return unscoped;
       const keys = Object.keys(bin);
       if (keys.length === 1) return keys[0];
+      if (preferredBin && bin[preferredBin]) return preferredBin;
       return bin[unscoped] ? unscoped : keys[0];
     }
     return files[0];

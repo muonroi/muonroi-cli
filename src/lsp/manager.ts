@@ -59,11 +59,25 @@ export function createWorkspaceLspManager(
   const definitions = createRuntimeLspDefinitions(cwd, settings);
   const clients = new Map<string, Promise<ManagedClient | null>>();
 
+  // Servers we have already reported as not installed. Without this the "no
+  // command" path is silent: a Go/Rust/C++/Java file just gets no LSP and the
+  // caller sees "unavailable" with no way to learn WHICH server is missing.
+  const reportedMissing = new Set<string>();
+
   const createClient =
     options.createClient ??
     (async ({ serverId, root, definition, settings: normalizedSettings }) => {
       const launch = await definition.resolveLaunch(root, normalizedSettings);
-      if (!launch?.command) return null;
+      if (!launch?.command) {
+        if (!reportedMissing.has(serverId)) {
+          reportedMissing.add(serverId);
+          console.error(
+            `[lsp] no language server found for "${serverId}" (${definition.extensions.join(", ")}). ` +
+              `Install it and make sure it is on PATH, or set lsp.builtins.${serverId}.command in settings.`,
+          );
+        }
+        return null;
+      }
       return createLspClientSession({
         serverId,
         root,
@@ -159,7 +173,14 @@ export function createWorkspaceLspManager(
             serverId: client.serverId,
             diagnostics: client.getDiagnostics(filePath),
           };
-        } catch {
+        } catch (err) {
+          // Dropping the client silently here is what let a dead language server
+          // look like "no diagnostics" for the whole session.
+          console.error(
+            `[lsp:${definition.id}] sync failed for ${filePath}, dropping client: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
           clients.delete(key);
           return null;
         }
@@ -289,11 +310,63 @@ export function createWorkspaceLspManager(
     return messages.join("; ").slice(0, 120) || "none";
   }
 
+  /**
+   * didOpen `filePath` on every client that is about to be asked for its
+   * diagnostics, so the server actually analyses it. Returns true when the file
+   * cannot be read — nothing to diagnose, and reporting it "clean" would lie.
+   */
+  async function openForDiagnostics(filePath: string, records: ManagedClient[]): Promise<boolean> {
+    let content: string;
+    try {
+      content = await readFile(filePath, "utf8");
+    } catch (err) {
+      console.error(
+        `[lsp] cannot read ${filePath} for diagnostics: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return true;
+    }
+
+    const extension = path.extname(filePath).toLowerCase();
+    await Promise.all(
+      records.map(async ({ key, definition, client }) => {
+        const languageId = definition.languageIds[extension] ?? (extension.slice(1) || "plaintext");
+        try {
+          await client.openOrChangeFile(filePath, languageId, content);
+        } catch (err) {
+          // Drop the client so the next call re-spawns it; the diagnostics wait
+          // below will surface this as a failure rather than a clean verdict.
+          console.error(
+            `[lsp:${definition.id}] didOpen failed for ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          clients.delete(key);
+        }
+      }),
+    );
+    return false;
+  }
+
   async function waitForDiagnostics(filePath: string, timeout: number): Promise<LspQueryResult> {
     const clampedTimeout = Math.min(Math.max(timeout, 0), 5000);
     const t0 = Date.now();
     const records = await getClientsForFile(filePath);
     if (records.length === 0) {
+      return {
+        diagnostics: [],
+        lspStatus: "unavailable",
+        clean: false,
+        metadata: { tokenBudgetUsed: tokenBudget(Date.now() - t0, 0) },
+      };
+    }
+
+    // A language server only publishes diagnostics for files it has been told
+    // about. Without this didOpen, waiting on a file the server has never seen
+    // waits out the full timeout, gets nothing, and reports lspStatus "ok" /
+    // clean: true — a green verdict on a file that was never analysed at all.
+    // (Proven: a file with two tsc type errors reported clean.) Callers that
+    // already synced the buffer (syncFile) are unaffected: openOrChangeFile is
+    // idempotent, and diagnostics already cached short-circuit the wait below.
+    const unreadable = await openForDiagnostics(filePath, records);
+    if (unreadable) {
       return {
         diagnostics: [],
         lspStatus: "unavailable",
