@@ -132,6 +132,7 @@ import {
   initialInitNewFormState,
 } from "./components/init-new-form-card.js";
 import { computeMcpRunInfo, findLastCollapsibleIndex, MessageView } from "./components/message-view.js";
+import { groupToolEntries } from "./utils/group-tool-entries.js";
 import {
   initialPointToExistingFormState,
   PointToExistingFormCard,
@@ -977,7 +978,7 @@ export function useAppLogic(props: AppLogicProps) {
   }, [setModel]);
   const initialHasApiKey = agent.hasApiKey();
   const [hasApiKey, setHasApiKey] = useState(initialHasApiKey);
-  const [messages, setMessages] = useState<ChatEntry[]>(() => agent.getChatEntries());
+  const [messages, setMessages] = useState<ChatEntry[]>(() => groupToolEntries(agent.getChatEntries()));
   const [streamContent, setStreamContent] = useState("");
   // Reasoning state: track activity + last-elapsed for a "💭 Thought for Ns"
   // pill instead of dumping CoT into the chat (saves 80–120 setState/sec on
@@ -2709,7 +2710,11 @@ export function useAppLogic(props: AppLogicProps) {
                 prevUserIdx++;
               }
             }
-            return fresh;
+            // The persisted transcript has one tool_result per call and no
+            // tool_group, so this resync used to wipe the group the live turn
+            // built and leave a flat "→ <tool>" line per call on screen — the
+            // state the user actually reads after the answer lands. Re-fold them.
+            return groupToolEntries(fresh);
           });
           setSessionTitle(activeTurn.agent.getSessionTitle());
           setSessionId(activeTurn.agent.getSessionId());
@@ -3362,7 +3367,7 @@ export function useAppLogic(props: AppLogicProps) {
 
   const resetToNewSession = useCallback(() => {
     const snapshot = agent.startNewSession();
-    setMessages(snapshot?.entries ?? []);
+    setMessages(groupToolEntries(snapshot?.entries ?? []));
     setExpandedMessages(new Set());
     activeTurnRef.current = null;
     clearLiveTurnUi();
@@ -3811,7 +3816,7 @@ export function useAppLogic(props: AppLogicProps) {
                     appendCompaction(sessionId, nextSeq, cr.summary, cr.tokensBeforeCompress);
                   }
                   agent.setMessages([createCompactionSummaryMessage(cr.summary)]);
-                  setMessages(agent.getChatEntries());
+                  setMessages(groupToolEntries(agent.getChatEntries()));
                   setMessages((prev) => [
                     ...prev,
                     buildAssistantEntry(
@@ -4224,7 +4229,7 @@ export function useAppLogic(props: AppLogicProps) {
                 }
                 const summaryMsg = createCompactionSummaryMessage(cr.summary);
                 agent.setMessages([summaryMsg]);
-                setMessages(agent.getChatEntries());
+                setMessages(groupToolEntries(agent.getChatEntries()));
                 setMessages((prev) => [
                   ...prev,
                   buildAssistantEntry(
@@ -4248,7 +4253,7 @@ export function useAppLogic(props: AppLogicProps) {
                     revertLatestCompaction(sessionId);
                   }
                   agent.setMessages(restoredMessages);
-                  setMessages(agent.getChatEntries());
+                  setMessages(groupToolEntries(agent.getChatEntries()));
                   const text = lines.slice(2).join("\n");
                   setMessages((prev) => [...prev, buildAssistantEntry(text)]);
                   return;
@@ -5041,7 +5046,7 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   const summaryMsg = createCompactionSummaryMessage(cr.summary);
                   agent.setMessages([summaryMsg]);
-                  setMessages(agent.getChatEntries());
+                  setMessages(groupToolEntries(agent.getChatEntries()));
                   setMessages((prev) => [
                     ...prev,
                     buildAssistantEntry(
@@ -5064,7 +5069,7 @@ export function useAppLogic(props: AppLogicProps) {
                       revertLatestCompaction(sessionId);
                     }
                     agent.setMessages(restoredMessages);
-                    setMessages(agent.getChatEntries());
+                    setMessages(groupToolEntries(agent.getChatEntries()));
                     const text = lines.slice(2).join("\n");
                     setMessages((prev) => [...prev, buildAssistantEntry(text)]);
                     return;
