@@ -183,6 +183,8 @@ const HELP = [
   "**Experience Engine (/ee)**",
   "",
   "Usage:",
+  "  /ee config               — Show EE connection settings",
+  "  /ee config <url> [token] — Connect to an EE server (writes ~/.experience/config.json)",
   "  /ee stats [7d|30d|all]   — Knowledge base statistics",
   "  /ee timeline <topic>     — Chronological principle evolution",
   "  /ee graph <id>           — Principle relationship graph",
@@ -198,9 +200,92 @@ const HELP = [
 
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
+/** Never echo a token back in full — the transcript is persisted to SQLite. */
+function maskToken(token: string | null | undefined): string {
+  if (!token) return "(none)";
+  return token.length <= 4 ? "set (…)" : `set (…${token.slice(-4)})`;
+}
+
+/**
+ * Show or set the EE connection. Until this existed, EE was configurable only
+ * by the one-shot first-run wizard — and index.ts marks eeSetupPrompted even
+ * when the user SKIPS it, so skipping once left hand-editing
+ * ~/.experience/config.json as the only way back in.
+ */
+async function handleConfig(args: string[]): Promise<string> {
+  const { getCachedServerBaseUrl, getCachedAuthToken, getExperienceConfigPath, probeEEHealth, refreshAuthToken } =
+    await import("../../ee/auth.js");
+  const url = args[0];
+
+  if (!url) {
+    const baseUrl = getCachedServerBaseUrl();
+    const lines = [
+      "**EE Config**",
+      "",
+      `  serverBaseUrl: ${baseUrl ?? "(not configured)"}`,
+      `  serverAuthToken: ${maskToken(getCachedAuthToken())}`,
+      `  config file: ${getExperienceConfigPath()}`,
+    ];
+    if (process.env.MUONROI_EE_BASE_URL) {
+      lines.push("", `  ⚠ MUONROI_EE_BASE_URL=${process.env.MUONROI_EE_BASE_URL} overrides the config file.`);
+    }
+    if (baseUrl) {
+      const health = await probeEEHealth(baseUrl, getCachedAuthToken() ?? undefined);
+      lines.push("", health.ok ? `  ✓ reachable (${health.detail})` : `  ⚠ not reachable — ${health.detail}`);
+    } else {
+      lines.push("", "Connect one with: `/ee config <url> [token]`");
+    }
+    return lines.join("\n");
+  }
+
+  let normalized: string;
+  try {
+    normalized = new URL(url).toString().replace(/\/$/, "");
+  } catch {
+    return `"${url}" is not a valid URL. Example: \`/ee config https://experience.example.com <token>\``;
+  }
+
+  const token = args[1];
+  try {
+    const { writeExperienceConfig } = await import("../../ee/auth.js");
+    await writeExperienceConfig({
+      serverBaseUrl: normalized,
+      ...(token ? { serverAuthToken: token } : {}),
+    });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    console.error(`[slash/ee] writing ${getExperienceConfigPath()} failed: ${message}`);
+    return `Could not write ${getExperienceConfigPath()}: ${message}`;
+  }
+
+  // Re-read so THIS session picks the change up; without it the new server is
+  // only live after a restart.
+  await refreshAuthToken();
+  const { detectEEClientMode, describeMode } = await import("../../ee/client-mode.js");
+  const info = await detectEEClientMode({ force: true });
+
+  const health = await probeEEHealth(normalized, token || (getCachedAuthToken() ?? undefined));
+  return [
+    "**EE Config saved**",
+    "",
+    `  serverBaseUrl: ${normalized}`,
+    `  serverAuthToken: ${maskToken(token ?? getCachedAuthToken())}`,
+    `  config file: ${getExperienceConfigPath()}`,
+    `  client mode: ${info.mode} — ${describeMode(info)}`,
+    "",
+    health.ok
+      ? `  ✓ reachable (${health.detail}) — recall is live for this session.`
+      : `  ⚠ saved, but not reachable — ${health.detail}. EE calls degrade gracefully until it responds.`,
+  ].join("\n");
+}
+
 export const handleEESlash: SlashHandler = async (args, _ctx) => {
   const sub = args[0]?.toLowerCase();
   if (!sub) return HELP;
+
+  // `config` must not construct the EE client: it is the command you reach for
+  // precisely when there is no server configured yet.
+  if (sub === "config" || sub === "setup") return await handleConfig(args.slice(1));
 
   const client = getDefaultEEClient();
 

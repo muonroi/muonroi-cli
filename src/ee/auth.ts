@@ -84,6 +84,49 @@ export async function writeExperienceConfig(
   await fs.writeFile(p, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
 }
 
+/** Where the EE config lives, for display in setup/status output. */
+export function getExperienceConfigPath(opts: { home?: string } = {}): string {
+  return configPath(opts.home);
+}
+
+/**
+ * Best-effort reachability probe against an EE server's /health.
+ *
+ * Returns a reason on failure rather than a bare boolean: "saved but not
+ * reachable" and "saved, server says 401" are different problems for the user
+ * to act on, and collapsing them to `false` hides which one they have.
+ * Never throws — a probe is diagnostics, and must not fail a config write that
+ * already succeeded.
+ */
+export async function probeEEHealth(
+  baseUrl: string,
+  token?: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<{ ok: boolean; detail: string }> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), opts.timeoutMs ?? 4000);
+  try {
+    const res = await fetch(`${baseUrl}/health`, {
+      signal: ac.signal,
+      headers: token ? { authorization: `Bearer ${token}` } : undefined,
+    });
+    if (res.ok) return { ok: true, detail: `HTTP ${res.status}` };
+    return {
+      ok: false,
+      detail:
+        res.status === 401 || res.status === 403
+          ? `HTTP ${res.status} — the server rejected this auth token`
+          : `HTTP ${res.status}`,
+    };
+  } catch (err) {
+    const message = (err as Error)?.name === "AbortError" ? "timed out" : ((err as Error)?.message ?? String(err));
+    console.error(`[ee/auth] /health probe failed for ${baseUrl}: ${message}`);
+    return { ok: false, detail: message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function getCachedAuthToken(): string | null {
   return _token;
 }
