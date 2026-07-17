@@ -148,12 +148,15 @@ export class GrokOAuthProvider implements ProviderOAuth {
   // login
   // -------------------------------------------------------------------------
 
-  async login(opts: { onUserCode?: (code: string, url: string) => void } = {}): Promise<OAuthTokens> {
+  async login(
+    opts: { onUserCode?: (code: string, url: string) => void; signal?: AbortSignal } = {},
+  ): Promise<OAuthTokens> {
     const { codeVerifier, codeChallenge } = generatePKCE();
     const state = randomBytes(16).toString("base64url");
     const nonce = randomBytes(16).toString("base64url");
 
     let callbackServer: OAuthCallbackServer | undefined;
+    let manualPasteRl: readline.Interface | undefined;
     let authCode: string;
     let receivedState = "";
 
@@ -166,6 +169,20 @@ export class GrokOAuthProvider implements ProviderOAuth {
         const loginTimeout = setTimeout(() => {
           reject(new Error("OAuth browser callback timed out"));
         }, CALLBACK_TIMEOUT_MS);
+
+        // Cancelling must END the flow, not just abandon it: the `finally`
+        // below is what closes the loopback server (and the readline), and an
+        // abandoned server holds its port for the full callback timeout, so the
+        // next sign-in cannot bind.
+        const onAbort = () => {
+          clearTimeout(loginTimeout);
+          reject(new OAuthLoginError("xai", "Sign-in cancelled."));
+        };
+        if (opts.signal?.aborted) {
+          onAbort();
+          return;
+        }
+        opts.signal?.addEventListener("abort", onAbort, { once: true });
 
         this.callbackServerFn({
           onCode: (code: string, s: string) => {
@@ -189,15 +206,23 @@ export class GrokOAuthProvider implements ProviderOAuth {
             opts.onUserCode?.(authorizeUrl, authorizeUrl);
             this.openBrowserFn(authorizeUrl);
 
-            // Simple manual token/code input fallback (when redirect fails and xAI page shows a code)
-            if (process.stdin.isTTY) {
-              const rl = readline.createInterface({ input: process.stdin });
+            // Manual code-paste fallback (xAI's page sometimes shows a code
+            // instead of redirecting to the loopback URI).
+            //
+            // CLI only. `isRaw` means another consumer already owns stdin —
+            // inside the TUI that is OpenTUI's key handler. Attaching a readline
+            // there stole every keystroke, and on the normal HTTP-callback path
+            // it was never closed, so the TUI kept receiving nothing: Esc did
+            // not dismiss the provider dialog and only restarting the session
+            // recovered it. The console.log pair also printed into the TUI's
+            // alternate screen. Both are correct for `keys login`, wrong here.
+            if (process.stdin.isTTY && !process.stdin.isRaw) {
+              manualPasteRl = readline.createInterface({ input: process.stdin });
               console.log('  If the xAI page shows a code ("Could not establish connection") instead of redirecting,');
               console.log("  copy the code and paste it here then press Enter:");
-              rl.on("line", (line: string) => {
+              manualPasteRl.on("line", (line: string) => {
                 const c = line.trim();
                 if (c.length > 30) {
-                  rl.close();
                   clearTimeout(loginTimeout);
                   resolve(c);
                 }
@@ -216,6 +241,9 @@ export class GrokOAuthProvider implements ProviderOAuth {
       throw new OAuthLoginError("xai", String(err));
     } finally {
       callbackServer?.close();
+      // Unconditional: the old code only closed this when the user actually
+      // pasted a code, so the normal HTTP-callback path left stdin captured.
+      manualPasteRl?.close();
     }
 
     if (receivedState && receivedState !== state) {

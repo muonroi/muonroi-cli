@@ -908,6 +908,19 @@ export function useAppLogic(props: AppLogicProps) {
         setApiKeyPrompt({ ...apiKeyPrompt, error: "Could not store key. Try `export <PROVIDER>_API_KEY=…`." });
         return;
       }
+      // Same reason as the OAuth path: boot skips a provider with no
+      // credentials, so without this the key is stored but the provider stays
+      // unusable until the next start.
+      try {
+        const { rewarmProviderFactory } = await import("../providers/warm.js");
+        await rewarmProviderFactory(apiKeyPrompt.provider);
+      } catch (err) {
+        console.error(
+          `[providers] ${apiKeyPrompt.provider} key stored but its factory could not be rebuilt; a restart may be needed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
       await refreshProvidersWithKey();
       setApiKeyPrompt(null);
     } catch (e) {
@@ -922,6 +935,9 @@ export function useAppLogic(props: AppLogicProps) {
   const [oauthProviders, setOAuthProviders] = useState<ReadonlySet<ProviderId>>(() => new Set());
   const [oauthLogin, setOAuthLogin] = useState<{ provider: ProviderId; error: string | null } | null>(null);
   const oauthCancelRef = useRef(false);
+  // Aborts the in-flight sign-in itself, not just the UI's interest in it —
+  // see cancelProviderOAuth.
+  const oauthAbortRef = useRef<AbortController | null>(null);
 
   // Populate the OAuth-capable provider set once, from the OAuth registry.
   useEffect(() => {
@@ -943,6 +959,11 @@ export function useAppLogic(props: AppLogicProps) {
   const startProviderOAuth = useCallback(
     async (provider: ProviderId) => {
       oauthCancelRef.current = false;
+      // Abort the PREVIOUS attempt's server before starting another: the
+      // browser flow binds a loopback callback on a two-port set, so a
+      // still-running one would make this attempt fail to bind.
+      oauthAbortRef.current?.abort();
+      oauthAbortRef.current = new AbortController();
       setOAuthLogin({ provider, error: null });
       try {
         const { getOAuthProviderConfig } = await import("../providers/auth/registry.js");
@@ -951,7 +972,7 @@ export function useAppLogic(props: AppLogicProps) {
           setOAuthLogin({ provider, error: "OAuth is not available for this provider." });
           return;
         }
-        const tokens = await cfg.provider.login({});
+        const tokens = await cfg.provider.login({ signal: oauthAbortRef.current?.signal });
         if (oauthCancelRef.current) return;
         const { saveTokens } = await import("../providers/auth/token-store.js");
         await saveTokens(provider, tokens);
@@ -960,8 +981,25 @@ export function useAppLogic(props: AppLogicProps) {
           const { clearEnvVar } = await import("../providers/env-store.js");
           const { ENV_BY_PROVIDER } = await import("../providers/keychain.js");
           clearEnvVar(ENV_BY_PROVIDER[provider]);
-        } catch {
-          /* best-effort */
+        } catch (err) {
+          console.error(
+            `[providers] could not clear the stored ${provider} key after OAuth login: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        // The factory bakes in the auth it saw when it was built, so the tokens
+        // we just saved reach nothing until it is rebuilt — that is why signing
+        // in only took effect after restarting the session.
+        try {
+          const { rewarmProviderFactory } = await import("../providers/warm.js");
+          await rewarmProviderFactory(provider);
+        } catch (err) {
+          console.error(
+            `[providers] ${provider} signed in but its factory could not be rebuilt; a restart may be needed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
         }
         await refreshProvidersWithKey();
         setOAuthLogin(null);
@@ -975,6 +1013,12 @@ export function useAppLogic(props: AppLogicProps) {
 
   const cancelProviderOAuth = useCallback(() => {
     oauthCancelRef.current = true;
+    // Esc used to close the card and leave the sign-in running: its loopback
+    // server kept port 1455/1457 for the full 5-minute callback timeout, so the
+    // next attempt could not bind and only restarting the CLI recovered it.
+    // Abort ends the flow, which closes the server and frees the port now.
+    oauthAbortRef.current?.abort();
+    oauthAbortRef.current = null;
     setOAuthLogin(null);
   }, []);
 
