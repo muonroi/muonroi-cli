@@ -9,6 +9,7 @@ import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clearLastSurfacedMatches, getDefaultEEClient, getLastSurfacedMatches } from "../ee/intercept.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
+import { type CompactProgress, stageProgress } from "../flow/compaction/progress.js";
 import { writeScaffoldCheckpoint } from "../flow/scaffold-checkpoint.js";
 import { appendCrashLog, setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
@@ -1085,6 +1086,8 @@ export function useAppLogic(props: AppLogicProps) {
   // Peek toggle (ctrl+e) for the todo panel while it auto-collapses during a
   // council debate. Default collapsed; expands back to the full panel on demand.
   const [councilTodoExpanded, setCouncilTodoExpanded] = useState(false);
+  // Non-null only while a /compact is in flight; drives CompactProgressCard.
+  const [compactRun, setCompactRun] = useState<{ progress: CompactProgress; startedAt: number } | null>(null);
   const [councilInfoCards, setCouncilInfoCards] = useState<CouncilInfoCard[]>([]);
   // P3 — council metadata for the context rail (leader/panel/budget/research/
   // cost), upsert-merged from incremental council_meta patches.
@@ -4212,15 +4215,11 @@ export function useAppLogic(props: AppLogicProps) {
               const match = result.match(/Instructions:\s*(.+)/);
               const instructions = match ? match[1].trim() : "";
               const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
+              const startedAt = Date.now();
+              setCompactRun({ progress: stageProgress("artifacts"), startedAt });
               try {
-                const cr = await deliberateCompact(
-                  flowDir,
-                  agent.getMessages(),
-                  "",
-                  4096,
-                  agent.getProvider(),
-                  model,
-                  instructions,
+                const cr = await deliberateCompact(flowDir, agent.getMessages(), "", 4096, model, instructions, (p) =>
+                  setCompactRun((prev) => (prev ? { ...prev, progress: p } : prev)),
                 );
                 const sessionId = agent.getSessionId();
                 if (sessionId) {
@@ -4238,6 +4237,8 @@ export function useAppLogic(props: AppLogicProps) {
                 ]);
               } catch (e: unknown) {
                 setMessages((prev) => [...prev, buildAssistantEntry(`Compaction failed: ${e}`)]);
+              } finally {
+                setCompactRun(null);
               }
               return;
             }
@@ -5029,15 +5030,11 @@ export function useAppLogic(props: AppLogicProps) {
                 const match = result.match(/Instructions:\s*(.+)/);
                 const instructions = match ? match[1].trim() : "";
                 const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
+                const startedAt = Date.now();
+                setCompactRun({ progress: stageProgress("artifacts"), startedAt });
                 try {
-                  const cr = await deliberateCompact(
-                    flowDir,
-                    agent.getMessages(),
-                    "",
-                    4096,
-                    agent.getProvider(),
-                    model,
-                    instructions,
+                  const cr = await deliberateCompact(flowDir, agent.getMessages(), "", 4096, model, instructions, (p) =>
+                    setCompactRun((prev) => (prev ? { ...prev, progress: p } : prev)),
                   );
                   const sessionId = agent.getSessionId();
                   if (sessionId) {
@@ -5055,6 +5052,8 @@ export function useAppLogic(props: AppLogicProps) {
                   ]);
                 } catch (e: unknown) {
                   setMessages((prev) => [...prev, buildAssistantEntry(`Compaction failed: ${e}`)]);
+                } finally {
+                  setCompactRun(null);
                 }
                 return;
               }
@@ -7415,6 +7414,7 @@ export function useAppLogic(props: AppLogicProps) {
     councilMessages,
     councilTranscriptExpanded,
     councilTodoExpanded,
+    compactRun,
     councilPhases,
     councilPlaceholders,
     councilProgress,

@@ -93,6 +93,7 @@ import { ProductStatusCard } from "./cards/product-status-card.js";
 import { BtwOverlay, type BtwState } from "./components/btw-overlay.js";
 import { makePairKey, usePairSideMap } from "./components/bubble-layout.js";
 import { ContextRail, type ContextRailRow } from "./components/context-rail.js";
+import { CompactProgressCard } from "./components/compact-progress-card.js";
 import { CopyFlashBanner } from "./components/copy-flash-banner.js";
 import { CouncilDebatePill } from "./components/council-debate-pill.js";
 import { CouncilInfoCardView } from "./components/council-info-card.js";
@@ -612,6 +613,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     councilProgress,
     councilStatuses,
     councilTodoExpanded,
+    compactRun,
     defaultProvider,
     disabledModels,
     disabledProviders,
@@ -986,6 +988,9 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         ),
                       )}
                     {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
+                    {compactRun && (
+                      <CompactProgressCard t={t} progress={compactRun.progress} startedAt={compactRun.startedAt} />
+                    )}
                     {/* Council metadata cards render here INLINE only when the
                       rail is off; when the rail is on they are hoisted into it
                       (see the <ContextRail> below) so they stop pushing the live
