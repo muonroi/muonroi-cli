@@ -18,7 +18,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { installMockModel, textOnlyStream } from "../../agent-harness/mock-model.js";
 import { loadCatalog } from "../../models/registry.js";
 import { closeDatabase, getDatabase } from "../../storage/db.js";
-import { appendMessages } from "../../storage/transcript.js";
+import { appendMessages, buildChatEntries } from "../../storage/transcript.js";
 import { Agent } from "../orchestrator.js";
 
 // A single 50 KB intermediate tool result — the "clutter" a read-heavy turn (13
@@ -50,10 +50,13 @@ vi.mock("../message-processor.js", () => ({
       this.deps.reportTurnToolLoad?.(reportedLoad);
       const childId = this.deps.session?.id;
       if (childId) {
-        // The heavy tool clutter is persisted to the CHILD (isolated) session.
+        // The real MessageProcessor persists to whatever session is running —
+        // during a fork that is the CHILD. So the heavy tool clutter AND the
+        // final answer both land here; only the answer is absorbed to the parent.
         appendMessages(childId, [
           { role: "assistant", content: "intermediate analysis step" },
           { role: "tool", content: CLUTTER },
+          { role: "assistant", content: FINAL_OUTCOME },
         ] as never);
       }
       // In-memory working set the salvage step reads: clutter + final outcome.
@@ -155,6 +158,39 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
     console.log(
       `[measured] parentBytes=${parentBytes} childHasClutter=${childText.includes("CLUTTER_")} childKind=${child.kind}`,
     );
+  });
+
+  it("renders the absorbed answer ONCE — the child's copy of it is not a second entry", async () => {
+    // Absorption persists the child's final answer into the parent too, so the
+    // text exists in both sessions. The chain-aware transcript render must not
+    // show it twice.
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId()!;
+    for await (const _ of agent.processMessage("review toàn bộ src/council")) {
+      // drain
+    }
+
+    const db = getDatabase();
+    const childId = (db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").get(parentId) as { id: string })
+      .id;
+
+    // Precondition: the text really is persisted in BOTH sessions.
+    const persistedIn = (sid: string) =>
+      (db.prepare("SELECT message_json FROM messages WHERE session_id = ?").all(sid) as Array<{ message_json: string }>)
+        .map((r) => r.message_json)
+        .filter((j) => j.includes(FINAL_OUTCOME)).length;
+    expect(persistedIn(parentId)).toBe(1);
+    expect(persistedIn(childId)).toBe(1);
+
+    const entries = buildChatEntries(parentId);
+    const answers = entries.filter((e) => e.type === "assistant" && e.content.includes(FINAL_OUTCOME));
+    expect(answers).toHaveLength(1);
+
+    // The child's OTHER assistant work is untouched — only the absorbed message
+    // is dropped, not the whole child transcript.
+    expect(entries.some((e) => e.type === "assistant" && e.content === "intermediate analysis step")).toBe(true);
   });
 
   it("DIRECT_ANSWER runs in the parent — no child session created (baseline)", async () => {

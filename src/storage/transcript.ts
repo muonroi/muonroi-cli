@@ -743,13 +743,20 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
     logger.error("storage", "Failed to load session metadata for chain in buildChatEntries", { error: err });
   }
 
+  // One read per session in the chain — the prompt/answer reconciliation below
+  // and the render walk both need every session's records.
+  const recordsBySession = new Map<string, EffectiveMessageRecord[]>();
+  for (const sid of chain) {
+    recordsBySession.set(sid, buildEffectiveMessageRecords(sid));
+  }
+
   // Map each child sub-session's initial user prompt to its creation timestamp
   const childPrompts = new Map<string, Date>();
   for (let i = 1; i < chain.length; i++) {
     const sid = chain[i];
     const meta = sessionMeta.get(sid);
     if (meta && meta.parent_session_id) {
-      const records = buildEffectiveMessageRecords(sid);
+      const records = recordsBySession.get(sid) ?? [];
       const firstUser = records.find((r) => r.message.role === "user");
       if (firstUser) {
         const content = renderUserContent(firstUser.message.content);
@@ -760,6 +767,26 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
     }
   }
 
+  // When a sub-session finishes, the orchestrator absorbs its LAST assistant
+  // message into the PARENT (salvageSubSessionOutput + appendCompletedTurn,
+  // orchestrator.ts) so the parent keeps context continuity. That content is
+  // therefore persisted in BOTH sessions, and the chain walk below would render
+  // the final answer twice. Keep the parent's copy — it sits in the timeline
+  // where the user actually asked — and drop the child's, mirroring how the
+  // child's duplicated user prompt is handled above.
+  const absorbedByChild = new Map<string, string>();
+  for (let i = 1; i < chain.length; i++) {
+    const sid = chain[i];
+    const parentId = sessionMeta.get(sid)?.parent_session_id;
+    if (!parentId) continue;
+    const parentRecords = recordsBySession.get(parentId);
+    if (!parentRecords) continue;
+    const text = lastAssistantText(recordsBySession.get(sid) ?? []);
+    if (text && parentRecords.some((r) => r.message.role === "assistant" && assistantText(r.message) === text)) {
+      absorbedByChild.set(sid, text);
+    }
+  }
+
   const callMap = new Map<string, ToolCall>();
   const entries: ChatEntry[] = [];
   const renderedResponseCallIds = new Set<string>();
@@ -767,8 +794,11 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
 
   for (let i = 0; i < chain.length; i++) {
     const sid = chain[i];
-    const records = buildEffectiveMessageRecords(sid);
+    const records = recordsBySession.get(sid) ?? [];
     const isChildSession = i > 0;
+    // Only the single message the parent absorbed is dropped, so a child that
+    // legitimately repeats itself still renders its other turns.
+    let absorbedPending = absorbedByChild.get(sid);
 
     for (let j = 0; j < records.length; j++) {
       const { message, timestamp } = records[j];
@@ -805,8 +835,15 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
       }
 
       if (message.role === "assistant") {
+        // Call first regardless: it registers this message's tool-calls in
+        // callMap, which the tool-result branch below needs even when the
+        // message itself is skipped as an absorbed duplicate.
         const text = renderAssistantContent(message.content, callMap);
         if (text) {
+          if (absorbedPending !== undefined && text === absorbedPending) {
+            absorbedPending = undefined;
+            continue;
+          }
           entries.push({ type: "assistant", content: text, timestamp });
         }
         continue;
@@ -892,6 +929,24 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
 
   logger.debug("storage", "Built chat entries successfully", { sessionId, count: entries.length });
   return entries;
+}
+
+/** Rendered text of an assistant message, with no callMap side effect. */
+function assistantText(message: ModelMessage): string {
+  return renderAssistantContent(message.content, new Map<string, ToolCall>());
+}
+
+/**
+ * Text of the session's LAST assistant message — the one the sub-session
+ * absorption path hands to the parent. Empty when that message carried only
+ * tool-calls (nothing renders, so nothing can duplicate).
+ */
+function lastAssistantText(records: EffectiveMessageRecord[]): string {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const message = records[i].message;
+    if (message.role === "assistant") return assistantText(message);
+  }
+  return "";
 }
 
 function getNextSequence(db: ReturnType<typeof getDatabase>, sessionId: string): number {
