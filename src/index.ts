@@ -1057,7 +1057,7 @@ program
     }
 
     // First run with no credentials does NOT block: boot straight into the TUI.
-    // The in-chat provider picker (/providers, /login) handles auth on demand.
+    // The in-chat provider picker (/providers) handles auth on demand.
     // Headless (`--prompt`/`--verify`) with no key still fails via requireApiKey.
     const isInteractive = !options.prompt && !options.verify && process.stdin.isTTY;
 

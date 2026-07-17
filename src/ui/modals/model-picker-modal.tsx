@@ -245,7 +245,7 @@ export function ModelPickerModal({
                   const fg = focused ? t.accent : enabled ? t.text : t.textMuted;
                   const starFg = isDefault ? t.primary : t.textDim;
                   const canOAuth = oauthSet.has(p);
-                  const suffix = !hasKey ? (canOAuth ? "  (O sign in · K key)" : "  (no key — press K)") : "";
+                  const suffix = !hasKey ? (canOAuth ? "  (Enter sign in · K key)" : "  (no key — press K)") : "";
                   return (
                     <Semantic
                       key={p}

@@ -1332,7 +1332,7 @@ export function useAppLogic(props: AppLogicProps) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: sessionId + messages.length are intentional recompute signals (getSessionTree reads the current session internally)
   const sessionTree = useMemo(() => agent.getSessionTree(), [agent, sessionId, messages.length]);
   // Boot straight to chat: no forced API-key modal on start. Auth is on-demand
-  // via the provider picker (opens on a no-auth send, or via /providers /login).
+  // via the provider picker (opens on a no-auth send, or via /providers).
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const [showSlashMenu, setShowSlashMenu] = useState(false);
@@ -4927,7 +4927,6 @@ export function useAppLogic(props: AppLogicProps) {
           break;
         case "providers":
         case "models":
-        case "login":
           setShowModelPicker(true);
           setModelPickerIndex(0);
           setModelSearchQuery("");
@@ -6684,7 +6683,14 @@ export function useAppLogic(props: AppLogicProps) {
         }
         if (key.name === "d" || key.name === "return") {
           const p = configuredProviders[providerChipIndex];
-          if (p && providersWithKey.has(p)) setAsDefaultProvider(p);
+          if (!p) return;
+          // Enter means "use this provider". With credentials that means making
+          // it the default; with none it means signing in, which is the only
+          // useful thing left to do on the row (Enter was a dead key there).
+          // /login is gone, so this picker is the single auth surface: K adds a
+          // key, Enter signs in via OAuth where the provider supports it.
+          if (providersWithKey.has(p)) setAsDefaultProvider(p);
+          else if (oauthProviders.has(p)) void startProviderOAuth(p);
           return;
         }
         return;
