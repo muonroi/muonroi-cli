@@ -1327,7 +1327,7 @@ export class MessageProcessor {
       ),
       turnModelId,
     );
-    const runtime = resolveModelRuntime(provider, turnModelId);
+    const runtime = resolveModelRuntime(turnModelId);
     const modelInfo = runtime.modelInfo;
 
     // SAMR: Step-Aware Model Routing — downgrade to fast model for tool-execution
@@ -1361,7 +1361,7 @@ export class MessageProcessor {
     const stepRouterDecision = decideStepRouting(turnModelId, deps.providerId, stepRouterCfg);
     const stepRouterPhase: "phase1" | "phase2" | "done" = stepRouterDecision.phase2ModelId ? "phase1" : "done";
     const phase2Runtime = stepRouterDecision.phase2ModelId
-      ? resolveModelRuntime(provider, stepRouterDecision.phase2ModelId)
+      ? resolveModelRuntime(stepRouterDecision.phase2ModelId)
       : null;
     if (stepRouterDecision.phase2ModelId && _debugOn) {
       _debugSteps.push({

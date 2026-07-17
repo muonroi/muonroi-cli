@@ -71,6 +71,12 @@ const ALLOWED_FIELDS: Partial<Record<EventKind, Record<string, FieldSpec>>> = {
     status: "pass",
     round: "pass",
     correlationId: "pass",
+    // Liveness counters. Plain magnitudes (like elapsedMs / charCount above) —
+    // no prompt or response content — and without them a harness consumer
+    // cannot tell a slow reasoning call from a hung one, because `elapsedMs`
+    // alone freezes whenever the tick generator stops being pulled.
+    streamedChars: "pass",
+    lastDeltaAgeMs: "pass",
     elapsedMs: "pass",
   },
   "council-turn-length": {

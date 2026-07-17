@@ -1,7 +1,6 @@
 import { generateText, type ModelMessage } from "ai";
 import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
-import type { ProviderFactory as LegacyProvider } from "../providers/runtime.js";
 import { requireRuntimeProvider, resolveModelRuntime, resolveTemperatureParam } from "../providers/runtime.js";
 import { logger } from "../utils/logger.js";
 import { COMPACT_PROPOSER_SYSTEM_PROMPT } from "./compaction-proposer-prompt.js";
@@ -32,13 +31,12 @@ export interface CompactionProposal {
  * Returns null if the proposer call fails (caller should fall back gracefully).
  */
 export async function proposeCompaction(
-  provider: LegacyProvider,
   modelId: string,
   messages: ModelMessage[],
   signal?: AbortSignal,
 ): Promise<CompactionProposal | null> {
   try {
-    const runtime = resolveModelRuntime(provider, modelId);
+    const runtime = resolveModelRuntime(modelId);
     const compactCaps = getProviderCapabilities(requireRuntimeProvider(runtime));
     const serialized = serializeConversation(messages);
 
@@ -616,7 +614,6 @@ function readUsage(usage: unknown): CompactionUsage {
 }
 
 async function summarizeConversation(
-  provider: LegacyProvider,
   modelId: string,
   messages: ModelMessage[],
   reserveTokens: number,
@@ -647,7 +644,7 @@ async function summarizeConversation(
     promptParts.push(`Additional focus: ${customInstructions.trim()}`);
   }
 
-  const runtime = resolveModelRuntime(provider, modelId);
+  const runtime = resolveModelRuntime(modelId);
   const compactCaps = getProviderCapabilities(requireRuntimeProvider(runtime));
   const result = await generateText({
     model: runtime.model,
@@ -675,7 +672,6 @@ function addUsage(a: CompactionUsage, b: CompactionUsage): CompactionUsage {
 }
 
 export async function generateCompactionSummary(
-  provider: LegacyProvider,
   modelId: string,
   preparation: PreparedCompaction,
   customInstructions?: string,
@@ -687,7 +683,6 @@ export async function generateCompactionSummary(
     const [historyResult, prefixResult] = await Promise.all([
       messagesToSummarize.length > 0
         ? summarizeConversation(
-            provider,
             modelId,
             messagesToSummarize,
             settings.reserveTokens,
@@ -698,7 +693,6 @@ export async function generateCompactionSummary(
           )
         : Promise.resolve<CompactionSummaryResult>({ summary: previousSummary?.trim() || "", usage: emptyUsage() }),
       summarizeConversation(
-        provider,
         modelId,
         turnPrefixMessages,
         settings.reserveTokens,
@@ -717,7 +711,6 @@ export async function generateCompactionSummary(
   }
 
   return summarizeConversation(
-    provider,
     modelId,
     messagesToSummarize,
     settings.reserveTokens,

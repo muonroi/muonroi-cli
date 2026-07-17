@@ -89,6 +89,85 @@ export function appendCrashLog(label: string, msg: string): void {
   }
 }
 
+/**
+ * Arm the event-loop freeze diagnostics for this TUI session.
+ *
+ * Every existing hang guard in this codebase (provider stall watchdog, turn
+ * watchdog) is driven by a timer, so all of them are blind to a blocked event
+ * loop — a timer cannot fire while the JS thread is stuck. Measured live
+ * 2026-07-16 (session 90c3ff533826): the TUI froze 304.5s, input replayed on
+ * recovery, and the 120s stall watchdog only rescued the turn 6.7s AFTER the
+ * loop came back. This closes that blind spot: the monitor reports the block
+ * once the loop frees up, and — when armed — the CPU profiler supplies the
+ * stack captured DURING it.
+ *
+ * Best-effort: never let diagnostics break the CLI.
+ */
+async function startFreezeDiagnostics(): Promise<void> {
+  try {
+    const { getLoopBlockThresholdMs, isLoopProfileEnabled } = await import("./utils/settings.js");
+    const { startEventLoopMonitor } = await import("./utils/event-loop-monitor.js");
+    const { logger } = await import("./utils/logger.js");
+
+    const thresholdMs = getLoopBlockThresholdMs();
+    if (thresholdMs <= 0) return;
+
+    const profiler = isLoopProfileEnabled()
+      ? await (await import("./utils/loop-profiler.js")).createLoopProfiler()
+      : null;
+
+    if (profiler) {
+      // Bound segment size. Loop-driven ON PURPOSE: it cannot rotate during a
+      // block, so the segment covering a freeze survives to be captured.
+      const rotateTimer = setInterval(() => profiler.rotate(), 30_000);
+      (rotateTimer as unknown as { unref?: () => void }).unref?.();
+    }
+
+    logger.info("cli", `[freeze] diagnostics armed (threshold ${thresholdMs}ms)`, {
+      thresholdMs,
+      profiler: profiler ? "on" : "off",
+    });
+
+    startEventLoopMonitor({
+      thresholdMs,
+      onBlock: (block) => {
+        logger.warn(
+          "cli",
+          `[freeze] event loop blocked for ${block.blockedMs}ms — UI was frozen and no timer could fire`,
+          {
+            blockedMs: block.blockedMs,
+            breadcrumb: block.breadcrumb,
+            detectedAt: block.detectedAt,
+            profiler: profiler ? "armed" : "off (set MUONROI_LOOP_PROFILE=1 for the culprit stack)",
+          },
+        );
+        if (!profiler) return;
+        void profiler
+          .capture(block.breadcrumb ?? "unknown")
+          .then((res) => {
+            if (res) {
+              // The leaf is usually a native primitive (`now`, a regex step) —
+              // true but useless as a headline. Lead with the first frame that
+              // has a file:line, i.e. OUR code.
+              const suspect = res.hotStack.find((f) => !f.endsWith("(native)")) ?? res.hotStack[0];
+              logger.warn("cli", `[freeze] blocked in: ${suspect ?? "(unattributed)"}`, {
+                hotStack: res.hotStack,
+                file: res.file,
+                blockedMs: block.blockedMs,
+              });
+            }
+          })
+          .catch((err) => {
+            logger.error("cli", `[freeze] profile capture failed: ${(err as Error)?.message}`, { error: err });
+          });
+      },
+    });
+  } catch (err) {
+    // Diagnostics must never take the CLI down with them.
+    appendCrashLog("FREEZE_DIAG", err instanceof Error ? (err.stack ?? err.message) : String(err));
+  }
+}
+
 process.on("uncaughtException", (err) => {
   appendCrashLog("UNCAUGHT", err.stack || err.message);
   console.error("Fatal:", err.message);
@@ -264,6 +343,15 @@ async function startInteractive(
   const { loadMcpServers } = await import("./utils/settings.js");
   await warmMcpClients(loadMcpServers(), !session);
 
+  // Register a factory for every credentialed provider, not just the session's.
+  // A model resolved for another provider (compaction, classify, a sub-agent,
+  // a mode-specific model) can then be routed to ITS OWN endpoint instead of
+  // being POSTed to the session provider's — the 404 in session 0c6728ba1a25
+  // (`gpt-5.4` → api.x.ai) existed only because the openai factory this
+  // redirect needs had never been built. Best-effort: never blocks boot.
+  const { warmProviderFactories } = await import("./providers/warm.js");
+  await warmProviderFactories();
+
   const agent = new Agent(apiKey, baseURL, model, maxToolRounds, {
     session,
     batchApi,
@@ -314,6 +402,11 @@ async function startInteractive(
   // process.exit(1) (see the unhandledRejection handler above). Cleared in
   // restoreTerminalSync() the moment we begin tearing the terminal back down.
   setTuiActive(true);
+
+  // Armed only once the TUI owns the terminal: this hunts a freeze of the
+  // interactive session, and the logger only routes to debug.log (instead of
+  // stdout, which would corrupt the framebuffer) once the TUI is active.
+  await startFreezeDiagnostics();
 
   // Deliberate debug-console toggle. With openConsoleOnError:false the overlay
   // never auto-pops, so F12 is the ONLY way in — and, crucially, back out:

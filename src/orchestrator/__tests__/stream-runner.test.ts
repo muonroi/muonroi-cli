@@ -7,18 +7,23 @@
 
 import type { ModelMessage } from "ai";
 import { beforeAll, describe, expect, it } from "vitest";
-import { getTestModelForProvider, getTestModels, getTestProviders } from "../../__test-helpers__/catalog-fixtures.js";
+import {
+  getTestModelForProvider,
+  getTestModels,
+  getTestProviders,
+  registerTestProviderFactories,
+} from "../../__test-helpers__/catalog-fixtures.js";
 import { loadCatalog } from "../../models/registry.js";
 import { computePromptCacheKey, type ResolvedModelRuntime } from "../../providers/runtime.js";
 import type { BashTool } from "../../tools/bash";
 import type { TaskRequest, ToolResult } from "../../types/index";
-import type { LegacyProvider } from "../agent-options";
 import type { CrossTurnDedup } from "../cross-turn-dedup.js";
 import type { ReadPathBudget } from "../read-path-budget.js";
 import { StreamRunner, type StreamRunnerDeps } from "../stream-runner.js";
 
 beforeAll(async () => {
   await loadCatalog();
+  registerTestProviderFactories();
 });
 
 function makeBashStub(): BashTool {
@@ -33,7 +38,6 @@ function makeDeps(overrides: Partial<StreamRunnerDeps> = {}): StreamRunnerDeps {
   const testModels = getTestModels();
   const testProviders = getTestProviders();
   return {
-    getProvider: () => (() => null) as unknown as LegacyProvider,
     resolveModelForTask: () => testModels.fast,
     getModelId: () => testModels.fast,
     getProviderId: () => testProviders.default as "anthropic",
@@ -163,7 +167,6 @@ describe("StreamRunner — DI surface", () => {
     };
     // Every callback throws — instantiation must not call any of them.
     const runner = new StreamRunner({
-      getProvider: trip as unknown as () => LegacyProvider,
       resolveModelForTask: trip as unknown as () => string,
       getModelId: trip as unknown as () => string,
       getProviderId: trip as unknown as () => "anthropic",

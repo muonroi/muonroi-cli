@@ -19,7 +19,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { createDriver, type Driver } from "./driver.js";
-import { createEventTee } from "./event-tee.js";
+import { createEventTee, resolveEventLogPath } from "./event-tee.js";
 import type { LiveEvent, LiveFrame, VisualFrame } from "./protocol.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 
@@ -202,12 +202,23 @@ const FEATURES = [
   "snapshot_visual",
   "cell",
   "visual_quality",
+  "wait_for_event",
+  "event_log",
 ] as const;
 
-export function buildCapabilitiesPayload(): { protocol: string; features: readonly string[] } {
+export function buildCapabilitiesPayload(): {
+  protocol: string;
+  features: readonly string[];
+  /** Where LiveEvents are teed as JSONL, or null when the sink is disabled. */
+  eventLogPath: string | null;
+} {
   return {
     protocol: PROTOCOL_VERSION,
     features: FEATURES,
+    // A default-on sink nobody can locate is still opt-in. Reporting the
+    // resolved path here is what makes it discoverable without the caller
+    // reproducing the env/tmpdir/pid rule.
+    eventLogPath: resolveEventLogPath(process.env["MUONROI_HARNESS_EVENT_LOG"]),
   };
 }
 
@@ -286,7 +297,14 @@ export function registerReadTools(server: McpServer, getDriver: () => Driver | n
 
   server.registerTool(
     "tui.render_text",
-    { description: "ASCII debug render of the current frame.", inputSchema: {} },
+    {
+      // "debug render" undersold it: this is the primary way to see what is on
+      // screen right now — every node, modal and message in the semantic tree.
+      description:
+        "See the current screen as a semantic tree (every node, modal, message, and focus state). " +
+        "Use tui.render_visual instead for the literal characters a human reads.",
+      inputSchema: {},
+    },
     async () => {
       const d = getDriver();
       if (!d) return noDriver();
@@ -436,24 +454,54 @@ export function registerAsyncTools(server: McpServer, getDriver: () => Driver | 
   const waitConditionShape = {
     selector: z.string().max(500).optional(),
     idle: z.boolean().optional(),
+    event: z.string().max(64).optional(),
   };
+
+  /**
+   * Rebuild the driver's WaitArgs from validated MCP input.
+   *
+   * Built key-by-key rather than passed through, because the driver dispatches
+   * on `"selector" in args` BEFORE `"event" in args` — an explicitly-`undefined`
+   * `selector` key would still win that check and silently wait on nothing.
+   */
+  function toWaitArgs(c: { selector?: string; idle?: boolean; event?: string }): Record<string, unknown> {
+    if (typeof c.selector === "string") return { selector: c.selector };
+    if (typeof c.event === "string") return { event: c.event };
+    if (c.idle) return { idle: true };
+    return {};
+  }
 
   server.registerTool(
     "tui.wait_for",
     {
-      description: "Wait until a selector matches or the TUI is idle (or both for all=).",
+      description:
+        "Block until a selector matches, a LiveEvent of the given kind arrives, or the TUI is idle " +
+        "(all= requires every condition). Prefer this over polling: the wait resolves on the driver's " +
+        "own event stream, so a modal pause (event='askcard-open') or a sprint halt wakes it immediately.",
       inputSchema: {
         selector: z.string().max(500).optional(),
         idle: z.boolean().optional(),
+        // The driver has always supported an `event` condition (buildCheck in
+        // driver.ts); only this MCP schema withheld it, so external agents fell
+        // back to polling a DB that never records askcard-open at all.
+        event: z.string().max(64).optional(),
         all: z.array(z.object(waitConditionShape)).max(10).optional(),
-        timeoutMs: z.number().int().min(0).max(60_000).optional(),
+        // 10 min, matching the longest legitimate single wait (a council debate
+        // phase measured 119.5s, and an unattended /ideal sprint runs longer).
+        // At 60s a caller had to re-issue the wait repeatedly — polling wearing
+        // a wait_for costume.
+        timeoutMs: z.number().int().min(0).max(600_000).optional(),
       },
     },
     async (input) => {
       const d = getDriver();
       if (!d) return noDriver();
+      const args: Record<string, unknown> = input.all
+        ? { all: input.all.map(toWaitArgs) }
+        : toWaitArgs(input as { selector?: string; idle?: boolean; event?: string });
+      if (typeof input.timeoutMs === "number") args.timeoutMs = input.timeoutMs;
       try {
-        await d.wait_for(input as Parameters<typeof d.wait_for>[0]);
+        await d.wait_for(args as Parameters<typeof d.wait_for>[0]);
         return { content: [{ type: "text" as const, text: "ok" }] };
       } catch (e) {
         return {
@@ -483,7 +531,18 @@ export function registerAsyncTools(server: McpServer, getDriver: () => Driver | 
   server.registerTool(
     "tui.last_event",
     {
-      description: "Return the most recent event of the given kind (null if none).",
+      // Keyword-loaded on purpose: deferred-tool search matches this text, and
+      // the terse original ("Return the most recent event of the given kind")
+      // did not rank for "is the TUI waiting for input or hung" — the exact
+      // question it answers. An unfindable tool is an absent one.
+      description:
+        "Check what a live run is doing: is it waiting on a human (kind='askcard-open' — the " +
+        "modal/prompt/approval question), what stage it reached (kind='sprint-stage'), did it " +
+        "fail or hang (kind='sprint-halt' / 'toast'), how the council progressed " +
+        "(kind='council-step'). Returns the most recent event of that kind with its FULL payload " +
+        "(null if none) — including the complete askcard question text, which tui.query truncates. " +
+        "Use this instead of polling a database or log file: modal pauses write no DB row, so a " +
+        "poller cannot tell 'waiting for a human' from 'hung'. Pair with tui.wait_for to block.",
       // Full protocol event set (minus the idle sentinel) so an external agent can
       // observe lifecycle events — council/sprint/route/askcard, not just toasts.
       // The Driver accepts any kind; this enum is the MCP-boundary validation.
@@ -661,9 +720,10 @@ export function createMcpHarnessServer({ spawn }: { spawn: HarnessSpawn }): McpS
         sendType: (t: string) => sendLine(JSON.stringify({ op: "type", text: t })),
       });
 
-      // Optional JSONL event sink for external milestone watchers (null unless
-      // MUONROI_HARNESS_EVENT_LOG is set). Ephemeral kinds carry an at-emit
-      // visual snapshot so flash events aren't lost before an agent wakes.
+      // JSONL event sink for external milestone watchers — on by default, null
+      // only when MUONROI_HARNESS_EVENT_LOG explicitly disables it. Ephemeral
+      // kinds carry an at-emit visual snapshot so flash events aren't lost
+      // before an agent wakes. Path is reported by tui.capabilities.
       const eventTee = createEventTee(() => driver.render_visual(), process.env["MUONROI_HARNESS_EVENT_LOG"]);
 
       // onLine already delivers complete newline-stripped lines — no extra

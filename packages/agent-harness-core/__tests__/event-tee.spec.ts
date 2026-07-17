@@ -38,12 +38,22 @@ function readLines(): Array<Record<string, unknown>> {
 const toast: LiveEvent = { t: "event", kind: "toast", level: "error", text: "boom" } as LiveEvent;
 const askcard: LiveEvent = { t: "event", kind: "askcard-open" } as unknown as LiveEvent;
 
+/**
+ * These once asserted that unset/blank meant OFF. The sink is now on by
+ * default — an opt-in sink is one nobody opts into, and its absence made a
+ * 17-minute askcard pause look identical to a hang. Only an explicit disable
+ * value turns it off now; see event-log-default.spec.ts for the path rules.
+ */
 describe("createEventTee — disabled path", () => {
-  it("returns null when env is undefined", () => {
-    expect(createEventTee(() => "x", undefined)).toBeNull();
+  it("returns a sink when env is undefined (default-on)", () => {
+    expect(createEventTee(() => "x", undefined)).not.toBeNull();
   });
-  it("returns null when env is blank/whitespace", () => {
-    expect(createEventTee(() => "x", "   ")).toBeNull();
+  it("returns a sink when env is blank/whitespace (default-on)", () => {
+    expect(createEventTee(() => "x", "   ")).not.toBeNull();
+  });
+  it("returns null only when explicitly disabled", () => {
+    expect(createEventTee(() => "x", "0")).toBeNull();
+    expect(createEventTee(() => "x", "off")).toBeNull();
   });
 });
 

@@ -40,10 +40,10 @@ describe("model → provider detection", () => {
 
 describe("end-to-end: create factory + resolve runtime", () => {
   test("deepseek model resolves with catalog modelInfo populated", () => {
-    const pf = createProviderFactory("deepseek", {
+    createProviderFactory("deepseek", {
       apiKey: MOCK_KEY,
     });
-    const runtime = resolveModelRuntime(pf.factory, "deepseek-v4-flash");
+    const runtime = resolveModelRuntime("deepseek-v4-flash");
     expect(runtime.modelId).toBe("deepseek-v4-flash");
     expect(runtime.model).toBeDefined();
     expect(runtime.modelInfo?.provider).toBe("deepseek");
@@ -52,10 +52,10 @@ describe("end-to-end: create factory + resolve runtime", () => {
   });
 
   test("openai model not in catalog throws", () => {
-    const pf = createProviderFactory("openai", {
+    createProviderFactory("openai", {
       apiKey: MOCK_KEY,
     });
-    expect(() => resolveModelRuntime(pf.factory, "gpt-4o")).toThrow("not found in catalog");
+    expect(() => resolveModelRuntime("gpt-4o")).toThrow("not found in catalog");
   });
 
   // Anthropic-thinking and xai reasoning-effort behavior is covered by
@@ -63,8 +63,8 @@ describe("end-to-end: create factory + resolve runtime", () => {
   // those tests do not depend on catalog presence.
 
   test("ollama model not in catalog throws", () => {
-    const pf = createProviderFactory("ollama", {});
-    expect(() => resolveModelRuntime(pf.factory, "llama3")).toThrow("not found in catalog");
+    createProviderFactory("ollama", {});
+    expect(() => resolveModelRuntime("llama3")).toThrow("not found in catalog");
   });
 
   test("anthropic factory has responses method", () => {

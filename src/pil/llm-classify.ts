@@ -512,11 +512,7 @@ export function orderClassifyCandidates(args: {
   return candidates;
 }
 
-export function createLlmClassifier(
-  factory: ProviderFactory,
-  modelId: string,
-  classifyOpts?: CreateClassifierOptions,
-): LlmClassifyFn {
+export function createLlmClassifier(modelId: string, classifyOpts?: CreateClassifierOptions): LlmClassifyFn {
   return async function classify(prompt: string, opts?: LlmClassifyOptions): Promise<LlmClassifyResult | null> {
     const signal = opts?.signal;
     const recentTurns = opts?.recentTurns;
@@ -723,11 +719,13 @@ export function createLlmClassifier(
       const chainDeadline = Date.now() + CLASSIFY_TOTAL_BUDGET_MS;
       for (const cand of candidates) {
         if (chainDeadline - Date.now() < 750) break; // too little left → fail-open
-        const f = cand.providerId ? await resolveCrossProviderClassifyFactory(cand.providerId) : factory;
-        if (!f) continue;
+        // A cross-provider candidate's factory must exist in the registry before
+        // resolveModelRuntime can derive it — the session only ever warmed its
+        // own. A provider we cannot build (no key, no OAuth) simply drops out.
+        if (cand.providerId && !(await resolveCrossProviderClassifyFactory(cand.providerId))) continue;
         let runtime: ReturnType<typeof resolveModelRuntime>;
         try {
-          runtime = resolveModelRuntime(f, cand.modelId);
+          runtime = resolveModelRuntime(cand.modelId);
         } catch (e) {
           console.error(`[pil.llm-classify] resolveModelRuntime failed for ${cand.modelId}: ${(e as Error)?.message}`);
           continue;
@@ -774,7 +772,6 @@ const ROUTER_SYSTEM_PROMPT =
   "No other text, only the comma-separated line.";
 
 export async function classifySubSessionAction(
-  factory: ProviderFactory,
   modelId: string,
   prompt: string,
   contextInfo?: {
@@ -808,7 +805,7 @@ export async function classifySubSessionAction(
       : undefined;
     const classificationModelId = fastModel?.id ?? modelId;
 
-    const runtime = resolveModelRuntime(factory, classificationModelId);
+    const runtime = resolveModelRuntime(classificationModelId);
     const isReasoning = runtime.modelInfo?.reasoning === true;
     // Same flat safety-net ceiling as the main classifier (see CLASSIFY_TIMEOUT_MS).
     timer = setTimeout(() => controller.abort(), CLASSIFY_TIMEOUT_MS);
