@@ -59,16 +59,33 @@ export async function* selectTaskAwarePanel(opts: {
       prompt,
       maxTokens: 512,
     });
-  } catch {
+  } catch (err) {
+    // Fail-open: caller keeps its default roster. Log so a provider outage on
+    // the leader model is diagnosable instead of silently degrading panel
+    // selection to the prompt-blind roster. (No-Silent-Catch.)
+    console.error(
+      `[council/panel-select] leader panel selection call failed, keeping default roster: ${err instanceof Error ? err.message : String(err)}`,
+      { leaderModelId, poolSize: pool.length },
+    );
     return null;
   }
 
   const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) return null;
+  if (!match) {
+    console.error("[council/panel-select] leader returned no JSON object, keeping default roster", {
+      leaderModelId,
+      rawHead: raw.slice(0, 200),
+    });
+    return null;
+  }
   let parsed: { members?: Array<{ model?: unknown }> };
   try {
     parsed = JSON.parse(match[0]) as { members?: Array<{ model?: unknown }> };
-  } catch {
+  } catch (err) {
+    console.error(
+      `[council/panel-select] leader selection JSON parse failed, keeping default roster: ${err instanceof Error ? err.message : String(err)}`,
+      { leaderModelId, rawHead: match[0].slice(0, 200) },
+    );
     return null;
   }
 

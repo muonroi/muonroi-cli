@@ -27,7 +27,7 @@ The installers fetch a pre-compiled single binary from GitHub Releases.
 ## First run
 - Wizard appears automatically.
 - Lists supported providers (DeepSeek + SiliconFlow ready; others via BYOK).
-- Four credential options: paste key, Bitwarden sync (B in /providers), keys export/import (encrypted bundle), or skip for later.
+- Four credential options: paste key, Bitwarden sync (bw in /providers), keys export/import (encrypted bundle), or skip for later.
 - Keys land in OS keychain (keytar). Settings written to ~/.muonroi-cli/user-settings.json.
 - Role routing (leader/implement/verify/research) is configured for you.
 
@@ -58,10 +58,30 @@ Add to your MCP client config:
 
 The CLI's OWN inner agent exposes these as NATIVE in-process tools (no MCP self-spawn):
 - setup_guide (this document)
-- ee_query / ee_health / ee_feedback — Experience Engine semantic recall + compaction checkpoints + feedback for learning
+- ee_query / ee_health / ee_feedback / ee_write — Experience Engine semantic recall + compaction checkpoints + feedback for learning
 - usage_forensics <id-prefix> — per-session cost/token forensics (peak input, cache hits, anomalies)
 - lsp_query — goToDefinition, findReferences, hover, symbols, call hierarchy etc.
 - selfverify_* — Tier-1 heuristic + Tier-2 agentic self-QA harness runs (start/poll/result/cancel/list)
+
+## Experience Engine over MCP (other agents)
+
+The ee_* tools above are native to this CLI's agent. To give ANOTHER agent
+(Claude Code, Codex, Gemini CLI…) the same brain, install the engine and register
+its own MCP server — no muonroi-cli needed:
+
+    npm i -g @muonroi/experience-engine
+    claude mcp add experience-engine -- exp-mcp
+
+Or in any mcpServers config:
+
+{
+  "mcpServers": {
+    "experience-engine": { "command": "exp-mcp" }
+  }
+}
+
+The "muonroi-tools" server above deliberately does NOT serve ee_* — same brain,
+one implementation, reachable without installing a CLI you have no use for.
 
 For BB/.NET template recipes and package docs, also connect an external "muonroi-docs" MCP server if available (provides docs_search + setup_guide for the templates).
 

@@ -36,7 +36,7 @@ import { renderResumeDigest, writeSprintOutcome, writeSprintVerify } from "../fl
 import { isContextRailEnabled } from "../gsd/flags.js";
 import { SPRINT_EXECUTION_MARKER } from "../pil/layer6-output.js";
 import { detectProviderForModel } from "../providers/runtime.js";
-import { logUIInteraction } from "../storage/index.js";
+import { logInteraction, logUIInteraction } from "../storage/index.js";
 import type { StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
 import { commitToProduct, release } from "../usage/ledger.js";
 import { CapBreachError } from "../usage/types.js";
@@ -308,6 +308,71 @@ export async function* withImplIdleWatchdog(
  * suspended sub-agent promise may leak in the background, but the run recovers.
  * `totalMs <= 0` disables the guard (returns the task unchanged).
  */
+/**
+ * Extract why an isolated implementation task failed, from its ToolResult.
+ *
+ * `output` is checked because StreamRunner reports EVERY sub-agent failure
+ * there — "Task failed: …" (stream-runner.ts:1061), "[Cancelled]" (:982), a
+ * provider stall (:988), an unknown-agent message (:265) — and never assigns
+ * `error`; grep stream-runner.ts for `error:` and there are no hits. Reading
+ * `error` alone made `result.error?.trim()` permanently undefined, so every
+ * distinct failure collapsed into the contentless fallback and two /ideal runs
+ * halted 1s into implementation with the cause already erased.
+ *
+ * `error` still wins when a caller does populate it — ToolResult declares the
+ * field, so a future non-StreamRunner producer may be more specific.
+ */
+export function resolveImplFailureReason(result: { output?: string; error?: string }): string {
+  return result.error?.trim() || result.output?.trim() || "isolated implementation task failed";
+}
+
+/**
+ * Persist an implementation-stage failure to `interaction_logs`.
+ *
+ * The implementation stage is where /ideal either ships code or does not, so its
+ * exception is the single most valuable line in a post-mortem — yet run
+ * mrn9yfle9801 halted with only `halt_card_open {trigger:"loop_throw"}` on
+ * record and the message itself unrecoverable: stderr belongs to the TUI child
+ * (the harness never captures it) and the council path writes no `messages`
+ * rows. `elapsedMs` is what separates the two indistinguishable causes — an
+ * immediate `!result.success` from a `withIsolatedImplDeadline` watchdog trip.
+ *
+ * Never throws: a broken audit trail must not take down the sprint it is
+ * describing.
+ */
+export function logSprintImplError(
+  ctx: DriverContext,
+  info: {
+    sprintN: number;
+    message: string;
+    stack?: string;
+    implModelId?: string;
+    elapsedMs: number;
+    isolated: boolean;
+  },
+): void {
+  try {
+    logInteraction(ctx.sessionId ?? ctx.runId, "council", {
+      eventSubtype: "sprint_impl_error",
+      ...(info.implModelId ? { model: info.implModelId } : {}),
+      durationMs: info.elapsedMs,
+      data: {
+        runId: ctx.runId,
+        sprintN: info.sprintN,
+        isolated: info.isolated,
+        message: info.message.slice(0, 2000),
+        stack: info.stack,
+      },
+    });
+  } catch (err) {
+    console.error(
+      `[sprint-runner] failed to persist implementation error (sprint ${info.sprintN}): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
 export async function withIsolatedImplDeadline<T>(task: Promise<T>, totalMs: number, sprintN: number): Promise<T> {
   if (!(Number.isFinite(totalMs) && totalMs > 0)) return task;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -861,6 +926,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   }
 
   let implError: string | null = null;
+  let implErrorStack: string | undefined;
   if (ctx.processMessageFn && implPrompt.trim()) {
     const useIsolated = shouldUseIsolatedImpl(!!ctx.runIsolatedTask);
     try {
@@ -904,7 +970,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
           sprintN,
         );
         if (!result.success) {
-          implError = result.error?.trim() || "isolated implementation task failed";
+          implError = resolveImplFailureReason(result);
         } else if (result.output?.trim()) {
           yield { type: "content", content: `\n${result.output.trim()}\n` };
         }
@@ -918,8 +984,11 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       }
     } catch (e) {
       implError = e instanceof Error ? e.message : String(e);
+      implErrorStack = e instanceof Error ? e.stack?.split("\n").slice(0, 4).join(" | ") : undefined;
       // No-Silent-Catch: the finally below surfaces a phaseError chunk, but log
       // here too so the hang/failure is diagnosable from stderr / MUONROI logs.
+      // Persisting happens at the single convergence point below — a thrown
+      // error and a `!result.success` return must not log differently.
       console.error(`[sprint-runner] implementation stage failed (sprint ${sprintN}, run ${ctx.runId}): ${implError}`);
     } finally {
       // A3 FIX: phaseDone for implementation MUST always fire, even when
@@ -956,6 +1025,21 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     });
   }
   if (implError) {
+    // The ONE place both failure shapes converge. The catch above handles a
+    // thrown error; a `!result.success` return never reaches it and instead
+    // falls through to here — which is why persisting from inside the catch
+    // recorded nothing for the two runs that actually failed. This throw
+    // escapes to the UI's loop-level catch (use-app-logic.tsx), which renders
+    // the message but persists only {reason, trigger, sprintN} — no text. So
+    // this is the last point at which the reason still exists.
+    logSprintImplError(ctx, {
+      sprintN,
+      message: implError,
+      stack: implErrorStack,
+      implModelId: process.env.MUONROI_IDEAL_IMPL_MODEL?.trim() || ctx.sessionModelId,
+      elapsedMs: Date.now() - implStartedAt,
+      isolated: shouldUseIsolatedImpl(!!ctx.runIsolatedTask),
+    });
     throw new Error(implError);
   }
 

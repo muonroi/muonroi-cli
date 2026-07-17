@@ -29,11 +29,18 @@ describe("tools-mcp server smoke", () => {
       expect(names).toContain("selfverify_result");
       expect(names).toContain("selfverify_list");
       expect(names).toContain("selfverify_cancel");
-      expect(names).toContain("ee_query");
-      expect(names).toContain("ee_feedback");
-      expect(names).toContain("ee_health");
       expect(names).toContain("usage_forensics");
       expect(names).toContain("lsp_query");
+
+      // ee_* moved to experience-engine's own MCP server (`exp-mcp`): the brain
+      // is the product, and serving it to foreign agents should not require
+      // installing this CLI. Assert their ABSENCE so a re-registration here —
+      // which would resurrect two drifting copies of the same four tools — fails
+      // loudly instead of silently shadowing exp-mcp for anyone running both.
+      expect(names).not.toContain("ee_query");
+      expect(names).not.toContain("ee_feedback");
+      expect(names).not.toContain("ee_health");
+      expect(names).not.toContain("ee_write");
     } finally {
       await client.close();
     }

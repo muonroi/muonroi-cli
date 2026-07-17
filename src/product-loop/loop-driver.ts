@@ -42,20 +42,39 @@ import type { DriverContext, DriverResult, ProductSpec, ProductStatusCardData, S
 // both the leak and the risk of a double count here.
 
 /**
- * Best-effort interaction_logs writer for the loop-driver. Swallows failures
- * so a broken DB never blocks the FSM. `ctx.sessionId` falls back to runId
- * for legacy callers that don't pass a chat session id.
+ * Best-effort interaction_logs writer for the loop-driver. Logs and continues on
+ * failure so a broken DB never blocks the FSM. `ctx.sessionId` falls back to
+ * runId for legacy callers that don't pass a chat session id. `cols` carries
+ * fields that belong in real columns rather than metadata_json.
  */
-function logLoopEvent(ctx: DriverContext, subtype: string, data: Record<string, unknown>): void {
+function logLoopEvent(
+  ctx: DriverContext,
+  subtype: string,
+  data: Record<string, unknown>,
+  cols?: { model?: string; durationMs?: number },
+): void {
   try {
     const sid = ctx.sessionId ?? ctx.runId;
     // Stamp runId on every row so multi-run sessions can be demuxed during
     // forensics — previously only route_decision carried this field. Caller
     // overrides win if the payload already contained a runId.
     const enriched = "runId" in data ? data : { ...data, runId: ctx.runId };
-    logInteraction(sid, "council", { eventSubtype: subtype, data: enriched });
-  } catch {
-    /* non-critical — audit trail only */
+    // `cols` promotes fields out of metadata_json into real columns so they are
+    // aggregatable in SQL. Without it every council_message row landed with
+    // duration_ms NULL, leaving `debate_complete` (the whole debate) as the only
+    // timed row — an aggregate that cannot name which speaker was slow.
+    logInteraction(sid, "council", {
+      eventSubtype: subtype,
+      data: enriched,
+      ...(cols?.model ? { model: cols.model } : {}),
+      ...(typeof cols?.durationMs === "number" ? { durationMs: cols.durationMs } : {}),
+    });
+  } catch (err) {
+    // Audit trail only — never block the FSM. Logged so a broken DB surfaces
+    // instead of silently emptying the forensics table. (No-Silent-Catch.)
+    console.error(
+      `[loop-driver] logLoopEvent failed for subtype "${subtype}": ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 
@@ -718,21 +737,27 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
               // tables stay empty for the debate path).
               if (chunk.type === "council_message" && chunk.councilMessage) {
                 const cm = chunk.councilMessage;
-                logLoopEvent(ctx, "council_message", {
-                  phase: "research",
-                  kind: cm.kind,
-                  speakerRole: cm.speaker.role,
-                  speakerModel: cm.speaker.model,
-                  partnerRole: cm.partner?.role ?? null,
-                  round: cm.round ?? null,
-                  attempts: cm.attempts ?? 1,
-                  failureReason: cm.failureReason ?? null,
-                  toolCalls: cm.toolCalls?.map((tc) => tc.name) ?? [],
-                  // Cap at 4000 chars so a single row stays well under SQLite
-                  // text limits even for the most verbose speaker turn.
-                  textExcerpt: cm.text.slice(0, 4000),
-                  textLength: cm.text.length,
-                });
+                logLoopEvent(
+                  ctx,
+                  "council_message",
+                  {
+                    phase: "research",
+                    kind: cm.kind,
+                    speakerRole: cm.speaker.role,
+                    speakerModel: cm.speaker.model,
+                    partnerRole: cm.partner?.role ?? null,
+                    round: cm.round ?? null,
+                    attempts: cm.attempts ?? 1,
+                    failureReason: cm.failureReason ?? null,
+                    toolCalls: cm.toolCalls?.map((tc) => tc.name) ?? [],
+                    // Cap at 4000 chars so a single row stays well under SQLite
+                    // text limits even for the most verbose speaker turn.
+                    textExcerpt: cm.text.slice(0, 4000),
+                    textLength: cm.text.length,
+                    durationMs: cm.durationMs ?? null,
+                  },
+                  { model: cm.speaker.model, durationMs: cm.durationMs },
+                );
               }
               yield chunk;
             }

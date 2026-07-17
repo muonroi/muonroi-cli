@@ -98,6 +98,7 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
 
     const { createCouncilLLM } = await import("../llm.js");
@@ -139,6 +140,7 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
 
     const { createCouncilLLM } = await import("../llm.js");
@@ -177,6 +179,7 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
 
     const { createCouncilLLM } = await import("../llm.js");
@@ -208,6 +211,7 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
 
     const { createCouncilLLM } = await import("../llm.js");
@@ -270,6 +274,7 @@ describe("planDebate — forwards signal to the direct generateObject attempt", 
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
 
     const { planDebate } = await import("../debate-planner.js");

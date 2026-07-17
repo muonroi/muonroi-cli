@@ -42,8 +42,11 @@ export interface SlashMenuItem {
 export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   // ── Primary surface ────────────────────────────────────────────────────
   { id: "exit", label: "exit", description: "Quit the CLI" },
-  { id: "providers", label: "providers", description: "Manage providers + API keys (enable/disable, set default)" },
-  { id: "login", label: "login", description: "Sign in to a provider (OAuth) or add an API key" },
+  {
+    id: "providers",
+    label: "providers",
+    description: "Providers, keys and sign-in (K adds a key, Enter signs in with OAuth)",
+  },
   { id: "compact", label: "compact", description: "Compact conversation context" },
   { id: "clear", label: "clear", description: "Clear conversation and start fresh" },
   { id: "ideal", label: "ideal", description: "Product Ideal Loop — from idea to shipped product, autonomously" },
@@ -63,7 +66,12 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "verify", label: "verify", description: "Run local verification", hidden: true },
   { id: "update", label: "update", description: "Update muonroi-cli to the latest version", hidden: true },
   { id: "cost", label: "cost", description: "Show session cost breakdown", hidden: true },
-  { id: "ee", label: "ee", description: "Experience Engine status and controls", hidden: true },
+  {
+    id: "ee",
+    label: "ee",
+    description: "Experience Engine — connect a brain (/ee config <url> [token]), stats, search",
+    hidden: true,
+  },
   { id: "route", label: "route", description: "Show current model routing info", hidden: true },
   { id: "plan", label: "plan", description: "Show active GSD plan", hidden: true },
   { id: "execute", label: "execute", description: "Execute active GSD plan", hidden: true },

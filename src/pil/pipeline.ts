@@ -29,6 +29,7 @@ import { layer3EeInjection, surfaceCompactionArtifacts } from "./layer3-ee-injec
 import { layer4Gsd } from "./layer4-gsd.js";
 import { layer5Context } from "./layer5-context.js";
 import { isMetaAnalysisPrompt, isSprintPlanExecution, layer6Output } from "./layer6-output.js";
+import { getRepoStructureHints } from "./repo-structure-hints.js";
 import { PipelineContextSchema } from "./schema.js";
 import { injectSessionExperience, isSelfExperiencePrompt } from "./session-experience-injection.js";
 import { bumpSessionTurn } from "./session-state.js";
@@ -120,6 +121,7 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
     const sizeResult = scoreComplexitySize({
       rawText: ctx.raw,
       taskType: ctx.taskType ?? "general",
+      repoHints: getRepoStructureHints(process.cwd()),
     });
     ctx = {
       ...ctx,

@@ -17,6 +17,7 @@ import { logger } from "../../utils/logger.js";
 import { readArtifact, writeArtifact } from "../artifact-io.js";
 import { compressChat } from "./compress.js";
 import { extractDecisions } from "./extract.js";
+import { type CompactProgressFn, type CompactStage, stageProgress } from "./progress.js";
 
 /**
  * Anti-mù for the deliberate (/compact) path — parity with the auto/tool-loop
@@ -98,17 +99,41 @@ export async function deliberateCompact(
   messages: ModelMessage[],
   systemPrompt: string,
   tokenBudget: number,
-  provider?: unknown,
   modelId?: string,
   customInstructions?: string,
+  onProgress?: CompactProgressFn,
 ): Promise<CompactionResult> {
+  // Callers reach this through @ts-nocheck UI code, so an argument-order drift
+  // is invisible to tsc. It is NOT invisible at runtime: a non-string modelId
+  // makes resolveModelRuntime throw, compressChat catches it, and /compact
+  // silently degrades to truncation — which is how commit e2100fb7 shipped a
+  // broken /compact. Fail loudly instead of summarizing nothing.
+  if (modelId !== undefined && typeof modelId !== "string") {
+    throw new TypeError(
+      `deliberateCompact: modelId must be a model id string, got ${typeof modelId}. ` +
+        `Check the argument order at the call site.`,
+    );
+  }
+
+  const report = (stage: CompactStage, fraction?: number) => {
+    if (!onProgress) return;
+    try {
+      onProgress(stageProgress(stage, fraction));
+    } catch (err) {
+      // A broken progress sink must never fail the compaction it is reporting.
+      logger.error("orchestrator", "compact progress callback threw", { stage, message: (err as Error)?.message });
+    }
+  };
+
+  report("artifacts");
   // Anti-mù parity: persist every tool result to the artifact cache (+ EE)
   // BEFORE we summarize the history away, so the model can still rehydrate a
   // specific tool output via ee_query "tool-artifact id=<id>" after /compact.
   recordToolArtifactsForRehydrate(messages, flowDir);
 
   // Pass 1: Extract decisions/facts/constraints
-  const extracted = await extractDecisions(messages, provider, modelId, customInstructions);
+  report("extract");
+  const extracted = await extractDecisions(messages, modelId, customInstructions);
   const totalExtracted = extracted.decisions.length + extracted.facts.length + extracted.constraints.length;
 
   // Append to decisions.md
@@ -133,6 +158,7 @@ export async function deliberateCompact(
   }
 
   // Snapshot full chat to history/
+  report("snapshot");
   const historyDir = path.join(flowDir, "history");
   await fs.mkdir(historyDir, { recursive: true });
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -148,7 +174,11 @@ export async function deliberateCompact(
   const tokensBefore = estimateConversationTokens(systemPrompt, messages);
 
   // Pass 2: Compress
-  const compressed = await compressChat(messages, systemPrompt, tokenBudget, provider, modelId, customInstructions);
+  report("compress");
+  const compressed = await compressChat(messages, systemPrompt, tokenBudget, modelId, customInstructions, (f) =>
+    report("compress", f),
+  );
+  report("done");
 
   return {
     decisionsExtracted: totalExtracted,

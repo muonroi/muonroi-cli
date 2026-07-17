@@ -38,7 +38,14 @@ export interface ProviderOAuth {
    * Calls onUserCode with the human-readable code + verification URL so the
    * caller can display them to the user before polling.
    */
-  login(opts: { onUserCode?: (code: string, url: string) => void }): Promise<OAuthTokens>;
+  /**
+   * `signal` aborts an in-flight sign-in. Browser flows bind a loopback
+   * callback server on a fixed, tiny port set; without an abort the server
+   * outlives a cancelled sign-in for the full callback timeout and the next
+   * attempt cannot bind — which reads to the user as "OAuth is broken until I
+   * restart the CLI".
+   */
+  login(opts: { onUserCode?: (code: string, url: string) => void; signal?: AbortSignal }): Promise<OAuthTokens>;
 
   /**
    * Exchange a refresh token for new tokens.

@@ -215,6 +215,13 @@ export interface ToolGroup {
   items: ToolGroupItem[];
   startedAt: number;
   finishedAt?: number;
+  /**
+   * True when this group was rebuilt from a persisted transcript rather than
+   * observed live (see ui/utils/group-tool-entries.ts). Its timestamps come
+   * from entry write-time, so the elapsed span is NOT a real measurement and
+   * must not be displayed as one.
+   */
+  restored?: boolean;
   inputTokens?: number;
   outputTokens?: number;
 }
@@ -311,6 +318,17 @@ export interface CouncilStatusData {
   startedAt?: number;
   tokensIn?: number;
   tokensOut?: number;
+  /**
+   * Push-based stream liveness (additive, optional). `elapsedMs` alone cannot
+   * prove a council call is alive: the tick generator only advances when the
+   * CONSUMER pulls, so a round awaiting its pairs via Promise.all freezes it.
+   * These two come from the token stream itself — `streamedChars` counts text +
+   * reasoning deltas since the phase began, and `lastDeltaAgeMs` is the age of
+   * the most recent delta. Growing chars / small age = SLOW BUT ALIVE; static
+   * chars + growing age = genuinely STUCK.
+   */
+  streamedChars?: number;
+  lastDeltaAgeMs?: number;
   errorMessage?: string;
 }
 
@@ -496,6 +514,16 @@ export interface CouncilMessage {
   attempts?: number; // >1 → "recovered on retry" badge
   failureReason?: string; // present → render inline skipped line, not a bubble
   runId?: string; // reserved for future multi-session demux
+  /**
+   * Wall-clock of THIS speaker's LLM call, including retries.
+   *
+   * Without it the only timed council rows are `debate_complete` (the whole
+   * debate, measured at 87s..1128s) and `council_summary` — aggregates that
+   * cannot say WHICH model burned the time, so every latency diagnosis is
+   * guesswork. Persisted to `interaction_logs.duration_ms` alongside the
+   * `speakerModel` this row already carries, making the bottleneck queryable.
+   */
+  durationMs?: number;
 }
 
 export interface StreamChunk {

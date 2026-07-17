@@ -20,7 +20,10 @@ describe("scroll-lock E2E", () => {
   let ctx: Awaited<ReturnType<typeof spawnHarness>>;
 
   beforeAll(async () => {
-    ctx = await spawnHarness({ env: { MUONROI_SCROLL_LOCK: "1" } });
+    // MUONROI_HARNESS_SCROLL_GEOM exposes props.viewportH / scrollHeight /
+    // overflows / manualScroll on `id=log` — the only way to distinguish "the
+    // lock did not engage" from "there was nothing to scroll".
+    ctx = await spawnHarness({ env: { MUONROI_SCROLL_LOCK: "1", MUONROI_HARNESS_SCROLL_GEOM: "1" } });
     await ctx.driver.wait_for({ idle: true, timeoutMs: 30_000 });
     // Mount guard: idle can fire before React mounts (seq=0 empty frame race);
     // typing then drops the keys and `id=log` never appears. Same guard as
@@ -62,6 +65,14 @@ describe("scroll-lock E2E", () => {
       ctx.driver.press("Enter");
       await ctx.driver.wait_for({ idle: true, timeoutMs: 30_000 });
     }
+
+    // `idle` means the agent turn finished — NOT that the transcript has been
+    // laid out. Measured at the instant idle fired: scrollHeight 27 == viewportH
+    // 27, i.e. props.overflows false, so PageUp had nothing to scroll and the
+    // lock could never engage; the layout only caught up (scrollHeight 91 → 175)
+    // hundreds of ms later, long after the keys were gone. That is what made
+    // this spec fail. Wait for real overflow before scrolling.
+    await ctx.driver.wait_for({ selector: "id=log props.overflows=true", timeoutMs: 15_000 });
 
     // Scroll up: composer is empty, so PageUp drives the transcript. The
     // jump-to-latest pill renders only while locked, so waiting on its selector

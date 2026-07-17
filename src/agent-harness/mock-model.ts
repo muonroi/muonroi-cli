@@ -67,6 +67,16 @@ export interface MockModelFixture {
    */
   classify?: string;
   /**
+   * Milliseconds to wait before each streamed chunk. Default 0 (instant).
+   *
+   * A real provider takes seconds; the mock is instant, which makes anything
+   * that only exists WHILE a call is in flight — a progress card, a spinner —
+   * impossible to observe from a spec. Set this to hold the in-flight state open
+   * long enough to assert on it. Keep it small: it is wall-clock in every spec
+   * that sets it.
+   */
+  chunkDelayMs?: number;
+  /**
    * Opt in to the PIL-classifier intercept described on `classify`. When true,
    * a `doStream` call carrying the classifier's system prompt is answered with
    * `classify` (or DEFAULT_CLASSIFY_LINE) WITHOUT consuming a turn fixture.
@@ -154,6 +164,7 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
   // delivered to the classifier — intercepting would override their reply with
   // DEFAULT_CLASSIFY_LINE and make every classification collapse to "generate".
   const interceptClassify = fx.autoClassify === true || fx.classify !== undefined;
+  const chunkDelayMs = Math.max(0, fx.chunkDelayMs ?? 0);
 
   const model = new MockLanguageModelV3({
     provider,
@@ -188,8 +199,11 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
       return {
         stream: simulateReadableStream<LanguageModelV3StreamPart>({
           chunks,
-          initialDelayInMs: null,
-          chunkDelayInMs: null,
+          // Only the turn stream honours the delay — the classify intercept above
+          // fires on EVERY turn, so pacing it would tax specs that just want a
+          // slow answer.
+          initialDelayInMs: chunkDelayMs || null,
+          chunkDelayInMs: chunkDelayMs || null,
         }),
       };
     },

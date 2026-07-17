@@ -291,13 +291,13 @@ async function proposeModelCards(
  * exact ModelCard[] it wants shown — full control over questions, options,
  * option kinds, and cancel/adjust markers.
  */
-export function createModelClarificationProposer(providerFactory: any, modelId: string): ModelClarificationProposer {
+export function createModelClarificationProposer(modelId: string): ModelClarificationProposer {
   return async (input) => {
     // process.stderr.write(`[discovery] createModelClarificationProposer CALLED!\n`);
     try {
       const { resolveModelRuntime } = await import("../providers/runtime.js");
       const { generateText } = await import("ai");
-      const runtime = resolveModelRuntime(providerFactory, modelId);
+      const runtime = resolveModelRuntime(modelId);
       const contextStr = input.additionalContext
         ? `\nCurrent CLI enrichment / context (use this to decide what is already known):\n${input.additionalContext}`
         : "";

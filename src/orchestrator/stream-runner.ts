@@ -27,6 +27,7 @@
 //   - F1 (sub-agent cumulative cap)         — wrapToolSetWithCap
 //   - reasoning-strip (provider quirk)       — taskCaps.sanitizeHistory
 
+import { appendFileSync } from "node:fs";
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
 import { recordArtifact } from "../ee/artifact-cache.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
@@ -48,6 +49,7 @@ import { getVisionGuidanceForTextOnly } from "../providers/mcp-vision-bridge.js"
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
   buildTurnProviderOptions,
+  factoryForModel,
   type ResolvedModelRuntime,
   requireRuntimeProvider,
   resolveModelRuntime,
@@ -75,7 +77,6 @@ import {
 } from "../utils/settings";
 import { resolveShell } from "../utils/shell.js";
 import { prepareVerifySandbox } from "../verify/entrypoint";
-import type { LegacyProvider } from "./agent-options";
 import { asNumber } from "./batch-utils";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
@@ -111,8 +112,6 @@ import { combineAbortSignals, firstLine, formatSubagentActivity } from "./tool-u
  * without holding a circular reference. Mirrors the CouncilManager DI pattern.
  */
 export interface StreamRunnerDeps {
-  /** Current top-level provider instance (already validated). */
-  getProvider(): LegacyProvider;
   /** Resolve a specific task tier's model id (uses Agent's role config). */
   resolveModelForTask(task: "compact" | "explore" | "general" | "title" | "verify"): string;
   /** Top-level model id (for routed_from telemetry). */
@@ -214,6 +213,36 @@ export interface SetupShortCircuit {
 export type SetupOutcome = { kind: "prepared"; prepared: PreparedSubAgentCall } | SetupShortCircuit;
 
 /**
+ * Emit one sub-agent diagnostic line (MUONROI_DEBUG_SUBAGENT=1).
+ *
+ * Writes to the file named by MUONROI_SUBAGENT_DEBUG_LOG when set, else stderr.
+ * The file sink exists because stderr is a dead end for the case this
+ * diagnostic was written for: under the MCP harness the TUI runs as a child
+ * whose stderr nobody reads (opentui-spawn.ts consumes only the fd3/named-pipe
+ * stream), so every line went into a pipe no one drains. G1 — "Task failed: No
+ * output generated" — was named, given this flag, and never diagnosed, because
+ * the diagnostic could not reach whoever turned it on. Mirrors the working
+ * MUONROI_COUNCIL_DEBUG_LOG sink in council/llm.ts.
+ */
+export function writeSubagentDebug(enabled: boolean, line: string): void {
+  if (!enabled) return;
+  const text = `[subagent] ${line}\n`;
+  const path = process.env.MUONROI_SUBAGENT_DEBUG_LOG?.trim();
+  if (!path) {
+    process.stderr.write(text);
+    return;
+  }
+  try {
+    appendFileSync(path, text);
+  } catch (err) {
+    // Never let diagnostics become the failure. Fall back to stderr and say why.
+    process.stderr.write(
+      `[subagent] debug-log append failed (path=${path}): ${err instanceof Error ? err.message : String(err)}\n${text}`,
+    );
+  }
+}
+
+/**
  * StreamRunner — extracted sub-agent stream lifecycle.
  *
  * Lifecycle:
@@ -236,7 +265,6 @@ export class StreamRunner {
     onActivity?: (detail: string) => void,
     signal?: AbortSignal,
   ): Promise<SetupOutcome> {
-    const provider = this.deps.getProvider();
     const agentKey = String(request.agent);
     const isExplore = agentKey === "explore";
     const isGeneral = agentKey === "general";
@@ -363,12 +391,18 @@ export class StreamRunner {
     if (childModelId !== topModelId) {
       statusBarStore.setState({ routed_from: topModelId, model: childModelId });
     }
+    // The vision branch must build its model from the CHILD model's own factory.
+    // It previously called the PARENT session's factory directly, so a sub-agent
+    // routed to another provider had its id POSTed to the parent's endpoint.
     const childRuntime = isVision
-      ? {
-          ...resolveModelRuntime(provider, childModelId),
-          model: provider.responses?.(childModelId) ?? provider(childModelId),
-        }
-      : resolveModelRuntime(provider, childModelId);
+      ? (() => {
+          const childFactory = factoryForModel(childModelId);
+          return {
+            ...resolveModelRuntime(childModelId),
+            model: childFactory.responses?.(childModelId) ?? childFactory(childModelId),
+          };
+        })()
+      : resolveModelRuntime(childModelId);
     const taskCaps = getProviderCapabilities(requireRuntimeProvider(childRuntime));
     if (isComputer && !taskCaps.supportsClientTools(childRuntime.modelInfo)) {
       return {
@@ -522,9 +556,7 @@ export class StreamRunner {
     // diagnose "No output generated" / silent task failures (e.g. with
     // gpt-5.4 reasoning models). Disabled by default — zero cost.
     const debugSubagent = process.env.MUONROI_DEBUG_SUBAGENT === "1";
-    const debugLog = (line: string): void => {
-      if (debugSubagent) process.stderr.write(`[subagent] ${line}\n`);
-    };
+    const debugLog = writeSubagentDebug.bind(null, debugSubagent);
     if (debugSubagent) {
       const mi = childRuntime.modelInfo;
       debugLog(
@@ -1023,7 +1055,8 @@ export class StreamRunner {
       // MUONROI_DEBUG_SUBAGENT=1 so we can see whether `msg` is "No output
       // generated" (AI SDK validation failure on empty assistant response)
       // or a deeper provider error.
-      if (process.env.MUONROI_DEBUG_SUBAGENT === "1") {
+      const debugCatch = process.env.MUONROI_DEBUG_SUBAGENT === "1";
+      if (debugCatch) {
         const e = err as {
           name?: string;
           message?: string;
@@ -1033,29 +1066,39 @@ export class StreamRunner {
           data?: unknown;
           responseBody?: unknown;
         };
-        process.stderr.write(
-          `[subagent] catch: name=${e.name ?? "?"} statusCode=${e.statusCode ?? "?"} message=${(e.message ?? "").slice(0, 400)}\n`,
+        writeSubagentDebug(
+          true,
+          `catch: name=${e.name ?? "?"} statusCode=${e.statusCode ?? "?"} message=${(e.message ?? "").slice(0, 400)}`,
         );
         if (e.cause !== undefined) {
           try {
-            process.stderr.write(
-              `[subagent] catch.cause=${JSON.stringify(e.cause, Object.getOwnPropertyNames(e.cause as object)).slice(0, 600)}\n`,
+            writeSubagentDebug(
+              true,
+              `catch.cause=${JSON.stringify(e.cause, Object.getOwnPropertyNames(e.cause as object)).slice(0, 600)}`,
             );
-          } catch {
-            process.stderr.write(`[subagent] catch.cause(string)=${String(e.cause).slice(0, 400)}\n`);
+          } catch (jsonErr) {
+            writeSubagentDebug(
+              true,
+              `catch.cause(string)=${String(e.cause).slice(0, 400)} [stringify failed: ${
+                jsonErr instanceof Error ? jsonErr.message : String(jsonErr)
+              }]`,
+            );
           }
         }
         if (e.responseBody !== undefined) {
-          process.stderr.write(`[subagent] catch.responseBody=${String(e.responseBody).slice(0, 600)}\n`);
+          writeSubagentDebug(true, `catch.responseBody=${String(e.responseBody).slice(0, 600)}`);
         }
         if (e.data !== undefined) {
           try {
-            process.stderr.write(`[subagent] catch.data=${JSON.stringify(e.data).slice(0, 400)}\n`);
-          } catch {
-            /* non-serializable */
+            writeSubagentDebug(true, `catch.data=${JSON.stringify(e.data).slice(0, 400)}`);
+          } catch (jsonErr) {
+            writeSubagentDebug(
+              true,
+              `catch.data(unserializable): ${jsonErr instanceof Error ? jsonErr.message : String(jsonErr)}`,
+            );
           }
         }
-        if (e.stack) process.stderr.write(`[subagent] stack: ${e.stack.split("\n").slice(0, 6).join(" | ")}\n`);
+        if (e.stack) writeSubagentDebug(true, `stack: ${e.stack.split("\n").slice(0, 6).join(" | ")}`);
       }
       const output = `Task failed: ${msg}`;
       return {

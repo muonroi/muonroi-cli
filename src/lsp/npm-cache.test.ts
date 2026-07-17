@@ -30,6 +30,32 @@ describe("lspNpmWhich", () => {
     expect(result).toBe(path.join(dir, "node_modules", ".bin", "multi-bin"));
   });
 
+  // The pyright shape: the bin named after the package is the batch CLI, and the
+  // language server is a DIFFERENT bin. Picking by package name launched the CLI
+  // with --stdio (exit 4, "pyright --help for usage"), so Python LSP never
+  // started for anyone relying on auto-install.
+  it("prefers the caller's binary over the one named after the package", async () => {
+    const dir = await createFakePackageCache("pyright", {
+      pyright: "index.js",
+      "pyright-langserver": "langserver.index.js",
+    });
+
+    const result = await lspNpmWhich("pyright", "pyright-langserver");
+
+    expect(result).toBe(path.join(dir, "node_modules", ".bin", "pyright-langserver"));
+  });
+
+  it("falls back to the package-named binary when the caller asks for one that is absent", async () => {
+    const dir = await createFakePackageCache("multi-bin", {
+      "multi-bin": "lib/main.js",
+      "multi-bin-helper": "lib/helper.js",
+    });
+
+    const result = await lspNpmWhich("multi-bin", "not-shipped");
+
+    expect(result).toBe(path.join(dir, "node_modules", ".bin", "multi-bin"));
+  });
+
   it("returns null when the package cannot be installed", async () => {
     const result = await lspNpmWhich("@nonexistent-scope/totally-fake-package-that-does-not-exist-12345");
     expect(result).toBeNull();

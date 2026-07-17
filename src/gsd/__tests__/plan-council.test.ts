@@ -197,6 +197,79 @@ describe("plan-council", () => {
     expect(verify).toContain("verdictParseFailed: yes");
   });
 
+  it("debate path: empty synthesis retries then succeeds (transient failure recovery)", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-debate-retry-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    let calls = 0;
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      // First attempt fails (empty synthesis — provider hiccup / abort), the
+      // retry succeeds with a valid structured verdict. Default retry budget is 1.
+      runDebate: async () => {
+        calls += 1;
+        if (calls === 1) return "";
+        return '```council-verdict\n{"verdict":"approve","concerns":[]}\n```';
+      },
+    });
+
+    expect(calls).toBe(2);
+    expect(result.verdict).toBe("pass");
+    expect(result.verdictSource).toBe("structured");
+    expect(result.verdictParseFailed).toBe(false);
+    expect(canExecute(tmp, "standard").allowed).toBe(true);
+  });
+
+  it("debate path: persistent empty synthesis falls back to perspective path (never bricks)", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-debate-empty-persp-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    let debateCalls = 0;
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      // Debate ALWAYS returns empty — the failure mode that previously wrote a
+      // forced-`revise` brick. It must instead fall back to the perspective path.
+      runDebate: async () => {
+        debateCalls += 1;
+        return "";
+      },
+      runPerspectiveFn: async () => '```council-verdict\n{"verdict":"approve","concerns":[]}\n```',
+    });
+
+    // Retried (default 1 → 2 attempts) then fell through to perspective review.
+    expect(debateCalls).toBe(2);
+    expect(result.perspectives).toHaveLength(2);
+    expect(result.verdict).toBe("pass");
+    expect(result.verdictSource).toBe("structured");
+    // The execute gate is UNLOCKED — the run is not bricked.
+    expect(canExecute(tmp, "standard").allowed).toBe(true);
+    expect(readPlanVerifyVerdict(tmp)).toBe("pass");
+  });
+
+  it("debate path: persistent empty synthesis + no perspective runner → heuristic verdict, not brick", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-debate-empty-heur-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      runDebate: async () => "", // always empty, no runPerspectiveFn → heuristic last resort
+    });
+
+    // A well-structured plan clears the heuristic → pass (not a forced-revise brick).
+    expect(result.verdict).toBe("pass");
+    expect(result.verdictSource).toBe("heuristic-fallback");
+    expect(canExecute(tmp, "standard").allowed).toBe(true);
+  });
+
   it("perspective path parses structured verdict from each perspective", async () => {
     tmp = mkdtempSync(join(tmpdir(), "pc-st-"));
     ensurePlanningWorkspace(tmp, SESSION_MODEL);

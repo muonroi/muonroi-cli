@@ -13,7 +13,7 @@ import {
 } from "./debate-checkpoint.js";
 import { resolveDebateSummary } from "./debate-summary.js";
 import { pickCouncilTaskModel } from "./leader.js";
-import { tracedAsync, tracedGenerate } from "./llm.js";
+import { councilStreamLivenessReader, tracedAsync, tracedGenerate } from "./llm.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
 import {
   buildFollowupPrompt,
@@ -434,7 +434,38 @@ export async function researchWithFallback(
   }
 }
 
+/**
+ * Times every `debateWithRetryInner` exit path — success, retry, fallback and
+ * total failure all cost wall-clock, and a slow FAILING speaker is exactly the
+ * case worth seeing. Wrapping is why `durationMs` cannot drift out of sync with
+ * the four separate returns inside.
+ *
+ * The number is per-SPEAKER. The only timed council rows today are
+ * `debate_complete` (whole debate: 87s..1128s measured) and `council_summary`
+ * — aggregates that cannot name the model responsible.
+ */
 async function debateWithRetry(
+  llm: CouncilLLM,
+  model: string,
+  system: string,
+  prompt: string,
+  signal: AbortSignal | undefined,
+  traceCb: (t: string) => void,
+  toolBudget: ToolBudget,
+  fallbackPool: string[] = [],
+): Promise<{
+  text: string;
+  toolCalls: Array<{ toolName: string; result?: unknown }>;
+  failureReason?: string;
+  attempts: number;
+  durationMs: number;
+}> {
+  const startedAt = Date.now();
+  const r = await debateWithRetryInner(llm, model, system, prompt, signal, traceCb, toolBudget, fallbackPool);
+  return { ...r, durationMs: Date.now() - startedAt };
+}
+
+async function debateWithRetryInner(
   llm: CouncilLLM,
   model: string,
   system: string,
@@ -622,6 +653,7 @@ export async function* runDebate(
     });
 
     const researchTraces: string[] = [];
+    const researchStartedAt = Date.now();
     researchFindings = yield* tracedAsync(
       () =>
         researchWithFallback(
@@ -640,6 +672,10 @@ export async function* runDebate(
         label: internetFirst ? "Researching (internet-first)" : "Researching codebase",
         detail: spec.problemStatement.slice(0, 80),
         role: "research",
+        // Research is a single long generateText (up to ~10 min / 15 tool steps)
+        // with a quiet main stream — the phase most easily misread as hung, and
+        // the one whose cost the per-round numbers could not account for.
+        liveness: councilStreamLivenessReader(),
       },
     );
     // CQ-22: emit research tool traces as council_status
@@ -667,6 +703,10 @@ export async function* runDebate(
         text: researchFailed
           ? "⚠ Research unavailable — both providers failed. The council proceeds on the panel's own knowledge (no external findings injected)."
           : (researchFindings ?? ""),
+        // Spans researchWithFallback including any fallback provider attempt.
+        // Measured per-speaker debate turns summed to only ~3.7 min against a
+        // ~507s historical `debate_complete`, so the balance is here.
+        durationMs: Date.now() - researchStartedAt,
       },
     };
   }
@@ -721,6 +761,7 @@ export async function* runDebate(
         conversationContext: selfContext,
         language: debateLanguage,
       });
+      const startedAt = Date.now();
       return openingWithRetry(llm, self.model, system, prompt).then((r) => ({
         role: self.role,
         model: self.model,
@@ -728,6 +769,7 @@ export async function* runDebate(
         position: r.text,
         error: r.text ? null : (r.error ?? "empty completion after retries"),
         attempts: r.attempts,
+        durationMs: Date.now() - startedAt,
       }));
     });
 
@@ -738,6 +780,9 @@ export async function* runDebate(
       // each speaker is tasked to argue (A: live debate preview) instead of a bare
       // spinner during the atomic generateText window.
       detail: formatSpeakerRoster(participants),
+      // Promise.all does not pump this generator, so `elapsedMs` freezes while
+      // the openings run. Push-based stream counters keep the heartbeat honest.
+      liveness: councilStreamLivenessReader(),
     });
 
     yield { type: "content", content: "\n── Opening Analysis ──\n" };
@@ -753,6 +798,7 @@ export async function* runDebate(
             text: `[Error: ${o.error}]`,
             attempts: o.attempts,
             failureReason: o.error,
+            durationMs: o.durationMs,
           },
         };
       } else {
@@ -772,6 +818,7 @@ export async function* runDebate(
             round: 0,
             text: o.position,
             attempts: o.attempts,
+            durationMs: o.durationMs,
           },
         };
         emitCouncilTurnLength({
@@ -1034,6 +1081,7 @@ export async function* runDebate(
               traces?: string[];
               failureReason?: string;
               attempts?: number;
+              durationMs?: number;
             }> = [];
 
             try {
@@ -1076,6 +1124,7 @@ export async function* runDebate(
                   traces: aTraces,
                   failureReason: aResult.failureReason,
                   attempts: aResult.attempts,
+                  durationMs: aResult.durationMs,
                 });
 
                 const bPrompt = buildResponsePrompt({
@@ -1109,6 +1158,7 @@ export async function* runDebate(
                   traces: bTraces,
                   failureReason: bResult.failureReason,
                   attempts: bResult.attempts,
+                  durationMs: bResult.durationMs,
                 });
               } else {
                 // No longer pass the full exchange history — `runningSummary` (LLM-
@@ -1148,6 +1198,7 @@ export async function* runDebate(
                   traces: aTraces,
                   failureReason: aResult.failureReason,
                   attempts: aResult.attempts,
+                  durationMs: aResult.durationMs,
                 });
 
                 const bPrompt = buildFollowupPrompt({
@@ -1183,6 +1234,7 @@ export async function* runDebate(
                   traces: bTraces,
                   failureReason: bResult.failureReason,
                   attempts: bResult.attempts,
+                  durationMs: bResult.durationMs,
                 });
               }
 
@@ -1201,6 +1253,11 @@ export async function* runDebate(
         // Distinct speakers with their lens (A: live debate preview) — dedup by
         // formatted line so a speaker appearing in two pairs shows once.
         detail: formatSpeakerRoster(pairs.flatMap((p) => [p.a, p.b])),
+        // THE case this exists for: each pair turn can run to the 5-min council
+        // ceiling on a reasoning model, and Promise.all never pumps this
+        // generator — `elapsedMs` freezes and a healthy 15-min round looks hung.
+        // These counters come off the token stream, so they keep advancing.
+        liveness: councilStreamLivenessReader(),
       },
     );
 
@@ -1266,6 +1323,7 @@ export async function* runDebate(
               text: chunk.text.trim(),
               toolCalls: chunk.toolCalls?.map((t) => ({ name: t.toolName })),
               attempts: chunk.attempts,
+              durationMs: chunk.durationMs,
             },
           };
           emitCouncilTurnLength({
@@ -1459,6 +1517,10 @@ export async function* runDebate(
           speaker: { role: "Leader", model: leaderModelId },
           round,
           text: verdictText,
+          // Spans every evaluateDebate attempt including fallback models, so a
+          // leader that ate the round is attributable rather than hidden inside
+          // the `debate_complete` aggregate.
+          durationMs: Date.now() - evalStart,
         },
       };
 

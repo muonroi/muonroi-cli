@@ -39,6 +39,66 @@ const USER_MSG_COLLAPSED_LINES = 5;
 // to this many lines to stop the chat scroll wall and cut markdown re-render
 // cost. 8 fits comfortably on a short terminal and conveys the gist.
 const ASSISTANT_MSG_COLLAPSED_LINES = 8;
+// Chain-of-thought is never the answer — it is the model talking to itself.
+// Unlike the final assistant message (which must stay fully visible), reasoning
+// collapses even on the final entry: once the turn is answered, a wall of
+// "[Thought]" above the reply is pure noise. 3 lines keeps a gist visible.
+const REASONING_COLLAPSED_LINES = 3;
+
+/**
+ * Index of the newest entry that renders a `ctrl+e` affordance, or -1.
+ *
+ * The TUI has ONE global ctrl+e, so it must resolve to a single target. Every
+ * component that prints "ctrl+e expand" must be represented here, otherwise the
+ * affordance lies: it tells the user a key works while nothing is listening.
+ * Mirrors the collapse conditions in AssistantMessageContent / UserMessageContent
+ * / ReasoningContent / ToolGroupView — keep the two in sync.
+ */
+export function findLastCollapsibleIndex(messages: ChatEntry[]): number {
+  let lastAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.type === "assistant") {
+      lastAssistantIdx = i;
+      break;
+    }
+  }
+  const lineCount = (s: string | undefined) => (s ? s.split("\n").length : 0);
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m) continue;
+    if (m.type === "user" && lineCount(m.content) > USER_MSG_COLLAPSED_LINES) return i;
+    if (m.type === "assistant") {
+      if (lineCount(m.reasoning) > REASONING_COLLAPSED_LINES) return i;
+      // The final assistant message never auto-collapses its body (F7), so it
+      // offers no body affordance to toggle.
+      if (i !== lastAssistantIdx && lineCount(m.content) > ASSISTANT_MSG_COLLAPSED_LINES) return i;
+    }
+    if (m.type === "tool_group" && m.toolGroup?.state === "done" && (m.toolGroup?.items.length ?? 0) > 0) return i;
+  }
+  return -1;
+}
+
+export function ReasoningContent({ content, t, expanded }: { content: string; t: Theme; expanded: boolean }) {
+  const lines = content.split("\n");
+  const isLong = lines.length > REASONING_COLLAPSED_LINES;
+  const body = !isLong || expanded ? content : lines.slice(0, REASONING_COLLAPSED_LINES).join("\n");
+  const hidden = lines.length - REASONING_COLLAPSED_LINES;
+  return (
+    <box paddingLeft={0} marginBottom={1} flexShrink={0} flexDirection="column">
+      <text fg={t.textMuted}>{"[Thought] Thought"}</text>
+      <box border={["left"]} borderColor={t.textMuted} paddingLeft={2} marginTop={1} flexDirection="column">
+        <Markdown content={body} t={t} />
+        {isLong && (
+          <text fg={t.textDim}>
+            {"ctrl+e "}
+            <span style={{ fg: t.textMuted }}>{expanded ? "collapse" : `expand (${hidden} more lines)`}</span>
+          </text>
+        )}
+      </box>
+    </box>
+  );
+}
 
 export function AssistantMessageContent({
   content,
@@ -256,12 +316,7 @@ function MessageViewImpl({
         <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
           {entry.sourceLabel ? <text fg={t.textMuted}>{entry.sourceLabel}</text> : null}
           {entry.reasoning ? (
-            <box paddingLeft={0} marginBottom={1} flexShrink={0} flexDirection="column">
-              <text fg={t.textMuted}>[Thought] Thought</text>
-              <box border={["left"]} borderColor={t.textMuted} paddingLeft={2} marginTop={1} flexDirection="column">
-                <Markdown content={entry.reasoning} t={t} />
-              </box>
-            </box>
+            <ReasoningContent content={entry.reasoning} t={t} expanded={expandedMessages?.has(index) ?? false} />
           ) : null}
           {fallbackSr ? (
             <StructuredResponseView t={t} sr={fallbackSr} modeColor={entry.modeColor || modeColor} />

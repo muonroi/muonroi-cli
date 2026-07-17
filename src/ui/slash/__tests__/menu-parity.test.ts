@@ -42,4 +42,12 @@ describe("slash menu / registry parity", () => {
     expect(ideal).toBeDefined();
     expect(ideal?.label).toBe("ideal");
   });
+
+  // /login opened the exact same picker as /providers — two names for one
+  // surface, so the auth story read as two competing modes. /providers is the
+  // single entry point now: K adds a key, Enter signs in via OAuth.
+  it("has no /login entry — /providers is the only auth surface", () => {
+    expect(SLASH_MENU_ITEMS.find((m) => m.id === "login")).toBeUndefined();
+    expect(SLASH_MENU_ITEMS.find((m) => m.id === "providers")).toBeDefined();
+  });
 });

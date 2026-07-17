@@ -93,6 +93,8 @@ import { ProductStatusCard } from "./cards/product-status-card.js";
 import { BtwOverlay, type BtwState } from "./components/btw-overlay.js";
 import { makePairKey, usePairSideMap } from "./components/bubble-layout.js";
 import { ContextRail, type ContextRailRow } from "./components/context-rail.js";
+import { AgentRailActivities } from "./components/agent-rail-activities.js";
+import { CompactProgressCard } from "./components/compact-progress-card.js";
 import { CopyFlashBanner } from "./components/copy-flash-banner.js";
 import { CouncilDebatePill } from "./components/council-debate-pill.js";
 import { CouncilInfoCardView } from "./components/council-info-card.js";
@@ -222,6 +224,7 @@ import {
 } from "./utils/format.js";
 import { isEscapeKey } from "./utils/modal.js";
 import { sanitizeContent } from "./utils/text.js";
+import { collectAgentActivities } from "./utils/agent-activities.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
 /**
@@ -476,7 +479,6 @@ Follow the repository's commit and pull request workflows. Inspect the current c
 const BUILTIN_TYPED_SLASH_COMMANDS = new Set([
   "/clear",
   "/providers",
-  "/login",
   "/model",
   "/models",
   "/sandbox",
@@ -612,6 +614,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     councilProgress,
     councilStatuses,
     councilTodoExpanded,
+    compactRun,
     defaultProvider,
     disabledModels,
     disabledProviders,
@@ -733,6 +736,19 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     width,
   } = useAppLogic({ agent, startupConfig, initialMessage, onExit, onRelaunch });
 
+  // True while a tool group is streaming its items. Gates the legacy inline
+  // activeToolCalls list so a running tool isn't printed twice (see below).
+  const hasActiveToolGroup = useMemo(
+    () => messages.some((m) => m.type === "tool_group" && m.toolGroup?.state === "active"),
+    [messages],
+  );
+
+  // Roster of every sub-agent / background job spawned this session, for the
+  // rail. Derived from the transcript + in-flight calls, so it cannot drift from
+  // what actually ran.
+  const agentActivities = useMemo(() => collectAgentActivities(messages, activeToolCalls), [messages, activeToolCalls]);
+  const [selectedActivity, setSelectedActivity] = useState<string | null>(null);
+
   // Agent-mode input bridge: translate harness {op:"type"/"press"} commands into
   // synthetic OpenTUI keypresses (via the shared useAppContext().keyHandler) so
   // an external driver (MCP harness / vitest spec) can actually type into the
@@ -740,6 +756,41 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // had no consumer, so type/press silently no-opped (frames flowed out, input
   // was dead). No-op when agentRuntime is undefined (normal interactive mode).
   useAgentInputBridge(agentRuntime);
+
+  // Publish the transcript scrollbox's geometry so a spec can tell WHY a scroll
+  // assertion failed. Without it, "the lock did not engage" and "the transcript
+  // never overflowed, so there was nothing to scroll away from" are the same
+  // observation — which is what made scroll-lock.spec unfixable by inspection
+  // (measured: scrollHeight 27 == viewportH 27 at the instant `idle` fired).
+  //
+  // Opt-in (MUONROI_HARNESS_SCROLL_GEOM=1) on top of agent-mode, so a spec that
+  // does not ask for it is bit-for-bit unaffected: this adds a timer and extra
+  // frames, and the harness shares a process boundary with a native renderer
+  // that segfaults under load. Observability must not perturb the thing it
+  // observes.
+  //
+  // Sampled on an interval, never read during render: scrollHeight/viewport are
+  // layout getters, and sampling them outside the render pass keeps them from
+  // feeding back into it. setState only on a real change, so a settled
+  // transcript stops producing frames.
+  const [scrollGeom, setScrollGeom] = useState<{ vpH: number; scrollH: number; manual: boolean } | null>(null);
+  useEffect(() => {
+    if (!agentRuntime || process.env.MUONROI_HARNESS_SCROLL_GEOM !== "1") return;
+    const read = () => {
+      const sb = scrollRef.current;
+      if (!sb) return;
+      const next = {
+        vpH: (sb.viewport as unknown as { height?: number })?.height ?? -1,
+        scrollH: sb.scrollHeight ?? -1,
+        manual: Boolean((sb as unknown as { _hasManualScroll?: boolean })._hasManualScroll),
+      };
+      setScrollGeom((prev) =>
+        prev && prev.vpH === next.vpH && prev.scrollH === next.scrollH && prev.manual === next.manual ? prev : next,
+      );
+    };
+    const id = setInterval(read, 200);
+    return () => clearInterval(id);
+  }, [agentRuntime, scrollRef]);
 
   // Context rail (MUONROI_CONTEXT_RAIL): only render when enabled, the user
   // hasn't hidden it (Ctrl+B), and the terminal is wide enough that a fixed
@@ -898,7 +949,22 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                 <Semantic
                   id="log"
                   role="log"
-                  props={{ scrollTop: scrollRef.current?.scrollTop ?? 0, locked: scrollLockedAway, newSinceLock }}
+                  props={{
+                    scrollTop: scrollRef.current?.scrollTop ?? 0,
+                    locked: scrollLockedAway,
+                    newSinceLock,
+                    // Present only in agent-mode (see the sampler above).
+                    ...(scrollGeom
+                      ? {
+                          viewportH: scrollGeom.vpH,
+                          scrollHeight: scrollGeom.scrollH,
+                          manualScroll: scrollGeom.manual,
+                          // The one derived answer every scroll spec actually
+                          // wants: is there anything to scroll away from?
+                          overflows: scrollGeom.scrollH > scrollGeom.vpH,
+                        }
+                      : {}),
+                  }}
                 >
                   {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
                   <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
@@ -943,31 +1009,45 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         <text fg={t.textMuted}>{liveTurnSourceLabel}</text>
                       </box>
                     )}
-                    {/* Active tool calls — pending inline */}
-                    {activeToolCalls.map((tc) =>
-                      tc.function.name === "task" ? (
-                        <SubagentTaskLine
-                          key={tc.id}
-                          t={t}
-                          agent={tryParseArg(tc, "agent") || "sub-agent"}
-                          label={toolArgs(tc) || "Working"}
-                          pending
-                        />
-                      ) : tc.function.name === "delegate" ? (
-                        <DelegationTaskLine
-                          key={tc.id}
-                          t={t}
-                          label={toolArgs(tc) || "Background research"}
-                          pending
-                          id={undefined}
-                        />
-                      ) : (
-                        <InlineTool key={tc.id} t={t} pending>
-                          {toolLabel(tc)}
-                        </InlineTool>
-                      ),
-                    )}
+                    {/* Active tool calls — pending inline.
+                      Since the tool-group panel landed, every live call already
+                      renders as a "▸ <label>" item inside its group, so echoing
+                      the same calls here printed each running tool TWICE ("▸ Grep
+                      …" in the group, "→ Grep …" right under it). The legacy list
+                      stays as the fallback for the no-group path (setActiveToolCalls
+                      with no active turn) and for task/delegate, whose rich lines
+                      carry agent + status the group's plain label does not. */}
+                    {activeToolCalls
+                      .filter(
+                        (tc) => !hasActiveToolGroup || tc.function.name === "task" || tc.function.name === "delegate",
+                      )
+                      .map((tc) =>
+                        tc.function.name === "task" ? (
+                          <SubagentTaskLine
+                            key={tc.id}
+                            t={t}
+                            agent={tryParseArg(tc, "agent") || "sub-agent"}
+                            label={toolArgs(tc) || "Working"}
+                            pending
+                          />
+                        ) : tc.function.name === "delegate" ? (
+                          <DelegationTaskLine
+                            key={tc.id}
+                            t={t}
+                            label={toolArgs(tc) || "Background research"}
+                            pending
+                            id={undefined}
+                          />
+                        ) : (
+                          <InlineTool key={tc.id} t={t} pending>
+                            {toolLabel(tc)}
+                          </InlineTool>
+                        ),
+                      )}
                     {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
+                    {compactRun && (
+                      <CompactProgressCard t={t} progress={compactRun.progress} startedAt={compactRun.startedAt} />
+                    )}
                     {/* Council metadata cards render here INLINE only when the
                       rail is off; when the rail is on they are hoisted into it
                       (see the <ContextRail> below) so they stop pushing the live
@@ -1317,6 +1397,13 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               {railActive && (
                 <ContextRail width={railWidth} rows={railRows}>
                   <SessionTreeCard nodes={sessionTree} />
+                  <AgentRailActivities
+                    activities={agentActivities}
+                    selected={selectedActivity}
+                    onSelect={setSelectedActivity}
+                    width={railWidth}
+                    t={t}
+                  />
                   {renderCouncilMeta(railWidth)}
                 </ContextRail>
               )}

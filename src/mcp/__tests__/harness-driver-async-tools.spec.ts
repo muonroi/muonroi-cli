@@ -131,3 +131,92 @@ describe("registerAsyncTools", () => {
     expect(c.isError).toBe(true);
   });
 });
+
+/**
+ * A /ideal run sat on an askcard for 17 minutes while a DB-poll watcher saw
+ * nothing — askcard-open writes no DB row. The driver could already wait on an
+ * event kind (buildCheck in driver.ts); only this MCP schema withheld it, so
+ * every external agent fell back to polling. These pin the wait args that
+ * actually reach the driver, because the driver dispatches on `"selector" in
+ * args` before `"event" in args` — an undefined-but-present selector key waits
+ * on nothing, forever, silently.
+ */
+describe("tui.wait_for — event conditions", () => {
+  function captureArgs() {
+    const seen: Record<string, unknown>[] = [];
+    const driver = {
+      ...makeStubDriver(),
+      wait_for: async (args: Record<string, unknown>) => {
+        seen.push(args);
+      },
+    } as unknown as Driver;
+    return { driver, seen };
+  }
+
+  it("forwards an event condition to the driver", async () => {
+    const fake = makeFakeServer();
+    const { driver, seen } = captureArgs();
+    registerAsyncTools(fake.server, () => driver, { onStop: () => {} });
+
+    const r: any = await fake.invoke("tui.wait_for", { event: "askcard-open", timeoutMs: 600_000 });
+
+    expect(r.content[0].text).toBe("ok");
+    expect(seen[0]).toEqual({ event: "askcard-open", timeoutMs: 600_000 });
+  });
+
+  /**
+   * makeFakeServer ignores the registered config, so the tests above would pass
+   * even with `event` absent from the schema — a real MCP client's zod
+   * validation would reject the call long before the driver saw it. The schema
+   * IS the boundary that was broken, so assert it directly.
+   */
+  it("advertises event and a 10-minute ceiling in the declared schema", async () => {
+    const configs = new Map<string, any>();
+    const server = {
+      registerTool: (name: string, config: unknown, _cb: unknown) => configs.set(name, config),
+    } as any;
+    registerAsyncTools(server, () => makeStubDriver(), { onStop: () => {} });
+
+    const schema = configs.get("tui.wait_for").inputSchema;
+    expect(schema.event).toBeDefined();
+    expect(schema.event.safeParse("askcard-open").success).toBe(true);
+    // A 60s ceiling forced callers to re-issue the wait — polling in disguise.
+    expect(schema.timeoutMs.safeParse(600_000).success).toBe(true);
+    // Nested all[] conditions must accept an event too.
+    expect(schema.all.safeParse([{ event: "sprint-halt" }]).success).toBe(true);
+  });
+
+  it("never leaks an undefined selector key alongside an event", async () => {
+    const fake = makeFakeServer();
+    const { driver, seen } = captureArgs();
+    registerAsyncTools(fake.server, () => driver, { onStop: () => {} });
+
+    // Shape an SDK sends when the caller omitted the optional selector.
+    await fake.invoke("tui.wait_for", { selector: undefined, idle: undefined, event: "sprint-halt" });
+
+    // `"selector" in args` would be true and win the driver's dispatch.
+    expect("selector" in seen[0]).toBe(false);
+    expect(seen[0]).toEqual({ event: "sprint-halt" });
+  });
+
+  it("keeps selector authoritative when both are given", async () => {
+    const fake = makeFakeServer();
+    const { driver, seen } = captureArgs();
+    registerAsyncTools(fake.server, () => driver, { onStop: () => {} });
+    await fake.invoke("tui.wait_for", { selector: "id=askcard", event: "askcard-open" });
+    expect(seen[0]).toEqual({ selector: "id=askcard" });
+  });
+
+  it("forwards event conditions nested in all[]", async () => {
+    const fake = makeFakeServer();
+    const { driver, seen } = captureArgs();
+    registerAsyncTools(fake.server, () => driver, { onStop: () => {} });
+
+    await fake.invoke("tui.wait_for", {
+      all: [{ event: "sprint-halt" }, { idle: true }],
+      timeoutMs: 1000,
+    });
+
+    expect(seen[0]).toEqual({ all: [{ event: "sprint-halt" }, { idle: true }], timeoutMs: 1000 });
+  });
+});

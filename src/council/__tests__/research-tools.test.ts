@@ -66,6 +66,7 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
         model: {},
         providerOptions: undefined,
       }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
     vi.doMock("../../tools/registry.js", () => ({
       createBuiltinTools: vi.fn().mockReturnValue({}),
@@ -111,6 +112,7 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
     vi.doMock("../../tools/registry.js", () => ({
       createBuiltinTools: vi.fn().mockReturnValue({}),
@@ -167,6 +169,7 @@ describe("CQ-03: research() MCP tool merge", () => {
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
     vi.doMock("../../tools/registry.js", () => ({
       createBuiltinTools: vi.fn().mockReturnValue({ builtin_bash: {} }),
@@ -218,6 +221,7 @@ describe("CQ-03: research() MCP tool merge", () => {
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
+      shouldDropParam: vi.fn().mockReturnValue(false),
     }));
     vi.doMock("../../tools/registry.js", () => ({
       createBuiltinTools: vi.fn().mockReturnValue({ builtin_bash: {} }),

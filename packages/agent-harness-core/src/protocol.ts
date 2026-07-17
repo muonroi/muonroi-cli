@@ -176,6 +176,21 @@ export type LiveEvent =
       correlationId: string;
       /** Milliseconds elapsed in this speaker's turn/phase; advances on ticks. */
       elapsedMs?: number;
+      /**
+       * Chars (text + reasoning deltas) streamed since this phase began.
+       * `elapsedMs` can freeze on a HEALTHY call — its tick generator only
+       * advances when the consumer pulls, and a round awaiting its pairs via
+       * Promise.all does not pull. This counter is pushed from the token stream
+       * itself, so growth here proves liveness regardless of pumping.
+       */
+      streamedChars?: number;
+      /**
+       * Age in ms of the most recent stream delta. Small + growing
+       * `streamedChars` = SLOW BUT ALIVE (e.g. a reasoning model emitting
+       * reasoning tokens for minutes before any text); growing age + static
+       * chars = genuinely STUCK.
+       */
+      lastDeltaAgeMs?: number;
     }
   // Thrift measurability — emitted when a council speaker's turn output is fully
   // assembled (opening statement or discussion turn). Observe-only: NO truncation,

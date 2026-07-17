@@ -8,26 +8,7 @@
  * health probe is reported, not hidden, and never blocks setup.
  */
 import { createInterface } from "node:readline";
-import { writeExperienceConfig } from "./auth.js";
-
-/** Best-effort reachability probe — returns true/false, never throws. */
-async function probeHealth(baseUrl: string, token?: string): Promise<boolean> {
-  try {
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 4000);
-    try {
-      const res = await fetch(`${baseUrl}/health`, {
-        signal: ac.signal,
-        headers: token ? { authorization: `Bearer ${token}` } : undefined,
-      });
-      return res.ok;
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch {
-    return false;
-  }
-}
+import { probeEEHealth, writeExperienceConfig } from "./auth.js";
 
 /**
  * Returns true when a config was written (so the caller can reload EE auth).
@@ -39,8 +20,8 @@ export async function firstRunEESetup(): Promise<boolean> {
   try {
     process.stderr.write(
       "\nExperience Engine (optional) — a shared brain that recalls past decisions, gotchas,\n" +
-        "and recipes so the agent works like a senior on your stack. You can set this up later\n" +
-        "by editing ~/.experience/config.json or setting MUONROI_EE_BASE_URL.\n\n",
+        "and recipes so the agent works like a senior on your stack. Skipping is fine: you can\n" +
+        "connect one at any time with `/ee config <url> [token]`.\n\n",
     );
     const url = (await ask("EE server URL (blank to skip): ")).trim();
     if (!url) {
@@ -61,11 +42,11 @@ export async function firstRunEESetup(): Promise<boolean> {
     });
     process.stderr.write(`Wrote Experience Engine config → ~/.experience/config.json (serverBaseUrl=${normalized}).\n`);
 
-    const reachable = await probeHealth(normalized, token || undefined);
+    const health = await probeEEHealth(normalized, token || undefined);
     process.stderr.write(
-      reachable
+      health.ok
         ? "  ✓ EE server reachable.\n"
-        : "  ⚠ Could not reach the EE server right now (saved anyway — run 'muonroi-cli doctor' to recheck).\n",
+        : `  ⚠ Could not reach the EE server right now — ${health.detail} (saved anyway; recheck with '/ee config').\n`,
     );
     return true;
   } catch (err) {

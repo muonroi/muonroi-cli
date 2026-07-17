@@ -9,6 +9,7 @@ import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clearLastSurfacedMatches, getDefaultEEClient, getLastSurfacedMatches } from "../ee/intercept.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
+import { type CompactProgress, stageProgress } from "../flow/compaction/progress.js";
 import { writeScaffoldCheckpoint } from "../flow/scaffold-checkpoint.js";
 import { appendCrashLog, setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
@@ -131,7 +132,8 @@ import {
   type InitNewFormState,
   initialInitNewFormState,
 } from "./components/init-new-form-card.js";
-import { computeMcpRunInfo, MessageView } from "./components/message-view.js";
+import { computeMcpRunInfo, findLastCollapsibleIndex, MessageView } from "./components/message-view.js";
+import { groupToolEntries } from "./utils/group-tool-entries.js";
 import {
   initialPointToExistingFormState,
   PointToExistingFormCard,
@@ -860,7 +862,15 @@ export function useAppLogic(props: AppLogicProps) {
         resolvePickerProviders(SPLASH_PROVIDERS, configured, (p) => getModelsForProvider(p).length > 0),
       );
       setProvidersWithKey(new Set(configured));
-    } catch {
+    } catch (err) {
+      // This resets every chip to "no key — press K". Silently, that reads as
+      // "the key I just set was not saved" when the credentials are in fact on
+      // disk and only the lookup failed — so say so instead of swallowing it.
+      console.error(
+        `[providers] credential lookup failed; chips will show no key: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
       setConfiguredProviders([...SPLASH_PROVIDERS]);
       setProvidersWithKey(new Set());
     }
@@ -898,6 +908,19 @@ export function useAppLogic(props: AppLogicProps) {
         setApiKeyPrompt({ ...apiKeyPrompt, error: "Could not store key. Try `export <PROVIDER>_API_KEY=…`." });
         return;
       }
+      // Same reason as the OAuth path: boot skips a provider with no
+      // credentials, so without this the key is stored but the provider stays
+      // unusable until the next start.
+      try {
+        const { rewarmProviderFactory } = await import("../providers/warm.js");
+        await rewarmProviderFactory(apiKeyPrompt.provider);
+      } catch (err) {
+        console.error(
+          `[providers] ${apiKeyPrompt.provider} key stored but its factory could not be rebuilt; a restart may be needed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
       await refreshProvidersWithKey();
       setApiKeyPrompt(null);
     } catch (e) {
@@ -912,6 +935,9 @@ export function useAppLogic(props: AppLogicProps) {
   const [oauthProviders, setOAuthProviders] = useState<ReadonlySet<ProviderId>>(() => new Set());
   const [oauthLogin, setOAuthLogin] = useState<{ provider: ProviderId; error: string | null } | null>(null);
   const oauthCancelRef = useRef(false);
+  // Aborts the in-flight sign-in itself, not just the UI's interest in it —
+  // see cancelProviderOAuth.
+  const oauthAbortRef = useRef<AbortController | null>(null);
 
   // Populate the OAuth-capable provider set once, from the OAuth registry.
   useEffect(() => {
@@ -933,6 +959,11 @@ export function useAppLogic(props: AppLogicProps) {
   const startProviderOAuth = useCallback(
     async (provider: ProviderId) => {
       oauthCancelRef.current = false;
+      // Abort the PREVIOUS attempt's server before starting another: the
+      // browser flow binds a loopback callback on a two-port set, so a
+      // still-running one would make this attempt fail to bind.
+      oauthAbortRef.current?.abort();
+      oauthAbortRef.current = new AbortController();
       setOAuthLogin({ provider, error: null });
       try {
         const { getOAuthProviderConfig } = await import("../providers/auth/registry.js");
@@ -941,7 +972,7 @@ export function useAppLogic(props: AppLogicProps) {
           setOAuthLogin({ provider, error: "OAuth is not available for this provider." });
           return;
         }
-        const tokens = await cfg.provider.login({});
+        const tokens = await cfg.provider.login({ signal: oauthAbortRef.current?.signal });
         if (oauthCancelRef.current) return;
         const { saveTokens } = await import("../providers/auth/token-store.js");
         await saveTokens(provider, tokens);
@@ -950,8 +981,25 @@ export function useAppLogic(props: AppLogicProps) {
           const { clearEnvVar } = await import("../providers/env-store.js");
           const { ENV_BY_PROVIDER } = await import("../providers/keychain.js");
           clearEnvVar(ENV_BY_PROVIDER[provider]);
-        } catch {
-          /* best-effort */
+        } catch (err) {
+          console.error(
+            `[providers] could not clear the stored ${provider} key after OAuth login: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        // The factory bakes in the auth it saw when it was built, so the tokens
+        // we just saved reach nothing until it is rebuilt — that is why signing
+        // in only took effect after restarting the session.
+        try {
+          const { rewarmProviderFactory } = await import("../providers/warm.js");
+          await rewarmProviderFactory(provider);
+        } catch (err) {
+          console.error(
+            `[providers] ${provider} signed in but its factory could not be rebuilt; a restart may be needed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
         }
         await refreshProvidersWithKey();
         setOAuthLogin(null);
@@ -965,6 +1013,12 @@ export function useAppLogic(props: AppLogicProps) {
 
   const cancelProviderOAuth = useCallback(() => {
     oauthCancelRef.current = true;
+    // Esc used to close the card and leave the sign-in running: its loopback
+    // server kept port 1455/1457 for the full 5-minute callback timeout, so the
+    // next attempt could not bind and only restarting the CLI recovered it.
+    // Abort ends the flow, which closes the server and frees the port now.
+    oauthAbortRef.current?.abort();
+    oauthAbortRef.current = null;
     setOAuthLogin(null);
   }, []);
 
@@ -977,7 +1031,7 @@ export function useAppLogic(props: AppLogicProps) {
   }, [setModel]);
   const initialHasApiKey = agent.hasApiKey();
   const [hasApiKey, setHasApiKey] = useState(initialHasApiKey);
-  const [messages, setMessages] = useState<ChatEntry[]>(() => agent.getChatEntries());
+  const [messages, setMessages] = useState<ChatEntry[]>(() => groupToolEntries(agent.getChatEntries()));
   const [streamContent, setStreamContent] = useState("");
   // Reasoning state: track activity + last-elapsed for a "💭 Thought for Ns"
   // pill instead of dumping CoT into the chat (saves 80–120 setState/sec on
@@ -1084,6 +1138,8 @@ export function useAppLogic(props: AppLogicProps) {
   // Peek toggle (ctrl+e) for the todo panel while it auto-collapses during a
   // council debate. Default collapsed; expands back to the full panel on demand.
   const [councilTodoExpanded, setCouncilTodoExpanded] = useState(false);
+  // Non-null only while a /compact is in flight; drives CompactProgressCard.
+  const [compactRun, setCompactRun] = useState<{ progress: CompactProgress; startedAt: number } | null>(null);
   const [councilInfoCards, setCouncilInfoCards] = useState<CouncilInfoCard[]>([]);
   // P3 — council metadata for the context rail (leader/panel/budget/research/
   // cost), upsert-merged from incremental council_meta patches.
@@ -1100,6 +1156,14 @@ export function useAppLogic(props: AppLogicProps) {
   // global (all/live rounds). Mirrored into a ref so the global key handler can
   // read the current round list without re-subscribing on every round update.
   const [selectedRound, setSelectedRound] = useState<number | null>(null);
+  // Mirrors councilStatuses for the global key handler: ctrl+e only belongs to
+  // the council todo panel while that panel is actually auto-collapsed, which
+  // app.tsx gates on `councilStatuses.length > 0`. Reading it from a ref keeps
+  // handleKey off the councilStatuses dep list.
+  const councilStatusesRef = useRef<CouncilStatusData[]>([]);
+  useEffect(() => {
+    councilStatusesRef.current = councilStatuses;
+  }, [councilStatuses]);
   const councilRoundsRef = useRef<CouncilRoundRecord[]>([]);
   useEffect(() => {
     councilRoundsRef.current = councilRounds;
@@ -1320,7 +1384,7 @@ export function useAppLogic(props: AppLogicProps) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: sessionId + messages.length are intentional recompute signals (getSessionTree reads the current session internally)
   const sessionTree = useMemo(() => agent.getSessionTree(), [agent, sessionId, messages.length]);
   // Boot straight to chat: no forced API-key modal on start. Auth is on-demand
-  // via the provider picker (opens on a no-auth send, or via /providers /login).
+  // via the provider picker (opens on a no-auth send, or via /providers).
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const [showSlashMenu, setShowSlashMenu] = useState(false);
@@ -1376,6 +1440,18 @@ export function useAppLogic(props: AppLogicProps) {
   const newSinceLockRef = useRef(0);
   const [newSinceLock, setNewSinceLock] = useState(0);
   const [scrollLockedAway, setScrollLockedAway] = useState(false);
+  // Transcript length when the user last left the bottom. The pill counts new
+  // *entries* against this watermark. It must NOT count scrollToBottom() calls:
+  // those fire per 32ms stream flush and per tool event, so a single streaming
+  // answer used to push the pill into the hundreds ("251 new below").
+  const lockedAtCountRef = useRef(0);
+  // Ref mirror of scrollLockedAway so the scroll helpers can read the current
+  // lock state synchronously (React state lags a render behind).
+  const lockedAwayRef = useRef(false);
+  const messageCountRef = useRef(0);
+  useEffect(() => {
+    messageCountRef.current = messages.length;
+  }, [messages.length]);
   // Context rail (MUONROI_CONTEXT_RAIL): user can hide/show the right metadata
   // panel with Ctrl+B. Defaults visible; the rail also auto-hides below 100 cols
   // (decided in app.tsx where terminal width is known).
@@ -1392,28 +1468,46 @@ export function useAppLogic(props: AppLogicProps) {
     const vpH = (sb.viewport as unknown as { height?: number }).height ?? 0;
     return sb.scrollTop + vpH >= sb.scrollHeight - 2;
   }, []);
+  // Retire the jump-to-latest pill. Single writer for the three lock fields so
+  // the ref mirror can never drift from the rendered state.
+  const clearScrollLock = useCallback(() => {
+    lockedAwayRef.current = false;
+    lockedAtCountRef.current = messageCountRef.current;
+    if (newSinceLockRef.current !== 0) {
+      newSinceLockRef.current = 0;
+      setNewSinceLock(0);
+    }
+    setScrollLockedAway(false);
+  }, []);
+  // Engage the lock. Single writer, mirroring clearScrollLock. The first call
+  // after leaving the bottom sets the watermark; later calls are no-ops, so
+  // repeated scroll attempts for the SAME content (32ms stream flushes, tool
+  // events) can never inflate the pill.
+  const engageScrollLock = useCallback(() => {
+    if (!isScrollLockEnabled() || lockedAwayRef.current) return;
+    lockedAwayRef.current = true;
+    lockedAtCountRef.current = messageCountRef.current;
+    setScrollLockedAway(true);
+  }, []);
   // Soft scroll: respects scroll-lock. New content that arrives while the user
   // reads history does NOT move the viewport; it just increments the pill count.
   const scrollToBottom = useCallback(() => {
     if (isScrollLockEnabled() && !isPinnedToBottom()) {
-      newSinceLockRef.current += 1;
-      setNewSinceLock(newSinceLockRef.current);
-      setScrollLockedAway(true);
+      engageScrollLock();
+      const fresh = Math.max(0, messageCountRef.current - lockedAtCountRef.current);
+      newSinceLockRef.current = fresh;
+      setNewSinceLock(fresh);
       return;
     }
     // Pinned (or lock off): scroll, and if the user had manually scrolled back
     // to the bottom on their own, retire the jump-to-latest pill.
-    if (newSinceLockRef.current !== 0) {
-      newSinceLockRef.current = 0;
-      setNewSinceLock(0);
-      setScrollLockedAway(false);
-    }
+    if (lockedAwayRef.current || newSinceLockRef.current !== 0) clearScrollLock();
     try {
       scrollRef.current?.scrollTo(scrollRef.current?.scrollHeight ?? 99999);
     } catch {
       /* */
     }
-  }, [isPinnedToBottom]);
+  }, [isPinnedToBottom, clearScrollLock, engageScrollLock]);
   // Hard scroll: re-arms native sticky and jumps to the latest line regardless
   // of manual-scroll state. Used by explicit user actions (new prompt submit,
   // jump-to-latest pill) that intend to return to the live tail.
@@ -1428,10 +1522,8 @@ export function useAppLogic(props: AppLogicProps) {
         /* */
       }
     }
-    newSinceLockRef.current = 0;
-    setNewSinceLock(0);
-    setScrollLockedAway(false);
-  }, []);
+    clearScrollLock();
+  }, [clearScrollLock]);
   const { width, height } = useTerminalDimensions();
   const processedInitial = useRef(false);
   const contentAccRef = useRef("");
@@ -2676,7 +2768,11 @@ export function useAppLogic(props: AppLogicProps) {
                 prevUserIdx++;
               }
             }
-            return fresh;
+            // The persisted transcript has one tool_result per call and no
+            // tool_group, so this resync used to wipe the group the live turn
+            // built and leave a flat "→ <tool>" line per call on screen — the
+            // state the user actually reads after the answer lands. Re-fold them.
+            return groupToolEntries(fresh);
           });
           setSessionTitle(activeTurn.agent.getSessionTitle());
           setSessionId(activeTurn.agent.getSessionId());
@@ -3283,6 +3379,21 @@ export function useAppLogic(props: AppLogicProps) {
     showSlashMenu,
   ]);
 
+  // Retire the pill when the user scrolls back to the bottom BY HAND (mouse
+  // wheel / trackpad). Previously only End (scrollToBottomForced) or new content
+  // arriving while pinned could clear it, so wheeling down to the newest line
+  // left a stale "N new below" sitting there — the reported bug.
+  // ScrollBoxRenderable exposes no scroll event (checked @opentui/core 0.1.107:
+  // scrollTo/scrollBy/scrollTop, no emitter), so a poll is the only hook. It
+  // runs ONLY while the pill is up, and stops the moment it clears.
+  useEffect(() => {
+    if (!scrollLockedAway) return;
+    const id = setInterval(() => {
+      if (isPinnedToBottom()) clearScrollLock();
+    }, 200);
+    return () => clearInterval(id);
+  }, [scrollLockedAway, isPinnedToBottom, clearScrollLock]);
+
   useEffect(() => {
     const onRawInput = (sequence: string) => {
       const parsed = parseKeypress(sequence, { useKittyKeyboard: renderer.useKittyKeyboard });
@@ -3314,7 +3425,7 @@ export function useAppLogic(props: AppLogicProps) {
 
   const resetToNewSession = useCallback(() => {
     const snapshot = agent.startNewSession();
-    setMessages(snapshot?.entries ?? []);
+    setMessages(groupToolEntries(snapshot?.entries ?? []));
     setExpandedMessages(new Set());
     activeTurnRef.current = null;
     clearLiveTurnUi();
@@ -3763,7 +3874,7 @@ export function useAppLogic(props: AppLogicProps) {
                     appendCompaction(sessionId, nextSeq, cr.summary, cr.tokensBeforeCompress);
                   }
                   agent.setMessages([createCompactionSummaryMessage(cr.summary)]);
-                  setMessages(agent.getChatEntries());
+                  setMessages(groupToolEntries(agent.getChatEntries()));
                   setMessages((prev) => [
                     ...prev,
                     buildAssistantEntry(
@@ -4159,15 +4270,11 @@ export function useAppLogic(props: AppLogicProps) {
               const match = result.match(/Instructions:\s*(.+)/);
               const instructions = match ? match[1].trim() : "";
               const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
+              const startedAt = Date.now();
+              setCompactRun({ progress: stageProgress("artifacts"), startedAt });
               try {
-                const cr = await deliberateCompact(
-                  flowDir,
-                  agent.getMessages(),
-                  "",
-                  4096,
-                  agent.getProvider(),
-                  model,
-                  instructions,
+                const cr = await deliberateCompact(flowDir, agent.getMessages(), "", 4096, model, instructions, (p) =>
+                  setCompactRun((prev) => (prev ? { ...prev, progress: p } : prev)),
                 );
                 const sessionId = agent.getSessionId();
                 if (sessionId) {
@@ -4176,7 +4283,7 @@ export function useAppLogic(props: AppLogicProps) {
                 }
                 const summaryMsg = createCompactionSummaryMessage(cr.summary);
                 agent.setMessages([summaryMsg]);
-                setMessages(agent.getChatEntries());
+                setMessages(groupToolEntries(agent.getChatEntries()));
                 setMessages((prev) => [
                   ...prev,
                   buildAssistantEntry(
@@ -4185,6 +4292,8 @@ export function useAppLogic(props: AppLogicProps) {
                 ]);
               } catch (e: unknown) {
                 setMessages((prev) => [...prev, buildAssistantEntry(`Compaction failed: ${e}`)]);
+              } finally {
+                setCompactRun(null);
               }
               return;
             }
@@ -4200,7 +4309,7 @@ export function useAppLogic(props: AppLogicProps) {
                     revertLatestCompaction(sessionId);
                   }
                   agent.setMessages(restoredMessages);
-                  setMessages(agent.getChatEntries());
+                  setMessages(groupToolEntries(agent.getChatEntries()));
                   const text = lines.slice(2).join("\n");
                   setMessages((prev) => [...prev, buildAssistantEntry(text)]);
                   return;
@@ -4866,7 +4975,6 @@ export function useAppLogic(props: AppLogicProps) {
           break;
         case "providers":
         case "models":
-        case "login":
           setShowModelPicker(true);
           setModelPickerIndex(0);
           setModelSearchQuery("");
@@ -4976,15 +5084,11 @@ export function useAppLogic(props: AppLogicProps) {
                 const match = result.match(/Instructions:\s*(.+)/);
                 const instructions = match ? match[1].trim() : "";
                 const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
+                const startedAt = Date.now();
+                setCompactRun({ progress: stageProgress("artifacts"), startedAt });
                 try {
-                  const cr = await deliberateCompact(
-                    flowDir,
-                    agent.getMessages(),
-                    "",
-                    4096,
-                    agent.getProvider(),
-                    model,
-                    instructions,
+                  const cr = await deliberateCompact(flowDir, agent.getMessages(), "", 4096, model, instructions, (p) =>
+                    setCompactRun((prev) => (prev ? { ...prev, progress: p } : prev)),
                   );
                   const sessionId = agent.getSessionId();
                   if (sessionId) {
@@ -4993,7 +5097,7 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   const summaryMsg = createCompactionSummaryMessage(cr.summary);
                   agent.setMessages([summaryMsg]);
-                  setMessages(agent.getChatEntries());
+                  setMessages(groupToolEntries(agent.getChatEntries()));
                   setMessages((prev) => [
                     ...prev,
                     buildAssistantEntry(
@@ -5002,6 +5106,8 @@ export function useAppLogic(props: AppLogicProps) {
                   ]);
                 } catch (e: unknown) {
                   setMessages((prev) => [...prev, buildAssistantEntry(`Compaction failed: ${e}`)]);
+                } finally {
+                  setCompactRun(null);
                 }
                 return;
               }
@@ -5016,7 +5122,7 @@ export function useAppLogic(props: AppLogicProps) {
                       revertLatestCompaction(sessionId);
                     }
                     agent.setMessages(restoredMessages);
-                    setMessages(agent.getChatEntries());
+                    setMessages(groupToolEntries(agent.getChatEntries()));
                     const text = lines.slice(2).join("\n");
                     setMessages((prev) => [...prev, buildAssistantEntry(text)]);
                     return;
@@ -5270,9 +5376,12 @@ export function useAppLogic(props: AppLogicProps) {
 
       // Ctrl+E — peek the full todo panel while it is auto-collapsed during a
       // council debate (app.tsx collapses it to one line so the debate scrollbox
-      // keeps its height). Global + unconditional toggle; a no-op visually when
-      // no todo snapshot exists or no council is active.
-      if (key.name === "e" && key.ctrl && !key.meta) {
+      // keeps its height). Scoped to an ACTIVE council: app.tsx only collapses
+      // the panel when `councilStatuses.length > 0`, so outside a debate this
+      // toggle is invisible — and an unconditional `return` here swallowed the
+      // key before the transcript expand handler below could ever see it,
+      // making every "ctrl+e expand" affordance in the message log dead.
+      if (key.name === "e" && key.ctrl && !key.meta && councilStatusesRef.current.length > 0) {
         setCouncilTodoExpanded((v) => !v);
         return;
       }
@@ -5322,11 +5431,14 @@ export function useAppLogic(props: AppLogicProps) {
               /* */
             }
             // Paging up leaves the tail; paging back to bottom clears the pill.
-            if (key.name === "pagedown" && isPinnedToBottom()) {
-              newSinceLockRef.current = 0;
-              setNewSinceLock(0);
-              setScrollLockedAway(false);
-            }
+            // Engaging on pageup is what was missing: the lock was only ever set
+            // from scrollToBottom(), i.e. when new content ARRIVED while away
+            // from the tail. Paging up therefore surfaced the pill only if a
+            // render happened to follow — measured as engaging on one run and
+            // not the next. Setting it here makes it depend on the key, not on
+            // whether the stream was still flushing.
+            if (key.name === "pageup" && !isPinnedToBottom()) engageScrollLock();
+            if (key.name === "pagedown" && isPinnedToBottom()) clearScrollLock();
           }
           return;
         }
@@ -6626,7 +6738,14 @@ export function useAppLogic(props: AppLogicProps) {
         }
         if (key.name === "d" || key.name === "return") {
           const p = configuredProviders[providerChipIndex];
-          if (p && providersWithKey.has(p)) setAsDefaultProvider(p);
+          if (!p) return;
+          // Enter means "use this provider". With credentials that means making
+          // it the default; with none it means signing in, which is the only
+          // useful thing left to do on the row (Enter was a dead key there).
+          // /login is gone, so this picker is the single auth surface: K adds a
+          // key, Enter signs in via OAuth where the provider supports it.
+          if (providersWithKey.has(p)) setAsDefaultProvider(p);
+          else if (oauthProviders.has(p)) void startProviderOAuth(p);
           return;
         }
         return;
@@ -6862,18 +6981,16 @@ export function useAppLogic(props: AppLogicProps) {
       }
 
       if (key.name === "e" && key.ctrl) {
-        let lastUserIdx = -1;
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i]!.type === "user") {
-            lastUserIdx = i;
-            break;
-          }
-        }
-        if (lastUserIdx >= 0) {
+        // Toggle the NEWEST entry that actually renders a "ctrl+e" affordance —
+        // long user text, collapsed model narration, chain-of-thought, or a done
+        // tool group. Targeting only the last *user* message meant the key did
+        // nothing for every other affordance that advertises it.
+        const idx = findLastCollapsibleIndex(messages);
+        if (idx >= 0) {
           setExpandedMessages((prev) => {
             const next = new Set(prev);
-            if (next.has(lastUserIdx)) next.delete(lastUserIdx);
-            else next.add(lastUserIdx);
+            if (next.has(idx)) next.delete(idx);
+            else next.add(idx);
             return next;
           });
         }
@@ -7133,6 +7250,7 @@ export function useAppLogic(props: AppLogicProps) {
       setSessionPickerIndex,
       scrollToBottomForced,
       isPinnedToBottom,
+      clearScrollLock,
     ],
   );
   useKeyboard(handleKey);
@@ -7364,6 +7482,7 @@ export function useAppLogic(props: AppLogicProps) {
     councilMessages,
     councilTranscriptExpanded,
     councilTodoExpanded,
+    compactRun,
     councilPhases,
     councilPlaceholders,
     councilProgress,
