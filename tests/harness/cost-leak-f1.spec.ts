@@ -22,17 +22,11 @@ import { z } from "zod";
 
 import { installMockModel, textOnlyStream, toolCallStream } from "../../src/agent-harness/mock-model.js";
 import { loadCatalog } from "../../src/models/registry.js";
-import type { ProviderFactory } from "../../src/providers/runtime.js";
 import { computePromptCacheKey, resolveModelRuntime } from "../../src/providers/runtime.js";
 import { getProviderOption, inspectAll } from "./recording.js";
 
-function stubFactory(): ProviderFactory {
-  const fn = ((_id: string) => {
-    throw new Error("real provider factory must not be invoked under mock");
-  }) as ProviderFactory;
-  fn.responses = fn;
-  return fn;
-}
+// No stub factory: resolveModelRuntime derives the factory from the model id,
+// and installMockModel's global short-circuits the factory path entirely.
 
 // biome-ignore lint/suspicious/noExplicitAny: streamText result generic is provider-specific
 async function drain(result: { fullStream: AsyncIterable<any> }): Promise<void> {
@@ -68,7 +62,7 @@ describe("F1: stable promptCacheKey across all rounds in a session", () => {
     const expectedKey = computePromptCacheKey(sessionId);
     expect(expectedKey).toMatch(/^[a-f0-9]{32}$/);
 
-    const runtime = resolveModelRuntime(stubFactory(), "gpt-5.4");
+    const runtime = resolveModelRuntime("gpt-5.4");
     const noopTool = tool({
       description: "no-op",
       inputSchema: z.object({}).strict(),
