@@ -1,7 +1,7 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearEnvVar, envFilePath, loadEnvFileIntoProcess, persistEnvVar } from "../env-store.js";
 
 let dir: string;
@@ -23,6 +23,28 @@ describe("env-store", () => {
     persistEnvVar("TEST_KEY_A", "value-a-1234567890");
     expect(process.env.TEST_KEY_A).toBe("value-a-1234567890");
     expect(readFileSync(envFilePath(), "utf8")).toContain("TEST_KEY_A=value-a-1234567890");
+  });
+
+  // readLines() returning [] on ANY read error made persistEnvVar rebuild the
+  // store from nothing: set one key and every other key in the file is gone.
+  // A directory at the store path is a portable non-ENOENT read failure; the
+  // real ones are a locked file or bad permissions.
+  it("refuses to write when the store exists but cannot be read, instead of dropping the other keys", () => {
+    mkdirSync(envFilePath(), { recursive: true });
+
+    expect(() => persistEnvVar("TEST_KEY_A", "value-a-1234567890")).toThrow(/cannot read/);
+  });
+
+  // Boot must survive it, but must not pretend the store was empty.
+  it("boots without the stored keys when the store is unreadable, and says so", () => {
+    mkdirSync(envFilePath(), { recursive: true });
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((m) => void errors.push(String(m)));
+
+    expect(() => loadEnvFileIntoProcess()).not.toThrow();
+    expect(errors.join("\n")).toMatch(/cannot read/);
+
+    spy.mockRestore();
   });
 
   it("upserts (replaces) an existing var without duplicating lines", () => {

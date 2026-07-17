@@ -862,7 +862,15 @@ export function useAppLogic(props: AppLogicProps) {
         resolvePickerProviders(SPLASH_PROVIDERS, configured, (p) => getModelsForProvider(p).length > 0),
       );
       setProvidersWithKey(new Set(configured));
-    } catch {
+    } catch (err) {
+      // This resets every chip to "no key — press K". Silently, that reads as
+      // "the key I just set was not saved" when the credentials are in fact on
+      // disk and only the lookup failed — so say so instead of swallowing it.
+      console.error(
+        `[providers] credential lookup failed; chips will show no key: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
       setConfiguredProviders([...SPLASH_PROVIDERS]);
       setProvidersWithKey(new Set());
     }
