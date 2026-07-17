@@ -215,6 +215,13 @@ export interface ToolGroup {
   items: ToolGroupItem[];
   startedAt: number;
   finishedAt?: number;
+  /**
+   * True when this group was rebuilt from a persisted transcript rather than
+   * observed live (see ui/utils/group-tool-entries.ts). Its timestamps come
+   * from entry write-time, so the elapsed span is NOT a real measurement and
+   * must not be displayed as one.
+   */
+  restored?: boolean;
   inputTokens?: number;
   outputTokens?: number;
 }
