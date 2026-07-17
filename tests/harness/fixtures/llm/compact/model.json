@@ -1,0 +1,12 @@
+{
+  "___comment": "Slow stream so the /compact progress card stays observable. Without chunkDelayMs the mock answers instantly and the card is created and torn down inside one frame — nothing to assert on.",
+  "model": {
+    "chunkDelayMs": 300,
+    "stream": [
+      { "type": "text-start", "id": "0" },
+      { "type": "text-delta", "id": "0", "delta": "{\"decisions\":[],\"facts\":[],\"constraints\":[]}" },
+      { "type": "text-end", "id": "0" },
+      { "type": "finish", "finishReason": "stop", "usage": { "inputTokens": 10, "outputTokens": 10 } }
+    ]
+  }
+}

@@ -5,7 +5,7 @@
  * then restores preserved blocks into the output.
  */
 
-import { generateText, type ModelMessage } from "ai";
+import { type ModelMessage, streamText } from "ai";
 import { serializeConversation } from "../../orchestrator/compaction.js";
 import { resolveModelRuntime, resolveTemperatureParam } from "../../providers/runtime.js";
 import { logger } from "../../utils/logger.js";
@@ -32,6 +32,7 @@ export async function compressChat(
   tokenBudget: number,
   modelId?: string,
   customInstructions?: string,
+  onFraction?: (fraction: number) => void,
 ): Promise<CompressResult> {
   const serialized = serializeConversation(messages);
   const { cleaned, blocks } = extractPreservedBlocks(serialized);
@@ -65,14 +66,26 @@ export async function compressChat(
       // compaction fires when history is large, which is exactly when the full
       // serialized text can overflow the summarizer. Keep head + tail.
       const guardedInput = capCompactionInput(cleaned, runtime.modelInfo?.contextWindow ?? 0);
-      const result = await generateText({
+      // Streamed rather than awaited whole so the caller can report real
+      // progress: this pass is the bulk of a /compact's wall-clock, and a bar
+      // that freezes for a minute reads as a hang. The summary text is still
+      // only used once complete.
+      const result = streamText({
         model: runtime.model,
         system:
           "You are an AI context compaction agent. Your job is to heavily summarize a chat history. Keep the core outcomes, the final state, and the technical context. Remove verbose pleasantries, step-by-step thinking, and irrelevant intermediate steps. Do NOT wrap in markdown unless it's code.",
         prompt: `The following conversation exceeds the token budget. Please summarize it concisely, maintaining the essence of what was discussed, what code was written, and what decisions were reached:${extraPrompt}\n\n${guardedInput}`,
         ...resolveTemperatureParam(runtime, 0.1),
       });
-      compressedContent = result.text.trim();
+      let streamed = "";
+      for await (const delta of result.textStream) {
+        streamed += delta;
+        // availableChars is the size the model was ASKED to fit under, so it is
+        // the only honest denominator available — a concise summary finishes
+        // early and the caller jumps the bar to done rather than overshooting.
+        if (onFraction && availableChars > 0) onFraction(Math.min(1, streamed.length / availableChars));
+      }
+      compressedContent = streamed.trim();
       usedLLM = true;
     } catch (e) {
       // Fall back to deterministic truncation below, but do NOT swallow the
