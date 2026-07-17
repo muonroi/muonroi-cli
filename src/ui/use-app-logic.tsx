@@ -1411,10 +1411,17 @@ export function useAppLogic(props: AppLogicProps) {
   const isPinnedToBottom = useCallback((): boolean => {
     const sb = scrollRef.current;
     if (!sb) return true;
+    // Geometry is the ground truth for "am I at the bottom", and it is checked
+    // FIRST: _hasManualScroll is opentui's own flag, and it only self-clears at
+    // the bottom when its internal sticky bookkeeping agrees. When it doesn't,
+    // the flag stays true forever after any wheel scroll — so trusting it alone
+    // (the old behaviour) pinned isPinnedToBottom() to false and left the
+    // jump-to-latest pill on screen permanently, even sitting on the last line.
+    const vpH = (sb.viewport as unknown as { height?: number }).height ?? 0;
+    if (sb.scrollTop + vpH >= sb.scrollHeight - 2) return true;
     const manual = (sb as unknown as { _hasManualScroll?: boolean })._hasManualScroll;
     if (typeof manual === "boolean") return !manual;
-    const vpH = (sb.viewport as unknown as { height?: number }).height ?? 0;
-    return sb.scrollTop + vpH >= sb.scrollHeight - 2;
+    return false;
   }, []);
   // Retire the jump-to-latest pill. Single writer for the three lock fields so
   // the ref mirror can never drift from the rendered state.

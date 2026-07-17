@@ -1287,7 +1287,11 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     )}
                   </scrollbox>
                 </Semantic>
-                {scrollLockedAway && (
+                {/* Only worth a pill when there is actually something new below.
+                    Scrolled up with nothing new arriving, the pill said "press
+                    End to jump to latest" — a permanent hint that told the user
+                    nothing they could not already see, so it read as stuck. */}
+                {scrollLockedAway && newSinceLock > 0 && (
                   <box flexShrink={0} alignItems="center" marginTop={0}>
                     <JumpToLatestPill newSinceLock={newSinceLock} />
                   </box>

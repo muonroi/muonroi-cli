@@ -844,12 +844,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     return;
   }
 
-  if (shouldSkipForReasoning) {
-    yield {
-      type: "content",
-      content: `\n[Auto-council skipped: ${deps.modelId} is a reasoning model and already performs internal self-debate. Set MUONROI_AUTOCOUNCIL_SKIP_REASONING=0 or autoCouncilSkipReasoning=false to force council — or call the convene_council tool if THIS task needs a multi-model debate.]\n`,
-    };
-  }
+  // Skipping auto-council is the normal, expected path for a reasoning model —
+  // not an event the user needs narrated on every turn. The decision (and the
+  // gate values behind it) is still recorded via autoCouncilSkipReason above,
+  // so forensics keep the full story without the transcript noise.
 
   if (deps.batchApi) {
     try {
