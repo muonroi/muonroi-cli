@@ -131,7 +131,7 @@ import {
   type InitNewFormState,
   initialInitNewFormState,
 } from "./components/init-new-form-card.js";
-import { computeMcpRunInfo, MessageView } from "./components/message-view.js";
+import { computeMcpRunInfo, findLastCollapsibleIndex, MessageView } from "./components/message-view.js";
 import {
   initialPointToExistingFormState,
   PointToExistingFormCard,
@@ -1100,6 +1100,14 @@ export function useAppLogic(props: AppLogicProps) {
   // global (all/live rounds). Mirrored into a ref so the global key handler can
   // read the current round list without re-subscribing on every round update.
   const [selectedRound, setSelectedRound] = useState<number | null>(null);
+  // Mirrors councilStatuses for the global key handler: ctrl+e only belongs to
+  // the council todo panel while that panel is actually auto-collapsed, which
+  // app.tsx gates on `councilStatuses.length > 0`. Reading it from a ref keeps
+  // handleKey off the councilStatuses dep list.
+  const councilStatusesRef = useRef<CouncilStatusData[]>([]);
+  useEffect(() => {
+    councilStatusesRef.current = councilStatuses;
+  }, [councilStatuses]);
   const councilRoundsRef = useRef<CouncilRoundRecord[]>([]);
   useEffect(() => {
     councilRoundsRef.current = councilRounds;
@@ -1376,6 +1384,18 @@ export function useAppLogic(props: AppLogicProps) {
   const newSinceLockRef = useRef(0);
   const [newSinceLock, setNewSinceLock] = useState(0);
   const [scrollLockedAway, setScrollLockedAway] = useState(false);
+  // Transcript length when the user last left the bottom. The pill counts new
+  // *entries* against this watermark. It must NOT count scrollToBottom() calls:
+  // those fire per 32ms stream flush and per tool event, so a single streaming
+  // answer used to push the pill into the hundreds ("251 new below").
+  const lockedAtCountRef = useRef(0);
+  // Ref mirror of scrollLockedAway so the scroll helpers can read the current
+  // lock state synchronously (React state lags a render behind).
+  const lockedAwayRef = useRef(false);
+  const messageCountRef = useRef(0);
+  useEffect(() => {
+    messageCountRef.current = messages.length;
+  }, [messages.length]);
   // Context rail (MUONROI_CONTEXT_RAIL): user can hide/show the right metadata
   // panel with Ctrl+B. Defaults visible; the rail also auto-hides below 100 cols
   // (decided in app.tsx where terminal width is known).
@@ -1392,28 +1412,43 @@ export function useAppLogic(props: AppLogicProps) {
     const vpH = (sb.viewport as unknown as { height?: number }).height ?? 0;
     return sb.scrollTop + vpH >= sb.scrollHeight - 2;
   }, []);
+  // Retire the jump-to-latest pill. Single writer for the three lock fields so
+  // the ref mirror can never drift from the rendered state.
+  const clearScrollLock = useCallback(() => {
+    lockedAwayRef.current = false;
+    lockedAtCountRef.current = messageCountRef.current;
+    if (newSinceLockRef.current !== 0) {
+      newSinceLockRef.current = 0;
+      setNewSinceLock(0);
+    }
+    setScrollLockedAway(false);
+  }, []);
   // Soft scroll: respects scroll-lock. New content that arrives while the user
   // reads history does NOT move the viewport; it just increments the pill count.
   const scrollToBottom = useCallback(() => {
     if (isScrollLockEnabled() && !isPinnedToBottom()) {
-      newSinceLockRef.current += 1;
-      setNewSinceLock(newSinceLockRef.current);
-      setScrollLockedAway(true);
+      // First call after leaving the bottom sets the watermark; later calls only
+      // re-derive the count, so repeated scroll attempts for the SAME content
+      // (32ms stream flushes, tool events) can never inflate the pill.
+      if (!lockedAwayRef.current) {
+        lockedAwayRef.current = true;
+        lockedAtCountRef.current = messageCountRef.current;
+        setScrollLockedAway(true);
+      }
+      const fresh = Math.max(0, messageCountRef.current - lockedAtCountRef.current);
+      newSinceLockRef.current = fresh;
+      setNewSinceLock(fresh);
       return;
     }
     // Pinned (or lock off): scroll, and if the user had manually scrolled back
     // to the bottom on their own, retire the jump-to-latest pill.
-    if (newSinceLockRef.current !== 0) {
-      newSinceLockRef.current = 0;
-      setNewSinceLock(0);
-      setScrollLockedAway(false);
-    }
+    if (lockedAwayRef.current || newSinceLockRef.current !== 0) clearScrollLock();
     try {
       scrollRef.current?.scrollTo(scrollRef.current?.scrollHeight ?? 99999);
     } catch {
       /* */
     }
-  }, [isPinnedToBottom]);
+  }, [isPinnedToBottom, clearScrollLock]);
   // Hard scroll: re-arms native sticky and jumps to the latest line regardless
   // of manual-scroll state. Used by explicit user actions (new prompt submit,
   // jump-to-latest pill) that intend to return to the live tail.
@@ -1428,10 +1463,8 @@ export function useAppLogic(props: AppLogicProps) {
         /* */
       }
     }
-    newSinceLockRef.current = 0;
-    setNewSinceLock(0);
-    setScrollLockedAway(false);
-  }, []);
+    clearScrollLock();
+  }, [clearScrollLock]);
   const { width, height } = useTerminalDimensions();
   const processedInitial = useRef(false);
   const contentAccRef = useRef("");
@@ -3282,6 +3315,21 @@ export function useAppLogic(props: AppLogicProps) {
     showApiKeyModal,
     showSlashMenu,
   ]);
+
+  // Retire the pill when the user scrolls back to the bottom BY HAND (mouse
+  // wheel / trackpad). Previously only End (scrollToBottomForced) or new content
+  // arriving while pinned could clear it, so wheeling down to the newest line
+  // left a stale "N new below" sitting there — the reported bug.
+  // ScrollBoxRenderable exposes no scroll event (checked @opentui/core 0.1.107:
+  // scrollTo/scrollBy/scrollTop, no emitter), so a poll is the only hook. It
+  // runs ONLY while the pill is up, and stops the moment it clears.
+  useEffect(() => {
+    if (!scrollLockedAway) return;
+    const id = setInterval(() => {
+      if (isPinnedToBottom()) clearScrollLock();
+    }, 200);
+    return () => clearInterval(id);
+  }, [scrollLockedAway, isPinnedToBottom, clearScrollLock]);
 
   useEffect(() => {
     const onRawInput = (sequence: string) => {
@@ -5270,9 +5318,12 @@ export function useAppLogic(props: AppLogicProps) {
 
       // Ctrl+E — peek the full todo panel while it is auto-collapsed during a
       // council debate (app.tsx collapses it to one line so the debate scrollbox
-      // keeps its height). Global + unconditional toggle; a no-op visually when
-      // no todo snapshot exists or no council is active.
-      if (key.name === "e" && key.ctrl && !key.meta) {
+      // keeps its height). Scoped to an ACTIVE council: app.tsx only collapses
+      // the panel when `councilStatuses.length > 0`, so outside a debate this
+      // toggle is invisible — and an unconditional `return` here swallowed the
+      // key before the transcript expand handler below could ever see it,
+      // making every "ctrl+e expand" affordance in the message log dead.
+      if (key.name === "e" && key.ctrl && !key.meta && councilStatusesRef.current.length > 0) {
         setCouncilTodoExpanded((v) => !v);
         return;
       }
@@ -5322,11 +5373,7 @@ export function useAppLogic(props: AppLogicProps) {
               /* */
             }
             // Paging up leaves the tail; paging back to bottom clears the pill.
-            if (key.name === "pagedown" && isPinnedToBottom()) {
-              newSinceLockRef.current = 0;
-              setNewSinceLock(0);
-              setScrollLockedAway(false);
-            }
+            if (key.name === "pagedown" && isPinnedToBottom()) clearScrollLock();
           }
           return;
         }
@@ -6862,18 +6909,16 @@ export function useAppLogic(props: AppLogicProps) {
       }
 
       if (key.name === "e" && key.ctrl) {
-        let lastUserIdx = -1;
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i]!.type === "user") {
-            lastUserIdx = i;
-            break;
-          }
-        }
-        if (lastUserIdx >= 0) {
+        // Toggle the NEWEST entry that actually renders a "ctrl+e" affordance —
+        // long user text, collapsed model narration, chain-of-thought, or a done
+        // tool group. Targeting only the last *user* message meant the key did
+        // nothing for every other affordance that advertises it.
+        const idx = findLastCollapsibleIndex(messages);
+        if (idx >= 0) {
           setExpandedMessages((prev) => {
             const next = new Set(prev);
-            if (next.has(lastUserIdx)) next.delete(lastUserIdx);
-            else next.add(lastUserIdx);
+            if (next.has(idx)) next.delete(idx);
+            else next.add(idx);
             return next;
           });
         }
@@ -7133,6 +7178,7 @@ export function useAppLogic(props: AppLogicProps) {
       setSessionPickerIndex,
       scrollToBottomForced,
       isPinnedToBottom,
+      clearScrollLock,
     ],
   );
   useKeyboard(handleKey);

@@ -733,6 +733,13 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     width,
   } = useAppLogic({ agent, startupConfig, initialMessage, onExit, onRelaunch });
 
+  // True while a tool group is streaming its items. Gates the legacy inline
+  // activeToolCalls list so a running tool isn't printed twice (see below).
+  const hasActiveToolGroup = useMemo(
+    () => messages.some((m) => m.type === "tool_group" && m.toolGroup?.state === "active"),
+    [messages],
+  );
+
   // Agent-mode input bridge: translate harness {op:"type"/"press"} commands into
   // synthetic OpenTUI keypresses (via the shared useAppContext().keyHandler) so
   // an external driver (MCP harness / vitest spec) can actually type into the
@@ -943,30 +950,41 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         <text fg={t.textMuted}>{liveTurnSourceLabel}</text>
                       </box>
                     )}
-                    {/* Active tool calls — pending inline */}
-                    {activeToolCalls.map((tc) =>
-                      tc.function.name === "task" ? (
-                        <SubagentTaskLine
-                          key={tc.id}
-                          t={t}
-                          agent={tryParseArg(tc, "agent") || "sub-agent"}
-                          label={toolArgs(tc) || "Working"}
-                          pending
-                        />
-                      ) : tc.function.name === "delegate" ? (
-                        <DelegationTaskLine
-                          key={tc.id}
-                          t={t}
-                          label={toolArgs(tc) || "Background research"}
-                          pending
-                          id={undefined}
-                        />
-                      ) : (
-                        <InlineTool key={tc.id} t={t} pending>
-                          {toolLabel(tc)}
-                        </InlineTool>
-                      ),
-                    )}
+                    {/* Active tool calls — pending inline.
+                      Since the tool-group panel landed, every live call already
+                      renders as a "▸ <label>" item inside its group, so echoing
+                      the same calls here printed each running tool TWICE ("▸ Grep
+                      …" in the group, "→ Grep …" right under it). The legacy list
+                      stays as the fallback for the no-group path (setActiveToolCalls
+                      with no active turn) and for task/delegate, whose rich lines
+                      carry agent + status the group's plain label does not. */}
+                    {activeToolCalls
+                      .filter(
+                        (tc) => !hasActiveToolGroup || tc.function.name === "task" || tc.function.name === "delegate",
+                      )
+                      .map((tc) =>
+                        tc.function.name === "task" ? (
+                          <SubagentTaskLine
+                            key={tc.id}
+                            t={t}
+                            agent={tryParseArg(tc, "agent") || "sub-agent"}
+                            label={toolArgs(tc) || "Working"}
+                            pending
+                          />
+                        ) : tc.function.name === "delegate" ? (
+                          <DelegationTaskLine
+                            key={tc.id}
+                            t={t}
+                            label={toolArgs(tc) || "Background research"}
+                            pending
+                            id={undefined}
+                          />
+                        ) : (
+                          <InlineTool key={tc.id} t={t} pending>
+                            {toolLabel(tc)}
+                          </InlineTool>
+                        ),
+                      )}
                     {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
                     {/* Council metadata cards render here INLINE only when the
                       rail is off; when the rail is on they are hoisted into it
