@@ -1,0 +1,25 @@
+{
+  "___comment": "Spawns a background shell so the rail's Agents block has a real activity to list.",
+  "model": {
+    "stream": [
+      [
+        { "type": "tool-input-start", "id": "c1", "toolName": "bash" },
+        { "type": "tool-input-delta", "id": "c1", "delta": "{\"command\":\"sleep 30\",\"background\":true}" },
+        { "type": "tool-input-end", "id": "c1" },
+        {
+          "type": "tool-call",
+          "toolCallId": "c1",
+          "toolName": "bash",
+          "input": "{\"command\":\"sleep 30\",\"background\":true}"
+        },
+        { "type": "finish", "finishReason": "tool-calls", "usage": { "inputTokens": 10, "outputTokens": 5 } }
+      ],
+      [
+        { "type": "text-start", "id": "0" },
+        { "type": "text-delta", "id": "0", "delta": "Started the dev server in the background." },
+        { "type": "text-end", "id": "0" },
+        { "type": "finish", "finishReason": "stop", "usage": { "inputTokens": 10, "outputTokens": 8 } }
+      ]
+    ]
+  }
+}

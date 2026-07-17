@@ -93,6 +93,7 @@ import { ProductStatusCard } from "./cards/product-status-card.js";
 import { BtwOverlay, type BtwState } from "./components/btw-overlay.js";
 import { makePairKey, usePairSideMap } from "./components/bubble-layout.js";
 import { ContextRail, type ContextRailRow } from "./components/context-rail.js";
+import { AgentRailActivities } from "./components/agent-rail-activities.js";
 import { CompactProgressCard } from "./components/compact-progress-card.js";
 import { CopyFlashBanner } from "./components/copy-flash-banner.js";
 import { CouncilDebatePill } from "./components/council-debate-pill.js";
@@ -223,6 +224,7 @@ import {
 } from "./utils/format.js";
 import { isEscapeKey } from "./utils/modal.js";
 import { sanitizeContent } from "./utils/text.js";
+import { collectAgentActivities } from "./utils/agent-activities.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
 /**
@@ -741,6 +743,12 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     () => messages.some((m) => m.type === "tool_group" && m.toolGroup?.state === "active"),
     [messages],
   );
+
+  // Roster of every sub-agent / background job spawned this session, for the
+  // rail. Derived from the transcript + in-flight calls, so it cannot drift from
+  // what actually ran.
+  const agentActivities = useMemo(() => collectAgentActivities(messages, activeToolCalls), [messages, activeToolCalls]);
+  const [selectedActivity, setSelectedActivity] = useState<string | null>(null);
 
   // Agent-mode input bridge: translate harness {op:"type"/"press"} commands into
   // synthetic OpenTUI keypresses (via the shared useAppContext().keyHandler) so
@@ -1340,6 +1348,13 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               {railActive && (
                 <ContextRail width={railWidth} rows={railRows}>
                   <SessionTreeCard nodes={sessionTree} />
+                  <AgentRailActivities
+                    activities={agentActivities}
+                    selected={selectedActivity}
+                    onSelect={setSelectedActivity}
+                    width={railWidth}
+                    t={t}
+                  />
                   {renderCouncilMeta(railWidth)}
                 </ContextRail>
               )}

@@ -274,12 +274,22 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
 
   return {
     async health(): Promise<{ ok: boolean; status: number }> {
+      const startedAt = Date.now();
       try {
         const resp = await f(`${baseUrl}/health`, {
           signal: AbortSignal.timeout(DEFAULT_HEALTH_TIMEOUT_MS),
         });
         return { ok: resp.ok, status: resp.status };
-      } catch {
+      } catch (err) {
+        // status:0 means "no response" and says nothing about WHY. Timeout, DNS,
+        // refused connection and TLS failure all degrade to the same shape, so a
+        // bare catch here leaves an agent with an unfalsifiable symptom — exactly
+        // what happened on 2026-07-17, when status:0 was really the server
+        // blocking its event loop.
+        logEeFailure("client.health", classifyEeError(err), err, {
+          elapsedMs: Date.now() - startedAt,
+          budgetMs: DEFAULT_HEALTH_TIMEOUT_MS,
+        });
         return { ok: false, status: 0 };
       }
     },
@@ -663,6 +673,7 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       // races the server and loses → spurious ee_unavailable. 15s gives margin
       // so a slow-but-valid recall still lands rather than being dropped.
       const timeoutMs = opts.timeoutMs ?? 15000;
+      const startedAt = Date.now();
       try {
         const resp = await f(`${baseUrl}/api/recall`, {
           method: "POST",
@@ -670,9 +681,24 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
           body: JSON.stringify(redactedBody),
           signal: opts.signal ?? AbortSignal.timeout(timeoutMs),
         });
-        if (!resp.ok) return null;
+        if (!resp.ok) {
+          // Keep returning null — callers map it to "EE unavailable" — but never
+          // discard the status. Collapsing 429/401/500 into the same null a
+          // timeout produces is what made the 2026-07-17 incident unfalsifiable
+          // from the client: "is the server rate-limiting us?" could not be
+          // answered without reading the server's source.
+          logEeFailure("client.recall", "error", new Error(`HTTP ${resp.status}`), {
+            status: resp.status,
+            elapsedMs: Date.now() - startedAt,
+          });
+          return null;
+        }
         return (await resp.json()) as import("./types.js").EERecallResponse;
-      } catch {
+      } catch (err) {
+        logEeFailure("client.recall", classifyEeError(err), err, {
+          elapsedMs: Date.now() - startedAt,
+          budgetMs: timeoutMs,
+        });
         return null;
       }
     },
