@@ -757,6 +757,41 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // was dead). No-op when agentRuntime is undefined (normal interactive mode).
   useAgentInputBridge(agentRuntime);
 
+  // Publish the transcript scrollbox's geometry so a spec can tell WHY a scroll
+  // assertion failed. Without it, "the lock did not engage" and "the transcript
+  // never overflowed, so there was nothing to scroll away from" are the same
+  // observation — which is what made scroll-lock.spec unfixable by inspection
+  // (measured: scrollHeight 27 == viewportH 27 at the instant `idle` fired).
+  //
+  // Opt-in (MUONROI_HARNESS_SCROLL_GEOM=1) on top of agent-mode, so a spec that
+  // does not ask for it is bit-for-bit unaffected: this adds a timer and extra
+  // frames, and the harness shares a process boundary with a native renderer
+  // that segfaults under load. Observability must not perturb the thing it
+  // observes.
+  //
+  // Sampled on an interval, never read during render: scrollHeight/viewport are
+  // layout getters, and sampling them outside the render pass keeps them from
+  // feeding back into it. setState only on a real change, so a settled
+  // transcript stops producing frames.
+  const [scrollGeom, setScrollGeom] = useState<{ vpH: number; scrollH: number; manual: boolean } | null>(null);
+  useEffect(() => {
+    if (!agentRuntime || process.env.MUONROI_HARNESS_SCROLL_GEOM !== "1") return;
+    const read = () => {
+      const sb = scrollRef.current;
+      if (!sb) return;
+      const next = {
+        vpH: (sb.viewport as unknown as { height?: number })?.height ?? -1,
+        scrollH: sb.scrollHeight ?? -1,
+        manual: Boolean((sb as unknown as { _hasManualScroll?: boolean })._hasManualScroll),
+      };
+      setScrollGeom((prev) =>
+        prev && prev.vpH === next.vpH && prev.scrollH === next.scrollH && prev.manual === next.manual ? prev : next,
+      );
+    };
+    const id = setInterval(read, 200);
+    return () => clearInterval(id);
+  }, [agentRuntime, scrollRef]);
+
   // Context rail (MUONROI_CONTEXT_RAIL): only render when enabled, the user
   // hasn't hidden it (Ctrl+B), and the terminal is wide enough that a fixed
   // side panel doesn't starve the transcript. Below 100 cols it stays inline.
@@ -914,7 +949,22 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                 <Semantic
                   id="log"
                   role="log"
-                  props={{ scrollTop: scrollRef.current?.scrollTop ?? 0, locked: scrollLockedAway, newSinceLock }}
+                  props={{
+                    scrollTop: scrollRef.current?.scrollTop ?? 0,
+                    locked: scrollLockedAway,
+                    newSinceLock,
+                    // Present only in agent-mode (see the sampler above).
+                    ...(scrollGeom
+                      ? {
+                          viewportH: scrollGeom.vpH,
+                          scrollHeight: scrollGeom.scrollH,
+                          manualScroll: scrollGeom.manual,
+                          // The one derived answer every scroll spec actually
+                          // wants: is there anything to scroll away from?
+                          overflows: scrollGeom.scrollH > scrollGeom.vpH,
+                        }
+                      : {}),
+                  }}
                 >
                   {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
                   <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>

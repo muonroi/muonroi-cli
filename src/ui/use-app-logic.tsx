@@ -1435,18 +1435,21 @@ export function useAppLogic(props: AppLogicProps) {
     }
     setScrollLockedAway(false);
   }, []);
+  // Engage the lock. Single writer, mirroring clearScrollLock. The first call
+  // after leaving the bottom sets the watermark; later calls are no-ops, so
+  // repeated scroll attempts for the SAME content (32ms stream flushes, tool
+  // events) can never inflate the pill.
+  const engageScrollLock = useCallback(() => {
+    if (!isScrollLockEnabled() || lockedAwayRef.current) return;
+    lockedAwayRef.current = true;
+    lockedAtCountRef.current = messageCountRef.current;
+    setScrollLockedAway(true);
+  }, []);
   // Soft scroll: respects scroll-lock. New content that arrives while the user
   // reads history does NOT move the viewport; it just increments the pill count.
   const scrollToBottom = useCallback(() => {
     if (isScrollLockEnabled() && !isPinnedToBottom()) {
-      // First call after leaving the bottom sets the watermark; later calls only
-      // re-derive the count, so repeated scroll attempts for the SAME content
-      // (32ms stream flushes, tool events) can never inflate the pill.
-      if (!lockedAwayRef.current) {
-        lockedAwayRef.current = true;
-        lockedAtCountRef.current = messageCountRef.current;
-        setScrollLockedAway(true);
-      }
+      engageScrollLock();
       const fresh = Math.max(0, messageCountRef.current - lockedAtCountRef.current);
       newSinceLockRef.current = fresh;
       setNewSinceLock(fresh);
@@ -1460,7 +1463,7 @@ export function useAppLogic(props: AppLogicProps) {
     } catch {
       /* */
     }
-  }, [isPinnedToBottom, clearScrollLock]);
+  }, [isPinnedToBottom, clearScrollLock, engageScrollLock]);
   // Hard scroll: re-arms native sticky and jumps to the latest line regardless
   // of manual-scroll state. Used by explicit user actions (new prompt submit,
   // jump-to-latest pill) that intend to return to the live tail.
@@ -5384,6 +5387,13 @@ export function useAppLogic(props: AppLogicProps) {
               /* */
             }
             // Paging up leaves the tail; paging back to bottom clears the pill.
+            // Engaging on pageup is what was missing: the lock was only ever set
+            // from scrollToBottom(), i.e. when new content ARRIVED while away
+            // from the tail. Paging up therefore surfaced the pill only if a
+            // render happened to follow — measured as engaging on one run and
+            // not the next. Setting it here makes it depend on the key, not on
+            // whether the stream was still flushing.
+            if (key.name === "pageup" && !isPinnedToBottom()) engageScrollLock();
             if (key.name === "pagedown" && isPinnedToBottom()) clearScrollLock();
           }
           return;
