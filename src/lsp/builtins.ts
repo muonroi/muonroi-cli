@@ -396,7 +396,9 @@ async function resolveNodeServerLaunch(
 
   if (!autoInstall) return null;
 
-  const cached = await lspNpmWhich(packageName);
+  // Pass `binary` explicitly: a package can ship several bins and the one named
+  // after the package is not always the language server (see lspNpmWhich).
+  const cached = await lspNpmWhich(packageName, binary);
   if (cached) {
     return { command: cached, args: baseArgs };
   }

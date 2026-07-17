@@ -862,7 +862,15 @@ export function useAppLogic(props: AppLogicProps) {
         resolvePickerProviders(SPLASH_PROVIDERS, configured, (p) => getModelsForProvider(p).length > 0),
       );
       setProvidersWithKey(new Set(configured));
-    } catch {
+    } catch (err) {
+      // This resets every chip to "no key — press K". Silently, that reads as
+      // "the key I just set was not saved" when the credentials are in fact on
+      // disk and only the lookup failed — so say so instead of swallowing it.
+      console.error(
+        `[providers] credential lookup failed; chips will show no key: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
       setConfiguredProviders([...SPLASH_PROVIDERS]);
       setProvidersWithKey(new Set());
     }
@@ -900,6 +908,19 @@ export function useAppLogic(props: AppLogicProps) {
         setApiKeyPrompt({ ...apiKeyPrompt, error: "Could not store key. Try `export <PROVIDER>_API_KEY=…`." });
         return;
       }
+      // Same reason as the OAuth path: boot skips a provider with no
+      // credentials, so without this the key is stored but the provider stays
+      // unusable until the next start.
+      try {
+        const { rewarmProviderFactory } = await import("../providers/warm.js");
+        await rewarmProviderFactory(apiKeyPrompt.provider);
+      } catch (err) {
+        console.error(
+          `[providers] ${apiKeyPrompt.provider} key stored but its factory could not be rebuilt; a restart may be needed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
       await refreshProvidersWithKey();
       setApiKeyPrompt(null);
     } catch (e) {
@@ -914,6 +935,9 @@ export function useAppLogic(props: AppLogicProps) {
   const [oauthProviders, setOAuthProviders] = useState<ReadonlySet<ProviderId>>(() => new Set());
   const [oauthLogin, setOAuthLogin] = useState<{ provider: ProviderId; error: string | null } | null>(null);
   const oauthCancelRef = useRef(false);
+  // Aborts the in-flight sign-in itself, not just the UI's interest in it —
+  // see cancelProviderOAuth.
+  const oauthAbortRef = useRef<AbortController | null>(null);
 
   // Populate the OAuth-capable provider set once, from the OAuth registry.
   useEffect(() => {
@@ -935,6 +959,11 @@ export function useAppLogic(props: AppLogicProps) {
   const startProviderOAuth = useCallback(
     async (provider: ProviderId) => {
       oauthCancelRef.current = false;
+      // Abort the PREVIOUS attempt's server before starting another: the
+      // browser flow binds a loopback callback on a two-port set, so a
+      // still-running one would make this attempt fail to bind.
+      oauthAbortRef.current?.abort();
+      oauthAbortRef.current = new AbortController();
       setOAuthLogin({ provider, error: null });
       try {
         const { getOAuthProviderConfig } = await import("../providers/auth/registry.js");
@@ -943,7 +972,7 @@ export function useAppLogic(props: AppLogicProps) {
           setOAuthLogin({ provider, error: "OAuth is not available for this provider." });
           return;
         }
-        const tokens = await cfg.provider.login({});
+        const tokens = await cfg.provider.login({ signal: oauthAbortRef.current?.signal });
         if (oauthCancelRef.current) return;
         const { saveTokens } = await import("../providers/auth/token-store.js");
         await saveTokens(provider, tokens);
@@ -952,8 +981,25 @@ export function useAppLogic(props: AppLogicProps) {
           const { clearEnvVar } = await import("../providers/env-store.js");
           const { ENV_BY_PROVIDER } = await import("../providers/keychain.js");
           clearEnvVar(ENV_BY_PROVIDER[provider]);
-        } catch {
-          /* best-effort */
+        } catch (err) {
+          console.error(
+            `[providers] could not clear the stored ${provider} key after OAuth login: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        // The factory bakes in the auth it saw when it was built, so the tokens
+        // we just saved reach nothing until it is rebuilt — that is why signing
+        // in only took effect after restarting the session.
+        try {
+          const { rewarmProviderFactory } = await import("../providers/warm.js");
+          await rewarmProviderFactory(provider);
+        } catch (err) {
+          console.error(
+            `[providers] ${provider} signed in but its factory could not be rebuilt; a restart may be needed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
         }
         await refreshProvidersWithKey();
         setOAuthLogin(null);
@@ -967,6 +1013,12 @@ export function useAppLogic(props: AppLogicProps) {
 
   const cancelProviderOAuth = useCallback(() => {
     oauthCancelRef.current = true;
+    // Esc used to close the card and leave the sign-in running: its loopback
+    // server kept port 1455/1457 for the full 5-minute callback timeout, so the
+    // next attempt could not bind and only restarting the CLI recovered it.
+    // Abort ends the flow, which closes the server and frees the port now.
+    oauthAbortRef.current?.abort();
+    oauthAbortRef.current = null;
     setOAuthLogin(null);
   }, []);
 
@@ -1332,7 +1384,7 @@ export function useAppLogic(props: AppLogicProps) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: sessionId + messages.length are intentional recompute signals (getSessionTree reads the current session internally)
   const sessionTree = useMemo(() => agent.getSessionTree(), [agent, sessionId, messages.length]);
   // Boot straight to chat: no forced API-key modal on start. Auth is on-demand
-  // via the provider picker (opens on a no-auth send, or via /providers /login).
+  // via the provider picker (opens on a no-auth send, or via /providers).
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const [showSlashMenu, setShowSlashMenu] = useState(false);
@@ -1427,18 +1479,21 @@ export function useAppLogic(props: AppLogicProps) {
     }
     setScrollLockedAway(false);
   }, []);
+  // Engage the lock. Single writer, mirroring clearScrollLock. The first call
+  // after leaving the bottom sets the watermark; later calls are no-ops, so
+  // repeated scroll attempts for the SAME content (32ms stream flushes, tool
+  // events) can never inflate the pill.
+  const engageScrollLock = useCallback(() => {
+    if (!isScrollLockEnabled() || lockedAwayRef.current) return;
+    lockedAwayRef.current = true;
+    lockedAtCountRef.current = messageCountRef.current;
+    setScrollLockedAway(true);
+  }, []);
   // Soft scroll: respects scroll-lock. New content that arrives while the user
   // reads history does NOT move the viewport; it just increments the pill count.
   const scrollToBottom = useCallback(() => {
     if (isScrollLockEnabled() && !isPinnedToBottom()) {
-      // First call after leaving the bottom sets the watermark; later calls only
-      // re-derive the count, so repeated scroll attempts for the SAME content
-      // (32ms stream flushes, tool events) can never inflate the pill.
-      if (!lockedAwayRef.current) {
-        lockedAwayRef.current = true;
-        lockedAtCountRef.current = messageCountRef.current;
-        setScrollLockedAway(true);
-      }
+      engageScrollLock();
       const fresh = Math.max(0, messageCountRef.current - lockedAtCountRef.current);
       newSinceLockRef.current = fresh;
       setNewSinceLock(fresh);
@@ -1452,7 +1507,7 @@ export function useAppLogic(props: AppLogicProps) {
     } catch {
       /* */
     }
-  }, [isPinnedToBottom, clearScrollLock]);
+  }, [isPinnedToBottom, clearScrollLock, engageScrollLock]);
   // Hard scroll: re-arms native sticky and jumps to the latest line regardless
   // of manual-scroll state. Used by explicit user actions (new prompt submit,
   // jump-to-latest pill) that intend to return to the live tail.
@@ -4920,7 +4975,6 @@ export function useAppLogic(props: AppLogicProps) {
           break;
         case "providers":
         case "models":
-        case "login":
           setShowModelPicker(true);
           setModelPickerIndex(0);
           setModelSearchQuery("");
@@ -5377,6 +5431,13 @@ export function useAppLogic(props: AppLogicProps) {
               /* */
             }
             // Paging up leaves the tail; paging back to bottom clears the pill.
+            // Engaging on pageup is what was missing: the lock was only ever set
+            // from scrollToBottom(), i.e. when new content ARRIVED while away
+            // from the tail. Paging up therefore surfaced the pill only if a
+            // render happened to follow — measured as engaging on one run and
+            // not the next. Setting it here makes it depend on the key, not on
+            // whether the stream was still flushing.
+            if (key.name === "pageup" && !isPinnedToBottom()) engageScrollLock();
             if (key.name === "pagedown" && isPinnedToBottom()) clearScrollLock();
           }
           return;
@@ -6677,7 +6738,14 @@ export function useAppLogic(props: AppLogicProps) {
         }
         if (key.name === "d" || key.name === "return") {
           const p = configuredProviders[providerChipIndex];
-          if (p && providersWithKey.has(p)) setAsDefaultProvider(p);
+          if (!p) return;
+          // Enter means "use this provider". With credentials that means making
+          // it the default; with none it means signing in, which is the only
+          // useful thing left to do on the row (Enter was a dead key there).
+          // /login is gone, so this picker is the single auth surface: K adds a
+          // key, Enter signs in via OAuth where the provider supports it.
+          if (providersWithKey.has(p)) setAsDefaultProvider(p);
+          else if (oauthProviders.has(p)) void startProviderOAuth(p);
           return;
         }
         return;

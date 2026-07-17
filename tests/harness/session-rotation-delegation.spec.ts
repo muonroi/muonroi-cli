@@ -10,6 +10,51 @@ import { spawnHarness } from "./helpers.js";
 
 const requireSync = createRequire(import.meta.url);
 
+/**
+ * Block until the DB satisfies `ready`, i.e. the exact postcondition the test
+ * goes on to assert.
+ *
+ * `wait_for({idle: true})` cannot express "the turn finished". Idle is pure
+ * quiescence — `createIdleDetector` fires `--agent-idle-ms` (default 50) after
+ * the last `markActivity()`. `press("Enter")` marks activity, but the turn then
+ * spends an unbounded, machine-dependent stretch spinning up (classify, module
+ * load, DB open) during which nothing marks activity. Exceed 50ms there and
+ * idle fires BEFORE the turn produces a single frame, so the gate returns, the
+ * spec types `/exit` mid-turn, and the assistant message it asserts on is never
+ * written. That is why this spec passed alone and failed inside the full suite,
+ * where memory pressure makes a >50ms pre-turn gap routine.
+ *
+ * Messages commit live (`appendMessages` → `withTransaction` in
+ * src/storage/transcript.ts), so the row is visible from here the moment it
+ * lands — no need to exit the child first.
+ */
+async function waitForDb(dbPath: string, what: string, ready: (db: any) => boolean, timeoutMs: number): Promise<void> {
+  const BetterSqlite3 = requireSync("better-sqlite3");
+  const deadline = Date.now() + timeoutMs;
+  let lastErr = "";
+  while (Date.now() < deadline) {
+    if (existsSync(dbPath)) {
+      let db: any;
+      try {
+        db = new BetterSqlite3(dbPath, { readonly: true });
+        if (ready(db)) return;
+      } catch (err) {
+        // Expected while the child is mid-write (locked / half-created schema);
+        // only the final timeout message is a real failure.
+        lastErr = err instanceof Error ? err.message : String(err);
+      } finally {
+        try {
+          db?.close();
+        } catch (err) {
+          lastErr = err instanceof Error ? err.message : String(err);
+        }
+      }
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}${lastErr ? ` (last DB error: ${lastErr})` : ""}`);
+}
+
 // CI-quarantined (runs locally + pre-push, skipped only on CI). This drives a
 // full classifier → sub-session spawn/rotate → SQLite-commit flow that is too
 // heavy for the shared 2-core GitHub runner: after a 25–46s cold boot the mock
@@ -112,9 +157,18 @@ describe.skipIf(!!process.env.CI)("E2E Harness - Sub-Session Delegation & Silent
     ctx.driver.type("create verification script");
     ctx.driver.press("Enter");
 
-    // Wait for LLM response
-    await ctx.driver.wait_for({ selector: "role=log", timeoutMs: 30_000 });
-    await ctx.driver.wait_for({ idle: true, timeoutMs: 30_000 });
+    // Wait for the absorbed summary to actually land — the postcondition this
+    // test asserts — rather than for a 50ms quiescence window that can elapse
+    // before the turn even starts. See waitForDb.
+    await waitForDb(
+      dbPath,
+      "the parent session to absorb the sub-session summary",
+      (db) =>
+        (db.prepare("SELECT message_json FROM messages WHERE role = 'assistant'").all() as any[]).some((r) =>
+          String(r.message_json).includes("Result Summary: completed task successfully."),
+        ),
+      60_000,
+    );
 
     // Exit gracefully to ensure DB commits
     ctx.driver.type("/exit");
@@ -133,16 +187,21 @@ describe.skipIf(!!process.env.CI)("E2E Harness - Sub-Session Delegation & Silent
     const BetterSqlite3 = requireSync("better-sqlite3");
     const db = new BetterSqlite3(dbPath);
 
-    // Verify session linkage
-    const sessions = db
-      .prepare("SELECT id, parent_session_id, status FROM sessions ORDER BY created_at DESC")
-      .all() as any[];
+    // Verify session linkage.
+    //
+    // Identify the pair by the link itself, NOT by `ORDER BY created_at DESC`.
+    // created_at ties at second granularity (see the same caveat on
+    // getSessionChain in src/storage/transcript.ts), and parent+child are
+    // created well inside one second, so the ordering between them is
+    // arbitrary — "sessions[0] is the child" is a coin flip that returns the
+    // parent (parent_session_id = null) often enough to fail the suite.
+    const sessions = db.prepare("SELECT id, parent_session_id, status FROM sessions").all() as any[];
     expect(sessions.length).toBeGreaterThanOrEqual(2);
 
-    // The most recently created session should be the sub-session (child) and have a parent_session_id pointing to the parent.
-    const child = sessions[0];
-    const parent = sessions[1];
-    expect(child.parent_session_id).toBe(parent.id);
+    const child = sessions.find((s) => s.parent_session_id !== null);
+    expect(child, "no session carries a parent_session_id — the sub-session never linked").toBeDefined();
+    const parent = sessions.find((s) => s.id === child.parent_session_id);
+    expect(parent, `child ${child.id} points at a parent that is not in the DB`).toBeDefined();
 
     // Verify parent's message has absorbed the final sub-session outcome
     const parentMessages = db
@@ -234,8 +293,17 @@ describe.skipIf(!!process.env.CI)("E2E Harness - Sub-Session Delegation & Silent
     ctx.driver.type("switch to a different topic");
     ctx.driver.press("Enter");
 
-    await ctx.driver.wait_for({ selector: "role=log", timeoutMs: 30_000 });
-    await ctx.driver.wait_for({ idle: true, timeoutMs: 30_000 });
+    // Same idle race as the spawn test — gate on the rotation actually being
+    // committed (the linked pair this test asserts on). See waitForDb.
+    await waitForDb(
+      specDbPath,
+      "the session to rotate into a linked child",
+      (db) => {
+        const rows = db.prepare("SELECT id, parent_session_id FROM sessions").all() as any[];
+        return rows.some((r) => r.parent_session_id && rows.some((other) => other.id === r.parent_session_id));
+      },
+      60_000,
+    );
 
     ctx.driver.type("/exit");
     ctx.driver.press("Enter");
@@ -252,10 +320,14 @@ describe.skipIf(!!process.env.CI)("E2E Harness - Sub-Session Delegation & Silent
     const BetterSqlite3 = requireSync("better-sqlite3");
     const db = new BetterSqlite3(specDbPath);
 
-    const sessions = db.prepare("SELECT id, parent_session_id FROM sessions ORDER BY created_at DESC").all() as any[];
+    // Same created_at-tie caveat as the spawn test: match on the link, not on
+    // creation order.
+    const sessions = db.prepare("SELECT id, parent_session_id FROM sessions").all() as any[];
     expect(sessions.length).toBeGreaterThanOrEqual(2);
-    // The rotated session should point to the old session
-    expect(sessions[0].parent_session_id).toBe(sessions[1].id);
+    // The rotated session should point to the old session.
+    const rotated = sessions.find((s) => s.parent_session_id !== null);
+    expect(rotated, "no session carries a parent_session_id — the rotation never linked").toBeDefined();
+    expect(sessions.some((s) => s.id === rotated.parent_session_id)).toBe(true);
 
     db.close();
     ctx.cleanup();

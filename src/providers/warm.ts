@@ -46,6 +46,51 @@ export interface WarmResult {
  * session-specific options (custom baseURL, OAuth headers), and rebuilding it
  * from bare defaults here would silently downgrade the live session's wiring.
  */
+/**
+ * Rebuild ONE provider's factory after its credentials changed mid-session.
+ *
+ * `createProviderFactoryAsync` reads OAuth tokens at CONSTRUCTION and bakes the
+ * resulting auth headers into the factory (runtime.ts: `loadTokensWithRefresh()`
+ * then `authHeaders(tokens)`). Boot warms openai/xai even with no tokens —
+ * `getOAuthProviderConfig` only reports that a provider SUPPORTS OAuth — so the
+ * entry built at boot is an API-key-path factory. Signing in later saved tokens
+ * that nothing re-read: the stale factory stayed registered and the provider
+ * kept failing until the next process start. That is the "OAuth only works
+ * after I restart the session" report; the same held for a key set via `K` on a
+ * provider skipped at boot for "no credentials".
+ *
+ * warmProviderFactories() cannot be reused for this: it deliberately SKIPS a
+ * provider that already has a factory. The registry is last-built-wins, so
+ * building again is what replaces the stale entry.
+ */
+export async function rewarmProviderFactory(id: ProviderId): Promise<boolean> {
+  try {
+    const { loadUserSettings } = await import("../utils/settings.js");
+    const baseURL = loadUserSettings()?.providers?.[id]?.baseURL;
+
+    let apiKey: string | undefined;
+    try {
+      const { loadKeyForProvider } = await import("./keychain.js");
+      apiKey = (await loadKeyForProvider(id)) || undefined;
+    } catch (err) {
+      // No stored key is the normal OAuth case, so this is not an error —
+      // but log it: a keychain fault here silently downgrades auth.
+      logger.debug("cli", `[provider-warm] key read failed for ${id}: ${(err as Error)?.message}`, { error: err });
+      apiKey = undefined;
+    }
+
+    await createProviderFactoryAsync(id, { ...(apiKey ? { apiKey } : {}), ...(baseURL ? { baseURL } : {}) });
+    logger.info("cli", `[provider-warm] rebuilt ${id} factory after a credential change`, { providerId: id });
+    return true;
+  } catch (err) {
+    logger.warn("cli", `[provider-warm] failed to rebuild factory for ${id}: ${(err as Error)?.message}`, {
+      error: err,
+      providerId: id,
+    });
+    return false;
+  }
+}
+
 export async function warmProviderFactories(): Promise<WarmResult> {
   const warmed: ProviderId[] = [];
   const skipped: Array<{ id: ProviderId; reason: string }> = [];

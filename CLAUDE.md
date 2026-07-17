@@ -404,6 +404,35 @@ Controls which event kinds are emitted on the sidechannel.
 opt in with `MUONROI_HARNESS_EVENTS=llm-token` only when you need token-level
 correlation.
 
+### `MUONROI_HARNESS_SCROLL_GEOM=1` — scroll geometry on `id=log`
+
+Adds four props to the transcript log node, sampled outside the render pass
+(agent-mode only, opt-in — it costs a timer and extra frames, so no spec that
+does not ask for it is affected):
+
+| prop | meaning |
+|---|---|
+| `viewportH` | scrollbox viewport height |
+| `scrollHeight` | laid-out content height |
+| `overflows` | `scrollHeight > viewportH` — **is there anything to scroll?** |
+| `manualScroll` | opentui's `_hasManualScroll` |
+
+**Reach for this before debugging any scroll assertion.** Without it, "the lock
+did not engage" and "the transcript never overflowed" are indistinguishable, and
+you will fix the wrong thing (that is exactly what happened: scroll-lock.spec was
+written off as a viewport flake for weeks).
+
+`wait_for({idle:true})` means **the agent turn finished, NOT that the UI has been
+laid out**. Measured at the instant idle fired: `scrollHeight` 27 == `viewportH`
+27 (`overflows:false`), with the layout only catching up ~700ms–3s later
+(`scrollHeight` 91 → 175). Keys pressed in that window hit an un-laid-out box and
+do nothing. Gate scroll input on the real condition instead:
+
+```ts
+await driver.wait_for({ selector: "id=log props.overflows=true", timeoutMs: 15_000 });
+driver.press("PageUp");
+```
+
 ### Observing a live run — DO NOT hand-roll a poller
 
 If you are driving the TUI from an MCP client, these two calls replace every

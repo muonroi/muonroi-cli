@@ -19,9 +19,17 @@ export function envFilePath(): string {
 function readLines(): string[] {
   try {
     return readFileSync(envFilePath(), "utf8").split(/\r?\n/);
-  } catch {
+  } catch (err) {
     // Missing file is the normal first-run case — no key store yet.
-    return [];
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    // Anything else (locked, permissions, corrupt) must NOT read as "no keys":
+    // persistEnvVar rebuilds the file from these lines, so returning [] here
+    // silently rewrites the store WITHOUT the keys it failed to read — the user
+    // sets one key and the others are gone. Fail loudly instead.
+    throw new Error(
+      `[env-store] cannot read ${envFilePath()}: ${err instanceof Error ? err.message : String(err)}. ` +
+        `Refusing to continue — writing now would drop the keys already in it.`,
+    );
   }
 }
 
@@ -185,7 +193,16 @@ export function clearEnvVar(name: string): void {
  * for why, and `MUONROI_ENV_PRECEDENCE=ambient` to opt out.
  */
 export function loadEnvFileIntoProcess(): void {
-  for (const line of readLines()) {
+  let lines: string[];
+  try {
+    lines = readLines();
+  } catch (err) {
+    // Boot must survive an unreadable store, but never in silence: every
+    // provider would 401 and the CLI would look like it lost the keys.
+    console.error(`${err instanceof Error ? err.message : String(err)} — continuing without the stored keys.`);
+    return;
+  }
+  for (const line of lines) {
     const parsed = parseLine(line);
     if (!parsed) continue;
     const ambient = process.env[parsed.key];

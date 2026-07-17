@@ -149,7 +149,9 @@ export class OpenAIOAuthProvider implements ProviderOAuth {
   // login
   // -------------------------------------------------------------------------
 
-  async login(opts: { onUserCode?: (code: string, url: string) => void } = {}): Promise<OAuthTokens> {
+  async login(
+    opts: { onUserCode?: (code: string, url: string) => void; signal?: AbortSignal } = {},
+  ): Promise<OAuthTokens> {
     const { codeVerifier, codeChallenge } = generatePKCE();
     const state = randomBytes(16).toString("base64url");
 
@@ -162,6 +164,21 @@ export class OpenAIOAuthProvider implements ProviderOAuth {
         const loginTimeout = setTimeout(() => {
           reject(new Error("OAuth browser callback timed out"));
         }, CALLBACK_TIMEOUT_MS);
+
+        // Cancelling used to abandon this promise rather than end it: the
+        // loopback server then held its port for the full CALLBACK_TIMEOUT_MS
+        // (5 min) across only two ports, so the next sign-in could not bind and
+        // the user had to restart the CLI. Rejecting here runs the `finally`
+        // below, which closes the server and frees the port immediately.
+        const onAbort = () => {
+          clearTimeout(loginTimeout);
+          reject(new OAuthLoginError("openai", "Sign-in cancelled."));
+        };
+        if (opts.signal?.aborted) {
+          onAbort();
+          return;
+        }
+        opts.signal?.addEventListener("abort", onAbort, { once: true });
 
         const tryPorts = async () => {
           let bindError: unknown;
