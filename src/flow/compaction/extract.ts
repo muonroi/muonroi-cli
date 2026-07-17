@@ -8,11 +8,7 @@
 
 import { generateText, type ModelMessage } from "ai";
 import { serializeConversation } from "../../orchestrator/compaction.js";
-import {
-  type ProviderFactory as LegacyProvider,
-  resolveModelRuntime,
-  resolveTemperatureParam,
-} from "../../providers/runtime.js";
+import { resolveModelRuntime, resolveTemperatureParam } from "../../providers/runtime.js";
 import { logger } from "../../utils/logger.js";
 import { capCompactionInput } from "./input-guard.js";
 import { extractPreservedBlocks } from "./preserve.js";
@@ -41,12 +37,11 @@ function matchAll(text: string, re: RegExp): string[] {
 /**
  * Extract decisions, facts, and constraints from messages.
  *
- * Scans serialized conversation text for explicit markers, but if provider
- * and modelId are given, it asks the LLM to intelligently extract them.
+ * Scans serialized conversation text for explicit markers, but if modelId is
+ * given, it asks the LLM to intelligently extract them.
  */
 export async function extractDecisions(
   messages: ModelMessage[],
-  provider?: unknown,
   modelId?: string,
   customInstructions?: string,
 ): Promise<ExtractedDecisions> {
@@ -66,9 +61,9 @@ export async function extractDecisions(
 
   let usedLLM = false;
 
-  if (provider && modelId) {
+  if (modelId) {
     try {
-      const runtime = resolveModelRuntime(provider as LegacyProvider, modelId);
+      const runtime = resolveModelRuntime(modelId);
       const extraPrompt = customInstructions ? `\n\nUSER FOCUS/INSTRUCTIONS:\n${customInstructions}\n` : "";
       // Guard input against the summarizer's context window (see input-guard).
       const guardedInput = capCompactionInput(serialized, runtime.modelInfo?.contextWindow ?? 0);

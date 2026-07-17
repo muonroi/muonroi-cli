@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolvePlanCouncilLeader } from "../council/leader.js";
 import type { ToolResult } from "../types/index.js";
 import { buildCouncilContextBundle, type CouncilContextBundle } from "./council-context.js";
+import { getPlanReviewDebateRetries } from "./flags.js";
 import { buildGsdPerspectiveTaskRequest } from "./model-tier.js";
 import { planningArtifact } from "./paths.js";
 import {
@@ -209,87 +210,120 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
     const bundle = buildCouncilContextBundle(cwd, { depth, revisionCycle });
     const topic = buildDebateTopic(planBody, bundle);
 
+    // The council debate returns an EMPTY synthesis on any of its fail-open
+    // paths (provider unreachable, sub-phase catch, user/watchdog abort) — a
+    // silent null we must NOT collapse into a permanent forced-`revise`. Retry
+    // the debate on empty (covers transient aborts), then fall back to the
+    // perspective path so an autonomous /ideal run never bricks with 0 code.
+    const maxRetries = getPlanReviewDebateRetries();
     let synthesis = "";
-    try {
-      synthesis = await opts.runDebate(topic);
-    } catch (err) {
-      console.error(`[gsd] plan review debate failed: ${(err as Error).message}`);
+    let lastDebateError: string | undefined;
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      try {
+        synthesis = (await opts.runDebate(topic)) ?? "";
+      } catch (err) {
+        lastDebateError = (err as Error).message;
+        console.error(`[gsd] plan-review debate threw (attempt ${attempt + 1}/${maxRetries + 1}): ${lastDebateError}`);
+        synthesis = "";
+      }
+      if (synthesis.trim()) break;
+      if (attempt < maxRetries) {
+        console.error(
+          `[gsd] plan-review debate returned empty synthesis ` +
+            `(attempt ${attempt + 1}/${maxRetries + 1}) — provider unreachable / aborted / ` +
+            `sub-phase fail-open; retrying`,
+        );
+      }
     }
 
-    const parsed = extractStructuredVerdict(synthesis);
-    const parseFailed = parsed === null;
-    // Model-first: if we could not extract structured verdict, DO NOT regex
-    // the prose. Force a conservative revise so the loop iterates and the
-    // leader gets another chance to emit valid JSON (the prior-concerns
-    // directive re-states the contract).
-    // Map "approve" → "pass" so the merged verdict matches the union the rest
-    // of the pipeline expects (applyVerdict keys the gate on `=== "pass"`).
-    const rawVerdict = parseFailed ? "revise" : parsed!.verdict;
-    const verdict: PerspectiveVerdict | "pass" = rawVerdict === "approve" ? "pass" : rawVerdict;
-    const source: VerdictSource = parseFailed ? "parse-failed" : "structured";
-    const concerns = parsed?.concerns.map(String) ?? [
-      "Council leader did not emit a structured verdict block — forcing revision.",
-    ];
-    const evidence = parsed?.evidence.map(String) ?? [];
-    const rationale = parsed?.rationale ?? "";
+    // Persistent empty synthesis after retries — this is a DEBATE FAILURE, not
+    // a plan defect. Do NOT write a misleading "leader did not emit a verdict"
+    // forced-revise (which would brick the run). Log the real reason
+    // (No-Silent-Catch) and fall through to the perspective path below, which
+    // produces a genuine verdict from parallel sub-agent reviewers (heuristic
+    // last resort) so the loop can proceed.
+    if (!synthesis.trim()) {
+      console.error(
+        `[gsd] plan-review debate produced no synthesis after ${maxRetries + 1} attempt(s)` +
+          `${lastDebateError ? ` (last error: ${lastDebateError})` : ""} — ` +
+          `falling back to perspective review`,
+      );
+    } else {
+      const parsed = extractStructuredVerdict(synthesis);
+      const parseFailed = parsed === null;
+      // Model-first: if we could not extract structured verdict, DO NOT regex
+      // the prose. Force a conservative revise so the loop iterates and the
+      // leader gets another chance to emit valid JSON (the prior-concerns
+      // directive re-states the contract).
+      // Map "approve" → "pass" so the merged verdict matches the union the rest
+      // of the pipeline expects (applyVerdict keys the gate on `=== "pass"`).
+      const rawVerdict = parseFailed ? "revise" : parsed!.verdict;
+      const verdict: PerspectiveVerdict | "pass" = rawVerdict === "approve" ? "pass" : rawVerdict;
+      const source: VerdictSource = parseFailed ? "parse-failed" : "structured";
+      const concerns = parsed?.concerns.map(String) ?? [
+        "Council leader did not emit a structured verdict block — forcing revision.",
+      ];
+      const evidence = parsed?.evidence.map(String) ?? [];
+      const rationale = parsed?.rationale ?? "";
 
-    const planReviewPath = planningArtifact(cwd, "PLAN-REVIEW.md");
-    const planVerifyPath = planningArtifact(cwd, "PLAN-VERIFY.md");
+      const planReviewPath = planningArtifact(cwd, "PLAN-REVIEW.md");
+      const planVerifyPath = planningArtifact(cwd, "PLAN-VERIFY.md");
 
-    const reviewContent = [
-      "# PLAN-REVIEW",
-      "",
-      `Leader: \`${leader.modelId}\``,
-      `Revision cycle: ${revisionCycle}`,
-      `Verdict source: ${source}${parseFailed ? " (parse failed — forced revise)" : ""}`,
-      "",
-      "## Council Debate Synthesis",
-      "",
-      synthesis.trim() || "No synthesis generated.",
-      rationale ? `\n**Rationale:** ${rationale}` : "",
-      "",
-      "## Merged Concerns",
-      "",
-      concerns.length ? concerns.map((c) => `- ${c}`).join("\n") : "- (none)",
-    ].join("\n");
+      const reviewContent = [
+        "# PLAN-REVIEW",
+        "",
+        `Leader: \`${leader.modelId}\``,
+        `Revision cycle: ${revisionCycle}`,
+        `Verdict source: ${source}${parseFailed ? " (parse failed — forced revise)" : ""}`,
+        "",
+        "## Council Debate Synthesis",
+        "",
+        synthesis.trim() || "No synthesis generated.",
+        rationale ? `\n**Rationale:** ${rationale}` : "",
+        "",
+        "## Merged Concerns",
+        "",
+        concerns.length ? concerns.map((c) => `- ${c}`).join("\n") : "- (none)",
+      ].join("\n");
 
-    const verifyContent = [
-      "# PLAN-VERIFY",
-      "",
-      `verdict: ${verdict}`,
-      `revisionRequired: ${verdict === "revise" || verdict === "block" ? "yes" : "no"}`,
-      `verdictSource: ${source}`,
-      `verdictParseFailed: ${parseFailed ? "yes" : "no"}`,
-      "",
-      "## Summary",
-      verdict === "pass"
-        ? "Council leader approved via structured verdict."
-        : parseFailed
-          ? "Structured verdict missing — forced revision so the leader re-emits valid JSON."
-          : `Council requested ${verdict}.`,
-      "",
-      "## Concerns",
-      concerns.length ? concerns.map((c) => `- ${c}`).join("\n") : "- (none)",
-    ].join("\n");
+      const verifyContent = [
+        "# PLAN-VERIFY",
+        "",
+        `verdict: ${verdict}`,
+        `revisionRequired: ${verdict === "revise" || verdict === "block" ? "yes" : "no"}`,
+        `verdictSource: ${source}`,
+        `verdictParseFailed: ${parseFailed ? "yes" : "no"}`,
+        "",
+        "## Summary",
+        verdict === "pass"
+          ? "Council leader approved via structured verdict."
+          : parseFailed
+            ? "Structured verdict missing — forced revision so the leader re-emits valid JSON."
+            : `Council requested ${verdict}.`,
+        "",
+        "## Concerns",
+        concerns.length ? concerns.map((c) => `- ${c}`).join("\n") : "- (none)",
+      ].join("\n");
 
-    writeFileSync(planReviewPath, reviewContent, "utf8");
-    writeFileSync(planVerifyPath, verifyContent, "utf8");
+      writeFileSync(planReviewPath, reviewContent, "utf8");
+      writeFileSync(planVerifyPath, verifyContent, "utf8");
 
-    applyVerdict(cwd, verdict);
+      applyVerdict(cwd, verdict);
 
-    return {
-      skipped: false,
-      perspectives: [],
-      planReviewPath,
-      planVerifyPath,
-      verdict,
-      leaderModelId: leader.modelId,
-      revisionRequired: verdict === "revise" || verdict === "block",
-      contextBundleChars: bundle.totalChars,
-      hadPriorConcerns: bundle.hadPriorConcerns,
-      verdictSource: source,
-      verdictParseFailed: parseFailed,
-    };
+      return {
+        skipped: false,
+        perspectives: [],
+        planReviewPath,
+        planVerifyPath,
+        verdict,
+        leaderModelId: leader.modelId,
+        revisionRequired: verdict === "revise" || verdict === "block",
+        contextBundleChars: bundle.totalChars,
+        hadPriorConcerns: bundle.hadPriorConcerns,
+        verdictSource: source,
+        verdictParseFailed: parseFailed,
+      };
+    }
   }
 
   // ---------- Perspective path (parallel sub-agents) ----------

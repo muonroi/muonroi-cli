@@ -7,6 +7,7 @@
 
 import type { ModelMessage } from "ai";
 import { beforeAll, describe, expect, it } from "vitest";
+import { registerTestProviderFactories } from "../../__test-helpers__/catalog-fixtures.js";
 import { loadCatalog } from "../../models/registry.js";
 import type { BashTool } from "../../tools/bash";
 import type { ProcessMessageObserver } from "../agent-options";
@@ -131,6 +132,7 @@ function makeDeps(overrides: Partial<MessageProcessorDeps> = {}): MessageProcess
 describe("MessageProcessor — DI surface invariants", () => {
   beforeAll(async () => {
     await loadCatalog();
+    registerTestProviderFactories();
   });
 
   it("constructs without throwing when given a valid deps bag", () => {

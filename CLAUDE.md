@@ -404,22 +404,58 @@ Controls which event kinds are emitted on the sidechannel.
 opt in with `MUONROI_HARNESS_EVENTS=llm-token` only when you need token-level
 correlation.
 
+### Observing a live run — DO NOT hand-roll a poller
+
+If you are driving the TUI from an MCP client, these two calls replace every
+watcher you might be tempted to write. Reach for them FIRST:
+
+| Need | Call |
+|---|---|
+| Is it waiting on a human? | `tui.last_event {kind: "askcard-open"}` |
+| What stage is it in? | `tui.last_event {kind: "sprint-stage"}` |
+| Did it fail? | `tui.last_event {kind: "sprint-halt"}` / `{kind: "toast"}` |
+| Block until X happens | `tui.wait_for {event\|selector\|idle, timeoutMs}` |
+| Has the run ended? | `tui.wait_for {idle: true}` |
+
+`tui.last_event` reads the driver's event ring and returns the FULL payload —
+the entire askcard question, not the truncated `name` that `tui.query` exposes.
+`tui.wait_for` blocks server-side on the same stream; it accepts `selector`,
+`idle`, or `event` (any `LiveEvent` kind), plus `all: [...]`, with `timeoutMs`
+up to 600_000.
+
+**The DB cannot answer any of the above.** `askcard-open` writes no
+`interaction_logs` row, so "waiting for a human" and "hung" are the same
+observation to a DB poller — a `/ideal` run once sat on an approve card for 17
+minutes while a watcher reported nothing. No silence threshold fixes this:
+sprint planning legitimately runs ~12 minutes writing zero rows, so a poller
+tuned to catch the modal false-positives on normal work. Use the DB for
+post-hoc forensics (per-speaker `duration_ms`, usage), never for liveness.
+
+`/ideal` reliably stops at the **"Approve discussion plan"** askcard between
+scoping and sprint 1. That is a fixed human-wait point, not a hang.
+
 ### `MUONROI_HARNESS_EVENT_LOG` — event JSONL sink (wake-at-milestone)
 
-Set on the **MCP server process** to a file path and the harness appends every
-`LiveEvent` as one JSONL line (`{ts, kind, event}`). Ephemeral kinds
-(`toast`, `disconnect`, `stream-retry`, `ee-timeout`, `ee-error`,
-`grounding-flag`) additionally carry a `visualText` snapshot captured at emit
-time, so flash events aren't lost before an agent wakes. Unset → zero behavior
-change. Wiring: `event-tee.ts` + `makeLineHandler` in `mcp-server.ts`.
+**On by default.** The harness appends every `LiveEvent` as one JSONL line
+(`{ts, kind, event}`) to `<tmpdir>/muonroi-harness-events-<pid>.jsonl`. Set the
+var on the **MCP server process** to a path to choose your own, or to `0` /
+`off` / `false` / `no` to disable. `tui.capabilities` reports the resolved path
+as `eventLogPath` — read it rather than recomputing the rule.
 
-Pair it with the generic milestone watcher so an agent driving the TUI never
-blocks on a long synchronous wait (and never rewrites a bespoke monitor):
+Ephemeral kinds (`toast`, `disconnect`, `stream-retry`, `ee-timeout`,
+`ee-error`, `grounding-flag`) additionally carry a `visualText` snapshot
+captured at emit time, so flash events aren't lost before an agent wakes.
+Wiring: `event-tee.ts` + `makeLineHandler` in `mcp-server.ts`.
+
+**This is NOT the tool for an agent driving the TUI over MCP** — that agent has
+`tui.last_event` / `tui.wait_for` above and should use them. The log exists only
+for watchers in a SEPARATE process, which cannot reach the in-process driver.
+Reach for it for unattended long runs, not to answer "what is it doing now":
 
 ```bash
 # Wakes on ANY of the requested kinds — including modal pauses (askcard-open)
 # that never write a DB row, which a DB-poll monitor is blind to.
-bun scripts/harness-watch.mjs "$MUONROI_HARNESS_EVENT_LOG" \
+bun scripts/harness-watch.mjs "$(<path from tui.capabilities>)" \
     --kinds askcard-open,council-step,sprint-halt --max-polls 30 --poll-ms 10000
 ```
 

@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
 import type { ModelInfo } from "../types/index.js";
-import { logger } from "../utils/logger.js";
 import { getReasoningEffortForModel } from "../utils/settings.js";
 import { getProviderCapabilities } from "./capabilities.js";
 import { getProviderStrategy } from "./strategies/registry.js";
@@ -15,14 +14,7 @@ export type ProviderFactory = ((modelId: string) => any) & {
   defaultProviderOptions?: Record<string, unknown>;
   /** AI SDK top-level call params to strip (backend doesn't accept them). */
   unsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
-  /**
-   * The provider this factory talks to. Stamped by createProviderFactory so a
-   * caller that blindly reuses one provider's factory with a model from a
-   * DIFFERENT provider can be detected and auto-corrected in resolveModelRuntime
-   * (see the factory registry below) — otherwise the request would hit the wrong
-   * endpoint (e.g. a gateway-routed model POSTed straight to a native API,
-   * bypassing the configured gateway).
-   */
+  /** The provider this factory talks to. Stamped by createProviderFactory. */
   providerId?: ProviderId;
 };
 
@@ -44,19 +36,34 @@ export interface ResolvedModelRuntime {
 
 /**
  * Session-scoped registry of the most-recently-built factory per provider.
- * resolveModelRuntime consults this to auto-correct a factory/model provider
- * mismatch: when a caller reuses provider A's factory to run a model that
- * belongs to provider B (a real hazard in sub-task paths like compaction that
- * inherit the parent session's factory), we substitute B's real factory if one
- * was built this session. Single-orchestrator invariant (v1, see CQ-16a) makes
- * a module-level map safe. Last-built wins, so a /model key change that rebuilds
- * a provider's factory transparently refreshes the entry.
+ * It is the ONLY way a model reaches a factory: `factoryForModel` derives the
+ * factory from the model's own provider, so provider A's factory can never be
+ * paired with provider B's model (a real hazard in sub-task paths like
+ * compaction that used to inherit the parent session's factory). Boot warms an
+ * entry for every credentialed provider (see ./warm.ts). Single-orchestrator
+ * invariant (v1, see CQ-16a) makes a module-level map safe. Last-built wins, so
+ * a /model key change that rebuilds a provider's factory refreshes the entry.
  */
 const providerFactoryRegistry = new Map<ProviderId, ProviderFactory>();
 
 /** Test seam: clear the registry between cases so entries never leak across specs. */
 export function __resetProviderFactoryRegistry(): void {
   providerFactoryRegistry.clear();
+}
+
+/**
+ * Whether a factory for `id` was already built this session.
+ *
+ * Used by the boot warm-up to avoid CLOBBERING a factory that was built with
+ * session-specific options (custom baseURL, OAuth headers) with a plainer one.
+ */
+export function hasProviderFactory(id: ProviderId): boolean {
+  return providerFactoryRegistry.has(id);
+}
+
+/** The providers that have a factory this session. */
+export function registeredProviderIds(): ProviderId[] {
+  return [...providerFactoryRegistry.keys()];
 }
 
 /**
@@ -144,7 +151,34 @@ interface MockRuntimeGlobals {
   __muonroiMockModelInfo?: ModelInfo;
 }
 
-export function resolveModelRuntime(factory: ProviderFactory, modelId: string): ResolvedModelRuntime {
+/**
+ * The factory for `modelId`'s OWN provider.
+ *
+ * Deriving the factory from the model is what makes a cross-wire structurally
+ * impossible: callers pass only a model id, so there is no second, independent
+ * value that can disagree with it. Previously the factory and the model id
+ * travelled separately and every sub-task path (compaction, classify,
+ * sub-agents) silently borrowed whatever factory its parent held — measured
+ * live 2026-07-16 (session 0c6728ba1a25): model `gpt-5.4` (openai) went out
+ * through an `xai` factory, and api.x.ai answered "The model gpt-5.4 does not
+ * exist", sending the user hunting a model-name problem that did not exist.
+ */
+export function factoryForModel(modelId: string): ProviderFactory {
+  const providerId = getModelInfo(modelId)?.provider as ProviderId | undefined;
+  if (!providerId) {
+    throw new Error(`Model "${modelId}" not found in catalog — cannot determine provider.`);
+  }
+  const factory = providerFactoryRegistry.get(providerId);
+  if (!factory) {
+    throw new Error(
+      `No provider factory for "${providerId}" (model "${modelId}") — that provider is not authenticated this session. ` +
+        `Run /login for it, or pick a model from an authenticated provider.`,
+    );
+  }
+  return factory;
+}
+
+export function resolveModelRuntime(modelId: string): ResolvedModelRuntime {
   // Resolve aliases (e.g. "deepseek-v4-flash") to the provider-native id
   // (e.g. "deepseek-v4-flash") BEFORE invoking the factory.
   // Without this, DeepSeek / xAI reject the request because
@@ -155,32 +189,6 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   const providerId = modelInfo?.provider as ProviderId | undefined;
   if (!providerId && !mockGlobals.__muonroiMockModel) {
     throw new Error(`Model "${modelId}" not found in catalog — cannot determine provider.`);
-  }
-
-  // Factory/model provider guard (Layer 2). A caller that reuses one provider's
-  // factory to run a model from another provider (e.g. compaction inheriting the
-  // parent session's native factory for a gateway-routed model) would otherwise
-  // POST to the wrong endpoint. If the passed factory is stamped for a different
-  // provider AND we built the correct one this session, substitute it so the
-  // request lands on the right backend; otherwise keep going (Part 3's wire-id
-  // normalization keeps it valid) but log the mismatch so it is never silent.
-  let effectiveFactory = factory;
-  if (providerId && factory.providerId && factory.providerId !== providerId) {
-    const correct = providerFactoryRegistry.get(providerId);
-    if (correct) {
-      effectiveFactory = correct;
-      logger.debug("orchestrator", "Redirected model to its own provider factory", {
-        modelId: canonicalId,
-        modelProvider: providerId,
-        factoryProvider: factory.providerId,
-      });
-    } else {
-      logger.warn("orchestrator", "Factory/model provider mismatch; no factory for model's provider", {
-        modelId: canonicalId,
-        modelProvider: providerId,
-        factoryProvider: factory.providerId,
-      });
-    }
   }
 
   const userEffort = getReasoningEffortForModel(modelId);
@@ -212,14 +220,15 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
     };
     providerLevelDefaults = mockGlobals.__muonroiMockDefaultProviderOptions;
   } else {
+    const factory = factoryForModel(canonicalId);
     const strategy = getProviderStrategy(providerId!);
     resolved = strategy.resolve({
-      factory: effectiveFactory,
+      factory,
       modelId: canonicalId,
       modelInfo,
       reasoningEffort: userEffort,
     });
-    providerLevelDefaults = effectiveFactory.defaultProviderOptions;
+    providerLevelDefaults = factory.defaultProviderOptions;
   }
 
   // Merge provider-level defaults from the factory (e.g. OAuth backends inject

@@ -205,8 +205,9 @@ export async function* planDebate(
   try {
     const providerId = detectProviderForModel(leaderModelId);
     const key = await loadKeyForProvider(providerId);
-    const { factory } = createProviderFactory(providerId, { apiKey: key });
-    const runtime = resolveModelRuntime(factory, leaderModelId);
+    // Registers the leader provider's factory so resolveModelRuntime can derive it.
+    createProviderFactory(providerId, { apiKey: key });
+    const runtime = resolveModelRuntime(leaderModelId);
 
     // Bound attempt-1: a wedged provider response here would freeze the whole
     // council/loop silently (no streamText stall watchdog covers generateObject).

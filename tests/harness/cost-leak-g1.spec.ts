@@ -22,17 +22,11 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { installMockModel, textOnlyStream } from "../../src/agent-harness/mock-model.js";
 import { loadCatalog } from "../../src/models/registry.js";
-import type { ProviderFactory } from "../../src/providers/runtime.js";
 import { resolveModelRuntime, shouldDropParam } from "../../src/providers/runtime.js";
 import { assertParamAbsent, assertParamPresent, inspectAll } from "./recording.js";
 
-function stubFactory(): ProviderFactory {
-  const fn = ((_id: string) => {
-    throw new Error("real provider factory must not be invoked under mock");
-  }) as ProviderFactory;
-  fn.responses = fn;
-  return fn;
-}
+// No stub factory: resolveModelRuntime derives the factory from the model id,
+// and installMockModel's global short-circuits the factory path entirely.
 
 /**
  * Mirrors the orchestrator's dropParam pattern (orchestrator.ts:1362).
@@ -81,7 +75,7 @@ describe("G1: sub-agent drops unsupportedParams from streamText call", () => {
 
     // gpt-4o (non-reasoning) — G2's temperature-drop rule does not apply, so
     // temperature should remain present and isolate the maxOutputTokens drop.
-    const runtime = resolveModelRuntime(stubFactory(), "gpt-4o");
+    const runtime = resolveModelRuntime("gpt-4o");
     const result = streamText(buildStreamTextOptions(runtime));
     await drain(result);
 
@@ -100,7 +94,7 @@ describe("G1: sub-agent drops unsupportedParams from streamText call", () => {
     cleanup = handle.uninstall;
 
     // gpt-4o — non-reasoning, no G2 drop — both params should pass through.
-    const runtime = resolveModelRuntime(stubFactory(), "gpt-4o");
+    const runtime = resolveModelRuntime("gpt-4o");
     const result = streamText(buildStreamTextOptions(runtime));
     await drain(result);
 
@@ -118,7 +112,7 @@ describe("G1: sub-agent drops unsupportedParams from streamText call", () => {
     cleanup = handle.uninstall;
 
     // gpt-5.4 is a reasoning model — G2 rule fires: temperature dropped.
-    const runtime = resolveModelRuntime(stubFactory(), "gpt-5.4");
+    const runtime = resolveModelRuntime("gpt-5.4");
     const result = streamText(buildStreamTextOptions(runtime));
     await drain(result);
 
@@ -134,7 +128,7 @@ describe("G1: sub-agent drops unsupportedParams from streamText call", () => {
     });
     cleanup = handle.uninstall;
 
-    const runtime = resolveModelRuntime(stubFactory(), "gpt-5.4");
+    const runtime = resolveModelRuntime("gpt-5.4");
     const result = streamText(buildStreamTextOptions(runtime));
     await drain(result);
 
@@ -151,7 +145,7 @@ describe("G1: sub-agent drops unsupportedParams from streamText call", () => {
     });
     cleanup = handle.uninstall;
 
-    const runtime = resolveModelRuntime(stubFactory(), "gpt-5.4");
+    const runtime = resolveModelRuntime("gpt-5.4");
     const result = streamText(buildStreamTextOptions(runtime));
     await drain(result);
 

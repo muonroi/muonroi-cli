@@ -98,7 +98,6 @@ export async function deliberateCompact(
   messages: ModelMessage[],
   systemPrompt: string,
   tokenBudget: number,
-  provider?: unknown,
   modelId?: string,
   customInstructions?: string,
 ): Promise<CompactionResult> {
@@ -108,7 +107,7 @@ export async function deliberateCompact(
   recordToolArtifactsForRehydrate(messages, flowDir);
 
   // Pass 1: Extract decisions/facts/constraints
-  const extracted = await extractDecisions(messages, provider, modelId, customInstructions);
+  const extracted = await extractDecisions(messages, modelId, customInstructions);
   const totalExtracted = extracted.decisions.length + extracted.facts.length + extracted.constraints.length;
 
   // Append to decisions.md
@@ -148,7 +147,7 @@ export async function deliberateCompact(
   const tokensBefore = estimateConversationTokens(systemPrompt, messages);
 
   // Pass 2: Compress
-  const compressed = await compressChat(messages, systemPrompt, tokenBudget, provider, modelId, customInstructions);
+  const compressed = await compressChat(messages, systemPrompt, tokenBudget, modelId, customInstructions);
 
   return {
     decisionsExtracted: totalExtracted,
