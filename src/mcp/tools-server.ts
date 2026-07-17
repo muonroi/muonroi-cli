@@ -12,12 +12,21 @@
  * (src/tools/native-tools.ts) — it no longer self-spawns this server. The two
  * surfaces share their cores (self-verify-runner.ts, setup-guide-text.ts, the
  * ee/forensics/lsp modules) so behaviour is identical.
+ *
+ * The ee_* tools are deliberately NOT here. The brain is the product and
+ * muonroi-cli is one consumer of it, so serving the brain to foreign agents is
+ * experience-engine's job, not ours: `npm i -g @muonroi/experience-engine` then
+ * `claude mcp add experience-engine -- exp-mcp`. Shipping them from here forced
+ * anyone who wanted the brain over MCP to install a whole CLI they had no use
+ * for, and left two implementations of the same four tools to drift apart. The
+ * CLI's own agent is unaffected — it calls the brain natively via
+ * src/ee/search.ts (no MCP hop), which is where ee_query/ee_write/ee_feedback
+ * live for us.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { registerEETools } from "./ee-tools.js";
 import { registerForensicsTools } from "./forensics-tools.js";
 import { registerLspTools } from "./lsp-tools.js";
 import { type Job, JobManager, type Runner } from "./self-verify-jobs.js";
@@ -161,7 +170,6 @@ export function createToolsServer(runner: Runner = defaultRunner): McpServer {
   const server = new McpServer({ name: "muonroi-tools", version: "0.1.0" });
   const jm = new JobManager(runner);
   registerSelfVerifyTools(server, jm);
-  registerEETools(server);
   registerForensicsTools(server);
   registerLspTools(server);
   registerSetupGuideTool(server);
