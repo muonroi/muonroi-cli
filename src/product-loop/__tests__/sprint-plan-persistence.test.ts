@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   computeMissingPlanTargets,
   detectExistingPlanTargets,
+  extractDeferredTargetPaths,
   extractPlanTargetPaths,
   getImplRecheckEnabled,
   IMPL_EXECUTION_DIRECTIVE,
@@ -137,6 +138,51 @@ describe("computeMissingPlanTargets (4A completeness re-check)", () => {
     expect([...existing, ...missing].sort()).toEqual(all);
     expect(existing).toEqual(["src/here.ts"]);
     expect(missing).toEqual(["src/gone.ts"]);
+  });
+});
+
+describe("extractDeferredTargetPaths / deferral-aware re-check (regression: run mrq8mesr0389)", () => {
+  let cwd: string;
+  beforeEach(async () => {
+    cwd = await mktmp();
+  });
+  afterEach(async () => {
+    await fs.rm(cwd, { recursive: true, force: true });
+  });
+
+  // Real shape from the sandbox plan: module-hook.ts is NAMED in folderStructure
+  // yet the API entry that carries the path is marked [POST-MVP] / DEFERRED on its
+  // sibling lines. The blind regex flagged it "missing" and spawned a
+  // plan-contradicting repair turn that wedged the run after sprint 1.
+  const deferredPlan = [
+    '"folderStructure": "packages/agent-harness-core/src/sandbox/* (gate.ts, capability-mask.ts, module-hook.ts).",',
+    '{ "step": "Implement packages/agent-harness-core/src/sandbox/capability-mask.ts this sprint" },',
+    "{",
+    '  "name": "moduleHook.install()/uninstall() [POST-MVP]",',
+    '  "location": "packages/agent-harness-core/src/sandbox/module-hook.ts",',
+    '  "contract": "DEFERRED: Only after prototype proves p95 delta <3%"',
+    "}",
+  ].join("\n");
+
+  it("marks a path deferred when a POST-MVP/DEFERRED marker sits within the window", () => {
+    const deferred = extractDeferredTargetPaths(deferredPlan);
+    expect(deferred).toContain("packages/agent-harness-core/src/sandbox/module-hook.ts");
+  });
+
+  it("excludes deferred targets from the completeness re-check (no plan-contradicting repair)", async () => {
+    // gate.ts landed on disk; module-hook.ts did NOT (deliberately deferred).
+    await fs.mkdir(path.join(cwd, "packages/agent-harness-core/src/sandbox"), { recursive: true });
+    await fs.writeFile(path.join(cwd, "packages/agent-harness-core/src/sandbox/gate.ts"), "//\n", "utf8");
+    const missing = await computeMissingPlanTargets(deferredPlan, cwd);
+    // The deferred, absent module-hook.ts must NOT be reported as missing.
+    expect(missing).not.toContain("packages/agent-harness-core/src/sandbox/module-hook.ts");
+    // capability-mask.ts is a genuine (non-deferred) missing target → still flagged.
+    expect(missing).toContain("packages/agent-harness-core/src/sandbox/capability-mask.ts");
+  });
+
+  it("returns [] deferred paths when the plan has no deferral markers", () => {
+    const plan = "Implement src/a.ts and src/b.ts and tests/c.test.ts this sprint.";
+    expect(extractDeferredTargetPaths(plan)).toEqual([]);
   });
 });
 
