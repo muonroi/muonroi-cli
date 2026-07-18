@@ -13,5 +13,6 @@ export * from "./transports/ws.js";
 
 export * from "./sandbox/capability-mask.js";
 export * from "./sandbox/gate.js";
+export * from "./sandbox/module-hook.js";
 // Sprint 1 sandbox boundary exports
 export * from "./sandbox/types.js";
