@@ -746,6 +746,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     telegramTokenError,
     telegramTokenInputRef,
     typeahead,
+    runUpdateFromUi,
     updateInfo,
     updateOutput,
     walletDisplayInfo,
@@ -1575,13 +1576,19 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               <box flexGrow={1} minHeight={0} />
             </box>
             {updateInfo?.hasUpdate && (
-              <box paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0}>
+              <box
+                paddingLeft={2}
+                paddingRight={2}
+                flexDirection="row"
+                flexShrink={0}
+                onMouseDown={() => runUpdateFromUi()}
+              >
                 <text fg="#f59e0b">
                   {"┃ Update available: v"}
                   {startupConfig.version}
                   {" → v"}
                   {updateInfo.latestVersion}
-                  {" — run /update to install"}
+                  {" — click or run /update to install"}
                 </text>
               </box>
             )}

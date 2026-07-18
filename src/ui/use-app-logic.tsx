@@ -3295,6 +3295,28 @@ export function useAppLogic(props: AppLogicProps) {
     setTimeout(() => (getActiveModalInput() ?? inputRef.current)?.focus(), 0);
   }, [getActiveModalInput]);
 
+  // Single entry point for running a self-update, shared by the /update command,
+  // the startup UpdateModal's Enter, and a click on the "Update available"
+  // banner. Guarded against a double-trigger while one is already running.
+  const isUpdatingRef = useRef(false);
+  const runUpdateFromUi = useCallback(() => {
+    if (isUpdatingRef.current) return;
+    isUpdatingRef.current = true;
+    setIsUpdating(true);
+    setUpdateOutput(null);
+    setShowUpdateModal(false);
+    // Echo into the log too — the home-screen updateOutput banner only renders
+    // on the splash screen, so an update from an active chat needs a log entry.
+    setMessages((prev) => [...prev, buildAssistantEntry("🔄 Checking for updates...")]);
+    runUpdate(startupConfig.version).then((result) => {
+      isUpdatingRef.current = false;
+      setIsUpdating(false);
+      const text = result.success ? result.output : `Update failed: ${result.output}`;
+      setUpdateOutput(text);
+      setMessages((prev) => [...prev, buildAssistantEntry(text)]);
+    });
+  }, [startupConfig.version]);
+
   useEffect(() => {
     if (copyFlashId === 0) return;
     const id = setTimeout(() => setCopyFlashId(0), 2000);
@@ -5280,18 +5302,7 @@ export function useAppLogic(props: AppLogicProps) {
           }
           break;
         case "update":
-          setIsUpdating(true);
-          setUpdateOutput(null);
-          // Always echo into the message log — the home-screen `updateOutput`
-          // banner only renders on the splash screen, so an /update run inside an
-          // active chat would otherwise produce no visible output at all.
-          setMessages((prev) => [...prev, buildAssistantEntry("🔄 Checking for updates...")]);
-          runUpdate(startupConfig.version).then((result) => {
-            setIsUpdating(false);
-            const text = result.success ? result.output : `Update failed: ${result.output}`;
-            setUpdateOutput(text);
-            setMessages((prev) => [...prev, buildAssistantEntry(text)]);
-          });
+          runUpdateFromUi();
           break;
         case "clear":
           agent.clearHistory();
@@ -6485,17 +6496,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         if (key.name === "return") {
-          setIsUpdating(true);
-          setShowUpdateModal(false);
-          // Echo into the message log too — same reason as the /update command:
-          // the updateOutput banner only renders on the home/splash screen.
-          setMessages((prev) => [...prev, buildAssistantEntry("🔄 Checking for updates...")]);
-          runUpdate(startupConfig.version).then((result) => {
-            setIsUpdating(false);
-            const text = result.success ? result.output : `Update failed: ${result.output}`;
-            setUpdateOutput(text);
-            setMessages((prev) => [...prev, buildAssistantEntry(text)]);
-          });
+          runUpdateFromUi();
           return;
         }
         return;
@@ -7849,6 +7850,7 @@ export function useAppLogic(props: AppLogicProps) {
     handleRootMouseDown,
     handleRootMouseUp,
     handleSubmit,
+    runUpdateFromUi,
     hasMessages,
     height,
     initNewForm,
