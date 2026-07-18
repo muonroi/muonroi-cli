@@ -74,6 +74,7 @@ import type {
   UserPromptSubmitHookInput,
 } from "../hooks/types";
 import { acquireMcpTools } from "../mcp/client-pool";
+import { publishNeedsKey } from "../mcp/needs-key-bus";
 import { dropRedundantFsMcpTools, filterMcpServersByMessage } from "../mcp/smart-filter";
 import { getModelInfo, isReasoningModel } from "../models/registry.js";
 import {
@@ -1145,6 +1146,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           }
           if (mcpBundle) {
             closeMcp = mcpBundle.close;
+            // Surface enabled-but-keyless servers to the TUI's inline fix card.
+            // The bus dedupes per server per session, so re-publishing every
+            // turn is a no-op after the first announcement.
+            if (Array.isArray(mcpBundle.needsKey) && mcpBundle.needsKey.length > 0) {
+              publishNeedsKey(mcpBundle.needsKey);
+            }
             // Drop filesystem-MCP read/write/edit tools that duplicate the
             // first-class builtin file tools. Without this, models re-read the
             // SAME file via both `read_file` and `mcp_filesystem__read_text_file`

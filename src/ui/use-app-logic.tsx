@@ -13,6 +13,8 @@ import { type CompactProgress, stageProgress } from "../flow/compaction/progress
 import { writeScaffoldCheckpoint } from "../flow/scaffold-checkpoint.js";
 import { appendCrashLog, setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
+import type { MissingKeyServer } from "../mcp/key-requirements";
+import { subscribeNeedsKey } from "../mcp/needs-key-bus";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import type { AskUserAskInfo } from "../orchestrator/ask-user.js";
@@ -241,6 +243,13 @@ import {
   mapCouncilCardKey,
 } from "./utils/format.js";
 import { isEscapeKey } from "./utils/modal.js";
+import type { NeedsKeyCardMode } from "./modals/mcp-needs-key-card.js";
+import {
+  buildNeedsKeyActions,
+  defaultSubmitKeyDeps,
+  setMcpServerEnabled,
+  submitMcpServerKey,
+} from "./needs-key-controller.js";
 import { sanitizeContent } from "./utils/text.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
@@ -1559,6 +1568,17 @@ export function useAppLogic(props: AppLogicProps) {
   const showConnectModalRef = useRef(false);
   const showTelegramTokenModalRef = useRef(false);
   const showTelegramPairModalRef = useRef(false);
+  // ---- MCP needs-key inline fix card (enabled server missing its API key) ----
+  // Queue of servers to fix, FIFO — one card at a time. Fed by the needs-key
+  // bus (tool-engine publishes McpToolBundle.needsKey once per server/session).
+  const [needsKeyQueue, setNeedsKeyQueue] = useState<MissingKeyServer[]>([]);
+  const [needsKeyMode, setNeedsKeyMode] = useState<NeedsKeyCardMode>("actions");
+  const [needsKeyIndex, setNeedsKeyIndex] = useState(0);
+  const [needsKeyError, setNeedsKeyError] = useState<string | null>(null);
+  const needsKeyInputRef = useRef<TextareaRenderable>(null);
+  const needsKeyQueueRef = useRef<MissingKeyServer[]>([]);
+  const needsKeyModeRef = useRef<NeedsKeyCardMode>("actions");
+  const needsKeyIndexRef = useRef(0);
   const {
     showMcpModal,
     setShowMcpModal,
@@ -1590,6 +1610,88 @@ export function useAppLogic(props: AppLogicProps) {
   const mcpArgsRef = useRef<TextareaRenderable>(null);
   const mcpCwdRef = useRef<TextareaRenderable>(null);
   const mcpEnvRef = useRef<TextareaRenderable>(null);
+
+  // ---- MCP needs-key card wiring (state declared above with the modal refs) ----
+  useEffect(() => {
+    needsKeyQueueRef.current = needsKeyQueue;
+  }, [needsKeyQueue]);
+  useEffect(() => {
+    needsKeyModeRef.current = needsKeyMode;
+  }, [needsKeyMode]);
+  useEffect(() => {
+    needsKeyIndexRef.current = needsKeyIndex;
+  }, [needsKeyIndex]);
+
+  // Receive enabled-but-keyless servers from the turn pipeline (needs-key bus).
+  // The bus already dedupes per server per session; the queue-level dedupe here
+  // only guards against a server being re-announced while still queued.
+  useEffect(
+    () =>
+      subscribeNeedsKey((fresh) => {
+        setNeedsKeyQueue((queue) => {
+          const queued = new Set(queue.map((s) => s.id));
+          const added = fresh.filter((s) => !queued.has(s.id));
+          return added.length > 0 ? [...queue, ...added] : queue;
+        });
+      }),
+    [],
+  );
+
+  /** Close the current card (snooze / use-builtin / after success) and advance the queue. */
+  const advanceNeedsKeyQueue = useCallback(() => {
+    needsKeyInputRef.current?.clear();
+    setNeedsKeyMode("actions");
+    setNeedsKeyIndex(0);
+    setNeedsKeyError(null);
+    setNeedsKeyQueue((queue) => queue.slice(1));
+  }, []);
+
+  /** "Paste API key" submit: validate → store → re-enable → reconnect the pool. */
+  const submitNeedsKeyKey = useCallback(() => {
+    if (needsKeyModeRef.current === "validating") return; // re-entry guard (textarea onSubmit + global Enter)
+    const server = needsKeyQueueRef.current[0];
+    if (!server) return;
+    const rawKey = needsKeyInputRef.current?.plainText ?? "";
+    setNeedsKeyMode("validating");
+    setNeedsKeyError(null);
+    void (async () => {
+      const result = await submitMcpServerKey(server, rawKey, defaultSubmitKeyDeps());
+      if (result.ok) {
+        setMcpServers(loadMcpServers());
+        pushToast("info", `${server.label} key stored — reconnecting.`);
+        advanceNeedsKeyQueue();
+      } else {
+        setNeedsKeyError(result.error);
+        setNeedsKeyMode("input");
+      }
+    })();
+  }, [advanceNeedsKeyQueue, pushToast, setMcpServers]);
+
+  /** Activate the currently-selected card action. */
+  const activateNeedsKeyAction = useCallback(() => {
+    const server = needsKeyQueueRef.current[0];
+    if (!server) return;
+    const actions = buildNeedsKeyActions(server);
+    const action = actions[Math.min(needsKeyIndexRef.current, actions.length - 1)];
+    if (!action) return;
+    switch (action.id) {
+      case "paste-key":
+        needsKeyInputRef.current?.clear();
+        setNeedsKeyError(null);
+        setNeedsKeyMode("input");
+        return;
+      case "disable":
+        setMcpServerEnabled(server.id, false);
+        setMcpServers(loadMcpServers());
+        pushToast("info", `${server.label} disabled — re-enable any time via /mcp.`);
+        advanceNeedsKeyQueue();
+        return;
+      case "use-builtin":
+      case "snooze":
+        advanceNeedsKeyQueue();
+        return;
+    }
+  }, [advanceNeedsKeyQueue, pushToast, setMcpServers]);
   const {
     showAgentsModal,
     setShowAgentsModal,
@@ -5247,6 +5349,7 @@ export function useAppLogic(props: AppLogicProps) {
     showConnectModal ||
     showTelegramTokenModal ||
     showTelegramPairModal ||
+    needsKeyQueue.length > 0 ||
     showMcpModal ||
     showSandboxPicker ||
     showSessionPicker ||
@@ -6439,6 +6542,40 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
+      if (needsKeyQueueRef.current.length > 0) {
+        const server = needsKeyQueueRef.current[0];
+        const mode = needsKeyModeRef.current;
+        if (mode === "validating") return; // swallow input while the key probe runs
+        if (mode === "input") {
+          if (isEscapeKey(key)) {
+            setNeedsKeyMode("actions");
+            setNeedsKeyError(null);
+            return;
+          }
+          if (key.name === "return") {
+            submitNeedsKeyKey(); // internally re-entry-guarded vs the textarea's own onSubmit
+          }
+          return; // typing goes to the focused textarea
+        }
+        if (isEscapeKey(key)) {
+          advanceNeedsKeyQueue(); // snooze for this session
+          return;
+        }
+        if (key.name === "up") {
+          setNeedsKeyIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (key.name === "down") {
+          const max = server ? buildNeedsKeyActions(server).length - 1 : 0;
+          setNeedsKeyIndex((i) => Math.min(max, i + 1));
+          return;
+        }
+        if (key.name === "return") {
+          activateNeedsKeyAction();
+          return;
+        }
+        return;
+      }
       if (showTelegramTokenModalRef.current) {
         if (isEscapeKey(key)) {
           setShowTelegramTokenModal(false);
@@ -7193,6 +7330,9 @@ export function useAppLogic(props: AppLogicProps) {
       showScheduleDetails,
       submitTelegramPair,
       submitTelegramToken,
+      submitNeedsKeyKey,
+      activateNeedsKeyAction,
+      advanceNeedsKeyQueue,
       submitMcpEditor,
       submitSubagentEditor,
       planQuestions,
@@ -7523,6 +7663,12 @@ export function useAppLogic(props: AppLogicProps) {
     mcpLabelRef,
     mcpModalIndex,
     mcpRows,
+    needsKeyError,
+    needsKeyIndex,
+    needsKeyInputRef,
+    needsKeyMode,
+    needsKeyQueue,
+    submitNeedsKeyKey,
     mcpSearchQuery,
     mcpUrlRef,
     messages,

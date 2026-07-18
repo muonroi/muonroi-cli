@@ -153,6 +153,8 @@ import { Markdown } from "./markdown";
 import { buildMcpBrowseRows, McpBrowserModal, McpEditorModal } from "./mcp-modal";
 import { createEmptyMcpEditorDraft, type McpEditorDraft } from "./mcp-modal-types";
 import { ApiKeyModal } from "./modals/api-key-modal.js";
+import { McpNeedsKeyCard } from "./modals/mcp-needs-key-card.js";
+import { buildNeedsKeyActions } from "./needs-key-controller.js";
 import { ConnectModal, TelegramPairModal, TelegramTokenModal } from "./modals/connect-modal.js";
 import { ModelPickerModal } from "./modals/model-picker-modal.js";
 import { SandboxPickerModal } from "./modals/sandbox-picker-modal.js";
@@ -653,6 +655,12 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     mcpLabelRef,
     mcpModalIndex,
     mcpRows,
+    needsKeyError,
+    needsKeyIndex,
+    needsKeyInputRef,
+    needsKeyMode,
+    needsKeyQueue,
+    submitNeedsKeyKey,
     mcpSearchQuery,
     mcpUrlRef,
     messages,
@@ -1610,6 +1618,20 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             height={height}
             currentVersion={startupConfig.version}
             latestVersion={updateInfo.latestVersion}
+          />
+        )}
+        {needsKeyQueue.length > 0 && needsKeyQueue[0] && (
+          <McpNeedsKeyCard
+            t={t}
+            width={width}
+            height={height}
+            server={needsKeyQueue[0]}
+            actions={buildNeedsKeyActions(needsKeyQueue[0])}
+            selectedIndex={needsKeyIndex}
+            mode={needsKeyMode}
+            inputRef={needsKeyInputRef}
+            error={needsKeyError}
+            onSubmitKey={submitNeedsKeyKey}
           />
         )}
         {showMcpModal && !showMcpEditor && (
