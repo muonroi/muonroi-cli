@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -175,6 +175,53 @@ describe("sprint-runner", () => {
     expect(appendIteration).toHaveBeenCalledTimes(1);
     expect(postSprintBoundary).toHaveBeenCalledWith(expect.objectContaining({ outcome: "pass", sprintN: 1 }));
     expect(chunks.some((c: any) => c.type === "content")).toBe(true);
+  });
+
+  it("does NOT spawn a repair turn for a plan-DEFERRED target — loop advances to verify (regression: run mrq8mesr0389)", async () => {
+    const realCwd = mkdtempSync(join(tmpdir(), "sprint-cwd-"));
+    try {
+      // Council plan NAMES a required file (src/feature.ts) AND a POST-MVP /
+      // DEFERRED file (packages/x/module-hook.ts) it deliberately does NOT build
+      // this sprint — the exact shape that wedged run mrq8mesr0389.
+      const deferredPlan = [
+        '"folderStructure": "src/feature.ts; packages/x/module-hook.ts",',
+        '{ "step": "Implement src/feature.ts this sprint" },',
+        "{",
+        '  "name": "moduleHook.install() [POST-MVP]",',
+        '  "location": "packages/x/module-hook.ts",',
+        '  "contract": "DEFERRED: only after benchmark"',
+        "}",
+      ].join("\n");
+      (runCouncil as any).mockImplementation(async function* () {
+        yield { type: "content", content: "planning..." };
+        return deferredPlan;
+      });
+      // Faithful implementer: creates ONLY the required file, honoring the
+      // deferral. module-hook.ts is left absent on purpose.
+      const processMessageFn = vi.fn(async function* () {
+        mkdirSync(join(realCwd, "src"), { recursive: true });
+        writeFileSync(join(realCwd, "src/feature.ts"), "export const f = 1;\n");
+        yield { type: "content", content: "implemented src/feature.ts" };
+      });
+      const ctx = makeCtx({ cwd: realCwd, processMessageFn });
+
+      const { result, error } = await drain(
+        runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
+      );
+
+      // No wedge: the loop completed to a shipped IterationState.
+      expect(error).toBeUndefined();
+      expect(result?.stage).toBe("shipped");
+      // The DEFERRED file was NEVER force-created by a repair turn.
+      expect(existsSync(join(realCwd, "packages/x/module-hook.ts"))).toBe(false);
+      // EXACTLY one impl turn. Before the fix, the absent (deferred) module-hook.ts
+      // registered as a "missing target" → a 2nd (repair) processMessageFn turn.
+      expect(processMessageFn).toHaveBeenCalledTimes(1);
+      // Loop advanced past implementation into verification.
+      expect(runVerifyOrchestration).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(realCwd, { recursive: true, force: true });
+    }
   });
 
   it("MUONROI_SPRINT_SKIP_VERIFY=1 bypasses the verify stage (A skip-verify recovery)", async () => {
