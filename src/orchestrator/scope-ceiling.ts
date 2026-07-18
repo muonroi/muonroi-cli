@@ -209,7 +209,8 @@ export async function forcedFinalize(opts: ForcedFinalizeOptions): Promise<Force
     return opts.__testInvoke();
   }
   // Lazy import keeps test-only paths from paying the AI SDK import cost.
-  const { generateText } = await import("ai");
+  // Stream + collect (NOT generateText): codex/oauth 400s non-stream requests.
+  const { generateTextStreamed } = await import("./../providers/streamed-generate.js");
   // Cast to `any` at the call boundary — the AI SDK's generic Prompt shape
   // requires either `prompt` xor `messages`, and we have already validated
   // `messages` shape at the orchestrator caller. Keeping types loose here
@@ -228,7 +229,7 @@ export async function forcedFinalize(opts: ForcedFinalizeOptions): Promise<Force
   callArgs.abortSignal = timedSignal;
   try {
     const result = await withDeadlineRace(
-      () => generateText(callArgs),
+      () => generateTextStreamed(callArgs),
       getProviderStallTimeoutMs() + 5_000,
       "forced_finalize",
     );

@@ -50,7 +50,8 @@
 //   - O1 (providerOptions shape forensics)  — extractProviderOptionsShape
 //   - reasoning-strip (provider quirk)       — turnCaps.sanitizeHistory
 
-import { generateText, type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
+import { type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
+import { generateTextStreamed } from "../providers/streamed-generate.js";
 import { getEffectiveCouncilRoleCount } from "../council/leader.js";
 import { recordArtifact } from "../ee/artifact-cache.js";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
@@ -1654,7 +1655,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   },
                 ];
 
-                const { text: decisionText } = await generateText({
+                // Stream + collect (NOT generateText): codex/oauth 400s non-stream requests.
+                const { text: decisionText } = await generateTextStreamed({
                   model: runtime.model,
                   system: systemPrompt,
                   messages: modelMessages,

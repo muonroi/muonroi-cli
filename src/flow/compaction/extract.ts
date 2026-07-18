@@ -6,7 +6,8 @@
  * and content inside <!-- preserve --> blocks.
  */
 
-import { generateText, type ModelMessage } from "ai";
+import type { ModelMessage } from "ai";
+import { generateTextStreamed } from "../../providers/streamed-generate.js";
 import { serializeConversation } from "../../orchestrator/compaction.js";
 import { resolveModelRuntime, resolveTemperatureParam } from "../../providers/runtime.js";
 import { logger } from "../../utils/logger.js";
@@ -67,7 +68,8 @@ export async function extractDecisions(
       const extraPrompt = customInstructions ? `\n\nUSER FOCUS/INSTRUCTIONS:\n${customInstructions}\n` : "";
       // Guard input against the summarizer's context window (see input-guard).
       const guardedInput = capCompactionInput(serialized, runtime.modelInfo?.contextWindow ?? 0);
-      const result = await generateText({
+      // Stream + collect (NOT generateText): codex/oauth 400s non-stream requests.
+      const result = await generateTextStreamed({
         model: runtime.model,
         system:
           'You are an AI context compaction agent. Extract all core decisions, technical facts, and project constraints from this conversation. Return strict JSON with { "decisions": string[], "facts": string[], "constraints": string[] }.',

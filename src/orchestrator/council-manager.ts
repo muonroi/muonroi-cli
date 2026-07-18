@@ -11,7 +11,8 @@
 // original orchestrator.ts (see commit history), only `this.xxx` → `this.deps.xxx()`
 // transposition where the field/method originally lived on Agent.
 
-import { generateText, type ModelMessage, stepCountIs } from "ai";
+import { type ModelMessage, stepCountIs } from "ai";
+import { generateTextStreamed } from "../providers/streamed-generate.js";
 import { getModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {
@@ -191,7 +192,7 @@ export class CouncilManager {
     const key = await loadKeyForProvider(providerId);
     ensureCouncilProvider(providerId, key);
     const runtime = resolveModelRuntime(modelId);
-    const { text } = await generateText({
+    const { text } = await generateTextStreamed({
       model: runtime.model,
       system,
       prompt,
@@ -243,7 +244,7 @@ export class CouncilManager {
       : `## Research Topic\n${topic}\n\nInvestigate the codebase and report your findings.`;
 
     try {
-      const { text } = await generateText({
+      const { text } = await generateTextStreamed({
         model: runtime.model,
         system: systemPrompt,
         prompt: userPrompt,

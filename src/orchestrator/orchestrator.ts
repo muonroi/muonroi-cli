@@ -250,11 +250,12 @@ async function genTitle(
   modelId: string,
 ): Promise<{ title: string; modelId: string; usage?: { totalTokens?: number } }> {
   try {
-    const { generateText } = await import("ai");
+    const { generateTextStreamed } = await import("../providers/streamed-generate.js");
     const runtime = resolveModelRuntime(modelId);
     const snippet = userMessage.length > 1500 ? `${userMessage.slice(0, 1500)}…` : userMessage;
 
-    const { text, usage } = await generateText({
+    // Stream + collect (NOT generateText): codex/oauth 400s non-stream requests.
+    const { text, usage } = await generateTextStreamed({
       model: runtime.model,
       system: TITLE_SYSTEM_PROMPT,
       prompt: `User's first message:\n\n${snippet}\n\nTitle:`,
@@ -3796,11 +3797,12 @@ export class Agent {
           `${serializedParent}\n\n` +
           `Provide clear, actionable guidance to resolve the child's query.`;
 
-        const { generateText } = await import("ai");
+        const { generateTextStreamed } = await import("../providers/streamed-generate.js");
         const modelId = self.modelId;
         const runtime = resolveModelRuntime(modelId);
 
-        const result = await generateText({
+        // Stream + collect (NOT generateText): codex/oauth 400s non-stream requests.
+        const result = await generateTextStreamed({
           model: runtime.model,
           system: systemPrompt,
           prompt: `Child Sub-session is stuck. Question:\n${question}`,

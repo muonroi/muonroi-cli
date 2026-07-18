@@ -1,4 +1,5 @@
-import { generateText, type ModelMessage } from "ai";
+import type { ModelMessage } from "ai";
+import { generateTextStreamed } from "../providers/streamed-generate.js";
 import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { requireRuntimeProvider, resolveModelRuntime, resolveTemperatureParam } from "../providers/runtime.js";
@@ -40,7 +41,7 @@ export async function proposeCompaction(
     const compactCaps = getProviderCapabilities(requireRuntimeProvider(runtime));
     const serialized = serializeConversation(messages);
 
-    const result = await generateText({
+    const result = await generateTextStreamed({
       model: runtime.model,
       system: COMPACT_PROPOSER_SYSTEM_PROMPT,
       prompt: `Current conversation messages:\n\n${serialized}\n\nDecide if compaction is needed and what to keep/drop/summarize. Return strict JSON.`,
@@ -646,7 +647,7 @@ async function summarizeConversation(
 
   const runtime = resolveModelRuntime(modelId);
   const compactCaps = getProviderCapabilities(requireRuntimeProvider(runtime));
-  const result = await generateText({
+  const result = await generateTextStreamed({
     model: runtime.model,
     system: SUMMARIZATION_SYSTEM_PROMPT,
     prompt: promptParts.filter(Boolean).join("\n\n"),
