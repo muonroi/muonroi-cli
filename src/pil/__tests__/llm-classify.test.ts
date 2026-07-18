@@ -405,6 +405,30 @@ describe("classifySubSessionAction", () => {
     const result = await classifySubSessionAction("deepseek-v4-flash", "test");
     expect(result).toBeNull();
   });
+
+  // Feature B1 — enter /ideal via natural language.
+  it("parses ENTER_IDEAL for an explicit request to enter ideal/build mode", async () => {
+    const handle = installMockModel({
+      fixture: {
+        stream: textOnlyStream("ENTER_IDEAL,0.96,User explicitly asked to enter ideal mode to build what was discussed."),
+      },
+    });
+    cleanup = handle.uninstall;
+    const result = await classifySubSessionAction("deepseek-v4-flash", "ok đi vào ideal mode để làm những gì đã bàn");
+    expect(result?.action).toBe("ENTER_IDEAL");
+    expect(result?.confidence).toBe(0.96);
+  });
+
+  it("keeps a normal multi-step task as SPAWN_SUB_SESSION, not ENTER_IDEAL", async () => {
+    // The router must be conservative: a plain task request — even a big one —
+    // stays SPAWN_SUB_SESSION. Only an EXPLICIT "enter ideal mode" earns ENTER_IDEAL.
+    const handle = installMockModel({
+      fixture: { stream: textOnlyStream("SPAWN_SUB_SESSION,0.97,Refactor the storage layer across files") },
+    });
+    cleanup = handle.uninstall;
+    const result = await classifySubSessionAction("deepseek-v4-flash", "refactor the storage layer");
+    expect(result?.action).toBe("SPAWN_SUB_SESSION");
+  });
 });
 
 describe("orderClassifyCandidates — cross-provider fallback ordering", () => {

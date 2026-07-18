@@ -86,6 +86,41 @@ export function isTaskAwarePanelEnabled(): boolean {
 }
 
 /**
+ * Feature A — conversation handoff into /ideal. Default ON. When ON,
+ * `orchestrator.runProductLoopV1` (subcommand "start") captures a recent-turns
+ * chat summary and passes it as `conversationContext` into `runProductLoop`, so
+ * the clarifier + council debate inherit what the user discussed before running
+ * `/ideal <vague reference>` instead of re-interviewing from scratch. Opt out:
+ * MUONROI_IDEAL_CONVO_HANDOFF=0.
+ */
+export function isIdealConversationHandoffEnabled(): boolean {
+  const raw = process.env.MUONROI_IDEAL_CONVO_HANDOFF;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}
+
+/**
+ * Feature B1 — enter /ideal via natural language. Default ON. When ON, the
+ * sub-session router (`classifySubSessionAction`) may return `ENTER_IDEAL` for an
+ * EXPLICIT request to enter ideal/product-loop/build mode, and the orchestrator
+ * dispatches `runProductLoopV1` for that turn. Opt out: MUONROI_IDEAL_NL_ENTRY=0.
+ */
+export function isIdealNlEntryEnabled(): boolean {
+  const raw = process.env.MUONROI_IDEAL_NL_ENTRY;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}
+
+/**
+ * Feature B2 — agent-callable `enter_ideal` tool. Default ON. When ON, the
+ * `enter_ideal` tool is registered so the agent can request entry into /ideal
+ * product-loop mode; the orchestrator dispatches the pending request after the
+ * current turn's tool phase completes. Opt out: MUONROI_IDEAL_TOOL_ENTRY=0.
+ */
+export function isIdealToolEntryEnabled(): boolean {
+  const raw = process.env.MUONROI_IDEAL_TOOL_ENTRY;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}
+
+/**
  * Plan-review debate retry budget. The council debate can return an EMPTY
  * synthesis on any of its fail-open paths (provider unreachable, sub-phase
  * catch, user/watchdog abort) — a silent null that plan-council previously

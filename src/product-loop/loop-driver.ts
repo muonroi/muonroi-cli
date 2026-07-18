@@ -79,6 +79,19 @@ function logLoopEvent(
 }
 
 /**
+ * Feature A — conversation handoff. Prepend a chat-derived conversation summary
+ * to the loop-driver's repo-audit conversationContext under a clear heading, so
+ * the clarifier + council debate inherit what the user discussed before running
+ * `/ideal`. Returns `base` unchanged when there is no prior conversation.
+ */
+export function withPriorConversation(prior: string | undefined, base: string): string {
+  const trimmed = prior?.trim();
+  if (!trimmed) return base;
+  const header = `## Prior conversation (from the chat before /ideal)\n${trimmed}`;
+  return base.trim() ? `${header}\n\n${base}` : header;
+}
+
+/**
  * Clamp a title for the milestone/phase index (F12): truncate at a word
  * boundary when possible and strip trailing punctuation/whitespace so a raw
  * slice can't leave a dangling "(" or a half word. Falls back to a hard slice
@@ -263,6 +276,14 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         // Build conversationContext for clarifier + debate so prompts are
         // grounded in real repo state, not generic boilerplate.
         conversationContext = auditAsContextBlock(audit);
+
+        // Feature A — conversation handoff. When the user discussed a topic in
+        // chat and then ran `/ideal <vague reference>` (or entered via NL/tool),
+        // the orchestrator threaded a recent-turns summary here. PREPEND it under
+        // a clear heading so the clarifier + council debate inherit the discussion
+        // instead of re-interviewing from scratch. Augments — never replaces — the
+        // repo audit context.
+        conversationContext = withPriorConversation(ctx.conversationContext, conversationContext);
 
         // P5 — cross-run workspace memory. prior.runs.length is still used
         // for the discovery card below to show how many prior runs were found.

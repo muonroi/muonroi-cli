@@ -748,7 +748,7 @@ export function createLlmClassifier(modelId: string, classifyOpts?: CreateClassi
   };
 }
 
-export type SubSessionAction = "DIRECT_ANSWER" | "ROTATE_SESSION" | "SPAWN_SUB_SESSION";
+export type SubSessionAction = "DIRECT_ANSWER" | "ROTATE_SESSION" | "SPAWN_SUB_SESSION" | "ENTER_IDEAL";
 
 export interface SubSessionRouteResult {
   action: SubSessionAction;
@@ -761,7 +761,8 @@ const ROUTER_SYSTEM_PROMPT =
   "Analyze the user's prompt and select one of the following ACTIONS:\n" +
   '- "DIRECT_ANSWER": The prompt is informational, a quick question, a code review, an explanation, greeting, or thanks. No file creation/modification, test execution, or multi-turn tool runs are needed.\n' +
   '- "ROTATE_SESSION": The user is starting a completely new topic or task unrelated to the active discussion (e.g. "let\'s switch to writing a python script", "forget the previous bug, show me how to..."). OR, if the session size (metadata) exceeds the rotation threshold and the active task is completed or the prompt starts a new focus, choose ROTATE_SESSION to prune/summarize the context.\n' +
-  '- "SPAWN_SUB_SESSION": The user wants to execute a multi-step task (e.g. "write tests for X and debug it", "refactor the storage layer", "implement feature Y", "fix all compile errors"). This requires running multiple tools (file edits, bash commands, searches).\n\n' +
+  '- "SPAWN_SUB_SESSION": The user wants to execute a multi-step task (e.g. "write tests for X and debug it", "refactor the storage layer", "implement feature Y", "fix all compile errors"). This requires running multiple tools (file edits, bash commands, searches).\n' +
+  '- "ENTER_IDEAL": The user EXPLICITLY asks to enter the product-loop / "ideal" / build mode to plan+build what was just discussed (e.g. "ok đi vào ideal mode để làm những gì đã bàn", "go into ideal mode", "let\'s start building what we discussed now", "start the /ideal build"). Choose this ONLY for an explicit request to switch INTO ideal/product-loop/build mode; a normal task request (even a big one) is still SPAWN_SUB_SESSION, and a question is still DIRECT_ANSWER.\n\n' +
   "Response format: Reply with exactly one comma-separated line containing:\n" +
   "<ACTION>,<CONFIDENCE>,<REASON>\n\n" +
   "Examples:\n" +
@@ -769,6 +770,7 @@ const ROUTER_SYSTEM_PROMPT =
   '- "ROTATE_SESSION,0.90,Complete shift to a different project/language."\n' +
   '- "ROTATE_SESSION,0.95,Session size exceeds threshold and current request starts a new task."\n' +
   '- "SPAWN_SUB_SESSION,0.98,Requires writing a test suite and fixing multiple files to get it green."\n' +
+  '- "ENTER_IDEAL,0.96,User explicitly asked to enter ideal mode to build what was discussed."\n' +
   "No other text, only the comma-separated line.";
 
 export async function classifySubSessionAction(
@@ -867,7 +869,12 @@ export async function classifySubSessionAction(
     const confidence = Number(parts[1].trim()) || 0.8;
     const reason = parts.slice(2).join(",").trim() || "No reason given";
 
-    if (action === "DIRECT_ANSWER" || action === "ROTATE_SESSION" || action === "SPAWN_SUB_SESSION") {
+    if (
+      action === "DIRECT_ANSWER" ||
+      action === "ROTATE_SESSION" ||
+      action === "SPAWN_SUB_SESSION" ||
+      action === "ENTER_IDEAL"
+    ) {
       return { action, confidence, reason };
     }
     return null;

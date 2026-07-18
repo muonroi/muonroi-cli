@@ -383,6 +383,8 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   askSafetyOverride?: (info: SafetyOverrideAskInfo) => Promise<SafetyOverrideVerdict>;
   /** ask_user handler — invoked when the model calls the `ask_user` tool; resolves the human's answer. */
   askUser?: (info: AskUserAskInfo) => Promise<string>;
+  /** Feature B2 — enter_ideal handler; records a pending product-loop request on the orchestrator. */
+  enterIdeal?: (idea: string) => void;
   runCouncilV2(
     userMessage: string,
     opts: {

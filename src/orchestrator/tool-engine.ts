@@ -422,6 +422,8 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   askSafetyOverride?: (info: SafetyOverrideAskInfo) => Promise<SafetyOverrideVerdict>;
   /** ask_user handler — invoked when the model calls the `ask_user` tool; resolves the human's answer. */
   askUser?: (info: AskUserAskInfo) => Promise<string>;
+  /** Feature B2 — enter_ideal handler; records a pending product-loop request on the orchestrator. */
+  enterIdeal?: (idea: string) => void;
   runCouncilV2(
     userMessage: string,
     opts: { skipClarification: boolean; observer?: ProcessMessageObserver; userModelMessage: ModelMessage },
@@ -1019,6 +1021,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // call a council that can't convene.
           councilConfigured: configuredRoleCount >= autoCouncilMinRoles,
           askUser: deps.askUser,
+          enterIdeal: deps.enterIdeal,
           runDebate: async (topic: string) => {
             // Reset before draining so a generator that throws BEFORE setting
             // synthesis (orchestrator.setLastSynthesis) cannot return a STALE

@@ -12,7 +12,12 @@ import { getTenantId } from "../ee/tenant.js";
 import { emitTranscriptToDisk } from "../ee/transcript-emit.js";
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
 import { ensureFlowDir } from "../flow/scaffold.js";
-import { isContextRailEnabled } from "../gsd/flags.js";
+import {
+  isContextRailEnabled,
+  isIdealConversationHandoffEnabled,
+  isIdealNlEntryEnabled,
+  isIdealToolEntryEnabled,
+} from "../gsd/flags.js";
 import { executeEventHooks } from "../hooks/index";
 import type {
   NotificationHookInput,
@@ -178,6 +183,7 @@ import { setProviderHint } from "./token-counter.js";
 import { getToolLimitAutoRecoverCap } from "./tool-limit-auto-recover.js";
 import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
 import { firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
+import { IDEAL_LOOP_DEFAULTS } from "../product-loop/loop-defaults.js";
 
 // ---------------------------------------------------------------------------
 // Provider implementations
@@ -378,6 +384,14 @@ export class Agent {
    * this so we can answer "did this billed call carry store=true?" etc.
    */
   private _lastProviderOptionsShape: string | null = null;
+  /**
+   * Feature B2 — pending `enter_ideal` request. The `enter_ideal` tool cannot
+   * itself stream the top-level product loop (it runs inside the tool phase), so
+   * its handler records the consolidated idea here and returns a ToolResult. After
+   * the current turn's tool phase completes, processMessage checks this field and
+   * dispatches runProductLoopV1, streaming its chunks and clearing the flag.
+   */
+  private _pendingEnterIdeal: { idea: string } | null = null;
   /** External abort context from src/index.ts SIGINT handler (TUI-04). */
   private externalAbortContext: import("./abort.js").AbortContext | null = null;
   /** Pending calls log for Pitfall 9 staged-write tracking. */
@@ -2147,7 +2161,18 @@ export class Agent {
           // explore child runs the debate's research phase so its multi-step tool
           // clutter never accretes into the council thread/context. Threads the
           // council abort signal so Esc cancels the research child too.
-          runIsolatedTask: (request) => this.runTaskRequest(request, undefined, signal),
+          // Relay the research child's per-tool activity to the SubagentStatus
+          // surface so the transcript shows live "→ …" lines instead of going
+          // silent while the isolated research sub-agent works.
+          runIsolatedTask: (request) =>
+            this.runTaskRequest(
+              request,
+              (detail) => {
+                if (signal?.aborted) return;
+                this.emitSubagentStatus({ agent: request.agent, description: request.description, detail });
+              },
+              signal,
+            ).finally(() => this.emitSubagentStatus(null)),
           onPostDebateAction: (action) => {
             chosenAction = action;
             // Relay to the auto-council caller (tool-engine) so nested runs honor
@@ -2381,8 +2406,21 @@ export class Agent {
       const prev = self.permissionMode;
       if (self.permissionMode === "safe") self.permissionMode = "auto-edit";
       try {
-        return await this.runTaskRequest(request, undefined, this.abortController?.signal);
+        // Live activity bridge: the isolated implement stage absorbs its own
+        // stream (compact ToolResult only at the END), which left the main
+        // panel silent for the whole stage. Relay per-tool activity through
+        // the SubagentStatus channel the UI already renders (SubagentActivity
+        // line + /ideal sprint status strip).
+        return await this.runTaskRequest(
+          request,
+          (detail) => {
+            if (this.abortController?.signal.aborted) return;
+            self.emitSubagentStatus({ agent: request.agent, description: request.description, detail });
+          },
+          this.abortController?.signal,
+        );
       } finally {
+        self.emitSubagentStatus(null);
         self.permissionMode = prev;
       }
     };
@@ -2493,6 +2531,16 @@ export class Agent {
       }
     }
 
+    // Feature A — conversation handoff. When the user discussed a topic in chat
+    // and then ran `/ideal <vague reference>` (or entered ideal via NL/tool),
+    // capture a recent-turns summary and ride it on a separate channel into the
+    // loop so the clarifier + council debate inherit the discussion. The idea
+    // stays the user's literal text (payload.idea). Only meaningful for "start".
+    const conversationContext =
+      payload.subcommand === "start" && isIdealConversationHandoffEnabled()
+        ? (this._buildRecentTurnsSummary() ?? undefined)
+        : undefined;
+
     const gen = runProductLoop({
       subcommand: payload.subcommand,
       idea: payload.idea ?? "",
@@ -2516,6 +2564,7 @@ export class Agent {
       // Mode C — wire verify-recipe detector so runProductLoop auto-detect can probe cwd.
       detectVerifyRecipe: () => this.detectVerifyRecipe(),
       skipPriorContext: payload.flags.noPriorContext === true,
+      conversationContext,
       complexity,
       needsClarification,
       sufficiencyMissing,
@@ -3204,6 +3253,42 @@ export class Agent {
       routeAction = "SPAWN_SUB_SESSION";
     }
 
+    // Feature B1 — enter /ideal via natural language. When the router judged the
+    // user EXPLICITLY asked to enter ideal/product-loop/build mode to build what
+    // was discussed, dispatch the product loop for this turn and stream its chunks
+    // into the current output. The conversation context flows automatically via
+    // Feature A (runProductLoopV1 captures a recent-turns summary). Fail-open: on
+    // any dispatch error, fall through to the ordinary turn so the user is never
+    // stranded. Skipped when the flag is off (routes as a normal task instead).
+    if (routeAction === "ENTER_IDEAL") {
+      if (isIdealNlEntryEnabled()) {
+        logger.info("orchestrator", "ENTER_IDEAL route — dispatching product loop for this turn", {});
+        try {
+          yield {
+            type: "toast",
+            toastLevel: "info",
+            content: "Đang vào chế độ /ideal để xây dựng những gì đã thảo luận...",
+          };
+          yield* this.runProductLoopV1(
+            {
+              subcommand: "start",
+              idea: userMessage,
+              flags: { ...IDEAL_LOOP_DEFAULTS },
+            },
+            { observer },
+          );
+          return;
+        } catch (err) {
+          logger.error("orchestrator", "ENTER_IDEAL dispatch failed — falling back to normal turn", { error: err });
+          // Fall through to the ordinary turn below (routeAction stays ENTER_IDEAL
+          // but no branch consumes it beyond here, so it behaves like DIRECT_ANSWER).
+        }
+      } else {
+        // Flag off — treat as an ordinary multi-step task so the intent isn't lost.
+        routeAction = "SPAWN_SUB_SESSION";
+      }
+    }
+
     const shouldRotate = currentChars > threshold || routeAction === "ROTATE_SESSION";
 
     if (shouldRotate && this.session && this.sessionStore) {
@@ -3481,6 +3566,36 @@ export class Agent {
         } catch (err) {
           logger.error("orchestrator", "Failed to absorb sub-session final summary", { error: err });
         }
+      }
+    }
+
+    // Feature B2 — post-turn dispatch of a pending `enter_ideal` request. The
+    // enter_ideal tool ran during this turn's tool phase and recorded the idea;
+    // now that the tool phase (and any sub-session absorb) is done, dispatch the
+    // product loop and stream its chunks into the same turn output. Cleared first
+    // so a dispatch failure or re-entrancy cannot loop. The conversation context
+    // flows automatically via Feature A inside runProductLoopV1.
+    const pendingEnterIdeal = this._pendingEnterIdeal;
+    this._pendingEnterIdeal = null;
+    if (pendingEnterIdeal && isIdealToolEntryEnabled()) {
+      logger.info("orchestrator", "enter_ideal tool — dispatching product loop after turn", {});
+      try {
+        yield {
+          type: "toast",
+          toastLevel: "info",
+          content: "Đang vào chế độ /ideal để xây dựng những gì đã thảo luận...",
+        };
+        yield* this.runProductLoopV1(
+          {
+            subcommand: "start",
+            idea: pendingEnterIdeal.idea,
+            flags: { ...IDEAL_LOOP_DEFAULTS },
+          },
+          { observer },
+        );
+      } catch (err) {
+        logger.error("orchestrator", "enter_ideal dispatch failed", { error: err });
+        yield { type: "toast", toastLevel: "warn", content: "Không thể vào /ideal — vui lòng chạy /ideal thủ công." };
       }
     }
   }
@@ -3762,6 +3877,11 @@ export class Agent {
         } finally {
           endInteractivePause();
         }
+      },
+      enterIdeal: (idea: string) => {
+        // Feature B2 — record a pending product-loop request. processMessage
+        // dispatches runProductLoopV1 after the current turn's tool phase ends.
+        self._pendingEnterIdeal = { idea };
       },
       runCouncilV2: (msg, opts) => self.runCouncilV2(msg, opts),
       processMessage: (msg, obs, imgs) => self.processMessage(msg, obs, imgs),

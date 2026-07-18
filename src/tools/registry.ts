@@ -7,6 +7,7 @@
  */
 
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
+import { isIdealToolEntryEnabled } from "../gsd/flags.js";
 import { registerGsdWorkflowTools } from "../gsd/workflow-tools.js";
 import type { AskUserAskInfo, AskUserOption } from "../orchestrator/ask-user.js";
 import { requestProactiveCompact } from "../orchestrator/compact-request.js";
@@ -77,6 +78,14 @@ interface ToolRegistryOpts {
    * that can never be answered.
    */
   askUser?: (info: AskUserAskInfo) => Promise<string>;
+  /**
+   * Feature B2 — when provided, the `enter_ideal` tool is registered so the agent
+   * can request entry into /ideal product-loop mode after the user agreed to start
+   * building what was discussed. The callback records a pending request on the
+   * orchestrator; the top-level loop is dispatched AFTER the current turn's tool
+   * phase completes (the tool cannot stream the loop itself). Omitted → tool absent.
+   */
+  enterIdeal?: (idea: string) => void;
 }
 
 /**
@@ -1361,6 +1370,38 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       depth: opts?.depthTier ?? "standard",
       runTask: opts?.runTask,
       runDebate: opts?.runDebate,
+    });
+  }
+
+  // Feature B2 — agent-callable entry into /ideal product-loop mode. Registered
+  // only when the orchestrator wired an `enterIdeal` callback AND the flag is on.
+  // The tool records a pending request; the top-level loop is dispatched after the
+  // current turn's tool phase completes (a tool cannot stream the loop itself).
+  const enterIdeal = opts?.enterIdeal;
+  if (enterIdeal && isIdealToolEntryEnabled()) {
+    tools.enter_ideal = dynamicTool({
+      description:
+        "Enter /ideal product-loop mode to plan+build the given idea; inherits the current conversation as context. " +
+        "Use when the user has agreed to start building what was discussed. Records the request and hands off to the " +
+        "product loop after this turn — do not call other tools expecting to continue the current turn afterward.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          idea: {
+            type: "string",
+            description: "The consolidated goal to build, phrased as a concrete product/feature request.",
+          },
+        },
+        required: ["idea"],
+      }),
+      execute: async (input: any) => {
+        const idea = typeof input?.idea === "string" ? input.idea.trim() : "";
+        if (!idea) {
+          return "ERROR: enter_ideal requires a non-empty `idea` describing what to build.";
+        }
+        enterIdeal(idea);
+        return `Entering /ideal to build: ${idea}`;
+      },
     });
   }
 
