@@ -41,8 +41,17 @@ export function EeConnectCard({
   const overlayBg = "#000000cc" as string;
   const panelWidth = Math.min(78, width - 6);
   const inputMode = mode === "input" || mode === "validating";
-  // header(1) + intro(2) + body + footer + padding — mirrors mcp-needs-key-card sizing.
-  const bodyHeight = mode === "how" ? EE_HOW_IT_WORKS_LINES.length : inputMode ? 4 : actions.length;
+  // The how-text lines are long and word-wrap, so count the WRAPPED rows (not
+  // the raw line count) or the panel is sized too short and the content spills
+  // past the card, pushing the footer off-screen. Content width = panel minus
+  // the paddingLeft(2)+paddingRight(2).
+  const howContentWidth = Math.max(1, panelWidth - 4);
+  const howBodyRows = EE_HOW_IT_WORKS_LINES.reduce(
+    (sum, line) => sum + Math.max(1, Math.ceil(line.length / howContentWidth)),
+    0,
+  );
+  // header(1) + intro(shown only when NOT how) + body + footer + padding.
+  const bodyHeight = mode === "how" ? howBodyRows : inputMode ? 4 : actions.length;
   const panelHeight = Math.min(9 + bodyHeight, Math.floor(height * 0.8));
   const top = bottomAlignedModalTop(height, panelHeight);
   const selectedHint = actions[selectedIndex]?.hint ?? "";
@@ -73,12 +82,14 @@ export function EeConnectCard({
             </text>
             <text fg={t.textMuted}>{"esc"}</text>
           </box>
-          <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
-            <text fg={t.text}>
-              {"No brain is connected — the agent works without memory of past lessons and gotchas."}
-            </text>
-            {mode !== "how" && <text fg={t.textMuted}>{selectedHint}</text>}
-          </box>
+          {mode !== "how" && (
+            <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
+              <text fg={t.text}>
+                {"No brain is connected — the agent works without memory of past lessons and gotchas."}
+              </text>
+              <text fg={t.textMuted}>{selectedHint}</text>
+            </box>
+          )}
           {mode === "how" ? (
             <box flexShrink={0} flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1}>
               {EE_HOW_IT_WORKS_LINES.map((line, i) => (

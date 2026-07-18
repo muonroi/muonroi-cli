@@ -47,13 +47,17 @@ export function buildEeConnectActions(): EeConnectAction[] {
   ];
 }
 
-/** Brief inline explanation shown by the "How it works" action. */
+/**
+ * Brief inline explanation shown by the "How it works" action. Keep each line
+ * short (≈60 cols) so it fits on ONE row inside the card and doesn't word-wrap
+ * (a wrapped line loses its leading indent and reads as broken).
+ */
 export const EE_HOW_IT_WORKS_LINES: readonly string[] = [
   "The Experience Engine is a shared brain for your agents:",
-  "  record  — after sessions, lessons/gotchas/recipes are extracted and stored.",
-  "  recall  — before risky or unfamiliar steps, relevant past lessons are injected.",
-  "  feedback — you confirm or reject hints, so the brain gets sharper over time.",
-  "Connect the hosted brain with a token, or run a local one on port 8082.",
+  "  record  — lessons & gotchas are saved after each session.",
+  "  recall  — relevant past lessons surface before risky steps.",
+  "  feedback — you confirm/reject hints so the brain sharpens.",
+  "Connect the hosted brain with a token, or run a local one.",
 ];
 
 export interface EeConnectDeps {
