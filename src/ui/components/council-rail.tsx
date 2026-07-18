@@ -23,6 +23,24 @@ import { CouncilNowBlock } from "./council-now.js";
  * the council surface is flag-gated and keeps its own render path so the two
  * cannot drift, and so the NOW block never leaks into the non-council rail.
  */
+/**
+ * De-cram the narrow council pane. app.tsx caps meta values at fixed char
+ * counts (Topic 90, each criterion 64, the full panel roster) that far exceed a
+ * ~28–36-col rail, so they wrap into a wall of text. Clamp every value to the
+ * ACTUAL rail width instead — one line each — with Topic alone allowed two lines
+ * (it is the one value worth wrapping). Purely presentational: callers still
+ * pass the untruncated rows to the harness `props` mirror.
+ */
+export function fitCouncilRailRows(rows: ContextRailRow[], inner: number): ContextRailRow[] {
+  const ellipsize = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0, Math.max(1, max - 1))}…`);
+  return rows.map((r) => {
+    const labelCost = r.label ? r.label.length + 2 : 0;
+    const lines = r.label === "Topic" ? 2 : 1;
+    const budget = Math.max(8, inner * lines - labelCost);
+    return { ...r, value: ellipsize(r.value, budget) };
+  });
+}
+
 export function CouncilRail({
   width,
   theme,
@@ -47,6 +65,8 @@ export function CouncilRail({
   children?: ReactNode;
 }) {
   const inner = Math.max(10, width - 3);
+  const fittedMetaRows = fitCouncilRailRows(metaRows, inner);
+  const fittedStageRows = stage ? fitCouncilRailRows(stage.rows, inner) : [];
   const divider = stage
     ? (() => {
         const base = `── ${stage.title} `;
@@ -82,7 +102,7 @@ export function CouncilRail({
         <CouncilNowBlock status={status} roundLabel={roundLabel} waiting={waiting} width={width} theme={theme} />
         <Semantic id="council-rail-meta" role="group" name="Council meta">
           <box flexDirection="column" flexShrink={0}>
-            {metaRows.map((r, idx) => (
+            {fittedMetaRows.map((r, idx) => (
               // Single-<text> flow (label + value) so a wrapping value can't get
               // its "Label: " separator trimmed — same rule as ContextRail.
               <box key={idx} flexDirection="column">
@@ -97,7 +117,7 @@ export function CouncilRail({
         {stage && (
           <box flexDirection="column" flexShrink={0}>
             <text fg={theme.councilLeaderBorder}>{divider}</text>
-            {stage.rows.map((r, idx) => (
+            {fittedStageRows.map((r, idx) => (
               <box key={`stage-${idx}`} flexDirection="column">
                 <text>
                   {r.label ? <span style={{ fg: theme.textMuted }}>{`${r.label}: `}</span> : null}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CouncilStatusData } from "../../../types/index.js";
 import { resolveCouncilLiveness } from "../council-now.js";
 import { packStripSegments } from "../council-strip.js";
+import { fitCouncilRailRows } from "../council-rail.js";
 import { resolveCouncilLayout, resolveCouncilRailWidth } from "../council-surface.js";
 
 describe("resolveCouncilLayout", () => {
@@ -70,5 +71,47 @@ describe("packStripSegments", () => {
   });
   it("returns empty for no segments", () => {
     expect(packStripSegments([], 80)).toEqual({ kept: [], dropped: 0 });
+  });
+});
+
+describe("fitCouncilRailRows", () => {
+  const inner = 27; // a ~30-col rail (width 30 → inner = width - 3)
+
+  it("clamps a long criterion to a single line at the rail width", () => {
+    const long = "  ○ Có bảng SWOT ngắn gọn, mỗi ô được liên kết với bằng chứng cụ thể";
+    const [row] = fitCouncilRailRows([{ label: "", value: long }], inner);
+    expect(row!.value.length).toBeLessThanOrEqual(inner);
+    expect(row!.value.endsWith("…")).toBe(true);
+    expect(row!.value.startsWith("  ○ ")).toBe(true);
+  });
+
+  it("gives Topic a two-line budget before ellipsizing", () => {
+    const topic = "x".repeat(200);
+    const [row] = fitCouncilRailRows([{ label: "Topic", value: topic }], inner);
+    // 2 lines * inner minus the "Topic: " label cost, then an ellipsis.
+    const budget = inner * 2 - "Topic".length - 2;
+    expect(row!.value.length).toBe(budget);
+    expect(row!.value.endsWith("…")).toBe(true);
+  });
+
+  it("compacts a full panel roster onto one line", () => {
+    const [row] = fitCouncilRailRows(
+      [{ label: "Panel", value: "3 (deepseek-v4-pro, grok-4.5, grok-composer-2.5-fast)" }],
+      inner,
+    );
+    expect(row!.value.length).toBeLessThanOrEqual(inner - "Panel".length - 2);
+    expect(row!.value.startsWith("3 (")).toBe(true);
+  });
+
+  it("leaves short values untouched", () => {
+    const rows = fitCouncilRailRows(
+      [
+        { label: "Mode", value: "Agent" },
+        { label: "Outcome", value: "0/5 criteria met" },
+      ],
+      inner,
+    );
+    expect(rows[0]!.value).toBe("Agent");
+    expect(rows[1]!.value).toBe("0/5 criteria met");
   });
 });
