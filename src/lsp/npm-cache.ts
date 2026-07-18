@@ -67,6 +67,20 @@ export async function lspNpmWhich(pkg: string, preferredBin?: string): Promise<s
   return path.join(binDir, resolved);
 }
 
+/**
+ * Non-installing probe: absolute path to `preferredBin` if the package is
+ * already warmed into the cache, else null. Never triggers an install — used
+ * by the LSP setup card to distinguish "already installed" from "would
+ * install" without side effects.
+ */
+export async function lspNpmCachedWhich(pkg: string, preferredBin?: string): Promise<string | null> {
+  const binDir = path.join(packageDir(pkg), "node_modules", ".bin");
+  const files = await readdir(binDir).catch((): string[] => []);
+  if (files.length === 0) return null;
+  const bin = preferredBin && files.includes(preferredBin) ? preferredBin : files.length === 1 ? files[0] : undefined;
+  return bin ? path.join(binDir, bin) : null;
+}
+
 export async function lspNpmAdd(pkg: string): Promise<string> {
   return withPackageLock(pkg, async () => {
     const dir = packageDir(pkg);

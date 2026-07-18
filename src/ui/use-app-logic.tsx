@@ -259,6 +259,17 @@ import {
   connectLocalEE,
   defaultEeConnectDeps,
 } from "./ee-connect-controller.js";
+import { subscribeLspSetup } from "../lsp/lsp-setup-bus.js";
+import { snoozeLspSetup } from "../lsp/lsp-setup-onboarding.js";
+import { detectProjectLanguages, type LspInstallStatus } from "../lsp/lsp-setup.js";
+import type { LspBuiltInServerId } from "../lsp/types.js";
+import type { LspSetupCardMode } from "./modals/lsp-setup-card.js";
+import {
+  buildLspSetupLanguages,
+  confirmLspSetup,
+  defaultLspSetupConfirmDeps,
+  toggleLspLanguage,
+} from "./lsp-setup-controller.js";
 import { sanitizeContent } from "./utils/text.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
@@ -1600,6 +1611,21 @@ export function useAppLogic(props: AppLogicProps) {
   const eeConnectVisibleRef = useRef(false);
   const eeConnectModeRef = useRef<EeConnectCardMode>("actions");
   const eeConnectIndexRef = useRef(0);
+  // ---- LSP setup card (first-run language-server onboarding) ----
+  // Parallel to the EE connect card but on its own bus/controller — LSP
+  // onboarding and EE onboarding must not couple. MULTI-select: Space toggles
+  // the language under the cursor, Enter installs the picked set. Fed by
+  // lsp-setup-bus (boot-time nudge in index.ts, or `/lsp setup`).
+  const [lspSetupVisible, setLspSetupVisible] = useState(false);
+  const [lspSetupMode, setLspSetupMode] = useState<LspSetupCardMode>("pick");
+  const [lspSetupCursor, setLspSetupCursor] = useState(0);
+  const [lspSetupSelected, setLspSetupSelected] = useState<ReadonlySet<string>>(new Set());
+  const [lspSetupDetected, setLspSetupDetected] = useState<ReadonlySet<string>>(new Set());
+  const [lspSetupStatuses, setLspSetupStatuses] = useState<LspInstallStatus[]>([]);
+  const lspSetupVisibleRef = useRef(false);
+  const lspSetupModeRef = useRef<LspSetupCardMode>("pick");
+  const lspSetupCursorRef = useRef(0);
+  const lspSetupSelectedRef = useRef<ReadonlySet<string>>(new Set());
   const {
     showMcpModal,
     setShowMcpModal,
@@ -1809,6 +1835,93 @@ export function useAppLogic(props: AppLogicProps) {
         return;
     }
   }, [dismissEeConnectCard, pushToast]);
+
+  // ---- LSP setup card wiring (state declared above with the modal refs) ----
+  useEffect(() => {
+    lspSetupVisibleRef.current = lspSetupVisible;
+  }, [lspSetupVisible]);
+  useEffect(() => {
+    lspSetupModeRef.current = lspSetupMode;
+  }, [lspSetupMode]);
+  useEffect(() => {
+    lspSetupCursorRef.current = lspSetupCursor;
+  }, [lspSetupCursor]);
+  useEffect(() => {
+    lspSetupSelectedRef.current = lspSetupSelected;
+  }, [lspSetupSelected]);
+
+  // Receive the "offer LSP language setup" signal (boot nudge or /lsp setup).
+  // The bus dedupes per session and buffers pre-mount publishes. Detected
+  // project languages are pre-selected as a nicety — the scan runs async and
+  // merges in only while the card is still in pick mode.
+  useEffect(
+    () =>
+      subscribeLspSetup(() => {
+        // Write the refs synchronously too (not just via the mirror effects):
+        // an immediate keypress after the card opens must see a fresh cursor(0)
+        // / mode / selection, not the deferred-committed values from a prior
+        // open of the same session.
+        lspSetupModeRef.current = "pick";
+        lspSetupCursorRef.current = 0;
+        lspSetupSelectedRef.current = new Set();
+        setLspSetupMode("pick");
+        setLspSetupCursor(0);
+        setLspSetupSelected(new Set());
+        setLspSetupDetected(new Set());
+        setLspSetupStatuses([]);
+        setLspSetupVisible(true);
+        void detectProjectLanguages(process.cwd())
+          .then((ids) => {
+            if (ids.length === 0 || lspSetupModeRef.current !== "pick") return;
+            setLspSetupDetected(new Set(ids));
+            setLspSetupSelected((prev) => {
+              const next = new Set(prev);
+              for (const id of ids) next.add(id);
+              lspSetupSelectedRef.current = next;
+              return next;
+            });
+          })
+          .catch(() => {});
+      }),
+    [],
+  );
+
+  /** Close the setup card. `snooze` = the user declined (esc / not now). */
+  const dismissLspSetupCard = useCallback((snooze: boolean) => {
+    lspSetupModeRef.current = "pick";
+    lspSetupCursorRef.current = 0;
+    lspSetupSelectedRef.current = new Set();
+    setLspSetupMode("pick");
+    setLspSetupCursor(0);
+    setLspSetupSelected(new Set());
+    setLspSetupStatuses([]);
+    setLspSetupVisible(false);
+    if (snooze) {
+      try {
+        snoozeLspSetup();
+      } catch {
+        // Settings write failure must not break dismissal.
+      }
+    }
+  }, []);
+
+  /** Enter on the picker: install the picked set, then show per-language results. */
+  const confirmLspSetupSelection = useCallback(() => {
+    if (lspSetupModeRef.current !== "pick") return; // re-entry guard
+    const ids = [...lspSetupSelectedRef.current] as LspBuiltInServerId[];
+    lspSetupModeRef.current = "installing"; // arm the guard synchronously (double-Enter safe)
+    setLspSetupMode("installing");
+    void (async () => {
+      const statuses = await confirmLspSetup(ids, defaultLspSetupConfirmDeps());
+      if (statuses.length === 0) {
+        pushToast("info", "LSP setup saved — no languages selected. Re-run any time via /lsp setup.");
+        dismissLspSetupCard(false);
+        return;
+      }
+      setLspSetupStatuses(statuses);
+      setLspSetupMode("result");
+    })();
+  }, [dismissLspSetupCard, pushToast]);
   const {
     showAgentsModal,
     setShowAgentsModal,
@@ -5513,6 +5626,7 @@ export function useAppLogic(props: AppLogicProps) {
     showTelegramPairModal ||
     needsKeyQueue.length > 0 ||
     eeConnectVisible ||
+    lspSetupVisible ||
     showMcpModal ||
     showSandboxPicker ||
     showSessionPicker ||
@@ -6768,6 +6882,58 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
+      if (lspSetupVisibleRef.current) {
+        // Multi-select card: this branch must consume EVERY key (including
+        // Space) so nothing falls through to the composer behind the modal.
+        const mode = lspSetupModeRef.current;
+        if (mode === "installing") return; // swallow input while installs run
+        if (mode === "result") {
+          if (isEscapeKey(key) || key.name === "return") {
+            dismissLspSetupCard(false); // setup already recorded — no snooze
+          }
+          return;
+        }
+        if (isEscapeKey(key)) {
+          dismissLspSetupCard(true); // snooze — re-offered in a few sessions
+          return;
+        }
+        // Cursor moves write the ref SYNCHRONOUSLY (not just via the deferred
+        // useEffect that mirrors state → ref). A fast Down+Space burst — a
+        // real user, and the E2E driver — otherwise reads a stale cursor in the
+        // Space branch below and toggles the wrong row, because React commits
+        // the mirror effect only after this synchronous key handler returns.
+        if (key.name === "up") {
+          const next = Math.max(0, lspSetupCursorRef.current - 1);
+          lspSetupCursorRef.current = next;
+          setLspSetupCursor(next);
+          return;
+        }
+        if (key.name === "down") {
+          const max = buildLspSetupLanguages().length - 1;
+          const next = Math.min(max, lspSetupCursorRef.current + 1);
+          lspSetupCursorRef.current = next;
+          setLspSetupCursor(next);
+          return;
+        }
+        if (key.name === "space" || key.sequence === " ") {
+          const lang = buildLspSetupLanguages()[lspSetupCursorRef.current];
+          if (lang) {
+            setLspSetupSelected((prev) => {
+              const next = toggleLspLanguage(prev, lang.id);
+              // Keep the ref in lock-step so an immediate Enter (confirm reads
+              // lspSetupSelectedRef) installs exactly the visible selection.
+              lspSetupSelectedRef.current = next;
+              return next;
+            });
+          }
+          return;
+        }
+        if (key.name === "return") {
+          confirmLspSetupSelection();
+          return;
+        }
+        return;
+      }
       if (showTelegramTokenModalRef.current) {
         if (isEscapeKey(key)) {
           setShowTelegramTokenModal(false);
@@ -7528,6 +7694,8 @@ export function useAppLogic(props: AppLogicProps) {
       submitEeConnectToken,
       activateEeConnectAction,
       dismissEeConnectCard,
+      confirmLspSetupSelection,
+      dismissLspSetupCard,
       submitMcpEditor,
       submitSubagentEditor,
       planQuestions,
@@ -7883,6 +8051,12 @@ export function useAppLogic(props: AppLogicProps) {
     eeConnectMode,
     eeConnectVisible,
     submitEeConnectToken,
+    lspSetupCursor,
+    lspSetupDetected,
+    lspSetupMode,
+    lspSetupSelected,
+    lspSetupStatuses,
+    lspSetupVisible,
     mcpSearchQuery,
     mcpUrlRef,
     messages,

@@ -157,6 +157,8 @@ import { McpNeedsKeyCard } from "./modals/mcp-needs-key-card.js";
 import { buildNeedsKeyActions } from "./needs-key-controller.js";
 import { EeConnectCard } from "./modals/ee-connect-card.js";
 import { buildEeConnectActions } from "./ee-connect-controller.js";
+import { LspSetupCard } from "./modals/lsp-setup-card.js";
+import { buildLspSetupLanguages } from "./lsp-setup-controller.js";
 import { ConnectModal, TelegramPairModal, TelegramTokenModal } from "./modals/connect-modal.js";
 import { ModelPickerModal } from "./modals/model-picker-modal.js";
 import { SandboxPickerModal } from "./modals/sandbox-picker-modal.js";
@@ -183,6 +185,7 @@ import "./slash/clear.js";
 import "./slash/pin.js";
 import "./slash/cost.js";
 import "./slash/ee.js";
+import "./slash/lsp.js";
 import "./slash/debug.js";
 import "./slash/council.js";
 import "./slash/ideal.js";
@@ -669,6 +672,12 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     eeConnectMode,
     eeConnectVisible,
     submitEeConnectToken,
+    lspSetupCursor,
+    lspSetupDetected,
+    lspSetupMode,
+    lspSetupSelected,
+    lspSetupStatuses,
+    lspSetupVisible,
     mcpSearchQuery,
     mcpUrlRef,
     messages,
@@ -1660,6 +1669,19 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             inputRef={eeConnectInputRef}
             error={eeConnectError}
             onSubmitToken={submitEeConnectToken}
+          />
+        )}
+        {lspSetupVisible && needsKeyQueue.length === 0 && !eeConnectVisible && (
+          <LspSetupCard
+            t={t}
+            width={width}
+            height={height}
+            languages={buildLspSetupLanguages()}
+            selectedIds={lspSetupSelected}
+            detectedIds={lspSetupDetected}
+            cursorIndex={lspSetupCursor}
+            mode={lspSetupMode}
+            statuses={lspSetupStatuses}
           />
         )}
         {showMcpModal && !showMcpEditor && (

@@ -1093,6 +1093,19 @@ program
         if (process.env.MUONROI_DEBUG)
           console.error(`[muonroi-cli] EE first-run setup skipped: ${(err as Error)?.message}`);
       }
+
+      // First-run LSP language onboarding: offer the multi-select language
+      // picker when it was never completed, isn't snoozed, and the project's
+      // detected languages aren't already covered by installed servers. Same
+      // fire-and-forget bus pattern as the EE connect nudge above — publishes
+      // on the lsp-setup bus (buffered until the TUI mounts), never blocks boot.
+      try {
+        const { maybeOfferLspSetup } = await import("./lsp/lsp-setup-onboarding.js");
+        void maybeOfferLspSetup().catch(() => {});
+      } catch (err) {
+        if (process.env.MUONROI_DEBUG)
+          console.error(`[muonroi-cli] LSP first-run setup skipped: ${(err as Error)?.message}`);
+      }
     }
 
     // Auto-detect EE client mode (thin / thin-degraded / fat / disabled).

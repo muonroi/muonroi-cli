@@ -72,6 +72,11 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
     description: "Experience Engine — connect a brain (/ee config <url> [token]), stats, search",
     hidden: true,
   },
+  {
+    id: "lsp",
+    label: "lsp",
+    description: "Language servers — /lsp setup picks & installs LSPs for your languages",
+  },
   { id: "route", label: "route", description: "Show current model routing info", hidden: true },
   { id: "plan", label: "plan", description: "Show active GSD plan", hidden: true },
   { id: "execute", label: "execute", description: "Execute active GSD plan", hidden: true },

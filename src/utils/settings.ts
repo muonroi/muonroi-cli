@@ -304,6 +304,13 @@ export interface UserSettings {
    */
   eeSetup?: { connectedAt?: string; snoozeRemaining?: number };
   /**
+   * First-run LSP language onboarding state (mirrors `eeSetup`): `configuredAt`
+   * is set once the user confirms the language picker; a skip / esc sets
+   * `snoozeRemaining` so the card re-surfaces after that many interactive
+   * sessions instead of never. See src/lsp/lsp-setup-onboarding.ts.
+   */
+  lspSetup?: { configuredAt?: string; snoozeRemaining?: number };
+  /**
    * Unix ms timestamp of the last npm-registry update check. Used to throttle
    * checkForUpdate to once per day so the CLI never spams the registry on
    * every launch.

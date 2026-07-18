@@ -282,6 +282,26 @@ const BUILT_IN_DEFINITIONS: Record<LspBuiltInServerId, BuiltInDefinition> = {
   },
 };
 
+/** Static metadata for one built-in language server (no launch logic). */
+export interface BuiltInServerMeta {
+  id: LspBuiltInServerId;
+  extensions: string[];
+  rootMarkers: string[];
+}
+
+/**
+ * Reflect the built-in server table for consumers that need the supported
+ * language list without launch wiring (e.g. the first-run LSP setup card).
+ * Derived from BUILT_IN_DEFINITIONS so there is exactly ONE source of truth.
+ */
+export function listBuiltInServerMeta(): BuiltInServerMeta[] {
+  return Object.values(BUILT_IN_DEFINITIONS).map((definition) => ({
+    id: definition.id,
+    extensions: [...definition.extensions],
+    rootMarkers: [...definition.rootMarkers],
+  }));
+}
+
 export function createRuntimeLspDefinitions(
   cwd: string,
   settings: NormalizedLspSettings,
@@ -406,7 +426,11 @@ async function resolveNodeServerLaunch(
   return null;
 }
 
-async function findCommandOnPath(binary: string): Promise<string | null> {
+/**
+ * PATH-only binary resolution (exported for the LSP setup pipeline so it does
+ * not duplicate the platform-suffix logic).
+ */
+export async function findCommandOnPath(binary: string): Promise<string | null> {
   const pathValue = process.env.PATH;
   if (!pathValue) return null;
 

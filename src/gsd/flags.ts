@@ -132,6 +132,17 @@ export function isEeConnectCardEnabled(): boolean {
 }
 
 /**
+ * LSP setup card — the inline first-run "which languages do you work in?"
+ * multi-select nudge + `/lsp setup` card. Default ON. When ON, a never-
+ * completed LSP setup (not snoozed, project languages not already covered)
+ * surfaces the card once per session. Opt out: MUONROI_LSP_SETUP_CARD=0.
+ */
+export function isLspSetupCardEnabled(): boolean {
+  const raw = process.env.MUONROI_LSP_SETUP_CARD;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}
+
+/**
  * Plan-review debate retry budget. The council debate can return an EMPTY
  * synthesis on any of its fail-open paths (provider unreachable, sub-phase
  * catch, user/watchdog abort) — a silent null that plan-council previously
