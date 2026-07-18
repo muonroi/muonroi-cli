@@ -36,6 +36,7 @@ import {
   type McpToolBundle,
 } from "./runtime.js";
 import { MCP_KEY_REQUIREMENTS, noticeNeedsKeyOnce, partitionEnabledServers } from "./key-requirements.js";
+import { publishNeedsKey } from "./needs-key-bus.js";
 import { validateMcpServerConfig } from "./validate.js";
 
 interface PoolEntry {
@@ -312,6 +313,10 @@ export async function warmMcpClients(servers: McpServerConfig[], syncAndLog = fa
       void (async () => {
         const { connectable, needsKey } = await partitionEnabledServers(keyGated);
         noticeNeedsKeyOnce(needsKey);
+        // Surface the inline fix card at boot too — the bus buffers until React
+        // mounts and dedupes per session, so this never double-fires with the
+        // per-turn publish in tool-engine.
+        publishNeedsKey(needsKey);
         for (const s of connectable) void bgWarm(s);
       })();
     }
@@ -323,6 +328,7 @@ export async function warmMcpClients(servers: McpServerConfig[], syncAndLog = fa
   // nag at startup). Native fallbacks cover the capability meanwhile.
   const { connectable, needsKey } = await partitionEnabledServers(servers);
   noticeNeedsKeyOnce(needsKey);
+  publishNeedsKey(needsKey);
   const validServers = connectable.filter((s) => validateMcpServerConfig(s).ok);
 
   if (validServers.length === 0) return;
