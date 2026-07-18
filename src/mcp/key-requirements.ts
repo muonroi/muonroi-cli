@@ -42,6 +42,16 @@ export interface MissingKeyServer {
   envVar: string;
   setupHint: string;
   nativeFallback?: string;
+  /**
+   * Whether the `nativeFallback` tool would actually WORK right now. For Tavily
+   * the native `web_search` shares the very same key (it calls the Tavily API
+   * directly), so "use built-in" is only truthful when the key is reachable via
+   * the process env — the one source the native tool reads that the card's
+   * missing-check does not gate on (server.env + keychain are already empty when
+   * this card shows). Without this the option promised a working fallback that
+   * would immediately error `no_tavily_key`.
+   */
+  nativeFallbackAvailable?: boolean;
 }
 
 /**
@@ -56,12 +66,18 @@ export async function resolveMissingKey(server: McpServerConfig): Promise<Missin
   if (fromEnv && fromEnv.length >= MIN_KEY_LEN) return null;
   const fromKeychain = await getMcpKey(req.keyId);
   if (fromKeychain && fromKeychain.length >= MIN_KEY_LEN) return null;
+  // The native fallback (e.g. web_search) reads the same key from the process
+  // env directly, so it only genuinely covers the capability when that env var
+  // is set — otherwise it errors identically to the missing MCP server.
+  const fromProcessEnv = process.env[req.envVar];
+  const nativeFallbackAvailable = !!req.nativeFallback && !!fromProcessEnv && fromProcessEnv.length >= MIN_KEY_LEN;
   return {
     id: server.id,
     label: server.label,
     envVar: req.envVar,
     setupHint: req.setupHint,
     nativeFallback: req.nativeFallback,
+    nativeFallbackAvailable,
   };
 }
 
@@ -104,7 +120,10 @@ export function noticeNeedsKeyOnce(needsKey: MissingKeyServer[]): MissingKeyServ
   const fresh = needsKey.filter((s) => !noticed.has(s.id));
   for (const s of fresh) {
     noticed.add(s.id);
-    const fallback = s.nativeFallback ? ` Using the built-in ${s.nativeFallback} until then.` : "";
+    // Only advertise the native fallback when it can actually serve the
+    // capability (its key is reachable); otherwise the claim is misleading.
+    const fallback =
+      s.nativeFallback && s.nativeFallbackAvailable ? ` Using the built-in ${s.nativeFallback} until then.` : "";
     console.warn(`[MCP] ${s.label} is off (no API key). ${s.setupHint}${fallback}`);
   }
   return fresh;

@@ -1,11 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MissingKeyServer } from "../../mcp/key-requirements";
-import {
-  buildNeedsKeyActions,
-  MIN_MCP_KEY_LEN,
-  type SubmitKeyDeps,
-  submitMcpServerKey,
-} from "../needs-key-controller";
+import { buildNeedsKeyActions, MIN_MCP_KEY_LEN, type SubmitKeyDeps, submitMcpServerKey } from "../needs-key-controller";
 
 const tavily: MissingKeyServer = {
   id: "tavily",
@@ -21,6 +16,10 @@ const futureServer: MissingKeyServer = {
   envVar: "FUTURE_API_KEY",
   setupHint: "Add a key.",
 };
+
+// Same as tavily but the native web_search key IS reachable (e.g. via the
+// process env), so the built-in genuinely covers the capability.
+const tavilyFallbackReady: MissingKeyServer = { ...tavily, nativeFallbackAvailable: true };
 
 function makeDeps(overrides: Partial<SubmitKeyDeps> = {}): SubmitKeyDeps & {
   validateKey: ReturnType<typeof vi.fn>;
@@ -40,13 +39,19 @@ function makeDeps(overrides: Partial<SubmitKeyDeps> = {}): SubmitKeyDeps & {
 }
 
 describe("buildNeedsKeyActions — the card's action list", () => {
-  it("renders paste-key first, plus use-builtin when a native fallback exists", () => {
-    const actions = buildNeedsKeyActions(tavily);
-    expect(actions.map((a) => a.id)).toEqual(["paste-key", "use-builtin", "disable", "snooze"]);
+  it("offers use-builtin only when the native fallback actually works", () => {
+    // Fallback declared but its key is NOT reachable → the built-in would error
+    // (web_search shares the same missing key), so the option is hidden.
+    const notReady = buildNeedsKeyActions(tavily);
+    expect(notReady.map((a) => a.id)).toEqual(["paste-key", "disable", "snooze"]);
+
+    // Fallback declared AND reachable → offer it (paste-key still first).
+    const ready = buildNeedsKeyActions(tavilyFallbackReady);
+    expect(ready.map((a) => a.id)).toEqual(["paste-key", "use-builtin", "disable", "snooze"]);
     // Labels generalize on the descriptor — no hardcoded server names in the UI.
-    expect(actions[0]?.label).toContain("TAVILY_API_KEY");
-    expect(actions[1]?.label).toContain("web_search");
-    expect(actions[2]?.label).toContain("Tavily Search");
+    expect(ready[0]?.label).toContain("TAVILY_API_KEY");
+    expect(ready[1]?.label).toContain("web_search");
+    expect(ready[2]?.label).toContain("Tavily Search");
   });
 
   it("omits use-builtin when the server has no native fallback", () => {

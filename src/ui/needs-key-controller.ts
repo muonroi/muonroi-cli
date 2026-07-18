@@ -27,8 +27,12 @@ export interface NeedsKeyAction {
 }
 
 /**
- * Actions offered by the card for one keyless server. "Use built-in" only
- * appears when the descriptor declares a native fallback tool.
+ * Actions offered by the card for one keyless server. "Use built-in" appears
+ * only when the native fallback tool would ACTUALLY work right now
+ * (`nativeFallbackAvailable`). For Tavily the native `web_search` shares the
+ * same missing key, so offering it unconditionally promised a fallback that
+ * immediately errors `no_tavily_key` — misleading. When the key is not
+ * reachable the user still has Paste / Disable / Not now.
  */
 export function buildNeedsKeyActions(server: MissingKeyServer): NeedsKeyAction[] {
   const actions: NeedsKeyAction[] = [
@@ -38,11 +42,11 @@ export function buildNeedsKeyActions(server: MissingKeyServer): NeedsKeyAction[]
       hint: `Validate, store, and reconnect ${server.label} now`,
     },
   ];
-  if (server.nativeFallback) {
+  if (server.nativeFallback && server.nativeFallbackAvailable) {
     actions.push({
       id: "use-builtin",
       label: `Use built-in ${server.nativeFallback}`,
-      hint: "The native tool already covers this — hide for this session",
+      hint: `${server.nativeFallback} is already available — skip ${server.label} for this session`,
     });
   }
   actions.push(
