@@ -92,7 +92,9 @@ import {
 import { ProductStatusCard } from "./cards/product-status-card.js";
 import { BtwOverlay, type BtwState } from "./components/btw-overlay.js";
 import { makePairKey, usePairSideMap } from "./components/bubble-layout.js";
-import { ContextRail, type ContextRailRow } from "./components/context-rail.js";
+import { ContextRail, type ContextRailRow, type ContextRailStage } from "./components/context-rail.js";
+import { buildStageDividerTitle, buildStageRows, deriveSprintStage, pushActivity } from "./components/sprint-stage.js";
+import { SprintStatusStrip } from "./components/sprint-status-strip.js";
 import { AgentRailActivities } from "./components/agent-rail-activities.js";
 import { CompactProgressCard } from "./components/compact-progress-card.js";
 import { CopyFlashBanner } from "./components/copy-flash-banner.js";
@@ -797,14 +799,99 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // side panel doesn't starve the transcript. Below 100 cols it stays inline.
   const railActive = isContextRailEnabled() && railVisible && width >= 100;
   const railWidth = Math.min(40, Math.max(28, Math.floor(width * 0.28)));
+
+  // ── Stage awareness (/ideal sprint loop) ──────────────────────────────────
+  // The rail keeps a small fixed IDENTITY block plus ONE stage block that swaps
+  // with the current sprint stage; the main panel gets a live status strip so
+  // it never goes silent during plan/research/implement.
+  const sprintStage = useMemo(() => deriveSprintStage(councilPhases), [councilPhases]);
+  // Sprint progress segment from the status-bar store (already tracked for the
+  // bottom bar) — subscribed here so the rail/strip can show "n/m · x/y".
+  const [sprintSeg, setSprintSeg] = useState(() => statusBarStore.getState().sprint);
+  useEffect(
+    () => statusBarStore.subscribe((s) => setSprintSeg((prev) => (prev === s.sprint ? prev : s.sprint))),
+    [],
+  );
+  // 1s ticking clock while a sprint stage is active, so elapsed displays tick
+  // continuously instead of freezing between chunks.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!sprintStage) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [sprintStage]);
+  // Rolling ring of the latest sub-agent activity details (implement stage) —
+  // fed by the same SubagentStatus events SubagentActivity renders, reset when
+  // the stage changes so sprint 2 doesn't inherit sprint 1's tail.
+  const [stageActivity, setStageActivity] = useState<readonly string[]>([]);
+  const stagePhaseId = sprintStage?.phaseId ?? null;
+  useEffect(() => {
+    setStageActivity([]);
+  }, [stagePhaseId]);
+  const subagentDetail = activeSubagent?.detail ?? null;
+  useEffect(() => {
+    if (!stagePhaseId || !subagentDetail) return;
+    setStageActivity((prev) => pushActivity(prev, subagentDetail));
+  }, [stagePhaseId, subagentDetail]);
+
+  // Live council progress line (shared by the classic Progress row and the
+  // planning stage block).
+  const roundBudget = typeof councilMeta?.roundBudget === "number" ? councilMeta.roundBudget : undefined;
+  let councilProgressLine: string | null = null;
+  if (councilRounds.length > 0) {
+    const last = councilRounds[councilRounds.length - 1];
+    const parts = [roundBudget ? `Round ${last.round}/${roundBudget}` : `Round ${last.round}`];
+    if (last.state === "running") parts.push("running");
+    if (typeof last.criteriaTotal === "number" && last.criteriaTotal >= 0) {
+      parts.push(`${last.criteriaMet ?? 0}/${last.criteriaTotal} met`);
+    }
+    if (last.state === "done") {
+      if (last.leaderDecision === "stop") {
+        parts.push(roundBudget && last.round < roundBudget ? "converged — stopped early" : "converged");
+      } else if (last.leaderDecision && last.leaderDecision !== "eval-unavailable") {
+        parts.push(last.leaderDecision);
+      }
+    }
+    councilProgressLine = parts.join(" · ");
+  }
+
+  // Fixed identity block — rows that rarely change during a run.
   const railRows: ContextRailRow[] = [
     { label: "Session", value: sessionId ? sessionId.slice(0, 12) : "—" },
     { label: "Mode", value: modeInfo?.label ?? "—" },
     { label: "Model", value: model ?? "—" },
   ];
-  // Council metadata rows (P3) — appended only when a debate has published them,
-  // so non-council sessions keep a lean rail.
-  if (councilMeta?.topic) {
+  if (councilMeta?.leader) railRows.push({ label: "Leader", value: councilMeta.leader });
+
+  // Stage block (active sprint stage) — replaces the full council row dump so
+  // the narrow rail stays readable ("gọn, mịn").
+  let railStage: ContextRailStage | null = null;
+  if (sprintStage) {
+    const metaCrits = councilMeta?.successCriteria ?? [];
+    const rawMet = councilMeta?.criteriaMet ?? [];
+    const met = rawMet.length === metaCrits.length ? rawMet : [];
+    railStage = {
+      title: buildStageDividerTitle(sprintStage, sprintSeg),
+      rows: buildStageRows({
+        info: sprintStage,
+        sprint: sprintSeg,
+        councilProgress: councilProgressLine,
+        topic: sprintStage.stage === "planning" ? (councilMeta?.topic ?? null) : null,
+        criteriaSummary:
+          sprintStage.stage === "planning" && metaCrits.length > 0
+            ? `${met.filter(Boolean).length}/${metaCrits.length} criteria met`
+            : null,
+        lastActivity: stageActivity[stageActivity.length - 1] ?? null,
+        now: nowTick,
+      }),
+    };
+  }
+
+  // Classic council metadata rows (P3) — only when NO sprint stage is active
+  // (pure /council debates keep the detailed view; during a sprint the stage
+  // block above carries the live signal and these rows are dropped, not
+  // truncated).
+  if (!sprintStage && councilMeta?.topic) {
     const t = councilMeta.topic.trim();
     railRows.push({ label: "Topic", value: t.length > 90 ? `${t.slice(0, 89)}…` : t });
   }
@@ -812,7 +899,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // with live ✓ (met) / ○ (pending) per criterion. Pinned beside Topic so the
   // user always sees WHAT "criteria met" refers to. `criteriaMet` is index-
   // aligned to `successCriteria` (may be shorter/absent before the first eval).
-  if (councilMeta?.successCriteria?.length) {
+  if (!sprintStage && councilMeta?.successCriteria?.length) {
     const crits = councilMeta.successCriteria;
     // Defense-in-depth: only trust criteriaMet when it is index-aligned to the
     // current criteria (same length). A count mismatch means it is stale from a
@@ -828,43 +915,29 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
       railRows.push({ label: "", value: `  ${mark} ${text.length > 64 ? `${text.slice(0, 63)}…` : text}` });
     });
   }
-  if (councilMeta?.leader) railRows.push({ label: "Leader", value: councilMeta.leader });
-  if (councilMeta?.panel?.length) {
+  if (!sprintStage && councilMeta?.panel?.length) {
     railRows.push({ label: "Panel", value: `${councilMeta.panel.length} (${councilMeta.panel.join(", ")})` });
   }
   // Round budget is a CEILING the leader may stop under once the panel converges
   // — not a commitment to run that many. Label it as a budget so it doesn't read
   // as "3 of 3 done" next to a Progress row that stopped early.
-  const roundBudget = typeof councilMeta?.roundBudget === "number" ? councilMeta.roundBudget : undefined;
-  if (roundBudget !== undefined) {
+  if (!sprintStage && roundBudget !== undefined) {
     const upTo =
       typeof councilMeta?.roundCeiling === "number" && councilMeta.roundCeiling > roundBudget
         ? ` (up to ${councilMeta.roundCeiling})`
         : "";
     railRows.push({ label: "Round budget", value: `${roundBudget} max${upTo}` });
   }
-  if (councilMeta?.researchMode !== undefined) {
+  if (!sprintStage && councilMeta?.researchMode !== undefined) {
     railRows.push({ label: "Research", value: councilMeta.researchMode ? "on" : "off" });
   }
-  if (councilMeta?.costAware) railRows.push({ label: "Cost-aware", value: "on" });
+  if (!sprintStage && councilMeta?.costAware) railRows.push({ label: "Cost-aware", value: "on" });
   // Live debate progress — current round vs budget + its outcome/decision, so the
   // rail reflects debate STATE. A `stop` before the budget is an EARLY convergence,
   // not a truncation — say so explicitly to resolve the "3 planned but 1 ran" look.
-  if (councilRounds.length > 0) {
-    const last = councilRounds[councilRounds.length - 1];
-    const parts = [roundBudget ? `Round ${last.round}/${roundBudget}` : `Round ${last.round}`];
-    if (last.state === "running") parts.push("running");
-    if (typeof last.criteriaTotal === "number" && last.criteriaTotal >= 0) {
-      parts.push(`${last.criteriaMet ?? 0}/${last.criteriaTotal} met`);
-    }
-    if (last.state === "done") {
-      if (last.leaderDecision === "stop") {
-        parts.push(roundBudget && last.round < roundBudget ? "converged — stopped early" : "converged");
-      } else if (last.leaderDecision && last.leaderDecision !== "eval-unavailable") {
-        parts.push(last.leaderDecision);
-      }
-    }
-    railRows.push({ label: "Progress", value: parts.join(" · ") });
+  // During a sprint the planning stage block carries the same line instead.
+  if (!sprintStage && councilProgressLine) {
+    railRows.push({ label: "Progress", value: councilProgressLine });
   }
 
   // Council metadata cards (phase timeline, product-status, statuses, info cards
@@ -872,7 +945,10 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // transcript when the rail is off, or hoisted into the rail when it is on — so
   // metadata stops pushing the live debate off screen. `cols` sizes the info
   // cards to whichever container holds them.
-  const renderCouncilMeta = (cols: number) => (
+  // `opts.hideRounds` — the rail hides the detailed per-round breakdown while a
+  // sprint stage other than planning is active (the stage block already carries
+  // the compact live signal; a full round list is planning-time detail).
+  const renderCouncilMeta = (cols: number, opts?: { hideRounds?: boolean }) => (
     <>
       {councilPhases.length > 0 && (
         <Semantic id="council-phases" role="listbox" name="Council Phases">
@@ -895,7 +971,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
           <CouncilInfoCardView key={`info-card-${idx}-${card.title}`} card={card} terminalCols={cols} theme={t} />
         </Semantic>
       ))}
-      {isRoundGroupsEnabled() && councilRounds.length > 0 && (
+      {!opts?.hideRounds && isRoundGroupsEnabled() && councilRounds.length > 0 && (
         <CouncilRailRounds
           rounds={councilRounds}
           selected={selectedRound}
@@ -1341,6 +1417,20 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     <JumpToLatestPill newSinceLock={newSinceLock} />
                   </box>
                 )}
+                {/* Live sprint status strip — pinned under the transcript so the
+                  main panel NEVER goes silent during plan/implement/verify. Ticks
+                  elapsed each second + echoes latest sub-agent activity even when
+                  the isolated implement stage absorbs its own stream. */}
+                {sprintStage && (
+                  <SprintStatusStrip
+                    t={t}
+                    info={sprintStage}
+                    sprint={sprintSeg}
+                    activity={stageActivity}
+                    now={nowTick}
+                    width={railActive ? width - railWidth : width}
+                  />
+                )}
                 {btwState && <BtwOverlay state={btwState} theme={t} />}
                 {/* TodoCard — fixed bottom so agent text cannot push it up */}
                 {taskListSnapshot && (
@@ -1395,7 +1485,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                 </box>
               </box>
               {railActive && (
-                <ContextRail width={railWidth} rows={railRows}>
+                <ContextRail width={railWidth} rows={railRows} stage={railStage}>
                   <SessionTreeCard nodes={sessionTree} />
                   <AgentRailActivities
                     activities={agentActivities}
@@ -1404,7 +1494,9 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     width={railWidth}
                     t={t}
                   />
-                  {renderCouncilMeta(railWidth)}
+                  {renderCouncilMeta(railWidth, {
+                    hideRounds: !!sprintStage && sprintStage.stage !== "planning",
+                  })}
                 </ContextRail>
               )}
             </box>
