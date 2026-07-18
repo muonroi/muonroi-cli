@@ -3220,6 +3220,21 @@ export function useAppLogic(props: AppLogicProps) {
   // position and copy any terminal-level word selection (like Claude Code / Codex CLI).
   const lastClickRef = useRef<{ time: number; x: number; y: number }>({ time: 0, x: 0, y: 0 });
 
+  // When a modal popup with a text input is open (MCP needs-key card, EE connect
+  // card, or the API-key modal), that input must OWN focus: a mouse click
+  // anywhere — or a bracketed paste that the composer intercepts — must route to
+  // it, never fall through to the composer behind the modal. Reads refs (not
+  // state) so it is stale-closure safe inside the mouse/paste callbacks. Returns
+  // the active modal's input renderable, or null when the composer is the
+  // legitimate focus target. (`apiKeyPrompt` is a non-textarea credential prompt
+  // whose paste is already special-cased in handlePaste and is focus-independent.)
+  const getActiveModalInput = useCallback((): TextareaRenderable | null => {
+    if (needsKeyQueueRef.current.length > 0 && needsKeyModeRef.current === "input") return needsKeyInputRef.current;
+    if (eeConnectVisibleRef.current && eeConnectModeRef.current === "input") return eeConnectInputRef.current;
+    if (showApiKeyModalRef.current) return apiKeyInputRef.current;
+    return null;
+  }, []);
+
   const handleRootMouseUp = useCallback(
     (event?: { button?: number; type?: string; x?: number; y?: number }) => {
       // Right-click semantics:
@@ -3230,8 +3245,12 @@ export function useAppLogic(props: AppLogicProps) {
       if (isRightClick) {
         const copied = copyTuiSelectionToHost();
         if (!copied) {
-          const ta = inputRef.current;
-          const text = readTextFromHostClipboard();
+          // Route a right-click paste into the open modal input (secret →
+          // sanitize to strip newlines) rather than the composer behind it.
+          const modalInput = getActiveModalInput();
+          const ta = modalInput ?? inputRef.current;
+          const raw = readTextFromHostClipboard();
+          const text = modalInput ? sanitizeSecretInput(raw) : raw;
           if (ta && text) {
             const current = ta.plainText || "";
             const insertAt = typeof ta.cursorOffset === "number" ? ta.cursorOffset : current.length;
@@ -3244,7 +3263,7 @@ export function useAppLogic(props: AppLogicProps) {
             }
           }
         }
-        inputRef.current?.focus();
+        (getActiveModalInput() ?? inputRef.current)?.focus();
         return;
       }
 
@@ -3265,14 +3284,16 @@ export function useAppLogic(props: AppLogicProps) {
       } else {
         copyTuiSelectionToHost();
       }
-      inputRef.current?.focus();
+      // Never steal focus back to the composer while a modal input is open —
+      // re-assert the modal input so typing/paste stay inside it.
+      (getActiveModalInput() ?? inputRef.current)?.focus();
     },
-    [copyTuiSelectionToHost],
+    [copyTuiSelectionToHost, getActiveModalInput],
   );
 
   const handleRootMouseDown = useCallback(() => {
-    setTimeout(() => inputRef.current?.focus(), 0);
-  }, []);
+    setTimeout(() => (getActiveModalInput() ?? inputRef.current)?.focus(), 0);
+  }, [getActiveModalInput]);
 
   useEffect(() => {
     if (copyFlashId === 0) return;
@@ -7580,6 +7601,18 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
 
+      // A modal card input (MCP needs-key / EE connect / API-key modal) owns
+      // paste while open. The composer's onPaste still fires here if a prior
+      // mouse click left the composer focused, so route the sanitized secret to
+      // the modal input by ref (focus-independent) instead of the chat box.
+      const modalInput = getActiveModalInput();
+      if (modalInput) {
+        event.preventDefault();
+        const pasted = sanitizeSecretInput(decodePasteBytes(event.bytes));
+        if (pasted) modalInput.insertText(pasted);
+        return;
+      }
+
       const text = decodePasteBytes(event.bytes);
       const trimmed = text.trim();
       const imageExts = /\.(png|jpe?g|gif|webp|svg|bmp|ico|tiff?)$/i;
@@ -7599,7 +7632,7 @@ export function useAppLogic(props: AppLogicProps) {
       replacePasteBlocks([...pasteBlocksRef.current, block]);
       inputRef.current?.insertText(getPasteBlockToken(block));
     },
-    [apiKeyPrompt, replacePasteBlocks],
+    [apiKeyPrompt, replacePasteBlocks, getActiveModalInput],
   );
 
   const handleSubmit = useCallback(() => {
