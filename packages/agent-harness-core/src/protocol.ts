@@ -30,6 +30,12 @@ export type KnownRole =
   | "toast"
   | "tooltip"
   | "region"
+  // ARIA landmark / live-region / grouping roles (council surface sections)
+  | "status"
+  | "complementary"
+  | "group"
+  | "banner"
+  | "article"
   // IDE / editor surfaces (added for the desktop frontend; harmless in the TUI)
   | "editor"
   | "diff"

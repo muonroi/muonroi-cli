@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clearLastSurfacedMatches, getDefaultEEClient, getLastSurfacedMatches } from "../ee/intercept.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import { writeScaffoldCheckpoint } from "../flow/scaffold-checkpoint.js";
-import { isContextRailEnabled, isRoundGroupsEnabled } from "../gsd/flags.js";
+import { isContextRailEnabled, isCouncilSurfaceEnabled, isRoundGroupsEnabled } from "../gsd/flags.js";
 import { appendCrashLog, setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
@@ -110,8 +110,11 @@ import {
   initialCardState,
   reduceCardKey,
 } from "./components/council-question-card.js";
+import { CouncilRail } from "./components/council-rail.js";
 import { CouncilRailRounds } from "./components/council-rail-rounds.js";
 import { CouncilRoundGroup, CouncilRoundsOverview } from "./components/council-round-group.js";
+import { CouncilStrip } from "./components/council-strip.js";
+import { resolveCouncilLayout, resolveCouncilRailWidth } from "./components/council-surface.js";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
 import { CouncilSynthesisBanner } from "./components/council-synthesis-banner.js";
 import { HaltRecoveryCard } from "./components/halt-recovery-card.js";
@@ -1009,6 +1012,61 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     </>
   );
 
+  // ── Council surface (Concept 4, flag MUONROI_COUNCIL_SURFACE) ─────────────
+  // When enabled, the transcript + a SECTIONED rail (NOW liveness / meta /
+  // phases / rounds) mount as a self-reflowing surface: two panes at ≥96 cols,
+  // a one-line council-strip banner below. Honest data only — the NOW block and
+  // strip read the live council_status liveness that is already tracked; there
+  // is no per-role cost section because that data does not exist in state.
+  const councilSurfaceActive = isCouncilSurfaceEnabled();
+  const councilLayout = resolveCouncilLayout(width);
+  const councilTwoPane = councilSurfaceActive && councilLayout === "two-pane";
+  const councilStripMode = councilSurfaceActive && councilLayout === "strip";
+  const councilSurfaceRailWidth = resolveCouncilRailWidth(width);
+  // Latest live phase status (state start|tick) drives the liveness meter.
+  const liveCouncilStatus =
+    [...councilStatuses].reverse().find((s) => s.state === "start" || s.state === "tick") ?? null;
+  const councilRoundLabel =
+    councilRounds.length > 0 ? `r${councilRounds[councilRounds.length - 1]!.round}` : null;
+  // A blocking clarification/preflight card is a human-wait, NOT a stall.
+  const councilWaiting = !!pendingCouncilQuestion || !!preflightCardState;
+  const activeCouncilPhaseLabel = councilPhases.find((p) => p.state === "active")?.label ?? null;
+  const councilSurfaceTitle = sprintStage ? `SPRINT · Council` : "Council";
+  const councilRailNode = (
+    <CouncilRail
+      width={councilSurfaceRailWidth}
+      theme={t}
+      status={liveCouncilStatus}
+      roundLabel={councilRoundLabel}
+      waiting={councilWaiting}
+      metaRows={railRows}
+      stage={railStage}
+    >
+      <SessionTreeCard nodes={sessionTree} />
+      <AgentRailActivities
+        activities={agentActivities}
+        selected={selectedActivity}
+        onSelect={setSelectedActivity}
+        width={councilSurfaceRailWidth}
+        t={t}
+      />
+      {renderCouncilMeta(councilSurfaceRailWidth, {
+        hideRounds: !!sprintStage && sprintStage.stage !== "planning",
+      })}
+    </CouncilRail>
+  );
+  const councilStripNode = (
+    <CouncilStrip
+      status={liveCouncilStatus}
+      waiting={councilWaiting}
+      roundLabel={councilRoundLabel}
+      phaseLabel={activeCouncilPhaseLabel}
+      panel={councilMeta?.panel}
+      width={width}
+      theme={t}
+    />
+  );
+
   return (
     <SemanticProvider
       registry={
@@ -1043,8 +1101,20 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               paddingLeft={2}
               paddingRight={2}
               gap={1}
-              flexDirection="row"
+              flexDirection={councilStripMode ? "column" : "row"}
             >
+              {/* Council surface marker (Concept 4): carries props.layout for the
+                  harness and reflows the transcript/rail below. Invisible node. */}
+              {councilSurfaceActive && (
+                <Semantic
+                  id="council-surface"
+                  role="region"
+                  name={councilSurfaceTitle}
+                  props={{ layout: councilLayout, width }}
+                />
+              )}
+              {/* <96 cols: the rail collapses to a one-line priority strip. */}
+              {councilStripMode && councilStripNode}
               {/* Main transcript column — splits with the context rail (P1). */}
               <box flexDirection="column" flexGrow={1} gap={1}>
                 {/* Scrollable messages */}
@@ -1454,7 +1524,13 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     sprint={sprintSeg}
                     activity={stageActivity}
                     now={nowTick}
-                    width={railActive ? width - railWidth : width}
+                    width={
+                      councilTwoPane
+                        ? width - councilSurfaceRailWidth
+                        : railActive
+                          ? width - railWidth
+                          : width
+                    }
                   />
                 )}
                 {btwState && <BtwOverlay state={btwState} theme={t} />}
@@ -1510,21 +1586,26 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   />
                 </box>
               </box>
-              {railActive && (
-                <ContextRail width={railWidth} rows={railRows} stage={railStage}>
-                  <SessionTreeCard nodes={sessionTree} />
-                  <AgentRailActivities
-                    activities={agentActivities}
-                    selected={selectedActivity}
-                    onSelect={setSelectedActivity}
-                    width={railWidth}
-                    t={t}
-                  />
-                  {renderCouncilMeta(railWidth, {
-                    hideRounds: !!sprintStage && sprintStage.stage !== "planning",
-                  })}
-                </ContextRail>
-              )}
+              {/* Two-pane surface: the sectioned council rail (NOW block leads).
+                  Legacy ContextRail only when the surface flag is OFF. */}
+              {councilTwoPane
+                ? councilRailNode
+                : !councilSurfaceActive &&
+                  railActive && (
+                    <ContextRail width={railWidth} rows={railRows} stage={railStage}>
+                      <SessionTreeCard nodes={sessionTree} />
+                      <AgentRailActivities
+                        activities={agentActivities}
+                        selected={selectedActivity}
+                        onSelect={setSelectedActivity}
+                        width={railWidth}
+                        t={t}
+                      />
+                      {renderCouncilMeta(railWidth, {
+                        hideRounds: !!sprintStage && sprintStage.stage !== "planning",
+                      })}
+                    </ContextRail>
+                  )}
             </box>
             <box paddingLeft={2} paddingRight={2} flexShrink={0}>
               <StatusBar />

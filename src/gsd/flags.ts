@@ -63,6 +63,23 @@ export function isContextRailEnabled(): boolean {
 }
 
 /**
+ * Council surface (Concept 4 — "two-pane IDE / budgeted rail"). Default OFF
+ * during rollout: when OFF the legacy ContextRail path (isContextRailEnabled +
+ * railVisible + width≥100) renders unchanged, so this is a pure additive
+ * fallback. When ON, the council transcript + a SECTIONED rail (meta / phases /
+ * NOW liveness / rounds / cost) mount inside a `<CouncilSurface>` root that owns
+ * its own reflow: two-pane at ≥96 cols, a priority-ordered one-line
+ * `council-strip` banner below 84 cols (the 84–95 compact-rail band is a
+ * deferred follow-up — it currently renders as the strip). The surface unifies
+ * the four council consumers (auto-council, /council, /ideal, continue-as-
+ * council) behind one render path. Opt in: MUONROI_COUNCIL_SURFACE=1.
+ */
+export function isCouncilSurfaceEnabled(): boolean {
+  const raw = process.env.MUONROI_COUNCIL_SURFACE;
+  return raw === "1" || raw?.toLowerCase() === "true";
+}
+
+/**
  * Debate/council TUI two-pane redesign — round-grouped transcript. Default ON
  * (baked). When ON, debate turns are grouped by round; only the running round
  * streams live while done rounds render an expanded summary (input, outcome,
