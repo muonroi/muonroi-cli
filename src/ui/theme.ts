@@ -9,6 +9,10 @@ export const dark = {
   textDim: "#444444",
   primary: "#ffffff",
   accent: "#5c9cf5",
+  // Composer text color when the input begins with a recognized slash command
+  // (e.g. "/council <args>"). Green so a command invocation reads distinctly
+  // from plain free text, even with trailing arguments after the command token.
+  composerCommand: "#22c55e",
   subagentAccent: "#66d9c2",
   selected: "#ffffff",
   selectedBg: "#2a2a2a",

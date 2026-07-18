@@ -2078,10 +2078,17 @@ export function useAppLogic(props: AppLogicProps) {
       SLASH_MENU_ITEMS_ARROW_ORDER;
   const slashInputIsMatched = useMemo(() => {
     if (!showSlashMenu) return false;
-    const typed = slashSearchQuery.toLowerCase();
-    if (!typed) return false;
-    return filteredSlashItems.some((item) => item.id.toLowerCase() === typed || item.label.toLowerCase() === typed);
-  }, [showSlashMenu, filteredSlashItems, slashSearchQuery]);
+    // Match the LEADING command token, not the whole query, so the composer
+    // stays highlighted once the user types arguments after the command
+    // (e.g. "/council thảo luận …" → first token "council" still matches).
+    // Match against the full SLASH_MENU_ITEMS set (not filteredSlashItems,
+    // which narrows to nothing once the query includes the free-text args).
+    const firstToken = slashSearchQuery.trim().split(/\s+/, 1)[0]?.toLowerCase() ?? "";
+    if (!firstToken) return false;
+    return SLASH_MENU_ITEMS.some(
+      (item) => item.id.toLowerCase() === firstToken || item.label.toLowerCase() === firstToken,
+    );
+  }, [showSlashMenu, slashSearchQuery]);
   const mcpRows = buildMcpBrowseRows(mcpServers, POPULAR_MCP_CATALOG, mcpSearchQuery);
   const mcpEditorFields = mcpEditorDraft.transport === "stdio" ? MCP_STDIO_FIELDS : MCP_REMOTE_FIELDS;
   const agentRows = useMemo(

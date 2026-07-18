@@ -208,7 +208,13 @@ export function PromptBox({
                 placeholder={
                   isProcessing ? "Queue a follow-up... (esc to interrupt)" : placeholder || "Message muonroi-cli..."
                 }
-                textColor={slashInputIsMatched ? "#3b82f6" : t.text}
+                // Set BOTH textColor and focusedTextColor: the OpenTUI textarea
+                // renders typed text with focusedTextColor while it holds focus
+                // (which the composer effectively always does), and textColor
+                // only when blurred — so highlighting the recognized command
+                // requires the focused variant, not textColor alone.
+                textColor={slashInputIsMatched ? t.composerCommand : t.text}
+                focusedTextColor={slashInputIsMatched ? t.composerCommand : t.text}
                 backgroundColor={t.backgroundElement}
                 placeholderColor={t.textMuted}
                 minHeight={1}
