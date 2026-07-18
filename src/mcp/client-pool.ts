@@ -35,6 +35,7 @@ import {
   type McpBuildOptions,
   type McpToolBundle,
 } from "./runtime.js";
+import { MCP_KEY_REQUIREMENTS, noticeNeedsKeyOnce, partitionEnabledServers } from "./key-requirements.js";
 import { validateMcpServerConfig } from "./validate.js";
 
 interface PoolEntry {
@@ -188,7 +189,11 @@ export async function acquireMcpTools(servers: McpServerConfig[], opts?: McpBuil
   const tools: ToolSet = {};
   const errors: string[] = [];
 
-  const enabled = servers.filter((s) => s.enabled);
+  // Exclude enabled-but-keyless servers (unconfigured, not failures) before
+  // pooling, and announce them once — mirrors buildMcpToolSet so the pooled
+  // path stops the per-turn "⚠️ unavailable" nag identically.
+  const { connectable: enabled, needsKey } = await partitionEnabledServers(servers);
+  noticeNeedsKeyOnce(needsKey);
   interface Slot {
     label: string;
     key: string;
@@ -267,6 +272,7 @@ export async function acquireMcpTools(servers: McpServerConfig[], opts?: McpBuil
   return {
     tools,
     errors,
+    needsKey,
     // Release, not close: pooled clients persist across turns by design.
     async close() {},
   };
@@ -282,25 +288,42 @@ export async function acquireMcpTools(servers: McpServerConfig[], opts?: McpBuil
  * evicted by getOrConnect so a real turn retries.
  */
 export async function warmMcpClients(servers: McpServerConfig[], syncAndLog = false): Promise<void> {
-  const validServers = servers.filter((s) => s.enabled && validateMcpServerConfig(s).ok);
+  const bgWarm = (s: McpServerConfig): Promise<unknown> =>
+    getOrConnect(s).catch((e) => {
+      // Intentionally non-fatal: getOrConnect evicts the failed entry so a
+      // real turn retries. Surface at debug level only (No Silent Catch).
+      if (process.env.MUONROI_DEBUG_MCP) {
+        console.error(`[mcp:warm] background warmup failed for ${s.id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    });
 
-  // Fire-and-forget background warmup — no user-facing output.
+  // Fire-and-forget background warmup — no user-facing output. Servers with NO
+  // key requirement connect SYNCHRONOUSLY (the async keychain check for a
+  // key-gated server must never delay filesystem/memory pre-connect); key-gated
+  // servers are resolved off-thread and only the configured ones are warmed,
+  // with keyless ones announced once instead of nagged.
   if (!syncAndLog) {
-    void Promise.all(
-      validServers.map((s) =>
-        getOrConnect(s).catch((e) => {
-          // Intentionally non-fatal: getOrConnect evicts the failed entry so a
-          // real turn retries. Surface at debug level only (No Silent Catch).
-          if (process.env.MUONROI_DEBUG_MCP) {
-            console.error(
-              `[mcp:warm] background warmup failed for ${s.id}: ${e instanceof Error ? e.message : String(e)}`,
-            );
-          }
-        }),
-      ),
-    );
+    const enabled = servers.filter((s) => s.enabled && validateMcpServerConfig(s).ok);
+    for (const s of enabled) {
+      if (!MCP_KEY_REQUIREMENTS[s.id]) void bgWarm(s);
+    }
+    const keyGated = enabled.filter((s) => MCP_KEY_REQUIREMENTS[s.id]);
+    if (keyGated.length > 0) {
+      void (async () => {
+        const { connectable, needsKey } = await partitionEnabledServers(keyGated);
+        noticeNeedsKeyOnce(needsKey);
+        for (const s of connectable) void bgWarm(s);
+      })();
+    }
     return;
   }
+
+  // Keyless-required servers are unconfigured, not warmup failures — exclude
+  // them from the count/spinner and announce once (fixes the "⚠️ N unavailable"
+  // nag at startup). Native fallbacks cover the capability meanwhile.
+  const { connectable, needsKey } = await partitionEnabledServers(servers);
+  noticeNeedsKeyOnce(needsKey);
+  const validServers = connectable.filter((s) => validateMcpServerConfig(s).ok);
 
   if (validServers.length === 0) return;
 
