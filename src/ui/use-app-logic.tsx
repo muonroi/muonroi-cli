@@ -250,6 +250,15 @@ import {
   setMcpServerEnabled,
   submitMcpServerKey,
 } from "./needs-key-controller.js";
+import { subscribeEeConnect } from "../ee/ee-connect-bus.js";
+import { snoozeEeConnect } from "../ee/ee-connect.js";
+import type { EeConnectCardMode } from "./modals/ee-connect-card.js";
+import {
+  buildEeConnectActions,
+  connectHostedEE,
+  connectLocalEE,
+  defaultEeConnectDeps,
+} from "./ee-connect-controller.js";
 import { sanitizeContent } from "./utils/text.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
@@ -1579,6 +1588,18 @@ export function useAppLogic(props: AppLogicProps) {
   const needsKeyQueueRef = useRef<MissingKeyServer[]>([]);
   const needsKeyModeRef = useRef<NeedsKeyCardMode>("actions");
   const needsKeyIndexRef = useRef(0);
+  // ---- EE connect card (unconfigured Experience Engine brain) ----
+  // Parallel to the needs-key card but on its own bus/controller — EE
+  // onboarding and MCP key-repair must not couple. Fed by ee-connect-bus
+  // (boot-time nudge in index.ts, or `/ee setup`).
+  const [eeConnectVisible, setEeConnectVisible] = useState(false);
+  const [eeConnectMode, setEeConnectMode] = useState<EeConnectCardMode>("actions");
+  const [eeConnectIndex, setEeConnectIndex] = useState(0);
+  const [eeConnectError, setEeConnectError] = useState<string | null>(null);
+  const eeConnectInputRef = useRef<TextareaRenderable>(null);
+  const eeConnectVisibleRef = useRef(false);
+  const eeConnectModeRef = useRef<EeConnectCardMode>("actions");
+  const eeConnectIndexRef = useRef(0);
   const {
     showMcpModal,
     setShowMcpModal,
@@ -1692,6 +1713,102 @@ export function useAppLogic(props: AppLogicProps) {
         return;
     }
   }, [advanceNeedsKeyQueue, pushToast, setMcpServers]);
+
+  // ---- EE connect card wiring (state declared above with the modal refs) ----
+  useEffect(() => {
+    eeConnectVisibleRef.current = eeConnectVisible;
+  }, [eeConnectVisible]);
+  useEffect(() => {
+    eeConnectModeRef.current = eeConnectMode;
+  }, [eeConnectMode]);
+  useEffect(() => {
+    eeConnectIndexRef.current = eeConnectIndex;
+  }, [eeConnectIndex]);
+
+  // Receive the "offer to connect the brain" signal (boot nudge or /ee setup).
+  // The bus dedupes per session and buffers pre-mount publishes.
+  useEffect(
+    () =>
+      subscribeEeConnect(() => {
+        setEeConnectMode("actions");
+        setEeConnectIndex(0);
+        setEeConnectError(null);
+        setEeConnectVisible(true);
+      }),
+    [],
+  );
+
+  /** Close the connect card. `snooze` = the user declined (esc / Not now). */
+  const dismissEeConnectCard = useCallback((snooze: boolean) => {
+    eeConnectInputRef.current?.clear();
+    setEeConnectMode("actions");
+    setEeConnectIndex(0);
+    setEeConnectError(null);
+    setEeConnectVisible(false);
+    if (snooze) {
+      try {
+        snoozeEeConnect();
+      } catch {
+        // Settings write failure must not break dismissal.
+      }
+    }
+  }, []);
+
+  /** "Connect hosted" submit: probe with token → write config → reload cache. */
+  const submitEeConnectToken = useCallback(() => {
+    if (eeConnectModeRef.current === "validating") return; // re-entry guard (textarea onSubmit + global Enter)
+    const rawToken = eeConnectInputRef.current?.plainText ?? "";
+    setEeConnectMode("validating");
+    setEeConnectError(null);
+    void (async () => {
+      const result = await connectHostedEE(rawToken, defaultEeConnectDeps());
+      if (result.ok) {
+        statusBarStore.setState({ ee_status: "ok" });
+        pushToast("info", "Experience Engine connected — recall is live for this session.");
+        dismissEeConnectCard(false);
+      } else {
+        setEeConnectError(result.error);
+        setEeConnectMode("input");
+      }
+    })();
+  }, [dismissEeConnectCard, pushToast]);
+
+  /** Activate the currently-selected connect-card action. */
+  const activateEeConnectAction = useCallback(() => {
+    const actions = buildEeConnectActions();
+    const action = actions[Math.min(eeConnectIndexRef.current, actions.length - 1)];
+    if (!action) return;
+    switch (action.id) {
+      case "hosted":
+        eeConnectInputRef.current?.clear();
+        setEeConnectError(null);
+        setEeConnectMode("input");
+        return;
+      case "local":
+        setEeConnectMode("validating");
+        setEeConnectError(null);
+        void (async () => {
+          const result = await connectLocalEE(defaultEeConnectDeps());
+          if (result.ok) {
+            statusBarStore.setState({ ee_status: "ok" });
+            pushToast("info", "Local Experience Engine connected — recall is live for this session.");
+            dismissEeConnectCard(false);
+          } else {
+            // Short hint ("start the local brain, or use hosted") back on the action list.
+            setEeConnectError(result.error);
+            setEeConnectMode("actions");
+          }
+        })();
+        return;
+      case "how":
+        setEeConnectError(null);
+        setEeConnectMode("how");
+        return;
+      case "not-now":
+        dismissEeConnectCard(true);
+        return;
+    }
+  }, [dismissEeConnectCard, pushToast]);
   const {
     showAgentsModal,
     setShowAgentsModal,
@@ -5350,6 +5467,7 @@ export function useAppLogic(props: AppLogicProps) {
     showTelegramTokenModal ||
     showTelegramPairModal ||
     needsKeyQueue.length > 0 ||
+    eeConnectVisible ||
     showMcpModal ||
     showSandboxPicker ||
     showSessionPicker ||
@@ -6576,6 +6694,45 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
+      if (eeConnectVisibleRef.current) {
+        const mode = eeConnectModeRef.current;
+        if (mode === "validating") return; // swallow input while the probe runs
+        if (mode === "input") {
+          if (isEscapeKey(key)) {
+            setEeConnectMode("actions");
+            setEeConnectError(null);
+            return;
+          }
+          if (key.name === "return") {
+            submitEeConnectToken(); // internally re-entry-guarded vs the textarea's own onSubmit
+          }
+          return; // typing goes to the focused textarea
+        }
+        if (mode === "how") {
+          if (isEscapeKey(key) || key.name === "return") {
+            setEeConnectMode("actions");
+          }
+          return;
+        }
+        if (isEscapeKey(key)) {
+          dismissEeConnectCard(true); // snooze — re-offered in a few sessions
+          return;
+        }
+        if (key.name === "up") {
+          setEeConnectIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (key.name === "down") {
+          const max = buildEeConnectActions().length - 1;
+          setEeConnectIndex((i) => Math.min(max, i + 1));
+          return;
+        }
+        if (key.name === "return") {
+          activateEeConnectAction();
+          return;
+        }
+        return;
+      }
       if (showTelegramTokenModalRef.current) {
         if (isEscapeKey(key)) {
           setShowTelegramTokenModal(false);
@@ -7333,6 +7490,9 @@ export function useAppLogic(props: AppLogicProps) {
       submitNeedsKeyKey,
       activateNeedsKeyAction,
       advanceNeedsKeyQueue,
+      submitEeConnectToken,
+      activateEeConnectAction,
+      dismissEeConnectCard,
       submitMcpEditor,
       submitSubagentEditor,
       planQuestions,
@@ -7669,6 +7829,12 @@ export function useAppLogic(props: AppLogicProps) {
     needsKeyMode,
     needsKeyQueue,
     submitNeedsKeyKey,
+    eeConnectError,
+    eeConnectIndex,
+    eeConnectInputRef,
+    eeConnectMode,
+    eeConnectVisible,
+    submitEeConnectToken,
     mcpSearchQuery,
     mcpUrlRef,
     messages,

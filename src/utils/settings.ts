@@ -297,6 +297,13 @@ export interface UserSettings {
   /** Set true after the user has been prompted (or skipped) the first-run Experience Engine setup. */
   eeSetupPrompted?: boolean;
   /**
+   * EE connect nudge state (replaces the one-shot eeSetupPrompted trap for the
+   * re-offer path): `connectedAt` is set on a successful connect; a skip /
+   * "Not now" sets `snoozeRemaining` so the card re-surfaces after that many
+   * interactive sessions instead of never. See src/ee/ee-connect.ts.
+   */
+  eeSetup?: { connectedAt?: string; snoozeRemaining?: number };
+  /**
    * Unix ms timestamp of the last npm-registry update check. Used to throttle
    * checkForUpdate to once per day so the CLI never spams the registry on
    * every launch.

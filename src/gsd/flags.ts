@@ -121,6 +121,17 @@ export function isIdealToolEntryEnabled(): boolean {
 }
 
 /**
+ * EE connect card — the inline "connect the Experience Engine brain" nudge +
+ * `/ee setup` card. Default ON. When ON, an unconfigured EE (no serverBaseUrl,
+ * no reachable local brain, not snoozed) surfaces the connect card once per
+ * session. Opt out: MUONROI_EE_CONNECT_CARD=0.
+ */
+export function isEeConnectCardEnabled(): boolean {
+  const raw = process.env.MUONROI_EE_CONNECT_CARD;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}
+
+/**
  * Plan-review debate retry budget. The council debate can return an EMPTY
  * synthesis on any of its fail-open paths (provider unreachable, sub-phase
  * catch, user/watchdog abort) — a silent null that plan-council previously

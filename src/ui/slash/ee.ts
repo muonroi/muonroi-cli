@@ -183,6 +183,7 @@ const HELP = [
   "**Experience Engine (/ee)**",
   "",
   "Usage:",
+  "  /ee setup                — Open the guided connect card (hosted or local brain)",
   "  /ee config               — Show EE connection settings",
   "  /ee config <url> [token] — Connect to an EE server (writes ~/.experience/config.json)",
   "  /ee stats [7d|30d|all]   — Knowledge base statistics",
@@ -285,7 +286,17 @@ export const handleEESlash: SlashHandler = async (args, _ctx) => {
 
   // `config` must not construct the EE client: it is the command you reach for
   // precisely when there is no server configured yet.
-  if (sub === "config" || sub === "setup") return await handleConfig(args.slice(1));
+  if (sub === "config") return await handleConfig(args.slice(1));
+
+  // `/ee setup` (no args) opens the guided connect card instead of demanding
+  // url+token as slash args. With args it forwards to the power-user config path.
+  if (sub === "setup") {
+    if (args.length > 1) return await handleConfig(args.slice(1));
+    const { publishEeConnect, resetEeConnectAnnouncements } = await import("../../ee/ee-connect-bus.js");
+    resetEeConnectAnnouncements(); // explicit request — bypass the once-per-session dedupe
+    publishEeConnect();
+    return "Opening the Experience Engine connect card — pick hosted or local, or press esc to close.";
+  }
 
   const client = getDefaultEEClient();
 

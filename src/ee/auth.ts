@@ -101,7 +101,7 @@ export function getExperienceConfigPath(opts: { home?: string } = {}): string {
 export async function probeEEHealth(
   baseUrl: string,
   token?: string,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; quiet?: boolean } = {},
 ): Promise<{ ok: boolean; detail: string }> {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), opts.timeoutMs ?? 4000);
@@ -120,7 +120,10 @@ export async function probeEEHealth(
     };
   } catch (err) {
     const message = (err as Error)?.name === "AbortError" ? "timed out" : ((err as Error)?.message ?? String(err));
-    console.error(`[ee/auth] /health probe failed for ${baseUrl}: ${message}`);
+    // `quiet` suppresses the log for probes where "not running" is the expected
+    // common case (e.g. the boot-time local-brain detection) — a failure there
+    // is an answer, not an error worth printing over the TUI.
+    if (!opts.quiet) console.error(`[ee/auth] /health probe failed for ${baseUrl}: ${message}`);
     return { ok: false, detail: message };
   } finally {
     clearTimeout(timer);

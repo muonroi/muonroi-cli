@@ -1076,6 +1076,18 @@ program
           const wrote = await firstRunEESetup();
           if (wrote) await loadEEAuthToken().catch(() => {});
           saveUserSettings({ eeSetupPrompted: true });
+          // Skipping is a SNOOZE, not a permanent opt-out: the in-TUI connect
+          // card re-offers after a few sessions (see src/ee/ee-connect.ts).
+          const { recordEeConnected, snoozeEeConnect } = await import("./ee/ee-connect.js");
+          if (wrote) recordEeConnected();
+          else snoozeEeConnect();
+        } else {
+          // Already prompted once (or config existed before): if EE is still
+          // unconfigured, no local brain answers, and the snooze has run out,
+          // surface the inline connect card. Fire-and-forget — publishes on the
+          // ee-connect bus (buffered until the TUI mounts), never blocks boot.
+          const { maybeOfferEeConnect } = await import("./ee/ee-connect.js");
+          void maybeOfferEeConnect().catch(() => {});
         }
       } catch (err) {
         if (process.env.MUONROI_DEBUG)

@@ -155,6 +155,8 @@ import { createEmptyMcpEditorDraft, type McpEditorDraft } from "./mcp-modal-type
 import { ApiKeyModal } from "./modals/api-key-modal.js";
 import { McpNeedsKeyCard } from "./modals/mcp-needs-key-card.js";
 import { buildNeedsKeyActions } from "./needs-key-controller.js";
+import { EeConnectCard } from "./modals/ee-connect-card.js";
+import { buildEeConnectActions } from "./ee-connect-controller.js";
 import { ConnectModal, TelegramPairModal, TelegramTokenModal } from "./modals/connect-modal.js";
 import { ModelPickerModal } from "./modals/model-picker-modal.js";
 import { SandboxPickerModal } from "./modals/sandbox-picker-modal.js";
@@ -661,6 +663,12 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     needsKeyMode,
     needsKeyQueue,
     submitNeedsKeyKey,
+    eeConnectError,
+    eeConnectIndex,
+    eeConnectInputRef,
+    eeConnectMode,
+    eeConnectVisible,
+    submitEeConnectToken,
     mcpSearchQuery,
     mcpUrlRef,
     messages,
@@ -1632,6 +1640,19 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             inputRef={needsKeyInputRef}
             error={needsKeyError}
             onSubmitKey={submitNeedsKeyKey}
+          />
+        )}
+        {eeConnectVisible && needsKeyQueue.length === 0 && (
+          <EeConnectCard
+            t={t}
+            width={width}
+            height={height}
+            actions={buildEeConnectActions()}
+            selectedIndex={eeConnectIndex}
+            mode={eeConnectMode}
+            inputRef={eeConnectInputRef}
+            error={eeConnectError}
+            onSubmitToken={submitEeConnectToken}
           />
         )}
         {showMcpModal && !showMcpEditor && (

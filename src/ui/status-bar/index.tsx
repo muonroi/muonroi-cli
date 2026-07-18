@@ -23,7 +23,8 @@ function useStatusBarState(): StatusBarState {
 const EE_DOT: Record<string, { color: string; symbol: string }> = {
   ok: { color: "green", symbol: "●" }, // ●
   warn: { color: "yellow", symbol: "●" }, // ●
-  down: { color: "red", symbol: "●" }, // ●
+  down: { color: "red", symbol: "●" }, // ● configured but unreachable
+  off: { color: "#555555", symbol: "◌" }, // ◌ not configured — connect via /ee setup
   unknown: { color: "gray", symbol: "○" }, // ○
 };
 
