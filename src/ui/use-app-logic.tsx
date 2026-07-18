@@ -4622,9 +4622,11 @@ export function useAppLogic(props: AppLogicProps) {
                     : "Product loop starting… (initializing council + discovery — first phase usually appears within 30s)\n",
                 ),
               ]);
-              // Fresh product-loop run — clear any persisted phase/status so old
-              // runs don't bleed into the new one (phaseIds collide across runs).
-              setCouncilPhases([]);
+              // Fresh product-loop run — clear any persisted council UI (phases,
+              // statuses, AND leftover debate arrays from a prior /council or
+              // /ideal turn) so old runs don't bleed into the new one (phaseIds
+              // collide across runs; a stale debate block would pin to the log).
+              clearLiveTurnUi();
               setCouncilStatuses([]);
               councilDoneAtRef.current.clear();
               // Liveness heartbeat — between "Product loop starting…" and the
@@ -4906,7 +4908,15 @@ export function useAppLogic(props: AppLogicProps) {
                 });
               } finally {
                 if (!firstChunkSeen) clearHeartbeat();
-                setCouncilPhases([]);
+                // Tear down ALL council ephemeral UI (debate turns, rounds, info
+                // cards, meta, phases, topic) — not just phases/statuses. The
+                // debate arrays are append-only and render as a block BELOW the
+                // messages list in the sticky-bottom log; leaving them populated
+                // pins the stale debate to the viewport bottom, so a message sent
+                // after /ideal renders above it and scrolls off screen (looks
+                // "swallowed"). clearLiveTurnUi is the canonical teardown the
+                // normal turn path already uses.
+                clearLiveTurnUi();
                 setCouncilStatuses([]);
                 councilDoneAtRef.current.clear();
                 setProductStatus(null);
@@ -5126,9 +5136,12 @@ export function useAppLogic(props: AppLogicProps) {
               } finally {
                 // Clear council ephemeral UI so the assistant message (containing
                 // synthesis output + stats) becomes the bottommost visible content.
-                // Without this, the persisted timeline hides the final result and
-                // makes the council look stuck.
-                setCouncilPhases([]);
+                // Without this, the persisted timeline AND the append-only debate
+                // block (turns/rounds/info cards) hide the final result and pin a
+                // stale debate to the sticky-bottom log, swallowing later messages.
+                // clearLiveTurnUi tears down every council ephemeral array, not
+                // just phases — matching the normal turn path's teardown.
+                clearLiveTurnUi();
                 setCouncilStatuses([]);
                 councilDoneAtRef.current.clear();
                 // Stop any orphaned inter-card heartbeat so a finished/cancelled
