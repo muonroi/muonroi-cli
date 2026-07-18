@@ -55,6 +55,20 @@ import { getApiKey, getBaseURL, getCurrentModel, saveUserSettings } from "./util
 import { runUpdate } from "./utils/update-checker";
 import { buildVerifyPrompt, getVerifyCliError } from "./verify/entrypoint";
 
+// ---------------------------------------------------------------------------
+// Security: non-root runtime contract (Sprint 1 sandbox Exec profile gate).
+// The in-process boundary relies on the OS-level non-root guarantee. Running as
+// root is allowed only in explicit development/CI escape hatch mode.
+// ---------------------------------------------------------------------------
+if (process.getuid !== undefined && process.getuid() === 0 && process.env.MUONROI_ALLOW_ROOT !== "1") {
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[muonroi-cli] SECURITY WARNING: running as root. " +
+      "The Sprint 1 sandbox Exec profile refuses spawn when uid===0. " +
+      "Set MUONROI_ALLOW_ROOT=1 only in isolated dev/CI environments.",
+  );
+}
+
 // Hydrate chat secrets (no-op now: secrets live in the environment/env-store)
 await hydrateChatEnvFromKeychain();
 

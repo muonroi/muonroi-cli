@@ -8,4 +8,10 @@ export * from "./selector.js";
 export * from "./spec-helpers.js";
 export * from "./transports/sidechannel.js";
 export * from "./transports/ws.js";
+
 // mcp-server intentionally NOT re-exported here — it's a CLI subcommand impl, accessed via "./mcp-server" subpath only.
+
+export * from "./sandbox/capability-mask.js";
+export * from "./sandbox/gate.js";
+// Sprint 1 sandbox boundary exports
+export * from "./sandbox/types.js";
