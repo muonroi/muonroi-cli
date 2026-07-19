@@ -169,7 +169,7 @@ Each step is independently shippable and reversible via its flag.
 |---|---|---|
 | 0 — close bypasses | **DONE** — H1 (vision override) + H2 (vision-backend usage) | `af58df67`, `ca984cea` |
 | 1 — gate skeleton, meter-only | **DONE** — `call_accounting` on main/subagent/vision/council | `af58df67` |
-| 2 — ceiling enforce (off→warn→throw) | **MACHINERY DONE**, default `off` | `e2ef45ee` |
+| 2 — ceiling enforce | **DONE + ARMED** — default `warn` for stats; `subagent`/`vision` default `throw` at a calibrated absolute cap (`MUONROI_GATE_THROW_MAX_TOKENS`=100k est ≈ ~200k real, 25× normal capped work) with H4 recovery | `e2ef45ee`, `4afa2bab`, `533245e7` |
 | 3 — C3 dedup key → raw pre-cap (H5) | **DONE** — Symbol side-channel | `d1769434` |
 | H11 — dead `createAdapter` | **GUARDED** (deprecation note); full subsystem deletion deferred to a separate cleanup PR (multi-file, LOW severity, non-live) | this doc |
 | 4/5 — migrate read-path-budget/cap-tool-result | deferred (meter proves redundancy first) | — |
