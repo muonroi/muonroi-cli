@@ -30,6 +30,7 @@ export type InteractionEventType =
   | "text_tool_resteer"
   | "turn_tool_load"
   | "dedup"
+  | "call_accounting"
   | "session_experience";
 
 // Retention: keep ~14 days of detail logs. Override via env if a workspace

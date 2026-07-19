@@ -3,8 +3,20 @@ import { getModelInfo } from "../models/registry.js";
 import type { ModelInfo } from "../types/index.js";
 import { getReasoningEffortForModel } from "../utils/settings.js";
 import { getProviderCapabilities } from "./capabilities.js";
+import { ceilingForCall, type GateStage, wrapModelWithGate } from "./model-gate.js";
 import { getProviderStrategy } from "./strategies/registry.js";
 import type { ProviderId } from "./types.js";
+
+/**
+ * Bước 2 — attribution carrier for the metered gate (H8). A resolve site passes
+ * its pipeline stage + session so every doStream/doGenerate through the returned
+ * model is metered under the right stage. Omitting it is honest, not fatal: the
+ * meter records `unattributed` rather than guessing `main`.
+ */
+export interface ResolveRuntimeOpts {
+  stage?: GateStage;
+  sessionId?: string;
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ProviderFactory = ((modelId: string) => any) & {
@@ -178,7 +190,7 @@ export function factoryForModel(modelId: string): ProviderFactory {
   return factory;
 }
 
-export function resolveModelRuntime(modelId: string): ResolvedModelRuntime {
+export function resolveModelRuntime(modelId: string, opts?: ResolveRuntimeOpts): ResolvedModelRuntime {
   // Resolve aliases (e.g. "deepseek-v4-flash") to the provider-native id
   // (e.g. "deepseek-v4-flash") BEFORE invoking the factory.
   // Without this, DeepSeek / xAI reject the request because
@@ -248,6 +260,18 @@ export function resolveModelRuntime(modelId: string): ResolvedModelRuntime {
       },
     };
   }
+
+  // Bước 2 — the metered gate. Wrap the resolved model so every doStream/
+  // doGenerate call passes through ONE instrumented point (design §2). Returns a
+  // new object (never mutates), meter-only for now (no ceiling enforcement).
+  // Universal: a new call site cannot get a model without this factory. Sites
+  // that have not migrated a stage are metered as `unattributed` (H8).
+  resolved.model = wrapModelWithGate(resolved.model, {
+    stage: opts?.stage ?? "unattributed",
+    modelId: resolved.modelId,
+    sessionId: opts?.sessionId,
+    ceiling: ceilingForCall(resolved.modelInfo),
+  });
 
   return resolved;
 }

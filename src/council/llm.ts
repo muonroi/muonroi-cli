@@ -544,7 +544,7 @@ export function createCouncilLLM(
       }
       const providerId = detectProviderForModel(modelId);
       await ensureCouncilFactory(providerId);
-      const runtime = resolveModelRuntime(modelId);
+      const runtime = resolveModelRuntime(modelId, { stage: "council", sessionId });
       const t0 = Date.now();
       // Combine the user-abort signal (when threaded from runCouncil) with the
       // per-call wall-clock deadline. Without the parent signal, an Esc/Ctrl-C
@@ -658,7 +658,7 @@ export function createCouncilLLM(
       }
       const providerId = detectProviderForModel(modelId);
       await ensureCouncilFactory(providerId);
-      const runtime = resolveModelRuntime(modelId);
+      const runtime = resolveModelRuntime(modelId, { stage: "council", sessionId });
 
       // Verification tools — re-introduced after the no-tools fix (session
       // a7a5690d2049). The original failure was stepCountIs(4) + full toolset
@@ -850,7 +850,7 @@ export function createCouncilLLM(
       }
       const providerId = detectProviderForModel(modelId);
       await ensureCouncilFactory(providerId);
-      const runtime = resolveModelRuntime(modelId);
+      const runtime = resolveModelRuntime(modelId, { stage: "council", sessionId });
 
       const builtinTools = createTools(bash, mode);
 

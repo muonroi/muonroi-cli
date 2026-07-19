@@ -6,7 +6,7 @@
  * path would surface them.
  */
 
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { installMockModel, textOnlyStream } from "../agent-harness/mock-model.js";
 import { loadCatalog } from "../models/registry.js";
@@ -17,9 +17,20 @@ import { __resetProviderFactoryRegistry, createProviderFactory, resolveModelRunt
 const MOCK_KEY = "x".repeat(32);
 
 describe("resolveModelRuntime mock hook", () => {
+  const prevGate = process.env.MUONROI_GATE;
   beforeAll(async () => {
     // Catalog must be loaded so getModelInfo("gpt-5.4") returns provider=openai.
     await loadCatalog();
+    // These tests assert the mock-hook short-circuit in isolation (model identity,
+    // params flow-through) — orthogonal to the Bước-2 metered gate, which returns a
+    // NEW wrapper object (H6). Disable the gate here so identity assertions target
+    // the mock directly; the gate's own wrap/delegate behavior is covered in
+    // model-gate.test.ts.
+    process.env.MUONROI_GATE = "0";
+  });
+  afterAll(() => {
+    if (prevGate === undefined) delete process.env.MUONROI_GATE;
+    else process.env.MUONROI_GATE = prevGate;
   });
 
   let uninstall: (() => void) | null = null;

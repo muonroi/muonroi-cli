@@ -9,6 +9,10 @@ const mockGenerateText = vi.fn().mockResolvedValue({ text: "Mocked parent advice
 vi.mock("ai", () => {
   return {
     generateText: (...args: any[]) => mockGenerateText(...args),
+    // Bước-2 metered gate wraps the resolved model via wrapLanguageModel; this
+    // wholesale `ai` mock must expose it. Identity passthrough — metering is not
+    // under test here.
+    wrapLanguageModel: ({ model }: { model: unknown }) => model,
   };
 });
 

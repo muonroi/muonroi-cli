@@ -49,7 +49,6 @@ import { getVisionGuidanceForTextOnly } from "../providers/mcp-vision-bridge.js"
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
   buildTurnProviderOptions,
-  factoryForModel,
   type ResolvedModelRuntime,
   requireRuntimeProvider,
   resolveModelRuntime,
@@ -391,18 +390,18 @@ export class StreamRunner {
     if (childModelId !== topModelId) {
       statusBarStore.setState({ routed_from: topModelId, model: childModelId });
     }
-    // The vision branch must build its model from the CHILD model's own factory.
-    // It previously called the PARENT session's factory directly, so a sub-agent
-    // routed to another provider had its id POSTed to the parent's endpoint.
-    const childRuntime = isVision
-      ? (() => {
-          const childFactory = factoryForModel(childModelId);
-          return {
-            ...resolveModelRuntime(childModelId),
-            model: childFactory.responses?.(childModelId) ?? childFactory(childModelId),
-          };
-        })()
-      : resolveModelRuntime(childModelId);
+    // Bước 2 / H1: sub-agents (vision included) resolve through the factory like
+    // every other call. The old vision branch spread the resolved runtime then
+    // REPLACED `model` with a freshly-built `factoryForModel(...)` handle — the
+    // one path that bypassed the metered gate (an unwrapped, unmetered model).
+    // `resolveModelRuntime` already derives the factory from the CHILD model's
+    // own provider (the original cross-wire bug the override guarded against is
+    // fixed there) AND picks responses-vs-chat via the provider strategy, so the
+    // override is now pure bypass. Drop it; stamp the stage for attribution (H8).
+    const childRuntime = resolveModelRuntime(childModelId, {
+      stage: isVision ? "vision" : "subagent",
+      sessionId: this.deps.getSessionId(),
+    });
     const taskCaps = getProviderCapabilities(requireRuntimeProvider(childRuntime));
     if (isComputer && !taskCaps.supportsClientTools(childRuntime.modelInfo)) {
       return {
