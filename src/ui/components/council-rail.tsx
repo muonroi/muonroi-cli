@@ -77,7 +77,11 @@ export function CouncilRail({
       Pass null when there is nothing to show so the DETAIL rule is suppressed. */
   detailNode?: ReactNode;
 }) {
-  const inner = Math.max(10, width - 3);
+  // Usable text width = rail width minus the left border (1), paddingLeft (2)
+  // and paddingRight (1) of the box below = width - 4. A section rule padded to
+  // more than this wraps to a second line ("── PHASES" / "──────"), so size the
+  // rules and value truncation to the REAL content width.
+  const inner = Math.max(10, width - 4);
   const fittedMetaRows = fitCouncilRailRows(metaRows, inner);
   const fittedStageRows = stage ? fitCouncilRailRows(stage.rows, inner) : [];
   const allRows = stage ? [...metaRows, ...stage.rows] : metaRows;
