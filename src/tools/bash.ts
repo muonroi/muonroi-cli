@@ -1,4 +1,4 @@
-import { type ChildProcess, exec, spawn } from "child_process";
+import { type ChildProcess, spawn } from "child_process";
 import { createReadStream, createWriteStream, existsSync } from "fs";
 import { mkdtemp, rm, stat, unlink } from "fs/promises";
 import os from "os";
@@ -144,104 +144,158 @@ export class BashTool {
 
       const runId = nextBashRunId();
       const startedAt = Date.now();
+      // Route through spawn + spawnInvocation (NOT exec's `{shell}` option): exec
+      // appends its OWN flag, producing `wsl.exe -c <cmd>` (invalid — wsl has no
+      // -c) and `pwsh -c` without -NoProfile. spawnInvocation gives the correct
+      // argv per shell kind (`wsl bash -lc`, pwsh `-NoProfile -Command`, `bash
+      // -lc`, cmd `/d /s /c`) — the same path the background runner already uses.
+      const { binary, args } = this.spawnInvocation(prepared.command);
+      const MAX_BUFFER = 10 * 1024 * 1024;
       return await new Promise<ToolResult>((resolve) => {
         let settled = false;
         let aborted = false;
+        let timedOut = false;
+        let maxBufferHit = false;
         let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+        let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+        const outChunks: string[] = [];
+        const errChunks: string[] = [];
+        let bufferedLen = 0;
 
         const finish = (result: ToolResult) => {
           if (settled) return;
           settled = true;
           if (forceKillTimer) clearTimeout(forceKillTimer);
+          if (timeoutTimer) clearTimeout(timeoutTimer);
           abortSignal?.removeEventListener("abort", onAbort);
           resolve(result);
         };
 
-        const child = exec(
-          prepared.command,
-          {
-            cwd: this.cwd,
-            timeout,
-            maxBuffer: 10 * 1024 * 1024,
-            env: { ...process.env, FORCE_COLOR: "0" },
-            ...(this.resolvedShell.binary ? { shell: this.resolvedShell.binary } : {}),
-          },
-          (err, stdoutRaw, stderrRaw) => {
-            if (aborted || abortSignal?.aborted) {
-              finish({ success: false, error: "[Cancelled]" });
-              return;
-            }
+        const child = spawn(binary, args, {
+          cwd: this.cwd,
+          env: { ...process.env, FORCE_COLOR: "0" },
+          windowsHide: true,
+        });
 
-            const stdout = stripAnsi(stdoutRaw);
-            const stderr = stripAnsi(stderrRaw);
-            // exec discards signal/timeout into a bare `err`. Recover them so we
-            // never record `exitCode:1` for a signal death and can annotate why.
-            const execErr = err as (NodeJS.ErrnoException & { killed?: boolean; signal?: string }) | null;
-            const timedOut = Boolean(execErr?.killed);
-            const signal = execErr?.signal ?? undefined;
-            const exitCode = err && typeof err.code === "number" ? err.code : err ? (signal ? 128 : 1) : 0;
-            recordBashRun({
-              id: runId,
-              command,
-              stdout,
-              stderr,
-              exitCode,
-              durationMs: Date.now() - startedAt,
-            });
-            const totalChars = stdout.length + stderr.length;
-            const output = stdout + (stderr ? `\nSTDERR: ${stderr}` : "");
-            if (err) {
-              // Exit 141 = 128 + SIGPIPE: the pipe reader (`| head`, `| grep -q`)
-              // closed after getting what it needed. With real stdout present this
-              // is the requested answer, not a failure — a build/test that fails on
-              // its own merits never dies of SIGPIPE. Only reachable via pipefail or
-              // a direct SIGPIPE death, which safety-conscious models trigger with
-              // `set -o pipefail; … | head`. Do NOT flip a genuine crash: require
-              // stdout and no timeout kill.
-              if (!timedOut && (exitCode === 141 || signal === "SIGPIPE") && stdout.trim()) {
-                finish({
-                  success: true,
-                  output: `${output.trim()}\n[exit 141 (SIGPIPE): output truncated by a pipe reader such as | head — benign]`,
-                  bashRunId: runId,
-                  bashTotalChars: totalChars,
-                });
-                return;
+        // spawn failure (shell binary missing / not executable) → surface, don't hang.
+        child.on("error", (spawnErr: Error) => {
+          finish({
+            success: false,
+            error: `Command failed to start: ${spawnErr.message}`,
+            bashRunId: runId,
+            bashTotalChars: 0,
+          });
+        });
+
+        const capture = (chunks: string[], data: Buffer) => {
+          if (maxBufferHit) return;
+          const s = data.toString("utf8");
+          bufferedLen += s.length;
+          chunks.push(s);
+          if (bufferedLen > MAX_BUFFER) {
+            maxBufferHit = true;
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              /* already exited */
+            }
+          }
+        };
+        child.stdout?.on("data", (d: Buffer) => capture(outChunks, d));
+        child.stderr?.on("data", (d: Buffer) => capture(errChunks, d));
+
+        if (timeout && timeout > 0) {
+          timeoutTimer = setTimeout(() => {
+            timedOut = true;
+            try {
+              child.kill("SIGTERM");
+            } catch {
+              /* already exited */
+            }
+            forceKillTimer = setTimeout(() => {
+              try {
+                child.kill("SIGKILL");
+              } catch {
+                /* already exited */
               }
-              // Every other non-zero stays a failure, but the model finally sees
-              // WHY: it can then read `[exit code 1]` on a `grep`/`diff`/`test`
-              // probe as a normal boolean answer, not a broken command, while a
-              // failing build/test (exit 1/2 + output) still reads as ✗.
-              const annotation = timedOut
-                ? `[command timed out after ${timeout}ms and was killed${signal ? ` (${signal})` : ""}]`
-                : signal
-                  ? `[terminated by signal ${signal}]`
-                  : `[exit code ${exitCode}]`;
-              if (output.trim()) {
-                finish({
-                  success: false,
-                  error: `${output.trim()}\n${annotation}`,
-                  bashRunId: runId,
-                  bashTotalChars: totalChars,
-                });
-                return;
-              }
+            }, 1_000);
+          }, timeout);
+        }
+
+        child.on("close", (code, sig) => {
+          if (aborted || abortSignal?.aborted) {
+            finish({ success: false, error: "[Cancelled]" });
+            return;
+          }
+          const stdout = stripAnsi(outChunks.join(""));
+          const stderr = stripAnsi(errChunks.join(""));
+          const signal = sig ?? undefined;
+          const exitCode = typeof code === "number" ? code : signal ? 128 : 1;
+          const failed = maxBufferHit || timedOut || signal != null || (typeof code === "number" && code !== 0);
+          recordBashRun({
+            id: runId,
+            command,
+            stdout,
+            stderr,
+            exitCode,
+            durationMs: Date.now() - startedAt,
+          });
+          const totalChars = stdout.length + stderr.length;
+          let output = stdout + (stderr ? `\nSTDERR: ${stderr}` : "");
+          if (maxBufferHit) output += `\n[output exceeded ${MAX_BUFFER} bytes — truncated and process killed]`;
+          if (failed) {
+            // Exit 141 = 128 + SIGPIPE: the pipe reader (`| head`, `| grep -q`)
+            // closed after getting what it needed. With real stdout present this
+            // is the requested answer, not a failure — a build/test that fails on
+            // its own merits never dies of SIGPIPE. Reachable via pipefail or a
+            // direct SIGPIPE death, which safety-conscious models trigger with
+            // `set -o pipefail; … | head`. Do NOT flip a genuine crash: require
+            // stdout, no timeout, no maxBuffer kill.
+            if (!timedOut && !maxBufferHit && (exitCode === 141 || signal === "SIGPIPE") && stdout.trim()) {
               finish({
-                success: false,
-                error: `${annotation} (no output): ${err.message.replace(/^Command failed: /, "")}`,
+                success: true,
+                output: `${output.trim()}\n[exit 141 (SIGPIPE): output truncated by a pipe reader such as | head — benign]`,
                 bashRunId: runId,
                 bashTotalChars: totalChars,
               });
               return;
             }
-
+            // Every other non-zero stays a failure, but the model finally sees
+            // WHY: it can then read `[exit code 1]` on a `grep`/`diff`/`test`
+            // probe as a normal boolean answer, not a broken command, while a
+            // failing build/test (exit 1/2 + output) still reads as ✗.
+            const annotation = maxBufferHit
+              ? `[output exceeded ${MAX_BUFFER} bytes; process killed]`
+              : timedOut
+                ? `[command timed out after ${timeout}ms and was killed${signal ? ` (${signal})` : ""}]`
+                : signal
+                  ? `[terminated by signal ${signal}]`
+                  : `[exit code ${exitCode}]`;
+            if (output.trim()) {
+              finish({
+                success: false,
+                error: `${output.trim()}\n${annotation}`,
+                bashRunId: runId,
+                bashTotalChars: totalChars,
+              });
+              return;
+            }
             finish({
-              success: true,
-              output: output.trim() || "Command executed successfully (no output)",
+              success: false,
+              error: `${annotation} (no output)`,
               bashRunId: runId,
               bashTotalChars: totalChars,
             });
-          },
-        );
+            return;
+          }
+
+          finish({
+            success: true,
+            output: output.trim() || "Command executed successfully (no output)",
+            bashRunId: runId,
+            bashTotalChars: totalChars,
+          });
+        });
 
         const onAbort = () => {
           aborted = true;
@@ -468,7 +522,18 @@ export class BashTool {
   }
 
   getToolDescription(): string {
-    return "Execute a bash command. Use for find, ls, git, build tools, package managers, running tests, and any other shell command. For content search, prefer the dedicated grep tool. Set background=true for long-running processes like dev servers, watchers, or anything that should keep running while you continue working. For file read/write/edit, prefer the dedicated file tools instead.";
+    const base =
+      "Execute a bash command. Use for find, ls, git, build tools, package managers, running tests, and any other shell command. For content search, prefer the dedicated grep tool. Set background=true for long-running processes like dev servers, watchers, or anything that should keep running while you continue working. For file read/write/edit, prefer the dedicated file tools instead.";
+    // On a non-POSIX host the model must NOT emit ls/grep/head/find — they don't
+    // exist (cmd) or take different flags (PowerShell). Declare the dialect so it
+    // uses native syntax instead of failing every command.
+    const s = this.resolvedShell;
+    if (!s.isPosix) {
+      return s.kind === "cmd"
+        ? `${base} IMPORTANT: this host runs Windows cmd.exe, NOT a POSIX shell. Use cmd syntax (dir, type, findstr, where, del) — POSIX tools like ls/grep/head/find/cat are unavailable.`
+        : `${base} IMPORTANT: this host runs PowerShell, NOT a POSIX shell. Use PowerShell cmdlets (Get-ChildItem, Select-String, Select-Object -First N, Get-Content) — POSIX tools like ls -la/grep/head/find behave differently or fail.`;
+    }
+    return base;
   }
 
   getResolvedShell(): ResolvedShell {
