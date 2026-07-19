@@ -163,6 +163,26 @@ each migration **verified against the meter** (falsifiable — the whole point o
 
 Each step is independently shippable and reversible via its flag.
 
+### Rollout status (shipped)
+
+| Step | Status | Commits |
+|---|---|---|
+| 0 — close bypasses | **DONE** — H1 (vision override) + H2 (vision-backend usage) | `af58df67`, `ca984cea` |
+| 1 — gate skeleton, meter-only | **DONE** — `call_accounting` on main/subagent/vision/council | `af58df67` |
+| 2 — ceiling enforce (off→warn→throw) | **MACHINERY DONE**, default `off` | `e2ef45ee` |
+| 3 — C3 dedup key → raw pre-cap (H5) | **DONE** — Symbol side-channel | `d1769434` |
+| H11 — dead `createAdapter` | **GUARDED** (deprecation note); full subsystem deletion deferred to a separate cleanup PR (multi-file, LOW severity, non-live) | this doc |
+| 4/5 — migrate read-path-budget/cap-tool-result | deferred (meter proves redundancy first) | — |
+
+**Deferred (documented, low-value/non-live):**
+- `throw` mode flip — needs ~1 week of `call_accounting` + per-`(model,stage)`
+  est/real calibration before arming (D9). Machinery + H4 recovery are in place.
+- compaction/pil stage `sessionId` threading — compaction cost is ALREADY visible
+  via the Bước-1 `compaction` usage source; pil bills as `council` today. Both are
+  meter-visibility niceties, not leaks; threading is multi-hop signature churn.
+- adapter-subsystem deletion (H11) — dead in prod (tests only); guarded against
+  becoming a live bypass via the barrel deprecation note.
+
 ## 6. Risks / red-team targets (hand to Fable 5)
 
 1. **Bypass paths.** Does *every* LLM call truly go through `resolveModelRuntime`? Audit the
