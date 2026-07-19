@@ -27,6 +27,7 @@
 
 import { createHash } from "node:crypto";
 import type { ToolSet } from "ai";
+import { RAW_FOR_DEDUP } from "./sub-agent-cap";
 
 const DEFAULT_MAX_ENTRIES = 200;
 const DEFAULT_MIN_CHARS = 500;
@@ -133,11 +134,20 @@ export class CrossTurnDedup {
    * Inspect a tool output. If identical content was seen earlier (in this
    * or a previous turn), returns a short stub string. Otherwise records
    * the content and returns null (caller passes through the original).
+   *
+   * `served` is the string that will actually reach the model if not stubbed.
+   * `hashSource` (H5) is the identity to hash/cache on — pass the RAW pre-cap
+   * content here so a downstream cap's non-deterministic trimming does not defeat
+   * the hash; defaults to `served` when the two are the same (top-level path).
    */
-  public maybeDedup(toolName: string, raw: string): string | null {
+  public maybeDedup(toolName: string, served: string, hashSource?: string): string | null {
     if (!this.enabled) return null;
-    if (raw.length < this.minChars) return null;
-    const hash = shortHash(raw);
+    const identity = hashSource ?? served;
+    // Gate on the identity length (the real content), not the possibly-trimmed
+    // served string — a capped output can fall under minChars while its raw
+    // source is large and worth deduping.
+    if (identity.length < this.minChars) return null;
+    const hash = shortHash(identity);
     const existing = this.cache.get(hash);
     if (existing) {
       // Refresh LRU position so frequently-reused outputs survive eviction.
@@ -158,9 +168,10 @@ export class CrossTurnDedup {
         existing.sameTurnRepeats += 1;
         if (existing.sameTurnRepeats === 1) {
           // Deliberate re-serve (see comment above). Meter its cost so the
-          // policy trade-off is visible and a future fix is falsifiable.
+          // policy trade-off is visible and a future fix is falsifiable. Count
+          // the SERVED length (what actually re-bills), not the raw identity.
           this.sameTurnReserves += 1;
-          this.sameTurnReservedChars += raw.length;
+          this.sameTurnReservedChars += served.length;
           return null;
         }
         this.hits += 1;
@@ -174,9 +185,10 @@ export class CrossTurnDedup {
       // G3 — short marker. Old format was ~110 chars; this is ~45.
       return `[dup of ${existing.firstSeenToolName} from turn ${existing.firstSeenTurn} — reuse]`;
     }
-    // Insert new entry, evicting oldest if over cap.
+    // Insert new entry, evicting oldest if over cap. Cache the raw identity so a
+    // later capped re-read (different served bytes, same source) still matches.
     this.cache.set(hash, {
-      content: raw,
+      content: identity,
       firstSeenTurn: this.currentTurn || 1,
       firstSeenToolName: toolName,
       sameTurnRepeats: 0,
@@ -201,9 +213,12 @@ export function isCrossTurnDedupEnabled(): boolean {
 /**
  * Wrap a ToolSet so every tool's execute() output is hashed and
  * deduped via the shared CrossTurnDedup instance. The wrap is applied
- * AFTER any other compression (e.g. sub-agent cap), so the cap sees
- * the raw output and the dedup sees the already-compressed output —
- * keeping the dedup keyed on what actually reaches the model.
+ * AFTER any other compression (e.g. sub-agent cap): the cap sees the raw
+ * output, and the dedup SERVES the already-compressed output but HASHES the
+ * raw pre-cap content the cap stashed under RAW_FOR_DEDUP (H5) — so the cap's
+ * non-deterministic trimming/markers can no longer defeat the hash. On the
+ * top-level path (no cap) there is no Symbol and it hashes the served output
+ * directly.
  *
  * If dedup is disabled (null instance or env=0), returns the original
  * tool set unchanged.
@@ -237,7 +252,11 @@ function dedupResult(dedup: CrossTurnDedup, toolName: string, raw: unknown): unk
   if (raw && typeof raw === "object") {
     const obj = raw as Record<string, unknown>;
     if (typeof obj.output === "string") {
-      const stub = dedup.maybeDedup(toolName, obj.output);
+      // H5: if a sub-agent cap ran first, it stashed the RAW pre-cap output under
+      // RAW_FOR_DEDUP — hash on that so the cap's non-deterministic trimming can't
+      // defeat the match. The Symbol never serializes to the model wire.
+      const hashSource = (obj as Record<string | symbol, unknown>)[RAW_FOR_DEDUP];
+      const stub = dedup.maybeDedup(toolName, obj.output, typeof hashSource === "string" ? hashSource : undefined);
       if (stub !== null) return { ...obj, output: stub };
     }
     // MCP tool result shape: { type: "content", value: [{type:"text", text}, ...] }.

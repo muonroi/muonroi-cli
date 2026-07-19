@@ -2,6 +2,7 @@ import type { ToolSet } from "ai";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { CrossTurnDedup, isCrossTurnDedupEnabled, wrapToolSetWithDedup } from "../cross-turn-dedup.js";
+import { RAW_FOR_DEDUP, wrapToolSetWithCap } from "../sub-agent-cap.js";
 
 describe("CrossTurnDedup", () => {
   describe("maybeDedup", () => {
@@ -21,6 +22,24 @@ describe("CrossTurnDedup", () => {
       expect(second).toContain("[dup of");
       expect(second).toContain("read_file");
       expect(second).toContain("turn 1");
+    });
+
+    it("keys off hashSource (raw pre-cap), not the served string (H5)", () => {
+      const dedup = new CrossTurnDedup({ minChars: 10 });
+      dedup.beginTurn();
+      const raw = "R".repeat(2_000);
+
+      // Turn 1: served output is the full raw (cap passthrough).
+      expect(dedup.maybeDedup("read_file", raw, raw)).toBeNull();
+
+      // Turn 2: SAME raw source, but a downstream cap trimmed the served string
+      // to different bytes (marker + head). Hashing the served string would MISS;
+      // hashing the raw source matches.
+      dedup.beginTurn();
+      const trimmedServed = `${raw.slice(0, 200)}\n\n... [1800 chars trimmed by sub-agent cap] ...`;
+      const stub = dedup.maybeDedup("read_file", trimmedServed, raw);
+      expect(stub).not.toBeNull();
+      expect(stub).toContain("[dup of");
     });
 
     it("distinct large tool outputs do not collide on sha256-16", () => {
@@ -244,6 +263,37 @@ describe("CrossTurnDedup", () => {
 
       const out = (await exec({})) as { value: unknown[] };
       expect(out.value[0]).toEqual(image);
+    });
+
+    it("dedups across turns even when the inner cap trims differently (H5 end-to-end)", async () => {
+      // Layer the real cap INNER and cross-turn dedup OUTER, exactly as
+      // stream-runner wires them. Turn 1 reads at passthrough; turn 2 reads the
+      // same file after the cap's budget crossed into a trim tier — different
+      // served bytes, same raw. Before H5 the dedup hashed the trimmed output and
+      // missed; now it hashes the RAW_FOR_DEDUP Symbol the cap stashed.
+      const dedup = new CrossTurnDedup({ minChars: 10 });
+      const raw = "Z".repeat(9_000);
+      let call = 0;
+      const baseTools: ToolSet = {
+        // biome-ignore lint/suspicious/noExplicitAny: minimal tool stub
+        read_file: { description: "d", inputSchema: {}, execute: async () => ({ output: raw }) } as any,
+      };
+      // Small budget so the 2nd call is in a trim tier → different served bytes.
+      const cap = wrapToolSetWithCap(baseTools, { maxCumulativeChars: 20_000, dedupRepeatOutputs: false });
+      const wrapped = wrapToolSetWithDedup(cap.tools, dedup);
+      const exec = (wrapped.read_file as unknown as { execute: (i: unknown) => Promise<unknown> }).execute;
+
+      dedup.beginTurn();
+      const first = (await exec({})) as Record<string | symbol, unknown>;
+      call++;
+      // Symbol side-channel is present but never serializes to the wire.
+      expect(first[RAW_FOR_DEDUP]).toBe(raw);
+      expect(JSON.stringify(first)).not.toContain("rawForDedup");
+
+      dedup.beginTurn();
+      const second = (await exec({})) as { output: string };
+      expect(second.output).toContain("[dup of");
+      expect(call).toBe(1);
     });
   });
 });
