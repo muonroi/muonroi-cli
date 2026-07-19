@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as registry from "../models/registry.js";
+import * as usage from "../storage/usage.js";
 import * as settings from "../utils/settings.js";
 import * as keychain from "./keychain.js";
 import {
+  callVisionBackend,
   findNativeVisionFallback,
   formatNativeVisionObservation,
   formatNativeVisionUnavailable,
@@ -18,6 +20,49 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("callVisionBackend usage recording (H2)", () => {
+  const chain = [{ provider: "zai" as const, model_id: "glm-4.6v-flash" }];
+  const content = [{ type: "text", text: "describe" }];
+
+  function stubFetchWithUsage(): void {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: "I see a form." } }],
+          usage: { prompt_tokens: 1200, completion_tokens: 300, total_tokens: 1500 },
+        }),
+      })),
+    );
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("records the provider usage under the `vision` source when a sessionId is given", async () => {
+    stubFetchWithUsage();
+    const rec = vi.spyOn(usage, "recordUsageEvent").mockImplementation(() => {});
+    const res = await callVisionBackend(chain, content, undefined, undefined, { sessionId: "sess-1" });
+    expect(res.ok).toBe(true);
+    expect(rec).toHaveBeenCalledTimes(1);
+    const [sessionId, source, model, tokenUsage] = rec.mock.calls[0];
+    expect(sessionId).toBe("sess-1");
+    expect(source).toBe("vision");
+    expect(model).toBe("glm-4.6v-flash");
+    expect(tokenUsage).toMatchObject({ inputTokens: 1200, outputTokens: 300, totalTokens: 1500 });
+  });
+
+  it("does NOT record usage when no sessionId is threaded", async () => {
+    stubFetchWithUsage();
+    const rec = vi.spyOn(usage, "recordUsageEvent").mockImplementation(() => {});
+    const res = await callVisionBackend(chain, content);
+    expect(res.ok).toBe(true);
+    expect(rec).not.toHaveBeenCalled();
+  });
 });
 
 describe("looksLikeOcrIntent", () => {

@@ -110,6 +110,7 @@ export async function proxyVision(
   messages: ModelMessage[],
   modelId: string,
   signal?: AbortSignal,
+  sessionId?: string,
 ): Promise<VisionProxyResult> {
   if (!needsVisionProxy(modelId)) {
     return { messages, proxied: false, imageCount: 0 };
@@ -149,7 +150,7 @@ export async function proxyVision(
     }
 
     const kind: VisionTaskKind = designIntent ? "design" : ocrIntent ? "ocr" : "default";
-    const descriptions = await describeImages(imageParts, textParts, signal, kind);
+    const descriptions = await describeImages(imageParts, textParts, signal, kind, sessionId);
 
     const newContent = [...textParts, { type: "text" as const, text: descriptions }];
     processed.push({ ...msg, content: newContent });
@@ -163,6 +164,7 @@ async function describeImages(
   contextTexts: TextPart[],
   signal?: AbortSignal,
   kind: VisionTaskKind = "default",
+  sessionId?: string,
 ): Promise<string> {
   const userContext = contextTexts.map((t) => t.text).join("\n");
   const designIntent = kind === "design";
@@ -190,7 +192,7 @@ async function describeImages(
 
   const responseFormat = designIntent ? { type: "json_object" as const } : undefined;
   const chain = await resolveAvailableVisionChain(kind);
-  const result = await callVisionBackend(chain, visionContent, signal, responseFormat);
+  const result = await callVisionBackend(chain, visionContent, signal, responseFormat, { sessionId });
 
   if (result.ok) {
     return formatNativeVisionObservation(result.text, { imageCount: images.length });

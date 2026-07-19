@@ -212,6 +212,7 @@ export async function bridgeMcpToolResult(
   modelId: string,
   signal?: AbortSignal,
   toolCallId?: string,
+  sessionId?: string,
 ): Promise<McpVisionBridgeResult> {
   if (!needsVisionProxy(modelId)) {
     return { output: toolOutput, proxied: false };
@@ -232,7 +233,7 @@ export async function bridgeMcpToolResult(
 
   // Detect context for better analysis prompt
   const context = detectImageContext(toolName, toolOutput);
-  const rawObservation = await analyzeImages(images, context, signal);
+  const rawObservation = await analyzeImages(images, context, signal, undefined, sessionId);
   if (!rawObservation) {
     // Even when the vision proxy fails (no API key / network error), we MUST
     // still strip the base64 payload from the tool output. Otherwise a single
@@ -279,6 +280,7 @@ export async function analyzeImageFromSource(
   question?: string,
   cwd?: string,
   signal?: AbortSignal,
+  sessionId?: string,
 ): Promise<string> {
   let images: ExtractedImage[];
 
@@ -325,7 +327,7 @@ export async function analyzeImageFromSource(
 
   const prompt = question ? buildFollowUpPrompt(question, images.length) : undefined;
 
-  const rawObservation = await analyzeImages(images, context, signal, prompt);
+  const rawObservation = await analyzeImages(images, context, signal, prompt, sessionId);
   if (!rawObservation) {
     const { collectVisionUnavailableReasons } = await import("./vision-backend.js");
     return formatNativeVisionUnavailable(1, await collectVisionUnavailableReasons());
@@ -344,10 +346,11 @@ export async function askVisionProxy(
   imageIdOrPath?: string,
   cwd?: string,
   signal?: AbortSignal,
+  sessionId?: string,
 ): Promise<string> {
   // If it looks like a file path, analyze it directly
   if (imageIdOrPath && !imageIdOrPath.startsWith("img_")) {
-    return analyzeImageFromSource(imageIdOrPath, question, cwd, signal);
+    return analyzeImageFromSource(imageIdOrPath, question, cwd, signal, sessionId);
   }
 
   const targets = imageIdOrPath
@@ -388,7 +391,9 @@ export async function askVisionProxy(
   }
 
   const kind: VisionTaskKind = looksLikeOcrIntent(question) ? "ocr" : "default";
-  const result = await callVisionBackend(await resolveAvailableVisionChain(kind), visionContent, signal);
+  const result = await callVisionBackend(await resolveAvailableVisionChain(kind), visionContent, signal, undefined, {
+    sessionId,
+  });
   if (result.ok) {
     return formatNativeVisionObservation(result.text, {
       imageCount: targets.length,
@@ -475,6 +480,7 @@ async function analyzeImages(
   context: ImageContext,
   signal?: AbortSignal,
   customPrompt?: string,
+  sessionId?: string,
 ): Promise<string | null> {
   // Fast-path: SVG inputs are vector text. Skip the vision model entirely —
   // pass the source straight through wrapped in the layout contract envelope.
@@ -508,6 +514,7 @@ async function analyzeImages(
     visionContent,
     signal,
     responseFormat,
+    { sessionId },
   );
   if (result.ok) return result.text;
   return null;

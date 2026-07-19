@@ -4,9 +4,28 @@
  */
 import type { CatalogVisionProxyRouting, CatalogVisionProxySlot } from "../models/catalog-client.js";
 import { getModelInfo, getVisionProxyRouting, MODELS, SWITCH_PROVIDER_ORDER } from "../models/registry.js";
+import { recordUsageEvent } from "../storage/usage.js";
 import { apiBaseFor } from "./endpoints.js";
 import { loadKeyForProvider } from "./keychain.js";
 import type { ProviderId } from "./types.js";
+
+/**
+ * Bước 2 / H2: the vision backend is a hand-rolled `fetch` — it does NOT resolve
+ * through `resolveModelRuntime`, so the metered gate never sees it. To close the
+ * bypass we capture the provider's own `usage` from the response and record it
+ * under the `vision` usage source, making these calls visible to
+ * `usage forensics` (previously the tokens were discarded entirely). Threaded
+ * from callers that hold a session; a call with no session simply skips the row.
+ */
+export interface VisionCallMeta {
+  sessionId?: string;
+}
+
+interface VisionUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
 
 export type VisionTaskKind = "default" | "ocr" | "design";
 
@@ -154,6 +173,7 @@ export async function callVisionBackend(
   content: Array<Record<string, unknown>>,
   signal?: AbortSignal,
   responseFormat?: { type: "json_object" },
+  meta?: VisionCallMeta,
 ): Promise<VisionCallResult> {
   const failureReasons: string[] = [];
 
@@ -175,6 +195,19 @@ export async function callVisionBackend(
     const base = apiBaseFor(provider);
     const result = await callVisionModelAt(base, slot.model_id, content, apiKey, signal, responseFormat);
     if (result.ok) {
+      // H2: record the provider's own usage under the `vision` source so this
+      // otherwise-invisible paid call shows up in `usage forensics`. Fail-open.
+      if (meta?.sessionId && result.usage) {
+        try {
+          recordUsageEvent(meta.sessionId, "vision", slot.model_id, {
+            inputTokens: result.usage.inputTokens,
+            outputTokens: result.usage.outputTokens,
+            totalTokens: result.usage.totalTokens,
+          });
+        } catch {
+          /* usage recording is best-effort — never break the vision call */
+        }
+      }
       return { ok: true, text: result.text, model: slot.model_id, provider };
     }
     failureReasons.push(`${slot.model_id}@${provider}: ${result.reason}`);
@@ -184,7 +217,7 @@ export async function callVisionBackend(
   return { ok: false, reason: failureReasons.join(" | ") || "no vision backend configured" };
 }
 
-type VisionHttpResult = { ok: true; text: string } | { ok: false; reason: string };
+type VisionHttpResult = { ok: true; text: string; usage?: VisionUsage } | { ok: false; reason: string };
 
 async function callVisionModelAt(
   baseURL: string,
@@ -237,10 +270,20 @@ async function callVisionModelAt(
 
   const data = (await res.json().catch(() => null)) as {
     choices?: Array<{ message?: { content?: string } }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   } | null;
   const text = data?.choices?.[0]?.message?.content;
   if (!text) return { ok: false, reason: "empty response body" };
-  return { ok: true, text };
+  // OpenAI-compatible usage block (H2). Absent on some backends → omit.
+  const u = data?.usage;
+  const usage: VisionUsage | undefined = u
+    ? {
+        inputTokens: u.prompt_tokens ?? 0,
+        outputTokens: u.completion_tokens ?? 0,
+        totalTokens: u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0),
+      }
+    : undefined;
+  return { ok: true, text, usage };
 }
 
 /** Ask the vision model to write as direct sight for the primary (text-only) agent. */

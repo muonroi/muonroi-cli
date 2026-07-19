@@ -1155,7 +1155,7 @@ export class MessageProcessor {
       } else {
         try {
           if (historyHasImages) {
-            const historyResult = await proxyVision(deps.messages, turnModelId, signal);
+            const historyResult = await proxyVision(deps.messages, turnModelId, signal, deps.session?.id);
             if (historyResult.proxied) {
               deps.setMessages(historyResult.messages);
               yield {
@@ -1165,7 +1165,12 @@ export class MessageProcessor {
             }
           }
           if (turnHasImages) {
-            const proxyResult = await proxyVision([userModelMessage, userEnrichedMessage], turnModelId, signal);
+            const proxyResult = await proxyVision(
+              [userModelMessage, userEnrichedMessage],
+              turnModelId,
+              signal,
+              deps.session?.id,
+            );
             if (proxyResult.proxied) {
               userModelMessage = proxyResult.messages[0];
               userEnrichedMessage = proxyResult.messages[1];

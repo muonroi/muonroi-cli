@@ -51,7 +51,6 @@
 //   - reasoning-strip (provider quirk)       — turnCaps.sanitizeHistory
 
 import { type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
-import { generateTextStreamed } from "../providers/streamed-generate.js";
 import { getEffectiveCouncilRoleCount } from "../council/leader.js";
 import { recordArtifact } from "../ee/artifact-cache.js";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
@@ -116,6 +115,7 @@ import {
   resolveTemperatureParam,
   shouldDropParam,
 } from "../providers/runtime.js";
+import { generateTextStreamed } from "../providers/streamed-generate.js";
 import type { ProviderId } from "../providers/types.js";
 import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
 import { wireDebug } from "../providers/wire-debug.js";
@@ -2642,6 +2642,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   turnModelId,
                   signal,
                   part.toolCallId,
+                  deps.session?.id,
                 );
                 if (bridgeResult.proxied) {
                   tr = {

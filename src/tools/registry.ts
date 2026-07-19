@@ -1434,7 +1434,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         required: ["image_source"],
       }),
       execute: async (input: any) => {
-        return analyzeImageFromSource(input.image_source, input.question, cwd);
+        return analyzeImageFromSource(input.image_source, input.question, cwd, undefined, opts?.sessionId);
       },
     });
 
@@ -1460,7 +1460,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         required: ["question"],
       }),
       execute: async (input: any) => {
-        return askVisionProxy(input.question, input.image_id_or_path, cwd);
+        return askVisionProxy(input.question, input.image_id_or_path, cwd, undefined, opts?.sessionId);
       },
     });
 
