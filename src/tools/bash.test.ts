@@ -94,3 +94,42 @@ describe("BashTool non-sandbox behavior", () => {
     expect(bash.getCwd()).toBe(root);
   });
 });
+
+// Exit-code semantics: a benign non-zero exit (pipe truncation, grep/diff/test
+// boolean answers, timeouts) must not masquerade as a broken command. These run
+// under a POSIX shell only — cmd/pwsh speak different syntax.
+describe("BashTool exit-code reporting", () => {
+  const bash = new BashTool(process.cwd(), { shellSettings: { kind: "bash" } });
+  const posix = bash.getResolvedShell().isPosix;
+
+  it("treats SIGPIPE 141 with output as success (| head truncation is benign)", async () => {
+    if (!posix) return;
+    const r = await bash.execute("set -o pipefail; seq 1 200000 | head -3");
+    expect(r.success).toBe(true);
+    expect(r.output ?? "").toContain("1");
+    expect(r.output ?? "").toMatch(/SIGPIPE/);
+  });
+
+  it("keeps a benign non-zero exit (grep no-match) as failure but annotates the code", async () => {
+    if (!posix) return;
+    const r = await bash.execute("printf 'a\\nb\\n' | grep -c 'zzznope'");
+    expect(r.success).toBe(false);
+    // The count '0' IS the answer — the model must still see it, plus the code.
+    expect(r.error ?? "").toContain("0");
+    expect(r.error ?? "").toMatch(/\[exit code 1\]/);
+  });
+
+  it("labels a timeout kill instead of presenting the echoed output as an error", async () => {
+    if (!posix) return;
+    const r = await bash.execute("echo partial; sleep 5", 1000);
+    expect(r.success).toBe(false);
+    expect(r.error ?? "").toMatch(/timed out after 1000ms/);
+  });
+
+  it("still reports a genuine command failure as a failure", async () => {
+    if (!posix) return;
+    const r = await bash.execute("echo working; false");
+    expect(r.success).toBe(false);
+    expect(r.error ?? "").toMatch(/\[exit code 1\]/);
+  });
+});

@@ -174,7 +174,12 @@ export class BashTool {
 
             const stdout = stripAnsi(stdoutRaw);
             const stderr = stripAnsi(stderrRaw);
-            const exitCode = err && typeof err.code === "number" ? err.code : err ? 1 : 0;
+            // exec discards signal/timeout into a bare `err`. Recover them so we
+            // never record `exitCode:1` for a signal death and can annotate why.
+            const execErr = err as (NodeJS.ErrnoException & { killed?: boolean; signal?: string }) | null;
+            const timedOut = Boolean(execErr?.killed);
+            const signal = execErr?.signal ?? undefined;
+            const exitCode = err && typeof err.code === "number" ? err.code : err ? (signal ? 128 : 1) : 0;
             recordBashRun({
               id: runId,
               command,
@@ -186,13 +191,43 @@ export class BashTool {
             const totalChars = stdout.length + stderr.length;
             const output = stdout + (stderr ? `\nSTDERR: ${stderr}` : "");
             if (err) {
+              // Exit 141 = 128 + SIGPIPE: the pipe reader (`| head`, `| grep -q`)
+              // closed after getting what it needed. With real stdout present this
+              // is the requested answer, not a failure — a build/test that fails on
+              // its own merits never dies of SIGPIPE. Only reachable via pipefail or
+              // a direct SIGPIPE death, which safety-conscious models trigger with
+              // `set -o pipefail; … | head`. Do NOT flip a genuine crash: require
+              // stdout and no timeout kill.
+              if (!timedOut && (exitCode === 141 || signal === "SIGPIPE") && stdout.trim()) {
+                finish({
+                  success: true,
+                  output: `${output.trim()}\n[exit 141 (SIGPIPE): output truncated by a pipe reader such as | head — benign]`,
+                  bashRunId: runId,
+                  bashTotalChars: totalChars,
+                });
+                return;
+              }
+              // Every other non-zero stays a failure, but the model finally sees
+              // WHY: it can then read `[exit code 1]` on a `grep`/`diff`/`test`
+              // probe as a normal boolean answer, not a broken command, while a
+              // failing build/test (exit 1/2 + output) still reads as ✗.
+              const annotation = timedOut
+                ? `[command timed out after ${timeout}ms and was killed${signal ? ` (${signal})` : ""}]`
+                : signal
+                  ? `[terminated by signal ${signal}]`
+                  : `[exit code ${exitCode}]`;
               if (output.trim()) {
-                finish({ success: false, error: output.trim(), bashRunId: runId, bashTotalChars: totalChars });
+                finish({
+                  success: false,
+                  error: `${output.trim()}\n${annotation}`,
+                  bashRunId: runId,
+                  bashTotalChars: totalChars,
+                });
                 return;
               }
               finish({
                 success: false,
-                error: `Command failed: ${err.message}`,
+                error: `${annotation} (no output): ${err.message.replace(/^Command failed: /, "")}`,
                 bashRunId: runId,
                 bashTotalChars: totalChars,
               });
