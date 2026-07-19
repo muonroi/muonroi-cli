@@ -152,13 +152,20 @@ export class InputCeilingExceededError extends Error {
 export type CeilingMode = "off" | "warn" | "throw";
 
 /**
- * Ceiling enforcement mode from `MUONROI_GATE_CEILING`. Default `off` (D1: ship
- * warn/throw only after per-(model,stage) calibration exists — D9). `warn` logs
- * a prominent row; `throw` raises `InputCeilingExceededError`.
+ * Ceiling enforcement mode from `MUONROI_GATE_CEILING`.
+ *
+ * Default is **`warn`** (log-only, never throws) so multi-dimensional ceiling
+ * stats are collected on every run without anyone remembering to opt in — a warn
+ * is a pure diagnostic and changes nothing about the call. `throw` (raises
+ * `InputCeilingExceededError` for throw-eligible stages) stays explicit opt-in,
+ * armed only after per-(model,stage) calibration (D9). `off` fully silences the
+ * ceiling path (still records the row, just no warn/throw).
  */
 export function ceilingMode(): CeilingMode {
-  const v = (process.env.MUONROI_GATE_CEILING ?? "").toLowerCase();
-  return v === "warn" || v === "throw" ? v : "off";
+  const raw = process.env.MUONROI_GATE_CEILING;
+  if (raw === undefined || raw === "") return "warn";
+  const v = raw.toLowerCase();
+  return v === "warn" || v === "throw" || v === "off" ? v : "warn";
 }
 
 /**
@@ -287,15 +294,27 @@ export function wrapModelWithGate(model: any, ctx: GateContext): any {
 }
 
 /**
- * Per-call context ceiling for a model, in tokens.
+ * Fraction of the catalog context window to use as the per-call ceiling.
  *
- * H7: the per-call ceiling derives honestly from catalog `contextWindow`. The
- * per-STAGE multiplier is deliberately NOT applied here — catalog carries no
- * per-stage ceiling; stage budgets are settings/env policy and belong to the
- * ENFORCE phase, not this meter. Returns undefined when the catalog has no
- * context window (nothing to compare against).
+ * H7: the per-call ceiling derives from catalog `contextWindow` (the honest
+ * data), but the per-STAGE budget is settings/env POLICY, not catalog data — a
+ * call rarely wants to fill the whole window before we flag it. `MUONROI_GATE_
+ * CEILING_RATIO` (0 < r <= 1, default 1.0) scales it: e.g. 0.6 flags a call
+ * once it passes 60% of the window. Out-of-range / unparseable values fall back
+ * to 1.0 (no scaling). This is the knob calibration will tune before `throw`.
+ */
+function ceilingRatio(): number {
+  const raw = Number(process.env.MUONROI_GATE_CEILING_RATIO);
+  return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : 1;
+}
+
+/**
+ * Per-call context ceiling for a model, in tokens: catalog `contextWindow`
+ * scaled by the env stage-budget ratio (H7). Returns undefined when the catalog
+ * has no context window (nothing to compare against).
  */
 export function ceilingForCall(modelInfo: ModelInfo | undefined): number | undefined {
   const ctxWindow = modelInfo?.contextWindow;
-  return typeof ctxWindow === "number" && ctxWindow > 0 ? ctxWindow : undefined;
+  if (typeof ctxWindow !== "number" || ctxWindow <= 0) return undefined;
+  return Math.floor(ctxWindow * ceilingRatio());
 }

@@ -20,6 +20,7 @@ afterEach(() => {
   mockLog.mockReset();
   delete process.env.MUONROI_GATE;
   delete process.env.MUONROI_GATE_CEILING;
+  delete process.env.MUONROI_GATE_CEILING_RATIO;
 });
 
 describe("analyzePrompt segment attribution", () => {
@@ -132,14 +133,14 @@ describe("wrapModelWithGate", () => {
 });
 
 describe("ceilingMode", () => {
-  it("defaults to off; reads warn/throw case-insensitively", () => {
+  it("defaults to warn (always-on stats); reads off/warn/throw case-insensitively", () => {
+    expect(ceilingMode()).toBe("warn"); // default when unset
+    process.env.MUONROI_GATE_CEILING = "off";
     expect(ceilingMode()).toBe("off");
-    process.env.MUONROI_GATE_CEILING = "WARN";
-    expect(ceilingMode()).toBe("warn");
-    process.env.MUONROI_GATE_CEILING = "throw";
+    process.env.MUONROI_GATE_CEILING = "THROW";
     expect(ceilingMode()).toBe("throw");
     process.env.MUONROI_GATE_CEILING = "nonsense";
-    expect(ceilingMode()).toBe("off");
+    expect(ceilingMode()).toBe("warn"); // unrecognized → warn, not silent off
   });
 });
 
@@ -204,9 +205,18 @@ describe("wrapModelWithGate ceiling enforcement", () => {
 });
 
 describe("ceilingForCall", () => {
-  it("derives from catalog contextWindow", () => {
+  it("derives from catalog contextWindow (ratio 1.0 default)", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
     expect(ceilingForCall({ contextWindow: 128000 } as any)).toBe(128000);
+  });
+  it("scales by MUONROI_GATE_CEILING_RATIO (H7 stage budget policy)", () => {
+    process.env.MUONROI_GATE_CEILING_RATIO = "0.6";
+    // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+    expect(ceilingForCall({ contextWindow: 200000 } as any)).toBe(120000);
+    process.env.MUONROI_GATE_CEILING_RATIO = "2"; // out of range → no scaling
+    // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+    expect(ceilingForCall({ contextWindow: 200000 } as any)).toBe(200000);
+    delete process.env.MUONROI_GATE_CEILING_RATIO;
   });
   it("returns undefined without a context window", () => {
     expect(ceilingForCall(undefined)).toBeUndefined();

@@ -214,10 +214,16 @@ Each step is independently shippable and reversible via its flag.
 
 ## 8. Locked decisions (approved)
 
-- **D1 — Ceiling policy rollout:** ship `warn` (log only) → after ~1 week of
-  `call_accounting` + calibration, flip to `truncate` → `throw` **only for `subagent`** (where
-  a runaway is most costly); `compaction` never throws. Flag:
-  `MUONROI_GATE_CEILING=warn|truncate|throw`.
+- **D1 — Ceiling policy rollout:** `MUONROI_GATE_CEILING` now **defaults to `warn`**
+  (log-only, always-on stats — a warn changes nothing about the call, so it is safe to
+  leave on by default and avoids "forgot to enable it"). After ~1 week of `call_accounting`
+  + calibration, flip to `throw` **only for `subagent`/`vision`** (where a runaway is most
+  costly); `main` stays advisory, `compaction`/`pil` never throw. `off` fully silences the
+  ceiling path. Per-call ceiling = catalog `contextWindow` × `MUONROI_GATE_CEILING_RATIO`
+  (0<r≤1, default 1.0) — the stage-budget knob (H7) calibration tunes before arming `throw`.
+  Live-verified: with `RATIO=0.1`, `/council` produced 5 `ceilingHit`+`warn` rows, each
+  driven by tool_results (77k–99k chars), system negligible — the ceiling flags the right
+  segment.
 - **D2 — `call_accounting` sink:** `interaction_logs` first (cheap, 14-day retention);
   promote to a dedicated table only if per-segment queries get heavy.
 - **D3 — Token estimate:** calibrated `chars/4` (this is a *ceiling*, not billing; billing
