@@ -31,6 +31,15 @@ import { getProviderOption, loadDumpedRecordings } from "./recording.js";
 // known-caveat #4 already documents as the desired state until an openai
 // model lands in catalog.json. (Evidence: CI runs 26431673369 / 26431994835
 // — the F1 failure was always the spawn timeout, never an assertion.)
+//
+// NOT a measurement gap: the invariant this suite would assert (every round
+// carries the SAME openai.promptCacheKey, session-scoped, order-independent)
+// is ALREADY covered and passing at the provider-recording layer by
+// `tests/harness/cost-leak-f1.spec.ts` (3 tests) + `computePromptCacheKey`
+// stability in `src/providers/prompt-cache-key.spec.ts`. This TUI variant is
+// redundant end-to-end coverage; un-skipping it needs an openai model in the
+// catalog OR a provider-id override threaded through `--mock-llm` (deep harness
+// plumbing) for marginal gain over the already-falsifiable provider-layer test.
 describe.skip("F1 TUI: providerOptions.openai.promptCacheKey is present and stable", () => {
   let handle: CostLeakHarness;
 
