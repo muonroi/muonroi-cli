@@ -23,22 +23,28 @@ global.fetch = vi.fn(async () => new Response(JSON.stringify({ results: [] }), {
 import { runResearchMigrationPrompt, runResearchOnboarding, validateTavilyKey } from "../research-onboarding.js";
 
 describe("validateTavilyKey", () => {
-  it("returns true on HTTP 200", async () => {
+  it("returns 'ok' on HTTP 200", async () => {
     (global.fetch as any).mockResolvedValueOnce(new Response("{}", { status: 200 }));
-    const ok = await validateTavilyKey("tvly-1234567890abcdefghij");
-    expect(ok).toBe(true);
+    expect(await validateTavilyKey("tvly-1234567890abcdefghij")).toBe("ok");
   });
 
-  it("returns false on HTTP 401", async () => {
+  it("returns 'unauthorized' on HTTP 401/403", async () => {
     (global.fetch as any).mockResolvedValueOnce(new Response("Unauthorized", { status: 401 }));
-    const ok = await validateTavilyKey("tvly-bad-keykeykeykey");
-    expect(ok).toBe(false);
+    expect(await validateTavilyKey("tvly-bad-keykeykeykey")).toBe("unauthorized");
+    (global.fetch as any).mockResolvedValueOnce(new Response("Forbidden", { status: 403 }));
+    expect(await validateTavilyKey("tvly-bad-keykeykeykey")).toBe("unauthorized");
   });
 
-  it("returns false on network error", async () => {
+  it("returns 'unverified' (not a rejection) on a network error", async () => {
     (global.fetch as any).mockRejectedValueOnce(new Error("ECONNREFUSED"));
-    const ok = await validateTavilyKey("tvly-1234567890abcdefghij");
-    expect(ok).toBe(false);
+    expect(await validateTavilyKey("tvly-1234567890abcdefghij")).toBe("unverified");
+  });
+
+  it("returns 'unverified' on a rate-limit / 5xx (inconclusive, key kept)", async () => {
+    (global.fetch as any).mockResolvedValueOnce(new Response("", { status: 429 }));
+    expect(await validateTavilyKey("tvly-1234567890abcdefghij")).toBe("unverified");
+    (global.fetch as any).mockResolvedValueOnce(new Response("", { status: 503 }));
+    expect(await validateTavilyKey("tvly-1234567890abcdefghij")).toBe("unverified");
   });
 });
 
@@ -93,6 +99,18 @@ describe("runResearchOnboarding", () => {
     });
     expect(result.tavilyEnabled).toBe(false);
     expect(settingsStore.webResearchPrompted).toBe(true);
+  });
+
+  it("Y + valid key but probe unreachable: still stores + enables (no silent discard)", async () => {
+    (global.fetch as any).mockRejectedValueOnce(new Error("ETIMEDOUT"));
+    const result = await runResearchOnboarding({
+      askYesNo: async () => "y",
+      askText: async () => "tvly-1234567890abcdefghij",
+      log: () => {},
+    });
+    expect(result.tavilyEnabled).toBe(true);
+    const tavily = mcpServers.find((s) => s.id === "tavily");
+    expect(tavily?.enabled).toBe(true);
   });
 
   it("invalid key retries up to 3 times then skips", async () => {

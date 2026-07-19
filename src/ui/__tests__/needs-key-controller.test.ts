@@ -86,14 +86,28 @@ describe("submitMcpServerKey — the paste-key pipeline", () => {
     expect(deps.reconnect).not.toHaveBeenCalled();
   });
 
-  it("surfaces validation failure and does not store or reconnect", async () => {
-    const deps = makeDeps({ validateKey: vi.fn(async () => false) });
+  it("rejects an unauthorized key (false / 'unauthorized') without storing", async () => {
+    for (const verdict of [false, "unauthorized" as const]) {
+      const deps = makeDeps({ validateKey: vi.fn(async () => verdict) });
+      const result = await submitMcpServerKey(tavily, goodKey, deps);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toMatch(/validation failed/i);
+      expect(deps.storeKey).not.toHaveBeenCalled();
+      expect(deps.setServerEnabled).not.toHaveBeenCalled();
+      expect(deps.reconnect).not.toHaveBeenCalled();
+    }
+  });
+
+  it("STORES an unverified key (offline/rate-limited probe) and flags it unverified", async () => {
+    // The core fix: a network-inconclusive probe must NOT discard the key the
+    // user pasted — otherwise it "isn't saved" and re-prompts next launch.
+    const deps = makeDeps({ validateKey: vi.fn(async () => "unverified" as const) });
     const result = await submitMcpServerKey(tavily, goodKey, deps);
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toMatch(/validation failed/i);
-    expect(deps.storeKey).not.toHaveBeenCalled();
-    expect(deps.setServerEnabled).not.toHaveBeenCalled();
-    expect(deps.reconnect).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: true, unverified: true });
+    expect(deps.storeKey).toHaveBeenCalledWith("tavily", goodKey);
+    expect(deps.setServerEnabled).toHaveBeenCalledWith("tavily", true);
+    expect(deps.resetNotice).toHaveBeenCalledWith("tavily");
+    expect(deps.reconnect).toHaveBeenCalledTimes(1);
   });
 
   it("fails cleanly when the server has no registered keychain slot", async () => {

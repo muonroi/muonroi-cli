@@ -1705,7 +1705,14 @@ export function useAppLogic(props: AppLogicProps) {
       const result = await submitMcpServerKey(server, rawKey, defaultSubmitKeyDeps());
       if (result.ok) {
         setMcpServers(loadMcpServers());
-        pushToast("info", `${server.label} key stored — reconnecting.`);
+        if (result.unverified) {
+          // Saved despite an inconclusive online probe (offline / rate-limited) —
+          // tell the user it IS stored so they don't think setup failed, but flag
+          // that it wasn't verified. It will be exercised on first real use.
+          pushToast("warn", `${server.label} key saved (couldn't verify online — will be used as-is).`);
+        } else {
+          pushToast("info", `${server.label} key stored — reconnecting.`);
+        }
         advanceNeedsKeyQueue();
       } else {
         setNeedsKeyError(result.error);

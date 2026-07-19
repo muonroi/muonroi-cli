@@ -83,17 +83,32 @@ export function setMcpServerEnabled(id: string, enabled: boolean): boolean {
 }
 
 /**
+ * Tri-state key check. `true`/`false` are still accepted from a validator for
+ * back-compat (true→ok, false→unauthorized), but a real probe should return the
+ * richer verdict so an INCONCLUSIVE result ("unverified": offline/rate-limited)
+ * does not get treated as a bad key and silently discard what the user pasted.
+ */
+export type KeyCheck = "ok" | "unauthorized" | "unverified";
+
+/** Normalize a validator's return value (boolean or KeyCheck) to a KeyCheck. */
+export function normalizeKeyCheck(v: boolean | KeyCheck): KeyCheck {
+  if (v === true) return "ok";
+  if (v === false) return "unauthorized";
+  return v;
+}
+
+/**
  * Validate a candidate key for a server. Tavily has a real API probe; other
  * key-gated servers accept any plausible-length key for now.
  * TODO: move per-server validators into MCP_KEY_REQUIREMENTS so a future
  * server ships its probe alongside its envVar/setupHint.
  */
-export async function defaultValidateMcpKey(serverId: string, key: string): Promise<boolean> {
+export async function defaultValidateMcpKey(serverId: string, key: string): Promise<KeyCheck> {
   if (serverId === "tavily") {
     const { validateTavilyKey } = await import("../mcp/research-onboarding.js");
     return validateTavilyKey(key);
   }
-  return key.trim().length >= MIN_MCP_KEY_LEN;
+  return key.trim().length >= MIN_MCP_KEY_LEN ? "ok" : "unauthorized";
 }
 
 /** Reconnect pooled MCP clients so a freshly-keyed server comes up THIS session. */
@@ -103,20 +118,26 @@ export async function reconnectMcpServers(): Promise<void> {
 }
 
 export interface SubmitKeyDeps {
-  validateKey: (serverId: string, key: string) => Promise<boolean>;
+  /** Return a KeyCheck (or a legacy boolean: true→ok, false→unauthorized). */
+  validateKey: (serverId: string, key: string) => Promise<boolean | KeyCheck>;
   storeKey: (keyId: McpKeyId, key: string) => Promise<unknown>;
   setServerEnabled: (id: string, enabled: boolean) => boolean;
   resetNotice: (id: string) => void;
   reconnect: () => Promise<void> | void;
 }
 
-export type SubmitKeyResult = { ok: true } | { ok: false; error: string };
+export type SubmitKeyResult = { ok: true; unverified?: boolean } | { ok: false; error: string };
 
 /**
  * Full "paste key" pipeline: trim → length gate → validate → store → re-enable
  * server → reset the once-per-session notice (so retries surface again if the
  * key later fails) → reconnect the pool. Deps are injected for testability;
  * production wiring is `defaultSubmitKeyDeps()`.
+ *
+ * Only an explicit `unauthorized` verdict blocks storage. An `unverified` probe
+ * (offline / rate-limited / 5xx) STORES the key anyway and reports it back so
+ * the UI can note it was saved-but-unverified — this is the fix for a valid key
+ * being silently thrown away on a setup-time network blip and re-prompted later.
  */
 export async function submitMcpServerKey(
   server: MissingKeyServer,
@@ -127,9 +148,9 @@ export async function submitMcpServerKey(
   if (key.length < MIN_MCP_KEY_LEN) {
     return { ok: false, error: `Key looks too short (min ${MIN_MCP_KEY_LEN} chars).` };
   }
-  const valid = await deps.validateKey(server.id, key);
-  if (!valid) {
-    return { ok: false, error: "Key validation failed (HTTP 401 or network error)." };
+  const check = normalizeKeyCheck(await deps.validateKey(server.id, key));
+  if (check === "unauthorized") {
+    return { ok: false, error: "Key validation failed (HTTP 401/403 — the key was rejected)." };
   }
   const keyId = MCP_KEY_REQUIREMENTS[server.id]?.keyId;
   if (!keyId) {
@@ -143,7 +164,7 @@ export async function submitMcpServerKey(
   deps.setServerEnabled(server.id, true);
   deps.resetNotice(server.id);
   await deps.reconnect();
-  return { ok: true };
+  return check === "unverified" ? { ok: true, unverified: true } : { ok: true };
 }
 
 /** Production dependency wiring for submitMcpServerKey. */
