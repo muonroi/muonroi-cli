@@ -70,6 +70,25 @@ export function listBashRunIds(): string[] {
   return [...cache.keys()];
 }
 
+/**
+ * Actionable "run_id not found" message for bash_output_get. A bare error made
+ * weaker models (observed: opencode/kimi-k2.7-code) loop — they kept calling
+ * bash_output_get with a guessed run_id, got a dead-end error, and re-guessed,
+ * once burning ~800k input tokens on one question (session 5349b59e16bf). List
+ * the valid ids AND redirect to the `bash` tool so the model has a concrete next
+ * step instead of re-guessing. Pure + exported for unit testing.
+ */
+export function bashOutputNotFoundMessage(runId: string): string {
+  const ids = listBashRunIds();
+  const valid = ids.length > 0 ? `Valid cached run_ids: ${ids.join(", ")}.` : "No bash runs are cached yet.";
+  return (
+    `ERROR: No cached bash run with id '${runId}'. ${valid}\n` +
+    "bash_output_get only re-queries output from a command that ALREADY ran. " +
+    "To run a NEW command (or if you have not run bash yet), call the `bash` tool directly — " +
+    "do NOT call bash_output_get with a guessed run_id."
+  );
+}
+
 export function clearBashOutputCache(): void {
   cache.clear();
   nextId = 1;

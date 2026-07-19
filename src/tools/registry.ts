@@ -18,7 +18,7 @@ import { needsVisionProxy } from "../providers/vision-proxy.js";
 import type { AgentMode, TaskRequest, ToolResult } from "../types/index.js";
 import { loadMcpServers } from "../utils/settings.js";
 import type { BashTool } from "./bash.js";
-import { type BashSliceMode, getBashRun, sliceBashOutput } from "./bash-output-cache.js";
+import { type BashSliceMode, bashOutputNotFoundMessage, getBashRun, sliceBashOutput } from "./bash-output-cache.js";
 import { editFile, readFile, readFiles, writeFile } from "./file.js";
 import { FileTracker } from "./file-tracker.js";
 import {
@@ -642,7 +642,8 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     execute: async (input: any) => {
       const record = getBashRun(input.run_id);
       if (!record) {
-        return truncateOutput(`ERROR: No cached bash run with id '${input.run_id}'. Cache holds up to 50 runs.`);
+        // Actionable recovery, not a dead end — see bashOutputNotFoundMessage.
+        return truncateOutput(bashOutputNotFoundMessage(input.run_id));
       }
       const slice = sliceBashOutput(record, {
         mode: input.mode as BashSliceMode,

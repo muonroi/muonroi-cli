@@ -191,3 +191,39 @@ describe("createToolLoopCapPredicate — pattern guard", () => {
     );
   });
 });
+
+describe("createToolLoopCapPredicate — all-error backstop (session 5349b59e16bf)", () => {
+  // Each step calls bash_output_get with a DIFFERENT (guessed) run_id and gets an
+  // ERROR back — the exact 800k-token loop. Different args ⇒ the args-hash
+  // detector never fires; the all-error signature collapses them so it does.
+  const errStep = (run_id: string) => ({
+    toolCalls: [{ toolName: "bash_output_get", input: { run_id, mode: "full" } }],
+    toolResults: [
+      { toolName: "bash_output_get", output: { type: "text", value: `ERROR: No cached bash run with id '${run_id}'.` } },
+    ],
+  });
+
+  it("fires the pattern guard after 3 all-error steps despite varying args", async () => {
+    const ask = vi.fn().mockResolvedValue("stop");
+    const stop = createToolLoopCapPredicate({ initialCap: 100, ask });
+    const all = [errStep("bash-0"), errStep("bash-1"), errStep("bash-2")];
+    let verdict = false;
+    for (let i = 1; i <= all.length; i++) verdict = await stop({ steps: all.slice(0, i) });
+    expect(ask).toHaveBeenCalledWith(expect.objectContaining({ kind: "pattern", toolName: "bash_output_get" }));
+    expect(verdict).toBe(true);
+  });
+
+  it("does NOT fire when steps make progress (a non-error result present)", async () => {
+    const ask = vi.fn().mockResolvedValue("stop");
+    const stop = createToolLoopCapPredicate({ initialCap: 100, ask });
+    // Distinct productive bash commands, each succeeding → never all-error, never
+    // identical args → no loop signal.
+    const okStep = (i: number) => ({
+      toolCalls: [{ toolName: "bash", input: { command: `echo step-${i}` } }],
+      toolResults: [{ toolName: "bash", output: { type: "text", value: `[bash_run_id: bash-${i}] step-${i}` } }],
+    });
+    const all = [okStep(1), okStep(2), okStep(3), okStep(4)];
+    for (let i = 1; i <= all.length; i++) await stop({ steps: all.slice(0, i) });
+    expect(ask).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "pattern" }));
+  });
+});
