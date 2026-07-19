@@ -41,6 +41,12 @@ export function fitCouncilRailRows(rows: ContextRailRow[], inner: number): Conte
   });
 }
 
+/** A full-width `── TITLE ──` section rule (lazygit side-panel header). */
+function sectionRuleText(title: string, inner: number): string {
+  const base = `── ${title} `;
+  return base.length >= inner ? base.slice(0, inner) : base.padEnd(inner, "─");
+}
+
 export function CouncilRail({
   width,
   theme,
@@ -49,11 +55,13 @@ export function CouncilRail({
   waiting,
   metaRows,
   stage,
-  children,
+  phasesNode,
+  roundsNode,
+  detailNode,
 }: {
   width: number;
   theme: Theme;
-  /** Current live status driving the NOW liveness block, or null. */
+  /** Current live status driving the VITALS liveness block, or null. */
   status: CouncilStatusData | null;
   roundLabel?: string | null;
   waiting?: boolean;
@@ -61,19 +69,19 @@ export function CouncilRail({
   metaRows: ContextRailRow[];
   /** Active sprint stage block (/ideal), or null. */
   stage?: ContextRailStage | null;
-  /** Phases / status / info cards / round list (renderCouncilMeta output). */
-  children?: ReactNode;
+  /** The PHASES section body (phase timeline), or null. */
+  phasesNode?: ReactNode;
+  /** The ROUNDS section body (round jump list), or null. */
+  roundsNode?: ReactNode;
+  /** Scrollable detail — status list / info cards / session tree / activities.
+      Pass null when there is nothing to show so the DETAIL rule is suppressed. */
+  detailNode?: ReactNode;
 }) {
   const inner = Math.max(10, width - 3);
   const fittedMetaRows = fitCouncilRailRows(metaRows, inner);
   const fittedStageRows = stage ? fitCouncilRailRows(stage.rows, inner) : [];
-  const divider = stage
-    ? (() => {
-        const base = `── ${stage.title} `;
-        return base.length >= inner ? base.slice(0, inner) : base.padEnd(inner, "─");
-      })()
-    : "";
   const allRows = stage ? [...metaRows, ...stage.rows] : metaRows;
+  const rule = (title: string) => <text fg={theme.councilLeaderBorder}>{sectionRuleText(title, inner)}</text>;
 
   return (
     <Semantic
@@ -99,7 +107,7 @@ export function CouncilRail({
         paddingRight={1}
         gap={1}
       >
-        <CouncilNowBlock status={status} roundLabel={roundLabel} waiting={waiting} width={width} theme={theme} />
+        {/* META — identity / topic / panel, pinned at the top under the border. */}
         <Semantic id="council-rail-meta" role="group" name="Council meta">
           <box flexDirection="column" flexShrink={0}>
             {fittedMetaRows.map((r, idx) => (
@@ -114,9 +122,22 @@ export function CouncilRail({
             ))}
           </box>
         </Semantic>
+        {/* ── PHASES ── */}
+        {phasesNode ? (
+          <box flexDirection="column" flexShrink={0}>
+            {rule("PHASES")}
+            {phasesNode}
+          </box>
+        ) : null}
+        {/* ── VITALS ── the heartbeat + liveness meter (most-protected). */}
+        <box flexDirection="column" flexShrink={0}>
+          {rule("VITALS")}
+          <CouncilNowBlock status={status} roundLabel={roundLabel} waiting={waiting} width={width} theme={theme} />
+        </box>
+        {/* Active sprint stage block (/ideal). */}
         {stage && (
           <box flexDirection="column" flexShrink={0}>
-            <text fg={theme.councilLeaderBorder}>{divider}</text>
+            <text fg={theme.councilLeaderBorder}>{sectionRuleText(stage.title, inner)}</text>
             {fittedStageRows.map((r, idx) => (
               <box key={`stage-${idx}`} flexDirection="column">
                 <text>
@@ -127,11 +148,24 @@ export function CouncilRail({
             ))}
           </box>
         )}
-        {children ? (
-          // biome-ignore lint/suspicious/noExplicitAny: OpenTUI stickyStart typing
-          <scrollbox flexGrow={1} stickyScroll={false} stickyStart={"top" as any}>
-            {children}
-          </scrollbox>
+        {/* ── ROUNDS ── */}
+        {roundsNode ? (
+          <box flexDirection="column" flexShrink={0}>
+            {rule("ROUNDS")}
+            {roundsNode}
+          </box>
+        ) : null}
+        {/* Scrollable detail (status list, info cards, session tree, activities)
+            takes the remaining height so a long timeline never pushes the pinned
+            PHASES / VITALS / ROUNDS sections off screen. */}
+        {detailNode ? (
+          <box flexDirection="column" flexGrow={1} minHeight={0}>
+            {rule("DETAIL")}
+            {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI stickyStart typing */}
+            <scrollbox flexGrow={1} stickyScroll={false} stickyStart={"top" as any}>
+              {detailNode}
+            </scrollbox>
+          </box>
         ) : null}
       </box>
     </Semantic>

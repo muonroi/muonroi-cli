@@ -977,13 +977,26 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // `opts.hideRounds` — the rail hides the detailed per-round breakdown while a
   // sprint stage other than planning is active (the stage block already carries
   // the compact live signal; a full round list is planning-time detail).
-  const renderCouncilMeta = (cols: number, opts?: { hideRounds?: boolean }) => (
+  // The council rail content, split into named sections so the Concept-4/1 mix
+  // rail (CouncilRail) can wrap each in its own titled `── SECTION ──` rule.
+  const councilPhasesNode = () =>
+    councilPhases.length > 0 ? (
+      <Semantic id="council-phases" role="listbox" name="Council Phases">
+        <CouncilPhaseTimeline phases={councilPhases} theme={t} expanded={councilTranscriptExpanded} />
+      </Semantic>
+    ) : null;
+  const councilRoundsNode = (cols: number, opts?: { hideRounds?: boolean }) =>
+    !opts?.hideRounds && isRoundGroupsEnabled() && councilRounds.length > 0 ? (
+      <CouncilRailRounds
+        rounds={councilRounds}
+        selected={selectedRound}
+        onSelect={setSelectedRound}
+        width={cols}
+        theme={t}
+      />
+    ) : null;
+  const councilDetailNode = (cols: number) => (
     <>
-      {councilPhases.length > 0 && (
-        <Semantic id="council-phases" role="listbox" name="Council Phases">
-          <CouncilPhaseTimeline phases={councilPhases} theme={t} expanded={councilTranscriptExpanded} />
-        </Semantic>
-      )}
       {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
       {councilStatuses.length > 0 && (
         <Semantic id="council-status" role="listbox" name="Council Status">
@@ -1000,15 +1013,14 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
           <CouncilInfoCardView key={`info-card-${idx}-${card.title}`} card={card} terminalCols={cols} theme={t} />
         </Semantic>
       ))}
-      {!opts?.hideRounds && isRoundGroupsEnabled() && councilRounds.length > 0 && (
-        <CouncilRailRounds
-          rounds={councilRounds}
-          selected={selectedRound}
-          onSelect={setSelectedRound}
-          width={cols}
-          theme={t}
-        />
-      )}
+    </>
+  );
+  // Flat composition preserved for the legacy (non-surface) rail + inline paths.
+  const renderCouncilMeta = (cols: number, opts?: { hideRounds?: boolean }) => (
+    <>
+      {councilPhasesNode()}
+      {councilDetailNode(cols)}
+      {councilRoundsNode(cols, opts)}
     </>
   );
 
@@ -1041,19 +1053,30 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
       waiting={councilWaiting}
       metaRows={railRows}
       stage={railStage}
-    >
-      <SessionTreeCard nodes={sessionTree} />
-      <AgentRailActivities
-        activities={agentActivities}
-        selected={selectedActivity}
-        onSelect={setSelectedActivity}
-        width={councilSurfaceRailWidth}
-        t={t}
-      />
-      {renderCouncilMeta(councilSurfaceRailWidth, {
+      phasesNode={councilPhasesNode()}
+      roundsNode={councilRoundsNode(councilSurfaceRailWidth, {
         hideRounds: !!sprintStage && sprintStage.stage !== "planning",
       })}
-    </CouncilRail>
+      detailNode={
+        sessionTree.length > 0 ||
+        agentActivities.length > 0 ||
+        !!productStatus ||
+        councilStatuses.length > 0 ||
+        councilInfoCards.length > 0 ? (
+          <>
+            <SessionTreeCard nodes={sessionTree} />
+            <AgentRailActivities
+              activities={agentActivities}
+              selected={selectedActivity}
+              onSelect={setSelectedActivity}
+              width={councilSurfaceRailWidth}
+              t={t}
+            />
+            {councilDetailNode(councilSurfaceRailWidth)}
+          </>
+        ) : null
+      }
+    />
   );
   const councilStripNode = (
     <CouncilStrip

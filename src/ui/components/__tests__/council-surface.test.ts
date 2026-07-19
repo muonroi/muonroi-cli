@@ -3,6 +3,7 @@ import type { CouncilStatusData } from "../../../types/index.js";
 import { resolveCouncilLiveness } from "../council-now.js";
 import { packStripSegments } from "../council-strip.js";
 import { fitCouncilRailRows } from "../council-rail.js";
+import { heartbeatBars } from "../council-now.js";
 import { resolveCouncilLayout, resolveCouncilRailWidth } from "../council-surface.js";
 
 describe("resolveCouncilLayout", () => {
@@ -113,5 +114,26 @@ describe("fitCouncilRailRows", () => {
     );
     expect(rows[0]!.value).toBe("Agent");
     expect(rows[1]!.value).toBe("0/5 criteria met");
+  });
+});
+
+describe("heartbeatBars", () => {
+  it("returns empty until there are at least two samples to diff", () => {
+    expect(heartbeatBars([])).toBe("");
+    expect(heartbeatBars([100])).toBe("");
+  });
+
+  it("renders one bar per delta, newest burst full-height", () => {
+    // deltas: 10, 40 → normalised 0.25, 1.0 → a short then a full block.
+    const bars = heartbeatBars([0, 10, 50]);
+    expect(bars.length).toBe(2);
+    expect(bars.at(-1)).toBe("█"); // the max delta is always full-height
+  });
+
+  it("treats a frozen stream (no growth) as flat low bars", () => {
+    const bars = heartbeatBars([500, 500, 500]);
+    expect(bars.length).toBe(2);
+    // zero deltas → lowest block, never blank
+    expect([...bars].every((c) => c === "▁")).toBe(true);
   });
 });
