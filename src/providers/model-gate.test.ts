@@ -3,7 +3,15 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { analyzePrompt, ceilingForCall, meterCall, wrapModelWithGate } from "./model-gate.js";
+import {
+  analyzePrompt,
+  ceilingForCall,
+  ceilingMode,
+  enforceCeiling,
+  InputCeilingExceededError,
+  meterCall,
+  wrapModelWithGate,
+} from "./model-gate.js";
 
 const mockLog = vi.hoisted(() => vi.fn());
 vi.mock("../storage/interaction-log.js", () => ({ logInteraction: mockLog }));
@@ -11,6 +19,7 @@ vi.mock("../storage/interaction-log.js", () => ({ logInteraction: mockLog }));
 afterEach(() => {
   mockLog.mockReset();
   delete process.env.MUONROI_GATE;
+  delete process.env.MUONROI_GATE_CEILING;
 });
 
 describe("analyzePrompt segment attribution", () => {
@@ -119,6 +128,78 @@ describe("wrapModelWithGate", () => {
     expect(inner).toHaveBeenCalledTimes(1);
     expect(mockLog).toHaveBeenCalledTimes(1);
     expect(mockLog.mock.calls[0][1]).toBe("call_accounting");
+  });
+});
+
+describe("ceilingMode", () => {
+  it("defaults to off; reads warn/throw case-insensitively", () => {
+    expect(ceilingMode()).toBe("off");
+    process.env.MUONROI_GATE_CEILING = "WARN";
+    expect(ceilingMode()).toBe("warn");
+    process.env.MUONROI_GATE_CEILING = "throw";
+    expect(ceilingMode()).toBe("throw");
+    process.env.MUONROI_GATE_CEILING = "nonsense";
+    expect(ceilingMode()).toBe("off");
+  });
+});
+
+describe("enforceCeiling", () => {
+  const over = {
+    estInputTokens: 500,
+    bySegment: { system: 0, history: 2000, toolResults: 0 },
+    fileParts: 0,
+    fileBytes: 0,
+    chars: 2000,
+  };
+  const under = { ...over, estInputTokens: 50 };
+
+  it("off mode never throws even when over ceiling", () => {
+    process.env.MUONROI_GATE_CEILING = "off";
+    expect(() => enforceCeiling(over, { stage: "subagent", modelId: "m", ceiling: 100 })).not.toThrow();
+  });
+
+  it("throw mode throws InputCeilingExceededError for a throw-eligible stage", () => {
+    process.env.MUONROI_GATE_CEILING = "throw";
+    expect(() => enforceCeiling(over, { stage: "subagent", modelId: "m", ceiling: 100 })).toThrow(
+      InputCeilingExceededError,
+    );
+  });
+
+  it("throw mode does NOT throw for a non-eligible stage (main stays advisory)", () => {
+    process.env.MUONROI_GATE_CEILING = "throw";
+    expect(() => enforceCeiling(over, { stage: "main", modelId: "m", ceiling: 100 })).not.toThrow();
+  });
+
+  it("never throws when under the ceiling", () => {
+    process.env.MUONROI_GATE_CEILING = "throw";
+    expect(() => enforceCeiling(under, { stage: "subagent", modelId: "m", ceiling: 100 })).not.toThrow();
+  });
+
+  it("never throws without a known ceiling", () => {
+    process.env.MUONROI_GATE_CEILING = "throw";
+    expect(() => enforceCeiling(over, { stage: "subagent", modelId: "m" })).not.toThrow();
+  });
+});
+
+describe("wrapModelWithGate ceiling enforcement", () => {
+  it("throws before delegating when a subagent call exceeds the ceiling in throw mode", async () => {
+    process.env.MUONROI_GATE_CEILING = "throw";
+    const inner = vi.fn(async () => ({ stream: "S" }));
+    const model = {
+      specificationVersion: "v3" as const,
+      provider: "x",
+      modelId: "m1",
+      supportedUrls: {},
+      doGenerate: async () => ({}),
+      doStream: inner,
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+    const wrapped = wrapModelWithGate(model as any, { stage: "subagent", modelId: "m1", sessionId: "s1", ceiling: 10 });
+    const big = "x".repeat(400); // ~100 est tokens > 10 ceiling
+    await expect(wrapped.doStream({ prompt: [{ role: "user", content: big }] })).rejects.toBeInstanceOf(
+      InputCeilingExceededError,
+    );
+    expect(inner).not.toHaveBeenCalled(); // fail BEFORE the expensive call
   });
 });
 

@@ -1,4 +1,5 @@
 import { APICallError } from "@ai-sdk/provider";
+import { InputCeilingExceededError } from "../providers/model-gate";
 
 const STATUS_MESSAGES: Record<number, string> = {
   400: "The provider rejected this request as invalid — usually a parameter or model it doesn't support. Try switching models with `-m <model>`, or simplify the request and retry.",
@@ -15,6 +16,10 @@ const STATUS_MESSAGES: Record<number, string> = {
 };
 
 export function isContextLimitError(error: unknown): boolean {
+  // H4: the metered gate's typed ceiling error is an input-overflow condition
+  // too, but carries a bespoke message a regex would miss — recognize it so the
+  // overflow-recovery path (compact-and-retry) fires for it.
+  if (error instanceof InputCeilingExceededError) return true;
   const message = error instanceof Error ? error.message : String(error);
   return /(context|token|prompt).*(limit|length|large|window|overflow)|too many tokens|maximum context/i.test(message);
 }

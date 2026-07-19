@@ -127,6 +127,50 @@ export function analyzePrompt(prompt: unknown): CallComposition {
 }
 
 /**
+ * Thrown when a call's estimated input exceeds its ceiling AND the ceiling mode
+ * is `throw`. Typed so the orchestrator's overflow-recovery path can recognize
+ * it (H4) — it is NOT a provider APICallError, so a message regex would miss it.
+ */
+export class InputCeilingExceededError extends Error {
+  readonly stage: GateStage;
+  readonly est: number;
+  readonly ceiling: number;
+  readonly topSegments: CallComposition["bySegment"];
+  constructor(stage: GateStage, est: number, ceiling: number, topSegments: CallComposition["bySegment"]) {
+    super(
+      `Input ceiling exceeded on '${stage}' call: est ${est} tokens > ceiling ${ceiling}. ` +
+        `Segments — system:${topSegments.system} history:${topSegments.history} tool_results:${topSegments.toolResults} chars.`,
+    );
+    this.name = "InputCeilingExceededError";
+    this.stage = stage;
+    this.est = est;
+    this.ceiling = ceiling;
+    this.topSegments = topSegments;
+  }
+}
+
+export type CeilingMode = "off" | "warn" | "throw";
+
+/**
+ * Ceiling enforcement mode from `MUONROI_GATE_CEILING`. Default `off` (D1: ship
+ * warn/throw only after per-(model,stage) calibration exists — D9). `warn` logs
+ * a prominent row; `throw` raises `InputCeilingExceededError`.
+ */
+export function ceilingMode(): CeilingMode {
+  const v = (process.env.MUONROI_GATE_CEILING ?? "").toLowerCase();
+  return v === "warn" || v === "throw" ? v : "off";
+}
+
+/**
+ * Stages where a `throw` ceiling is armed. D1: enforce only where a runaway is
+ * most costly — the sub-agent tool loop (and its vision variant), whose growing
+ * history is the documented leak. `main` stays advisory (warn) even in throw
+ * mode so a user's own long turn is never hard-killed mid-flight; compaction/pil
+ * are never enforced (compaction IS the recovery mechanism — H4).
+ */
+const THROW_ELIGIBLE: ReadonlySet<GateStage> = new Set<GateStage>(["subagent", "vision"]);
+
+/**
  * Write one `call_accounting` row for a metered call. Fail-open: logging must
  * never break a turn (a call with no sessionId is skipped — nowhere to attribute).
  */
@@ -149,6 +193,7 @@ export function meterCall(prompt: unknown, ctx: GateContext, op: "stream" | "gen
         fileBytes: comp.fileBytes,
         ceiling: ctx.ceiling ?? null,
         ceilingHit,
+        ceilingMode: ceilingMode(),
       },
     });
   } catch {
@@ -157,7 +202,66 @@ export function meterCall(prompt: unknown, ctx: GateContext, op: "stream" | "gen
 }
 
 /**
- * Wrap a resolved model so every doStream/doGenerate call is metered.
+ * Enforce the per-call ceiling per the current mode. Throws
+ * `InputCeilingExceededError` in `throw` mode for a throw-eligible stage; logs a
+ * warning in `warn` mode. Never throws for `off`, a non-eligible stage, or when
+ * the ceiling is unknown. `analyzePrompt` is passed in so the prompt is walked
+ * once by the caller (no double walk).
+ */
+export function enforceCeiling(comp: CallComposition, ctx: GateContext): void {
+  if (typeof ctx.ceiling !== "number") return;
+  if (comp.estInputTokens <= ctx.ceiling) return;
+  const mode = ceilingMode();
+  if (mode === "off") return;
+  if (mode === "throw" && THROW_ELIGIBLE.has(ctx.stage)) {
+    throw new InputCeilingExceededError(ctx.stage, comp.estInputTokens, ctx.ceiling, comp.bySegment);
+  }
+  // warn (or throw on a non-eligible stage): visibility only, never kill the call.
+  console.warn(
+    `[model-gate] ceiling ${mode === "throw" ? "warn (stage not throw-eligible)" : "warn"}: ` +
+      `stage=${ctx.stage} est=${comp.estInputTokens} > ceiling=${ctx.ceiling} model=${ctx.modelId}`,
+  );
+}
+
+/**
+ * Meter + enforce a single call. Walks the prompt ONCE, records the accounting
+ * row, then applies the ceiling policy (which may throw before delegating).
+ */
+function gateCall(prompt: unknown, ctx: GateContext, op: "stream" | "generate"): void {
+  let comp: CallComposition | undefined;
+  try {
+    comp = analyzePrompt(prompt);
+    if (ctx.sessionId) {
+      const ceilingHit = typeof ctx.ceiling === "number" ? comp.estInputTokens > ctx.ceiling : false;
+      logInteraction(ctx.sessionId, "call_accounting", {
+        eventSubtype: ctx.stage,
+        model: ctx.modelId,
+        inputTokens: comp.estInputTokens,
+        data: {
+          op,
+          stage: ctx.stage,
+          estInputTokens: comp.estInputTokens,
+          chars: comp.chars,
+          bySegment: comp.bySegment,
+          fileParts: comp.fileParts,
+          fileBytes: comp.fileBytes,
+          ceiling: ctx.ceiling ?? null,
+          ceilingHit,
+          ceilingMode: ceilingMode(),
+        },
+      });
+    }
+  } catch {
+    // Metering is fail-open — but enforcement must still run below if we got a
+    // composition (a DB write failure must not disarm the ceiling).
+  }
+  // Enforce OUTSIDE the fail-open catch so a genuine ceiling throw propagates.
+  if (comp) enforceCeiling(comp, ctx);
+}
+
+/**
+ * Wrap a resolved model so every doStream/doGenerate call is metered and, when
+ * armed, ceiling-enforced.
  *
  * Returns a NEW model instance (H6) — the input model is never mutated. When the
  * gate is disabled or the model is falsy, returns the model untouched so callers
@@ -171,11 +275,11 @@ export function wrapModelWithGate(model: any, ctx: GateContext): any {
     middleware: {
       specificationVersion: "v3",
       wrapStream: async ({ doStream, params }) => {
-        meterCall((params as { prompt?: unknown }).prompt, ctx, "stream");
+        gateCall((params as { prompt?: unknown }).prompt, ctx, "stream");
         return doStream();
       },
       wrapGenerate: async ({ doGenerate, params }) => {
-        meterCall((params as { prompt?: unknown }).prompt, ctx, "generate");
+        gateCall((params as { prompt?: unknown }).prompt, ctx, "generate");
         return doGenerate();
       },
     },

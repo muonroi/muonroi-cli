@@ -105,6 +105,7 @@ import {
   listCachedImages,
   scrubImagePayloadsInMessages,
 } from "../providers/mcp-vision-bridge.js";
+import { InputCeilingExceededError } from "../providers/model-gate";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
   buildTurnProviderOptions,
@@ -3858,7 +3859,18 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             streamOk = true;
           }
         } catch (responseError: unknown) {
-          if (!attemptedOverflowRecovery && !assistantText.trim() && modelInfo && isContextLimitError(responseError)) {
+          // H4: recover from an input-overflow error via compact-and-retry-once.
+          // The `!assistantText.trim()` guard applies only to provider
+          // context-limit errors (which fire before any text streams). The gate's
+          // typed InputCeilingExceededError trips at a LATE step, AFTER text has
+          // already streamed, so it must recover regardless of assistantText.
+          const isCeilingError = responseError instanceof InputCeilingExceededError;
+          if (
+            !attemptedOverflowRecovery &&
+            modelInfo &&
+            isContextLimitError(responseError) &&
+            (isCeilingError || !assistantText.trim())
+          ) {
             attemptedOverflowRecovery = true;
             continue;
           }
