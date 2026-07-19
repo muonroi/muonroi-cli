@@ -161,11 +161,20 @@ export type CeilingMode = "off" | "warn" | "throw";
  * armed only after per-(model,stage) calibration (D9). `off` fully silences the
  * ceiling path (still records the row, just no warn/throw).
  */
-export function ceilingMode(): CeilingMode {
+export function ceilingMode(stage?: GateStage): CeilingMode {
   const raw = process.env.MUONROI_GATE_CEILING;
-  if (raw === undefined || raw === "") return "warn";
-  const v = raw.toLowerCase();
-  return v === "warn" || v === "throw" || v === "off" ? v : "warn";
+  if (raw !== undefined && raw !== "") {
+    // Explicit global override wins for every stage.
+    const v = raw.toLowerCase();
+    return v === "warn" || v === "throw" || v === "off" ? v : "warn";
+  }
+  // No explicit setting: per-stage DEFAULT. The sub-agent tool loop (and its
+  // vision variant) is the documented runaway source and is already bounded by
+  // the cumulative cap (~60k est), so a `throw` backstop there is safe (only an
+  // escapee past the cap trips it) and worth having on by default. Every other
+  // stage defaults to `warn` (log-only stats) — a user's own long turn or a
+  // council/compaction call is never hard-killed without an explicit opt-in.
+  return stage && THROW_ELIGIBLE.has(stage) ? "throw" : "warn";
 }
 
 /**
@@ -177,6 +186,26 @@ export function ceilingMode(): CeilingMode {
  */
 const THROW_ELIGIBLE: ReadonlySet<GateStage> = new Set<GateStage>(["subagent", "vision"]);
 
+/** Default absolute est-token throw cap (calibrated). See throwCeilingTokens. */
+const DEFAULT_THROW_MAX_TOKENS = 100_000;
+
+/**
+ * The absolute est-token ceiling above which a throw-eligible stage THROWS.
+ *
+ * Calibrated (2026-07-19, live measurement): `chars/4` under-estimates real
+ * provider tokens by ~2× for muonroi's token-dense system prompts (a 1:1
+ * chitchat call measured est 20,563 vs real 45,171 = 2.2×). So this est cap of
+ * 100k ≈ ~200k REAL tokens — decisively a runaway. It sits ABOVE the sub-agent
+ * cumulative cap budget (240k chars ≈ 60k est), so normal capped work can never
+ * trip it; only a call that ESCAPED the cap (a new bypass / regression) does.
+ * This is deliberately absolute, NOT window×ratio: a single ratio collides with
+ * the 60k cap budget on small-window models. Tune via `MUONROI_GATE_THROW_MAX_TOKENS`.
+ */
+export function throwCeilingTokens(): number {
+  const raw = Number(process.env.MUONROI_GATE_THROW_MAX_TOKENS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_THROW_MAX_TOKENS;
+}
+
 /**
  * Write one `call_accounting` row for a metered call. Fail-open: logging must
  * never break a turn (a call with no sessionId is skipped — nowhere to attribute).
@@ -184,50 +213,71 @@ const THROW_ELIGIBLE: ReadonlySet<GateStage> = new Set<GateStage>(["subagent", "
 export function meterCall(prompt: unknown, ctx: GateContext, op: "stream" | "generate"): void {
   try {
     if (!ctx.sessionId) return;
-    const comp = analyzePrompt(prompt);
-    const ceilingHit = typeof ctx.ceiling === "number" ? comp.estInputTokens > ctx.ceiling : false;
-    logInteraction(ctx.sessionId, "call_accounting", {
-      eventSubtype: ctx.stage,
-      model: ctx.modelId,
-      inputTokens: comp.estInputTokens,
-      data: {
-        op,
-        stage: ctx.stage,
-        estInputTokens: comp.estInputTokens,
-        chars: comp.chars,
-        bySegment: comp.bySegment,
-        fileParts: comp.fileParts,
-        fileBytes: comp.fileBytes,
-        ceiling: ctx.ceiling ?? null,
-        ceilingHit,
-        ceilingMode: ceilingMode(),
-      },
-    });
+    logInteraction(ctx.sessionId, "call_accounting", buildAccountingRow(analyzePrompt(prompt), ctx, op));
   } catch {
     // Fail-open — the meter must never break the call it measures.
   }
 }
 
+/** Shape the `call_accounting` row from a walked composition (shared by meterCall + gateCall). */
+function buildAccountingRow(
+  comp: CallComposition,
+  ctx: GateContext,
+  op: "stream" | "generate",
+): Parameters<typeof logInteraction>[2] {
+  const ceilingHit = typeof ctx.ceiling === "number" ? comp.estInputTokens > ctx.ceiling : false;
+  const eligible = THROW_ELIGIBLE.has(ctx.stage);
+  const throwCeiling = eligible ? throwCeilingTokens() : null;
+  return {
+    eventSubtype: ctx.stage,
+    model: ctx.modelId,
+    inputTokens: comp.estInputTokens,
+    data: {
+      op,
+      stage: ctx.stage,
+      estInputTokens: comp.estInputTokens,
+      chars: comp.chars,
+      bySegment: comp.bySegment,
+      fileParts: comp.fileParts,
+      fileBytes: comp.fileBytes,
+      ceiling: ctx.ceiling ?? null,
+      ceilingHit,
+      ceilingMode: ceilingMode(ctx.stage),
+      throwCeiling,
+      throwHit: throwCeiling !== null && comp.estInputTokens > throwCeiling,
+    },
+  };
+}
+
 /**
- * Enforce the per-call ceiling per the current mode. Throws
- * `InputCeilingExceededError` in `throw` mode for a throw-eligible stage; logs a
- * warning in `warn` mode. Never throws for `off`, a non-eligible stage, or when
- * the ceiling is unknown. `analyzePrompt` is passed in so the prompt is walked
- * once by the caller (no double walk).
+ * Enforce the ceiling. Two distinct lines:
+ *  - THROW line (absolute `throwCeilingTokens()`, eligible stages only): a hard
+ *    backstop for a runaway that escaped the cumulative cap. Raises
+ *    `InputCeilingExceededError`, which the orchestrator recovers via
+ *    compact-and-retry-once (H4).
+ *  - WARN line (`ctx.ceiling` = catalog window × ratio): visibility only, logs a
+ *    warning, never kills the call.
+ * `off` mode silences both. `comp` is passed in so the prompt is walked once.
  */
 export function enforceCeiling(comp: CallComposition, ctx: GateContext): void {
-  if (typeof ctx.ceiling !== "number") return;
-  if (comp.estInputTokens <= ctx.ceiling) return;
-  const mode = ceilingMode();
+  const mode = ceilingMode(ctx.stage);
   if (mode === "off") return;
+  const est = comp.estInputTokens;
+
+  // Hard throw line first — absolute, eligible stages, only when armed.
   if (mode === "throw" && THROW_ELIGIBLE.has(ctx.stage)) {
-    throw new InputCeilingExceededError(ctx.stage, comp.estInputTokens, ctx.ceiling, comp.bySegment);
+    const throwAt = throwCeilingTokens();
+    if (est > throwAt) {
+      throw new InputCeilingExceededError(ctx.stage, est, throwAt, comp.bySegment);
+    }
   }
-  // warn (or throw on a non-eligible stage): visibility only, never kill the call.
-  console.warn(
-    `[model-gate] ceiling ${mode === "throw" ? "warn (stage not throw-eligible)" : "warn"}: ` +
-      `stage=${ctx.stage} est=${comp.estInputTokens} > ceiling=${ctx.ceiling} model=${ctx.modelId}`,
-  );
+
+  // Soft warn line — window×ratio, visibility only.
+  if (typeof ctx.ceiling === "number" && est > ctx.ceiling) {
+    console.warn(
+      `[model-gate] ceiling warn: stage=${ctx.stage} est=${est} > ceiling=${ctx.ceiling} model=${ctx.modelId}`,
+    );
+  }
 }
 
 /**
@@ -239,24 +289,7 @@ function gateCall(prompt: unknown, ctx: GateContext, op: "stream" | "generate"):
   try {
     comp = analyzePrompt(prompt);
     if (ctx.sessionId) {
-      const ceilingHit = typeof ctx.ceiling === "number" ? comp.estInputTokens > ctx.ceiling : false;
-      logInteraction(ctx.sessionId, "call_accounting", {
-        eventSubtype: ctx.stage,
-        model: ctx.modelId,
-        inputTokens: comp.estInputTokens,
-        data: {
-          op,
-          stage: ctx.stage,
-          estInputTokens: comp.estInputTokens,
-          chars: comp.chars,
-          bySegment: comp.bySegment,
-          fileParts: comp.fileParts,
-          fileBytes: comp.fileBytes,
-          ceiling: ctx.ceiling ?? null,
-          ceilingHit,
-          ceilingMode: ceilingMode(),
-        },
-      });
+      logInteraction(ctx.sessionId, "call_accounting", buildAccountingRow(comp, ctx, op));
     }
   } catch {
     // Metering is fail-open — but enforcement must still run below if we got a
