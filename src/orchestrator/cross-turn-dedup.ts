@@ -53,6 +53,19 @@ export interface CrossTurnDedupStats {
   size: number;
   /** Lifetime number of distinct outputs inserted. */
   inserts: number;
+  /**
+   * Times the same-turn policy RE-SERVED full content instead of stubbing it
+   * (the deliberate O1/O2 trade-off that avoids the single-read fallback). Each
+   * one re-bills its content — the "leak" the dedup knowingly accepts.
+   */
+  sameTurnReserves: number;
+  /**
+   * Total characters re-served via the same-turn passthrough. This is the
+   * MEASURABLE cost of the same-turn re-serve policy — invisible before because
+   * `hits` only counted stubs, never the passthrough re-bills. Divide by ~4 for
+   * a rough token estimate. Surfaced so a fix to the policy is falsifiable.
+   */
+  sameTurnReservedChars: number;
 }
 
 export interface CrossTurnDedupOptions {
@@ -77,6 +90,8 @@ export class CrossTurnDedup {
   private currentTurn = 0;
   private hits = 0;
   private inserts = 0;
+  private sameTurnReserves = 0;
+  private sameTurnReservedChars = 0;
 
   constructor(opts: CrossTurnDedupOptions = {}) {
     this.maxEntries = Math.max(1, opts.maxEntries ?? DEFAULT_MAX_ENTRIES);
@@ -95,7 +110,13 @@ export class CrossTurnDedup {
   }
 
   public getStats(): CrossTurnDedupStats {
-    return { hits: this.hits, size: this.cache.size, inserts: this.inserts };
+    return {
+      hits: this.hits,
+      size: this.cache.size,
+      inserts: this.inserts,
+      sameTurnReserves: this.sameTurnReserves,
+      sameTurnReservedChars: this.sameTurnReservedChars,
+    };
   }
 
   /** Test-only / reset helper. */
@@ -103,6 +124,8 @@ export class CrossTurnDedup {
     this.cache.clear();
     this.hits = 0;
     this.inserts = 0;
+    this.sameTurnReserves = 0;
+    this.sameTurnReservedChars = 0;
     this.currentTurn = 0;
   }
 
@@ -133,7 +156,13 @@ export class CrossTurnDedup {
         // content ONCE (passthrough) to satisfy the loop, then hard-stop on any
         // further in-turn repeat so an infinite loop stays bounded.
         existing.sameTurnRepeats += 1;
-        if (existing.sameTurnRepeats === 1) return null;
+        if (existing.sameTurnRepeats === 1) {
+          // Deliberate re-serve (see comment above). Meter its cost so the
+          // policy trade-off is visible and a future fix is falsifiable.
+          this.sameTurnReserves += 1;
+          this.sameTurnReservedChars += raw.length;
+          return null;
+        }
         this.hits += 1;
         return `[${existing.firstSeenToolName} already returned this EXACT result ${existing.sameTurnRepeats + 1}× this turn — it is unchanged and already in the context above. STOP re-calling it; answer from the result you already have.]`;
       }

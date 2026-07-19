@@ -85,6 +85,24 @@ describe("CrossTurnDedup", () => {
       expect(dedup.getStats().hits).toBe(1);
     });
 
+    it("meters the same-turn re-serve cost (the invisible policy trade-off)", () => {
+      const dedup = new CrossTurnDedup({ minChars: 10 });
+      dedup.beginTurn();
+      const payload = "L".repeat(1_000);
+      // First occurrence — recorded, nothing re-served.
+      dedup.maybeDedup("read_file", payload);
+      expect(dedup.getStats().sameTurnReserves).toBe(0);
+      expect(dedup.getStats().sameTurnReservedChars).toBe(0);
+      // First same-turn repeat — re-serves the full 1000 chars (the leak we meter).
+      dedup.maybeDedup("read_file", payload);
+      expect(dedup.getStats().sameTurnReserves).toBe(1);
+      expect(dedup.getStats().sameTurnReservedChars).toBe(1_000);
+      // Second repeat hard-stops (stub) — NOT counted as a re-serve.
+      dedup.maybeDedup("read_file", payload);
+      expect(dedup.getStats().sameTurnReserves).toBe(1);
+      expect(dedup.getStats().sameTurnReservedChars).toBe(1_000);
+    });
+
     it("skips outputs below the min-chars threshold", () => {
       const dedup = new CrossTurnDedup({ minChars: 500 });
       dedup.beginTurn();

@@ -32,6 +32,7 @@ import type {
 import { shutdownWorkspaceLspManager } from "../lsp/runtime";
 import { ensureDefaultMcpServers } from "../mcp/auto-setup.js";
 import { getModelInfo, normalizeModelId } from "../models/registry.js";
+import { IDEAL_LOOP_DEFAULTS } from "../product-loop/loop-defaults.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { apiBaseFor } from "../providers/endpoints.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
@@ -183,7 +184,6 @@ import { setProviderHint } from "./token-counter.js";
 import { getToolLimitAutoRecoverCap } from "./tool-limit-auto-recover.js";
 import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
 import { firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
-import { IDEAL_LOOP_DEFAULTS } from "../product-loop/loop-defaults.js";
 
 // ---------------------------------------------------------------------------
 // Provider implementations
@@ -1877,9 +1877,17 @@ export class Agent {
       signal,
     );
 
-    // Record compaction call in cost-log — bypasses recordUsage because
-    // compaction returns usage separately and isn't routed through the
-    // status-bar / usage event pipeline (intentional: it's overhead, not user spend).
+    // Record compaction usage in usage_events under a dedicated `compaction`
+    // source. Previously this was cost-log-ONLY ("overhead, not user spend"),
+    // which made compaction cost INVISIBLE to `usage forensics` — you could not
+    // tell how much a bloated context (e.g. redundant reads) cost to compact.
+    // Measurement-first: overhead must be attributable, not hidden. It has its
+    // own source so it never inflates the `message` bucket.
+    this.recordUsage(
+      { inputTokens: compactUsage.promptTokens, outputTokens: compactUsage.completionTokens },
+      "compaction",
+      compactModelId,
+    );
     const compactProvider = detectProviderForModel(compactModelId);
     appendCostLog({
       ts: compactStartedAt,

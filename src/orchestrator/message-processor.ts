@@ -1453,6 +1453,22 @@ export class MessageProcessor {
       if (deps.getAbortController()?.signal === signal) {
         deps.setAbortController(null);
       }
+      // Meter the C3 same-turn re-serve cost — the dedup deliberately re-bills
+      // full content on same-turn re-reads (avoiding a worse single-read
+      // fallback), and that cost was invisible. Emit cumulative per session so
+      // cost-leak analysis can attribute it and a future policy fix is
+      // falsifiable. Only when there is something to report.
+      const dstats = deps.crossTurnDedup?.getStats();
+      if (deps.session?.id && dstats && dstats.sameTurnReservedChars > 0) {
+        logInteraction(deps.session.id, "dedup", {
+          data: {
+            hits: dstats.hits,
+            sameTurnReserves: dstats.sameTurnReserves,
+            sameTurnReservedChars: dstats.sameTurnReservedChars,
+            approxTokens: Math.round(dstats.sameTurnReservedChars / 4),
+          },
+        });
+      }
     }
   }
 }
