@@ -11,6 +11,7 @@
  *  3. `experienceMode: "off"` suppresses the wiring entirely — no recall fires.
  */
 import { describe, expect, it, vi } from "vitest";
+import { logInteraction } from "../../storage/index";
 
 // Hoisted so the vi.mock factory below can close over the same spy we assert on.
 const { recallSpy } = vi.hoisted(() => ({ recallSpy: vi.fn() }));
@@ -123,6 +124,7 @@ describe("runCouncil per-stance recall wiring", () => {
   it("fires one stance-tagged recall per unique role and folds the seed into an opening prompt", async () => {
     recallSpy.mockReset();
     recallSpy.mockResolvedValue({ text: SEED });
+    vi.mocked(logInteraction).mockClear();
 
     const llm = await runOnce();
 
@@ -135,6 +137,11 @@ describe("runCouncil per-stance recall wiring", () => {
       call.some((arg) => typeof arg === "string" && arg.includes(SEED) && arg.includes("Experience recall")),
     );
     expect(sawSeededOpening).toBe(true);
+
+    // 3. A stance_recall telemetry event records which roles actually got a seed.
+    const stanceLog = vi.mocked(logInteraction).mock.calls.find((c) => c[2]?.eventSubtype === "stance_recall");
+    expect(stanceLog).toBeDefined();
+    expect((stanceLog?.[2]?.data as { seededRoles?: string[] })?.seededRoles?.sort()).toEqual(["analyst", "critic"]);
   });
 
   it("fires NO recall when experienceMode is off", async () => {

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
+import { logInteraction } from "../storage/index.js";
 import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
 import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
 import { getCouncilLanguage } from "../utils/settings.js";
@@ -752,6 +753,21 @@ export async function* runDebate(
     // above) — its latency was hidden behind research, not paid cold here. Null
     // when there is no client, on resume, or when the recall failed.
     const stanceSeeds: Map<string, string> | null = stanceRecallPromise ? await stanceRecallPromise : null;
+
+    // Telemetry baseline for the shipped per-stance weighting: how many unique
+    // roles asked for a seed vs how many actually landed one (+ total seed chars).
+    // Fires only when a recall was attempted (stanceRecallPromise set), so the
+    // direct-runDebate tests that pass no stanceRecall stay silent. Consistently
+    // empty seededRoles in prod = the recall path is broken again (the ~9.3s-vs-
+    // timeout guillotine this feature fixed). logInteraction is fail-open.
+    if (stanceRecallPromise) {
+      const seededRoles = stanceSeeds ? [...stanceSeeds.keys()] : [];
+      const seedChars = stanceSeeds ? [...stanceSeeds.values()].reduce((n, s) => n + s.length, 0) : 0;
+      logInteraction(config.runId ?? "unknown", "council", {
+        eventSubtype: "stance_recall",
+        data: { uniqueRoles: new Set(participants.map((p) => p.role)).size, seededRoles, seedChars },
+      });
+    }
 
     const openingPromises = participants.map((self) => {
       const partner = participants.find((c) => c.role !== self.role) ?? participants[0];
