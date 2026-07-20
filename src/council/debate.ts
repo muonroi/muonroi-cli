@@ -623,6 +623,19 @@ export async function* runDebate(
     };
   }
 
+  // Sprint-2 item 3 — prefetch per-stance recall NOW so the research phase below
+  // shadows its latency instead of the opening block paying it cold. The recall
+  // needs only roles + problemStatement (both already known), not research
+  // findings, so firing it here is safe. Skipped on resume (openings are skipped);
+  // never throws (makeStanceRecall's contract, plus the defensive .catch). Awaited
+  // in the opening block. A null result leaves every opening unseeded.
+  const stanceRecallPromise: Promise<Map<string, string> | null> | null =
+    !resumed && config.stanceRecall
+      ? config
+          .stanceRecall(Array.from(new Set(participants.map((p) => p.role))), spec.problemStatement)
+          .catch(() => null)
+      : null;
+
   // ── Leader decides: research needed? (skipped if user overrode upstream) ──
   // Reuse the leader's upstream research decision (computed once in runCouncil)
   // when available; only run the classifier here for direct callers that did not
@@ -735,15 +748,10 @@ export async function* runDebate(
     // opening context so every stance opens grounded in the experience its lens
     // cares about. Bounded + failure-tolerant inside the injected fn; a null/empty
     // result leaves openings unchanged.
-    let stanceSeeds: Map<string, string> | null = null;
-    if (config.stanceRecall) {
-      try {
-        const roles = Array.from(new Set(participants.map((p) => p.role)));
-        stanceSeeds = await config.stanceRecall(roles, spec.problemStatement);
-      } catch {
-        stanceSeeds = null;
-      }
-    }
+    // Await the recall prefetched before the research phase (stanceRecallPromise
+    // above) — its latency was hidden behind research, not paid cold here. Null
+    // when there is no client, on resume, or when the recall failed.
+    const stanceSeeds: Map<string, string> | null = stanceRecallPromise ? await stanceRecallPromise : null;
 
     const openingPromises = participants.map((self) => {
       const partner = participants.find((c) => c.role !== self.role) ?? participants[0];

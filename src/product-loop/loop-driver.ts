@@ -730,6 +730,10 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
               // Item 3 — per-stance recall: each participant opens grounded in the
               // stance-weighted slice of the brain its lens cares about. Bounded +
               // failure-tolerant; unavailable EE leaves openings unchanged.
+              // Intentionally always-on here: the autonomous /ideal loop has no
+              // interactive experience-mode switch. runCouncil, by contrast, gates
+              // this on experienceMode !== "off" to honor the user's /council
+              // toggle. Divergence is deliberate, not an oversight.
               stanceRecall: makeStanceRecall(getDefaultEEClient(), {
                 cwd: ctx.flowDir,
                 sourceSession: ctx.sessionId ?? ctx.runId,
