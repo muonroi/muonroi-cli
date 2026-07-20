@@ -110,6 +110,7 @@ import {
   initialCardState,
   reduceCardKey,
 } from "./components/council-question-card.js";
+import { CouncilBanner } from "./components/council-banner.js";
 import { CouncilRail } from "./components/council-rail.js";
 import { CouncilRailRounds } from "./components/council-rail-rounds.js";
 import { CouncilRoundGroup, CouncilRoundsOverview } from "./components/council-round-group.js";
@@ -616,6 +617,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     councilCardState,
     councilInfoCards,
     councilMeta,
+    councilConvene,
     councilRounds,
     selectedRound,
     setSelectedRound,
@@ -884,6 +886,14 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     councilProgressLine = parts.join(" · ");
   }
 
+  // Council surface layout resolved early so the fixed rail META can shed the
+  // per-criterion outcome rows into the scrollable DETAIL region (two-pane only)
+  // — that 5-row block is the main thing squeezing DETAIL. The one-line Outcome
+  // summary stays in META; the sticky banner also pins the outcome count.
+  const councilTwoPaneRail = isCouncilSurfaceEnabled() && resolveCouncilLayout(width) === "two-pane";
+  // Outcome criteria captured for reuse by the banner (counts) + DETAIL (list).
+  let outcomeCriteria: string[] = [];
+  let outcomeMet: boolean[] = [];
   // Fixed identity block — rows that rarely change during a run.
   const railRows: ContextRailRow[] = [
     { label: "Session", value: sessionId ? sessionId.slice(0, 12) : "—" },
@@ -937,11 +947,17 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     const rawMet = councilMeta.criteriaMet ?? [];
     const met = rawMet.length === crits.length ? rawMet : [];
     const metCount = met.filter(Boolean).length;
+    outcomeCriteria = crits;
+    outcomeMet = met;
     railRows.push({ label: "Outcome", value: `${metCount}/${crits.length} criteria met` });
-    crits.forEach((c, i) => {
-      const mark = met[i] ? "✓" : "○";
-      const text = c.trim();
-      railRows.push({ label: "", value: `  ${mark} ${text.length > 64 ? `${text.slice(0, 63)}…` : text}` });
+    // In the two-pane surface the per-criterion ✓/○ rows live in the scrollable
+    // DETAIL region (councilOutcomeNode) so they don't starve DETAIL; the legacy
+    // rail keeps them inline in META.
+    if (!councilTwoPaneRail)
+      crits.forEach((c, i) => {
+        const mark = met[i] ? "✓" : "○";
+        const text = c.trim();
+        railRows.push({ label: "", value: `  ${mark} ${text.length > 64 ? `${text.slice(0, 63)}…` : text}` });
     });
   }
   if (!sprintStage && councilMeta?.panel?.length) {
@@ -985,6 +1001,15 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         <CouncilPhaseTimeline phases={councilPhases} theme={t} expanded={councilTranscriptExpanded} />
       </Semantic>
     ) : null;
+  // Planned round count for the dimmed placeholders — the hard ceiling if the
+  // leader may extend, else the budget. Rounds beyond what has started render as
+  // "pending" so the full planned shape is visible up front.
+  const plannedRounds =
+    typeof councilMeta?.roundCeiling === "number"
+      ? councilMeta.roundCeiling
+      : typeof councilMeta?.roundBudget === "number"
+        ? councilMeta.roundBudget
+        : undefined;
   const councilRoundsNode = (cols: number, opts?: { hideRounds?: boolean }) =>
     !opts?.hideRounds && isRoundGroupsEnabled() && councilRounds.length > 0 ? (
       <CouncilRailRounds
@@ -993,6 +1018,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         onSelect={setSelectedRound}
         width={cols}
         theme={t}
+        plannedTotal={plannedRounds}
       />
     ) : null;
   const councilDetailNode = (cols: number) => (
@@ -1044,6 +1070,56 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   const councilWaiting = !!pendingCouncilQuestion || !!preflightCardState;
   const activeCouncilPhaseLabel = councilPhases.find((p) => p.state === "active")?.label ?? null;
   const councilSurfaceTitle = sprintStage ? `SPRINT · Council` : "Council";
+  // ── Sticky banner (top of main pane) + DETAIL outcome list (two-pane) ──────
+  // The banner replaces the stripped preamble noise with a phase-aware pin.
+  const outcomeMetCount = outcomeMet.filter(Boolean).length;
+  const councilLastRound = councilRounds.length > 0 ? councilRounds[councilRounds.length - 1]! : null;
+  const councilHasSynthesis = councilMessages.some((m) => m.kind === "synthesis");
+  // Honest synthesis-phase decision from the last round's leader verdict — not a
+  // fabricated post-debate action (the UI has no clean IMPLEMENT/CONTINUE signal).
+  const councilDecision = councilHasSynthesis
+    ? councilLastRound?.leaderDecision === "aborted"
+      ? "ended early"
+      : councilLastRound?.leaderDecision === "circuit-break"
+        ? "stopped"
+        : "converged"
+    : null;
+  const councilActive =
+    councilConvene !== null || councilRounds.length > 0 || outcomeCriteria.length > 0 || !!councilMeta?.topic;
+  const councilBannerNode =
+    councilTwoPane && councilActive ? (
+      <CouncilBanner
+        title={councilSurfaceTitle}
+        convene={councilConvene}
+        criteriaTotal={outcomeCriteria.length}
+        criteriaMet={outcomeMetCount}
+        roundCurrent={councilLastRound ? councilLastRound.round : null}
+        roundTotal={roundBudget}
+        phaseLabel={activeCouncilPhaseLabel}
+        status={liveCouncilStatus}
+        waiting={councilWaiting}
+        decision={councilDecision}
+        width={width - councilSurfaceRailWidth}
+        theme={t}
+      />
+    ) : null;
+  // Per-criterion ✓/○ list relocated from the fixed rail META into scrollable
+  // DETAIL (two-pane) so it no longer squeezes DETAIL to a sliver.
+  const councilOutcomeNode =
+    councilTwoPane && outcomeCriteria.length > 0 ? (
+      <Semantic id="council-outcome" role="list" name="Outcome criteria">
+        <box flexDirection="column" flexShrink={0}>
+          {outcomeCriteria.map((c, i) => {
+            const text = c.trim();
+            return (
+              <text key={`crit-${i}-${text.slice(0, 12)}`} fg={outcomeMet[i] ? t.diffAddedFg : t.textMuted}>
+                {`${outcomeMet[i] ? "✓" : "○"} ${text.length > 48 ? `${text.slice(0, 47)}…` : text}`}
+              </text>
+            );
+          })}
+        </box>
+      </Semantic>
+    ) : null;
   const councilRailNode = (
     <CouncilRail
       width={councilSurfaceRailWidth}
@@ -1058,12 +1134,14 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         hideRounds: !!sprintStage && sprintStage.stage !== "planning",
       })}
       detailNode={
+        councilOutcomeNode ||
         sessionTree.length > 0 ||
         agentActivities.length > 0 ||
         !!productStatus ||
         councilStatuses.length > 0 ||
         councilInfoCards.length > 0 ? (
           <>
+            {councilOutcomeNode}
             <SessionTreeCard nodes={sessionTree} />
             <AgentRailActivities
               activities={agentActivities}
@@ -1140,6 +1218,10 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               {councilStripMode && councilStripNode}
               {/* Main transcript column — splits with the context rail (P1). */}
               <box flexDirection="column" flexGrow={1} gap={1}>
+                {/* Sticky phase-aware council banner — pinned ABOVE the scroll
+                    region so the convene/outcome/round/decision pin stays visible
+                    while the debate transcript scrolls (replaces preamble noise). */}
+                {councilBannerNode}
                 {/* Scrollable messages */}
                 <Semantic
                   id="log"

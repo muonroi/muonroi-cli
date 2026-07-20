@@ -219,7 +219,8 @@ import type {
 
 export type { AppStartupConfig } from "./types.js";
 
-import { isScrollLockEnabled } from "../gsd/flags.js";
+import { isCouncilSurfaceEnabled, isScrollLockEnabled } from "../gsd/flags.js";
+import { stripCouncilNoise } from "./council-preamble.js";
 import {
   getEffectiveReasoningEffort,
   getModelByTier,
@@ -1173,6 +1174,13 @@ export function useAppLogic(props: AppLogicProps) {
   // P3 — council metadata for the context rail (leader/panel/budget/research/
   // cost), upsert-merged from incremental council_meta patches.
   const [councilMeta, setCouncilMeta] = useState<CouncilMetaPatch>({});
+  // The convene reason ("heavy · analyze") parsed out of the stripped
+  // `[Auto-council triggered: …]` line, promoted to the sticky banner header
+  // instead of being scrolled past in the transcript. Null for user-initiated
+  // /council. The preamble-window ref scopes `↳ …` echo stripping to the
+  // convene→first-debate-turn span (see council-preamble.ts).
+  const [councilConvene, setCouncilConvene] = useState<string | null>(null);
+  const inCouncilPreambleRef = useRef(false);
   // Tracks the current council's topic so a NEW council (topic change) can flush
   // the prior council's residue even when clearLiveTurnUi (turn-end) was skipped
   // — e.g. an Esc-interrupt before a fresh /council. applyCouncilMetaPatch is
@@ -1220,11 +1228,20 @@ export function useAppLogic(props: AppLogicProps) {
       // new one. selectedRound follows via the councilRounds effect above.
       setCouncilRounds([]);
       setCouncilMeta({ ...patch });
+      // Open the preamble-strip window at council start so the bare `↳ <answer>`
+      // clarification echoes are stripped even on the user-initiated /council path
+      // (which emits no `[Auto-council triggered]` trigger line). Closed on the
+      // first council_round. Distinctive noise lines strip regardless of window.
+      inCouncilPreambleRef.current = true;
       return;
     }
     setCouncilMeta((prev) => ({ ...prev, ...patch }));
   }, []);
   const applyCouncilRound = useCallback((rec: CouncilRoundRecord) => {
+    // First real debate round → close the preamble-strip window so later
+    // unrelated `↳ …` lines (e.g. EE rating reminders) survive. Shared by every
+    // council loop, so the close happens once here rather than at each call site.
+    inCouncilPreambleRef.current = false;
     setCouncilRounds((prev) => {
       const idx = prev.findIndex((r) => r.round === rec.round);
       if (idx < 0) return [...prev, rec];
@@ -2692,6 +2709,8 @@ export function useAppLogic(props: AppLogicProps) {
     setCouncilMessages([]);
     setCouncilInfoCards([]);
     setCouncilMeta({});
+    setCouncilConvene(null);
+    inCouncilPreambleRef.current = false;
     setCouncilRounds([]);
     setSelectedRound(null);
     setCouncilPlaceholders(new Map());
@@ -2829,6 +2848,24 @@ export function useAppLogic(props: AppLogicProps) {
     },
     [closeCurrentToolGroup, flushContent],
   );
+
+  // Two-pane council surface: strip the streamed preamble noise (convene line,
+  // dividers, budget, experience-loaded, ↳ echoes) from a content delta so it
+  // never reaches the transcript — it is redundant with the sticky banner + rail.
+  // Shared by the MAIN stream loop AND the detached /council + /ideal loops, each
+  // of which appends council content through its own setMessages updater. The
+  // convene reason is promoted to the banner header; the preamble window (opened
+  // on the trigger, closed on the first council_round) scopes the bare-↳ echo
+  // stripping. Returns the delta unchanged when the surface is off (headless is
+  // never here) or nothing matched; returns "" when a delta became whitespace-
+  // only after stripping so callers can skip the empty append.
+  const maybeStripCouncilContent = useCallback((raw: string): string => {
+    if (!isCouncilSurfaceEnabled() || !raw) return raw;
+    const stripped = stripCouncilNoise(raw, inCouncilPreambleRef.current);
+    if (stripped.sawTrigger) inCouncilPreambleRef.current = true;
+    if (stripped.convene) setCouncilConvene(stripped.convene);
+    return stripped.text !== raw && stripped.text.trim().length === 0 ? "" : stripped.text;
+  }, []);
 
   const applyTelegramAssistantPreview = useCallback(
     (fullContent: string) => {
@@ -3885,7 +3922,7 @@ export function useAppLogic(props: AppLogicProps) {
             }
 
             switch (chunk.type) {
-              case "content":
+              case "content": {
                 // Reasoning streak ended (model started speaking). Stamp the
                 // elapsed time so the pill can replace the live "Thinking…"
                 // indicator.
@@ -3895,8 +3932,9 @@ export function useAppLogic(props: AppLogicProps) {
                   setReasoningActive(false);
                   setStreamReasoning(reasoningAccRef.current);
                 }
-                applyLocalAssistantDelta(chunk.content || "");
+                applyLocalAssistantDelta(maybeStripCouncilContent(chunk.content || ""));
                 break;
+              }
               case "toast":
                 // Ephemeral notice — flash it, do NOT append to the persisted
                 // assistant message (that was the old "message thừa ở console"
@@ -4846,16 +4884,15 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   const _chunkType = chunk.type;
                   if (chunk.type === "content") {
-                    setMessages((prev) => {
-                      const last = prev[prev.length - 1];
-                      if (last?.type === "assistant") {
-                        return [
-                          ...prev.slice(0, -1),
-                          { ...last, content: (last.content ?? "") + (chunk.content ?? "") },
-                        ];
-                      }
-                      return [...prev, buildAssistantEntry(chunk.content ?? "")];
-                    });
+                    const cText = maybeStripCouncilContent(chunk.content ?? "");
+                    if (cText)
+                      setMessages((prev) => {
+                        const last = prev[prev.length - 1];
+                        if (last?.type === "assistant") {
+                          return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + cText }];
+                        }
+                        return [...prev, buildAssistantEntry(cText)];
+                      });
                   }
                   if (chunk.type === "council_question" && chunk.councilQuestion) {
                     const cq2 = chunk.councilQuestion;
@@ -5131,13 +5168,15 @@ export function useAppLogic(props: AppLogicProps) {
                   // clearInterCardHeartbeat is idempotent.
                   clearInterCardHeartbeat();
                   if (chunk.type === "content") {
-                    setMessages((prev) => {
-                      const last = prev[prev.length - 1];
-                      if (last?.type === "assistant") {
-                        return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + chunk.content }];
-                      }
-                      return [...prev, buildAssistantEntry(chunk.content ?? "")];
-                    });
+                    const cText = maybeStripCouncilContent(chunk.content ?? "");
+                    if (cText)
+                      setMessages((prev) => {
+                        const last = prev[prev.length - 1];
+                        if (last?.type === "assistant") {
+                          return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + cText }];
+                        }
+                        return [...prev, buildAssistantEntry(cText)];
+                      });
                   }
                   if (chunk.type === "council_question" && chunk.councilQuestion) {
                     const cq3 = chunk.councilQuestion;
@@ -5581,13 +5620,15 @@ export function useAppLogic(props: AppLogicProps) {
                   const gen = agent.runCouncilRound(topic);
                   for await (const chunk of gen) {
                     if (chunk.type === "content") {
-                      setMessages((prev) => {
-                        const last = prev[prev.length - 1];
-                        if (last?.type === "assistant") {
-                          return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + chunk.content }];
-                        }
-                        return [...prev, buildAssistantEntry(chunk.content ?? "")];
-                      });
+                      const cText = maybeStripCouncilContent(chunk.content ?? "");
+                      if (cText)
+                        setMessages((prev) => {
+                          const last = prev[prev.length - 1];
+                          if (last?.type === "assistant") {
+                            return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + cText }];
+                          }
+                          return [...prev, buildAssistantEntry(cText)];
+                        });
                     }
                     if (chunk.type === "done") break;
                   }
@@ -8005,6 +8046,7 @@ export function useAppLogic(props: AppLogicProps) {
     councilCardState,
     councilInfoCards,
     councilMeta,
+    councilConvene,
     councilRounds,
     selectedRound,
     setSelectedRound,
