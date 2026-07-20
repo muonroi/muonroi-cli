@@ -1,6 +1,7 @@
 import type { ModelMessage } from "ai";
 import type { CouncilExperienceResult } from "../ee/council-bridge.js";
 import { queryExperience } from "../ee/council-bridge.js";
+import { getDefaultEEClient } from "../ee/intercept.js";
 import { judgeCouncilOutcome } from "../ee/judge.js";
 import { recordCouncilOutcome } from "../ee/phase-outcome.js";
 import { isTaskAwarePanelEnabled } from "../gsd/flags.js";
@@ -22,6 +23,7 @@ import { selectTaskAwarePanel } from "./panel-select.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
 import { runPlanning } from "./planner.js";
 import { runPreflight } from "./preflight.js";
+import { makeStanceRecall } from "./stance-recall.js";
 import type {
   ActionPlan,
   ClarifiedSpec,
@@ -753,6 +755,20 @@ export async function* runCouncil(
       internetFirst,
       costAware,
       runId: sessionId,
+      // Sprint-2 item 3 — per-stance recall at debate opening. Only the product
+      // loop wired this (loop-driver.ts); runCouncil (interactive /council,
+      // convenePath, and sprint-planning via sprint-runner) got no per-stance
+      // seed. Gate on experienceMode to mirror the queryExperience gate above;
+      // makeStanceRecall returns undefined for a null client so debate.ts's
+      // `if (config.stanceRecall)` guard still holds. cwd: projectCwd is
+      // slug-equivalent to loop-driver's ctx.flowDir — the server canonicalizes
+      // right-to-left against repoPatterns and `.muonroi-flow` never matches, so
+      // both inputs resolve to the same project slug. debate.ts prefetches this
+      // behind the research phase, so its 15s ceiling is off the critical path.
+      stanceRecall:
+        experienceMode !== "off"
+          ? makeStanceRecall(getDefaultEEClient(), { cwd: projectCwd, sourceSession: sessionId })
+          : undefined,
       // #2 — isolated research bridge; when wired, runDebate runs research in a
       // budget-capped explore sub-agent instead of an in-process 15-step call.
       runIsolatedTask: options?.runIsolatedTask,

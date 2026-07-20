@@ -17,6 +17,13 @@ vi.mock("../../storage/index", () => ({
   logInteraction: vi.fn(),
 }));
 vi.mock("../../ee/council-bridge.js", () => ({ queryExperience: vi.fn().mockResolvedValue({ warnings: [] }) }));
+// runCouncil now wires per-stance recall (getDefaultEEClient) into runDebate.
+// Stub the client so the debate opening never hits the network or writes surfaces
+// to the real brain during unit tests. Recall → null → openings stay unseeded.
+vi.mock("../../ee/intercept.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../ee/intercept.js")>();
+  return { ...actual, getDefaultEEClient: () => ({ recall: async () => null }) };
+});
 vi.mock("../../ee/judge.js", () => ({
   judgeCouncilOutcome: vi.fn().mockResolvedValue({ confidence: 0.8, reason: "t" }),
 }));
