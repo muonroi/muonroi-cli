@@ -64,6 +64,20 @@ const PIL_PRINCIPLES_FLOOR = Math.max(0, PIL_SCORE_FLOOR - 0.15);
 // Mirrors the EE evolution promotion rule (3 confirmed hits → T1).
 const T1_HIT_THRESHOLD = 3;
 
+// Back-pressure cap on PASSIVE-injection recall debt. Passive injection records
+// 3-11 rateable points/turn; when the agent clears only a fraction, pendingCount
+// creeps unbounded (observed 8→29 in muonroi.db) and the turn-start nudge — capped
+// at ~10 ids — can never show the whole tail, so the ledger never reaches zero and
+// the recall loop stays half-closed. Once pending debt is at/above this cap we stop
+// recording NEW passive debt (the hint content is still injected and its id is still
+// visible for a manual ee_feedback; only the auto-tracked debt is bounded). Explicit
+// ee_query recall is NOT capped here — the agent chose to ask, so that debt is
+// higher-signal and tracked in full. Override via MUONROI_PIL_LEDGER_CAP (>=1).
+const PIL_PASSIVE_LEDGER_CAP = (() => {
+  const raw = Number(process.env.MUONROI_PIL_LEDGER_CAP);
+  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 15;
+})();
+
 /**
  * Inline reminder appended to the injected experience block (when rateable
  * principles/behavioral are present) so passively-injected recalls carry a
@@ -304,8 +318,11 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
     let ledgerRecorded = 0;
     const rateable = [...principleItems, ...behavioralItems].filter((p) => p.id);
     if (rateable.length > 0) {
+      // Negative arm (prompt-stale decay) always registers — cheap and correct.
       updateLastSurfacedState(rateable.map((p) => String(p.id)));
-      if (ledgerEnabled) {
+      // Positive arm: only pile on new rateable debt while the ledger is below the
+      // back-pressure cap, so passive debt stays bounded and drainable to zero.
+      if (ledgerEnabled && sessionRecallLedger.pendingCount() < PIL_PASSIVE_LEDGER_CAP) {
         sessionRecallLedger.record(
           rateable.map((p) => ({ id: String(p.id), collection: p.collection })),
           `passive-injection (unified): ${ctx.raw.slice(0, 80)}`,
@@ -492,7 +509,10 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   // deliberately. Collection is the search arm (deterministic), which is what
   // ee_feedback requires.
   let ledgerRecorded = 0;
-  if (ledgerEnabled) {
+  // Back-pressure: only record new passive debt while below the cap (see the unified
+  // path above). updateLastSurfacedState (line ~479) already registered the decay arm
+  // unconditionally, so bounding the positive arm here loses no prompt-stale signal.
+  if (ledgerEnabled && sessionRecallLedger.pendingCount() < PIL_PASSIVE_LEDGER_CAP) {
     const rateableEntries = [
       ...deduplicatedPrinciples.map((p) => ({ id: String(p.id), collection: "experience-principles" })),
       ...deduplicatedBehavioral.map((p) => ({ id: String(p.id), collection: "experience-behavioral" })),

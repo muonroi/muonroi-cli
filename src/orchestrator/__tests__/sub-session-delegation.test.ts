@@ -6,12 +6,19 @@ import { Agent } from "../orchestrator.js";
 
 // Mock generateText from 'ai'
 const mockGenerateText = vi.fn().mockResolvedValue({ text: "Mocked parent advice response" });
-vi.mock("ai", () => {
+vi.mock("ai", async (importOriginal) => {
+  // Preserve the real module — notably `streamText`, which consultParentSession now
+  // drives via generateTextStreamed (orchestrator.ts:3808) against the installed mock
+  // model. A wholesale replacement dropped `streamText`, so the consult path threw
+  // "No streamText export" inside withTurnWatchdog. Override only the two exports
+  // under test. Mirrors the `{ ...actual, streamText }` pattern in
+  // council/stream-liveness.test.ts.
+  const actual = await importOriginal<typeof import("ai")>();
   return {
+    ...actual,
     generateText: (...args: any[]) => mockGenerateText(...args),
     // Bước-2 metered gate wraps the resolved model via wrapLanguageModel; this
-    // wholesale `ai` mock must expose it. Identity passthrough — metering is not
-    // under test here.
+    // mock must expose it. Identity passthrough — metering is not under test here.
     wrapLanguageModel: ({ model }: { model: unknown }) => model,
   };
 });
@@ -616,15 +623,19 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
       chunks.push(chunk);
     }
 
-    // Verify that generateText was called to advice the sub-session
-    expect(mockGenerateText).toHaveBeenCalled();
+    // consultParentSession now STREAMS its advice via generateTextStreamed
+    // (orchestrator.ts:3808), not generateText — so the advice text comes from the
+    // installed mock model's fixture ("ignored mock stream"), and mockGenerateText is
+    // no longer on the consult path.
+    expect(mockGenerateText).not.toHaveBeenCalled();
 
     // Verify parent session is restored
     expect(agent.getSessionId()).toBe("session-parent");
 
-    // The parent's final messages should have absorbed the assistant message which contains Advice
+    // The parent's final messages should have absorbed the assistant message which
+    // contains the Advice streamed from the sub-session consult.
     expect((agent as any).messages).toHaveLength(3); // Hello parent + absorbed assistant (advice) + absorbed tool
-    expect((agent as any).messages[1].content).toContain("Advice: Mocked parent advice response");
+    expect((agent as any).messages[1].content).toContain("Advice: ignored mock stream");
   });
 
   it("automatically retries transient errors in sub-session before succeeding", async () => {
