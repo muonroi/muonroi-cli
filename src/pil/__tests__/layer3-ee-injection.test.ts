@@ -209,6 +209,43 @@ describe("Layer 3 formatter mode (ctx._brainData populated)", () => {
     expect(sessionRecallLedger.pendingCount()).toBe(2);
   });
 
+  test("back-pressure: at the ledger cap, passive injection stops growing debt but still injects content", async () => {
+    // Regression for the unbounded-debt creep (muonroi.db: pendingCount 8→29 while
+    // the nudge shows only ~10). Once passive debt hits PIL_PASSIVE_LEDGER_CAP (default
+    // 15) a new injection must NOT record more rateable debt — otherwise the ledger can
+    // never drain to zero — yet the hint content must still reach the prompt.
+    sessionRecallLedger.reset();
+    for (let i = 0; i < 15; i++) {
+      sessionRecallLedger.record([{ id: `fill${i}`, collection: "experience-behavioral" }], "seed");
+    }
+    expect(sessionRecallLedger.pendingCount()).toBe(15);
+
+    const { layer3EeInjection } = await import("../layer3-ee-injection.js");
+    const result = await layer3EeInjection({
+      raw: "x",
+      enriched: "x",
+      taskType: "debug" as const,
+      domain: null,
+      confidence: 0.85,
+      outputStyle: "balanced" as const,
+      tokenBudget: 2000,
+      metrics: null,
+      layers: [],
+      _brainData: {
+        t0_principles: [{ text: "always run tests", score: 0.9, id: "capA", collection: "experience-principles" }],
+        t1_rules: [],
+        t2_patterns: [{ text: "mock fs in unit tests", score: 0.7, id: "capB", collection: "experience-behavioral" }],
+        retrieval_skipped_reason: null,
+      },
+    });
+    // Debt stayed capped — the two new ids were NOT recorded.
+    expect(sessionRecallLedger.pendingCount()).toBe(15);
+    expect(sessionRecallLedger.isPending("capA")).toBe(false);
+    // …but the content was still injected and its id is still visible for a manual rate.
+    expect(result.enriched).toContain("always run tests");
+    expect(result.enriched).toContain("[id:capA]");
+  });
+
   test("unified path: no id (older server) renders text but stays unrateable (static nudge)", async () => {
     sessionRecallLedger.reset();
     const { layer3EeInjection } = await import("../layer3-ee-injection.js");
