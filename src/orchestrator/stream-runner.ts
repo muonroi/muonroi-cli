@@ -105,6 +105,7 @@ import { recordCompaction, recordElision } from "./session-experience.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { applyAnthropicPromptCaching, compactSubAgentMessages } from "./subagent-compactor.js";
+import { buildSubAgentStepData, isSubAgentStepMeterEnabled } from "./subagent-step-meter.js";
 import { combineAbortSignals, firstLine, formatSubagentActivity } from "./tool-utils";
 
 /**
@@ -658,7 +659,7 @@ export class StreamRunner {
     // before any mid-loop-compaction / cache-key change. Opt out with
     // MUONROI_SUBAGENT_STEP_METER=0 (default on, fail-open, one tiny row/step).
     let subStepIndex = 0;
-    const stepMeterEnabled = process.env.MUONROI_SUBAGENT_STEP_METER !== "0";
+    const stepMeterEnabled = isSubAgentStepMeterEnabled();
 
     const result = streamText({
       model: childRuntime.model,
@@ -787,30 +788,13 @@ export class StreamRunner {
         const sid = this.deps.getSessionId();
         if (!sid) return; // nowhere to attribute
         try {
-          const su = (usage ?? {}) as Record<string, unknown>;
-          const sdet = su.inputTokenDetails as Record<string, unknown> | undefined;
-          const sraw = su.raw as Record<string, unknown> | undefined;
-          const inputTokens = asNumber(su.inputTokens) ?? asNumber(su.promptTokens) ?? 0;
-          const cacheRead =
-            asNumber(su.cachedInputTokens) ??
-            asNumber(sdet?.cacheReadTokens) ??
-            asNumber(sraw?.prompt_cache_hit_tokens) ??
-            0;
-          const cacheCreate = asNumber(sdet?.cacheWriteTokens) ?? asNumber(sraw?.cache_creation_input_tokens) ?? 0;
+          const data = buildSubAgentStepData(usage, { stepIndex: idx, callId: subCallId });
           logInteraction(sid, "subagent_step", {
             eventSubtype: prepared.agentKey,
             model: childRuntime.modelId,
-            inputTokens,
-            outputTokens: asNumber(su.outputTokens) ?? 0,
-            data: {
-              stepIndex: idx,
-              callId: subCallId,
-              inputTokens,
-              cacheReadTokens: cacheRead,
-              cacheCreationTokens: cacheCreate,
-              // hitPct is derivable but stored for one-shot SQL readability.
-              hitPct: inputTokens > 0 ? Math.round((1000 * cacheRead) / inputTokens) / 10 : 0,
-            },
+            inputTokens: data.inputTokens,
+            outputTokens: data.outputTokens,
+            data: { ...data },
           });
         } catch {
           /* fail-open — instrumentation must never break a sub-agent step */
