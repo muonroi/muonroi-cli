@@ -619,7 +619,9 @@ export function buildSystemPromptParts(
     ? `\n\n[Flow State Resume]\nThe following is context from your previous work session. Use it to continue seamlessly:\n${resumeDigest}\n`
     : "";
 
-  const dynamicSuffix = `${planSection}${resumeSection}\n\nCurrent working directory: ${cwd}`;
+  const currentDateTime = new Date();
+  const dateTimeSection = `- Current date/time (UTC): ${currentDateTime.toISOString()}\n- Current working directory: ${cwd}`;
+  const dynamicSuffix = `${planSection}${resumeSection}\n\n${dateTimeSection}`;
 
   return { staticPrefix, dynamicSuffix };
 }
