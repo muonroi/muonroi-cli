@@ -88,6 +88,7 @@ import { logger } from "../utils/logger.js";
 import type { PermissionMode } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
+  getAutoCompactAbsoluteFloorTokens,
   getAutoCompactMinNewTokens,
   getAutoCompactThresholdPct,
   getCouncilRounds,
@@ -2033,12 +2034,21 @@ export class Agent {
     if (!isAutoCompactAfterTurnEnabled()) return log(false, "feature-disabled");
     const tokens = estimateConversationTokens(system, this.messages);
     const thresholdPct = getAutoCompactThresholdPct();
-    const minMeaningfulTokens = Math.max(POST_TURN_MIN_TOKENS, Math.floor(contextWindow * thresholdPct));
+    // Window-relative floor, then bound it by an absolute-token cap so a
+    // large-window model (256K/1M) can't carry 80K+ of uncached tool-history
+    // below 40% of its window and never trip compaction. min() leaves small
+    // windows (128K → 51.2K < 80K floor) unchanged. absFloor=0 disables the cap.
+    const windowFloor = Math.floor(contextWindow * thresholdPct);
+    const absFloor = getAutoCompactAbsoluteFloorTokens();
+    const effectiveFloor = absFloor > 0 ? Math.min(windowFloor, absFloor) : windowFloor;
+    const minMeaningfulTokens = Math.max(POST_TURN_MIN_TOKENS, effectiveFloor);
     if (tokens < minMeaningfulTokens) {
       return log(false, `under-threshold (${tokens} < ${minMeaningfulTokens})`, {
         tokens,
         thresholdPct,
         minMeaningfulTokens,
+        windowFloor,
+        absFloor,
       });
     }
     const minNew = getAutoCompactMinNewTokens();
@@ -2048,7 +2058,13 @@ export class Agent {
         lastAfter: this._lastCompactionTokensAfter,
       });
     }
-    log(true, `over-threshold (${tokens} >= ${minMeaningfulTokens})`, { tokens, thresholdPct, minMeaningfulTokens });
+    log(true, `over-threshold (${tokens} >= ${minMeaningfulTokens})`, {
+      tokens,
+      thresholdPct,
+      minMeaningfulTokens,
+      windowFloor,
+      absFloor,
+    });
     await this.compactForContext(
       provider,
       system,

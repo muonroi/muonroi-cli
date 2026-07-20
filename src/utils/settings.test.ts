@@ -258,3 +258,46 @@ describe("normalizeCouncilLanguage (Feature B)", () => {
     expect(normalizeCouncilLanguage("  日本語 ")).toBe("日本語");
   });
 });
+
+describe("getAutoCompactAbsoluteFloorTokens", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("defaults to 80000 when no env/setting present", async () => {
+    vi.stubEnv("MUONROI_AUTO_COMPACT_ABS_FLOOR", "");
+    const { getAutoCompactAbsoluteFloorTokens } = await import("./settings");
+    expect(getAutoCompactAbsoluteFloorTokens()).toBe(80_000);
+  });
+
+  it("honors an in-band env override", async () => {
+    vi.stubEnv("MUONROI_AUTO_COMPACT_ABS_FLOOR", "45000");
+    const { getAutoCompactAbsoluteFloorTokens } = await import("./settings");
+    expect(getAutoCompactAbsoluteFloorTokens()).toBe(45_000);
+  });
+
+  it("treats 0 as an explicit disable (not clamped away)", async () => {
+    vi.stubEnv("MUONROI_AUTO_COMPACT_ABS_FLOOR", "0");
+    const { getAutoCompactAbsoluteFloorTokens } = await import("./settings");
+    expect(getAutoCompactAbsoluteFloorTokens()).toBe(0);
+  });
+
+  it("falls back to default on out-of-band / non-numeric env", async () => {
+    const { getAutoCompactAbsoluteFloorTokens } = await import("./settings");
+    for (const bad of ["1500", "9999999", "abc"]) {
+      vi.stubEnv("MUONROI_AUTO_COMPACT_ABS_FLOOR", bad);
+      expect(getAutoCompactAbsoluteFloorTokens()).toBe(80_000);
+    }
+  });
+
+  it("effective floor = min(window×pct, absFloor): bounds a 256K window, no-ops a 128K window", async () => {
+    const { getAutoCompactAbsoluteFloorTokens } = await import("./settings");
+    vi.stubEnv("MUONROI_AUTO_COMPACT_ABS_FLOOR", "80000");
+    const abs = getAutoCompactAbsoluteFloorTokens();
+    const pct = 0.4;
+    // 256K model: window floor 102400 → capped to 80000
+    expect(Math.min(Math.floor(256_000 * pct), abs)).toBe(80_000);
+    // 128K model: window floor 51200 < 80000 → unchanged
+    expect(Math.min(Math.floor(128_000 * pct), abs)).toBe(51_200);
+  });
+});

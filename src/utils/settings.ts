@@ -227,6 +227,11 @@ export interface UserSettings {
   /** Minimum new tokens accumulated since the last compaction before another
    *  post-turn compaction may fire. Prevents cache-reset thrash. Default 20000. */
   autoCompactMinNewTokens?: number;
+  /** Absolute-token cap applied on top of the window-relative auto-compact
+   *  trigger: effective floor = min(window × thresholdPct, this). Bounds
+   *  large-window models from carrying huge uncached tool-history. Default
+   *  80000; 0 disables the cap. Env: MUONROI_AUTO_COMPACT_ABS_FLOOR. */
+  autoCompactAbsoluteFloorTokens?: number;
   roleModels?: Partial<Record<ModelRole, string>>;
   councilRounds?: number;
   autoCouncil?: boolean;
@@ -1019,6 +1024,39 @@ export function getAutoCompactMinNewTokens(): number {
   const val = loadUserSettings().autoCompactMinNewTokens;
   if (typeof val === "number" && val >= 0 && val <= 200_000) return val;
   return 20_000; // Observed thrash: re-compact after ~14K new tokens (session ff932f8568e8).
+}
+
+/**
+ * Absolute-token floor for the post-turn auto-compaction trigger, applied as a
+ * cap ON TOP of the window-relative threshold: the effective trigger is
+ * `min(window × thresholdPct, absoluteFloor)`.
+ *
+ * Why: the window-relative floor (40% of contextWindow) scales with the model's
+ * window. On a large-window model — DeepSeek 256K → 102K, or a 1M model → 400K —
+ * a session can accumulate 60–100K+ of DISTINCT, uncached tool-result history
+ * that re-bills FRESH on every call and never trips compaction, because it stays
+ * under 40% of the huge window (measured: session 47b3a8a546ca carried ~57K of
+ * tool-result history for 15 turns at 8% cache on a 256K model, 0 compactions).
+ * The absolute floor bounds that: no matter how big the window, compaction is
+ * evaluated once accumulated context passes this token count.
+ *
+ * Small-window models are UNAFFECTED — a 128K model's 40% (51.2K) is already
+ * below the default floor, so `min()` leaves it unchanged. Only genuinely large
+ * windows are pulled down. Env override: MUONROI_AUTO_COMPACT_ABS_FLOOR (0 =
+ * disable the absolute cap, restoring pure window-relative behavior).
+ */
+export function getAutoCompactAbsoluteFloorTokens(): number {
+  const envRaw = process.env.MUONROI_AUTO_COMPACT_ABS_FLOOR;
+  if (envRaw !== undefined && envRaw !== "") {
+    const n = Number(envRaw);
+    // 0 explicitly disables the cap; otherwise clamp to a sane band.
+    if (Number.isFinite(n) && n === 0) return 0;
+    if (Number.isFinite(n) && n >= 2_000 && n <= 1_000_000) return Math.floor(n);
+  }
+  const val = loadUserSettings().autoCompactAbsoluteFloorTokens;
+  if (typeof val === "number" && val === 0) return 0;
+  if (typeof val === "number" && val >= 2_000 && val <= 1_000_000) return Math.floor(val);
+  return 80_000; // ~= the Phase-B per-call target line; bounds windows > 200K, no-ops for ≤ 200K.
 }
 
 /**
