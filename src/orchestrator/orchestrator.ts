@@ -2111,7 +2111,9 @@ export class Agent {
       convenePath?: boolean;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
-    const { runCouncil, buildNeutralPostCouncilContinuation } = await import("../council/index.js");
+    const { runCouncil, buildNeutralPostCouncilContinuation, extractReadableSynthesis } = await import(
+      "../council/index.js"
+    );
     const { createCouncilLLM } = await import("../council/llm.js");
     const councilStats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
     const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, councilStats);
@@ -2228,10 +2230,15 @@ export class Agent {
       } while (!result.done);
 
       const synthesis = result.value;
+      // Keep lastSynthesis FULL (the raw JSON is needed for output-kind detection
+      // in the convene follow-up), but persist only the READABLE prose as the
+      // assistant turn so the conversation history isn't a raw evaluation blob.
       this.councilManager.setLastSynthesis(synthesis);
 
       if (options?.userModelMessage && synthesis) {
-        this.appendCompletedTurn(options.userModelMessage, [{ role: "assistant", content: synthesis }]);
+        this.appendCompletedTurn(options.userModelMessage, [
+          { role: "assistant", content: extractReadableSynthesis(synthesis) },
+        ]);
       }
 
       // Keep working in THIS session when the chosen action calls for it

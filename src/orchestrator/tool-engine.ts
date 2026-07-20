@@ -831,11 +831,26 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     deps.councilManager.setLastSynthesis(null);
     deps.councilManager.setLastPostDebateAction(null);
     // convenePath suppressed the hardcoded card, so there is no chosenAction to
-    // branch on. Hand the synthesis to a normal agent turn with a non-binding
-    // nudge and let the agent decide the next step (respond / ask_user /
-    // implement). Re-entry is guarded by setContinuation(true) below so
-    // shouldAutoCouncil (which checks !isContinuation) can't re-fire into a loop.
-    const { buildNeutralPostCouncilContinuation } = await import("../council/index.js");
+    // branch on. What happens next depends on the DELIVERABLE:
+    const { buildNeutralPostCouncilContinuation, extractReadableSynthesis, synthesisIsImplementation } = await import(
+      "../council/index.js"
+    );
+    if (synthesis && !synthesisIsImplementation(synthesis)) {
+      // Analysis / evaluation / decision: the synthesis IS the answer. convenePath
+      // skipped the interactive block that would have shown it, so present the
+      // READABLE synthesis (the consolidated prose — summary, findings, roadmap,
+      // recommendation) directly as the final reply. Do NOT re-enter a follow-up
+      // turn: it only re-formats the same conclusion and has been observed to
+      // stall for minutes ("Waiting for next phase… 866s" — session 47b3a8a546ca),
+      // leaving the user with a raw debate dump and no consolidated answer.
+      const readable = extractReadableSynthesis(synthesis).trim();
+      if (readable) yield { type: "content", content: `\n${readable}\n` };
+      return;
+    }
+    // Implementation deliverable: there is an original task to build. Hand the
+    // readable conclusion to a normal agent turn (respond / ask_user / implement).
+    // Re-entry is guarded by setContinuation(true) so shouldAutoCouncil (which
+    // checks !isContinuation) can't re-fire into a loop.
     const continuationPrompt = synthesis ? buildNeutralPostCouncilContinuation(synthesis) || null : null;
     if (continuationPrompt) {
       yield { type: "content", content: "\n[Auto-continuing with council recommendations...]\n" };

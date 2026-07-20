@@ -277,6 +277,38 @@ function synthesisOutputKind(synthesis: string): string | undefined {
   return m?.[1];
 }
 
+/** The literal separator between the machine-JSON and the human prose in a synthesis. */
+const READABLE_SEPARATOR = "---READABLE---";
+
+/**
+ * Extract the human-readable markdown portion of a synthesis — everything after
+ * the `---READABLE---` separator (see planner.parseOutcome / orchestrator, which
+ * ask the synthesizer for `<json>---READABLE---<markdown>`). Returns the whole
+ * string when there is no separator (older/plain-text synthesis).
+ *
+ * This is the consolidated, user-facing answer (summary + strengths + failure
+ * modes + roadmap + recommendation as prose). Feeding it — NOT the raw JSON — to
+ * the post-council follow-up and presenting it as the final reply is what stops
+ * the debate from reading as a "raw" JSON dump (session 47b3a8a546ca).
+ */
+export function extractReadableSynthesis(synthesis: string): string {
+  if (!synthesis) return synthesis;
+  const i = synthesis.indexOf(READABLE_SEPARATOR);
+  return i >= 0 ? synthesis.slice(i + READABLE_SEPARATOR.length).trim() : synthesis;
+}
+
+/**
+ * True when a synthesis is a build/implementation deliverable — it has an
+ * "original task" left to carry forward through the build workflow. Analysis,
+ * evaluation, decision and investigation syntheses are SELF-CONTAINED: the
+ * readable synthesis itself IS the answer, so the post-council flow presents it
+ * directly instead of re-entering a fragile follow-up turn.
+ */
+export function synthesisIsImplementation(synthesis: string): boolean {
+  const kind = synthesisOutputKind(synthesis);
+  return !!kind && IMPLEMENTATION_OUTPUT_KINDS.has(kind);
+}
+
 export function postDebateContinuation(
   action: string | undefined,
   synthesis: string,
@@ -333,8 +365,12 @@ export function postDebateContinuation(
  */
 export function buildNeutralPostCouncilContinuation(synthesis: string): string {
   if (!synthesis || !synthesis.trim()) return "";
+  // Feed the READABLE prose, never the raw JSON — the follow-up would otherwise
+  // waste tokens re-parsing an 11k-char evaluation blob and the JSON leaks into
+  // the reply. (Analysis deliverables skip this path entirely — see tool-engine.)
+  const readable = extractReadableSynthesis(synthesis);
   return (
-    `Council debate completed. Conclusion:\n\n${synthesis}\n\n` +
+    `Council debate completed. Conclusion:\n\n${readable}\n\n` +
     `You now decide the next step based on the user's original request — do not ` +
     `stop without doing one of these:\n` +
     `  • If the conclusion IS the deliverable (analysis/evaluation/decision), ` +
