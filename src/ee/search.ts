@@ -197,6 +197,15 @@ export async function feedbackEE(
   const wire = VERDICT_WIRE[verdict];
   const body: Record<string, unknown> = { pointId, collection, verdict: wire };
   if (wire === "IRRELEVANT") body.reason = reason;
+  // Send the caller's cwd so the server's deriveCallerMeta can canonicalize a
+  // project_slug for scope-narrowing. Without it, recordFeedback's
+  // `if (callerContext && (verdict === IGNORED || IRRELEVANT))` guard
+  // (hittrack.js:179) is always false, so an ignored/noise verdict FULL-supersedes
+  // the entry instead of merely excluding this project/language. This is what makes
+  // the documented `wrong_repo`/`wrong_language` "entry survives for other contexts"
+  // behaviour actually fire: the brain can only narrow scope if the client tells it
+  // where the verdict came from, and cwd is the one context every caller has.
+  body.cwd = process.cwd();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (authToken) headers.Authorization = `Bearer ${authToken}`;
   try {
