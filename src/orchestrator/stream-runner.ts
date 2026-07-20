@@ -59,6 +59,7 @@ import type { ProviderId } from "../providers/types.js";
 import { needsVisionProxy } from "../providers/vision-proxy.js";
 import { wireDebug } from "../providers/wire-debug.js";
 import { statusBarStore } from "../state/status-bar-store.js";
+import { logInteraction } from "../storage/interaction-log.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import type { AgentMode, TaskRequest, ToolResult, VerifyRecipe } from "../types/index";
@@ -649,6 +650,16 @@ export class StreamRunner {
         },
       },
     );
+    // Per-step cache instrumentation: the aggregate `task` usage event only
+    // reports one cache-hit % for the whole sub-agent run, so an 8% aggregate
+    // can't be attributed to a step (is the growing prefix uncacheable, or does
+    // one late step dominate?). Record each step's input vs cache_read so the
+    // cache curve across the tool loop is falsifiable — the measure-first rule
+    // before any mid-loop-compaction / cache-key change. Opt out with
+    // MUONROI_SUBAGENT_STEP_METER=0 (default on, fail-open, one tiny row/step).
+    let subStepIndex = 0;
+    const stepMeterEnabled = process.env.MUONROI_SUBAGENT_STEP_METER !== "0";
+
     const result = streamText({
       model: childRuntime.model,
       system: childSystem,
@@ -770,6 +781,41 @@ export class StreamRunner {
       ...resolveTemperatureParam(childRuntime, isExplore ? 0.2 : 0.5),
       ...(childDropMaxOutput ? {} : { maxOutputTokens: Math.min(this.deps.getMaxTokens(), 8_192) }),
       ...(childProviderOptions ? { providerOptions: childProviderOptions } : {}),
+      onStepFinish: ({ usage }) => {
+        const idx = subStepIndex++;
+        if (!stepMeterEnabled) return;
+        const sid = this.deps.getSessionId();
+        if (!sid) return; // nowhere to attribute
+        try {
+          const su = (usage ?? {}) as Record<string, unknown>;
+          const sdet = su.inputTokenDetails as Record<string, unknown> | undefined;
+          const sraw = su.raw as Record<string, unknown> | undefined;
+          const inputTokens = asNumber(su.inputTokens) ?? asNumber(su.promptTokens) ?? 0;
+          const cacheRead =
+            asNumber(su.cachedInputTokens) ??
+            asNumber(sdet?.cacheReadTokens) ??
+            asNumber(sraw?.prompt_cache_hit_tokens) ??
+            0;
+          const cacheCreate = asNumber(sdet?.cacheWriteTokens) ?? asNumber(sraw?.cache_creation_input_tokens) ?? 0;
+          logInteraction(sid, "subagent_step", {
+            eventSubtype: prepared.agentKey,
+            model: childRuntime.modelId,
+            inputTokens,
+            outputTokens: asNumber(su.outputTokens) ?? 0,
+            data: {
+              stepIndex: idx,
+              callId: subCallId,
+              inputTokens,
+              cacheReadTokens: cacheRead,
+              cacheCreationTokens: cacheCreate,
+              // hitPct is derivable but stored for one-shot SQL readability.
+              hitPct: inputTokens > 0 ? Math.round((1000 * cacheRead) / inputTokens) / 10 : 0,
+            },
+          });
+        } catch {
+          /* fail-open — instrumentation must never break a sub-agent step */
+        }
+      },
       onFinish: ({ totalUsage, finishReason }) => {
         const tu = totalUsage as Record<string, unknown>;
         const details = tu.inputTokenDetails as Record<string, unknown> | undefined;

@@ -31,6 +31,7 @@ export type InteractionEventType =
   | "turn_tool_load"
   | "dedup"
   | "call_accounting"
+  | "subagent_step"
   | "session_experience";
 
 // Retention: keep ~14 days of detail logs. Override via env if a workspace
