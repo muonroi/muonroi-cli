@@ -1572,7 +1572,7 @@ export async function* runDebate(
       });
       nextTopic = evaluation.nextRoundFocus;
 
-      if (evaluation.needsResearch && evaluation.researchQuery) {
+      if (evaluation.needsResearch && evaluation.researchQuery && !externalTopic) {
         const midPhaseId = `phase:mid-research-${round}`;
         const midStart = Date.now();
         yield phaseStart({
