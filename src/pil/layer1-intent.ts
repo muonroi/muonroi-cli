@@ -718,6 +718,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
           // ecosystem/diacritic regexes: layer4 reads these instead of scanning
           // the raw prompt.
           ecosystemScope: llmRes.ecosystemScope,
+          scopeKind: llmRes.scopeKind,
           replyLanguage: llmRes.replyLanguage,
           // G3 (b1): populated from the unified pil-context fetch above so
           // layer3 renders source="unified" instead of its legacy dense-only
