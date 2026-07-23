@@ -360,6 +360,20 @@ export type LiveEvent =
       atStep: number;
       runId: string;
     }
+  // Emitted when /resume is invoked while the TUI runs under the harness
+  // (agent-mode). A relaunch would spawn a NEW process that cannot inherit the
+  // fd3/4 (POSIX) or named-pipe (Windows) harness transport, stranding the
+  // driver (every subsequent tui.* call returns no_driver). So under agent-mode
+  // the relaunch is SUPPRESSED and this event is emitted instead: the current
+  // process + driver stay alive, and the driving agent should resume by calling
+  // tui.stop then tui.start({ args: ["--session=<sessionId>"] }).
+  | {
+      t: "event";
+      kind: "resume-request";
+      /** The session id the user selected to resume. */
+      sessionId: string;
+      ts: number;
+    }
   | { t: "idle" };
 
 export type StatePatch = { id: string } & Partial<Omit<UINode, "children" | "id">>;

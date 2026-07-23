@@ -528,6 +528,30 @@ async function startInteractive(
   // shell never reclaims the foreground mid-restart (which corrupted the
   // terminal and dropped the user back to a broken prompt).
   const onRelaunch = (sessionId: string) => {
+    // Under the harness (agent-mode), a relaunch spawns a NEW process that
+    // cannot inherit the fd3/4 (POSIX) / named-pipe (Windows) harness transport,
+    // so it strands the MCP driver — every subsequent tui.* call returns
+    // no_driver, and the driving client sees the server go dead. Suppress the
+    // relaunch: keep THIS process + driver alive and emit a resume-request event
+    // (plus a toast) so the driving agent resumes via tui.stop →
+    // tui.start({ args: ["--session=<id>"] }). No-op teardown, no process.exit.
+    const agentRt = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent?: (e: unknown) => void }
+      | undefined;
+    if (agentRt) {
+      try {
+        agentRt.emitEvent?.({ t: "event", kind: "resume-request", sessionId, ts: Date.now() });
+        agentRt.emitEvent?.({
+          t: "event",
+          kind: "toast",
+          level: "info",
+          text: `Resume under harness: driver held. Use tui.stop then tui.start --session=${sessionId}`,
+        });
+      } catch {
+        /* best-effort — never let a telemetry failure strand the resume */
+      }
+      return;
+    }
     void agent.cleanup().finally(() => {
       restoreTerminalForHandoff();
       // Let the terminal process the restore sequences before the child takes

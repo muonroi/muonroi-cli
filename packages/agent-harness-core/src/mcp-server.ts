@@ -55,7 +55,13 @@ export interface HarnessSpawnRequest {
 /** A function that spawns a TUI process and returns transport streams. */
 export type HarnessSpawn = (req: HarnessSpawnRequest) => Promise<HarnessSpawnResult>;
 
-const ARG_ALLOW = /^(--agent-[a-z-]+(=.*)?|--mock-llm(=.+)?|--profile=[a-zA-Z0-9_-]+)$/;
+// `--session=<id>` lets an MCP agent resume a persisted session by restarting
+// the harnessed child (tui.stop → tui.start({ args: ["--session=<id>"] })). Only
+// the combined `=` form is allowed so the value stays on a single argv token the
+// per-arg allowlist can vet; the id charset is restricted to word/dash chars so
+// it can never carry a path or shell metacharacter. See the resume-request event
+// (protocol.ts) for why in-TUI /resume relaunch is suppressed under agent-mode.
+const ARG_ALLOW = /^(--agent-[a-z-]+(=.*)?|--mock-llm(=.+)?|--profile=[a-zA-Z0-9_-]+|--session=[a-zA-Z0-9_-]+)$/;
 const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
 const ENV_STRIP = new Set([
   "NODE_OPTIONS",
