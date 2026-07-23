@@ -107,7 +107,48 @@ export function buildChildEnv(
   return sanitizeEnv({ ...merged, ...callerEnv });
 }
 
-const REPO_ROOT = process.cwd();
+/**
+ * The muonroi-cli repo root the server is anchored to. Used both as the
+ * security allowlist base (validateCwd / validateMockLlmPath) and as the base
+ * for resolving the child TUI entry point.
+ *
+ * MUST NOT be derived from `process.cwd()` alone: the MCP server can be launched
+ * from an arbitrary directory (e.g. a project-scoped `.mcp.json` with no `cwd`,
+ * or Claude launched from a sibling repo). When that happens, a bare
+ * `process.cwd()` both (a) silently widens the cwd allowlist to the launch dir
+ * and (b) makes `${cwd}/src/index.ts` point at a non-existent file, so the child
+ * dies on spawn and every subsequent tui.* call returns `no_driver` even though
+ * tui.start reported `ok:true`. The consumer injects the real root via
+ * `createMcpHarnessServer({ repoRoot })`; `process.cwd()` is only the fallback.
+ */
+let REPO_ROOT = process.cwd();
+
+/**
+ * Absolute path to the child TUI entry (muonroi-cli's `src/index.ts`). Injected
+ * by the consumer via `createMcpHarnessServer({ entry })`; falls back to
+ * `<REPO_ROOT>/src/index.ts` for backward compatibility. Kept independent of the
+ * launch cwd for the reasons documented on REPO_ROOT above.
+ */
+let SERVER_ENTRY: string | undefined;
+
+/**
+ * Anchor the server to a known repo root + entry point, decoupling both from the
+ * arbitrary launch `process.cwd()`. Called from createMcpHarnessServer when the
+ * consumer supplies them. Idempotent; unset fields leave the current value.
+ */
+export function configureHarnessRoots(opts: { repoRoot?: string; entry?: string }): void {
+  if (opts.repoRoot) REPO_ROOT = opts.repoRoot;
+  if (opts.entry) SERVER_ENTRY = opts.entry;
+}
+
+/**
+ * Resolve the child TUI entry point. Prefers the injected SERVER_ENTRY; falls
+ * back to `<REPO_ROOT>/src/index.ts`. Exported for unit testing the anchoring
+ * behaviour without booting a real TUI.
+ */
+export function resolveServerEntry(): string {
+  return SERVER_ENTRY ?? resolve(REPO_ROOT, "src/index.ts");
+}
 
 /**
  * Opt-in extra cwd roots for tui.start, layered ON TOP of the default
@@ -609,7 +650,18 @@ export function registerAsyncTools(server: McpServer, getDriver: () => Driver | 
  *   const server = createMcpHarnessServer({ spawn: opentuiSpawn });
  *   await server.connect(new StdioServerTransport());
  */
-export function createMcpHarnessServer({ spawn }: { spawn: HarnessSpawn }): McpServer {
+export function createMcpHarnessServer({
+  spawn,
+  repoRoot,
+  entry,
+}: {
+  spawn: HarnessSpawn;
+  /** Absolute muonroi-cli repo root; anchors the cwd allowlist + entry resolution. */
+  repoRoot?: string;
+  /** Absolute path to the child TUI entry (muonroi-cli src/index.ts). */
+  entry?: string;
+}): McpServer {
+  configureHarnessRoots({ repoRoot, entry });
   const server = new McpServer({ name: "muonroi-harness-driver", version: "0.1.0" });
   let currentDriver: Driver | null = null;
   let currentPid: number | undefined;
@@ -689,7 +741,10 @@ export function createMcpHarnessServer({ spawn }: { spawn: HarnessSpawn }): McpS
       }
       if (!finalArgs.includes("--agent-mode")) finalArgs.push("--agent-mode");
 
-      const entry = `${process.cwd()}/src/index.ts`;
+      // Resolve the entry from the injected value, NOT the launch cwd — see the
+      // REPO_ROOT / SERVER_ENTRY docs. A cwd-derived entry breaks (child dies →
+      // no_driver) whenever the server is launched outside the muonroi-cli repo.
+      const entry = resolveServerEntry();
 
       // Delegate to the injected spawn implementation — the core package has no
       // knowledge of the concrete transport (fd 3/4, named pipes, WebSocket …).
@@ -787,8 +842,15 @@ export function makeLineHandler(
  *
  * @param spawn  A HarnessSpawn implementation that matches the HarnessSpawn contract.
  *               muonroi-cli passes opentuiSpawn; other consumers can provide their own.
+ * @param opts   Optional { repoRoot, entry } to anchor the server independent of
+ *               the launch cwd. Consumers SHOULD pass these (derived from
+ *               import.meta.url); omitting them falls back to process.cwd(), which
+ *               is fragile when the server is launched outside the repo.
  */
-export async function runHarnessDriver(spawn: HarnessSpawn): Promise<void> {
-  const server = createMcpHarnessServer({ spawn });
+export async function runHarnessDriver(
+  spawn: HarnessSpawn,
+  opts: { repoRoot?: string; entry?: string } = {},
+): Promise<void> {
+  const server = createMcpHarnessServer({ spawn, repoRoot: opts.repoRoot, entry: opts.entry });
   await server.connect(new StdioServerTransport());
 }

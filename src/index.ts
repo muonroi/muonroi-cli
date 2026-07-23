@@ -1558,7 +1558,16 @@ program
   .action(async () => {
     const { runHarnessDriver } = await import("@muonroi/agent-harness-core/mcp-server");
     const { opentuiSpawn } = await import("./mcp/opentui-spawn.js");
-    await runHarnessDriver(opentuiSpawn);
+    // Anchor entry + repo root to THIS file, not the launch cwd. A cwd-derived
+    // entry silently breaks (child dies → every tui.* call returns no_driver)
+    // whenever the MCP server is launched from outside the muonroi-cli repo
+    // (e.g. a project-scoped .mcp.json with no `cwd`, or Claude started in a
+    // sibling project). import.meta.url is this compiled src/index.ts.
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, resolve } = await import("node:path");
+    const entry = fileURLToPath(import.meta.url);
+    const repoRoot = resolve(dirname(entry), ".."); // src/index.ts → repo root
+    await runHarnessDriver(opentuiSpawn, { entry, repoRoot });
   });
 
 program
