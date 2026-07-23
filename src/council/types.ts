@@ -302,6 +302,12 @@ export interface CouncilConfig {
   leaderNeedsResearch?: boolean;
   /** When true, the working directory has no source code yet — research prompt prefers internet sources. */
   internetFirst?: boolean;
+  /**
+   * When true, the turn is an out-of-repo ("external") question: runDebate skips
+   * the research phase AND grounding-verify so no council sub-path reads the repo.
+   * Council still convenes + debates + synthesizes on model knowledge.
+   */
+  externalTopic?: boolean;
   /** When true, leader sub-tasks downshift to cheaper tier models on the same provider. */
   costAware?: boolean;
   /**

@@ -507,6 +507,12 @@ export async function* runCouncil(
     /* fail-open — council runs without PIL context */
   }
 
+  // Gate A — out-of-repo ("external") questions must not trigger any repo read
+  // inside runDebate (research phase or grounding-verify sub-agent). Fail-open:
+  // pilCtx undefined on classify failure (or scopeKind absent) grounds exactly
+  // as today.
+  const externalTopic = pilCtx?.scopeKind === "external";
+
   const pilSeed = pilCtx?.grayAreas?.length ? pilCtx.grayAreas : undefined;
 
   // CQ-11: Pre-fetch EE warnings in parallel — starts here, awaited before planDebate
@@ -753,6 +759,7 @@ export async function* runCouncil(
       researchSkipOverride,
       leaderNeedsResearch,
       internetFirst,
+      externalTopic,
       costAware,
       runId: sessionId,
       // Sprint-2 item 3 — per-stance recall at debate opening. Only the product

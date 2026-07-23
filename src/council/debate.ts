@@ -590,6 +590,7 @@ export async function* runDebate(
   const researchSkipOverride = config.researchSkipOverride === true;
   const leaderNeedsResearch = config.leaderNeedsResearch;
   const internetFirst = config.internetFirst === true;
+  const externalTopic = config.externalTopic === true;
   const costAware = config.costAware === true;
   // Feature B — resolved council debate language. The chosen language IS the
   // debate language (no translate-back pass). "auto" (default) follows the
@@ -644,10 +645,12 @@ export async function* runDebate(
   // On resume the research phase already ran — never re-run it.
   const needsResearch = resumed
     ? false
-    : researchSkipOverride
+    : externalTopic
       ? false
-      : (leaderNeedsResearch ??
-        (yield* evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware)));
+      : researchSkipOverride
+        ? false
+        : (leaderNeedsResearch ??
+          (yield* evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware)));
 
   if (researchSkipOverride) {
     yield {
@@ -1920,6 +1923,7 @@ export async function* runDebate(
     const preText = [...exchangeLogs.values()].flat().join("\n\n");
     if (
       config.runIsolatedTask &&
+      !externalTopic &&
       groundingVerifyEnabled() &&
       !signal?.aborted &&
       computeEvidenceDensity(preText) < GROUNDING_VERIFY_THRESHOLD
