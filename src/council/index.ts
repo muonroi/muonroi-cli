@@ -163,6 +163,15 @@ export interface RunCouncilOptions {
    * for runDebate. Optional — omitted by headless/direct callers/tests.
    */
   runIsolatedTask?: IsolatedTaskRunner;
+  /**
+   * Gate A — caller-threaded out-of-repo ("external") scope. Set by the auto-
+   * council path (tool-engine.ts) from the main turn's already-classified
+   * `pilCtx.scopeKind`, so a topic already known to be external doesn't need
+   * a second self-classification round-trip inside `runCouncil`. When set it
+   * OVERRIDES this call's own self-classification (see `externalTopic`
+   * derivation below); undefined falls through to self-classify.
+   */
+  externalTopic?: boolean;
 }
 
 export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis";
@@ -500,12 +509,32 @@ export async function* runCouncil(
   const phaseAStart = Date.now();
 
   // CQ-11: Run PIL pipeline for full context (taskType, domain, outputStyle, grayAreas)
+  // Wire a classifier (same pattern as orchestrator/preprocessor.ts) so PIL's
+  // scopeKind/taskType actually resolve instead of hard-degrading to UNKNOWN —
+  // without an llmFallback, layer1-intent.ts never sets scopeKind, which left
+  // Gate A permanently dead in production (only hand-built CouncilConfig in
+  // tests exercised it).
+  let llmFallback: import("../pil/llm-classify.js").LlmClassifyFn | undefined;
+  try {
+    const { createLlmClassifier } = await import("../pil/llm-classify.js");
+    llmFallback = createLlmClassifier(sessionModelId, { routeFastTier: true });
+  } catch (err) {
+    console.error(`[council] classifier wiring failed for scope detection: ${(err as Error)?.message}`);
+  }
   let pilCtx: PipelineContext | undefined;
   try {
-    pilCtx = await runPipeline(topic, { sessionId });
-  } catch {
-    /* fail-open — council runs without PIL context */
+    pilCtx = await runPipeline(topic, { sessionId, llmFallback });
+  } catch (err) {
+    console.error(`[council] PIL pipeline failed (fail-open, no scope grounding): ${(err as Error)?.message}`);
   }
+
+  // Gate A — out-of-repo ("external") questions must not trigger any repo read
+  // inside runDebate (research phase or grounding-verify sub-agent). Fail-open:
+  // pilCtx undefined on classify failure (or scopeKind absent) grounds exactly
+  // as today. `options.externalTopic` (caller-threaded scope, e.g. the auto-
+  // council path forwarding the main turn's already-classified scopeKind)
+  // takes priority over this call's own self-classification.
+  const externalTopic = options?.externalTopic ?? pilCtx?.scopeKind === "external";
 
   const pilSeed = pilCtx?.grayAreas?.length ? pilCtx.grayAreas : undefined;
 
@@ -626,6 +655,12 @@ export async function* runCouncil(
   // Stays undefined if the classifier throws — fail-open: runDebate re-evaluates.
   let leaderNeedsResearch: boolean | undefined;
   if (options?.skipResearch) {
+    leaderNeedsResearch = false;
+    yield { type: "council_meta", councilMeta: { researchMode: false } };
+  } else if (externalTopic) {
+    // Gate A already short-circuits research inside runDebate for external
+    // topics — consulting the leader here would be a wasted LLM call whose
+    // answer can never be acted on. Skip it and set the signal directly.
     leaderNeedsResearch = false;
     yield { type: "council_meta", councilMeta: { researchMode: false } };
   } else {
@@ -753,6 +788,7 @@ export async function* runCouncil(
       researchSkipOverride,
       leaderNeedsResearch,
       internetFirst,
+      externalTopic,
       costAware,
       runId: sessionId,
       // Sprint-2 item 3 — per-stance recall at debate opening. Only the product

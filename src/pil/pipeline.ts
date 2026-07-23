@@ -114,6 +114,22 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
     }),
   );
 
+  if (ctx.scopeKind === "external") {
+    const { appendDecisionLog } = await import("../usage/decision-log.js");
+    appendDecisionLog({
+      ts: Date.now(),
+      sessionId: ctx.sessionId ?? null,
+      kind: "scope-gate",
+      taken: false, // grounding suppressed → the expensive repo-read path is NOT taken
+      reason: "external-scope: repo grounding suppressed (discovery/layer5/council research)",
+      meta: {
+        scopeKind: ctx.scopeKind,
+        taskType: ctx.taskType ?? null,
+        confidence: ctx.confidence,
+      },
+    }).catch((err) => console.error(`[pipeline] scope-gate decision-log write failed: ${(err as Error)?.message}`));
+  }
+
   // Layer 1.5: deterministic complexity-size classification. Pure heuristic,
   // no LLM call, no network. Consumed by 4B (step ceiling matrix) and 4A
   // (scope-reminder cadence K). Mirrored into _intentTrace for forensics.
@@ -166,8 +182,9 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
     ctx = { ...ctx, directAnswer: true };
   }
 
-  // Phase 1 discovery: L1.5–L1.8 (interactive, no hard timeout)
-  if (isDiscoveryEnabled() && ctx.intentKind !== "chitchat") {
+  // Phase 1 discovery: L1.5–L1.8 (interactive, no hard timeout).
+  // External-scope turns (not about this repo) skip the repo scan entirely.
+  if (isDiscoveryEnabled() && ctx.intentKind !== "chitchat" && ctx.scopeKind !== "external") {
     const { runDiscovery } = await import("./discovery.js");
     const discoveryStart = Date.now();
     try {

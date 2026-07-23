@@ -97,6 +97,15 @@ export interface LlmClassifyResult {
    */
   ecosystemScope: boolean | null;
   /**
+   * Model-decided repo relevance (widened `scope`): "ecosystem" (Muonroi
+   * PLATFORM/docs), "local" (this repo's own code), or "external" (NOT about any
+   * codebase in this repo — a general/conceptual/out-of-repo question). null when
+   * the model omitted/garbled the word. Drives the external-scope gate: only a
+   * confident "external" suppresses repo grounding. `ecosystemScope` above stays
+   * derived from the same word (=== "ecosystem").
+   */
+  scopeKind: "ecosystem" | "local" | "external" | null;
+  /**
    * The language the user wrote in, as a capitalized display name (e.g.
    * "Vietnamese", "Japanese"), or null when the user wrote in English / the
    * model omitted it. Drives Layer 4's language re-anchor nudge. Agent-first
@@ -338,6 +347,7 @@ const KNOWN_CLASSIFY_WORDS = new Set<string>([
   "heavy",
   "ecosystem",
   "local",
+  "external",
   "clear",
   "underspecified",
 ]);
@@ -363,9 +373,10 @@ const SYSTEM_PROMPT =
   "clarity ∈ { clear | underspecified } — whether the request gives enough to proceed WITHOUT guessing:\n" +
   "- underspecified — missing information the agent would need: an unstated target/scope ('add auth' — which flow?), a vague 'make it better' with no direction, competing interpretations, or an unresolved design choice. Such a task should be clarified with the user before code.\n" +
   "- clear — well-specified enough to plan and execute directly, even if large. A fully-spelled-out migration is 'clear'. When unsure, choose 'clear' (do NOT over-ask on ordinary work).\n" +
-  "scope ∈ { ecosystem | local }:\n" +
+  "scope ∈ { ecosystem | local | external }:\n" +
   "- ecosystem — the turn is about the Muonroi PLATFORM as a whole: the building-block / .NET packages, open-core boundary, the rule engine / decision tables, NuGet packages, or platform setup/install. These are documented in an authoritative docs source.\n" +
-  "- local — EVERYTHING else, including questions about this CLI's own internals (even when they mention the word 'muonroi'). When unsure, choose local.\n" +
+  "- local — a question about THIS project's own code/repo (this CLI's internals, its files, its behaviour), even when it mentions the word 'muonroi'.\n" +
+  "- external — the turn is NOT about any codebase in this repository: a general/conceptual question, an external-world analysis, a strategy/design debate about something outside this project's code. When unsure between local and external, choose local (the safe grounding default).\n" +
   "lang — the language the user's message is written in, as ONE lowercase English word: english, vietnamese, japanese, french, etc. Use 'english' for English or when unsure.\n\n" +
   "Rules (read carefully — Phase 4 4P-2 disambiguation):\n" +
   "- debug — fix a bug, CI/build/test failure, error, exception, crash, or any 'why is X broken' question.\n" +
@@ -407,7 +418,9 @@ const SYSTEM_PROMPT =
   "- 'làm cho CLI tốt hơn' → generate,concise,task,code,heavy,local,vietnamese,underspecified (vague 'make it better', no target)\n" +
   "- 'how does the building-block rule engine work' → analyze,concise,task,answer,standard,ecosystem,english,clear\n" +
   "- 'hệ sinh thái muonroi gồm những gì' → analyze,balanced,task,answer,standard,ecosystem,vietnamese,clear\n" +
-  "- 'plan the migration to hooks' → plan,balanced,task,report,heavy,local,english,clear\n\n" +
+  "- 'plan the migration to hooks' → plan,balanced,task,report,heavy,local,english,clear\n" +
+  "- 'giải thích CAP theorem' → analyze,concise,task,answer,standard,external,vietnamese,clear\n" +
+  "- 'design a council debate about pricing strategy for a SaaS product' → plan,balanced,task,report,heavy,external,english,clear\n\n" +
   "Prompts may be Vietnamese, English, or mixed. Reply with exactly eight words separated by commas. No other text.";
 
 // Appended to SYSTEM_PROMPT on the self-repair retry (see createLlmClassifier).
@@ -445,8 +458,11 @@ function parseResponse(raw: string): LlmClassifyResult | null {
   const depthWord = parts.find((p) => VALID_DEPTHS.has(p as DepthTier));
   const depthTier: DepthTier | null = (depthWord as DepthTier | undefined) ?? null;
   // Sixth word is the scope. "ecosystem" → platform/docs-authoritative turn;
-  // anything else (incl. absent) → not ecosystem. Position-independent.
-  const scopeWord = parts.find((p) => p === "ecosystem" || p === "local");
+  // "local" → this repo's own code; "external" → not about any repo codebase.
+  // Anything else (incl. absent) → null. Position-independent.
+  const scopeWord = parts.find((p) => p === "ecosystem" || p === "local" || p === "external");
+  const scopeKind: "ecosystem" | "local" | "external" | null =
+    scopeWord === "ecosystem" || scopeWord === "local" || scopeWord === "external" ? scopeWord : null;
   const ecosystemScope: boolean | null = scopeWord ? scopeWord === "ecosystem" : null;
   // Eighth word is the clarity signal. "underspecified" → the request is missing
   // information the agent needs → earn a clarify/council pass. Anything else
@@ -471,6 +487,7 @@ function parseResponse(raw: string): LlmClassifyResult | null {
     depthTier,
     needsClarification,
     ecosystemScope,
+    scopeKind,
     replyLanguage,
   };
 }

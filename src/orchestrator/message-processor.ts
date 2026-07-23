@@ -395,6 +395,8 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
       // synthesis returns to the agent, which decides the follow-up. Threaded from
       // the auto-council + runDebate call sites in tool-engine.
       convenePath?: boolean;
+      /** Gate A — thread the main turn's already-classified scopeKind so runCouncil skips a redundant self-classify round-trip. */
+      externalTopic?: boolean;
     },
   ): AsyncGenerator<StreamChunk, void, unknown>;
   processMessage(

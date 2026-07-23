@@ -429,7 +429,14 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   enterIdeal?: (idea: string) => void;
   runCouncilV2(
     userMessage: string,
-    opts: { skipClarification: boolean; observer?: ProcessMessageObserver; userModelMessage: ModelMessage },
+    opts: {
+      skipClarification: boolean;
+      observer?: ProcessMessageObserver;
+      userModelMessage: ModelMessage;
+      convenePath?: boolean;
+      /** Gate A — thread the main turn's already-classified scopeKind so runCouncil skips a redundant self-classify round-trip. */
+      externalTopic?: boolean;
+    },
   ): AsyncGenerator<StreamChunk, void, unknown>;
   processMessage(
     userMessage: string,
@@ -825,6 +832,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       // not a fixed CLI menu. (Pre-debate clarification is orthogonal and still
       // runs per skipClarification.)
       convenePath: true,
+      // Gate A — thread the main turn's already-classified scope so runCouncil
+      // skips a redundant self-classify round-trip inside its own runPipeline.
+      externalTopic: pilCtx.scopeKind === "external",
     });
     const synthesis = deps.councilManager.lastSynthesis;
     const chosenAction = deps.councilManager.lastPostDebateAction;
@@ -3582,6 +3592,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 skipClarification: true,
                 observer,
                 userModelMessage,
+                // Gate A — thread the main turn's already-classified scope so
+                // runCouncil skips a redundant self-classify round-trip.
+                externalTopic: pilCtx.scopeKind === "external",
               })) {
                 if ((chunk as { type?: string }).type === "done") continue;
                 yield chunk;
