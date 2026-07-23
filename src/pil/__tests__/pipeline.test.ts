@@ -85,6 +85,7 @@ describe("runPipeline()", () => {
         depthTier: "standard" as const,
         needsClarification: null,
         ecosystemScope: null,
+        scopeKind: null,
         replyLanguage: null,
       }),
     });

@@ -232,6 +232,31 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     expect(p?.replyLanguage).toBeNull();
   });
 
+  it("parses external scope and keeps language + ecosystemScope correct", async () => {
+    const ext = installMockModel({
+      fixture: { stream: textOnlyStream("analyze,concise,task,answer,heavy,external,vietnamese,clear") },
+    });
+    cleanup = ext.uninstall;
+    const extClassify = createLlmClassifier("deepseek-v4-flash");
+    const r = await extClassify("giải thích CAP theorem");
+    expect(r?.scopeKind).toBe("external");
+    // external is NOT the ecosystem — no docs nudge, and it must not be
+    // swallowed as the reply language.
+    expect(r?.ecosystemScope).toBe(false);
+    expect(r?.replyLanguage).toBe("Vietnamese");
+    ext.uninstall();
+
+    // local stays local; the overloaded `false` ecosystemScope bucket is covered.
+    const loc = installMockModel({
+      fixture: { stream: textOnlyStream("debug,concise,task,code,standard,local,english,clear") },
+    });
+    cleanup = loc.uninstall;
+    const locClassify = createLlmClassifier("deepseek-v4-flash");
+    const p = await locClassify("fix the crash");
+    expect(p?.scopeKind).toBe("local");
+    expect(p?.ecosystemScope).toBe(false);
+  });
+
   it("parses the fourth word as the output deliverable (Phase 2b)", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise,task,code,standard") } });
     cleanup = handle.uninstall;
@@ -410,7 +435,9 @@ describe("classifySubSessionAction", () => {
   it("parses ENTER_IDEAL for an explicit request to enter ideal/build mode", async () => {
     const handle = installMockModel({
       fixture: {
-        stream: textOnlyStream("ENTER_IDEAL,0.96,User explicitly asked to enter ideal mode to build what was discussed."),
+        stream: textOnlyStream(
+          "ENTER_IDEAL,0.96,User explicitly asked to enter ideal mode to build what was discussed.",
+        ),
       },
     });
     cleanup = handle.uninstall;
