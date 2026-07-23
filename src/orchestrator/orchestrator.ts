@@ -2109,6 +2109,14 @@ export class Agent {
        * calling agent (no CLI-hardcoded post-council branch).
        */
       convenePath?: boolean;
+      /**
+       * Gate A — caller-threaded out-of-repo ("external") scope, forwarded into
+       * runCouncil's `RunCouncilOptions.externalTopic`. Set by the auto-council
+       * caller (tool-engine) from the main turn's already-classified
+       * `pilCtx.scopeKind` so runCouncil doesn't need a second self-classify
+       * round-trip. Undefined falls through to runCouncil's own self-classify.
+       */
+      externalTopic?: boolean;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const { runCouncil, buildNeutralPostCouncilContinuation, extractReadableSynthesis } = await import(
@@ -2179,6 +2187,9 @@ export class Agent {
           // convene_council path — suppress ALL hardcoded post-debate decision
           // surface; the agent decides what happens after the synthesis.
           convenePath: options?.convenePath,
+          // Gate A — thread the caller's already-classified scope so runCouncil
+          // doesn't pay for a second self-classify round-trip.
+          externalTopic: options?.externalTopic,
           // When the Context Rail is active it carries leader/panel/cost as
           // ambient sidebar rows, so suppress the duplicate inline summary.
           suppressInlineMeta: isContextRailEnabled(),
