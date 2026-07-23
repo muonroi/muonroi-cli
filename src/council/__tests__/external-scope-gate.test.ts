@@ -106,7 +106,18 @@ function buildMockLLM(researchSpy: { called: boolean }) {
   return {
     generate: vi.fn().mockImplementation(async (_modelId: string, system: string) => {
       if (system.includes("deciding whether a codebase research phase is needed")) {
-        return JSON.stringify({ needsResearch: false, reason: "external topic — no repo knowledge required" });
+        // Deliberately TRUE (with a researchQuery) — this makes the test
+        // discriminating. The ONLY thing that may stop `llm.research` /
+        // `runIsolatedTask` from being called is the `externalTopic` gate
+        // (index.ts skipping this leader call entirely + debate.ts's
+        // `externalTopic ? false : ...` short-circuit). If the gate is broken,
+        // this answer flows through to `needsResearch: true` and the research
+        // phase runs — the assertions below then fail, proving the wiring.
+        return JSON.stringify({
+          needsResearch: true,
+          researchQuery: "repo internals for CAP theorem trade-offs",
+          reason: "would need codebase research if this were a local topic",
+        });
       }
       if (system.includes("evaluating whether")) {
         return JSON.stringify({

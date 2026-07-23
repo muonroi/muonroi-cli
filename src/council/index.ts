@@ -657,6 +657,12 @@ export async function* runCouncil(
   if (options?.skipResearch) {
     leaderNeedsResearch = false;
     yield { type: "council_meta", councilMeta: { researchMode: false } };
+  } else if (externalTopic) {
+    // Gate A already short-circuits research inside runDebate for external
+    // topics — consulting the leader here would be a wasted LLM call whose
+    // answer can never be acted on. Skip it and set the signal directly.
+    leaderNeedsResearch = false;
+    yield { type: "council_meta", councilMeta: { researchMode: false } };
   } else {
     try {
       const needGen = evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware);
