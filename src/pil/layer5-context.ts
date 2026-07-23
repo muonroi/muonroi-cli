@@ -156,7 +156,7 @@ export async function layer5Context(ctx: PipelineContext): Promise<PipelineConte
   const skipRecentFiles = /\b(ci|cd|build|deploy(?:ment)?|action(?:s)?|workflow|pipeline|gh\s+(check|run))\b/i.test(
     ctx.raw,
   );
-  if (!skipRecentFiles) {
+  if (!skipRecentFiles && ctx.scopeKind !== "external") {
     const filesBudget = Math.floor(ctx.tokenBudget * 0.03);
     const fileIndex = await fetchRecentFiles(cwd, filesBudget);
     if (fileIndex) {
@@ -164,7 +164,7 @@ export async function layer5Context(ctx: PipelineContext): Promise<PipelineConte
       deltaSegments.push(`files=${fileIndex.length}ch`);
     }
   } else {
-    deltaSegments.push("files=skipped-operational");
+    deltaSegments.push(ctx.scopeKind === "external" ? "files=skipped-external" : "files=skipped-operational");
   }
 
   if (parts.length === 0) {

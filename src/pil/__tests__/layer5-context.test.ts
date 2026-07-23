@@ -188,6 +188,15 @@ describe("layer5Context", () => {
     const layer = result.layers.find((l) => l.name === "context-enrichment");
     expect(layer!.delta).toContain("window=15m");
   });
+
+  it("skips recent-files indexing for external turns", async () => {
+    const result = await layer5Context(
+      makeCtx({ scopeKind: "external", intentKind: "task", resumeDigest: "Some context" }),
+    );
+    const layer = result.layers.find((l) => l.name === "context-enrichment");
+    expect(layer).toBeDefined();
+    expect(layer!.delta).toContain("files=skipped-external");
+  });
 });
 
 describe("staleThresholdMsForSessionLength — pure session_length → stale window mapping", () => {
