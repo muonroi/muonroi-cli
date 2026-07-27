@@ -1,14 +1,18 @@
 import { execSync } from "child_process";
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "fs";
 import os from "os";
 import path from "path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createLspClientSession } from "./client.js";
+import { lspNpmCachedWhich, lspNpmWhich } from "./npm-cache.js";
 
 let tsServerAvailable = false;
+let cachedTsServerAvailable = false;
+let cachedTsServerCommand: string | null = null;
+let bundledTsServerPath: string | null = null;
 let tmpDir = "";
 
-beforeAll(() => {
+beforeAll(async () => {
   // Check if typescript-language-server AND typescript are both available
   try {
     execSync("bunx typescript-language-server --version", { timeout: 5000, stdio: "pipe" });
@@ -18,6 +22,16 @@ beforeAll(() => {
     tsServerAvailable = false;
   }
 
+  try {
+    cachedTsServerCommand = await lspNpmWhich("typescript-language-server", "typescript-language-server");
+    cachedTsServerAvailable = cachedTsServerCommand !== null;
+  } catch {
+    cachedTsServerAvailable = false;
+    cachedTsServerCommand = null;
+  }
+
+  bundledTsServerPath = resolveBundledTsServerPath();
+
   // Create temp directory with a minimal TypeScript project
   tmpDir = path.join(os.tmpdir(), `lsp-smoke-${Date.now()}`);
   mkdirSync(tmpDir, { recursive: true });
@@ -25,6 +39,12 @@ beforeAll(() => {
   writeFileSync(
     path.join(tmpDir, "tsconfig.json"),
     JSON.stringify({ compilerOptions: { strict: true } }, null, 2),
+    "utf8",
+  );
+
+  writeFileSync(
+    path.join(tmpDir, "package.json"),
+    JSON.stringify({ name: "lsp-smoke", private: true }, null, 2),
     "utf8",
   );
 
@@ -40,25 +60,61 @@ afterAll(() => {
 });
 
 describe("LSP smoke test — createLspClientSession", () => {
-  it.skipIf(!tsServerAvailable || !!process.env.CI)(
-    "initializes LSP session with typescript-language-server",
-    { timeout: 30000 },
-    async () => {
-      const session = await createLspClientSession({
-        serverId: "ts-smoke",
-        root: tmpDir,
-        launch: { command: "bunx", args: ["typescript-language-server", "--stdio"] },
-        startupTimeoutMs: 15000,
-        diagnosticsDebounceMs: 500,
-      });
+  it("initializes LSP session with typescript-language-server", { timeout: 30000 }, async () => {
+    if (!tsServerAvailable || !bundledTsServerPath || process.env.CI) return;
 
-      expect(session.serverId).toBe("ts-smoke");
+    const session = await createLspClientSession({
+      serverId: "ts-smoke",
+      root: tmpDir,
+      launch: {
+        command: "bunx",
+        args: ["typescript-language-server", "--stdio"],
+        initializationOptions: { tsserver: { path: bundledTsServerPath } },
+      },
+      startupTimeoutMs: 15000,
+      diagnosticsDebounceMs: 500,
+    });
 
-      await session.openOrChangeFile(path.join(tmpDir, "test.ts"), "typescript", "const x: number = 1;");
+    expect(session.serverId).toBe("ts-smoke");
 
-      await session.stop();
-    },
-  );
+    await session.openOrChangeFile(path.join(tmpDir, "test.ts"), "typescript", "const x: number = 1;");
+
+    await session.stop();
+  });
+
+  it("initializes LSP session with the cached npm binary path", { timeout: 30000 }, async () => {
+    if (!cachedTsServerAvailable || !bundledTsServerPath || process.env.CI) return;
+
+    const cachedCommand = await lspNpmCachedWhich("typescript-language-server", "typescript-language-server");
+
+    expect(cachedCommand).toBe(cachedTsServerCommand);
+    expect(cachedCommand).not.toBeNull();
+    if (process.platform === "win32") {
+      expect(cachedCommand).toMatch(/\.cmd$/);
+    } else {
+      expect(cachedCommand).not.toMatch(/\.cmd$/);
+    }
+
+    const session = await createLspClientSession({
+      serverId: "ts-cache-smoke",
+      root: tmpDir,
+      launch: {
+        command: cachedCommand!,
+        args: ["--stdio"],
+        initializationOptions: { tsserver: { path: bundledTsServerPath } },
+      },
+      startupTimeoutMs: 15000,
+      diagnosticsDebounceMs: 500,
+    });
+
+    expect(session.serverId).toBe("ts-cache-smoke");
+
+    await session.openOrChangeFile(path.join(tmpDir, "test.ts"), "typescript", "const x: number = 1;");
+    const diagnostics = await session.waitForDiagnostics(path.join(tmpDir, "test.ts"), 5000);
+    expect(Array.isArray(diagnostics)).toBe(true);
+
+    await session.stop();
+  });
 
   it("createLspClientSession rejects for non-existent command", { timeout: 10000 }, async () => {
     await expect(
@@ -72,3 +128,16 @@ describe("LSP smoke test — createLspClientSession", () => {
     ).rejects.toThrow();
   });
 });
+
+function resolveBundledTsServerPath(): string | null {
+  const bunPackagesDir = path.join(process.cwd(), "node_modules", ".bun");
+  if (!existsSync(bunPackagesDir)) return null;
+
+  for (const entry of readdirSync(bunPackagesDir)) {
+    if (!entry.startsWith("typescript@")) continue;
+    const candidate = path.join(bunPackagesDir, entry, "node_modules", "typescript", "lib", "tsserver.js");
+    if (existsSync(candidate)) return candidate;
+  }
+
+  return null;
+}
