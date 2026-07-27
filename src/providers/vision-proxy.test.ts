@@ -72,8 +72,14 @@ describe("planImageHandlingForTextOnlyModel", () => {
   it("returns native_model when proxy providers lack keys but another vision model is configured", async () => {
     vi.spyOn(settings, "isProviderDisabled").mockReturnValue(false);
     vi.spyOn(settings, "isModelDisabled").mockReturnValue(false);
+    // Narrow the proxy chain to zai only, so a keyed vision model that is NOT a
+    // chain slot is the only way images can be served — the native_model branch.
+    vi.spyOn(registry, "getVisionProxyRouting").mockReturnValue({
+      default: { provider: "zai", model_id: "glm-4.6v-flash" },
+      fallback_chain: [],
+    });
     vi.spyOn(keychain, "loadKeyForProvider").mockImplementation(async (p) => {
-      if (p === "opencode-go") return "sk-opencode-key-123456789012345678";
+      if (p === "xai") return "sk-xai-key-1234567890123456789012";
       throw new Error("no key");
     });
     const plan = await planImageHandlingForTextOnlyModel({
@@ -82,9 +88,27 @@ describe("planImageHandlingForTextOnlyModel", () => {
     });
     expect(plan.strategy).toBe("native_model");
     if (plan.strategy === "native_model") {
-      expect(plan.fallback.provider).toBe("opencode-go");
-      expect(plan.fallback.modelId).toBe("opencode/glm-5.2");
+      expect(plan.fallback.provider).toBe("xai");
+      expect(plan.fallback.modelId).toBe("grok-4.5");
     }
+  });
+
+  it("does NOT route an image to opencode-go, which answers without seeing it", async () => {
+    // Verified live: the Console Go proxy returns HTTP 200 and "I cannot see the
+    // image" — it drops image parts. `supports_vision:false` in the catalog keeps
+    // it out of every vision path; the runtime blind-response guard in
+    // vision-backend.ts is the second line of defence.
+    vi.spyOn(settings, "isProviderDisabled").mockReturnValue(false);
+    vi.spyOn(settings, "isModelDisabled").mockReturnValue(false);
+    vi.spyOn(keychain, "loadKeyForProvider").mockImplementation(async (p) => {
+      if (p === "opencode-go") return "sk-opencode-key-123456789012345678";
+      throw new Error("no key");
+    });
+    const plan = await planImageHandlingForTextOnlyModel({
+      primaryModelId: "deepseek-v4-flash",
+      imageCount: 1,
+    });
+    expect(plan.strategy).toBe("unavailable");
   });
 
   it("returns unavailable when no vision keys at all", async () => {

@@ -23,6 +23,13 @@ import {
   wrapAnalyzerInstructions,
 } from "./vision-backend.js";
 import { needsVisionProxy } from "./vision-proxy.js";
+import {
+  askVisionSession,
+  closeVisionSession,
+  listVisionSessions,
+  mostRecentVisionSessionId,
+  openVisionSession,
+} from "./vision-session.js";
 
 const IMAGE_CACHE_MAX = 20;
 const IMAGE_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
@@ -104,12 +111,18 @@ interface CachedImage {
   label: string;
   description: string;
   timestamp: number;
+  /**
+   * Live vision sub-session holding THIS image, when one is open. Follow-ups
+   * routed through it are answered from the sub-agent's own notes instead of
+   * re-uploading and re-analysing the picture.
+   */
+  visionSessionId?: string;
 }
 
 const imageCache: CachedImage[] = [];
 let cacheIdCounter = 0;
 
-function addToCache(images: ExtractedImage[], description: string, label?: string): string[] {
+function addToCache(images: ExtractedImage[], description: string, label?: string, visionSessionId?: string): string[] {
   const ids: string[] = [];
   const now = Date.now();
 
@@ -128,6 +141,7 @@ function addToCache(images: ExtractedImage[], description: string, label?: strin
       label: label ?? img.source,
       description,
       timestamp: now,
+      visionSessionId,
     });
     ids.push(id);
 
@@ -327,14 +341,35 @@ export async function analyzeImageFromSource(
 
   const prompt = question ? buildFollowUpPrompt(question, images.length) : undefined;
 
-  const rawObservation = await analyzeImages(images, context, signal, prompt, sessionId);
-  if (!rawObservation) {
-    const { collectVisionUnavailableReasons } = await import("./vision-backend.js");
-    return formatNativeVisionUnavailable(1, await collectVisionUnavailableReasons());
+  // SVG is vector text — no vision model, and nothing to keep open.
+  const svgFast = trySvgFastPath(images, context);
+  if (svgFast) {
+    const cachedIds = addToCache(images, svgFast, source);
+    return formatNativeVisionObservation(svgFast, { imageCount: images.length, cachedIds });
   }
 
-  const cachedIds = addToCache(images, rawObservation, source);
-  return formatNativeVisionObservation(rawObservation, { imageCount: images.length, cachedIds });
+  // Read the image ONCE into a persistent sub-session; later ask_vision_proxy
+  // calls answer from that session rather than re-reading (session e74e-era
+  // behaviour: every follow-up re-uploaded the full base64 and re-ran a cold
+  // analysis).
+  const kind: VisionTaskKind =
+    context.type === "design" ? "design" : prompt && looksLikeOcrIntent(prompt) ? "ocr" : "default";
+  const opened = await openVisionSession({
+    images: images.map((img) => ({ base64: img.base64, mediaType: img.mediaType, label: img.source })),
+    prompt: prompt ?? buildContextualPrompt(images.length, context),
+    kind,
+    responseFormat: context.type === "design" ? { type: "json_object" as const } : undefined,
+    signal,
+    sessionId,
+  });
+  if (!opened.ok) return opened.text;
+
+  const cachedIds = addToCache(images, opened.raw, source, opened.visionSessionId ?? undefined);
+  return formatNativeVisionObservation(opened.raw, {
+    imageCount: images.length,
+    cachedIds,
+    visionSessionId: opened.visionSessionId ?? undefined,
+  });
 }
 
 /**
@@ -358,6 +393,14 @@ export async function askVisionProxy(
     : getRecentImages(1);
 
   if (targets.length === 0) {
+    // Images that arrived on the message path (a pasted screenshot) never enter
+    // the tool-side cache — they live only in their vision sub-session. Ask that
+    // session rather than reporting "no images".
+    const openSessionId = mostRecentVisionSessionId();
+    if (openSessionId) {
+      const answered = await askVisionSession(openSessionId, question, { signal, sessionId });
+      if (answered) return answered.text;
+    }
     const cached = listCachedImages();
     if (cached.length === 0) {
       return [
@@ -369,6 +412,19 @@ export async function askVisionProxy(
       ].join("\n");
     }
     return `No matching image. Available:\n${cached.map((c) => `- ${c.id}: ${c.label} (${c.age})`).join("\n")}\n\nSpecify image_id, or provide a file_path to analyze a new image.`;
+  }
+
+  // Preferred path: the image is still OPEN in its vision sub-session, so the
+  // sub-agent answers from what it already saw. No re-upload, no cold re-read —
+  // that stateless re-analysis on every follow-up is exactly what this replaces.
+  const liveSessionId = targets.find((t) => t.visionSessionId)?.visionSessionId;
+  if (liveSessionId) {
+    const answered = await askVisionSession(liveSessionId, question, { signal, sessionId });
+    if (answered) return answered.text;
+    // Session expired or was closed — fall through to a fresh stateless read.
+    for (const t of targets) {
+      if (t.visionSessionId === liveSessionId) t.visionSessionId = undefined;
+    }
   }
 
   const visionContent: Array<Record<string, unknown>> = [];
@@ -941,4 +997,28 @@ function wrapWithFallback(output: unknown, imageCount: number): unknown {
   const notice = formatNativeVisionUnavailable(imageCount, ["auto-analysis failed"]);
   if (typeof output === "string") return `${output}\n${notice}`;
   return { ...(output as Record<string, unknown>), _visionNotice: notice };
+}
+
+/**
+ * Release a vision sub-session once the agent is done looking at the image.
+ * Also clears the pointer on any cached image that referenced it, so a later
+ * follow-up falls back to a fresh read instead of a dead session id.
+ */
+export function closeVisionSessionAndCache(visionSessionId: string): string {
+  const summary = closeVisionSession(visionSessionId);
+  for (const img of imageCache) {
+    if (img.visionSessionId === visionSessionId) img.visionSessionId = undefined;
+  }
+  if (!summary) {
+    return `No open vision session "${visionSessionId}" (already closed or expired). Nothing to release.`;
+  }
+  return [
+    `Closed vision session ${summary.id} (${summary.imageCount} image(s): ${summary.labels.join(", ")}).`,
+    `${summary.questionsAnswered} follow-up(s) answered — ${summary.cachedAnswers} from the session's own notes, ${summary.reReads} needed another look at the image.`,
+  ].join("\n");
+}
+
+/** Open vision sub-sessions, for `list_vision_cache`. */
+export function listOpenVisionSessions(): ReturnType<typeof listVisionSessions> {
+  return listVisionSessions();
 }

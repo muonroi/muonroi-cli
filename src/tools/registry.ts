@@ -13,8 +13,15 @@ import type { AskUserAskInfo, AskUserOption } from "../orchestrator/ask-user.js"
 import { requestProactiveCompact } from "../orchestrator/compact-request.js";
 import { requestCouncilConvene } from "../orchestrator/council-request.js";
 import { canonicalizeBashCommand } from "../orchestrator/tool-args-hash.js";
-import { analyzeImageFromSource, askVisionProxy, listCachedImages } from "../providers/mcp-vision-bridge.js";
+import {
+  analyzeImageFromSource,
+  askVisionProxy,
+  closeVisionSessionAndCache,
+  listCachedImages,
+  listOpenVisionSessions,
+} from "../providers/mcp-vision-bridge.js";
 import { needsVisionProxy } from "../providers/vision-proxy.js";
+import { mostRecentVisionSessionId } from "../providers/vision-session.js";
 import type { AgentMode, TaskRequest, ToolResult } from "../types/index.js";
 import { loadMcpServers } from "../utils/settings.js";
 import type { BashTool } from "./bash.js";
@@ -1464,6 +1471,30 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       },
     });
 
+    tools.vision_done = dynamicTool({
+      description:
+        "Release a vision sub-session when you no longer need to look at its image(s). " +
+        "While a session is open the image stays loaded and ask_vision_proxy answers follow-ups " +
+        "from what it already saw — cheap and consistent. Call this ONCE you have finished " +
+        "reasoning about the image (before your final answer, or when the user moves on), " +
+        "so the image bytes are freed. Omit vision_session_id to close the most recent session.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          vision_session_id: {
+            type: "string",
+            description:
+              "Session id from the <vision-observation> block (e.g. vs_1a2b3c4d). Defaults to the most recent.",
+          },
+        },
+      }),
+      execute: async (input: any) => {
+        const id = input?.vision_session_id ?? mostRecentVisionSessionId();
+        if (!id) return "No open vision session to close.";
+        return closeVisionSessionAndCache(id);
+      },
+    });
+
     tools.list_vision_cache = dynamicTool({
       description:
         "List all cached images available for ask_vision_proxy queries. " +
@@ -1477,9 +1508,21 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         if (cached.length === 0) {
           return "No cached images. Use analyze_image to analyze an image file, or take a screenshot with browser_take_screenshot.";
         }
-        return cached
-          .map((c) => `${c.id}: ${c.label} (${c.source}, ${c.age})${c.hasDescription ? " [analyzed]" : ""}`)
-          .join("\n");
+        const open = listOpenVisionSessions();
+        const openBlock =
+          open.length > 0
+            ? `\n\nOpen vision sessions (follow-ups are free — no re-read):\n${open
+                .map(
+                  (s) =>
+                    `${s.id}: ${s.imageCount} image(s) [${s.labels.join(", ")}], ${s.questionsAnswered} answered — close with vision_done`,
+                )
+                .join("\n")}`
+            : "";
+        return (
+          cached
+            .map((c) => `${c.id}: ${c.label} (${c.source}, ${c.age})${c.hasDescription ? " [analyzed]" : ""}`)
+            .join("\n") + openBlock
+        );
       },
     });
   }

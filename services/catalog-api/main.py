@@ -136,6 +136,15 @@ class CatalogCouncilRouting(BaseModel):
 class CatalogVisionProxySlot(BaseModel):
     provider: str
     model_id: str
+    # Mirrors CatalogVisionProxySlot in src/models/catalog-client.ts. A slot may
+    # name a vision-only backend that is NOT a first-class ProviderId in the CLI
+    # (SiliconFlow Qwen-VL), carrying its own endpoint + key env var. Without
+    # these fields declared here, Pydantic DROPS them on serialization and the
+    # served catalog silently degrades that slot to an unresolvable provider —
+    # i.e. the CLI's vision fallback works from the bundled static catalog and
+    # breaks the moment the remote catalog is reachable.
+    api_base: Optional[str] = None
+    api_key_env: Optional[str] = None
 
 
 class CatalogVisionProxyRouting(BaseModel):

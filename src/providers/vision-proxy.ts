@@ -10,7 +10,6 @@ import type { ModelMessage } from "ai";
 import { getModelInfo } from "../models/registry.js";
 import { UI_LAYOUT_SCHEMA_HINT } from "./mcp-vision-bridge.js";
 import {
-  callVisionBackend,
   collectVisionUnavailableReasons,
   findNativeVisionFallback,
   formatNativeVisionObservation,
@@ -18,10 +17,9 @@ import {
   isVisionBackendAvailable,
   looksLikeOcrIntent,
   type NativeVisionFallback,
-  resolveAvailableVisionChain,
   type VisionTaskKind,
-  wrapAnalyzerInstructions,
 } from "./vision-backend.js";
+import { openVisionSession } from "./vision-session.js";
 
 const DESIGN_INTENT_PATTERNS = [
   /\bredesign\b/i,
@@ -168,37 +166,28 @@ async function describeImages(
 ): Promise<string> {
   const userContext = contextTexts.map((t) => t.text).join("\n");
   const designIntent = kind === "design";
-
-  const visionContent: Array<Record<string, unknown>> = [];
-  visionContent.push({
-    type: "text",
-    text: wrapAnalyzerInstructions(
-      designIntent
-        ? buildDesignPrompt(userContext, images.length)
-        : buildAnalysisPrompt(userContext, images.length, kind === "ocr"),
-      kind,
-    ),
-  });
-
-  for (const img of images) {
-    visionContent.push({
-      type: "image_url",
-      image_url: {
-        url: `data:${img.mediaType};base64,${img.image}`,
-        detail: "high",
-      },
-    });
-  }
+  const analysisPrompt = designIntent
+    ? buildDesignPrompt(userContext, images.length)
+    : buildAnalysisPrompt(userContext, images.length, kind === "ocr");
 
   const responseFormat = designIntent ? { type: "json_object" as const } : undefined;
-  const chain = await resolveAvailableVisionChain(kind);
-  const result = await callVisionBackend(chain, visionContent, signal, responseFormat, { sessionId });
-
-  if (result.ok) {
-    return formatNativeVisionObservation(result.text, { imageCount: images.length });
-  }
-
-  return formatNativeVisionUnavailable(images.length, [result.reason]);
+  // Open a persistent vision sub-session instead of a one-shot call: the image
+  // is read ONCE here, and every follow-up the primary asks via ask_vision_proxy
+  // is answered from that session's own notes rather than re-uploading and
+  // re-analysing the same pixels. The session is released by `vision_done`.
+  const opened = await openVisionSession({
+    images: images.map((img, i) => ({
+      base64: img.image,
+      mediaType: img.mediaType,
+      label: `image ${i + 1}`,
+    })),
+    prompt: analysisPrompt,
+    kind,
+    responseFormat,
+    signal,
+    sessionId,
+  });
+  return opened.text;
 }
 
 function trySvgFastPath(images: ImagePart[], designIntent: boolean): string | null {

@@ -21,7 +21,7 @@
  */
 
 /** The exact tool ids this gate governs. Core/code/todo tools are excluded. */
-export const VISION_TOOL_NAMES = ["analyze_image", "ask_vision_proxy", "list_vision_cache"] as const;
+export const VISION_TOOL_NAMES = ["analyze_image", "ask_vision_proxy", "list_vision_cache", "vision_done"] as const;
 
 /**
  * Image references in free text: an image file extension, a data: image URI, or

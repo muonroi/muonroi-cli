@@ -78,6 +78,19 @@ export interface CatalogCouncilRouting {
 export interface CatalogVisionProxySlot {
   provider: string;
   model_id: string;
+  /**
+   * Explicit OpenAI-compatible base URL for this slot. Lets the vision chain
+   * reach a backend that is NOT a first-class `ProviderId` (the vision path is a
+   * hand-rolled fetch, so it needs no adapter, keychain entry, or settings UI) —
+   * and lets a slot override a provider whose default base cannot serve images.
+   * Omitted → `apiBaseFor(provider)`.
+   */
+  api_base?: string;
+  /**
+   * Environment variable holding this slot's API key, for the same
+   * outside-the-ProviderId-union case. Omitted → `loadKeyForProvider(provider)`.
+   */
+  api_key_env?: string;
 }
 
 export interface CatalogVisionProxyRouting {
@@ -198,6 +211,20 @@ const CatalogProviderPeakHourSchema = z
   })
   .loose();
 
+/**
+ * A vision-proxy backend slot. `api_base` / `api_key_env` let the chain reach a
+ * vision-only backend that is not a first-class provider (see the field docs on
+ * CatalogVisionProxySlot).
+ */
+const VisionProxySlotSchema = z
+  .object({
+    provider: z.string().min(1),
+    model_id: z.string().min(1),
+    api_base: z.string().min(1).optional(),
+    api_key_env: z.string().min(1).optional(),
+  })
+  .loose();
+
 const CatalogResponseSchema = z
   .object({
     version: z.string(),
@@ -226,10 +253,10 @@ const CatalogResponseSchema = z
           .optional(),
         vision_proxy: z
           .object({
-            default: z.object({ provider: z.string().min(1), model_id: z.string().min(1) }).optional(),
-            ocr: z.object({ provider: z.string().min(1), model_id: z.string().min(1) }).optional(),
-            design: z.object({ provider: z.string().min(1), model_id: z.string().min(1) }).optional(),
-            fallback_chain: z.array(z.object({ provider: z.string().min(1), model_id: z.string().min(1) })).optional(),
+            default: VisionProxySlotSchema.optional(),
+            ocr: VisionProxySlotSchema.optional(),
+            design: VisionProxySlotSchema.optional(),
+            fallback_chain: z.array(VisionProxySlotSchema).optional(),
           })
           .optional(),
       })

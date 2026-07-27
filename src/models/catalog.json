@@ -388,7 +388,7 @@
       "default_reasoning_effort": "medium",
       "description": "Subscription version of GLM-5.2 MoE with 1M-token context window.",
       "aliases": ["glm-5.2-go"],
-      "supports_vision": true,
+      "supports_vision": false,
       "roles": ["leader", "implement", "verify"],
       "native_web_research": false,
       "web_research_kind": null
@@ -612,6 +612,12 @@
         {
           "provider": "zai",
           "model_id": "glm-5.2"
+        },
+        {
+          "provider": "siliconflow",
+          "model_id": "Qwen/Qwen3-VL-32B-Instruct",
+          "api_base": "https://api.siliconflow.com/v1",
+          "api_key_env": "SILICONFLOW_API_KEY"
         }
       ]
     },
