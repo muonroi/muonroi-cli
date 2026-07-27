@@ -45,6 +45,17 @@ export interface BuildProviderOptionsCtx {
   sessionId?: string;
   /** Resolved reasoning effort from user settings (overrides model default). */
   reasoningEffort?: "low" | "medium" | "high" | "xhigh";
+  /**
+   * "Spend NOTHING on reasoning for this call." Set by throwaway format-only
+   * calls (the PIL classifier) whose whole output is a fixed one-line shape —
+   * chain-of-thought buys nothing there and costs the call its latency budget.
+   *
+   * Distinct from `reasoningEffort: "low"`, which only picks the cheapest of the
+   * efforts a provider EXPOSES; this asks a provider that force-enables thinking
+   * server-side to turn it off entirely. Providers that cannot are free to
+   * ignore it.
+   */
+  minimizeReasoning?: boolean;
 }
 
 /**
@@ -191,6 +202,10 @@ function computePromptCacheKey(sessionId: string | undefined): string | undefine
 class AnthropicProviderCapabilities extends ReliableProviderCapabilities {
   override buildProviderOptions(ctx: BuildProviderOptionsCtx): Record<string, unknown> | undefined {
     const m = ctx.model;
+    // A format-only call (see `minimizeReasoning`) must not be handed a 8–10K
+    // thinking budget. Omitting the field leaves thinking off, which is what
+    // Anthropic defaults to — so this is a no-op for normal turns.
+    if (ctx.minimizeReasoning) return undefined;
     if (m?.thinkingType === "adaptive") {
       return { anthropic: { thinking: { type: "enabled", budgetTokens: 10_000 } } };
     }
@@ -314,9 +329,33 @@ class OllamaProviderCapabilities extends ReliableProviderCapabilities {
 /**
  * Z.ai — defaults are reliable; only the console URL differs.
  */
+/**
+ * Z.ai — the coding endpoint (`/api/coding/paas/v4`) force-enables thinking
+ * server-side for every GLM it hosts, and exposes no reasoning_effort knob. Two
+ * consequences, both measured live on 2026-07-27:
+ *
+ *   - time-to-first-byte is **10–11 s** (glm-4.7 and glm-4.5-air; full response
+ *     17–30 s), because nothing is emitted until the CoT finishes.
+ *   - sending `thinking: {type:"disabled"}` drops TTFT to **1.2–2.1 s** and the
+ *     whole response to the same, an ~8× cut.
+ *
+ * That gap silently killed the PIL classifier on every z.ai turn: its per-attempt
+ * ceiling is 8 s, so the call aborted before the first byte (`parts={start,abort}`,
+ * zero deltas) → intent-detection FAIL → all six PIL layers skipped, and the GSD
+ * complexity assessor left with no depth. Deterministic, not flaky.
+ *
+ * So honor `minimizeReasoning` here: a format-only call gets thinking switched
+ * off rather than waiting out a CoT whose content is thrown away. Normal turns
+ * (no flag) keep thinking — that is where GLM's reasoning actually earns its keep.
+ */
 class ZaiProviderCapabilities extends ReliableProviderCapabilities {
   override consoleSignupURL(): string {
     return consoleUrlFor("zai");
+  }
+
+  override buildProviderOptions(ctx: BuildProviderOptionsCtx): Record<string, unknown> | undefined {
+    if (ctx.minimizeReasoning) return { zai: { thinking: { type: "disabled" } } };
+    return undefined;
   }
 }
 

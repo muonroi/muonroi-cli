@@ -566,14 +566,30 @@ export function createLlmClassifier(modelId: string, classifyOpts?: CreateClassi
       const dropMaxTokens = runtime.unsupportedParams?.includes("maxOutputTokens") === true;
       const maxOut = isReasoning ? REASONING_MAX_OUTPUT_TOKENS : NONREASONING_MAX_OUTPUT_TOKENS;
 
-      // Minimize reasoning cost: force the lowest effort the provider exposes.
+      // Minimize reasoning cost: force the lowest effort the provider exposes,
+      // and — for providers that force thinking on server-side with no effort
+      // knob — ask for it OFF entirely via `minimizeReasoning`. Classify output
+      // is a fixed one-line shape; CoT buys nothing and is pure latency.
+      //
+      // The old gate required `supportsReasoningEffort`, so a provider with no
+      // effort knob got no minimization at all. Live: z.ai's coding endpoint
+      // force-thinks with TTFT 10–11 s against this attempt's 8 s ceiling, so
+      // EVERY z.ai classify aborted before the first byte and the whole PIL
+      // stack was skipped on every turn (see ZaiProviderCapabilities).
+      // Deliberately NOT gated on `isReasoning`: that comes from the catalog's
+      // `reasoning` flag, and the z.ai models were all catalogued as
+      // `reasoning:false` while the coding endpoint force-thinks — so gating on
+      // it would make this fix depend on the very flag that was wrong. Asking
+      // for minimal reasoning is always right for a format-only call; providers
+      // with nothing to say return undefined and the merge is a no-op.
       let providerOptions = runtime.providerOptions;
-      if (isReasoning && runtime.modelInfo?.supportsReasoningEffort && runtime.modelInfo.provider) {
-        const lowEffort = getProviderCapabilities(runtime.modelInfo.provider).buildProviderOptions({
+      if (runtime.modelInfo?.provider) {
+        const cheapest = getProviderCapabilities(runtime.modelInfo.provider).buildProviderOptions({
           model: runtime.modelInfo,
-          reasoningEffort: "low",
+          minimizeReasoning: true,
+          ...(runtime.modelInfo.supportsReasoningEffort ? { reasoningEffort: "low" as const } : {}),
         });
-        providerOptions = mergeProviderOptions(runtime.providerOptions, lowEffort);
+        providerOptions = mergeProviderOptions(runtime.providerOptions, cheapest);
       }
 
       const controller = new AbortController();
@@ -835,13 +851,20 @@ export async function classifySubSessionAction(
     const dropMaxTokens = runtime.unsupportedParams?.includes("maxOutputTokens") === true;
     const maxOut = isReasoning ? REASONING_MAX_OUTPUT_TOKENS : NONREASONING_MAX_OUTPUT_TOKENS;
 
+    // Same minimization as the main classifier (see the comment there): this is
+    // also a fixed-shape throwaway call, so reasoning is pure latency. Two fixes
+    // over the previous version: it no longer gates on the catalog `reasoning`
+    // flag (z.ai's was wrong), and it passes `runtime.modelInfo` — it used to
+    // pass `runtime.model` (the language model), so every field
+    // buildProviderOptions reads was undefined and the override never applied.
     let providerOptions = runtime.providerOptions;
-    if (isReasoning && runtime.modelInfo?.supportsReasoningEffort && runtime.modelInfo.provider) {
-      const lowEffort = getProviderCapabilities(runtime.modelInfo.provider).buildProviderOptions({
-        model: runtime.model,
-        reasoningEffort: "low",
+    if (runtime.modelInfo?.provider) {
+      const cheapest = getProviderCapabilities(runtime.modelInfo.provider).buildProviderOptions({
+        model: runtime.modelInfo,
+        minimizeReasoning: true,
+        ...(runtime.modelInfo.supportsReasoningEffort ? { reasoningEffort: "low" as const } : {}),
       });
-      providerOptions = mergeProviderOptions(runtime.providerOptions, lowEffort);
+      providerOptions = mergeProviderOptions(runtime.providerOptions, cheapest);
     }
 
     let promptWithContext = prompt.slice(0, 1000);

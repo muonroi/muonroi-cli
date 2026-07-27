@@ -221,3 +221,50 @@ describe("ProviderCapabilities — G3 buildProviderOptions", () => {
     });
   });
 });
+
+/**
+ * `minimizeReasoning` — "spend NOTHING on reasoning for this call", set by the
+ * PIL classifier (a format-only, one-line-output call).
+ *
+ * Motivating measurement (2026-07-27, Z.ai coding endpoint): thinking is forced
+ * on server-side with no reasoning_effort knob, giving TTFT 10–11 s against the
+ * classifier's 8 s per-attempt ceiling → every z.ai classify aborted before the
+ * first byte and the whole PIL stack was skipped. `thinking: {type:"disabled"}`
+ * cuts TTFT to 1.2–2.1 s.
+ */
+describe("buildProviderOptions — minimizeReasoning", () => {
+  it("zai disables thinking entirely (it exposes no effort knob)", () => {
+    const opts = getProviderCapabilities("zai").buildProviderOptions({
+      model: baseModel({ id: "glm-4.7", provider: "zai", reasoning: true }),
+      minimizeReasoning: true,
+    });
+    expect(opts).toEqual({ zai: { thinking: { type: "disabled" } } });
+  });
+
+  it("zai leaves thinking untouched on a normal turn (no flag)", () => {
+    const opts = getProviderCapabilities("zai").buildProviderOptions({
+      model: baseModel({ id: "glm-4.7", provider: "zai", reasoning: true }),
+    });
+    expect(opts).toBeUndefined();
+  });
+
+  it("anthropic withholds its thinking budget rather than funding a throwaway call", () => {
+    const model = baseModel({ id: "claude-x", provider: "anthropic", thinkingType: "adaptive" });
+    const caps = getProviderCapabilities("anthropic");
+    // Normal turn: thinking enabled as before.
+    expect(caps.buildProviderOptions({ model })).toEqual({
+      anthropic: { thinking: { type: "enabled", budgetTokens: 10_000 } },
+    });
+    // Format-only call: no budget granted.
+    expect(caps.buildProviderOptions({ model, minimizeReasoning: true })).toBeUndefined();
+  });
+
+  it("still honors reasoningEffort for providers that expose it", () => {
+    const opts = getProviderCapabilities("xai").buildProviderOptions({
+      model: baseModel({ id: "grok-x", provider: "xai", supportsReasoningEffort: true }),
+      minimizeReasoning: true,
+      reasoningEffort: "low",
+    });
+    expect(opts).toEqual({ xai: { reasoningEffort: "low" } });
+  });
+});
