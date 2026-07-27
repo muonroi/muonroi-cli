@@ -9,7 +9,7 @@
  */
 import type { LanguageModelV3ToolCall } from "@ai-sdk/provider";
 import { describe, expect, it } from "vitest";
-import { repairToolCallHook, resolveToolName } from "./repair-tool-call.js";
+import { recoverArgsFromToolName, repairToolCallHook, resolveToolName } from "./repair-tool-call.js";
 
 const REGISTERED = new Set(["ee_feedback", "ee_query", "usage_forensics", "grep", "read"]);
 
@@ -92,5 +92,62 @@ describe("repairToolCallHook — tool-name repair", () => {
       toolCall: call("mcp__muonroi-tools__ee_feedback", '{"id":"abc"}'),
     });
     expect(out).toBeNull();
+  });
+});
+
+/**
+ * Regression for session 2e5b1e80a4e6 — glm-4.7 on the Z.ai coding endpoint.
+ * The model leaked its own chat-template markup as content
+ * (`<tool_call>read_file file_path="README.md"</arg_value>`); Z.ai's server-side
+ * parser then returned ONE tool call whose `function.name` was that whole blob
+ * and whose `arguments` was `{}`. All three calls that turn died as
+ * NoSuchToolError, so the turn printed free text and did no work — even though
+ * both the tool and its argument were fully recoverable from the garbage name.
+ */
+describe("mangled tool name (provider swallowed the leaked markup)", () => {
+  const REG = new Set(["read_file", "ee_query", "grep"]);
+
+  it("resolves the leading identifier out of a name carrying inline args + a stray close tag", () => {
+    expect(resolveToolName('read_file file_path="README.md"</arg_value>', REG)).toBe("read_file");
+    expect(
+      resolveToolName('ee_query collection="experience-principles" query="project overview"</arg_value>', REG),
+    ).toBe("ee_query");
+  });
+
+  it("does NOT rewrite a genuinely unknown tool name", () => {
+    expect(resolveToolName("some_unknown_tool", REG)).toBeNull();
+    expect(resolveToolName('unknown_tool arg="x"', REG)).toBeNull();
+  });
+
+  it("leaves an already-registered name alone even when it contains a dash", () => {
+    expect(resolveToolName("read_file", REG)).toBeNull();
+  });
+
+  it("recovers the swallowed args when the provider sent an empty arguments object", async () => {
+    const out = await repairToolCallHook({
+      toolCall: call('read_file file_path="README.md"</arg_value>', "{}"),
+      tools: { read_file: {}, ee_query: {} },
+    });
+    expect(out?.toolName).toBe("read_file");
+    expect(JSON.parse(String(out?.input))).toEqual({ file_path: "README.md" });
+  });
+
+  it("never overrides arguments the model actually supplied", async () => {
+    const out = await repairToolCallHook({
+      toolCall: call('read_file file_path="README.md"', '{"file_path":"package.json"}'),
+      tools: { read_file: {} },
+    });
+    expect(out?.toolName).toBe("read_file");
+    expect(JSON.parse(String(out?.input))).toEqual({ file_path: "package.json" });
+  });
+});
+
+describe("recoverArgsFromToolName", () => {
+  it("parses double- and single-quoted pairs, and returns null when there are none", () => {
+    expect(recoverArgsFromToolName("read_file file_path=\"a.ts\" mode='r'")).toEqual({
+      file_path: "a.ts",
+      mode: "r",
+    });
+    expect(recoverArgsFromToolName("read_file")).toBeNull();
   });
 });

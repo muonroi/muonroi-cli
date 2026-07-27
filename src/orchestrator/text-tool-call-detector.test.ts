@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
+import {
+  detectTextEmittedToolCall,
+  parseDsmlToolCalls,
+  parseGlmToolCalls,
+  parseLeakedToolCalls,
+} from "./text-tool-call-detector.js";
 
 describe("detectTextEmittedToolCall", () => {
   it("detects the Cline/Roo <read_file><path> dialect (live deepseek failure)", () => {
@@ -169,5 +174,47 @@ describe("detectTextEmittedToolCall", () => {
     expect(calls[0]!.name).toBe("mcp_filesystem__search_files");
     expect(calls[0]!.args.pattern).toBe("Serilog");
     expect(calls[0]!.args.path).toBe("D:\\sources\\Core\\muonroi-building-block\\src");
+  });
+});
+
+/**
+ * Regression for session 2e5b1e80a4e6 — glm-4.7 (Z.ai coding endpoint) leaked
+ * its chat-template tool calls as assistant TEXT in two shapes within one
+ * session. Detection already fired via GENERIC_WRAPPER_RE, but only DSML had an
+ * intent parser, so the re-steer fell back to a generic nudge the model ignored
+ * twice in a row. These cover the GLM dialect + the dialect-agnostic entry point.
+ */
+describe("parseGlmToolCalls / parseLeakedToolCalls", () => {
+  it("parses the inline-attribute shape the model emitted first", () => {
+    const text =
+      'Tôi sẽ đọc file.<tool_call>read_file filepath="package.json" /><tool_call>read_file filepath="README.md" />';
+    expect(parseGlmToolCalls(text)).toEqual([
+      { name: "read_file", args: { filepath: "package.json" } },
+      { name: "read_file", args: { filepath: "README.md" } },
+    ]);
+  });
+
+  it("parses the arg_key/arg_value shape", () => {
+    const text =
+      "<tool_call>ee_query\n<arg_key>collection</arg_key>\n<arg_value>experience-principles</arg_value>\n<arg_key>query</arg_key>\n<arg_value>project overview</arg_value>\n</tool_call>";
+    expect(parseGlmToolCalls(text)).toEqual([
+      { name: "ee_query", args: { collection: "experience-principles", query: "project overview" } },
+    ]);
+  });
+
+  it("tolerates a truncated block with no closing tag", () => {
+    const text = "<tool_call>read_file\n<arg_key>file_path</arg_key>\n<arg_value>src/index.ts";
+    expect(parseGlmToolCalls(text)).toEqual([{ name: "read_file", args: { file_path: "src/index.ts" } }]);
+  });
+
+  it("returns [] on text with no tool_call markup", () => {
+    expect(parseGlmToolCalls("Just a normal answer about tool_call semantics.")).toEqual([]);
+  });
+
+  it("parseLeakedToolCalls covers both dialects", () => {
+    expect(parseLeakedToolCalls('<tool_call>grep pattern="foo" />')).toEqual([
+      { name: "grep", args: { pattern: "foo" } },
+    ]);
+    expect(parseLeakedToolCalls("plain text").length).toBe(0);
   });
 });

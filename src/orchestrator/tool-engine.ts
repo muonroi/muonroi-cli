@@ -243,7 +243,7 @@ import {
   cumulativeMessageChars,
   initCompactionHysteresisState,
 } from "./subagent-compactor.js";
-import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
+import { detectTextEmittedToolCall, parseLeakedToolCalls } from "./text-tool-call-detector.js";
 import { beginToolActivity, endToolActivity } from "./tool-activity.js";
 import { getToolLimitAutoRecoverCap, shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
@@ -4099,7 +4099,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // Recover the model's INTENT from the leaked markup (DeepSeek-native
           // DSML carries the tool + args) so the corrective restates the exact
           // call — far more effective than a generic "use the tool" nudge.
-          const _parsedCalls = parseDsmlToolCalls(assistantText);
+          const _parsedCalls = parseLeakedToolCalls(assistantText);
           const _intent =
             _parsedCalls.length > 0
               ? ` You appear to have intended: ${_parsedCalls
@@ -4148,7 +4148,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Re-steer exhausted: inject DSML intent as a user message so the
         // model re-issues the same calls via the real tool interface.
         if (_textToolCall.detected) {
-          const _parsedDsml = assistantText ? parseDsmlToolCalls(assistantText) : [];
+          const _parsedDsml = assistantText ? parseLeakedToolCalls(assistantText) : [];
           if (_parsedDsml.length > 0 && textToolReSteerCount < MAX_TEXT_TOOL_RESTEER) {
             textToolReSteerCount++;
             const _intentStr = _parsedDsml
@@ -4166,7 +4166,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             await closeMcp?.().catch(() => {});
             continue;
           }
-          // No parseable DSML — surface the dead-end warning.
+          // No parseable leaked call — surface the dead-end warning.
           yield {
             type: "content",
             content:

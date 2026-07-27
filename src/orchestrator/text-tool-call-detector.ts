@@ -217,4 +217,78 @@ export function parseDsmlToolCalls(text: string): ParsedDsmlCall[] {
   return calls;
 }
 
+/**
+ * Parse the GLM / Qwen `<tool_call>` dialect into the same structured shape.
+ *
+ * Live: session 2e5b1e80a4e6, glm-4.7 on the Z.ai coding endpoint. The model
+ * emitted its own chat-template tool-call markup as assistant CONTENT across
+ * three consecutive turns, in two shapes (both in one session):
+ *
+ *   inline-attribute:  <tool_call>read_file filepath="package.json" />
+ *   arg_key/arg_value: <tool_call>read_file
+ *                        <arg_key>file_path</arg_key>
+ *                        <arg_value>package.json</arg_value>
+ *                      </tool_call>
+ *
+ * `detectTextEmittedToolCall` already FIRES on these (GENERIC_WRAPPER_RE covers
+ * `<tool_call>`), but only DSML had an intent parser — so the re-steer fell back
+ * to the generic "use the tool interface" nudge, which the model ignored twice
+ * in a row. Recovering the exact call makes the corrective restate intent, which
+ * is what actually lands (same reason the DSML parser exists).
+ *
+ * Tolerant of missing close tags and of a trailing `</arg_value>` with no
+ * opener — cheap models truncate and mix the two shapes mid-block.
+ */
+const GLM_GUARD_RE = /<tool_call\b/i;
+const GLM_BLOCK_RE = /<tool_call\b[^>]*>([\s\S]*?)(?=<tool_call\b|<\/tool_call>|$)/gi;
+const GLM_NAME_RE = /^[\s\n]*([A-Za-z_][A-Za-z0-9_.-]*)/;
+const GLM_ARG_PAIR_RE = /<arg_key>([\s\S]*?)<\/arg_key>\s*<arg_value>([\s\S]*?)(?:<\/arg_value>|$)/gi;
+const GLM_INLINE_ARG_RE = /([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*"([^"]*)"|([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*'([^']*)'/g;
+
+export function parseGlmToolCalls(text: string): ParsedDsmlCall[] {
+  if (!text || !GLM_GUARD_RE.test(text)) return [];
+  const calls: ParsedDsmlCall[] = [];
+  GLM_BLOCK_RE.lastIndex = 0;
+  let block: RegExpExecArray | null;
+  while ((block = GLM_BLOCK_RE.exec(text)) !== null) {
+    const body = block[1] ?? "";
+    const nameMatch = body.match(GLM_NAME_RE);
+    if (!nameMatch) continue;
+    const name = nameMatch[1]!;
+    const rest = body.slice(nameMatch[0].length);
+    const args: Record<string, string> = {};
+
+    GLM_ARG_PAIR_RE.lastIndex = 0;
+    let pair: RegExpExecArray | null;
+    while ((pair = GLM_ARG_PAIR_RE.exec(rest)) !== null) {
+      args[(pair[1] ?? "").trim()] = (pair[2] ?? "").trim();
+    }
+
+    // No arg_key/arg_value pairs → the inline-attribute shape.
+    if (Object.keys(args).length === 0) {
+      GLM_INLINE_ARG_RE.lastIndex = 0;
+      let inline: RegExpExecArray | null;
+      while ((inline = GLM_INLINE_ARG_RE.exec(rest)) !== null) {
+        const k = inline[1] ?? inline[3];
+        const v = inline[2] ?? inline[4];
+        if (k) args[k] = (v ?? "").trim();
+      }
+    }
+    calls.push({ name, args });
+  }
+  return calls;
+}
+
+/**
+ * Recover a leaked tool call's intent regardless of dialect. Tries DeepSeek
+ * DSML first (its bar sentinels are unambiguous), then the GLM/Qwen
+ * `<tool_call>` shape. Returns [] when nothing parseable is present — callers
+ * then fall back to the generic re-steer wording.
+ */
+export function parseLeakedToolCalls(text: string): ParsedDsmlCall[] {
+  const dsml = parseDsmlToolCalls(text);
+  if (dsml.length > 0) return dsml;
+  return parseGlmToolCalls(text);
+}
+
 export const _internals = { TOOL_TAGS, PARAM_TAGS, GENERIC_WRAPPER_RE };

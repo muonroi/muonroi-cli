@@ -22,6 +22,13 @@
  *       turn burns a failed tool call (observed: session 47b3a8a546ca — 5×
  *       `mcp__muonroi-tools__ee_feedback` "unavailable tool").
  *
+ *       The same repair also salvages a name the PROVIDER mangled: when a model
+ *       leaks its chat-template markup as content, some endpoints parse it into
+ *       one tool call whose `function.name` is the whole blob and whose
+ *       `arguments` is `{}` (live: session 2e5b1e80a4e6, glm-4.7 on Z.ai coding
+ *       → `read_file file_path="README.md"</arg_value>`). We recover both the
+ *       leading tool name and the args swallowed alongside it.
+ *
  *   (B) Tool-ARGS repair — conservative recovery of malformed argument JSON
  *       emitted by models whose tokenization breaks structured JSON (first
  *       observed on Qwen3-30B via SiliconFlow). See tool-args-repair.ts.
@@ -54,10 +61,69 @@ import { repairToolCallArgs } from "./tool-args-repair.js";
  */
 export function resolveToolName(toolName: string, available: ReadonlySet<string>): string | null {
   if (available.has(toolName)) return null; // already valid — nothing to do
-  if (!toolName.startsWith("mcp_") || !toolName.includes("__")) return null;
-  const bare = toolName.slice(toolName.lastIndexOf("__") + 2);
-  if (bare && bare !== toolName && available.has(bare)) return bare;
+
+  if (toolName.startsWith("mcp_") && toolName.includes("__")) {
+    const bare = toolName.slice(toolName.lastIndexOf("__") + 2);
+    if (bare && bare !== toolName && available.has(bare)) return bare;
+    return null;
+  }
+
+  // Mangled name: the provider's own tool-call parser swallowed the model's
+  // leaked chat-template markup into `function.name`.
+  //
+  // Live: session 2e5b1e80a4e6 — glm-4.7 on the Z.ai coding endpoint emitted
+  // `<tool_call>read_file file_path="README.md"</arg_value>`, and Z.ai returned
+  // it as ONE tool call named `read_file file_path="README.md"</arg_value>` with
+  // `arguments: {}`. All three calls that turn died as NoSuchToolError, so the
+  // turn produced free text and no work — even though the intended call was
+  // fully recoverable from the garbage name.
+  //
+  // Precision: only fires when the raw name is NOT registered, the leading
+  // identifier IS registered, and what follows is non-identifier junk (a space,
+  // quote, or angle bracket). A legitimate unknown tool name is never rewritten.
+  const lead = toolName.match(MANGLED_NAME_RE);
+  if (lead?.[1] && available.has(lead[1])) return lead[1];
   return null;
+}
+
+/** Leading tool identifier followed by junk (whitespace / `<` / `"` / `=`). */
+const MANGLED_NAME_RE = /^([A-Za-z_][A-Za-z0-9_.-]*)[\s<"'=]/;
+
+/** `k="v"` / `k='v'` pairs, as leaked inside a mangled tool name. */
+const NAME_INLINE_ARG_RE = /([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*"([^"]*)"|([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*'([^']*)'/g;
+
+/**
+ * Recover arguments that the provider swallowed into the tool NAME.
+ *
+ * When Z.ai mangles `read_file file_path="README.md"` into the name, it also
+ * emits `arguments: {}` — so repairing the name alone would run `read_file`
+ * with no path and fail again. Returns the parsed pairs, or null when the name
+ * carries none.
+ */
+export function recoverArgsFromToolName(toolName: string): Record<string, string> | null {
+  NAME_INLINE_ARG_RE.lastIndex = 0;
+  const args: Record<string, string> = {};
+  let m: RegExpExecArray | null;
+  while ((m = NAME_INLINE_ARG_RE.exec(toolName)) !== null) {
+    const k = m[1] ?? m[3];
+    const v = m[2] ?? m[4];
+    if (k) args[k] = (v ?? "").trim();
+  }
+  return Object.keys(args).length > 0 ? args : null;
+}
+
+/** True when the model supplied no usable arguments (missing / empty / `{}`). */
+function hasNoUsableInput(input: unknown): boolean {
+  if (input === undefined || input === null) return true;
+  if (typeof input !== "string") return false;
+  const trimmed = input.trim();
+  if (trimmed.length === 0 || trimmed === "{}") return true;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return typeof parsed === "object" && parsed !== null && Object.keys(parsed).length === 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -83,6 +149,21 @@ export async function repairToolCallHook(args: {
   }
   const nameChanged = toolName !== original.toolName;
 
+  // (A2) When the name was mangled, the args it swallowed are the ONLY copy —
+  // the provider sent `arguments: {}` alongside it. Recover them, but never
+  // override arguments the model actually supplied.
+  let recoveredInput: string | null = null;
+  if (nameChanged && hasNoUsableInput(original.input)) {
+    const recovered = recoverArgsFromToolName(original.toolName);
+    if (recovered) {
+      try {
+        recoveredInput = JSON.stringify(recovered);
+      } catch {
+        recoveredInput = null;
+      }
+    }
+  }
+
   // (B) Tool-ARGS repair (best-effort). Valid JSON takes the fast path
   // (transforms empty) and is left byte-for-byte alone; only actually-
   // transformed args produce a new serialization. Re-emitting identical args
@@ -102,11 +183,11 @@ export async function repairToolCallHook(args: {
   }
 
   // Nothing to fix → fall through to the original error path.
-  if (!nameChanged && repairedInput === null) return null;
+  if (!nameChanged && repairedInput === null && recoveredInput === null) return null;
 
   return {
     ...original,
     toolName,
-    input: repairedInput ?? original.input,
+    input: recoveredInput ?? repairedInput ?? original.input,
   };
 }
