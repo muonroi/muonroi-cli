@@ -1,3 +1,4 @@
+import { readState } from "../gsd/workflow-engine.js";
 import type { DiscoveryInteractionHandler } from "../pil/discovery-types.js";
 import { runPipeline } from "../pil/pipeline.js";
 import type { StreamChunk } from "../types/index.js";
@@ -12,6 +13,24 @@ export interface PreprocessorResult {
   _naturalCeiling: number;
   _ceilingTaskType: string;
   _ceilingSize: ComplexitySize;
+}
+
+/**
+ * Depth recorded for the run currently in flight (`.planning/STATE.md` → Depth),
+ * or null when there is no active run / the field is not one of the three tiers.
+ * A missing or corrupt STATE.md is the normal "no active run" case, not an error.
+ */
+function readPriorDepthTier(cwd: string): "quick" | "standard" | "heavy" | null {
+  try {
+    const depth = readState(cwd).depth;
+    return depth === "quick" || depth === "standard" || depth === "heavy" ? depth : null;
+  } catch (err) {
+    logger.error("pil", "readState failed while resolving prior depth tier (treating as no active run)", {
+      error: err,
+      cwd,
+    });
+    return null;
+  }
 }
 
 export async function* prepareTurnContext(
@@ -73,6 +92,12 @@ export async function* prepareTurnContext(
         llmFallback,
         clarificationProposer,
         recentTurnsSummary: deps.buildRecentTurnsSummary(),
+        // Depth of the work already in flight. layer1 uses it ONLY so a
+        // continuation utterance ("tiếp tục", "continue") inherits the current
+        // depth instead of being re-scored in isolation — see
+        // resolveContinuationDepth in pil/layer1-intent.ts. Read here (not in
+        // PIL) to keep layer1 I/O-free. Fail-open: no active run ⇒ null.
+        priorDepthTier: readPriorDepthTier(deps.bash.getCwd()),
       });
     } catch (err) {
       pilCtxResolved = {

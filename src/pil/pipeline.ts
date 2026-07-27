@@ -111,6 +111,7 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
       llmFallback: options?.llmFallback,
       profileStyleBaseline,
       recentTurns: options?.recentTurnsSummary,
+      priorDepthTier: options?.priorDepthTier,
     }),
   );
 
@@ -350,6 +351,12 @@ export interface PipelineOptions {
    * context that was already established in prior turns.
    */
   recentTurnsSummary?: string | null;
+  /**
+   * Depth of the run already in flight (GSD STATE.md → Depth), supplied by the
+   * orchestrator. Forwarded to layer1 so a continuation utterance inherits the
+   * in-flight depth instead of being re-scored in isolation.
+   */
+  priorDepthTier?: "quick" | "standard" | "heavy" | null;
 }
 
 export async function runPipeline(raw: string, options?: PipelineOptions): Promise<PipelineContext> {
