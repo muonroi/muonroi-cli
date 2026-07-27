@@ -131,6 +131,19 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
               if (k === "values" && typeof v === "string") {
                 return v.replace(/\b[0-9a-f]{12}\b/g, "<session>");
               }
+              // Mask wall-clock epochs embedded in node ids. A restored
+              // tool-group is keyed `tg-restored-<startedAt>-<count>-<callId>`
+              // (src/ui/utils/group-tool-entries.ts) where startedAt is the
+              // persisted entry's timestamp — stable for a GIVEN transcript,
+              // which is what that id is for, but necessarily different across
+              // five freshly-spawned processes. Unmasked, this assertion could
+              // never pass: CI showed five variants identical except for that
+              // number, so the suite has been red on every push since the id
+              // was introduced. The rest of the id (prefix, item count, tool
+              // call id) still compares, so a genuinely unstable id is caught.
+              if (k === "id" && typeof v === "string") {
+                return v.replace(/\b\d{13}\b/g, "<epoch>");
+              }
               return v;
             });
           })()
