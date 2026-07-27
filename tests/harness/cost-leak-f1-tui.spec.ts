@@ -22,25 +22,25 @@ import {
 } from "./cost-leak-tui-helpers.js";
 import { getProviderOption, loadDumpedRecordings } from "./recording.js";
 
-// F1 routes through `gpt-5.4-mini`, which is not in the catalog (catalog.json
-// ships only deepseek/qwen/glm ids today). The CLI rejects the unknown model
-// id at startup and never reaches the agent-mode handshake, so `beforeAll`'s
-// `wait_for({selector: "role=textbox"})` times out and fails the suite —
-// even though the only `it()` is marked `.skip`. `.skip` on the describe
-// suppresses the beforeAll spawn entirely, which is what CLAUDE.md's
-// known-caveat #4 already documents as the desired state until an openai
-// model lands in catalog.json. (Evidence: CI runs 26431673369 / 26431994835
-// — the F1 failure was always the spawn timeout, never an assertion.)
+// F1 routes through `gpt-5.4-mini`. This model IS now in catalog.json (added
+// 2026-07-15, lines 89-107), so the CLI accepts it at startup and the
+// agent-mode handshake succeeds. Before this model was added, the CLI would
+// reject the unknown model id and `beforeAll`'s `wait_for({selector: "role=textbox"})`
+// would timeout — that was the original reason for `describe.skip`.
 //
-// NOT a measurement gap: the invariant this suite would assert (every round
-// carries the SAME openai.promptCacheKey, session-scoped, order-independent)
-// is ALREADY covered and passing at the provider-recording layer by
-// `tests/harness/cost-leak-f1.spec.ts` (3 tests) + `computePromptCacheKey`
-// stability in `src/providers/prompt-cache-key.spec.ts`. This TUI variant is
-// redundant end-to-end coverage; un-skipping it needs an openai model in the
-// catalog OR a provider-id override threaded through `--mock-llm` (deep harness
-// plumbing) for marginal gain over the already-falsifiable provider-layer test.
-describe.skip("F1 TUI: providerOptions.openai.promptCacheKey is present and stable", () => {
+// The comment below about "only deepseek/qwen/glm ids" is outdated and has
+// been removed. OpenAI OAuth models (gpt-5.5, gpt-5.4, gpt-5.4-mini) are now
+// in the local fallback catalog for offline-resilience when the CP catalog
+// endpoint is unreachable (src/models/catalog.json:49-107).
+//
+// NOTE: this TUI variant is redundant end-to-end coverage. The invariant
+// (every round carries the SAME openai.promptCacheKey, session-scoped,
+// order-independent) is ALREADY covered and passing at the provider-recording
+// layer by `tests/harness/cost-leak-f1.spec.ts` (3 tests) + `computePromptCacheKey`
+// stability in `src/providers/prompt-cache-key.spec.ts`. Un-skipping this adds
+// marginal E2E verification but not new coverage.
+
+describe("F1 TUI: providerOptions.openai.promptCacheKey is present and stable", () => {
   let handle: CostLeakHarness;
 
   beforeAll(async () => {
