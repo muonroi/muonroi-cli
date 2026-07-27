@@ -279,8 +279,34 @@ const CatalogResponseSchema = z
  * never break the CLI, so an invalid payload returns null and the caller falls
  * through to the trusted bundled catalog.
  */
+/**
+ * Recursively drop keys whose value is `null`.
+ *
+ * A JSON serializer that writes unset optionals as explicit `null` is common
+ * (FastAPI/Pydantic does it by default) — and every `.optional()` in the schema
+ * below REJECTS null while happily accepting a missing key. The live catalog API
+ * was serving `cached_input_price_per_million: null`, `routing_tiers: null`,
+ * `peak_hour.windows: null` …, so the whole document failed validation and every
+ * CLI silently fell back to its BUNDLED static catalog. The remote catalog was
+ * correct and consumed by nobody. The server now omits nulls; this makes the
+ * client robust to any deployment (or third-party catalog) that does not.
+ *
+ * Only applied to the REMOTE path — a bundled catalog with stray nulls is a
+ * build defect and should still fail loudly.
+ */
+function stripNulls(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripNulls);
+  if (value === null || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (v === null) continue;
+    out[k] = stripNulls(v);
+  }
+  return out;
+}
+
 export function safeValidateCatalogDocument(raw: unknown): CatalogDocument | null {
-  const parsed = CatalogResponseSchema.safeParse(raw);
+  const parsed = CatalogResponseSchema.safeParse(stripNulls(raw));
   if (!parsed.success) return null;
   return parsed.data as CatalogDocument;
 }

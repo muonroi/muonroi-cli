@@ -478,7 +478,23 @@ def health() -> dict:
     }
 
 
-@app.get("/api/v1/models", response_model=CatalogResponse, dependencies=[Depends(require_api_key)])
+@app.get(
+    "/api/v1/models",
+    response_model=CatalogResponse,
+    # Omit unset optionals instead of serializing them as JSON null.
+    #
+    # This is not cosmetic. The CLI validates the remote payload with a Zod
+    # schema whose optional fields are `.optional()` — which accepts a MISSING
+    # key but REJECTS an explicit null. Pydantic was emitting
+    # `cached_input_price_per_million: null`, `routing_tiers: null`,
+    # `peak_hour.windows: null`, etc., so `safeValidateCatalogDocument` returned
+    # null for the whole document and every CLI silently fell back to its
+    # BUNDLED static catalog. The remote catalog was being served correctly and
+    # consumed by nobody — verified by replaying this endpoint's own response
+    # through the CLI validator: invalid as served, valid with nulls stripped.
+    response_model_exclude_none=True,
+    dependencies=[Depends(require_api_key)],
+)
 def list_models(
     response: Response,
     tier: Optional[str] = Query(default=None, description="Filter by tier (fast|balanced|premium)"),
