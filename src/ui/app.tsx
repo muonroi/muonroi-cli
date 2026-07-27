@@ -37,6 +37,7 @@ import type {
   CouncilPhaseEvent,
   CouncilQuestionData,
   CouncilQuestionOption,
+  CouncilStanceRow,
   CouncilStatusData,
   Plan,
   PlanQuestion,
@@ -112,8 +113,15 @@ import {
 } from "./components/council-question-card.js";
 import { CouncilBanner } from "./components/council-banner.js";
 import { CouncilRail } from "./components/council-rail.js";
+import { CouncilScoreboard, countOpenSplits } from "./components/council-scoreboard.js";
+import {
+  collectDissent,
+  CouncilStanceMatrix,
+  pickStanceQuote,
+  stanceVerdictLabel,
+} from "./components/council-stance-matrix.js";
 import { CouncilRailRounds } from "./components/council-rail-rounds.js";
-import { CouncilRoundGroup, CouncilRoundsOverview } from "./components/council-round-group.js";
+import { CouncilRoundGroup, CouncilRoundsOverview, CouncilRunLedger } from "./components/council-round-group.js";
 import { CouncilStrip } from "./components/council-strip.js";
 import { resolveCouncilLayout, resolveCouncilRailWidth } from "./components/council-surface.js";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
@@ -128,6 +136,12 @@ import {
   initialInitNewFormState,
 } from "./components/init-new-form-card.js";
 import { JumpToLatestPill } from "./components/jump-to-latest-pill.js";
+import {
+  buildWatchlist,
+  CouncilWatchlist,
+  useWatchlistBaseline,
+  watchlistStateFrom,
+} from "./components/council-watchlist.js";
 import { computeMcpRunInfo, MessageView } from "./components/message-view.js";
 import {
   initialPointToExistingFormState,
@@ -628,6 +642,11 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     councilProgress,
     councilStatuses,
     councilTodoExpanded,
+    councilSteerMode,
+    stanceMatrixOpen,
+    stanceCell,
+    expandedTurns,
+    toggleTurnExpanded,
     compactRun,
     defaultProvider,
     disabledModels,
@@ -829,6 +848,13 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // hasn't hidden it (Ctrl+B), and the terminal is wide enough that a fixed
   // side panel doesn't starve the transcript. Below 100 cols it stays inline.
   const railActive = isContextRailEnabled() && railVisible && width >= 100;
+  // Design 2A — the nine static config rows collapse into one `▸ Run config`
+  // row at the bottom of the rail. Collapsed by default (that is the whole
+  // point: they never change after the run starts); click the row to unfold.
+  const [runConfigExpanded, setRunConfigExpanded] = useState(false);
+  // 2C — bumped to re-baseline the "While you were away" band, which is how it
+  // clears without also un-locking the transcript.
+  const [watchlistCleared, setWatchlistCleared] = useState(0);
   const railWidth = Math.min(40, Math.max(28, Math.floor(width * 0.28)));
 
   // ── Stage awareness (/ideal sprint loop) ──────────────────────────────────
@@ -1102,8 +1128,15 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     ) : null;
   // Per-criterion ✓/○ list relocated from the fixed rail META into scrollable
   // DETAIL (two-pane) so it no longer squeezes DETAIL to a sliver.
+  //
+  // Superseded by the scoreboard (design 2A), which renders the same criteria
+  // at the TOP of the rail and adds the stance sigils. Suppressed rather than
+  // deleted so the DETAIL list is still the fallback when the scoreboard has
+  // nothing to draw (no criteria and no ledger — e.g. a council that failed
+  // before its first turn).
+  const scoreboardOwnsCriteria = councilActive && outcomeCriteria.length > 0;
   const councilOutcomeNode =
-    councilTwoPane && outcomeCriteria.length > 0 ? (
+    councilTwoPane && outcomeCriteria.length > 0 && !scoreboardOwnsCriteria ? (
       <Semantic id="council-outcome" role="list" name="Outcome criteria">
         <box flexDirection="column" flexShrink={0}>
           {outcomeCriteria.map((c, i) => {
@@ -1117,10 +1150,154 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         </box>
       </Semantic>
     ) : null;
+  // ── Scoreboard rail body (design 2A) ──────────────────────────────────────
+  // Inverts the old rail's priority: the nine rows that never change after the
+  // run starts fold into ONE collapsed `▸ Run config`, and the live scoreboard
+  // (criteria + who is on which side, panel ledger, next decision) takes the
+  // top. Built here because every input already lives in this scope.
+  //
+  // Static-vs-live is decided by LABEL, not by push order, so a future row
+  // lands in the right half by naming rather than by position.
+  const RUN_CONFIG_LABELS = new Set([
+    "Session",
+    "Mode",
+    "Model",
+    "Leader",
+    "Topic",
+    "Panel",
+    "Round budget",
+    "Research",
+    "Cost-aware",
+  ]);
+  const runConfigRows = railRows.filter((r) => RUN_CONFIG_LABELS.has(r.label));
+  // Stance rows come from the leader's per-round grading. Before the first
+  // evaluation lands there are none — fall back to the pinned criteria with an
+  // EMPTY stance map so the rail still lists what the debate is graded against
+  // and every panelist reads as "has not spoken" (never as agreement).
+  const scoreboardStanceRows: CouncilStanceRow[] = councilMeta?.stanceRows?.length
+    ? councilMeta.stanceRows
+    : outcomeCriteria.map((c, i) => ({ criterion: c, met: !!outcomeMet[i], stances: {} }));
+  const councilLedger = councilMeta?.panelLedger ?? [];
+  // Roster for the sigil columns: prefer the roles that have actually spoken
+  // (ledger order == first-seen order == palette slot order), falling back to
+  // the announced panel before the first turn settles.
+  const scoreboardRoster =
+    councilLedger.length > 0
+      ? councilLedger.filter((e) => e.role !== "leader").map((e) => e.role)
+      : (councilMeta?.panel ?? []);
+  // Who has already spoken in the LIVE round — drives "Next decision".
+  const liveRoundNumber = councilLastRound?.state === "running" ? councilLastRound.round : null;
+  const liveRoundTurns =
+    liveRoundNumber === null ? [] : councilMessages.filter((m) => m.kind === "debate" && m.round === liveRoundNumber);
+  const spokenThisRound =
+    liveRoundNumber === null ? [] : Array.from(new Set(liveRoundTurns.map((m) => m.speaker.role)));
+  // 2A header — position against the plan + turns landed this round. Sourced
+  // from the round's own phase event, the only place carrying a start stamp.
+  const liveRoundStartedAt =
+    liveRoundNumber === null
+      ? null
+      : (councilPhases.find((p) => p.phaseId === `phase:round-${liveRoundNumber}`)?.startedAt ?? null);
+  const scoreboardProgress =
+    liveRoundNumber === null || !councilLastRound
+      ? null
+      : {
+          round: liveRoundNumber,
+          budget: councilMeta?.roundBudget ?? null,
+          ceiling: councilMeta?.roundCeiling ?? null,
+          emergent: councilLastRound.emergent,
+          startedAt: liveRoundStartedAt,
+          turnsDone: liveRoundTurns.length,
+          turnsExpected: councilLastRound.turnsExpected ?? null,
+        };
+  const runConfigSummary = [
+    sessionId ? sessionId.slice(0, 12) : null,
+    councilMeta?.leader ?? model ?? null,
+    councilLedger.length > 0 ? `$${councilLedger.reduce((sum, e) => sum + (e.usd || 0), 0).toFixed(2)}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  // Panelists who ended the run still opposing — the conclusion card's Dissent
+  // section. Derived from the SAME stance rows the rail and matrix render, so
+  // the verdict cannot claim a consensus the matrix contradicts.
+  const councilDissent = collectDissent(scoreboardStanceRows, scoreboardRoster);
+  // S4 — the selected cell and the passage behind it. Clamped HERE as well as in
+  // the reducer, because the roster can shrink between keypresses (a panelist
+  // dropped by the circuit breaker) and a stale column would read another
+  // panelist's stance under the wrong name.
+  const stanceSelection =
+    stanceMatrixOpen && scoreboardStanceRows.length > 0 && scoreboardRoster.length > 0
+      ? {
+          row: Math.max(0, Math.min(stanceCell.row, scoreboardStanceRows.length - 1)),
+          col: Math.max(0, Math.min(stanceCell.col, scoreboardRoster.length - 1)),
+        }
+      : null;
+  const stanceQuote = stanceSelection
+    ? pickStanceQuote({
+        criterion: scoreboardStanceRows[stanceSelection.row]?.criterion ?? "",
+        role: scoreboardRoster[stanceSelection.col] ?? "",
+        mark: scoreboardStanceRows[stanceSelection.row]?.stances[scoreboardRoster[stanceSelection.col] ?? ""] ?? null,
+        turns: councilMessages
+          .filter((m) => m.kind === "debate")
+          .map((m) => ({ role: m.speaker.role, text: m.text, round: m.round, model: m.speaker.model })),
+      })
+    : null;
+  // Roles holding an unresolved objection on ANY criterion — marks their turns
+  // `◐ contested` in the transcript, so the disagreement is visible where it was
+  // argued rather than only in the rail's aggregate.
+  const contestedRoles = new Set(councilDissent.map((d) => d.role));
+  // 2C — the "While you were away" band. Only armed while the transcript is
+  // scroll-locked away AND a council is live: outside those two, "what changed"
+  // is not a question the user has.
+  const watchlistArmed = councilActive && scrollLockedAway;
+  const watchlistNow = watchlistStateFrom(
+    scoreboardStanceRows,
+    scoreboardRoster,
+    councilLedger.reduce((sum, e) => sum + (e.usd || 0), 0),
+    councilMessages.filter((m) => m.kind === "debate").length,
+  );
+  const watchlistBaseline = useWatchlistBaseline(watchlistArmed, watchlistNow, watchlistCleared);
+  const watchlistEntries = watchlistBaseline
+    ? buildWatchlist(
+        watchlistBaseline.state,
+        watchlistNow,
+        Object.fromEntries(scoreboardStanceRows.map((r) => [r.criterion, r.split])),
+      )
+    : [];
+  const councilWatchlistNode =
+    watchlistEntries.length > 0 ? (
+      <CouncilWatchlist
+        entries={watchlistEntries}
+        since={watchlistBaseline?.at ?? null}
+        width={councilSurfaceRailWidth}
+        theme={t}
+        onDismiss={() => setWatchlistCleared((n) => n + 1)}
+      />
+    ) : null;
+  const councilScoreboardNode =
+    councilActive && (scoreboardStanceRows.length > 0 || councilLedger.length > 0 || scoreboardProgress) ? (
+      <CouncilScoreboard
+        width={councilSurfaceRailWidth}
+        theme={t}
+        stanceRows={scoreboardStanceRows}
+        roster={scoreboardRoster}
+        resolveStyle={resolveStyle}
+        ledger={councilLedger}
+        activeRole={liveCouncilStatus?.role ?? null}
+        spokenThisRound={spokenThisRound}
+        criteriaTotal={outcomeCriteria.length}
+        runConfigRows={runConfigRows}
+        runConfigSummary={runConfigSummary}
+        runConfigExpanded={runConfigExpanded}
+        onToggleRunConfig={() => setRunConfigExpanded((v) => !v)}
+        progress={scoreboardProgress}
+      />
+    ) : null;
   const councilRailNode = (
     <CouncilRail
       width={councilSurfaceRailWidth}
       theme={t}
+      scoreboardNode={councilScoreboardNode}
+      watchlistNode={councilWatchlistNode}
       status={liveCouncilStatus}
       roundLabel={councilRoundLabel}
       waiting={councilWaiting}
@@ -1162,6 +1339,9 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
       panel={councilMeta?.panel}
       width={width}
       theme={t}
+      criteriaMet={outcomeMetCount}
+      criteriaTotal={outcomeCriteria.length}
+      openSplits={countOpenSplits(scoreboardStanceRows, scoreboardRoster)}
     />
   );
 
@@ -1219,6 +1399,23 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     region so the convene/outcome/round/decision pin stays visible
                     while the debate transcript scrolls (replaces preamble noise). */}
                 {councilBannerNode}
+                {/* Ctrl+T — stance matrix (design S4). Pinned ABOVE the scroll
+                    region, like the banner, so it stays put while the debate
+                    streams underneath instead of scrolling away mid-read. */}
+                {stanceMatrixOpen && scoreboardStanceRows.length > 0 ? (
+                  <CouncilStanceMatrix
+                    rows={scoreboardStanceRows}
+                    roster={scoreboardRoster}
+                    resolveStyle={resolveStyle}
+                    theme={t}
+                    width={councilTwoPane ? width - councilSurfaceRailWidth : width}
+                    round={councilLastRound?.round ?? null}
+                    roundTotal={roundBudget ?? null}
+                    verdicts={scoreboardStanceRows.map((r) => stanceVerdictLabel(r, scoreboardRoster))}
+                    selected={stanceSelection}
+                    quote={stanceQuote}
+                  />
+                ) : null}
                 {/* Scrollable messages */}
                 <Semantic
                   id="log"
@@ -1389,6 +1586,11 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                               partnerLastText={partnerLastText}
                               partnerRole={cm.partner?.role}
                               theme={t}
+                              // Ctrl+O (expand everything) wins over the
+                              // per-turn set, so the global toggle still works.
+                              expanded={councilTranscriptExpanded || expandedTurns.has(idx)}
+                              onToggleExpand={() => toggleTurnExpanded(idx)}
+                              contested={contestedRoles.has(cm.speaker.role)}
                             />
                           </Semantic>
                         );
@@ -1439,6 +1641,10 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                                       record={rec}
                                       selected={isSelected}
                                       theme={t}
+                                      roster={scoreboardRoster}
+                                      resolveSigil={(role) => resolveStyle(role).sigil}
+                                      turnsDone={debateTurns.filter(({ cm }) => cm.round === rec.round).length}
+                                      criteriaTotal={outcomeCriteria.length}
                                     >
                                       {showTurns
                                         ? debateTurns.filter(({ cm }) => cm.round === rec.round).map(renderTurn)
@@ -1446,6 +1652,18 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                                     </CouncilRoundGroup>
                                   );
                                 })}
+                              {/* S6 — the after-N-rounds view: what each round
+                                  settled and how it ended. Only once more than
+                                  one round has landed; a single-round run is
+                                  already fully described by its own receipt. */}
+                              {selectedRound === null && councilRounds.filter((r) => r.state === "done").length > 1 ? (
+                                <CouncilRunLedger
+                                  rounds={councilRounds}
+                                  roster={scoreboardRoster}
+                                  theme={t}
+                                  resolveSigil={(role) => resolveStyle(role).sigil}
+                                />
+                              ) : null}
                             </>
                           ) : (
                             debateTurns.length > 0 && (
@@ -1479,7 +1697,13 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                               name={`${cm.kind}:${cm.speaker?.role ?? "?"}`}
                               value={cm.text}
                             >
-                              <CouncilSynthesisBanner key={idx} msg={cm} theme={t} />
+                              <CouncilSynthesisBanner
+                                key={idx}
+                                msg={cm}
+                                theme={t}
+                                dissent={councilDissent}
+                                resolveStyle={resolveStyle}
+                              />
                             </Semantic>
                           ))}
                         </>
@@ -1658,6 +1882,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     t={t}
                     inputRef={inputRef}
                     isProcessing={isProcessing}
+                    councilLive={councilStatuses.length > 0}
+                    steerMode={councilSteerMode}
                     showModelPicker={showModelPicker}
                     showSandboxPicker={showSandboxPicker}
                     showWalletPicker={showWalletPicker}
@@ -1688,7 +1914,42 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                 ? councilRailNode
                 : !councilSurfaceActive &&
                   railActive && (
-                    <ContextRail width={railWidth} rows={railRows} stage={railStage}>
+                    <ContextRail
+                      width={railWidth}
+                      rows={railRows}
+                      stage={railStage}
+                      watchlistNode={
+                        councilWatchlistNode ? (
+                          <CouncilWatchlist
+                            entries={watchlistEntries}
+                            since={watchlistBaseline?.at ?? null}
+                            width={railWidth}
+                            theme={t}
+                            onDismiss={() => setWatchlistCleared((n) => n + 1)}
+                          />
+                        ) : null
+                      }
+                      scoreboardNode={
+                        councilScoreboardNode ? (
+                          <CouncilScoreboard
+                            width={railWidth}
+                            theme={t}
+                            stanceRows={scoreboardStanceRows}
+                            roster={scoreboardRoster}
+                            resolveStyle={resolveStyle}
+                            ledger={councilLedger}
+                            activeRole={liveCouncilStatus?.role ?? null}
+                            spokenThisRound={spokenThisRound}
+                            criteriaTotal={outcomeCriteria.length}
+                            runConfigRows={runConfigRows}
+                            runConfigSummary={runConfigSummary}
+                            runConfigExpanded={runConfigExpanded}
+                            onToggleRunConfig={() => setRunConfigExpanded((v) => !v)}
+                            progress={scoreboardProgress}
+                          />
+                        ) : null
+                      }
+                    >
                       <SessionTreeCard nodes={sessionTree} />
                       <AgentRailActivities
                         activities={agentActivities}
@@ -1736,6 +1997,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   t={t}
                   inputRef={inputRef}
                   isProcessing={isProcessing}
+                  councilLive={councilStatuses.length > 0}
+                  steerMode={councilSteerMode}
                   showModelPicker={showModelPicker}
                   showSandboxPicker={showSandboxPicker}
                   showWalletPicker={showWalletPicker}

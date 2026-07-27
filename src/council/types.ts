@@ -1,6 +1,6 @@
 import type { ModelMessage } from "ai";
 import type { ProcessMessageObserver } from "../orchestrator/agent-options.js";
-import type { TaskRequest, ToolResult } from "../types/index.js";
+import type { CouncilPanelLedgerEntry, CouncilStanceRow, TaskRequest, ToolResult } from "../types/index.js";
 import type { ModelRole } from "../utils/settings.js";
 
 /**
@@ -73,9 +73,33 @@ export interface CouncilPreflight {
 
 // ── Debate Phase ─────────────────────────────────────────────────────────────
 
+/**
+ * One panelist's position on a single success criterion, as graded by the leader
+ * during its per-round evaluation.
+ *
+ *   "+"  supports      "-"  opposes      "~"  conditional      null  has not spoken
+ *
+ * `null` is load-bearing: a panelist who never argued a criterion must NEVER be
+ * folded into the agreeing majority, or a 4/5 with one abstention reads as
+ * opposition (and a 3/5 with two abstentions reads as consensus).
+ */
+export type StanceMark = "+" | "-" | "~" | null;
+
 export interface LeaderEvaluation {
   allCriteriaMet: boolean;
-  criteriaStatus: Array<{ criterion: string; met: boolean; evidence: string }>;
+  criteriaStatus: Array<{
+    criterion: string;
+    met: boolean;
+    evidence: string;
+    /**
+     * Per-panelist stance keyed by role label. Absent when the leader's model
+     * omitted the field or emitted an unparseable shape — callers must treat
+     * absence as "unknown", never as agreement.
+     */
+    stances?: Record<string, StanceMark>;
+    /** One-line reason the panel is split, present only on a contested criterion. */
+    split?: string;
+  }>;
   unresolvedPoints: string[];
   needsResearch: boolean;
   researchQuery?: string;
@@ -134,6 +158,21 @@ export interface DebateState {
    * or all criteria met). Lets synthesis/caller react to a user-driven partial stop.
    */
   escalation?: { action: "extend" | "accept" | "rescope"; grantedRounds?: number };
+  /**
+   * S8 — the run receipt inputs the post-debate card reports back ("2 rounds ·
+   * 14 turns · 3/4 criteria met · $0.19 · 4m12s"). Measured by the debate loop;
+   * the caller has no other way to see per-speaker spend or wall clock, and the
+   * numbers users ask for first should not have to be reconstructed.
+   */
+  panelLedger?: CouncilPanelLedgerEntry[];
+  /** Wall-clock duration of the debate loop, ms. */
+  elapsedMs?: number;
+  /**
+   * The final per-criterion stance snapshot, so the post-debate card can offer
+   * "re-run with <role>'s objection as the topic" against a position that was
+   * actually recorded rather than an invented one.
+   */
+  finalStanceRows?: CouncilStanceRow[];
 }
 
 /**

@@ -31,18 +31,25 @@ describe("findLastCollapsibleIndex", () => {
     expect(findLastCollapsibleIndex([user(2), assistant(3)])).toBe(-1);
   });
 
-  it("targets a long user message", () => {
-    expect(findLastCollapsibleIndex([user(2), user(9)])).toBe(1);
+  // Prose no longer auto-collapses, so a long message advertises no ctrl+e
+  // affordance and must NOT be a target — otherwise ctrl+e selects an entry with
+  // nothing to toggle and swallows the key.
+  it("ignores a long user message (user prose renders in full)", () => {
+    expect(findLastCollapsibleIndex([user(2), user(9)])).toBe(-1);
   });
 
-  it("ignores a user message at exactly the collapse threshold", () => {
-    expect(findLastCollapsibleIndex([user(5)])).toBe(-1);
+  it("ignores a long assistant body (assistant prose renders in full)", () => {
+    expect(findLastCollapsibleIndex([assistant(40)])).toBe(-1);
   });
 
-  // The bug the user hit: the ONLY handler targeted the last *user* message, so
-  // ctrl+e did nothing for a collapsed tool group / narration / reasoning.
   it("targets a done tool group even when a long user message sits above it", () => {
     expect(findLastCollapsibleIndex([user(9), toolGroup("done", 3)])).toBe(1);
+  });
+
+  // The regression that prompted the change: every previous answer folded back
+  // to 8 lines the moment a new turn started. Neither body is a target now.
+  it("keeps earlier assistant answers un-targeted once a newer turn lands", () => {
+    expect(findLastCollapsibleIndex([assistant(40), user(2), assistant(40)])).toBe(-1);
   });
 
   it("skips an active tool group (it is already expanded, no affordance)", () => {
@@ -57,18 +64,16 @@ describe("findLastCollapsibleIndex", () => {
     expect(findLastCollapsibleIndex([toolGroup("done", 0)])).toBe(-1);
   });
 
-  // F7: the final assistant message renders its body in full, so it advertises
-  // no body affordance — the long narration above it is the real target.
-  it("skips the final assistant body and targets earlier narration", () => {
-    expect(findLastCollapsibleIndex([assistant(20), assistant(20)])).toBe(0);
-  });
-
-  // ...but reasoning collapses even on the final message, so it IS a target.
-  it("targets the final assistant when it carries long reasoning", () => {
+  // Reasoning is the one prose surface that still collapses, so it IS a target.
+  it("targets an assistant carrying long reasoning", () => {
     expect(findLastCollapsibleIndex([assistant(20), assistant(2, 8)])).toBe(1);
   });
 
+  it("ignores reasoning at exactly the collapse threshold", () => {
+    expect(findLastCollapsibleIndex([assistant(2, 3)])).toBe(-1);
+  });
+
   it("picks the newest target when several qualify", () => {
-    expect(findLastCollapsibleIndex([user(9), toolGroup("done", 2), user(9)])).toBe(2);
+    expect(findLastCollapsibleIndex([toolGroup("done", 2), user(9), assistant(2, 8)])).toBe(2);
   });
 });

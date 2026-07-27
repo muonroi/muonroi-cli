@@ -54,6 +54,8 @@ export function CouncilRail({
   roundLabel,
   waiting,
   metaRows,
+  scoreboardNode,
+  watchlistNode,
   stage,
   phasesNode,
   roundsNode,
@@ -67,6 +69,21 @@ export function CouncilRail({
   waiting?: boolean;
   /** Identity/topic/panel/outcome rows (built the same way as the legacy rail). */
   metaRows: ContextRailRow[];
+  /**
+   * Design 2A — the scoreboard body. When supplied it REPLACES the flat META
+   * row dump: the static identity rows it renders are folded into its own
+   * collapsed `▸ Run config` section, so passing both would print them twice.
+   * `metaRows` is still passed and still mirrored into the harness `props`, so
+   * existing label/value assertions keep working either way.
+   */
+  scoreboardNode?: ReactNode;
+  /**
+   * Design 2C — the "While you were away" diff band. Sits ABOVE the scoreboard
+   * (and above the legacy meta rows) because for the seconds after you look
+   * back, the delta outranks current state; it disappears again the moment the
+   * transcript is re-pinned, so it never competes for the rail permanently.
+   */
+  watchlistNode?: ReactNode;
   /** Active sprint stage block (/ideal), or null. */
   stage?: ContextRailStage | null;
   /** The PHASES section body (phase timeline), or null. */
@@ -111,19 +128,22 @@ export function CouncilRail({
         paddingRight={1}
         gap={1}
       >
-        {/* META — identity / topic / panel, pinned at the top under the border. */}
+        {/* META — the scoreboard (design 2A) when available, else the legacy
+            identity / topic / panel row dump. */}
         <Semantic id="council-rail-meta" role="group" name="Council meta">
           <box flexDirection="column" flexShrink={0}>
-            {fittedMetaRows.map((r, idx) => (
-              // Single-<text> flow (label + value) so a wrapping value can't get
-              // its "Label: " separator trimmed — same rule as ContextRail.
-              <box key={idx} flexDirection="column">
-                <text>
-                  {r.label ? <span style={{ fg: theme.textMuted }}>{`${r.label}: `}</span> : null}
-                  {r.value}
-                </text>
-              </box>
-            ))}
+            {watchlistNode}
+            {scoreboardNode ??
+              fittedMetaRows.map((r, idx) => (
+                // Single-<text> flow (label + value) so a wrapping value can't get
+                // its "Label: " separator trimmed — same rule as ContextRail.
+                <box key={idx} flexDirection="column">
+                  <text>
+                    {r.label ? <span style={{ fg: theme.textMuted }}>{`${r.label}: `}</span> : null}
+                    {r.value}
+                  </text>
+                </box>
+              ))}
           </box>
         </Semantic>
         {/* ── PHASES ── */}

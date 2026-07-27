@@ -69,6 +69,16 @@ export interface CouncilStripProps {
   panel?: string[];
   width: number;
   theme: Theme;
+  /**
+   * Design S11 — below the two-pane threshold the rail unmounts entirely, so
+   * the scoreboard's two headline numbers fold into this line: how many pinned
+   * criteria are met, and how many the panel is actually deadlocked on. Without
+   * them a narrow terminal loses the whole outcome view, not just its layout.
+   * Omit / 0 total → the segments are suppressed rather than showing "0/0".
+   */
+  criteriaMet?: number;
+  criteriaTotal?: number;
+  openSplits?: number;
 }
 
 export function CouncilStrip({
@@ -79,6 +89,9 @@ export function CouncilStrip({
   panel,
   width,
   theme,
+  criteriaMet,
+  criteriaTotal,
+  openSplits = 0,
 }: CouncilStripProps) {
   const liveness = resolveCouncilLiveness(status, waiting);
   const chars = status?.streamedChars ?? 0;
@@ -96,6 +109,14 @@ export function CouncilStrip({
   const segments: CouncilStripSegment[] = [{ key: "now", text: livenessText }];
   if (phaseLabel) segments.push({ key: "phase", text: phaseLabel });
   if (roundLabel) segments.push({ key: "round", text: roundLabel });
+  // Outcome before roster: "what is still unresolved" outranks "who is on the
+  // panel" when there is only one line left to spend.
+  if (typeof criteriaTotal === "number" && criteriaTotal > 0) {
+    segments.push({ key: "criteria", text: `${criteriaMet ?? 0}/${criteriaTotal} met` });
+  }
+  if (openSplits > 0) {
+    segments.push({ key: "splits", text: `◐${openSplits} split${openSplits === 1 ? "" : "s"} ctrl+t` });
+  }
   if (panel && panel.length > 0) {
     segments.push({ key: "roster", text: panel.map((p) => p.slice(0, 3)).join(" ") });
   }

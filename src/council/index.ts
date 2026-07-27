@@ -8,21 +8,30 @@ import { isTaskAwarePanelEnabled } from "../gsd/flags.js";
 import { runPipeline } from "../pil/pipeline.js";
 import type { PipelineContext } from "../pil/types.js";
 import { idealTrace } from "../product-loop/ideal-trace.js";
+import { detectProviderForModel } from "../providers/runtime.js";
 import { appendSystemMessage, logInteraction } from "../storage/index.js";
 import { SessionStore } from "../storage/sessions.js";
 import type { StreamChunk } from "../types/index.js";
-import { getCouncilExperienceMode, isCouncilCostAware, isCouncilMultiProviderPreferred } from "../utils/settings.js";
+import {
+  getCouncilExperienceMode,
+  getCouncilLanguage,
+  isCouncilCostAware,
+  isCouncilMultiProviderPreferred,
+} from "../utils/settings.js";
 import { buildSpecFromTopic, runClarification } from "./clarifier.js";
 import { buildCouncilContext, buildProjectSnapshot } from "./context.js";
 import { evaluateResearchNeed, runDebate } from "./debate.js";
 import { planDebate } from "./debate-planner.js";
 import { detectOutOfStackProposals, writeDecisionsLock } from "./decisions-lock.js";
 import { runExecution } from "./executor.js";
+import { buildLaunchCard, cheapRunShape } from "./launch-card.js";
 import { buildCouncilCandidatePool, resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
 import { selectTaskAwarePanel } from "./panel-select.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
 import { runPlanning } from "./planner.js";
 import { runPreflight } from "./preflight.js";
+import { formatRunReceipt, pickLoudestDissent } from "./run-receipt.js";
+import { historicalUsdPerRound } from "./spend-log.js";
 import { makeStanceRecall } from "./stance-recall.js";
 import type {
   ActionPlan,
@@ -774,6 +783,75 @@ export async function* runCouncil(
     return null;
   }
 
+  // ── S1: launch configurator ─────────────────────────────────────────────────
+  // The last point before money is spent. Shown only on the interactive path:
+  // convenePath (the agent already decided to convene) and sprintPlanningMode
+  // (no human turn at all) would both be blocked by a card nobody can answer —
+  // the same gating the preflight approval card uses.
+  let launchRounds = debatePlan.plannedRounds ?? 3;
+  let launchParticipants = active;
+  let launchCostAware = costAware;
+  if (sessionId && !options?.convenePath && !options?.sprintPlanningMode && !userAborted()) {
+    const card = buildLaunchCard({
+      topic,
+      leaderModelId,
+      participants: active.map((p) => ({ role: p.role, model: p.model, stanceName: p.stance?.name })),
+      plannedRounds: launchRounds,
+      researchOn: !researchSkipOverride,
+      costAware,
+      language: getCouncilLanguage(),
+      usdPerRound: historicalUsdPerRound(),
+      providerOf: (modelId) => {
+        try {
+          return detectProviderForModel(modelId);
+        } catch {
+          // An unresolvable provider just drops out of the lineup summary —
+          // better a shorter line than a fabricated vendor name.
+          return undefined;
+        }
+      },
+    });
+    const setupQuestionId = `council-setup-${sessionId}`;
+    yield {
+      type: "council_question",
+      content: "",
+      councilQuestion: {
+        questionId: setupQuestionId,
+        phase: "council-setup",
+        question: card.question,
+        context: card.context,
+        isRequired: true,
+        options: card.options,
+        defaultIndex: card.defaultIndex,
+      },
+    } as StreamChunk;
+    const choice = (await respondToQuestion(setupQuestionId)).trim();
+    if (choice === "cancel" || choice === "refine") {
+      yield {
+        type: "content",
+        content:
+          choice === "refine"
+            ? "\n> Council not started — refine the topic and run `/council` again. Nothing was spent.\n"
+            : "\n> Council cancelled before the debate started. Nothing was spent.\n",
+      };
+      yield { type: "done" };
+      return null;
+    }
+    if (choice === "cheap") {
+      const shape = cheapRunShape({ plannedRounds: launchRounds, panelSize: active.length });
+      launchRounds = shape.rounds;
+      // Trim from the END so the planner's own ordering decides who is kept —
+      // it ordered the stances, and re-ranking them here would silently drop a
+      // lens the leader considered essential.
+      launchParticipants = active.slice(0, shape.panelists);
+      launchCostAware = true;
+      yield {
+        type: "content",
+        content: `\n> Cheap run: ${shape.rounds} round(s), ${launchParticipants.length} panelists, cost-aware model tier.\n`,
+      };
+    }
+  }
+
   // ── Phase C: Dynamic Debate ─────────────────────────────────────────────────
   const debateStart = Date.now();
   const debateGen = runDebate(
@@ -782,14 +860,15 @@ export async function* runCouncil(
       topic,
       conversationContext,
       leaderModelId,
-      participants: active,
-      debatePlan,
+      participants: launchParticipants,
+      debatePlan: { ...debatePlan, plannedRounds: launchRounds },
       signal: options?.signal,
       researchSkipOverride,
       leaderNeedsResearch,
       internetFirst,
       externalTopic,
-      costAware,
+      // S1 — a "cheap run" pick at the launch card flips this on for the debate.
+      costAware: launchCostAware,
       runId: sessionId,
       // Sprint-2 item 3 — per-stance recall at debate opening. Only the product
       // loop wired this (loop-driver.ts); runCouncil (interactive /council,
@@ -1193,6 +1272,32 @@ export async function* runCouncil(
         });
       }
 
+      // S8 — offer the recorded dissent as its own topic. Only when a panelist
+      // ended the run explicitly opposing a criterion: the option names a real
+      // position from the stance snapshot, so it can never invent an objection
+      // nobody made. Appended (not pinned) — re-arguing one objection is a
+      // deliberate choice, not the default next move.
+      //
+      // This is the one exemption to the "never two ask_followup rows" rule
+      // above. That rule exists so two GENERIC follow-ups don't sit next to each
+      // other; this row names a specific panelist and criterion, so it reads as
+      // a different question, and it routes identically (freetext re-run on this
+      // debate's context) so nothing downstream has to disambiguate.
+      const dissent = pickLoudestDissent(
+        debateState.finalStanceRows,
+        debateState.active.map((p) => p.stance?.name ?? p.role),
+      );
+      if (dissent && !options?.sprintPlanningMode) {
+        baseOptions.push({
+          label: `Re-run with ${dissent.role}'s objection as the topic`,
+          description: dissent.split
+            ? `${dissent.role} still opposes "${dissent.criterion}": ${dissent.split}`
+            : `${dissent.role} ended the debate still opposing "${dissent.criterion}".`,
+          value: "ask_followup",
+          kind: "freetext",
+        });
+      }
+
       // Model orders actions best-first (index 0 = recommended default); the
       // fallback set uses the deterministic recommendation. When inconclusive,
       // the pinned criteria option at index 0 is the honest default regardless of
@@ -1213,6 +1318,14 @@ export async function* runCouncil(
             ? (baseOptions[0]?.description ?? recommendation.reason)
             : recommendation.reason;
 
+      const runReceipt = formatRunReceipt({
+        rounds: debateState.roundCount,
+        turns: debateState.archive?.length ?? 0,
+        criteriaMet: critOutcome.total > 0 ? critOutcome.metCount : undefined,
+        criteriaTotal: critOutcome.total,
+        ledger: debateState.panelLedger,
+        elapsedMs: debateState.elapsedMs,
+      });
       const heading = synthesisFailed
         ? "## Debate Synthesis Failed"
         : inconclusive
@@ -1235,7 +1348,7 @@ export async function* runCouncil(
         debateState.roundCount > 0
           ? `\n\n📋 All ${debateState.roundCount} debate round(s) are archived — run \`/council inspect ${sessionId}\` to re-read the full exchange.`
           : "";
-      const headerBlock = `${heading}\n\n> ${confidenceBadge}\n>\n> **Why:** ${confidenceReason}${outcomeLine}\n\n${recommendLine}${roundsArchivedLine}\n\nLeader: \`${leaderModelId}\`. What would you like to do next?`;
+      const headerBlock = `${heading}\n\n> ${confidenceBadge}${runReceipt ? `\n>\n> **Run:** ${runReceipt}` : ""}\n>\n> **Why:** ${confidenceReason}${outcomeLine}\n\n${recommendLine}${roundsArchivedLine}\n\nLeader: \`${leaderModelId}\`. What would you like to do next?`;
 
       let answer: string;
       if (options?.sprintPlanningMode) {
@@ -1268,6 +1381,10 @@ export async function* runCouncil(
                   ? `The debate left ${refinementTopics.length} area(s) unresolved. Refine them or save the current outcome?`
                   : "What would you like to do next?",
             context:
+              // S8 — the run receipt leads, because "what did that cost me and
+              // what did it get me" is the first thing users ask after a debate,
+              // and until now it was nowhere on this card.
+              (runReceipt ? `${runReceipt}\n` : "") +
               `${confidenceBadge}\n${confidenceReason}` +
               (inconclusive ? `\nUnmet criteria: ${critOutcome.unmetLabels.join("; ")}` : "") +
               (hasEmptySections ? `\nUnresolved areas: ${refinementTopics.join(", ")}` : "") +

@@ -7,8 +7,53 @@
  */
 
 import { getDatabase } from "../../storage/db.js";
+import { COUNCIL_SIGILS } from "../components/role-palette.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
+
+/**
+ * Sigil for a participant, by their position in the roster.
+ *
+ * Uses the SAME `COUNCIL_SIGILS` table and the same first-seen ordering the live
+ * TUI assigns palette slots from, so a role carries one identity from the live
+ * debate through to this forensic view. This output is plain markdown (no
+ * color), which is exactly the case the sigils exist for.
+ */
+export function inspectSigil(index: number): string {
+  return COUNCIL_SIGILS[index % COUNCIL_SIGILS.length] ?? "•";
+}
+
+/**
+ * Summarise one round from the leader's evaluation text.
+ *
+ * The stored record is prose, not a struct, so the numbers are recovered by
+ * regex. Every part is independently optional: a round whose text does not
+ * carry a criteria count still renders with its decision, and one with neither
+ * renders as `○` rather than inventing an outcome.
+ */
+export function summariseRound(evalText: string | undefined): { mark: string; score: string; decision: string } {
+  const text = evalText ?? "";
+  const scoreMatch = text.match(/(\d+)\s*\/\s*(\d+)\s+criteria met/i);
+  const met = scoreMatch ? Number(scoreMatch[1]) : null;
+  const total = scoreMatch ? Number(scoreMatch[2]) : null;
+  const score = met !== null && total !== null ? `${met}/${total} met` : "";
+
+  // Decision keywords, matched in severity order so "stopped early" does not
+  // read as a plain continue.
+  const lower = text.toLowerCase();
+  const decision = /circuit|abort/.test(lower)
+    ? "ended early"
+    : /converg|sufficient|\bstop\b/.test(lower)
+      ? "sufficient — stop"
+      : /\bextend\b/.test(lower)
+        ? "extend"
+        : /\bcontinue\b/.test(lower)
+          ? "continue"
+          : "";
+
+  const mark = met !== null && total !== null ? (met >= total ? "✓" : met > 0 ? "◐" : "○") : "○";
+  return { mark, score, decision };
+}
 
 interface CouncilMemoryRecord {
   topic: string;
@@ -53,10 +98,13 @@ export const handleCouncilInspectSlash: SlashHandler = async (args) => {
     );
   }
 
-  let db;
+  let db: ReturnType<typeof getDatabase>;
   try {
     db = getDatabase();
-  } catch {
+  } catch (err) {
+    // No-Silent-Catch: "DB unavailable" with no reason is unactionable — a
+    // locked file and a missing file need opposite fixes.
+    console.error(`[council inspect] getDatabase failed: ${err instanceof Error ? err.message : String(err)}`);
     return `[council inspect] DB unavailable.`;
   }
 
@@ -129,16 +177,22 @@ export const handleCouncilInspectSlash: SlashHandler = async (args) => {
 
   // Participants
   lines.push("### Participants");
+  // Roster order == the slot order the live TUI colors by, so the sigil printed
+  // here is the same one that labelled this speaker during the debate.
+  const sigilFor = new Map<string, string>();
+  for (const p of memoryRecord.participants) {
+    if (!sigilFor.has(p.role)) sigilFor.set(p.role, inspectSigil(sigilFor.size));
+  }
   for (const p of memoryRecord.participants) {
     const stancePart = p.stance ? ` (${p.stance.name} — ${p.stance.lens})` : "";
-    lines.push(`- \`${p.role}\` · ${p.model}${stancePart}`);
+    lines.push(`- ${sigilFor.get(p.role) ?? "•"} \`${p.role}\` · ${p.model}${stancePart}`);
   }
   lines.push("");
 
   // Final positions
   lines.push("### Final Positions");
   for (const fp of memoryRecord.finalPositions) {
-    lines.push(`\n**${fp.role}:** ${fp.position || "(empty)"}`);
+    lines.push(`\n**${sigilFor.get(fp.role) ?? "•"} ${fp.role}:** ${fp.position || "(empty)"}`);
   }
   lines.push("");
 
@@ -150,7 +204,14 @@ export const handleCouncilInspectSlash: SlashHandler = async (args) => {
       const densityMatch = r.text.match(/evidenceDensity[=:]\s*([\d.]+)/i);
       const evalLine = leaderEvals.find((e) => e.round === r.n);
       const densityPart = densityMatch ? ` · evidenceDensity=${densityMatch[1]}` : "";
-      lines.push(`- **Round ${r.n}:**${densityPart} ${evalLine?.text ?? "(no evaluation logged)"}`);
+      // Lead with the round's OUTCOME (mark · score · decision) so the list is
+      // scannable; the full evaluation prose follows on the same line.
+      const { mark, score, decision } = summariseRound(evalLine?.text);
+      const headline = [score, decision].filter(Boolean).join(" · ");
+      lines.push(
+        `- ${mark} **Round ${r.n}:**${headline ? ` ${headline}` : ""}${densityPart} ` +
+          `${evalLine?.text ?? "(no evaluation logged)"}`,
+      );
     }
     lines.push("");
   }

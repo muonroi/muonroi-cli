@@ -556,6 +556,12 @@ export async function* runClarification(
       detail: `${questions.length} question${questions.length === 1 ? "" : "s"}`,
     });
 
+    // How many of this round's questions will actually be PUT to the user —
+    // prefilled seeds are answered from project discovery and never rendered,
+    // so counting them would promise a card that never appears.
+    const askableTotal = questions.filter((q) => !(q.id && prefillAnswers?.has(q.id))).length;
+    let askedSoFar = 0;
+
     for (const q of questions) {
       // Skip seed questions whose dimension was proven by project discovery.
       // The auto-filled answer is recorded as a normal Q&A so synthesizeSpec
@@ -597,6 +603,8 @@ export async function* runClarification(
           options,
           isRequired: q.isRequired,
           defaultIndex,
+          questionIndex: ++askedSoFar,
+          questionTotal: askableTotal,
         },
       };
 

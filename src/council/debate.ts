@@ -1,8 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
+import {
+  clearCouncilSteer,
+  drainCouncilSteer,
+  formatSteerBlock,
+  setActiveCouncilRun,
+  shouldCouncilConverge,
+} from "../state/council-steer.js";
 import { logInteraction } from "../storage/index.js";
-import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
+import type { CouncilPanelLedgerEntry, CouncilQuestionOption, CouncilStanceRow, StreamChunk } from "../types/index.js";
 import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
 import { getCouncilLanguage } from "../utils/settings.js";
 import {
@@ -15,6 +22,7 @@ import {
 import { resolveDebateSummary } from "./debate-summary.js";
 import { pickCouncilTaskModel } from "./leader.js";
 import { councilStreamLivenessReader, tracedAsync, tracedGenerate } from "./llm.js";
+import { createPanelLedger, LEADER_LEDGER_ROLE } from "./panel-ledger.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
 import {
   buildFollowupPrompt,
@@ -23,8 +31,10 @@ import {
   buildResponsePrompt,
   buildRoundSummaryPrompt,
 } from "./prompts.js";
+import { buildStanceRows } from "./stance.js";
 import type {
   ClarifiedSpec,
+  CouncilCallUsage,
   CouncilConfig,
   CouncilLLM,
   CouncilParticipant,
@@ -269,11 +279,13 @@ async function openingWithRetry(
   model: string,
   system: string,
   prompt: string,
+  /** Fires per BILLED attempt so a retried opening is costed in full, not once. */
+  onUsage?: (usage: CouncilCallUsage, modelUsed: string) => void,
 ): Promise<{ text: string; attempts: number; error?: string }> {
   let lastError: string | undefined;
   for (let attempt = 1; attempt <= MAX_OPENING_ATTEMPTS; attempt++) {
     try {
-      const text = await llm.generate(model, system, prompt);
+      const text = await llm.generate(model, system, prompt, undefined, (usage) => onUsage?.(usage, model));
       if (text && text.trim().length > 0) {
         return { text, attempts: attempt };
       }
@@ -454,6 +466,15 @@ async function debateWithRetry(
   traceCb: (t: string) => void,
   toolBudget: ToolBudget,
   fallbackPool: string[] = [],
+  /**
+   * Per-call usage sink. `llm.debate()` has always accepted this callback but
+   * no debate call site passed it, so per-speaker spend never left the provider
+   * layer (only the model-keyed aggregate in recordCouncilUsage). Threading it
+   * here is what makes the rail's panel ledger real rather than estimated.
+   * `modelUsed` is reported because a retry may land on a fallback model whose
+   * pricing differs from the one originally selected.
+   */
+  onUsage?: (usage: CouncilCallUsage, modelUsed: string) => void,
 ): Promise<{
   text: string;
   toolCalls: Array<{ toolName: string; result?: unknown }>;
@@ -462,7 +483,7 @@ async function debateWithRetry(
   durationMs: number;
 }> {
   const startedAt = Date.now();
-  const r = await debateWithRetryInner(llm, model, system, prompt, signal, traceCb, toolBudget, fallbackPool);
+  const r = await debateWithRetryInner(llm, model, system, prompt, signal, traceCb, toolBudget, fallbackPool, onUsage);
   return { ...r, durationMs: Date.now() - startedAt };
 }
 
@@ -475,18 +496,31 @@ async function debateWithRetryInner(
   traceCb: (t: string) => void,
   toolBudget: ToolBudget,
   fallbackPool: string[] = [],
+  onUsage?: (usage: CouncilCallUsage, modelUsed: string) => void,
 ): Promise<{
   text: string;
   toolCalls: Array<{ toolName: string; result?: unknown }>;
   failureReason?: string;
   attempts: number;
 }> {
+  // Every attempt below reports its own usage — a retry and a cross-provider
+  // fallback are separately billed calls, so the ledger must see all of them,
+  // not just the one whose text was ultimately used.
+  const sink = (modelUsed: string) => (usage: CouncilCallUsage) => onUsage?.(usage, modelUsed);
   // Respect the circuit breaker — once a model has tripped, it stays
   // tool-disabled for the rest of this council run.
   const allowTools = debateAllowsTools(model) && !toolBudget.disabled.has(model);
   let firstError: string | undefined;
   try {
-    const result = await llm.debate(model, system, prompt, signal, traceCb, { enableVerificationTools: allowTools });
+    const result = await llm.debate(
+      model,
+      system,
+      prompt,
+      signal,
+      traceCb,
+      { enableVerificationTools: allowTools },
+      sink(model),
+    );
     const text = (result.text ?? "").trim();
     if (text.length > 0) {
       // Non-empty response — reset the streak counter for this model.
@@ -513,7 +547,15 @@ async function debateWithRetryInner(
   let retryError: string;
   let retryToolCalls: Array<{ toolName: string; result?: unknown }> = [];
   try {
-    const retry = await llm.debate(model, system, prompt, signal, traceCb, { enableVerificationTools: false });
+    const retry = await llm.debate(
+      model,
+      system,
+      prompt,
+      signal,
+      traceCb,
+      { enableVerificationTools: false },
+      sink(model),
+    );
     const text = (retry.text ?? "").trim();
     if (text.length > 0) {
       return { text: retry.text, toolCalls: retry.toolCalls ?? [], attempts: 2 };
@@ -533,9 +575,15 @@ async function debateWithRetryInner(
     const fallbackModel = pickDebateFallbackModel(model, fallbackPool);
     if (fallbackModel) {
       try {
-        const fb = await llm.debate(fallbackModel, system, prompt, signal, traceCb, {
-          enableVerificationTools: false,
-        });
+        const fb = await llm.debate(
+          fallbackModel,
+          system,
+          prompt,
+          signal,
+          traceCb,
+          { enableVerificationTools: false },
+          sink(fallbackModel),
+        );
         const text = (fb.text ?? "").trim();
         if (text.length > 0) {
           traceCb(`[debate] ${model} failed both attempts; recovered via fallback ${fallbackModel}`);
@@ -789,7 +837,10 @@ export async function* runDebate(
         language: debateLanguage,
       });
       const startedAt = Date.now();
-      return openingWithRetry(llm, self.model, system, prompt).then((r) => ({
+      const openingLabel = self.stance?.name ?? self.role;
+      return openingWithRetry(llm, self.model, system, prompt, (usage, modelUsed) =>
+        panelLedger.recordUsage(openingLabel, modelUsed, usage, "opening"),
+      ).then((r) => ({
         role: self.role,
         model: self.model,
         stance: self.stance,
@@ -934,6 +985,23 @@ export async function* runDebate(
   // and the post-debate unmet-flag know what is still open. Empty before round 1
   // → the round-1 directive treats every criterion as unmet.
   let lastCriteriaMet: boolean[] = [];
+  // Latest per-criterion stance rows, refreshed after each leader evaluation.
+  // Carried out of the loop so the closing synthesis can name who ended the run
+  // still opposing (the conclusion card's Dissent section) — a converged verdict
+  // otherwise erases the position the council existed to hear argued.
+  let lastStanceRows: CouncilStanceRow[] = [];
+  // Per-speaker turns + real spend for the rail's panel block. Accumulated from
+  // each turn's usage callback (see debateWithRetry) — the only place role and
+  // billing are both in scope.
+  const panelLedger = createPanelLedger({ sessionId: config.runId });
+  // S5 — announce this run as the one accepting steering. The UI has no other
+  // way to learn the key: /council uses the session id, /ideal's loop-driver
+  // passes its own run id.
+  setActiveCouncilRun(config.runId);
+  // Wall clock for the post-debate run receipt. Stamped here rather than at the
+  // council entrypoint so it measures the DEBATE, not the clarify interview the
+  // user was answering (which can idle for minutes on a human).
+  const debateStartedAt = Date.now();
   // B4 — leader auto-remedy progress tracking. `bestCriteriaMetCount` is the
   // high-water mark of pinned criteria met; `roundsSinceProgress` counts
   // consecutive evaluated rounds that produced no NEW met criterion. Auto-extend
@@ -1008,6 +1076,18 @@ export async function* runDebate(
       yield { type: "content", content: `\n> Debate cancelled by user.\n` };
       break;
     }
+    // S5 — "force convergence now". Checked BEFORE a round starts, never during
+    // one: the round that was already running is allowed to finish and be
+    // graded, so converging costs nothing that was mid-flight and discards
+    // nothing that was paid for. `roundCount` already reflects the last
+    // COMPLETED round, so synthesis sees the real total.
+    if (round > 1 && shouldCouncilConverge(config.runId)) {
+      yield {
+        type: "content",
+        content: `\n> Converging at your request — skipping the remaining rounds and going straight to synthesis.\n`,
+      };
+      break;
+    }
     roundCount = round;
     // Set when the user extends the debate at this round's stop boundary (B4
     // escalation). Guards the convergence-exit below so a user "extend" isn't
@@ -1055,6 +1135,12 @@ export async function* runDebate(
     // that misleads on analysis/decision topics (observed session dd34c59c63e9:
     // an "evaluation" debate showed a bogus "implement" member).
     const roundParticipants = active.map((p) => p.stance?.name ?? p.model);
+    // Stance-matrix column keys. Deliberately `stance?.name ?? role` — the SAME
+    // expression the per-turn `speaker.role` uses (see the exchange emit below),
+    // NOT roundParticipants' `?? model` fallback. The rail resolves its palette
+    // slot + sigil by that key, so any divergence would paint a matrix column in
+    // a different color from the speaker bar it refers to.
+    const stanceRoster = active.map((p) => p.stance?.name ?? p.role);
     const roundEmergent = round > plannedMaxRounds;
     const roundTopic = nextTopic;
     const roundRec = (
@@ -1068,6 +1154,11 @@ export async function* runDebate(
         topic: roundTopic,
         participants: roundParticipants,
         pairCount: pairs.length,
+        // Each surviving pair exchanges twice (a→b, then b→a), so this is the
+        // turn denominator the rail's progress bar needs. Computed here because
+        // `pairs` has already dropped circuit-broken pairs — a count derived
+        // downstream from the participant list would over-promise.
+        turnsExpected: pairs.length * 2,
         emergent: roundEmergent,
         ...patch,
       },
@@ -1081,9 +1172,21 @@ export async function* runDebate(
     // Captured in `roundDirective` so it also lands on the round record's
     // `directive` field below — durable in the conclusion card, not only the
     // ephemeral live bubble a user misses if they look away mid-debate.
+    //
+    // S5 — user steering applies HERE, at the round boundary, never mid-turn.
+    // Drained (not peeked) so one nudge shapes one round instead of dominating
+    // the rest of the debate. Emitted even when the conductor is off, because a
+    // human instruction that silently evaporated would be worse than a directive
+    // that carries nothing else.
+    const steerNow = drainCouncilSteer(config.runId);
+    const steerBlock = formatSteerBlock(steerNow);
     let roundDirective: string | undefined;
-    if (leaderConductorEnabled() && spec.successCriteria.length > 0) {
-      roundDirective = buildLeaderDirective(round, spec.successCriteria, lastCriteriaMet, roundTopic);
+    if (steerBlock || (leaderConductorEnabled() && spec.successCriteria.length > 0)) {
+      const base =
+        leaderConductorEnabled() && spec.successCriteria.length > 0
+          ? buildLeaderDirective(round, spec.successCriteria, lastCriteriaMet, roundTopic)
+          : "";
+      roundDirective = [steerBlock, base].filter(Boolean).join("\n\n");
       yield {
         type: "council_message" as const,
         councilMessage: {
@@ -1140,7 +1243,9 @@ export async function* runDebate(
                   (t) => aTraces.push(t),
                   toolBudget,
                   fallbackPool,
+                  (usage, modelUsed) => panelLedger.recordUsage(aLabel, modelUsed, usage, `round ${round}`),
                 );
+                panelLedger.recordTurn(aLabel, a.model);
                 aResponse = aResult.text;
                 aToolCalls = aResult.toolCalls;
                 log.push(`[${aLabel}]: ${aResponse}`);
@@ -1174,7 +1279,9 @@ export async function* runDebate(
                   (t) => bTraces.push(t),
                   toolBudget,
                   fallbackPool,
+                  (usage, modelUsed) => panelLedger.recordUsage(bLabel, modelUsed, usage, `round ${round}`),
                 );
+                panelLedger.recordTurn(bLabel, b.model);
                 bResponse = bResult.text;
                 bToolCalls = bResult.toolCalls;
                 log.push(`[${bLabel}]: ${bResponse}`);
@@ -1203,6 +1310,7 @@ export async function* runDebate(
                   runningSummary,
                   spec,
                   language: debateLanguage,
+                  steering: steerBlock || undefined,
                 });
                 const aTraces: string[] = [];
                 const aResult = await debateWithRetry(
@@ -1214,7 +1322,9 @@ export async function* runDebate(
                   (t) => aTraces.push(t),
                   toolBudget,
                   fallbackPool,
+                  (usage, modelUsed) => panelLedger.recordUsage(aLabel, modelUsed, usage, `round ${round}`),
                 );
+                panelLedger.recordTurn(aLabel, a.model);
                 aResponse = aResult.text;
                 aToolCalls = aResult.toolCalls;
                 log.push(`[${aLabel}] (round ${round}): ${aResponse}`);
@@ -1239,6 +1349,7 @@ export async function* runDebate(
                   runningSummary,
                   spec,
                   language: debateLanguage,
+                  steering: steerBlock || undefined,
                 });
                 const bTraces: string[] = [];
                 const bResult = await debateWithRetry(
@@ -1250,7 +1361,9 @@ export async function* runDebate(
                   (t) => bTraces.push(t),
                   toolBudget,
                   fallbackPool,
+                  (usage, modelUsed) => panelLedger.recordUsage(bLabel, modelUsed, usage, `round ${round}`),
                 );
+                panelLedger.recordTurn(bLabel, b.model);
                 bResponse = bResult.text;
                 bToolCalls = bResult.toolCalls;
                 log.push(`[${bLabel}] (round ${round}): ${bResponse}`);
@@ -1445,6 +1558,12 @@ export async function* runDebate(
       kind: "evaluation",
       label: `Leader evaluation (round ${round})`,
     });
+    // Panel ledger refresh — emitted every round (not gated on pinned criteria,
+    // unlike the stance rows below) so the rail can answer "which panelist is
+    // this run paying for" even on a debate with no success criteria.
+    if (panelLedger.hasEntries()) {
+      yield { type: "council_meta" as const, councilMeta: { panelLedger: panelLedger.snapshot() } };
+    }
     const allExchangeText = [...exchangeLogs.values()].flat().slice(-8).join("\n\n");
     let evaluation = yield* evaluateDebate(
       spec,
@@ -1455,7 +1574,10 @@ export async function* runDebate(
       costAware,
       undefined,
       debateLanguage,
+      stanceRoster,
+      (usage, modelUsed) => panelLedger.recordUsage(LEADER_LEDGER_ROLE, modelUsed, usage, `evaluate r${round}`),
     );
+    panelLedger.recordTurn(LEADER_LEDGER_ROLE, leaderModelId);
     // Eval robustness: the leader's cost-tier eval model can be on a flaky proxy
     // (Console Go glm/kimi → "Upstream request failed") while panel models on
     // other providers stay healthy. Rather than surface "evaluation unavailable"
@@ -1484,6 +1606,8 @@ export async function* runDebate(
             costAware,
             fallbackModel,
             debateLanguage,
+            stanceRoster,
+            (usage, modelUsed) => panelLedger.recordUsage(LEADER_LEDGER_ROLE, modelUsed, usage, `evaluate r${round}`),
           );
           if (evaluation) break;
         }
@@ -1501,14 +1625,28 @@ export async function* runDebate(
       // rail so the user sees live ✓/○ against the exact outcome they saw — not
       // an opaque "N/M". Only when the spec has real pinned criteria.
       const hasPinned = spec.successCriteria.length > 0;
+      // Snapshot the met-set as it stood ENTERING this round, before the
+      // assignment below overwrites it. This is the round receipt's delta base.
+      const prevRoundMet = lastCriteriaMet.slice();
       const aligned = hasPinned ? alignCriteriaMet(spec.successCriteria, evaluation.criteriaStatus) : [];
       // Count of pinned criteria still open this round — used by both auto-remedy
       // and the interactive escalation boundaries below.
       const pinnedUnmet = hasPinned ? aligned.filter((m) => !m).length : 0;
       if (hasPinned) {
+        // Stance rows are built from the SAME evaluation that produced `aligned`,
+        // so the rail's ✓/○ marks and its "who is on which side" sigils can never
+        // disagree. buildStanceRows always returns one row per pinned criterion —
+        // a criterion the leader skipped arrives all-null ("not argued"), never
+        // as silent agreement.
+        const stanceRows = buildStanceRows({
+          criteria: spec.successCriteria,
+          criteriaStatus: evaluation.criteriaStatus,
+          roster: stanceRoster,
+        });
+        lastStanceRows = stanceRows;
         yield {
           type: "council_meta" as const,
-          councilMeta: { criteriaMet: aligned },
+          councilMeta: { criteriaMet: aligned, stanceRows },
         };
         lastCriteriaMet = aligned; // B5: feed next round's directive + final unmet-flag
         // B4: track progress against the PINNED criteria. A round that meets a new
@@ -1569,6 +1707,11 @@ export async function* runDebate(
         leaderDecision,
         nextRoundFocus: evaluation.nextRoundFocus,
         directive: roundDirective,
+        // Receipt inputs, frozen at grading time. `prevRoundMet` is captured
+        // BEFORE `lastCriteriaMet` was overwritten above, so the delta reflects
+        // what THIS round moved rather than the running total.
+        stanceRows: lastStanceRows.length > 0 ? lastStanceRows : undefined,
+        prevCriteriaMet: prevRoundMet.length > 0 ? prevRoundMet : undefined,
       });
       nextTopic = evaluation.nextRoundFocus;
 
@@ -2033,6 +2176,10 @@ export async function* runDebate(
   if (config.checkpointDir) {
     await deleteDebateCheckpoint(config.checkpointDir);
   }
+  // Drop this run's steering so a later debate in the same process starts clean
+  // — a leftover "force convergence" would silently end the NEXT debate at
+  // round 1.
+  clearCouncilSteer(config.runId);
 
   return {
     spec,
@@ -2049,6 +2196,11 @@ export async function* runDebate(
     // post-debate card can frame an unmet outcome as provisional. Undefined when
     // no round eval ever produced a criteria status (card treats as all-unmet).
     finalCriteriaMet: lastCriteriaMet.length > 0 ? lastCriteriaMet : undefined,
+    // S8 — run receipt inputs. The ledger is snapshotted (not the live object)
+    // so a later mutation cannot rewrite what the card already reported.
+    panelLedger: panelLedger.snapshot(),
+    elapsedMs: Date.now() - debateStartedAt,
+    finalStanceRows: lastStanceRows.length > 0 ? lastStanceRows : undefined,
   };
 }
 
@@ -2098,6 +2250,19 @@ async function* evaluateDebate(
   modelOverride?: string,
   /** Feature B — resolved council debate language (undefined → English). */
   debateLanguage?: string,
+  /**
+   * Panel role labels active this round. Threaded so the eval schema can carry
+   * per-criterion stances (see buildLeaderEvaluationPrompt) — the data behind
+   * the stance matrix and the rail's split sigils, at no extra model call.
+   */
+  participantRoles?: readonly string[],
+  /**
+   * Usage sink for the leader's own spend. The leader is billed like any
+   * panelist — grading every round is the single largest non-panel cost — so
+   * omitting it from the rail's ledger would understate the run. Attributed to
+   * the "leader" row rather than to any debater.
+   */
+  onLeaderUsage?: (usage: CouncilCallUsage, modelUsed: string) => void,
 ): AsyncGenerator<StreamChunk, LeaderEvaluation | null, unknown> {
   try {
     const { system, prompt } = buildLeaderEvaluationPrompt({
@@ -2105,6 +2270,7 @@ async function* evaluateDebate(
       exchangeLogs: exchangeText,
       round,
       language: debateLanguage,
+      participants: participantRoles,
     });
     const modelId = modelOverride ?? pickCouncilTaskModel("evaluate_round", leaderModelId, costAware);
     const raw = yield* tracedGenerate(llm, {
@@ -2120,6 +2286,7 @@ async function* evaluateDebate(
       // truncation — a tight budget could clip the JSON and null the round's
       // outcome. 1536 keeps the focus line + criteria array intact.
       maxTokens: 1536,
+      onUsage: onLeaderUsage ? (usage) => onLeaderUsage(usage, modelId) : undefined,
     });
     const jsonStr = extractEvalJson(raw);
     if (jsonStr) {

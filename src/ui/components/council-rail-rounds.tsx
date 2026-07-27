@@ -56,21 +56,36 @@ export interface CouncilRailRoundsProps {
 export function CouncilRailRounds({ rounds, selected, onSelect, width, theme, plannedTotal }: CouncilRailRoundsProps) {
   if (rounds.length === 0) return null;
   const maxStarted = rounds.reduce((m, r) => Math.max(m, r.round), 0);
-  type Row = { key: string; label: string; round: number | null; running: boolean; pending: boolean };
+  type Row = {
+    key: string;
+    label: string;
+    round: number | null;
+    running: boolean;
+    pending: boolean;
+    /** "2/4" once the leader has graded this round; "" while it is still open. */
+    score: string;
+  };
   const rows: Row[] = [
-    { key: "all", label: "All rounds", round: null, running: false, pending: false },
+    { key: "all", label: "All rounds", round: null, running: false, pending: false, score: "" },
     ...rounds.map((rec) => ({
       key: `round-${rec.round}`,
       label: roundLabel(rec, width),
       round: rec.round,
       running: rec.state === "running",
       pending: false,
+      // What the round ACHIEVED, beside its topic — otherwise the list says a
+      // round happened but not whether it moved anything, and the user has to
+      // open each one to find the round that mattered.
+      score:
+        typeof rec.criteriaTotal === "number" && rec.criteriaTotal > 0
+          ? `${rec.criteriaMet ?? 0}/${rec.criteriaTotal}`
+          : "",
     })),
   ];
   // Dimmed placeholders for planned-but-not-started rounds (round N .. plannedTotal).
   if (typeof plannedTotal === "number" && plannedTotal > maxStarted) {
     for (let n = maxStarted + 1; n <= plannedTotal; n++) {
-      rows.push({ key: `round-pending-${n}`, label: `Round ${n}`, round: n, running: false, pending: true });
+      rows.push({ key: `round-pending-${n}`, label: `Round ${n}`, round: n, running: false, pending: true, score: "" });
     }
   }
 
@@ -106,6 +121,7 @@ export function CouncilRailRounds({ rounds, selected, onSelect, width, theme, pl
                 <text fg={labelFg} attributes={isSel ? 1 : 0}>
                   {row.label}
                 </text>
+                {row.score ? <text fg={theme.diffAddedFg}>{`  ${row.score}`}</text> : null}
                 {row.running ? <text fg={theme.accent}>{" ·live"}</text> : null}
                 {row.pending ? <text fg={theme.textDim}>{" ·pending"}</text> : null}
               </box>

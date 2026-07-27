@@ -65,7 +65,12 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "review", label: "review", description: "Review recent changes", hidden: true },
   { id: "verify", label: "verify", description: "Run local verification", hidden: true },
   { id: "update", label: "update", description: "Update muonroi-cli to the latest version", hidden: true },
-  { id: "cost", label: "cost", description: "Show session cost breakdown", hidden: true },
+  {
+    id: "cost",
+    label: "cost",
+    description: "Session cost breakdown — /cost --council [id] splits a debate by phase & speaker",
+    hidden: true,
+  },
   {
     id: "ee",
     label: "ee",

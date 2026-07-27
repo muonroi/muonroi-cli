@@ -1045,6 +1045,13 @@ interface TracedGenerateArgs {
   maxTokens?: number;
   /** Tick interval in ms. Default 1000. Set 0 to disable ticks. */
   tickIntervalMs?: number;
+  /**
+   * Per-call usage sink. `llm.generate` has always accepted one; nothing passed
+   * it here, so leader/synthesis spend never reached anything but the aggregate
+   * `usage_events` row. Threading it is what lets the rail's panel ledger show a
+   * real "leader" line instead of a fabricated zero.
+   */
+  onUsage?: UsageCallback;
 }
 
 /**
@@ -1084,7 +1091,7 @@ export async function* tracedGenerate(
 
   const generatePromise = (async () => {
     try {
-      resultText = await llm.generate(args.modelId, args.system, args.prompt, args.maxTokens);
+      resultText = await llm.generate(args.modelId, args.system, args.prompt, args.maxTokens, args.onUsage);
     } catch (err) {
       resultErr = err;
     } finally {

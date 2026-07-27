@@ -485,6 +485,14 @@ export function buildFollowupPrompt(ctx: {
   spec: ClarifiedSpec;
   /** Feature B — resolved council debate language (undefined → English). */
   language?: string;
+  /**
+   * S5 — the human's steering for THIS round, already formatted. Lives in the
+   * prompt TAIL, never in `system`: the system string is byte-identical from
+   * round 2..N for a given speaker and that is what makes the provider prompt
+   * cache hit. Putting a per-round instruction there would bust the prefix on
+   * exactly the rounds a user is most likely to steer.
+   */
+  steering?: string;
 }): { system: string; prompt: string } {
   const me = personaOf(ctx.speakerRole, ctx.speakerStance);
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
@@ -525,6 +533,10 @@ export function buildFollowupPrompt(ctx: {
     // latest response differs), so nothing cacheable is lost by placing the
     // round number / running summary here.
     prompt:
+      // Steering leads: it is the one instruction in this message that came from
+      // a human watching the run, and it must not be read as part of the
+      // partner's argument.
+      (ctx.steering ? `${ctx.steering}\n\n` : "") +
       (ctx.runningSummary ? `## Discussion State So Far\n${ctx.runningSummary}\n\n` : "") +
       (ctx.speakerLastPosition ? `Your previous position:\n${ctx.speakerLastPosition}\n\n` : "") +
       `Their latest (${them.label}):\n${ctx.partnerPosition}`,
@@ -539,11 +551,39 @@ export function buildLeaderEvaluationPrompt(ctx: {
   round: number;
   /** Feature B — resolved council debate language (undefined → English). */
   language?: string;
+  /**
+   * Panel role labels active this round. When present, the eval schema gains a
+   * per-criterion `stances` map so the leader records WHERE EACH PANELIST STANDS
+   * as part of the grading it already does — the stance matrix (Ctrl+T) and the
+   * rail's inline split sigils cost no extra model call. Omit to keep the
+   * legacy schema exactly as it was.
+   */
+  participants?: readonly string[];
 }): {
   system: string;
   prompt: string;
 } {
   const stackLock = buildStackLockSection(ctx.spec);
+  // Per-criterion stance capture. Only emitted when the caller supplied the
+  // roster — without the exact role labels the leader would invent column names
+  // and every stance would be dropped by the normalizer anyway.
+  const roster = (ctx.participants ?? []).map((r) => r.trim()).filter((r) => r.length > 0);
+  const stanceSchemaField =
+    roster.length > 0 ? `, "stances": {${roster.map((r) => `"${r}": "+|-|~|null"`).join(", ")}}, "split": "..."` : "";
+  const stanceRule =
+    roster.length > 0
+      ? `\n## Per-criterion stances (IMPORTANT)\n` +
+        `For every criterion, record where EACH panelist stands, using exactly these role keys: ${roster.join(", ")}.\n` +
+        `  "+"   the panelist argued FOR this criterion being satisfied\n` +
+        `  "-"   the panelist argued AGAINST it / raised an unresolved objection to it\n` +
+        `  "~"   the panelist accepted it only under a stated condition\n` +
+        `  null  the panelist has NOT spoken to this criterion in the debate so far\n` +
+        `Use null freely and honestly. Do NOT infer agreement from silence — a panelist who never ` +
+        `addressed a criterion is null, never "+". Reporting a stance nobody took is the single worst ` +
+        `failure here: the user reads this table to decide whether to keep paying for rounds.\n` +
+        `Set "split" to one short sentence naming the actual disagreement ONLY when panelists conflict ` +
+        `on that criterion; use an empty string otherwise.\n\n`
+      : "";
   const outOfStackCheck = stackLock
     ? `\n## Out-of-stack enforcement\n` +
       `Scan the final positions for proposals that cite frameworks or technologies NOT in the STACK LOCK above.\n` +
@@ -570,12 +610,13 @@ export function buildLeaderEvaluationPrompt(ctx: {
       `- The remaining disagreements are minor wording, not substantive trade-offs\n` +
       `- The next round would mostly repeat already-stated positions\n` +
       `Continuing past convergence wastes ~120-150s per round and adds no new content. Prefer to stop early — the user can always /ask-followup to clarify a specific point.\n\n` +
+      stanceRule +
       outOfStackCheck +
       `Output ONLY a JSON object (no markdown):\n` +
       `{\n` +
       `  "nextRoundFocus": "one short phrase naming the single most important point the NEXT round should resolve (empty string if you are stopping)",\n` +
       `  "allCriteriaMet": true/false,\n` +
-      `  "criteriaStatus": [{"criterion": "...", "met": true/false, "evidence": "..."}],  // EXACTLY one entry per Success Criterion above, IN THE SAME ORDER. Do not merge, split, reorder, or invent criteria — the user pins these and watches each one.\n` +
+      `  "criteriaStatus": [{"criterion": "...", "met": true/false, "evidence": "..."${stanceSchemaField}}],  // EXACTLY one entry per Success Criterion above, IN THE SAME ORDER. Do not merge, split, reorder, or invent criteria — the user pins these and watches each one.\n` +
       `  "unresolvedPoints": ["point 1"],\n` +
       `  "needsResearch": false,\n` +
       `  "researchQuery": null,\n` +
