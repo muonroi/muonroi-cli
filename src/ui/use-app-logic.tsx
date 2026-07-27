@@ -4715,7 +4715,13 @@ export function useAppLogic(props: AppLogicProps) {
           getLiveEntries: () => messages,
         })
           .then(async (result) => {
-            if (result === null) return;
+            if (result === null) {
+              // No handler for this name. Returning quietly made a mistyped (or
+              // never-wired) command indistinguishable from a working one that
+              // prints nothing — which is exactly how /update looked dead.
+              pushToast("error", `Unknown command: /${name}`);
+              return;
+            }
 
             if (result.startsWith("__COMPACT__")) {
               const match = result.match(/Instructions:\s*(.+)/);
@@ -5419,7 +5425,9 @@ export function useAppLogic(props: AppLogicProps) {
       openWalletPicker,
       openScheduleModal,
       processMessage,
+      pushToast,
       resetToNewSession,
+      runUpdateFromUi,
       subAgents,
       model,
       messages.length,

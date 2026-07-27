@@ -1,11 +1,25 @@
+# The DETERMINISTIC gate: typecheck + the full unit suite + a boot/compile smoke.
+#
+# It used to run on master only, so every branch and every push to `develop` —
+# where the work actually happens — was gated by the Harness Suite alone: 60+
+# specs that each spawn a real TUI on a shared 2-core runner. The cheap, stable
+# check ran nowhere near the commits it could have caught, and the expensive,
+# timing-sensitive one was the sole verdict. That is why CI reads as "always
+# red": the signal came only from the flakiest layer.
 name: ci-matrix
 on:
   push:
-    branches: [master]
+    branches: ["**"]
   pull_request:
-    branches: [master]
+    branches: ["**"]
 permissions:
   contents: read
+
+# A branch's newer push makes the older run's verdict irrelevant — cancel it
+# rather than queueing 20-minute matrix runs behind each other.
+concurrency:
+  group: ci-matrix-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     strategy:

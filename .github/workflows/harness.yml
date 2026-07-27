@@ -17,6 +17,14 @@ on:
   pull_request:
     branches: ["**"]
 
+# Each run spawns dozens of real TUI processes for ~10-20 minutes. Without this,
+# a burst of pushes queues several of them on the same shared runners, which
+# starves the boot budgets the specs depend on and turns contention into
+# "failures" on commits that were already superseded.
+concurrency:
+  group: harness-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   harness:
     runs-on: ubuntu-latest
