@@ -28,6 +28,19 @@ export interface ContextRailProps {
   /** Optional stage block (active /ideal sprint stage). */
   stage?: ContextRailStage | null;
   /**
+   * Design 2A — the council scoreboard body. When supplied it REPLACES the flat
+   * metadata rows: the static ones are folded into the scoreboard's own
+   * collapsed `▸ Run config` section, so rendering both would duplicate them.
+   * `rows` is still mirrored into the harness `props` regardless.
+   */
+  scoreboardNode?: ReactNode;
+  /**
+   * Design 2C — the "While you were away" diff band, above everything else while
+   * the transcript is scroll-locked away. Independent of `scoreboardNode`, so a
+   * council whose scoreboard has no data yet still reports what changed.
+   */
+  watchlistNode?: ReactNode;
+  /**
    * Rich content rendered below the metadata rows — info cards (Clarified Spec,
    * Discussion Brief, Debate Plan), phase timeline, product-status. Wired by
    * later phases; absent in the skeleton.
@@ -42,7 +55,7 @@ export interface ContextRailProps {
  * re-scopes to a selected round (that hides the overview and recreates the
  * "empty rounds" problem). app.tsx gates visibility on width ≥ 100 and Ctrl+B.
  */
-export function ContextRail({ width, rows, stage, children }: ContextRailProps) {
+export function ContextRail({ width, rows, stage, children, scoreboardNode, watchlistNode }: ContextRailProps) {
   // Harness props cover identity + stage rows combined so existing assertions
   // on labels/values keep seeing every visible row.
   const allRows = stage ? [...rows, ...stage.rows] : rows;
@@ -81,7 +94,13 @@ export function ContextRail({ width, rows, stage, children }: ContextRailProps) 
         <text fg={dark.textMuted} attributes={1}>
           Context
         </text>
-        {rows.length > 0 && (
+        {watchlistNode}
+        {scoreboardNode ? (
+          <box flexDirection="column" flexShrink={0}>
+            {scoreboardNode}
+          </box>
+        ) : null}
+        {!scoreboardNode && rows.length > 0 && (
           <box flexDirection="column" flexShrink={0}>
             {rows.map((r, idx) => (
               // Index key: list-style rows (e.g. per-criterion outcome lines) may

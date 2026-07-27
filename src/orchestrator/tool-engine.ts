@@ -172,6 +172,7 @@ import { consumeProactiveCompact } from "./compact-request.js";
 import { relaxCompactionSettings } from "./compaction";
 import type { CouncilManager } from "./council-manager.js";
 import { consumeCouncilConvene, hasPendingCouncilConvene, peekCouncilConveneToolCallId } from "./council-request.js";
+import { resolveCouncilTopic } from "./council-topic.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
 import { humanizeApiError, isAuthenticationError, isContextLimitError, summarizeApiErrorForLog } from "./error-utils";
@@ -243,6 +244,7 @@ import {
   initCompactionHysteresisState,
 } from "./subagent-compactor.js";
 import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
+import { beginToolActivity, endToolActivity } from "./tool-activity.js";
 import { getToolLimitAutoRecoverCap, shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 import {
@@ -823,15 +825,22 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     // prompt is already specific. Skip only when the user turned it off. The
     // clarifier reuses PIL gray-areas as seed questions (no hardcoded questions),
     // and its models come from pickCouncilTaskModel (no hardcoded model/provider).
-    yield* deps.runCouncilV2(userMessage, {
+    // A continuation utterance names no subject — pinning it verbatim gives every
+    // debate round a contentless topic ("Topic for discussion: tiếp tục nhé",
+    // session 3f998bfef7db). Resolve to the work actually in flight.
+    yield* deps.runCouncilV2(resolveCouncilTopic(userMessage, deps.messages as Array<{ role?: string }>), {
       skipClarification: !isAutoCouncilClarifyEnabled(),
       observer,
       userModelMessage,
-      // Suppress the CLI-hardcoded post-debate option card. The follow-up is
-      // decided by the agent's own intent via the neutral continuation below,
-      // not a fixed CLI menu. (Pre-debate clarification is orthogonal and still
-      // runs per skipClarification.)
-      convenePath: true,
+      // Deliberately NOT convenePath. This council was convened by the CLI —
+      // the user never asked for it and no model called it — so there is no
+      // agent to hand the post-debate decision to. Suppressing the card here
+      // (a72731e6) did not delegate the choice, it hardcoded a different one:
+      // the synthesis was fed straight into an implementing turn and work began
+      // without the user ever being asked (user report 2026-07-27, session
+      // 3f998bfef7db seq 21-22). The model-callable paths (convene_council and
+      // the runDebate tool) keep convenePath — there the synthesis really IS a
+      // tool result the model reasons about.
       // Gate A — thread the main turn's already-classified scope so runCouncil
       // skips a redundant self-classify round-trip inside its own runPipeline.
       externalTopic: pilCtx.scopeKind === "external",
@@ -840,29 +849,21 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     const chosenAction = deps.councilManager.lastPostDebateAction;
     deps.councilManager.setLastSynthesis(null);
     deps.councilManager.setLastPostDebateAction(null);
-    // convenePath suppressed the hardcoded card, so there is no chosenAction to
-    // branch on. What happens next depends on the DELIVERABLE:
-    const { buildNeutralPostCouncilContinuation, extractReadableSynthesis, synthesisIsImplementation } = await import(
-      "../council/index.js"
-    );
-    if (synthesis && !synthesisIsImplementation(synthesis)) {
-      // Analysis / evaluation / decision: the synthesis IS the answer. convenePath
-      // skipped the interactive block that would have shown it, so present the
-      // READABLE synthesis (the consolidated prose — summary, findings, roadmap,
-      // recommendation) directly as the final reply. Do NOT re-enter a follow-up
-      // turn: it only re-formats the same conclusion and has been observed to
-      // stall for minutes ("Waiting for next phase… 866s" — session 47b3a8a546ca),
-      // leaving the user with a raw debate dump and no consolidated answer.
-      const readable = extractReadableSynthesis(synthesis).trim();
-      if (readable) yield { type: "content", content: `\n${readable}\n` };
-      return;
-    }
-    // Implementation deliverable: there is an original task to build. Hand the
-    // readable conclusion to a normal agent turn (respond / ask_user / implement).
-    // Re-entry is guarded by setContinuation(true) so shouldAutoCouncil (which
-    // checks !isContinuation) can't re-fire into a loop.
-    const continuationPrompt = synthesis ? buildNeutralPostCouncilContinuation(synthesis) || null : null;
+    // Honour the user's post-debate choice. `postDebateContinuation` returns
+    // null when no action was picked (card dismissed) and for an
+    // analysis/evaluation/decision debate whose deliverable IS the conclusion —
+    // so nothing runs unless the user asked for it. Implementation only starts
+    // on an explicit implement / generate_plan / continue_session pick.
+    // Shared with the /council slash path (orchestrator.runCouncilV2).
+    const { postDebateContinuation } = await import("../council/index.js");
+    const continuationPrompt = synthesis ? postDebateContinuation(chosenAction ?? undefined, synthesis) : null;
     if (continuationPrompt) {
+      // Collapse the live debate block BEFORE the continuation streams. It is
+      // rendered below the transcript and is otherwise only torn down at a turn
+      // boundary — which this continuation does not cross, so everything it
+      // produces would render above a still-mounted council block and look
+      // swallowed until the turn ended.
+      yield { type: "council_collapse" };
       yield { type: "content", content: "\n[Auto-continuing with council recommendations...]\n" };
       deps.councilManager.setContinuation(true);
       try {
@@ -1309,6 +1310,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // why this is not a stack: with parallel tool calls, last-writer-
             // wins is the honest summary; the CPU profile is the real evidence.
             setLoopBreadcrumb(`tool:${name}`);
+            // Tell the top-level turn watchdog this turn is WORKING, not hung,
+            // for as long as this call stays inside its own declared deadline.
+            // Without it a single long tool call (session 708f0fc4ac8b ran
+            // `bun test` with timeout=120000 against a 120s turn-idle window)
+            // trips the idle timer and a healthy turn is killed as hung.
+            const activityId = beginToolActivity((input as { timeout?: number } | undefined)?.timeout);
             try {
               if (!guarded) return await originalExecute(input, context);
               const gate = evaluateMutationGate(deps.bash.getCwd(), {
@@ -1321,6 +1328,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               }
               return await writeMutex.run(() => originalExecute(input, context));
             } finally {
+              endToolActivity(activityId);
               setLoopBreadcrumb(`after-tool:${name}`);
             }
           };

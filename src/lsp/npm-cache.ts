@@ -5,6 +5,11 @@ import path from "path";
 
 const CACHE_ROOT = path.join(os.homedir(), ".muonroi-cli", "cache", "lsp");
 const locks = new Map<string, Promise<unknown>>();
+const WINDOWS_BIN_SUFFIX = process.platform === "win32" ? ".cmd" : "";
+
+function cachedBinPath(binDir: string, bin: string): string {
+  return path.join(binDir, `${bin}${WINDOWS_BIN_SUFFIX}`);
+}
 
 function packageDir(pkg: string): string {
   const sanitized =
@@ -51,7 +56,7 @@ export async function lspNpmWhich(pkg: string, preferredBin?: string): Promise<s
   };
 
   const bin = await pick();
-  if (bin) return path.join(binDir, bin);
+  if (bin) return cachedBinPath(binDir, bin);
 
   try {
     await rm(path.join(dir, "package-lock.json"), { force: true });
@@ -64,7 +69,7 @@ export async function lspNpmWhich(pkg: string, preferredBin?: string): Promise<s
   }
   const resolved = await pick();
   if (!resolved) return null;
-  return path.join(binDir, resolved);
+  return cachedBinPath(binDir, resolved);
 }
 
 /**
@@ -78,7 +83,7 @@ export async function lspNpmCachedWhich(pkg: string, preferredBin?: string): Pro
   const files = await readdir(binDir).catch((): string[] => []);
   if (files.length === 0) return null;
   const bin = preferredBin && files.includes(preferredBin) ? preferredBin : files.length === 1 ? files[0] : undefined;
-  return bin ? path.join(binDir, bin) : null;
+  return bin ? cachedBinPath(binDir, bin) : null;
 }
 
 export async function lspNpmAdd(pkg: string): Promise<string> {

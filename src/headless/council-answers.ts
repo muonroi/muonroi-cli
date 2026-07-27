@@ -35,6 +35,11 @@ export function createCouncilAutoAnswerer(opts: {
 }): CouncilAutoAnswerer | null {
   if (!opts.enabled && !opts.file) return null;
   const queues: Record<CouncilQuestionPhase, string[]> = {
+    // No file queue: the launch card is suppressed on every non-interactive
+    // path, so a headless run should never see one. If one does arrive,
+    // defaultAnswerFor picks option 0 — "Start debate" — which is the only
+    // answer that keeps a headless run moving.
+    "council-setup": [],
     clarify: [...(opts.file?.clarify ?? [])],
     preflight: [...(opts.file?.preflight ?? [])],
     "plan-confirm": [...(opts.file?.["plan-confirm"] ?? [])],

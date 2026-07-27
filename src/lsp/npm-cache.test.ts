@@ -1,10 +1,12 @@
+import { existsSync } from "fs";
 import { mkdir, rm, writeFile } from "fs/promises";
 import os from "os";
 import path from "path";
-import { afterEach, describe, expect, it } from "vitest";
-import { lspNpmWhich } from "./npm-cache";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { lspNpmCachedWhich, lspNpmWhich } from "./npm-cache";
 
 const tempDirs: string[] = [];
+let expectedSuffix = "";
 
 afterEach(async () => {
   await Promise.all(
@@ -12,12 +14,18 @@ afterEach(async () => {
   );
 });
 
+beforeEach(() => {
+  expectedSuffix = process.platform === "win32" ? ".cmd" : "";
+});
+
 describe("lspNpmWhich", () => {
   it("resolves a single binary from a pre-populated cache", async () => {
     const dir = await createFakePackageCache("fake-server", { "fake-server": "lib/cli.js" });
     const result = await lspNpmWhich("fake-server");
 
-    expect(result).toBe(path.join(dir, "node_modules", ".bin", "fake-server"));
+    expect(result).toBe(path.join(dir, "node_modules", ".bin", `fake-server${expectedSuffix}`));
+    expect(result).not.toBeNull();
+    expect(existsSync(result!)).toBe(true);
   });
 
   it("resolves the correct binary from a multi-binary package", async () => {
@@ -27,7 +35,9 @@ describe("lspNpmWhich", () => {
     });
     const result = await lspNpmWhich("multi-bin");
 
-    expect(result).toBe(path.join(dir, "node_modules", ".bin", "multi-bin"));
+    expect(result).toBe(path.join(dir, "node_modules", ".bin", `multi-bin${expectedSuffix}`));
+    expect(result).not.toBeNull();
+    expect(existsSync(result!)).toBe(true);
   });
 
   // The pyright shape: the bin named after the package is the batch CLI, and the
@@ -42,7 +52,9 @@ describe("lspNpmWhich", () => {
 
     const result = await lspNpmWhich("pyright", "pyright-langserver");
 
-    expect(result).toBe(path.join(dir, "node_modules", ".bin", "pyright-langserver"));
+    expect(result).toBe(path.join(dir, "node_modules", ".bin", `pyright-langserver${expectedSuffix}`));
+    expect(result).not.toBeNull();
+    expect(existsSync(result!)).toBe(true);
   });
 
   it("falls back to the package-named binary when the caller asks for one that is absent", async () => {
@@ -53,12 +65,26 @@ describe("lspNpmWhich", () => {
 
     const result = await lspNpmWhich("multi-bin", "not-shipped");
 
-    expect(result).toBe(path.join(dir, "node_modules", ".bin", "multi-bin"));
+    expect(result).toBe(path.join(dir, "node_modules", ".bin", `multi-bin${expectedSuffix}`));
+    expect(result).not.toBeNull();
+    expect(existsSync(result!)).toBe(true);
   });
 
   it("returns null when the package cannot be installed", async () => {
     const result = await lspNpmWhich("@nonexistent-scope/totally-fake-package-that-does-not-exist-12345");
     expect(result).toBeNull();
+  });
+});
+
+describe("lspNpmCachedWhich", () => {
+  it("returns the cached binary path with the platform suffix", async () => {
+    const dir = await createFakePackageCache("cached-bin", { "cached-bin": "lib/server.js" });
+
+    const result = await lspNpmCachedWhich("cached-bin", "cached-bin");
+
+    expect(result).toBe(path.join(dir, "node_modules", ".bin", `cached-bin${expectedSuffix}`));
+    expect(result).not.toBeNull();
+    expect(existsSync(result!)).toBe(true);
   });
 });
 
@@ -77,11 +103,15 @@ async function createFakePackageCache(pkg: string, binEntries: Record<string, st
     await writeFile(targetPath, "#!/usr/bin/env node\n", { mode: 0o755 });
 
     const linkPath = path.join(binDir, name);
+    const windowsLinkPath = `${linkPath}.cmd`;
     const { symlink } = await import("fs/promises");
     await symlink(path.relative(binDir, targetPath), linkPath).catch(() => {
       // Fallback: write a stub file if symlinks fail (Windows)
       return writeFile(linkPath, `#!/bin/sh\nnode "${targetPath}" "$@"\n`, { mode: 0o755 });
     });
+    if (process.platform === "win32") {
+      await writeFile(windowsLinkPath, `@echo off\r\nnode "${targetPath}" %*\r\n`);
+    }
   }
 
   await writeFile(

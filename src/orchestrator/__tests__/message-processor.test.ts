@@ -193,7 +193,14 @@ describe("MessageProcessor — DI surface invariants", () => {
     expect(councilCalled).toBe(true);
   });
 
-  it("auto-council runs runCouncilV2 with convenePath:true (no hardcoded post-debate card)", async () => {
+  it("auto-council does NOT suppress the post-debate card (the user decides what happens next)", async () => {
+    // The auto-council path is convened by the CLI: the user never asked for a
+    // debate and no model called one, so there is no agent to hand the
+    // post-debate decision to. a72731e6 passed convenePath:true here, which did
+    // not delegate the choice — it replaced "ask the user" with "always
+    // implement", and work began the moment the council converged (user report
+    // 2026-07-27, session 3f998bfef7db seq 21-22). Only the model-callable
+    // paths (convene_council / the runDebate tool) may set convenePath.
     let capturedOpts: Record<string, unknown> | undefined;
     const deps = makeDeps({
       councilManager: makeCouncilStub({
@@ -205,25 +212,27 @@ describe("MessageProcessor — DI surface invariants", () => {
         yield { type: "done" };
       },
     });
-    // Same style as the neighbouring "delegates to deps.runCouncilV2 when
-    // auto-council gate is taken" test: we cannot exercise the gate
-    // end-to-end without PIL machinery, so directly invoke deps.runCouncilV2
-    // with the same options tool-engine.ts's auto-council branch passes,
-    // and assert convenePath is threaded through.
     const processor = new MessageProcessor(deps);
     expect(processor).toBeInstanceOf(MessageProcessor);
-    // convenePath is declared on MessageProcessorDeps.runCouncilV2's opts type,
-    // so the same options tool-engine.ts's auto-council branch passes type-check
-    // directly here (no cast needed).
+    // Mirror the options tool-engine.ts's auto-council branch now passes.
     const iter = deps.runCouncilV2("topic", {
       skipClarification: true,
       userModelMessage: { role: "user", content: "topic" },
-      convenePath: true,
     });
     for await (const _ of iter) {
       /* drain */
     }
-    expect(capturedOpts?.convenePath).toBe(true);
+    expect(capturedOpts?.convenePath).toBeUndefined();
+  });
+
+  it("nothing auto-runs after an auto-council unless the user picked an action", async () => {
+    const { postDebateContinuation } = await import("../../council/index.js");
+    const synthesis = ["```json", '{"type":"implementation_plan","conclusion":"build it"}', "```"].join("\n");
+
+    // Card dismissed / no pick → the turn ends at the composer.
+    expect(postDebateContinuation(undefined, synthesis)).toBeNull();
+    // Explicit pick → and only then does an implementing turn start.
+    expect(postDebateContinuation("implement", synthesis)).toContain(synthesis);
   });
 
   it("respects observer callbacks via notifyObserver (smoke)", () => {

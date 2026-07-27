@@ -244,6 +244,9 @@ import {
   isCouncilStartPatch,
   mapCouncilCardKey,
 } from "./utils/format.js";
+// S5 — council steering channel. This file is @ts-nocheck, so a missing import
+// here fails at RUNTIME, not at build: keep it explicit and beside the others.
+import { getActiveCouncilRun, pushCouncilSteer, requestCouncilConverge } from "../state/council-steer.js";
 import { isEscapeKey } from "./utils/modal.js";
 import type { NeedsKeyCardMode } from "./modals/mcp-needs-key-card.js";
 import {
@@ -1182,12 +1185,69 @@ export function useAppLogic(props: AppLogicProps) {
   // Peek toggle (ctrl+e) for the todo panel while it auto-collapses during a
   // council debate. Default collapsed; expands back to the full panel on demand.
   const [councilTodoExpanded, setCouncilTodoExpanded] = useState(false);
+  // Ctrl+T — the stance matrix (design S4) overlaid on the transcript. Lives
+  // here rather than in app.tsx because handleKey owns every council binding.
+  const [stanceMatrixOpen, setStanceMatrixOpen] = useState(false);
+  // Ref mirror so the Ctrl+←/→ branch can tell whether the matrix owns that key
+  // without adding stanceMatrixOpen to handleKey's dep list.
+  const stanceMatrixOpenRef = useRef(false);
+  // S5 — steer mode. Ctrl+S arms it while a debate is live; the next submitted
+  // message goes to the council's steering inbox rather than the message queue.
+  // A MODE rather than a modal on purpose: the submit path already handles
+  // Return correctly, and a new card would have to fight the ~20 other Return
+  // handlers in this reducer for the key.
+  const [councilSteerMode, setCouncilSteerMode] = useState(false);
+  const councilSteerModeRef = useRef(false);
+  useEffect(() => {
+    councilSteerModeRef.current = councilSteerMode;
+  }, [councilSteerMode]);
+  // S4 — the cell under the cursor, as absolute (criterion row, roster column)
+  // indices. Ctrl+↑↓←→ moves it and the quote panel follows; the matrix scrolls
+  // its own column window to keep the selection visible.
+  const [stanceCell, setStanceCell] = useState<{ row: number; col: number }>({ row: 0, col: 0 });
+  useEffect(() => {
+    stanceMatrixOpenRef.current = stanceMatrixOpen;
+    // Reopening always starts at the first cell — a stale cursor from a prior
+    // debate would open the matrix scrolled past the panelists that matter.
+    if (!stanceMatrixOpen) setStanceCell({ row: 0, col: 0 });
+  }, [stanceMatrixOpen]);
+  // Per-turn expand state for council debate bubbles, keyed by the turn's index
+  // in `councilMessages` (the same index the Semantic id `council-msg-N` uses).
+  // Sits BESIDE councilTranscriptExpanded rather than replacing it: Ctrl+O still
+  // expands everything at once, this is the per-turn override.
+  const [expandedTurns, setExpandedTurns] = useState<ReadonlySet<number>>(() => new Set<number>());
+  const toggleTurnExpanded = useCallback((idx: number) => {
+    setExpandedTurns((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  }, []);
+  // Ref mirror so the Ctrl+↵ binding can find the newest turn without putting
+  // councilMessages on handleKey's dep list (same pattern as councilStatusesRef).
+  const councilMessagesRef = useRef<CouncilMessage[]>([]);
+  useEffect(() => {
+    councilMessagesRef.current = councilMessages;
+  }, [councilMessages]);
   // Non-null only while a /compact is in flight; drives CompactProgressCard.
   const [compactRun, setCompactRun] = useState<{ progress: CompactProgress; startedAt: number } | null>(null);
   const [councilInfoCards, setCouncilInfoCards] = useState<CouncilInfoCard[]>([]);
   // P3 — council metadata for the context rail (leader/panel/budget/research/
   // cost), upsert-merged from incremental council_meta patches.
   const [councilMeta, setCouncilMeta] = useState<CouncilMetaPatch>({});
+  // Stance-matrix dimensions, mirrored so the Ctrl+arrow branch can clamp the
+  // cursor without pulling councilMeta into handleKey's dep list. Clamping HERE
+  // rather than at render is what keeps the cursor reversible: an unclamped
+  // increment would need as many presses back as it took to overshoot.
+  const stanceDimsRef = useRef<{ rows: number; cols: number }>({ rows: 0, cols: 0 });
+  useEffect(() => {
+    const ledger = councilMeta.panelLedger ?? [];
+    stanceDimsRef.current = {
+      rows: councilMeta.stanceRows?.length || councilMeta.successCriteria?.length || 0,
+      cols: ledger.length > 0 ? ledger.filter((e) => e.role !== "leader").length : (councilMeta.panel?.length ?? 0),
+    };
+  }, [councilMeta]);
   // The convene reason ("heavy · analyze") parsed out of the stripped
   // `[Auto-council triggered: …]` line, promoted to the sticky banner header
   // instead of being scrolled past in the transcript. Null for user-initiated
@@ -2702,24 +2762,22 @@ export function useAppLogic(props: AppLogicProps) {
     setScheduleModalIndex((idx) => Math.max(0, Math.min(idx, Math.max(0, scheduleRows.length - 1))));
   }, [scheduleRows.length]);
 
-  const clearLiveTurnUi = useCallback(() => {
-    setStreamContent("");
-    setReasoningActive(false);
-    setLastReasoningElapsedMs(0);
-    reasoningStartRef.current = null;
-    setStreamReasoning("");
-    reasoningAccRef.current = "";
-    lastReasoningRenderTimeRef.current = 0;
-    setActiveToolCalls([]);
-    setActiveSubagent(null);
-    setLiveTurnSourceLabel(null);
-    contentAccRef.current = "";
-    // Collapse the ephemeral council transcript to the persisted [Council
-    // Decision] message on every turn end. These three arrays are append-only
-    // and rendered as a block BELOW the timestamp-sorted messages list, so
-    // leaving them populated makes a later message render ABOVE the stale
-    // council block (looks "swallowed"). Synthesis is persisted independently,
-    // so clearing here loses nothing. Covers auto-council + slash paths.
+  /**
+   * Tear down the LIVE council block (ephemeral debate transcript, info cards,
+   * meta, rounds, phases, placeholders).
+   *
+   * These arrays are append-only and render as a block BELOW the
+   * timestamp-sorted messages list, so while they stay populated every newer
+   * message renders ABOVE them and reads as "swallowed". Two callers:
+   *   - clearLiveTurnUi, at every turn boundary (begin/finalize);
+   *   - the `council_collapse` chunk, when a debate hands off to a post-debate
+   *     continuation that runs INSIDE the same turn. No turn boundary happens
+   *     there, which is why the implementation phase used to stay invisible
+   *     until the whole turn ended (user report 2026-07-27).
+   * Synthesis is persisted independently as the [Council Decision] system
+   * message, so collapsing loses nothing.
+   */
+  const collapseCouncilUi = useCallback(() => {
     setCouncilMessages([]);
     setCouncilInfoCards([]);
     setCouncilMeta({});
@@ -2734,12 +2792,26 @@ export function useAppLogic(props: AppLogicProps) {
     // emits its `state:"done"` event, so <CouncilPhaseTimeline> stays frozen at
     // "Council working… elapsed Ns" forever and the session LOOKS hung even after
     // the turn actually finalized (live: reasoning-model hang c1d461439618).
-    // Clearing here (called at both beginLiveTurn and finalizeActiveTurn) tears
-    // the timeline down on every turn boundary. The completed phases were already
-    // rendered live; the persisted [Council Decision] message is the durable record.
     setCouncilPhases([]);
     councilTopicRef.current = undefined;
   }, []);
+
+  const clearLiveTurnUi = useCallback(() => {
+    setStreamContent("");
+    setReasoningActive(false);
+    setLastReasoningElapsedMs(0);
+    reasoningStartRef.current = null;
+    setStreamReasoning("");
+    reasoningAccRef.current = "";
+    lastReasoningRenderTimeRef.current = 0;
+    setActiveToolCalls([]);
+    setActiveSubagent(null);
+    setLiveTurnSourceLabel(null);
+    contentAccRef.current = "";
+    // Collapse the ephemeral council transcript to the persisted [Council
+    // Decision] message on every turn end. Covers auto-council + slash paths.
+    collapseCouncilUi();
+  }, [collapseCouncilUi]);
 
   const finishTurnProcessing = useCallback(() => {
     const nextQueued = queuedMessagesRef.current.shift();
@@ -3714,6 +3786,16 @@ export function useAppLogic(props: AppLogicProps) {
 
   const interruptActiveRun = useCallback(
     (key?: KeyEvent) => {
+      // S5 — steer mode owns Escape: backing out of a steering instruction must
+      // not abort the debate you were about to steer. Guarded HERE as well as in
+      // the key reducer because this runs from a separate `_internalKeyInput`
+      // subscriber whose ordering against the reducer is not guaranteed.
+      if (councilSteerModeRef.current) {
+        setCouncilSteerMode(false);
+        key?.preventDefault();
+        key?.stopPropagation();
+        return true;
+      }
       if (btwStateRef.current) {
         btwAbortRef.current?.abort();
         btwAbortRef.current = null;
@@ -3951,6 +4033,11 @@ export function useAppLogic(props: AppLogicProps) {
                 applyLocalAssistantDelta(maybeStripCouncilContent(chunk.content || ""));
                 break;
               }
+              case "council_collapse":
+                // See collapseCouncilUi — the post-debate continuation runs in
+                // this same turn, so nothing else tears the block down in time.
+                collapseCouncilUi();
+                break;
               case "toast":
                 // Ephemeral notice — flash it, do NOT append to the persisted
                 // assistant message (that was the old "message thừa ở console"
@@ -5019,6 +5106,12 @@ export function useAppLogic(props: AppLogicProps) {
                       /* best-effort */
                     }
                   }
+                  if (chunk.type === "council_collapse") {
+                    // Debate handed off to a continuation running INSIDE this
+                    // turn — collapse the live block now so what follows is not
+                    // rendered underneath it. See collapseCouncilUi.
+                    collapseCouncilUi();
+                  }
                   if (chunk.type === "council_phase" && chunk.councilPhase) {
                     const cp2 = chunk.councilPhase;
                     setCouncilPhases((prev) => upsertPhase(prev, cp2));
@@ -5312,6 +5405,12 @@ export function useAppLogic(props: AppLogicProps) {
                     } catch {
                       /* best-effort */
                     }
+                  }
+                  if (chunk.type === "council_collapse") {
+                    // Debate handed off to a continuation running INSIDE this
+                    // turn — collapse the live block now so what follows is not
+                    // rendered underneath it. See collapseCouncilUi.
+                    collapseCouncilUi();
                   }
                   if (chunk.type === "council_phase" && chunk.councilPhase) {
                     const cp3 = chunk.councilPhase;
@@ -5858,6 +5957,72 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
 
+      // Ctrl+T — stance matrix (design S4): where each panelist stands on each
+      // success criterion. Scoped to an ACTIVE council the same way Ctrl+E is,
+      // so the key stays available to the terminal outside a debate. Does NOT
+      // `return` when no council is running, or it would swallow the key.
+      if (key.name === "t" && key.ctrl && !key.meta && councilStatusesRef.current.length > 0) {
+        setStanceMatrixOpen((v) => !v);
+        return;
+      }
+
+      // Esc cancels steer mode BEFORE the interrupt handlers below see the key —
+      // otherwise backing out of a steer would abort the whole council, which is
+      // the opposite of what the user asked for.
+      // The interrupt listener is a SEPARATE `_internalKeyInput` subscriber, so
+      // returning here is not enough to stop it — it only skips keys marked
+      // defaultPrevented (see its comment at the onInternalKey handler).
+      if (isEscapeKey(key) && councilSteerModeRef.current) {
+        setCouncilSteerMode(false);
+        key.preventDefault?.();
+        return;
+      }
+
+      // Ctrl+S — arm steer mode (design S5). Gated on a debate that is actually
+      // listening: `getActiveCouncilRun()` is registered by the debate loop, so
+      // this can never arm a mode whose input would go nowhere. Does NOT return
+      // when no debate is live, leaving Ctrl+S free for the terminal.
+      if (key.name === "s" && key.ctrl && !key.meta && getActiveCouncilRun()) {
+        setCouncilSteerMode((v) => !v);
+        return;
+      }
+
+      // Ctrl+F — force convergence (design S5 option 2 / S4 footer). Takes effect
+      // at the NEXT round boundary: the round in flight finishes and is graded,
+      // so nothing already paid for is thrown away.
+      if (key.name === "f" && key.ctrl && !key.meta && getActiveCouncilRun()) {
+        if (requestCouncilConverge(getActiveCouncilRun())) {
+          setMessages((prev) => [
+            ...prev,
+            buildAssistantEntry(
+              "→ Convergence requested. The council finishes the round in flight, grades it, then goes straight to synthesis.",
+            ),
+          ]);
+          setTimeout(scrollToBottom, 10);
+        }
+        return;
+      }
+
+      // Ctrl+↵ — expand the newest council debate turn (design S3). The mouse
+      // route is onMouseDown on the affordance row; this is its keyboard twin.
+      // Targets the LAST turn because that is the one being read when a long
+      // body gets clipped mid-argument. Scoped to a council with turns, and does
+      // NOT return otherwise so a plain Ctrl+↵ still reaches the composer.
+      if (key.name === "return" && key.ctrl && !key.meta) {
+        const msgs = councilMessagesRef.current;
+        let last = -1;
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i]?.kind !== "synthesis") {
+            last = i;
+            break;
+          }
+        }
+        if (last >= 0) {
+          toggleTurnExpanded(last);
+          return;
+        }
+      }
+
       // Ctrl+B — toggle the right context rail (MUONROI_CONTEXT_RAIL). No-op
       // visually when the rail flag is off or the terminal is too narrow; the
       // toggle only flips intent, app.tsx gates actual rendering on width.
@@ -5870,6 +6035,38 @@ export function useAppLogic(props: AppLogicProps) {
       // back to the global view). Composer-aware: only when the prompt is empty,
       // so Ctrl+arrows still do word-nav while composing. No-op when no rounds
       // exist. Mirrors the rail's clickable round list (council-rail-rounds).
+      // While the stance matrix is open it OWNS Ctrl+←/→ (design S4: "columns
+      // scroll with ctrl+←/→, same binding as round scoping"). Checked before
+      // the round-scoping branch below, since only one of them can have the key.
+      // The matrix clamps the offset to its own visible-column count, so an
+      // over-page here is a no-op rather than a blank matrix.
+      if (
+        key.ctrl &&
+        !key.meta &&
+        stanceMatrixOpenRef.current &&
+        (key.name === "left" || key.name === "right" || key.name === "up" || key.name === "down")
+      ) {
+        const composerEmpty = !(inputRef.current?.plainText ?? "").trim();
+        if (composerEmpty) {
+          const { rows, cols } = stanceDimsRef.current;
+          const horizontal = key.name === "left" || key.name === "right";
+          const step = key.name === "right" || key.name === "down" ? 1 : -1;
+          setStanceCell((cur) => {
+            const limit = (horizontal ? cols : rows) - 1;
+            if (limit < 0) return cur;
+            const next = Math.max(0, Math.min(limit, (horizontal ? cur.col : cur.row) + step));
+            return horizontal
+              ? { row: Math.min(cur.row, Math.max(0, rows - 1)), col: next }
+              : { row: next, col: Math.min(cur.col, Math.max(0, cols - 1)) };
+          });
+          // No paging call here on purpose: the matrix scrolls its own column
+          // window to keep the selection visible (windowStart), which only moves
+          // when the cursor leaves the window. Stepping an offset in lockstep
+          // would slide the whole matrix under the user on every press.
+          return;
+        }
+      }
+
       if (key.ctrl && !key.meta && (key.name === "left" || key.name === "right")) {
         const rounds = councilRoundsRef.current;
         if (rounds.length > 0) {
@@ -7995,6 +8192,27 @@ export function useAppLogic(props: AppLogicProps) {
       setMessages((prev) => [...prev, buildUserEntry(message.trim())]);
       return;
     }
+    // S5 — steer mode (ctrl+s). While a debate is live, what the user types goes
+    // to the leader's NEXT round directive instead of the message queue. Checked
+    // before handleCommand so a steering instruction that happens to start with
+    // "/" is not eaten as a slash command.
+    if (councilSteerModeRef.current) {
+      const target = getActiveCouncilRun();
+      const queued = pushCouncilSteer(target, message.trim());
+      setCouncilSteerMode(false);
+      setMessages((prev) => [
+        ...prev,
+        buildAssistantEntry(
+          queued
+            ? `→ Steering queued for the council: "${message.trim()}"\n   It applies at the next round boundary — the turn in flight is never cut short.`
+            : // Say WHY nothing happened. A steer that silently evaporates is the
+              // worst outcome: the user believes the debate changed direction.
+              "Steering not queued — no debate is currently accepting instructions.",
+        ),
+      ]);
+      setTimeout(scrollToBottom, 10);
+      return;
+    }
     if (handleCommand(message)) {
       setShowSlashMenuSync(false);
       setSlashSearchQuery("");
@@ -8090,6 +8308,11 @@ export function useAppLogic(props: AppLogicProps) {
     councilMessages,
     councilTranscriptExpanded,
     councilTodoExpanded,
+    councilSteerMode,
+    stanceMatrixOpen,
+    stanceCell,
+    expandedTurns,
+    toggleTurnExpanded,
     compactRun,
     councilPhases,
     councilPlaceholders,

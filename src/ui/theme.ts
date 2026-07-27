@@ -77,6 +77,10 @@ export const dark = {
   councilInfoCardBorder: "#4a4a4a",
   councilInfoCardTitle: "#e5c07b",
   councilInfoCardHeading: "#9cdcfe",
+  /** Spend figures in the rail's panel ledger and run-config summary. */
+  councilCostFg: "#00b7b7",
+  /** A criterion the panel is split on — same amber as a partial round outcome. */
+  councilContested: "#e5c07b",
   // ── Halt recovery card tokens ─────────────────────────────────────────────
   haltCardBorder: "#c0392b",
   haltCardTitle: "#e74c3c",

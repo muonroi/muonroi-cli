@@ -7,6 +7,7 @@ import {
   StreamMessageWriter,
 } from "vscode-jsonrpc/node.js";
 import type { Diagnostic } from "vscode-languageserver-types";
+import { resolveSpawnTarget } from "./spawn-target";
 import type { LspDiagnostic, LspLaunchSpec } from "./types";
 
 export interface LspClientOptions {
@@ -260,13 +261,22 @@ function createConnection(process: ChildProcessWithoutNullStreams): MessageConne
 }
 
 async function spawnProcess(launch: LspLaunchSpec, cwd: string): Promise<ChildProcessWithoutNullStreams> {
-  const child = spawn(launch.command, launch.args ?? [], {
+  // npm installs language-server CLIs on Windows as `.cmd` shims, and Node has
+  // refused to spawn those directly since the CVE-2024-27980 fix — it throws
+  // EINVAL before the server starts. resolveSpawnTarget routes ONLY those
+  // through cmd.exe (with the quoting that then becomes our responsibility) and
+  // leaves every real executable, and every non-Windows host, untouched.
+  const target = resolveSpawnTarget(launch.command, launch.args ?? []);
+  const child = spawn(target.command, target.args, {
     cwd,
     env: {
       ...globalThis.process.env,
       ...launch.env,
     },
     stdio: ["pipe", "pipe", "pipe"],
+    // resolveSpawnTarget already quoted the payload for cmd.exe; verbatim stops
+    // Node from quoting it a second time.
+    ...(target.verbatim ? { windowsVerbatimArguments: true } : {}),
   });
 
   await new Promise<void>((resolve, reject) => {
