@@ -20,7 +20,7 @@ import {
 } from "../utils/settings.js";
 import { buildSpecFromTopic, runClarification } from "./clarifier.js";
 import { buildCouncilContext, buildProjectSnapshot } from "./context.js";
-import { evaluateResearchNeed, runDebate } from "./debate.js";
+import { evaluateResearchNeed, MAX_OPENING_ATTEMPTS, runDebate } from "./debate.js";
 import { planDebate } from "./debate-planner.js";
 import { detectOutOfStackProposals, writeDecisionsLock } from "./decisions-lock.js";
 import { runExecution } from "./executor.js";
@@ -939,6 +939,36 @@ export async function* runCouncil(
 
   if (userAborted()) {
     yield { type: "content", content: "\n> Council cancelled by user — skipping synthesis.\n" };
+    yield { type: "done" };
+    return null;
+  }
+
+  // ── Hard stop: a debate with ZERO surviving positions cannot be synthesized ──
+  // Session e74e820c6417 lost both openings to a transient socket teardown and
+  // then synthesized anyway: `participantCount: 0`, `evidenceDensity: 0`, no
+  // exchanges — and the leader happily produced a confident market evaluation
+  // built from the spec alone. That output is indistinguishable from a real
+  // council verdict to the reader, gets persisted into session memory as
+  // `[Council Decision]`, and costs 176s of leader time to fabricate. A debate
+  // with no debaters is a failed run, not a cheap one: say so and stop.
+  //
+  // One surviving position still synthesizes (F9) — that is a real, attributable
+  // opinion, merely un-debated.
+  if (debateState.active.length === 0) {
+    const reasons = debateState.openingFailures ?? [];
+    const detail = reasons.length > 0 ? `\n${reasons.map((r) => `  • ${r.model}: ${r.error}`).join("\n")}` : "";
+    yield {
+      type: "content",
+      content:
+        `\n**Council aborted — no panelist produced an opening statement.**\n` +
+        `Every participant failed after ${MAX_OPENING_ATTEMPTS} attempts, so there is nothing to debate ` +
+        `and nothing to synthesize. Synthesizing from the brief alone would be a fabricated verdict, not a council decision.${detail}\n\n` +
+        `This is usually a transient provider/network fault — re-run the council, or switch providers if it repeats.\n`,
+    };
+    logInteraction(sessionId ?? "unknown", "council", {
+      eventSubtype: "aborted_no_openings",
+      data: { topic, failures: reasons },
+    });
     yield { type: "done" };
     return null;
   }

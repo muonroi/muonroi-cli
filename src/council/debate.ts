@@ -273,7 +273,22 @@ function isFailedTurn(text: string): boolean {
  * stance from `active[]` and disables it for every subsequent round. We retry
  * up to MAX_OPENING_ATTEMPTS with linear backoff before giving up.
  */
-const MAX_OPENING_ATTEMPTS = 3;
+export const MAX_OPENING_ATTEMPTS = 3;
+/**
+ * Backoff between opening attempts. The original 1s/2s linear ramp spent its
+ * whole budget (3s of waiting) INSIDE a single transient network fault: session
+ * e74e820c6417 burned all 3 attempts on both participants against the same
+ * socket-teardown window and lost the entire debate. Jittered 2s/6s spreads the
+ * attempts across ~8s and de-synchronises participants that would otherwise
+ * retry in lockstep (they open in parallel, so identical backoff means every
+ * speaker hits the provider at the same instant).
+ */
+const OPENING_BACKOFF_MS = [2_000, 6_000];
+function openingBackoffMs(attempt: number): number {
+  const base = OPENING_BACKOFF_MS[attempt - 1] ?? OPENING_BACKOFF_MS[OPENING_BACKOFF_MS.length - 1]!;
+  return base + Math.floor(Math.random() * 750);
+}
+
 async function openingWithRetry(
   llm: CouncilLLM,
   model: string,
@@ -281,6 +296,8 @@ async function openingWithRetry(
   prompt: string,
   /** Fires per BILLED attempt so a retried opening is costed in full, not once. */
   onUsage?: (usage: CouncilCallUsage, modelUsed: string) => void,
+  /** Council runId — lets a total opening failure leave a durable forensic row. */
+  runId?: string,
 ): Promise<{ text: string; attempts: number; error?: string }> {
   let lastError: string | undefined;
   for (let attempt = 1; attempt <= MAX_OPENING_ATTEMPTS; attempt++) {
@@ -294,9 +311,18 @@ async function openingWithRetry(
       lastError = err instanceof Error ? err.message : String(err);
     }
     if (attempt < MAX_OPENING_ATTEMPTS) {
-      await new Promise((r) => setTimeout(r, 1000 * attempt));
+      await new Promise((r) => setTimeout(r, openingBackoffMs(attempt)));
     }
   }
+  // Durable failure record. Before this, the ONLY trace of a dead opening was an
+  // ephemeral `[Error: …]` council_message in the transcript — `writeDebugRecord`
+  // is gated behind MUONROI_COUNCIL_DEBUG_LOG (off by default), so diagnosing
+  // e74e820c6417 required re-running the provider by hand to recover the error
+  // string. logInteraction is fail-open.
+  logInteraction(runId ?? "unknown", "council", {
+    eventSubtype: "opening_failed",
+    data: { model, attempts: MAX_OPENING_ATTEMPTS, error: lastError ?? "unknown" },
+  });
   return { text: "", attempts: MAX_OPENING_ATTEMPTS, error: lastError };
 }
 
@@ -647,6 +673,7 @@ export async function* runDebate(
   // prompt below. config.debateLanguage lets a caller/test override the setting.
   const debateLanguage = config.debateLanguage ?? getCouncilLanguage();
   const active: CouncilParticipant[] = [];
+  const openingFailures: Array<{ model: string; role: string; error: string }> = [];
   const exchangeLogs: Map<string, string[]> = new Map();
   const archive: import("./types.js").DebateArchiveEntry[] = [];
   let runningSummary = "";
@@ -838,8 +865,13 @@ export async function* runDebate(
       });
       const startedAt = Date.now();
       const openingLabel = self.stance?.name ?? self.role;
-      return openingWithRetry(llm, self.model, system, prompt, (usage, modelUsed) =>
-        panelLedger.recordUsage(openingLabel, modelUsed, usage, "opening"),
+      return openingWithRetry(
+        llm,
+        self.model,
+        system,
+        prompt,
+        (usage, modelUsed) => panelLedger.recordUsage(openingLabel, modelUsed, usage, "opening"),
+        config.runId,
       ).then((r) => ({
         role: self.role,
         model: self.model,
@@ -867,6 +899,7 @@ export async function* runDebate(
     for (const o of openings) {
       const speakerRole = o.stance?.name ?? o.role;
       if (o.error) {
+        openingFailures.push({ model: o.model, role: speakerRole, error: o.error });
         yield {
           type: "council_message",
           councilMessage: {
@@ -919,9 +952,17 @@ export async function* runDebate(
   }
 
   if (active.length < 2) {
-    yield { type: "content", content: "\nNot enough successful openings for discussion.\n" };
+    yield {
+      type: "content",
+      content:
+        active.length === 0
+          ? "\nNo panelist produced an opening statement — there is nothing to debate.\n"
+          : "\nNot enough successful openings for discussion.\n",
+    };
     // Even a single-opening debate is worth persisting (F9) — a deterministic
     // synthesis of whatever position survived beats an empty research artifact.
+    // ZERO openings is a different case: the caller aborts instead of asking the
+    // leader to invent a verdict from the brief (session e74e820c6417).
     return {
       spec,
       exchangeLogs,
@@ -930,6 +971,7 @@ export async function* runDebate(
       researchFindings,
       active,
       archive,
+      openingFailures,
     };
   }
 

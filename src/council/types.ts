@@ -142,6 +142,15 @@ export interface DebateState {
   /** Role-indexed per-round positions for follow-up citations. */
   archive?: DebateArchiveEntry[];
   /**
+   * Per-participant opening failures (model + last error) for every speaker that
+   * never produced a position. Populated even when SOME openings succeed, so the
+   * caller can report a partial panel; when it accounts for the whole panel the
+   * run is aborted rather than synthesized (see council/index.ts). Exists because
+   * the provider error string was previously unreachable outside an opt-in debug
+   * log — see session e74e820c6417.
+   */
+  openingFailures?: Array<{ model: string; role: string; error: string }>;
+  /**
    * F1 — the last successful round's per-criterion met flags, index-aligned to
    * `spec.successCriteria`. Lets the post-debate card tell whether the debate
    * actually satisfied the pinned success criteria (distinct from evidence

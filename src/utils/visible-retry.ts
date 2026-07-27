@@ -18,12 +18,49 @@ export interface VisibleRetryOpts {
   onRetry?: (attempt: number, totalAttempts: number, delayMs: number, error: Error) => void;
 }
 
-function isRetryableError(err: unknown): boolean {
-  const e = err as { statusCode?: number; status?: number; name?: string; message?: string };
+/**
+ * Transient transport failures that carry NO http status — the fetch/undici
+ * layer tore the connection down before a response existed. Session
+ * e74e820c6417 lost every council opening statement to this class: both
+ * participants threw `The socket connection was closed unexpectedly` (also in
+ * crash.log as an unhandled rejection), the classifier below saw no status code
+ * and no "timeout"/"rate limit" substring, declared it non-retryable, and the
+ * debate died with `Not enough successful openings` after 6 silent one-shot
+ * attempts. A socket teardown is the single most retryable failure there is.
+ */
+const RETRYABLE_NETWORK_PATTERNS = [
+  "socket connection was closed",
+  "socket hang up",
+  "econnreset",
+  "econnrefused",
+  "econnaborted",
+  "enotfound",
+  "eai_again",
+  "epipe",
+  "etimedout",
+  "network error",
+  "fetch failed",
+  "premature close",
+  "terminated",
+  "stream closed",
+  "connection closed",
+  "connection error",
+];
+
+export function isRetryableError(err: unknown): boolean {
+  const e = err as { statusCode?: number; status?: number; name?: string; message?: string; code?: string };
+  // A user cancellation is never retryable — retrying it would resurrect a turn
+  // the human explicitly killed. (Deadline aborts surface as "timeout" below.)
+  if (e?.name === "AbortError" || e?.name === "TimeoutError") return e?.name === "TimeoutError";
   const code = e?.statusCode ?? e?.status;
   if (code === 429 || code === 408 || (code !== undefined && code >= 500 && code < 600)) return true;
+  // An explicit 4xx (auth, bad param, content filter) is deterministic — a
+  // retry burns latency and money to fail identically.
+  if (code !== undefined && code >= 400 && code < 500) return false;
   const msg = (e?.message ?? "").toLowerCase();
-  return msg.includes("rate limit") || msg.includes("too many requests") || msg.includes("timeout");
+  if (msg.includes("rate limit") || msg.includes("too many requests") || msg.includes("timeout")) return true;
+  const sysCode = typeof e?.code === "string" ? e.code.toLowerCase() : "";
+  return RETRYABLE_NETWORK_PATTERNS.some((p) => msg.includes(p) || sysCode === p);
 }
 
 /**
