@@ -31,8 +31,11 @@ describe("entry anchoring (no_driver regression)", () => {
   });
 
   it("falls back to <repoRoot>/src/index.ts, NOT <cwd>/src/index.ts", () => {
-    // Anchor repoRoot to a directory that is NOT process.cwd().
-    const repoRoot = "/somewhere/muonroi-cli";
+    // Anchor repoRoot to a directory that is NOT process.cwd(). Resolved, so
+    // the comparison below is meaningful on Windows too: an unresolved
+    // "/somewhere/..." gains a drive letter inside resolve() and would never be
+    // a prefix of itself.
+    const repoRoot = resolve("/somewhere/muonroi-cli");
     configureHarnessRoots({ repoRoot, entry: resolve(repoRoot, "src/index.ts") });
     expect(resolveServerEntry()).toBe(resolve(repoRoot, "src/index.ts"));
     expect(resolveServerEntry().startsWith(repoRoot)).toBe(true);

@@ -3484,7 +3484,9 @@ export function useAppLogic(props: AppLogicProps) {
     setShowUpdateModal(false);
     // Echo into the log too — the home-screen updateOutput banner only renders
     // on the splash screen, so an update from an active chat needs a log entry.
-    setMessages((prev) => [...prev, buildAssistantEntry("🔄 Checking for updates...")]);
+    // Not "checking" — on a linked source build this pulls, installs and
+    // rebuilds, which takes a while and the old wording made it look hung.
+    setMessages((prev) => [...prev, buildAssistantEntry("🔄 Updating — this can take a minute if a rebuild runs…")]);
     runUpdate(startupConfig.version).then((result) => {
       isUpdatingRef.current = false;
       setIsUpdating(false);

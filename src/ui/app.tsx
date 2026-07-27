@@ -839,10 +839,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // Sprint progress segment from the status-bar store (already tracked for the
   // bottom bar) — subscribed here so the rail/strip can show "n/m · x/y".
   const [sprintSeg, setSprintSeg] = useState(() => statusBarStore.getState().sprint);
-  useEffect(
-    () => statusBarStore.subscribe((s) => setSprintSeg((prev) => (prev === s.sprint ? prev : s.sprint))),
-    [],
-  );
+  useEffect(() => statusBarStore.subscribe((s) => setSprintSeg((prev) => (prev === s.sprint ? prev : s.sprint))), []);
   // 1s ticking clock while a sprint stage is active, so elapsed displays tick
   // continuously instead of freezing between chunks.
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -856,6 +853,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // the stage changes so sprint 2 doesn't inherit sprint 1's tail.
   const [stageActivity, setStageActivity] = useState<readonly string[]>([]);
   const stagePhaseId = sprintStage?.phaseId ?? null;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: stagePhaseId is the TRIGGER, not a value the body reads — the point is to clear the activity list on every phase change. Taking the rule's advice would run this once and never reset again.
   useEffect(() => {
     setStageActivity([]);
   }, [stagePhaseId]);
@@ -958,7 +956,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         const mark = met[i] ? "✓" : "○";
         const text = c.trim();
         railRows.push({ label: "", value: `  ${mark} ${text.length > 64 ? `${text.slice(0, 63)}…` : text}` });
-    });
+      });
   }
   if (!sprintStage && councilMeta?.panel?.length) {
     railRows.push({ label: "Panel", value: `${councilMeta.panel.length} (${councilMeta.panel.join(", ")})` });
@@ -1064,8 +1062,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // Latest live phase status (state start|tick) drives the liveness meter.
   const liveCouncilStatus =
     [...councilStatuses].reverse().find((s) => s.state === "start" || s.state === "tick") ?? null;
-  const councilRoundLabel =
-    councilRounds.length > 0 ? `r${councilRounds[councilRounds.length - 1]!.round}` : null;
+  const councilRoundLabel = councilRounds.length > 0 ? `r${councilRounds[councilRounds.length - 1]!.round}` : null;
   // A blocking clarification/preflight card is a human-wait, NOT a stall.
   const councilWaiting = !!pendingCouncilQuestion || !!preflightCardState;
   const activeCouncilPhaseLabel = councilPhases.find((p) => p.state === "active")?.label ?? null;
@@ -1137,7 +1134,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         councilOutcomeNode ||
         sessionTree.length > 0 ||
         agentActivities.length > 0 ||
-        !!productStatus ||
+        productStatus ||
         councilStatuses.length > 0 ||
         councilInfoCards.length > 0 ? (
           <>
@@ -1629,13 +1626,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     sprint={sprintSeg}
                     activity={stageActivity}
                     now={nowTick}
-                    width={
-                      councilTwoPane
-                        ? width - councilSurfaceRailWidth
-                        : railActive
-                          ? width - railWidth
-                          : width
-                    }
+                    width={councilTwoPane ? width - councilSurfaceRailWidth : railActive ? width - railWidth : width}
                   />
                 )}
                 {btwState && <BtwOverlay state={btwState} theme={t} />}
@@ -1781,8 +1772,9 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                 <text fg="#f59e0b">
                   {"┃ Update available: v"}
                   {startupConfig.version}
-                  {" → v"}
-                  {updateInfo.latestVersion}
+                  {" → "}
+                  {/* A source checkout has no next version — see latestLabel. */}
+                  {updateInfo.latestLabel ?? `v${updateInfo.latestVersion}`}
                   {" — click or run /update to install"}
                 </text>
               </box>
@@ -1828,6 +1820,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             height={height}
             currentVersion={startupConfig.version}
             latestVersion={updateInfo.latestVersion}
+            latestLabel={updateInfo.latestLabel}
           />
         )}
         {needsKeyQueue.length > 0 && needsKeyQueue[0] && (
