@@ -45,7 +45,19 @@ export interface ProviderOAuth {
    * attempt cannot bind — which reads to the user as "OAuth is broken until I
    * restart the CLI".
    */
-  login(opts: { onUserCode?: (code: string, url: string) => void; signal?: AbortSignal }): Promise<OAuthTokens>;
+  /**
+   * `allowManualCodePaste` declares that the CALLER owns stdin and can lend it
+   * to the flow for a manual code paste. Only a plain-CLI caller may set it.
+   * It is opt-in because a flow that reads stdin while a TUI owns it takes
+   * every keystroke away from the TUI (see grok-oauth.ts) — and the runtime
+   * cannot detect that ownership: Bun leaves `process.stdin.isRaw === false`
+   * even after OpenTUI calls `setRawMode(true)`, so sniffing is not an option.
+   */
+  login(opts: {
+    onUserCode?: (code: string, url: string) => void;
+    signal?: AbortSignal;
+    allowManualCodePaste?: boolean;
+  }): Promise<OAuthTokens>;
 
   /**
    * Exchange a refresh token for new tokens.

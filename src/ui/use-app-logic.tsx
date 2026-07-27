@@ -222,6 +222,7 @@ export type { AppStartupConfig } from "./types.js";
 import { isCouncilSurfaceEnabled, isScrollLockEnabled } from "../gsd/flags.js";
 import { stripCouncilNoise } from "./council-preamble.js";
 import {
+  getCatalogProviderIds,
   getEffectiveReasoningEffort,
   getModelByTier,
   getModelIds,
@@ -889,7 +890,16 @@ export function useAppLogic(props: AppLogicProps) {
       // selected in /models. Splash providers stay listed even with no key so
       // the user can still press `k` to add one.
       setConfiguredProviders(
-        resolvePickerProviders(SPLASH_PROVIDERS, configured, (p) => getModelsForProvider(p).length > 0),
+        resolvePickerProviders(
+          SPLASH_PROVIDERS,
+          configured,
+          (p) => getModelsForProvider(p).length > 0,
+          // Catalog-derived, so a provider that ships models is reachable in the
+          // picker BEFORE it has credentials. openai was invisible until signed
+          // in, and this picker is the only place to sign in — see
+          // resolvePickerProviders.
+          getCatalogProviderIds() as ProviderId[],
+        ),
       );
       setProvidersWithKey(new Set(configured));
     } catch (err) {
@@ -1002,6 +1012,9 @@ export function useAppLogic(props: AppLogicProps) {
           setOAuthLogin({ provider, error: "OAuth is not available for this provider." });
           return;
         }
+        // No allowManualCodePaste here: OpenTUI owns stdin. A flow that reads
+        // it takes every keystroke from the TUI and its readline close() leaves
+        // stdin paused — the "TUI is dead after signing in" bug.
         const tokens = await cfg.provider.login({ signal: oauthAbortRef.current?.signal });
         if (oauthCancelRef.current) return;
         const { saveTokens } = await import("../providers/auth/token-store.js");
@@ -5657,6 +5670,12 @@ export function useAppLogic(props: AppLogicProps) {
     [
       agent,
       handleExit,
+      // Both are useCallback-stable, so listing them costs no extra
+      // re-creation — it only stops the callback from closing over a stale
+      // one. This file is @ts-nocheck, so the lint rule is the only thing
+      // watching for that drift.
+      maybeStripCouncilContent,
+      runUpdateFromUi,
       model,
       messages,
       openMcpModal,
@@ -5664,7 +5683,6 @@ export function useAppLogic(props: AppLogicProps) {
       openWalletPicker,
       processMessage,
       resetToNewSession,
-      startupConfig.version,
       setShowSlashMenuSync,
       setModelPickerIndex,
       setModelSearchQuery,
