@@ -1036,6 +1036,23 @@ program
 
     changeDirectoryOrExit(options.directory);
 
+    // Load the env-store (~/.muonroi-cli/.env) into process.env and migrate any
+    // legacy keychain/settings keys BEFORE any key resolution. Best-effort.
+    //
+    // This MUST precede loadCatalog(): the remote catalog is authenticated with
+    // MUONROI_CATALOG_API_KEY, which lives in the env-store. Loading the store
+    // afterwards meant the fetch always went out keyless, took a 401, and fell
+    // back to the bundled static catalog — the remote catalog could not be
+    // reached no matter how the key was configured.
+    try {
+      const { loadEnvFileIntoProcess } = await import("./providers/env-store.js");
+      loadEnvFileIntoProcess();
+      const { migrateLegacyKeysToEnv } = await import("./providers/keychain.js");
+      await migrateLegacyKeysToEnv();
+    } catch (err) {
+      console.error(`[muonroi-cli] env-store init failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     // Boot model registry BEFORE any key resolution path runs —
     // detectProviderForModel consults the catalog's alias map to route model
     // ids to the correct provider. With an empty registry it falls back to a
@@ -1045,17 +1062,6 @@ program
     await loadCatalog().catch(() => {
       catalogLoadFailed = true;
     });
-
-    // Load the env-store (~/.muonroi-cli/.env) into process.env and migrate any
-    // legacy keychain/settings keys BEFORE any key resolution. Best-effort.
-    try {
-      const { loadEnvFileIntoProcess } = await import("./providers/env-store.js");
-      loadEnvFileIntoProcess();
-      const { migrateLegacyKeysToEnv } = await import("./providers/keychain.js");
-      await migrateLegacyKeysToEnv();
-    } catch (err) {
-      console.error(`[muonroi-cli] env-store init failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
 
     if (options.backgroundTaskFile) {
       await runBackgroundDelegation(options.backgroundTaskFile, options);
