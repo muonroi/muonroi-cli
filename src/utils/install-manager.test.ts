@@ -1,16 +1,7 @@
-import { exec } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("child_process", async () => {
-  const actual = await vi.importActual<typeof import("child_process")>("child_process");
-  return {
-    ...actual,
-    exec: vi.fn(),
-  };
-});
 
 import {
   buildScriptUninstallPlan,
@@ -185,50 +176,32 @@ describe("runManagedUpdate", () => {
     vi.restoreAllMocks();
   });
 
-  it("handles dev-link update when newer version is available", async () => {
-    vi.mocked(exec).mockImplementation(((cmd: any, callback: any) => {
-      callback(null, "hash\trefs/tags/v2.0.0\n", "");
-      return {} as any;
-    }) as any);
-
+  // This suite runs from the repo checkout, so detectInstallMethod() reports
+  // dev-link — the same path a `bun link`-ed install takes at runtime.
+  it("performs the update on a linked checkout instead of printing the commands", async () => {
+    const ran: string[] = [];
     const { runManagedUpdate } = await import("./install-manager");
-    const result = await runManagedUpdate("1.0.0");
+
+    const result = await runManagedUpdate("1.0.0", async (step) => {
+      ran.push(`${step.cmd} ${step.args.join(" ")}`);
+      return { code: 0, output: "" };
+    });
 
     expect(result.success).toBe(true);
-    expect(result.output).toContain("A new version of `muonroi-cli` is available!");
-    expect(result.output).toContain("Current Version:** `v1.0.0`");
-    expect(result.output).toContain("Latest Version:** `v2.0.0`");
-    expect(result.output).toContain("git -C");
-    expect(result.output).toContain("pull && bun install && bun run build");
+    expect(ran).toContain("git pull --ff-only");
+    expect(ran).toContain("bun run build");
+    // The old output was three commands for the user to copy — the whole defect.
+    expect(result.output).not.toContain("pull && bun install && bun run build");
   });
 
-  it("handles dev-link when already up to date", async () => {
-    vi.mocked(exec).mockImplementation(((cmd: any, callback: any) => {
-      callback(null, "hash\trefs/tags/v1.0.0\n", "");
-      return {} as any;
-    }) as any);
-
+  it("surfaces a failing step rather than reporting success", async () => {
     const { runManagedUpdate } = await import("./install-manager");
-    const result = await runManagedUpdate("1.0.0");
 
-    expect(result.success).toBe(true);
-    expect(result.output).toContain("You are already up to date!");
-    expect(result.output).toContain("Current Version:** `v1.0.0`");
-    expect(result.output).toContain("Latest Version:** `v1.0.0`");
-  });
+    const result = await runManagedUpdate("1.0.0", async (step) =>
+      step.args[0] === "install" ? { code: 1, output: "lockfile conflict" } : { code: 0, output: "" },
+    );
 
-  it("handles dev-link when local is ahead of latest remote version", async () => {
-    vi.mocked(exec).mockImplementation(((cmd: any, callback: any) => {
-      callback(null, "hash\trefs/tags/v1.0.0\n", "");
-      return {} as any;
-    }) as any);
-
-    const { runManagedUpdate } = await import("./install-manager");
-    const result = await runManagedUpdate("1.1.0");
-
-    expect(result.success).toBe(true);
-    expect(result.output).toContain("Your local installation is newer than the remote release tag.");
-    expect(result.output).toContain("Current Version:** `v1.1.0`");
-    expect(result.output).toContain("Latest Version:** `v1.0.0`");
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("lockfile conflict");
   });
 });
