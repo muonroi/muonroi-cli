@@ -72,7 +72,8 @@ describe("createWorkspaceLspManager", () => {
     expect(result.success).toBe(true);
     expect(result.output).toContain("file:///demo.ts");
     expect(client.openOrChangeFile).toHaveBeenCalledWith(filePath, "typescript", "const demo = 1;\n");
-    expect(client.waitForDiagnostics).toHaveBeenCalledWith(filePath, undefined);
+    // goToDefinition is a NO_DIAG_OP — didOpen fires but waitForDiagnostics is skipped.
+    expect(client.waitForDiagnostics).not.toHaveBeenCalled();
 
     await manager.close();
     expect(client.stop).toHaveBeenCalled();
@@ -111,6 +112,67 @@ describe("createWorkspaceLspManager", () => {
     expect(result).toEqual(diagnostics);
     expect(client.saveFile).toHaveBeenCalledWith(filePath);
     expect(client.waitForDiagnostics).toHaveBeenCalledWith(filePath, undefined);
+
+    await manager.close();
+  });
+
+  it("uses quick diagnostics timeout for findReferences (QUICK_DIAG_OPS)", async () => {
+    const root = await createTempWorkspace();
+    const filePath = path.join(root, "demo.ts");
+    await writeFile(filePath, "const demo = 1;\n");
+
+    const sendRequest = vi.fn(async () => [
+      { uri: "file:///demo.ts", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } } },
+    ]);
+    const client = createFakeClient({ sendRequest });
+
+    const manager = createWorkspaceLspManager(root, BASE_SETTINGS, {
+      createClient: async () => client,
+    });
+
+    const result = await manager.query({
+      operation: "findReferences",
+      filePath,
+      line: 1,
+      character: 1,
+    });
+
+    expect(result.success).toBe(true);
+    expect(client.openOrChangeFile).toHaveBeenCalledWith(filePath, "typescript", "const demo = 1;\n");
+    // QUICK_DIAG_OPS calls waitForDiagnostics with 300ms timeout
+    expect(client.waitForDiagnostics).toHaveBeenCalledWith(filePath, 300);
+
+    await manager.close();
+  });
+
+  it("skips diagnostics wait for documentSymbol (NO_DIAG_OPS)", async () => {
+    const root = await createTempWorkspace();
+    const filePath = path.join(root, "demo.ts");
+    await writeFile(filePath, "const demo = 1;\n");
+
+    const sendRequest = vi.fn(async () => [
+      {
+        name: "demo",
+        kind: 13,
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 13 } },
+        children: [],
+      },
+    ]);
+    const client = createFakeClient({ sendRequest });
+
+    const manager = createWorkspaceLspManager(root, BASE_SETTINGS, {
+      createClient: async () => client,
+    });
+
+    const result = await manager.query({
+      operation: "documentSymbol",
+      filePath,
+    });
+
+    expect(result.success).toBe(true);
+    expect(client.openOrChangeFile).toHaveBeenCalled();
+    // NO_DIAG_OPS: didOpen fires but waitForDiagnostics is skipped
+    expect(client.waitForDiagnostics).not.toHaveBeenCalled();
 
     await manager.close();
   });
