@@ -558,6 +558,7 @@ const BUILTIN_TYPED_SLASH_COMMANDS = new Set([
   "/quit",
   "/exit",
   "/q",
+  "/update",
   "/review",
   "/verify",
   "/commit-push",
@@ -4602,6 +4603,14 @@ export function useAppLogic(props: AppLogicProps) {
       }
       if (c === "/quit" || c === "/exit" || c === "/q") {
         handleExit();
+        return true;
+      }
+      // /update existed only as a slash-MENU entry and as the update modal's
+      // Enter key. Typing it fell through to dispatchSlash, which has no
+      // "update" handler, returns null, and the caller returns on null — so the
+      // command did nothing at all, silently.
+      if (c === "/update") {
+        runUpdateFromUi();
         return true;
       }
       if (c === "/review") {
