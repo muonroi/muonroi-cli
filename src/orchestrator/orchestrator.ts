@@ -43,6 +43,7 @@ import {
   requireRuntimeProvider,
   resolveModelRuntime,
   resolveTemperatureParam,
+  shouldDropParam,
 } from "../providers/runtime.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
 import { statusBarStore } from "../state/status-bar-store.js";
@@ -179,10 +180,12 @@ import { getReactiveDelegationThresholdChars, shouldReactivelyEscalate } from ".
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
 import { withStreamRetry } from "./retry-stream.js";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
+import { salvageSubSessionOutput } from "./salvage-sub-session-output.js";
 import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
 import { type ModelTaskKind, resolveModelForTask } from "./sub-agent-model-tier.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
+import { isToolActivityLive } from "./tool-activity.js";
 import { getToolLimitAutoRecoverCap } from "./tool-limit-auto-recover.js";
 import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
 import { firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
@@ -1448,7 +1451,10 @@ export class Agent {
                 system: childSystem,
                 messages: roundMessages,
                 temperature: childRuntime.modelInfo?.fixedTemperature ?? (request.agent === "explore" ? 0.2 : 0.5),
-                maxOutputTokens: !childCaps.acceptsParam("maxOutputTokens", childRuntime.modelInfo)
+                // shouldDropParam, not acceptsParam alone — the OAuth registry
+                // veto (`unsupportedParams`) is invisible to the catalog check
+                // and 400s on ChatGPT Codex. See compaction.ts.
+                maxOutputTokens: shouldDropParam(childRuntime, "maxOutputTokens")
                   ? undefined
                   : Math.min(this.maxTokens, 8_192),
                 reasoningEffort: childRuntime.providerOptions?.xai.reasoningEffort,
@@ -3504,6 +3510,13 @@ export class Agent {
     }
 
     let processor = new MessageProcessor(this._buildMessageProcessorDeps());
+    // Boundary between "already in the sub-session transcript" and "produced by
+    // THIS turn". Captured after the fork/resume above swapped `this.messages`
+    // to the sub-session, and read by salvageSubSessionOutput in the finally
+    // block below so a turn that produces nothing cannot hand the parent the
+    // PREVIOUS turn's answer (session 708f0fc4ac8b). Declared out here because
+    // `finally` cannot see bindings scoped to the `try` block.
+    const preTurnMessageCount = this.messages.length;
     const autoCommitOn = isAutoCommitEnabled();
     const cwd = this.bash.getCwd();
     const dirtyBefore = autoCommitOn ? await snapshotDirtyPaths(cwd) : new Set<string>();
@@ -3539,7 +3552,12 @@ export class Agent {
               idleMs: turnIdleMs,
               totalMs: turnTotalMs,
               label: "assistant turn",
-              shouldSuppressFire: isInteractivePaused,
+              // Hold the turn open while a human is answering a blocking card
+              // OR while a tool call is still inside its own deadline. The idle
+              // timer only resets on yielded chunks, so a single long tool call
+              // is indistinguishable from a wedge without this — see
+              // tool-activity.ts (session 708f0fc4ac8b).
+              shouldSuppressFire: () => isInteractivePaused() || isToolActivityLive(),
             });
           } catch (stallErr) {
             // A hung turn is NOT a transient error — retrying it (below) would
@@ -3591,7 +3609,7 @@ export class Agent {
     } finally {
       if (isSubSessionForked && parentSessionId && this.sessionStore) {
         try {
-          const finalMessages = salvageSubSessionOutput(this.messages);
+          const finalMessages = salvageSubSessionOutput(this.messages, preTurnMessageCount);
 
           // Restore parent session
           this.session = this.sessionStore.getRequiredSession(parentSessionId);
@@ -4224,25 +4242,4 @@ function isTransientError(err: unknown): boolean {
     msg.includes("econnreset") ||
     msg.includes("econnrefused")
   );
-}
-
-function salvageSubSessionOutput(messages: ModelMessage[]): ModelMessage[] {
-  let lastAsstIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "assistant") {
-      lastAsstIdx = i;
-      break;
-    }
-  }
-
-  const finalMessages: ModelMessage[] = [];
-  if (lastAsstIdx >= 0) {
-    finalMessages.push(messages[lastAsstIdx]);
-    for (let i = lastAsstIdx + 1; i < messages.length; i++) {
-      if (messages[i].role === "tool") {
-        finalMessages.push(messages[i]);
-      }
-    }
-  }
-  return finalMessages;
 }

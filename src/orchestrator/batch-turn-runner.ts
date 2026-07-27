@@ -30,7 +30,7 @@ import type { ModelMessage, ToolSet } from "ai";
 import { acquireMcpTools } from "../mcp/client-pool";
 import type { getModelInfo } from "../models/registry.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
-import { requireRuntimeProvider, type resolveModelRuntime } from "../providers/runtime.js";
+import { requireRuntimeProvider, type resolveModelRuntime, shouldDropParam } from "../providers/runtime.js";
 import type { BashTool } from "../tools/bash";
 import type { AgentMode, StreamChunk, TaskRequest, ToolCall, ToolResult } from "../types/index";
 import { openUrl } from "../utils/open-url";
@@ -249,9 +249,11 @@ export class BatchTurnRunner {
                     system,
                     messages: [..._messagesForCall, ...turnMessages],
                     temperature: runtime.modelInfo?.fixedTemperature ?? 0.7,
-                    maxOutputTokens: !batchCaps.acceptsParam("maxOutputTokens", runtime.modelInfo)
-                      ? undefined
-                      : deps.maxTokens,
+                    // shouldDropParam honours BOTH the catalog capability and the
+                    // OAuth registry veto (`unsupportedParams`) — acceptsParam alone
+                    // misses the latter and 400s. See compaction.ts for the session
+                    // that proved it.
+                    maxOutputTokens: shouldDropParam(runtime, "maxOutputTokens") ? undefined : deps.maxTokens,
                     reasoningEffort: runtime.providerOptions?.xai.reasoningEffort,
                     tools: batchTools,
                   }),
