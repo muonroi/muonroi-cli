@@ -61,6 +61,7 @@ import {
   persistApprovedPlan,
   recordUsageEvent,
   SessionStore,
+  sessionUsedGsdWorkflow,
 } from "../storage/index.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
@@ -1091,12 +1092,24 @@ export class Agent {
   getLastTodoSnapshot(): TaskListSnapshot | null {
     if (!this.session) return null;
 
+    // The GSD checklist is parsed out of `.planning/PLAN.md` — a file owned by
+    // the CWD, not by this conversation. Restoring it unconditionally pinned a
+    // stale plan onto any resumed session opened in a repo that had ever run
+    // GSD, including chats that never wrote a single todo. Only this session's
+    // own GSD tool calls make that plan its checklist.
     try {
-      const { getTaskListSnapshotFromGsd } = require("../gsd/phase-sync.js");
-      const gsdSnap = getTaskListSnapshotFromGsd(this.bash?.getCwd() ?? process.cwd());
-      if (gsdSnap) return gsdSnap;
+      if (sessionUsedGsdWorkflow(this.session.id)) {
+        const { getTaskListSnapshotFromGsd } = require("../gsd/phase-sync.js");
+        const gsdSnap = getTaskListSnapshotFromGsd(this.bash?.getCwd() ?? process.cwd());
+        if (gsdSnap) return gsdSnap;
+      }
     } catch (err) {
-      // fail-open to legacy todo_write args
+      // Fail-open to the legacy todo_write args below — but say why, otherwise
+      // a missing checklist looks like "the todos were lost".
+      logger.error("orchestrator", "GSD task-list restore failed; falling back to todo_write", {
+        sessionId: this.session.id,
+        message: (err as Error)?.message,
+      });
     }
 
     const argsJson = getLastTodoWriteArgs(this.session.id);

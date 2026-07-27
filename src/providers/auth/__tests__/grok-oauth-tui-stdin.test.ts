@@ -66,30 +66,49 @@ afterEach(() => {
 });
 
 describe("GrokOAuthProvider.login — stdin ownership", () => {
-  // Inside the TUI, OpenTUI holds stdin in raw mode. Attaching a readline stole
-  // every keystroke, so Esc no longer dismissed the provider dialog and only a
-  // restart recovered the session.
-  it("does not attach a readline when another consumer already owns stdin (raw mode)", async () => {
+  // Inside the TUI, OpenTUI holds stdin. Attaching a readline steals every
+  // keystroke, so Esc no longer dismisses the provider dialog and only a
+  // restart recovers the session.
+  //
+  // The gate is the caller's opt-in, NOT a runtime probe: this case pins the
+  // exact state measured inside the TUI under Bun 1.3.13 — isTTY true and
+  // isRaw FALSE even while OpenTUI holds raw mode — which is what made the
+  // previous `!process.stdin.isRaw` guard pass and the freeze come back.
+  it("does not attach a readline when the caller did not lend stdin (TUI, isRaw unreliable)", async () => {
     stdin.isTTY = true;
-    stdin.isRaw = true;
+    stdin.isRaw = false;
 
     await makeProvider(mockCallbackServer(vi.fn())).login({});
 
     expect(readline.createInterface).not.toHaveBeenCalled();
   });
 
-  // The manual-paste fallback is still right for `keys login` on a plain TTY.
-  it("attaches — and always closes — the readline on a non-raw TTY", async () => {
+  // The manual-paste fallback is still right for `keys login` on a plain TTY —
+  // there the caller owns stdin and says so explicitly.
+  it("attaches — and always closes — the readline when the caller opts in", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     stdin.isTTY = true;
     stdin.isRaw = false;
 
-    await makeProvider(mockCallbackServer(vi.fn())).login({});
+    await makeProvider(mockCallbackServer(vi.fn())).login({ allowManualCodePaste: true });
 
     expect(readline.createInterface).toHaveBeenCalled();
     // The old code closed it only when a code was pasted, so the normal
     // HTTP-callback path (this one) left stdin captured for good.
     expect(rlClose).toHaveBeenCalled();
+  });
+
+  it("leaves stdin flowing after the opted-in readline closes", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    stdin.isTTY = true;
+    // readline.close() pauses the input stream; a paused stdin is the same
+    // freeze under another name, so the flow must resume what it borrowed.
+    const resume = vi.spyOn(process.stdin, "resume").mockReturnValue(process.stdin);
+    vi.spyOn(process.stdin, "isPaused").mockReturnValue(false);
+
+    await makeProvider(mockCallbackServer(vi.fn())).login({ allowManualCodePaste: true });
+
+    expect(resume).toHaveBeenCalled();
   });
 });
 

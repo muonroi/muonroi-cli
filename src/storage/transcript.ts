@@ -1028,6 +1028,40 @@ function toFallbackToolCall(toolCallId: string, toolName: string): ToolCall {
   };
 }
 
+/**
+ * Did THIS session (or any session in its chain) actually drive a GSD workflow?
+ *
+ * The GSD task list is derived from `.planning/PLAN.md`, which belongs to the
+ * WORKING DIRECTORY, not to a session — every session opened in a repo that
+ * once had a plan would otherwise inherit it. That is exactly how resuming a
+ * chat that never wrote a todo came back with a pinned checklist of someone
+ * else's finished plan. Restoring it is only correct when this conversation is
+ * the one running that workflow.
+ */
+export function sessionUsedGsdWorkflow(sessionId: string): boolean {
+  const chain = getSessionChain(sessionId);
+  const db = getDatabase();
+  for (const id of chain) {
+    try {
+      const row = db
+        .prepare(`
+          SELECT 1 AS hit
+          FROM tool_calls
+          WHERE session_id = ? AND tool_name LIKE 'gsd\\_%' ESCAPE '\\'
+          LIMIT 1
+        `)
+        .get(id) as { hit: number } | undefined;
+      if (row) return true;
+    } catch (err) {
+      logger.error("storage", "[transcript] sessionUsedGsdWorkflow query failed", {
+        sessionId: id,
+        message: (err as Error)?.message,
+      });
+    }
+  }
+  return false;
+}
+
 export function getLastTodoWriteArgs(sessionId: string): string | null {
   const chain = getSessionChain(sessionId);
   const db = getDatabase();

@@ -2886,8 +2886,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // doesn't parse (malformed args) so the UI is never poisoned.
               if (tr.success && (tc.function.name === "todo_write" || tc.function.name.startsWith("gsd_"))) {
                 try {
+                  // A gsd_* call means the workflow plan IS the checklist. A
+                  // todo_write does not: preferring the CWD's `.planning/PLAN.md`
+                  // there replaced the model's own todos with whatever plan the
+                  // repo happens to carry.
                   const { getTaskListSnapshotFromGsd } = require("../gsd/phase-sync.js");
-                  const snap = getTaskListSnapshotFromGsd(deps.bash.getCwd());
+                  const snap = tc.function.name.startsWith("gsd_")
+                    ? getTaskListSnapshotFromGsd(deps.bash.getCwd())
+                    : null;
                   if (snap) {
                     yield { type: "task_list_update", taskListSnapshot: snap };
                   } else if (tc.function.name === "todo_write") {
@@ -2895,6 +2901,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                     if (snapLegacy) yield { type: "task_list_update", taskListSnapshot: snapLegacy };
                   }
                 } catch (err) {
+                  logger.error("orchestrator", "task-list snapshot failed; falling back to todo_write args", {
+                    tool: tc.function.name,
+                    message: (err as Error)?.message,
+                  });
                   if (tc.function.name === "todo_write") {
                     const snapLegacy = snapshotFromTodoWriteArgs(tc.function.arguments);
                     if (snapLegacy) yield { type: "task_list_update", taskListSnapshot: snapLegacy };

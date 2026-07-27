@@ -132,6 +132,22 @@ export function getModelsForProvider(providerId: string): ModelInfo[] {
 }
 
 /**
+ * Every provider the catalog actually ships models for, in catalog order.
+ *
+ * Callers that need "which providers can this build route to" must derive it
+ * from here rather than keeping a hand-maintained list — a curated list goes
+ * stale the moment a provider is added to catalog.json (that is how the model
+ * picker ended up hiding openai, and with it the only way to sign in to it).
+ */
+export function getCatalogProviderIds(): string[] {
+  const seen = new Set<string>();
+  for (const m of MODELS) {
+    if (m.provider) seen.add(m.provider);
+  }
+  return [...seen];
+}
+
+/**
  * Part E — does this model have NATIVE online web research (its own
  * web_search/browsing/Live-Search)? Missing flag → false (safe default per the
  * Kill #6 rule: never infer web capability from the provider).
