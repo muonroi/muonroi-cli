@@ -313,6 +313,7 @@ import {
   toToolCall,
   toToolResult,
 } from "./tool-utils";
+import { pingTurnProgress } from "./turn-progress.js";
 import type { TurnRunnerDepsBase } from "./turn-runner-deps.js";
 
 /**
@@ -1858,6 +1859,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               hasBash: _toolNamesAtCall.includes("bash"),
               toolNames: _toolNamesAtCall.slice(0, 25),
               toolChoice: _finalToolChoice ?? "undefined",
+              // How long the turn spent getting HERE. Nothing between the
+              // write-ahead and this point was timed, so when session
+              // 1096fc59144c showed 97s of wall clock with zero LLM calls logged
+              // in the gap, the cause was simply unattributable — MCP acquire and
+              // the GSD assessor were both ruled out afterwards by elimination,
+              // not by measurement. On attempt 1 this is the pre-stream setup
+              // cost; on a retry it is cumulative (setup + earlier attempts +
+              // backoff), which is exactly the number the turn watchdog races.
+              msSinceTurnStart: Date.now() - turnStartMs,
               hasResponseTools: _hasResponseTools,
               supportsClientTools: turnCaps.supportsClientTools(runtime.modelInfo),
               priorTurnHadTools: (_topMessagesForCall as Array<{ role?: string }>).some((m) => m?.role === "tool"),
@@ -1866,6 +1876,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         } catch {
           /* telemetry only */
         }
+        // Forward progress for the TOP-LEVEL turn watchdog (not the stall guard
+        // below): a request is going out to the provider right now. Without this
+        // the turn's single idle budget covers pre-stream setup + every retry
+        // backoff + time-to-first-byte at once, so a provider that is merely slow
+        // to first byte is killed as "hung" — z.ai/glm-4.7 TTFT is 10.6-11.4s and
+        // two 5xx retries burned 80s of the 120s before the third attempt even
+        // started (session 1096fc59144c). One ping buys one more idle window; a
+        // setup phase that issues no request at all still fires. See
+        // turn-progress.ts.
+        pingTurnProgress();
         // Silent-hang guard: abort the stream (and surface a toast in the
         // catch below) if the provider sends no chunk for too long. Re-armed
         // on every chunk via stall.pet(), so it never kills an actively
@@ -3279,6 +3299,21 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 }
               } catch (logErr) {
                 console.error(`[message-processor] interaction-log error failed: ${(logErr as Error)?.message}`);
+              }
+              // Flip the write-ahead user row off `pending`, the same way the
+              // THROWN-error path does (see the `markMessageErrored` call in this
+              // function's outer catch). Without it an error delivered as a stream
+              // PART left the row `pending` forever — indistinguishable in
+              // forensics from "stream still in flight" (session 1096fc59144c).
+              // Safe to do here rather than at end-of-turn: `appendMessages`
+              // upserts `status='completed'`, so if a later step still salvages
+              // text for this turn the row is corrected on the way out.
+              if (deps.session && userWriteAheadSeq != null && !assistantText.trim()) {
+                try {
+                  markMessageErrored(deps.session.id, userWriteAheadSeq);
+                } catch (markErr) {
+                  console.error(`[message-processor] mark-errored failed: ${(markErr as Error)?.message}`);
+                }
               }
               yield {
                 type: "error",

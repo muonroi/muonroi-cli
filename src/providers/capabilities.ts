@@ -388,6 +388,59 @@ export function getProviderCapabilities(providerId: ProviderId | string): Provid
 }
 
 /**
+ * Per-namespace SHALLOW merge of two providerOptions bags.
+ *
+ * The base already carries factory-level defaults folded into the provider
+ * namespace (e.g. OAuth `store:false`); the overlay only overrides specific keys
+ * (`reasoningEffort`, `thinking`) inside that same namespace, so a top-level
+ * spread — which would replace the whole namespace object — loses the defaults.
+ */
+export function mergeProviderOptions(
+  base: Record<string, unknown> | undefined,
+  overlay: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!overlay) return base;
+  if (!base) return overlay;
+  const out: Record<string, unknown> = { ...base };
+  for (const [ns, val] of Object.entries(overlay)) {
+    const baseNs = (base[ns] as Record<string, unknown> | undefined) ?? {};
+    out[ns] = { ...baseNs, ...(val as Record<string, unknown>) };
+  }
+  return out;
+}
+
+/**
+ * providerOptions for a THROWAWAY format-only call — a session title, a PIL
+ * classify verdict: output is a fixed short shape, so chain-of-thought buys
+ * nothing and costs the call its whole latency budget.
+ *
+ * Asks for the cheapest effort the provider EXPOSES *and* — via
+ * `minimizeReasoning` — for forced server-side thinking to be turned OFF.
+ * Providers with nothing to say return undefined and the merge is a no-op, so
+ * this is always safe to call.
+ *
+ * Deliberately NOT gated on the catalog `reasoning` flag: every z.ai model emits
+ * `reasoning_content` on the coding endpoint while six were catalogued as
+ * `reasoning:false`, so gating on the flag would make the saving depend on the
+ * very field that was wrong. Measured on glm-4.7: a session title cost 1357
+ * output tokens with forced thinking on (session 1096fc59144c, usage_event 196)
+ * against a `maxOutputTokens: 64` request.
+ */
+export function minimalReasoningProviderOptions(runtime: {
+  modelInfo?: ModelInfo;
+  providerOptions?: Record<string, unknown>;
+}): Record<string, unknown> | undefined {
+  const model = runtime.modelInfo;
+  if (!model?.provider) return runtime.providerOptions;
+  const cheapest = getProviderCapabilities(model.provider).buildProviderOptions({
+    model,
+    minimizeReasoning: true,
+    ...(model.supportsReasoningEffort ? { reasoningEffort: "low" as const } : {}),
+  });
+  return mergeProviderOptions(runtime.providerOptions, cheapest);
+}
+
+/**
  * Resolve the temperature to send for a given (provider, model), or `undefined`
  * to omit the field entirely.
  *

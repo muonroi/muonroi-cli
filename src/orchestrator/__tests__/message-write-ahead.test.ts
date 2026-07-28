@@ -29,6 +29,8 @@ interface PreparedStatementCall {
 
 const preparedCalls: PreparedStatementCall[] = [];
 let dbShouldThrow = false;
+/** Row returned by any `.get()` — set per test for the SELECT-then-UPDATE helpers. */
+let nextGetResult: unknown;
 
 vi.mock("../../storage/db", () => {
   const makeDb = () => ({
@@ -37,7 +39,10 @@ vi.mock("../../storage/db", () => {
         preparedCalls.push({ sql, runArgs: args });
         return undefined;
       },
-      get: () => undefined,
+      get: (...args: unknown[]) => {
+        preparedCalls.push({ sql, runArgs: args });
+        return nextGetResult;
+      },
       all: () => [],
     }),
     exec: () => undefined,
@@ -55,15 +60,22 @@ vi.mock("../../storage/db", () => {
 });
 
 // Import AFTER the mock so the helpers pick up the mocked db module.
-import { markMessageCompleted, markMessageErrored, persistMessageWriteAhead } from "../../storage/transcript";
+import {
+  markLatestPendingMessageErrored,
+  markMessageCompleted,
+  markMessageErrored,
+  persistMessageWriteAhead,
+} from "../../storage/transcript";
 
 describe("A5: write-ahead messages persistence", () => {
   beforeEach(() => {
     preparedCalls.length = 0;
+    nextGetResult = undefined;
   });
 
   afterEach(() => {
     preparedCalls.length = 0;
+    nextGetResult = undefined;
   });
 
   describe("persistMessageWriteAhead", () => {
@@ -147,6 +159,47 @@ describe("A5: write-ahead messages persistence", () => {
       dbShouldThrow = true;
       try {
         expect(() => markMessageErrored("session-d", 9)).not.toThrow();
+      } finally {
+        dbShouldThrow = false;
+      }
+    });
+  });
+
+  describe("markLatestPendingMessageErrored", () => {
+    // The top-level turn watchdog (orchestrator.ts) terminates a turn from
+    // OUTSIDE the message processor and so never saw `userWriteAheadSeq`. Before
+    // this helper it left the row `pending` forever: session 1096fc59144c lost
+    // two glm-4.7 turns that way, and the DB could not distinguish them from
+    // turns still in flight.
+    it("resolves the newest pending seq itself, then flips only that row", () => {
+      nextGetResult = { seq: 11 };
+
+      expect(markLatestPendingMessageErrored("session-w")).toBe(11);
+
+      const select = preparedCalls.find((c) => /SELECT seq FROM messages/.test(c.sql));
+      expect(select).toBeDefined();
+      expect(select!.sql).toMatch(/status = 'pending'/);
+      expect(select!.sql).toMatch(/ORDER BY seq DESC/);
+      expect(select!.runArgs).toContain("session-w");
+
+      const update = preparedCalls.find((c) => /UPDATE messages/.test(c.sql));
+      expect(update).toBeDefined();
+      expect(update!.sql).toMatch(/SET status = 'errored'/);
+      expect(update!.runArgs).toContain(11);
+    });
+
+    it("is a no-op returning null when the session has nothing pending", () => {
+      nextGetResult = undefined; // e.g. the inner path already finalized the turn
+
+      expect(markLatestPendingMessageErrored("session-w")).toBeNull();
+      expect(preparedCalls.filter((c) => /UPDATE messages/.test(c.sql))).toHaveLength(0);
+    });
+
+    it("is fail-open: a thrown SQL error does NOT propagate", () => {
+      dbShouldThrow = true;
+      try {
+        expect(() => markLatestPendingMessageErrored("session-w")).not.toThrow();
+        expect(markLatestPendingMessageErrored("session-w")).toBeNull();
       } finally {
         dbShouldThrow = false;
       }
