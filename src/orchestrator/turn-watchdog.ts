@@ -47,13 +47,28 @@ export interface TurnWatchdogOptions {
    * turn is not hung). See interactive-pause.ts.
    */
   shouldSuppressFire?: () => boolean;
+  /**
+   * Optional gate consulted the instant the IDLE timer would fire, asking "did
+   * the turn make real progress during the window that just elapsed?". When it
+   * returns true the idle timer re-arms from now instead of throwing.
+   *
+   * Unlike {@link shouldSuppressFire} this cannot hold a turn open indefinitely:
+   * each re-arm resets the reference instant, so surviving another window
+   * requires a NEW progress signal inside it. Wired to `turn-progress.ts`, whose
+   * only pinger is "a request was just issued to the provider" — that is what
+   * separates "slow to first byte / retrying" from "hung", which the chunk-only
+   * idle reset could not distinguish (session 1096fc59144c).
+   *
+   * The `total` guard deliberately ignores this: it is the hard ceiling.
+   */
+  hasProgressSince?: (sinceMs: number) => boolean;
 }
 
 export async function* withTurnWatchdog(
   gen: AsyncGenerator<StreamChunk, void, unknown>,
   opts: TurnWatchdogOptions,
 ): AsyncGenerator<StreamChunk, void, unknown> {
-  const { idleMs, totalMs, label, shouldSuppressFire } = opts;
+  const { idleMs, totalMs, label, shouldSuppressFire, hasProgressSince } = opts;
   const it = gen[Symbol.asyncIterator]();
 
   let totalTimer: ReturnType<typeof setTimeout> | undefined;
@@ -87,8 +102,16 @@ export async function* withTurnWatchdog(
         idleMs > 0
           ? new Promise<never>((_, reject) => {
               const armIdle = () => {
+                // Captured per arming so `hasProgressSince` is asked about the
+                // window that just elapsed, not the whole turn — each re-arm
+                // demands a fresh signal, so this cannot stall forever.
+                const armedAt = Date.now();
                 idleTimer = setTimeout(() => {
                   if (shouldSuppressFire?.()) {
+                    armIdle();
+                    return;
+                  }
+                  if (hasProgressSince?.(armedAt)) {
                     armIdle();
                     return;
                   }

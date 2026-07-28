@@ -86,6 +86,64 @@ describe("withTurnWatchdog", () => {
     expect(events).toContain("finally"); // unwound → cleanup ran (would be absent without the fix)
   });
 
+  describe("hasProgressSince — re-arm on real forward progress", () => {
+    // Session 1096fc59144c: the idle budget covered pre-stream setup + two
+    // provider 5xx retries + time-to-first-byte at once, so a z.ai turn that was
+    // merely slow (TTFT 10.6-11.4s) was killed as "hung" and the user saw a blank
+    // screen. A ping means "a request was just issued", and buys ONE more window.
+    it("re-arms instead of firing while progress keeps landing inside each window", async () => {
+      // The generator stays silent for ~3 idle windows — far past the point where
+      // the chunk-only reset would have declared it hung — but a ping lands in
+      // every window, so the turn survives to completion.
+      let pingAt = 0;
+      const pinger = setInterval(() => {
+        pingAt = Date.now();
+      }, 15);
+      try {
+        const out = await drain(
+          withTurnWatchdog(emitThenHang(["a"], 130), {
+            idleMs: 40,
+            totalMs: 5000,
+            label: "t",
+            hasProgressSince: (since) => pingAt > since,
+          }),
+        );
+        expect(out.map((c) => (c as { content: string }).content)).toEqual(["a"]);
+      } finally {
+        clearInterval(pinger);
+      }
+    });
+
+    it("still fires when progress is older than the window that just elapsed", async () => {
+      // A single stale ping must NOT buy window after window — each re-arm resets
+      // the reference instant, so surviving needs a FRESH signal every time.
+      const staleAt = Date.now();
+      await expect(
+        drain(
+          withTurnWatchdog(emitThenHang(["a"], 1000), {
+            idleMs: 40,
+            totalMs: 5000,
+            label: "t",
+            hasProgressSince: (since) => staleAt > since,
+          }),
+        ),
+      ).rejects.toMatchObject({ name: "TurnStallError", kind: "idle" });
+    });
+
+    it("does not let progress pings defeat the hard total ceiling", async () => {
+      await expect(
+        drain(
+          withTurnWatchdog(emitThenHang(["a"], 1000), {
+            idleMs: 30,
+            totalMs: 60,
+            label: "t",
+            hasProgressSince: () => true, // permanently "making progress"
+          }),
+        ),
+      ).rejects.toMatchObject({ name: "TurnStallError", kind: "total" });
+    });
+  });
+
   it("TurnStallError carries the kind and a descriptive message", () => {
     const e = new TurnStallError("total", "x exceeded 10s total watchdog — treated as hung");
     expect(e.kind).toBe("total");

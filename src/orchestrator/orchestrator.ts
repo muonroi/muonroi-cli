@@ -33,7 +33,7 @@ import { shutdownWorkspaceLspManager } from "../lsp/runtime";
 import { ensureDefaultMcpServers } from "../mcp/auto-setup.js";
 import { getModelInfo, normalizeModelId } from "../models/registry.js";
 import { IDEAL_LOOP_DEFAULTS } from "../product-loop/loop-defaults.js";
-import { getProviderCapabilities } from "../providers/capabilities.js";
+import { getProviderCapabilities, minimalReasoningProviderOptions } from "../providers/capabilities.js";
 import { apiBaseFor } from "../providers/endpoints.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {
@@ -58,6 +58,7 @@ import {
   getSessionTotalTokens,
   loadSessionChainTranscriptState,
   logInteraction,
+  markLatestPendingMessageErrored,
   markMessageCompleted,
   persistApprovedPlan,
   recordUsageEvent,
@@ -189,6 +190,7 @@ import { isToolActivityLive } from "./tool-activity.js";
 import { getToolLimitAutoRecoverCap } from "./tool-limit-auto-recover.js";
 import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
 import { firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
+import { hasTurnProgressSince } from "./turn-progress.js";
 
 // ---------------------------------------------------------------------------
 // Provider implementations
@@ -259,6 +261,11 @@ async function genTitle(
     const runtime = resolveModelRuntime(modelId);
     const snippet = userMessage.length > 1500 ? `${userMessage.slice(0, 1500)}…` : userMessage;
 
+    // A title is a ≤60-char fixed shape — reasoning on it is pure waste. On
+    // glm-4.7 (z.ai's coding endpoint force-thinks) one title burned 1357 output
+    // tokens against this call's own `maxOutputTokens: 64`.
+    const titleProviderOptions = minimalReasoningProviderOptions(runtime);
+
     // Stream + collect (NOT generateText): codex/oauth 400s non-stream requests.
     const { text, usage } = await generateTextStreamed({
       model: runtime.model,
@@ -266,7 +273,7 @@ async function genTitle(
       prompt: `User's first message:\n\n${snippet}\n\nTitle:`,
       ...resolveTemperatureParam(runtime, 0.3),
       ...(runtime.modelInfo?.supportsMaxOutputTokens === false ? {} : { maxOutputTokens: 64 }),
-      ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+      ...(titleProviderOptions ? { providerOptions: titleProviderOptions } : {}),
     });
 
     const title = sanitizeTitle(text ?? "");
@@ -3558,6 +3565,11 @@ export class Agent {
               // is indistinguishable from a wedge without this — see
               // tool-activity.ts (session 708f0fc4ac8b).
               shouldSuppressFire: () => isInteractivePaused() || isToolActivityLive(),
+              // Re-arm (once per fresh signal) when a request was issued to the
+              // provider inside the window that just elapsed, so pre-stream setup,
+              // retry backoff and the model's time-to-first-byte stop sharing a
+              // single 120s budget. See turn-progress.ts.
+              hasProgressSince: (sinceMs) => hasTurnProgressSince(sinceMs),
             });
           } catch (stallErr) {
             // A hung turn is NOT a transient error — retrying it (below) would
@@ -3568,7 +3580,36 @@ export class Agent {
                 message: stallErr.message,
               });
               this.abortController?.abort(new DOMException(stallErr.message, "TimeoutError"));
-              yield { type: "toast", toastLevel: "warn", content: `Turn ended by watchdog: ${stallErr.message}` };
+              // A watchdog kill must leave the SAME three artifacts a thrown
+              // provider error leaves (tool-engine.ts error path) — otherwise it
+              // ends the turn more quietly than a crash and the whole failure is
+              // invisible: session 1096fc59144c lost two glm-4.7 turns with zero
+              // `error` rows, zero transcript entries and both user rows stuck at
+              // `status='pending'`, so the screen was simply blank and the DB
+              // could not distinguish it from a turn that never ran.
+              //   1. a durable `error` interaction_log row (forensics),
+              //   2. the write-ahead user row flipped off `pending`,
+              //   3. an `error` chunk, not a toast — the UI folds `error` content
+              //      into the transcript, while a toast auto-dismisses.
+              const stallMessage = `Turn ended by watchdog: ${stallErr.message}`;
+              if (this.session) {
+                try {
+                  logInteraction(this.session.id, "error", {
+                    eventSubtype: "watchdog",
+                    data: { message: stallMessage.slice(0, 200), kind: stallErr.kind },
+                  });
+                } catch (logErr) {
+                  logger.error("orchestrator", "watchdog error-log failed", { error: logErr });
+                }
+                try {
+                  // No-op when the inner path already salvaged + finalized the
+                  // row (the UPDATE is scoped to status='pending').
+                  markLatestPendingMessageErrored(this.session.id);
+                } catch (markErr) {
+                  logger.error("orchestrator", "watchdog pending-message mark failed", { error: markErr });
+                }
+              }
+              yield { type: "error", content: stallMessage, isAuthError: false };
               yield { type: "done" };
             } else {
               throw stallErr;

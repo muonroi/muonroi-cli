@@ -15,7 +15,7 @@
 import { appendFileSync } from "node:fs";
 import { streamText } from "ai";
 import { getModelInfo, SWITCH_PROVIDER_ORDER } from "../models/registry.js";
-import { getProviderCapabilities } from "../providers/capabilities.js";
+import { getProviderCapabilities, mergeProviderOptions } from "../providers/capabilities.js";
 import { getConfiguredProviders, loadKeyForProvider, ProviderKeyMissingError } from "../providers/keychain.js";
 import type { ProviderFactory } from "../providers/runtime.js";
 import { createProviderFactoryAsync, resolveModelRuntime } from "../providers/runtime.js";
@@ -284,26 +284,6 @@ async function pickCrossProviderClassifyModels(
     if (!configured.has(p)) continue;
     const m = getRoutedModelByTier("fast", p);
     if (m && m.provider === p) out.push({ modelId: m.id, providerId: p });
-  }
-  return out;
-}
-
-/**
- * Per-namespace shallow merge of providerOptions. The base already carries
- * factory-level defaults folded into the provider namespace (e.g. OAuth
- * `store:false`); the overlay only overrides specific keys (reasoningEffort)
- * within the same namespace, so defaults survive.
- */
-function mergeProviderOptions(
-  base: Record<string, unknown> | undefined,
-  overlay: Record<string, unknown> | undefined,
-): Record<string, unknown> | undefined {
-  if (!overlay) return base;
-  if (!base) return overlay;
-  const out: Record<string, unknown> = { ...base };
-  for (const [ns, val] of Object.entries(overlay)) {
-    const baseNs = (base[ns] as Record<string, unknown> | undefined) ?? {};
-    out[ns] = { ...baseNs, ...(val as Record<string, unknown>) };
   }
   return out;
 }

@@ -560,6 +560,42 @@ export function markMessageErrored(sessionId: string, seq: number): void {
 }
 
 /**
+ * Same as {@link markMessageErrored} but resolves the seq itself: flips THIS
+ * session's newest still-`pending` row to `errored` and returns the seq it
+ * touched (null when there was nothing pending).
+ *
+ * Exists for turn-terminating paths that live OUTSIDE the message processor and
+ * therefore never saw `userWriteAheadSeq` — specifically the top-level turn
+ * watchdog in `orchestrator.ts`. Session 1096fc59144c (glm-4.7) died there twice
+ * and left both user rows stuck at `pending`, so forensics could not tell
+ * "watchdog killed it" from "stream still in flight".
+ *
+ * Safe against a racing finalize: the `status = 'pending'` predicate means a row
+ * the processor already flipped to `completed` is left alone, so calling this
+ * unconditionally on a watchdog fire cannot clobber a salvaged turn.
+ */
+export function markLatestPendingMessageErrored(sessionId: string): number | null {
+  try {
+    const row = getDatabase()
+      .prepare(`
+        SELECT seq FROM messages
+        WHERE session_id = ? AND status = 'pending'
+        ORDER BY seq DESC
+        LIMIT 1
+      `)
+      .get(sessionId) as { seq: number } | undefined;
+    if (!row) return null;
+    markMessageErrored(sessionId, row.seq);
+    return row.seq;
+  } catch (err) {
+    logger.error("storage", `[transcript] markLatestPendingMessageErrored failed: ${(err as Error).message}`, {
+      sessionId,
+    });
+    return null;
+  }
+}
+
+/**
  * Mark write-ahead rows orphaned by an earlier process kill (Ctrl+C, OOM,
  * `taskkill /F`) as `aborted` instead of leaving them `pending` forever.
  *

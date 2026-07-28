@@ -11,7 +11,7 @@ import { STALL_ABORT_REASON } from "./stall-watchdog.js";
  * so no client transform can guarantee prevention. These are matched narrowly
  * (400 + specific phrasing) so ordinary 400s stay non-transient.
  */
-function isProviderParamReject(err: unknown): boolean {
+export function isProviderParamReject(err: unknown): boolean {
   const status = APICallError.isInstance(err)
     ? err.statusCode
     : ((err as { statusCode?: number; status?: number } | null)?.statusCode ??
@@ -60,6 +60,7 @@ export function classifyStreamError(err: unknown, depth = 0): TransientCheck {
     status?: number;
     cause?: unknown;
     retryAfter?: number | string;
+    code?: string;
   };
 
   // AbortError: user cancellation — never retry, caller must handle
@@ -135,6 +136,15 @@ export function classifyStreamError(err: unknown, depth = 0): TransientCheck {
     return { transient: true, reason: "network-error" };
   }
 
+  // Bare errno `code` field with no message hint — undici/node-fetch attach the
+  // raw errno (e.g. "ECONNRESET") to `error.code` while the message is a generic
+  // "request failed". The council path historically checked `code` directly
+  // (visible-retry RETRYABLE_NETWORK_PATTERNS) so a message-less transport
+  // teardown was still retried; preserve that here under the unified classifier.
+  if (typeof e.code === "string" && isTransientMessage(e.code)) {
+    return { transient: true, reason: `errno-${e.code.toLowerCase()}` };
+  }
+
   // TypeError with "fetch failed" or network message
   if (e.name === "TypeError" && isTransientMessage(message)) {
     return { transient: true, reason: "fetch-failed" };
@@ -160,7 +170,14 @@ function isTransientMessage(message: string): boolean {
   // provider drops a streaming response mid-flight — a transient network drop,
   // not a client error. Left unclassified it escapes as an unhandledRejection,
   // which OpenTUI's handleError turns into an un-dismissable console overlay.
-  return /ECONNREFUSED|ETIMEDOUT|ECONNRESET|EAI_AGAIN|fetch failed|Unable to connect|network|socket hang up|socket connection was closed|socket.*closed unexpectedly/i.test(
+  //
+  // The pattern set is the union of every transport-failure phrasing observed
+  // across providers/runtimes (Bun fetch, undici, node-fetch, opencode Console
+  // Go proxy). It MUST stay a superset of the old council-path
+  // RETRYABLE_NETWORK_PATTERNS list — that was the bab91d29 bug class: the two
+  // classifiers drifted and "premature close" / "terminated" / bare errno codes
+  // were retried on one path and not the other.
+  return /ECONNREFUSED|ETIMEDOUT|ECONNRESET|ECONNABORTED|ENOTFOUND|EAI_AGAIN|EPIPE|fetch failed|Unable to connect|network|socket hang up|socket connection was closed|socket.*closed unexpectedly|premature close|terminated|stream closed|connection closed|connection error/i.test(
     message,
   );
 }

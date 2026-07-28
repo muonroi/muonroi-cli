@@ -19,6 +19,7 @@ export {
   loadSessionChainTranscriptState,
   loadTranscript,
   loadTranscriptState,
+  markLatestPendingMessageErrored,
   markMessageCompleted,
   markMessageErrored,
   markToolCallErrored,
