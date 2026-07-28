@@ -27,7 +27,7 @@ describe("pickPostDebateRecommendation — issue #3 default", () => {
     expect(r.value).toBe("generate_plan");
   });
 
-  for (const kind of ["decision", "evaluation", "investigation", "exploration", "other"]) {
+  for (const kind of ["decision", "evaluation", "investigation", "resolve_question"] as const) {
     it(`defaults ${kind} (no plan) to save_exit, not generate_plan`, () => {
       const r = pickPostDebateRecommendation({ ...base, outputKind: kind });
       expect(r.value).toBe("save_exit");

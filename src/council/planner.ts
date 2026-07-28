@@ -12,9 +12,11 @@ import type {
   DebatePlan,
   DebateState,
   EnhancedCouncilOutcome,
+  IntentKind,
   PostDebateActionId,
   PreflightResponder,
 } from "./types.js";
+import { coerceIntentKind } from "./types.js";
 
 export async function* runPlanning(
   debateState: DebateState,
@@ -356,7 +358,11 @@ function parseOutcome(synthesisText: string, debatePlan?: DebatePlan): EnhancedC
   if (jsonMatch) {
     try {
       const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
-      const type = typeof parsed.type === "string" ? parsed.type : (debatePlan?.outputShape.kind ?? "decision");
+      // Authoritative kind: trust the planner's already-coerced kind over the
+      // synthesizer's free-form "type" string (it can drift — bug 12d3022b was a
+      // leader LLM emitting implementation_plan for an analysis request). Fall
+      // back to coercing the synthesizer's type only when no plan kind exists.
+      const type: IntentKind = debatePlan?.outputShape.kind ?? coerceIntentKind(parsed.type);
       const summary = typeof parsed.summary === "string" ? parsed.summary : "";
       if (!summary) {
         throw new Error("No summary in parsed JSON");

@@ -40,10 +40,12 @@ import type {
   CouncilParticipant,
   CouncilStats,
   EnhancedCouncilOutcome,
+  IntentKind,
   IsolatedTaskRunner,
   PreflightResponder,
   QuestionResponder,
 } from "./types.js";
+import { coerceIntentKind, isImplementationKind } from "./types.js";
 
 /**
  * Wrap a CouncilLLM so every `generate` call inherits the council-wide abort
@@ -223,7 +225,7 @@ export function pickPostDebateRecommendation(input: {
   refinementTopics: string[];
   confidenceLevel: "high" | "medium" | "low";
   hasPlan: boolean;
-  outputKind: string;
+  outputKind: IntentKind;
   /**
    * F1 — count of pinned success criteria still unmet at debate end. When > 0 on
    * a successful synthesis, the criteria bar the user actually set was NOT met, so
@@ -256,7 +258,7 @@ export function pickPostDebateRecommendation(input: {
     };
   }
   if (!input.hasPlan) {
-    return input.outputKind === "implementation_plan"
+    return isImplementationKind(input.outputKind)
       ? { value: "generate_plan", reason: "Convert the agreed outcome into concrete steps." }
       : {
           value: "save_exit",
@@ -289,12 +291,13 @@ export function pickPostDebateRecommendation(input: {
  *   - save_exit / refine / retry_synthesis / follow-up / undefined → stop (those
  *     either already re-synthesized inside runCouncil or are terminal by intent).
  */
-const IMPLEMENTATION_OUTPUT_KINDS = new Set<string>(["implementation_plan"]);
 
 /** Recover the output-shape kind the synthesis was produced under (```json { "type": … }). */
-function synthesisOutputKind(synthesis: string): string | undefined {
+function synthesisOutputKind(synthesis: string): IntentKind | undefined {
   const m = synthesis.match(/"type"\s*:\s*"([^"]+)"/);
-  return m?.[1];
+  // Coerce at the boundary: a synthesizer LLM can emit any free-form string here.
+  // Unknown values resolve to "evaluation" (analysis-shape, safe default).
+  return m ? coerceIntentKind(m[1]) : undefined;
 }
 
 /** The literal separator between the machine-JSON and the human prose in a synthesis. */
@@ -326,13 +329,13 @@ export function extractReadableSynthesis(synthesis: string): string {
  */
 export function synthesisIsImplementation(synthesis: string): boolean {
   const kind = synthesisOutputKind(synthesis);
-  return !!kind && IMPLEMENTATION_OUTPUT_KINDS.has(kind);
+  return !!kind && isImplementationKind(kind);
 }
 
 export function postDebateContinuation(
   action: string | undefined,
   synthesis: string,
-  outputKind?: string,
+  outputKind?: IntentKind,
 ): string | null {
   if (!synthesis || !action) return null;
   // IMPLEMENT — the user decided there is enough to build. Load the council
@@ -356,7 +359,7 @@ export function postDebateContinuation(
     const kind = outputKind ?? synthesisOutputKind(synthesis);
     // Only an implementation-shaped debate has an "original task" left to build
     // (the /ideal build flow relies on this carry-forward — do NOT null it out).
-    if (kind && IMPLEMENTATION_OUTPUT_KINDS.has(kind)) {
+    if (kind && isImplementationKind(kind)) {
       return `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`;
     }
     // Analysis/evaluation/decision/investigation (or unknown → analysis): the

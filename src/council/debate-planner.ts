@@ -9,7 +9,16 @@ import { logger } from "../utils/logger.js";
 import { type CouncilExperienceMode, getProviderStallTimeoutMs } from "../utils/settings.js";
 import { tracedGenerate } from "./llm.js";
 import { buildDebatePlanPrompt } from "./prompts.js";
-import type { ClarifiedSpec, CouncilLLM, DebatePlan, DebateStance, OutputSection, OutputShape } from "./types.js";
+import type {
+  ClarifiedSpec,
+  CouncilLLM,
+  DebatePlan,
+  DebateStance,
+  IntentKind,
+  OutputSection,
+  OutputShape,
+} from "./types.js";
+import { coerceIntentKind } from "./types.js";
 
 const FALLBACK_PLAN: DebatePlan = {
   intentSummary: "(planner unavailable — using generic stances)",
@@ -336,7 +345,10 @@ function sanitizeShape(raw: unknown): OutputShape | null {
     ? obj.guardrails.filter((g): g is string => typeof g === "string" && g.trim().length > 0).map((g) => g.trim())
     : [];
   return {
-    kind: typeof obj.kind === "string" && obj.kind.trim() ? obj.kind.trim() : "decision",
+    // Type-level drift guard (bugs bab91d29/5c18d1d5/12d3022b): the leader LLM may
+    // emit any string here; coerceIntentKind bounds it to IntentKind so a drifted
+    // value can never reach the post-debate continuation switch as a raw string.
+    kind: coerceIntentKind(obj.kind) as IntentKind,
     sections,
     guardrails,
   };

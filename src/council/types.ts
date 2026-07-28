@@ -242,6 +242,56 @@ export interface ActionPlan {
 // ── Council Outcome (extends existing for backward compat) ───────────────────
 
 /**
+ * Bounded output-intent kind. The leader LLM selects FROM this vocabulary; an
+ * out-of-set value is coerced to "evaluation" at the planner/consumer boundary
+ * (see coerceIntentKind). This makes "drifted intent" unrepresentable at the
+ * type level — three prior bugs (bab91d29, 5c18d1d5, 12d3022b) all branched on
+ * a free-form string the model emitted and the code trusted.
+ *
+ * Two clusters:
+ *   - ANALYSIS kinds — the synthesis IS the deliverable; never a build mandate:
+ *     decision | evaluation | investigation | resolve_question
+ *   - IMPLEMENTATION kinds — carry an "original task" forward through the build
+ *     workflow: implementation_plan | action_items
+ */
+export type IntentKind =
+  | "decision"
+  | "evaluation"
+  | "investigation"
+  | "resolve_question"
+  | "implementation_plan"
+  | "action_items";
+
+/** Analysis-shape kinds. Synthesis is self-contained — no build carry-forward. */
+export const ANALYSIS_INTENT_KINDS = new Set<IntentKind>([
+  "decision",
+  "evaluation",
+  "investigation",
+  "resolve_question",
+]);
+
+/** Implementation-shape kinds. The post-debate flow may carry the conclusion forward. */
+export const IMPLEMENTATION_INTENT_KINDS = new Set<IntentKind>(["implementation_plan", "action_items"]);
+
+/**
+ * Coerce any LLM-emitted value into a valid IntentKind. Unknown / empty / non-string
+ * → "evaluation" (the safe analysis default — never a build mandate). Call this at
+ * every boundary where untrusted model output becomes an IntentKind.
+ */
+export function coerceIntentKind(raw: unknown): IntentKind {
+  if (typeof raw !== "string") return "evaluation";
+  const trimmed = raw.trim();
+  return ANALYSIS_INTENT_KINDS.has(trimmed as IntentKind) || IMPLEMENTATION_INTENT_KINDS.has(trimmed as IntentKind)
+    ? (trimmed as IntentKind)
+    : "evaluation";
+}
+
+/** True for implementation-shape kinds (the post-debate flow may carry forward). */
+export function isImplementationKind(kind: IntentKind): boolean {
+  return IMPLEMENTATION_INTENT_KINDS.has(kind);
+}
+
+/**
  * Output shape proposed by the leader LLM per topic.
  * Drives both the synthesis JSON schema and the human-readable Markdown sections.
  */
@@ -257,8 +307,8 @@ export interface OutputSection {
 }
 
 export interface OutputShape {
-  /** Free-form label (e.g. "evaluation", "implementation_plan", "decision"). */
-  kind: string;
+  /** Authoritative intent kind — bounded by {@link IntentKind}. LLM output is coerced. */
+  kind: IntentKind;
   sections: OutputSection[];
   /** Behavioural rules the synthesizer must obey. */
   guardrails: string[];
@@ -280,8 +330,8 @@ export interface DebatePlan {
 }
 
 export interface EnhancedCouncilOutcome {
-  /** Free-form (drives by leader plan). Common: decision, action_items, plan_update, evaluation, resolve_question. */
-  type: string;
+  /** Authoritative intent kind — bounded by {@link IntentKind}. Source: debatePlan.outputShape.kind. */
+  type: IntentKind;
   summary: string;
   /** Dynamic sections — keys mirror {@link OutputShape.sections}. */
   sections?: Record<string, unknown>;
