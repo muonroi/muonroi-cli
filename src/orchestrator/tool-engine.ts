@@ -170,6 +170,7 @@ import type { AskUserAskInfo } from "./ask-user.js";
 import { foldDynamicTailIntoUserMessage, splitFrontAndDynamicTail } from "./cache-prefix.js";
 import { consumeProactiveCompact } from "./compact-request.js";
 import { relaxCompactionSettings } from "./compaction";
+import { buildConvergenceMirror } from "./convergence-mirror.js";
 import type { CouncilManager } from "./council-manager.js";
 import { consumeCouncilConvene, hasPendingCouncilConvene, peekCouncilConveneToolCallId } from "./council-request.js";
 import { resolveCouncilTopic } from "./council-topic.js";
@@ -2020,8 +2021,20 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   runtime.modelId,
                 ) as typeof stepMessages;
               }
+              // Convergence mirror — a "you are here" note reflecting the
+              // turn's own tool-call history so the model can spot when it is
+              // circling the same concept without converging (session
+              // d0fbdd730b08 burned 2M tokens on 5 angles of one bug). Agent-
+              // first: this only OBSERVES + suggests ask_user/ee_query; it
+              // never blocks. Computed once per step from the raw stepMessages.
+              if (_mirrorNote && baseRes.messages) {
+                baseRes.messages = attachReminderToMessages(baseRes.messages, _mirrorNote) as typeof stepMessages;
+              }
               return baseRes;
             };
+            // Compute the mirror once per prepareStep call. Empty on early steps
+            // or when there's no overlap signal — see buildConvergenceMirror.
+            const _mirrorNote = buildConvergenceMirror(stepMessages, { stepNumber: sn });
             const stripped = turnCaps.sanitizeHistory(stepMessages) as typeof stepMessages;
 
             // Agent-controlled veto (PRESERVE) or lighter selective keep (KEEP_TOOL_IDS) for this turn's B4 compaction.

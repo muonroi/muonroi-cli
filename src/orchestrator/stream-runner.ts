@@ -78,6 +78,7 @@ import {
 import { resolveShell } from "../utils/shell.js";
 import { prepareVerifySandbox } from "../verify/entrypoint";
 import { asNumber } from "./batch-utils";
+import { buildConvergenceMirror } from "./convergence-mirror.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
 import {
@@ -771,13 +772,21 @@ export class StreamRunner {
           }
           return compacted;
         })();
+        // Convergence mirror — sub-agent path. Same primitive as the top-level
+        // tool loop (tool-engine.ts prepareStep): reflect this delegation's own
+        // tool-call history so the sub-agent can spot circling without
+        // converging. Agent-first — observes + suggests, never blocks.
+        const _subMirrorNote = buildConvergenceMirror(messages, { stepNumber });
+        const finalMessagesWithMirror = _subMirrorNote
+          ? attachReminderToMessages(finalMessages, _subMirrorNote)
+          : finalMessages;
 
         if (childRuntime.modelId.startsWith("claude")) {
-          return { messages: applyAnthropicPromptCaching(finalMessages, childRuntime.modelId) };
+          return { messages: applyAnthropicPromptCaching(finalMessagesWithMirror, childRuntime.modelId) };
         }
 
-        if (compacted === stripped && stripped === messages) return undefined;
-        return { messages: finalMessages };
+        if (compacted === stripped && stripped === messages && !_subMirrorNote) return undefined;
+        return { messages: finalMessagesWithMirror };
       },
       ...resolveTemperatureParam(childRuntime, isExplore ? 0.2 : 0.5),
       ...(childDropMaxOutput ? {} : { maxOutputTokens: Math.min(this.deps.getMaxTokens(), 8_192) }),
