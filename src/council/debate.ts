@@ -810,6 +810,17 @@ export async function* runDebate(
       ? `${conversationContext}\n\n---\n\n## Research Findings\n${researchFindings}`
       : conversationContext;
 
+  // Per-speaker turns + real spend for the rail's panel block. Accumulated from
+  // each turn's usage callback (debateWithRetry, leader evaluations) — the only
+  // places role and billing are both in scope. Declared at the FUNCTION body
+  // scope (indent 2), NOT inside `if (!resumed)`: the opening closures capture
+  // it, and on resume the rounds + synthesis still need it. MUST be initialized
+  // before `openingPromises` builds its closures — the opening usage callback
+  // fires during that map's execution, so a later `const panelLedger` triggered
+  // a TDZ "Cannot access 'panelLedger' before initialization" that aborted every
+  // council run (no panelist produced an opening statement).
+  const panelLedger = createPanelLedger({ sessionId: config.runId });
+
   // ── Phase 1: Parallel opening statements ───────────────────────────────────
   // Skipped entirely on resume — `active` was restored from the checkpoint so
   // re-running openings would both waste tokens and reset the debated positions.
@@ -1032,10 +1043,6 @@ export async function* runDebate(
   // still opposing (the conclusion card's Dissent section) — a converged verdict
   // otherwise erases the position the council existed to hear argued.
   let lastStanceRows: CouncilStanceRow[] = [];
-  // Per-speaker turns + real spend for the rail's panel block. Accumulated from
-  // each turn's usage callback (see debateWithRetry) — the only place role and
-  // billing are both in scope.
-  const panelLedger = createPanelLedger({ sessionId: config.runId });
   // S5 — announce this run as the one accepting steering. The UI has no other
   // way to learn the key: /council uses the session id, /ideal's loop-driver
   // passes its own run id.
