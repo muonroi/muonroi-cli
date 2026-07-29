@@ -76,6 +76,7 @@ class CatalogModel(BaseModel):
     reasoning: bool
     thinking_type: Optional[str] = None
     supports_effort: Optional[bool] = None
+    fixed_temperature: Optional[float] = None
     description: str
     aliases: Optional[list[str]] = None
     default_reasoning_effort: Optional[str] = None
@@ -84,6 +85,8 @@ class CatalogModel(BaseModel):
     routing_tiers: Optional[list[str]] = None
     # Mirrors CatalogModel.roles in src/models/catalog-client.ts (role routing).
     roles: Optional[list[str]] = None
+    native_web_research: Optional[bool] = None
+    web_research_kind: Optional[str] = None
 
 
 class CatalogPeakHourWindow(BaseModel):
