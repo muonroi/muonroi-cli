@@ -18,8 +18,14 @@ import { isAbsolute, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { createDriver, type Driver } from "./driver.js";
+import { createDriver, type Driver, type EventFilter, type LiveEventWithKind } from "./driver.js";
 import { createEventTee, resolveEventLogPath } from "./event-tee.js";
+import {
+  type BridgeCapabilities,
+  detectBridgeCapabilities,
+  EVENTS_RESOURCE_URI,
+  NotificationBridge,
+} from "./notification-bridge.js";
 import type { LiveEvent, LiveFrame, VisualFrame } from "./protocol.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 
@@ -258,6 +264,13 @@ export function buildCapabilitiesPayload(): {
   features: readonly string[];
   /** Where LiveEvents are teed as JSONL, or null when the sink is disabled. */
   eventLogPath: string | null;
+  /** Streaming event + heartbeat tool is available (single-call delivery). */
+  supportsStreamingWait: true;
+  /** Server advertises logging + a subscribable tui://events resource. */
+  supportsNotifications: true;
+  /** Server MAY use sampling/createMessage when the client advertises sampling
+   *  AND the caller passes pushMode:true at tui.start. Runtime-detected per session. */
+  supportsSampling: "client-dependent";
 } {
   return {
     protocol: PROTOCOL_VERSION,
@@ -266,6 +279,9 @@ export function buildCapabilitiesPayload(): {
     // resolved path here is what makes it discoverable without the caller
     // reproducing the env/tmpdir/pid rule.
     eventLogPath: resolveEventLogPath(process.env["MUONROI_HARNESS_EVENT_LOG"]),
+    supportsStreamingWait: true,
+    supportsNotifications: true,
+    supportsSampling: "client-dependent",
   };
 }
 
@@ -490,6 +506,10 @@ export function registerActionTools(server: McpServer, getDriver: () => Driver |
 
 export type AsyncToolDeps = {
   onStop: () => void;
+  /** Returns the spawned TUI child PID (undefined when no driver). */
+  getPid: () => number | undefined;
+  /** Milliseconds since the child process was spawned (undefined when no driver). */
+  getStartedAt: () => number | undefined;
 };
 
 export function registerAsyncTools(server: McpServer, getDriver: () => Driver | null, deps: AsyncToolDeps): void {
@@ -548,7 +568,14 @@ export function registerAsyncTools(server: McpServer, getDriver: () => Driver | 
         : toWaitArgs(input as { selector?: string; idle?: boolean; event?: string });
       if (typeof input.timeoutMs === "number") args.timeoutMs = input.timeoutMs;
       try {
-        await d.wait_for(args as Parameters<typeof d.wait_for>[0]);
+        const result = await d.wait_for(args as Parameters<typeof d.wait_for>[0]);
+        // For an `event` condition the matched LiveEvent is carried inline, so
+        // the caller no longer needs a follow-up `tui.last_event` round-trip.
+        // Selector/idle conditions keep the legacy bare "ok" string.
+        const event = (result as { event?: unknown } | undefined)?.event;
+        if (event) {
+          return { content: [{ type: "text" as const, text: JSON.stringify({ ok: true, event }) }] };
+        }
         return { content: [{ type: "text" as const, text: "ok" }] };
       } catch (e) {
         return {
@@ -637,6 +664,177 @@ export function registerAsyncTools(server: McpServer, getDriver: () => Driver | 
       return { content: [{ type: "text" as const, text: "ok" }] };
     },
   );
+
+  // -------------------------------------------------------------------------
+  // tui.wait_for_event — streaming heartbeat + event delivery in ONE call.
+  //
+  // Replaces the poll dance (wait_for → last_event → wait_for …) for long
+  // phases like council research: a single call streams periodic heartbeat
+  // rows (alive/pid/age + liveness pulled from the latest council-speaker /
+  // stream.delta) AND each matching event, then resolves on `until`, timeout,
+  // maxEvents, or TUI disconnect. This is the only portable path that
+  // delivers TUI progress into the LLM context as a tool result — MCP
+  // server→client notifications do not reliably reach the model.
+  // -------------------------------------------------------------------------
+  server.registerTool(
+    "tui.wait_for_event",
+    {
+      description:
+        "Stream heartbeat rows plus matching LiveEvents until a terminal condition is reached. " +
+        "Prefer this over repeated wait_for+last_event: a single call surfaces both progress (alive/pid/" +
+        "ageMs/lastEventAgeMs + streamedChars/elapsedMs from the latest council-speaker) and each event " +
+        "payload, resolving on `until`, `maxEvents`, `timeoutMs`, or TUI disconnect.",
+      inputSchema: {
+        // Kinds to deliver (default: all). Matches driver.events() EventFilter.
+        filter: z.union([z.string().max(64), z.array(z.string().max(64)).max(32)]).optional(),
+        // Heartbeat interval in ms. 0 disables. Default 5000.
+        heartbeatMs: z.number().int().min(0).max(60_000).optional(),
+        // Stop after delivering this many matching events (default 1000 — effectively unbounded).
+        maxEvents: z.number().int().min(1).max(1000).optional(),
+        // Overall deadline in ms (default 120000; cap 600000 = 10 min).
+        timeoutMs: z.number().int().min(0).max(600_000).optional(),
+        // Terminal condition: deliver events until one of `event` kind arrives
+        // (optionally matching `state` for council-step, or `status` for
+        // council-speaker). The matching event IS delivered, then the call ends.
+        until: z
+          .object({
+            event: z.string().max(64),
+            state: z.string().max(64).optional(),
+            status: z.string().max(64).optional(),
+          })
+          .optional(),
+      },
+    },
+    async (input) => {
+      const d = getDriver();
+      if (!d) return noDriver();
+
+      const kinds = Array.isArray(input.filter) ? input.filter : input.filter ? [input.filter] : undefined;
+      const heartbeatMs = input.heartbeatMs ?? 5000;
+      const maxEvents = input.maxEvents ?? 1000;
+      const timeoutMs = input.timeoutMs ?? 120_000;
+      const until = input.until;
+
+      const filter: EventFilter | undefined = kinds ? { kinds: kinds as LiveEventWithKind["kind"][] } : undefined;
+      const iterator = d.events(filter)[Symbol.asyncIterator]();
+
+      const start = Date.now();
+      const deadline = timeoutMs > 0 ? start + timeoutMs : Number.POSITIVE_INFINITY;
+      const rows: unknown[] = [];
+      let delivered = 0;
+      let terminal = false;
+      let timedOut = false;
+      let disconnected = false;
+
+      try {
+        while (delivered < maxEvents && !terminal && !timedOut) {
+          // Per-iteration: race the next event against a wake-timer so the loop
+          // can flush heartbeat rows and honor the hard deadline even when
+          // events are sparse (a healthy council research phase emits few).
+          // The wake-timer fires at min(heartbeatMs, 1s, remaining-to-deadline).
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            timedOut = true;
+            break;
+          }
+          const wakeMs = Math.max(50, Math.min(heartbeatMs > 0 ? heartbeatMs : 1000, remaining, 1000));
+
+          let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+          const wake = new Promise<"wake">((resolve) => {
+            wakeTimer = setTimeout(() => resolve("wake"), wakeMs);
+          });
+          const next = iterator.next().then((result) => ({ kind: "event" as const, result }));
+
+          const winner = await Promise.race([next, wake]);
+          if (wakeTimer) clearTimeout(wakeTimer);
+
+          if (winner === "wake") {
+            // Flush a heartbeat row for this interval (if heartbeats are on).
+            if (heartbeatMs > 0) rows.push(buildHeartbeatRow(d, deps));
+            // Check the hard deadline.
+            if (Date.now() >= deadline) timedOut = true;
+            continue;
+          }
+
+          const { result } = winner;
+          if (result.done) {
+            // Iterator closed (TUI disconnect).
+            disconnected = true;
+            break;
+          }
+          const ev = result.value as LiveEvent;
+          rows.push({ type: "event", event: ev });
+          delivered++;
+
+          if (until && matchesUntil(ev, until)) {
+            terminal = true;
+          }
+        }
+      } finally {
+        // Release the subscriber (late-subscribe replay already happened at
+        // subscription time; we only close the live tail).
+        await iterator.return?.();
+      }
+
+      // Final heartbeat so the caller sees the terminal liveness state.
+      const reason = timedOut ? "timeout" : terminal ? "until" : disconnected ? "disconnect" : "maxEvents";
+      rows.push({ ...buildHeartbeatRow(d, deps), terminal: true, reason });
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ ok: !timedOut, delivered, elapsedMs: Date.now() - start, rows }),
+          },
+        ],
+      };
+    },
+  );
+}
+
+/**
+ * Build a heartbeat row: child liveness + the newest council-speaker /
+ * stream.delta so the agent can tell ALIVE (advancing elapsedMs/streamedChars)
+ * from HUNG (frozen) in a single tool result.
+ */
+function buildHeartbeatRow(d: Driver, deps: AsyncToolDeps): Record<string, unknown> {
+  const pid = deps.getPid();
+  const startedAt = deps.getStartedAt();
+  const now = Date.now();
+  const speaker = d.last_event("council-speaker") as {
+    kind: "council-speaker";
+    status: string;
+    elapsedMs?: number;
+    streamedChars?: number;
+    correlationId?: string;
+  } | null;
+  const delta = d.last_event("stream.delta") as { kind: "stream.delta"; target: string; text: string } | null;
+  const lastEvent = speaker ?? delta;
+  return {
+    type: "heartbeat",
+    alive: pid !== undefined,
+    pid,
+    ageMs: startedAt ? now - startedAt : undefined,
+    lastEventKind: lastEvent?.kind,
+    lastEventAgeMs: undefined, // ring buffer doesn't store emit ts; derived from harness tee if needed
+    councilSpeaker: speaker
+      ? {
+          status: speaker.status,
+          elapsedMs: speaker.elapsedMs,
+          streamedChars: speaker.streamedChars,
+          correlationId: speaker.correlationId,
+        }
+      : undefined,
+  };
+}
+
+/** Does `ev` satisfy the `until` terminal condition? */
+function matchesUntil(ev: LiveEvent, until: { event: string; state?: string; status?: string }): boolean {
+  const e = ev as LiveEvent & { kind?: string; state?: string; status?: string };
+  if (e.kind !== until.event) return false;
+  if (until.state !== undefined && e.state !== until.state) return false;
+  if (until.status !== undefined && e.status !== until.status) return false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -671,10 +869,50 @@ export function createMcpHarnessServer({
   const server = new McpServer({ name: "muonroi-harness-driver", version: "0.1.0" });
   let currentDriver: Driver | null = null;
   let currentPid: number | undefined;
+  let currentStartedAt: number | undefined;
+  let stopBridge: (() => void) | null = null;
+  /** Bridge caps detected at the most recent tui.start (all-false if client caps unknown). */
+  let currentBridgeCaps: BridgeCapabilities = { logging: false, resources: false, sampling: false };
   const onStop = () => {
+    if (stopBridge) {
+      stopBridge();
+      stopBridge = null;
+    }
     currentDriver = null;
     currentPid = undefined;
+    currentStartedAt = undefined;
   };
+
+  // Register the subscribable event-feed resource so clients that advertised
+  // resources.subscribe can receive notifications/resources/updated. The read
+  // returns a compact snapshot of recent events from the ring buffer (when a
+  // driver is live) — the bridge drives the `updated` notifications.
+  server.registerResource(
+    "events",
+    EVENTS_RESOURCE_URI,
+    {
+      description: "Live event feed; subscribe to receive notifications/resources/updated on each event.",
+      mimeType: "application/json",
+    },
+    async () => {
+      const d = currentDriver;
+      // The resource is readable even without a live TUI (returns capabilities).
+      const snapshot = {
+        bridgeCaps: currentBridgeCaps,
+        // Surface the latest event of a few key kinds so a one-shot read is useful.
+        latest: d
+          ? {
+              councilStep: d.last_event("council-step"),
+              councilSpeaker: d.last_event("council-speaker"),
+              askcard: d.last_event("askcard-open"),
+            }
+          : null,
+      };
+      return {
+        contents: [{ uri: EVENTS_RESOURCE_URI, mimeType: "application/json", text: JSON.stringify(snapshot) }],
+      };
+    },
+  );
 
   server.registerTool(
     "tui.capabilities",
@@ -701,6 +939,12 @@ export function createMcpHarnessServer({
         cwd: z.string().max(2000).optional(),
         env: z.record(z.string(), z.string()).optional(),
         mockLlmDir: z.string().max(500).optional(),
+        // Opt-in server→client push. When true AND the client advertises the
+        // capability, terminal events (council-step done/error, sprint-halt,
+        // askcard-open) are forwarded via notifications/message,
+        // notifications/resources/updated, and (if supported) sampling/createMessage.
+        // The streaming tui.wait_for_event tool is always available regardless.
+        pushMode: z.boolean().optional(),
       },
     },
     async (input) => {
@@ -795,18 +1039,46 @@ export function createMcpHarnessServer({
         if (currentPid === proc.pid) {
           currentDriver = null;
           currentPid = undefined;
+          currentStartedAt = undefined;
         }
       });
 
       currentDriver = driver;
       currentPid = proc.pid;
-      return { content: [{ type: "text" as const, text: JSON.stringify({ ok: true, pid: proc.pid }) }] };
+      currentStartedAt = Date.now();
+
+      // Start the opt-in push bridge. Feature-detect client caps; when the
+      // client advertised logging/resources/sampling, forward events via those
+      // channels. `pushMode` additionally enables sampling on terminal events.
+      // All channels are additive — tui.wait_for_event remains the portable
+      // primary path. Safe no-op when nothing is supported.
+      currentBridgeCaps = detectBridgeCapabilities(server.server.getClientCapabilities());
+      const bridge = new NotificationBridge(server, driver, currentBridgeCaps, { pushMode: input.pushMode === true });
+      stopBridge = bridge.start();
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              ok: true,
+              pid: proc.pid,
+              bridge: currentBridgeCaps,
+              pushMode: input.pushMode === true,
+            }),
+          },
+        ],
+      };
     },
   );
 
   registerReadTools(server, () => currentDriver);
   registerActionTools(server, () => currentDriver);
-  registerAsyncTools(server, () => currentDriver, { onStop });
+  registerAsyncTools(server, () => currentDriver, {
+    onStop,
+    getPid: () => currentPid,
+    getStartedAt: () => currentStartedAt,
+  });
 
   return server;
 }

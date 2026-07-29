@@ -3759,7 +3759,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               const _ans =
                 typeof _d.response === "string" ? _d.response : JSON.stringify(_pendingStructuredResponse.data);
               deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: _ans } as ModelMessage]);
-            } catch {}
+            } catch (err) {
+              // Best-effort persistence of the structured-response assistant row — a
+              // failure here must not lose the answer the user already saw, but it
+              // MUST be surfaced (No-Silent-Catch) so a broken DB/session write does
+              // not rot silently. TUI "flashed then vanished" debug trail lives here.
+              console.warn(
+                `[tool-engine] appendCompletedTurn(structured-response) failed: ${(err as Error)?.message ?? err}`,
+              );
+            }
           }
           if (_responseToolEmitCount > 1 && deps.session) {
             try {
@@ -3780,7 +3788,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               const _ans =
                 typeof _d.response === "string" ? _d.response : JSON.stringify(_pendingStructuredResponse.data);
               deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: _ans } as ModelMessage]);
-            } catch {}
+            } catch (err) {
+              // Same best-effort persist on abort — surface the failure rather than
+              // swallow it (No-Silent-Catch), mirroring the non-abort path above.
+              console.warn(
+                `[tool-engine] appendCompletedTurn(structured-response, aborted) failed: ${(err as Error)?.message ?? err}`,
+              );
+            }
           }
           deps.discardAbortedTurn(userModelMessage);
           yield { type: "done" };

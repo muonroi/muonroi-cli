@@ -70,6 +70,10 @@
       "node": "./dist/node/mcp-server.js",
       "default": "./src/mcp-server.ts"
     },
+    "./notification-bridge": {
+      "types": "./src/notification-bridge.ts",
+      "default": "./src/notification-bridge.ts"
+    },
     "./event-filter": {
       "types": "./src/event-filter.ts",
       "default": "./src/event-filter.ts"

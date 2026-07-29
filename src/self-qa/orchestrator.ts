@@ -234,7 +234,7 @@ async function runStep(driver: Driver, step: ScenarioStep, budgetMs: number): Pr
   }
 }
 
-async function safeWait(fn: () => Promise<void>): Promise<void> {
+async function safeWait(fn: () => Promise<unknown>): Promise<void> {
   try {
     await fn();
   } catch {

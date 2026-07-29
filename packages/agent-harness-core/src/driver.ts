@@ -28,6 +28,13 @@ export type WaitArgs = (WaitConditionIdle | WaitConditionSelector | WaitConditio
   timeoutMs?: number;
 };
 
+/**
+ * Result of `wait_for`. For `event` conditions the matched LiveEvent is carried
+ * back so the caller no longer needs a separate `last_event` round-trip.
+ * Selector/idle conditions resolve to `void` (no payload) — backward compatible.
+ */
+export type WaitForResult = { event?: LiveEvent } | void;
+
 /** Events that carry a `kind` discriminator (excludes the `{ t: "idle" }` pseudo-event). */
 export type LiveEventWithKind = Extract<LiveEvent, { kind: string }>;
 
@@ -51,7 +58,7 @@ export type Driver = {
   press_sequence: (keys: string[]) => void;
   type: (text: string) => void;
   focus: (selector: string) => void;
-  wait_for: (args: WaitArgs) => Promise<void>;
+  wait_for: (args: WaitArgs) => Promise<WaitForResult>;
   query: (selector: string) => UINode | null;
   queryAll: (selector: string) => UINode[];
   count: (selector: string) => number;
@@ -147,7 +154,7 @@ export function createDriver(deps: DriverDeps): Driver {
   function notifyWaiters(): void {
     for (const w of waiters) {
       if (w.check()) {
-        w.resolve();
+        w.resolve(w.matchedEvent);
         waiters.delete(w);
       }
     }
@@ -215,9 +222,26 @@ export function createDriver(deps: DriverDeps): Driver {
 
   type Waiter = {
     check: () => boolean;
-    resolve: () => void;
+    /** Matched LiveEvent for `event` conditions (undefined for selector/idle). */
+    matchedEvent?: LiveEvent;
+    resolve: (event?: LiveEvent) => void;
     reject: (err: Error) => void;
   };
+
+  /**
+   * Find the newest buffered event of `kind` passing `matchFn` (if given).
+   * Used to surface the matched event from an `event` wait condition so the
+   * caller gets the payload inline — no second `last_event` round-trip needed.
+   */
+  function findMatchingEvent(kind: string, matchFn?: (e: LiveEvent) => boolean): LiveEvent | undefined {
+    for (let i = eventBuffer.length - 1; i >= 0; i--) {
+      const e = eventBuffer[i];
+      if (e.t === "event" && (e as LiveEventWithKind).kind === kind && (matchFn ? matchFn(e) : true)) {
+        return e;
+      }
+    }
+    return undefined;
+  }
 
   function buildCheck(cond: WaitConditionIdle | WaitConditionSelector | WaitConditionEvent): () => boolean {
     if ("idle" in cond && cond.idle) {
@@ -270,9 +294,17 @@ export function createDriver(deps: DriverDeps): Driver {
       deps.sendKey(`__focus__:${hits[0].id}`);
     },
 
-    wait_for(args: WaitArgs): Promise<void> {
+    wait_for(args: WaitArgs): Promise<WaitForResult> {
       const timeoutMs = (args as { timeoutMs?: number }).timeoutMs ?? 5000;
       const start = Date.now();
+
+      // Capture the event condition (if any) so we can surface the matched event.
+      const eventCond =
+        "event" in args
+          ? (args as WaitConditionEvent)
+          : "all" in args
+            ? (args as WaitConditionAll).all.find((c): c is WaitConditionEvent => "event" in c)
+            : undefined;
 
       let check: () => boolean;
       if ("all" in args) {
@@ -290,17 +322,25 @@ export function createDriver(deps: DriverDeps): Driver {
         check = () => false;
       }
 
-      // Check immediately in case condition is already met
-      if (check()) return Promise.resolve();
+      // Resolve value: for an `event` condition, carry the matched LiveEvent so
+      // the caller gets the payload inline (no second `last_event` round-trip).
+      const resolveValue = (): WaitForResult => {
+        if (!eventCond) return undefined;
+        const matched = findMatchingEvent(eventCond.event, eventCond.match);
+        return matched ? { event: matched } : undefined;
+      };
 
-      return new Promise<void>((resolve, reject) => {
+      // Check immediately in case condition is already met
+      if (check()) return Promise.resolve(resolveValue());
+
+      return new Promise<WaitForResult>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | null = null;
 
         const waiter: Waiter = {
           check,
-          resolve() {
+          resolve(_event) {
             if (timer !== null) clearTimeout(timer);
-            resolve();
+            resolve(resolveValue());
           },
           reject(err) {
             reject(err);
