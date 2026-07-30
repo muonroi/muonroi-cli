@@ -38,7 +38,9 @@ const POST_KILL_SETTLE_MS = 2_000;
  */
 function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
   const pid = child.pid;
-  if (process.platform === "win32" && typeof pid === "number") {
+  if (typeof pid !== "number") return;
+
+  if (process.platform === "win32") {
     try {
       // /T = tree, /F = force. The only reliable tree kill on Windows — there is
       // no process-group signalling to fall back on.
@@ -49,12 +51,30 @@ function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
         `[bash] taskkill tree-kill failed for pid ${pid}, falling back to child.kill: ${(err as Error)?.message}`,
       );
     }
+  } else {
+    // POSIX: the child is spawned `detached`, making it its own process-group
+    // leader, so a NEGATIVE pid signals the whole group — shell, its re-exec, and
+    // every grandchild. `child.kill()` alone reaches only the direct child, which
+    // CI caught on ubuntu/macos: the grandchild kept ticking (43 -> 63 writes)
+    // after the "tree kill" while the Windows job passed.
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch (err) {
+      // ESRCH: the group is already gone. Anything else (e.g. the child never
+      // became a group leader) falls through to the single-process kill below.
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "ESRCH") return;
+      console.error(
+        `[bash] process-group kill failed for pgid ${pid} (${code ?? "?"}), falling back to child.kill: ${(err as Error)?.message}`,
+      );
+    }
   }
   try {
     child.kill(signal);
   } catch (err) {
     // Already exited — the caller's settle path still runs, so this is benign.
-    console.error(`[bash] kill(${signal}) failed for pid ${pid ?? "?"}: ${(err as Error)?.message}`);
+    console.error(`[bash] kill(${signal}) failed for pid ${pid}: ${(err as Error)?.message}`);
   }
 }
 
@@ -251,6 +271,11 @@ export class BashTool {
           cwd: this.cwd,
           env: { ...process.env, FORCE_COLOR: "0" },
           windowsHide: true,
+          // POSIX only: make the child its own process-group leader so
+          // killProcessTree can signal the whole group via a negative pid.
+          // Windows has no process groups here — it uses `taskkill /T` instead,
+          // and `detached` there would spawn a separate console.
+          detached: process.platform !== "win32",
         });
 
         // spawn failure (shell binary missing / not executable) → surface, don't hang.
