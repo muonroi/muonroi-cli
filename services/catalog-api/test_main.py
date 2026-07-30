@@ -210,7 +210,12 @@ def test_real_catalog_provider_policies_peak_hour():
     assert cat.routing.switch_provider_order == ["deepseek", "zai", "opencode-go", "xai", "anthropic"]
     assert cat.routing.council is not None
     assert cat.routing.council.prefer_multi_provider is True
-    assert len(cat.routing.council.participants or []) == 4
+    # Three participants, one per allowed role. The catalog schema's role enum is
+    # exactly {implement, verify, research} (src/models/catalog-client.ts), so a
+    # fourth "leader" slot is not representable — it made loadCatalog() reject the
+    # whole document, leaving MODELS empty. anthropic is reachable through
+    # models[] + provider_policies, not through a council participant slot.
+    assert len(cat.routing.council.participants or []) == 3
     roles = {p.role for p in (cat.routing.council.participants or [])}
     assert roles == {"implement", "verify", "research"}
     assert cat.routing.vision_proxy is not None

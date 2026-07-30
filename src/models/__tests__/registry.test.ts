@@ -29,10 +29,13 @@ describe("MODELS catalog", () => {
   });
 
   describe("Part E — native web research", () => {
-    test("openai + xai + zai models are web-native; deepseek + opencode-go are not", () => {
+    // anthropic joined the web-native set with the Claude rows: every anthropic
+    // model carries native_web_research, backed by the server-side web_search
+    // tool that provider_policies.anthropic prices under server_tool_pricing.
+    test("anthropic + openai + xai + zai models are web-native; deepseek + opencode-go are not", () => {
+      const WEB_NATIVE_PROVIDERS = new Set(["anthropic", "openai", "xai", "zai"]);
       for (const m of MODELS) {
-        const expected = m.provider === "openai" || m.provider === "xai" || m.provider === "zai";
-        expect(modelHasNativeWebResearch(m.id)).toBe(expected);
+        expect(modelHasNativeWebResearch(m.id)).toBe(WEB_NATIVE_PROVIDERS.has(m.provider ?? ""));
       }
     });
 
@@ -204,7 +207,10 @@ describe("tier_routing catalog flag", () => {
 
 describe("provider_policies from catalog", () => {
   test("loads switch provider order from routing", () => {
-    expect(SWITCH_PROVIDER_ORDER).toEqual(["deepseek", "zai", "opencode-go", "xai"]);
+    // anthropic is last: it is the newest provider and must not displace the
+    // established switch order (see also the models[] ordering, which keeps
+    // getModelByTier's per-tier defaults on deepseek/openai).
+    expect(SWITCH_PROVIDER_ORDER).toEqual(["deepseek", "zai", "opencode-go", "xai", "anthropic"]);
   });
 
   test("loads zai peak-hour rule from vendor-sourced catalog metadata", () => {
