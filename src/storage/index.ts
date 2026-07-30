@@ -26,6 +26,7 @@ export {
   persistApprovedPlan,
   persistMessageWriteAhead,
   persistToolCallWriteAhead,
+  persistToolResultWriteAhead,
   revertLatestCompaction,
   type SessionChainNode,
   sessionUsedGsdWorkflow,

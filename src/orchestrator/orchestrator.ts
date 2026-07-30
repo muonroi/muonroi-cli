@@ -2401,6 +2401,11 @@ export class Agent {
         yield { type: "done" };
       }
     } finally {
+      // A card abandoned mid-debate (turn aborted, or this generator unwound by
+      // the turn watchdog's it.return()) never resolves, so its
+      // beginInteractivePause() would leak and suppress the turn watchdog for the
+      // rest of the process. Runs on every exit path — normal, throw, unwind.
+      this.councilManager.releasePendingWaits();
       if (ownsController && this.abortController?.signal === signal) {
         this.abortController = null;
       }

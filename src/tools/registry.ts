@@ -448,7 +448,16 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     // Phase 8 — safety-blocked commands queue, keyed by sessionId + toolCallId.
     // When the orchestrator intercepts a blocked result, the approval handler
     // stores the approved command here so bash.execute() can retry it.
-    execute: async (input: any, extra?: { toolCallId?: string; messages?: ReadonlyArray<unknown> }) => {
+    // `abortSignal` is part of the AI SDK's ToolCallOptions and streamText is
+    // called with one (src/orchestrator/stream-runner.ts). It was missing from
+    // this type, so every `bash.execute()` below dropped it and BashTool never
+    // registered its `onAbort` — the turn watchdog's abort could not kill a
+    // running child at all. Sessions 7ec700df5589 / d22397a9e47d: a `bun test` +
+    // `bun run typecheck` child outlived the CLI by 24h burning 16.5h of CPU.
+    execute: async (
+      input: any,
+      extra?: { toolCallId?: string; messages?: ReadonlyArray<unknown>; abortSignal?: AbortSignal },
+    ) => {
       // Corrective guard for malformed calls: a cheap model sometimes emits a
       // bash call with a missing / empty `command` (live: deepseek sent `{}`
       // repeatedly until the loop-guard fired). Passing undefined to
@@ -496,7 +505,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         if (_approvalEntry.kind === "once") {
           _approvedMap.delete(_approvalKey!);
         }
-        const result = await bash.execute(input.command, input.timeout ?? 30000);
+        const result = await bash.execute(input.command, input.timeout ?? 30000, extra?.abortSignal);
         return formatResult(result);
       }
 
@@ -588,7 +597,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       const repeatedIntent = canonical !== "" && canonical === entry.lastCanonical && entry.lastRunId !== null;
       const prevRunId = entry.lastRunId;
 
-      const result = await bash.execute(input.command, input.timeout ?? 30000);
+      const result = await bash.execute(input.command, input.timeout ?? 30000, extra?.abortSignal);
       const formatted = formatResult(result);
 
       // Record verification outcome so a later `git push` can be gated on it.

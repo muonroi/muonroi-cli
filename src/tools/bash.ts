@@ -14,6 +14,50 @@ import { nextBashRunId, recordBashRun, stripAnsi } from "./bash-output-cache.js"
 const MAX_TAIL_BYTES = 8_192;
 const MAX_BACKGROUND_PROCESSES = 8;
 
+/**
+ * Grace between "we killed the tree" and giving up on the `close` event.
+ *
+ * `close` only fires once every inherited stdio handle is closed, so a
+ * grandchild that outlives the shell keeps the promise pending forever. After a
+ * tree kill the handles normally close within milliseconds; if they do not, we
+ * settle anyway rather than wedge the turn. See the timeout/abort paths below.
+ */
+const POST_KILL_SETTLE_MS = 2_000;
+
+/**
+ * Kill a process and everything it spawned.
+ *
+ * `child.kill()` signals ONLY the direct child. That is not enough here:
+ * `bash -lc "<cmd>"` re-execs itself (observed live: bash.exe 21272 → bash.exe
+ * 5024 → bun.exe 7464), so signalling the top shell leaves the real workload
+ * running AND holding the stdio handles. Session 7ec700df5589's
+ * `bun test src/providers --runInBand; bun run typecheck` survived that way for
+ * over 24 hours and burned 59,244s of CPU until it was reaped by hand with
+ * `taskkill /F /T`. `src/orchestrator/delegations.ts` already used this pattern;
+ * the foreground bash path did not.
+ */
+function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  const pid = child.pid;
+  if (process.platform === "win32" && typeof pid === "number") {
+    try {
+      // /T = tree, /F = force. The only reliable tree kill on Windows — there is
+      // no process-group signalling to fall back on.
+      spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { windowsHide: true, stdio: "ignore" }).unref();
+      return;
+    } catch (err) {
+      console.error(
+        `[bash] taskkill tree-kill failed for pid ${pid}, falling back to child.kill: ${(err as Error)?.message}`,
+      );
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch (err) {
+    // Already exited — the caller's settle path still runs, so this is benign.
+    console.error(`[bash] kill(${signal}) failed for pid ${pid ?? "?"}: ${(err as Error)?.message}`);
+  }
+}
+
 export interface BackgroundProcess {
   id: number;
   command: string;
@@ -158,6 +202,7 @@ export class BashTool {
         let maxBufferHit = false;
         let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
         let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+        let settleTimer: ReturnType<typeof setTimeout> | undefined;
         const outChunks: string[] = [];
         const errChunks: string[] = [];
         let bufferedLen = 0;
@@ -167,8 +212,39 @@ export class BashTool {
           settled = true;
           if (forceKillTimer) clearTimeout(forceKillTimer);
           if (timeoutTimer) clearTimeout(timeoutTimer);
+          if (settleTimer) clearTimeout(settleTimer);
           abortSignal?.removeEventListener("abort", onAbort);
           resolve(result);
+        };
+
+        /**
+         * Settle a killed command WITHOUT waiting for `close`.
+         *
+         * The `close` handler is the happy path and stays authoritative — it wins
+         * whenever it fires, because `finish` is one-shot. This is the backstop
+         * for the case that actually broke production: a surviving grandchild
+         * holds the inherited stdio open, `close` never fires, and the tool would
+         * otherwise stay pending forever (session 7ec700df5589 — 24h+).
+         */
+        const finishAfterKill = (annotation: string) => {
+          if (settled) return;
+          const stdout = stripAnsi(outChunks.join(""));
+          const stderr = stripAnsi(errChunks.join(""));
+          recordBashRun({
+            id: runId,
+            command,
+            stdout,
+            stderr,
+            exitCode: 128,
+            durationMs: Date.now() - startedAt,
+          });
+          const output = (stdout + (stderr ? `\nSTDERR: ${stderr}` : "")).trim();
+          finish({
+            success: false,
+            error: output ? `${output}\n${annotation}` : `${annotation} (no output)`,
+            bashRunId: runId,
+            bashTotalChars: stdout.length + stderr.length,
+          });
         };
 
         const child = spawn(binary, args, {
@@ -194,11 +270,12 @@ export class BashTool {
           chunks.push(s);
           if (bufferedLen > MAX_BUFFER) {
             maxBufferHit = true;
-            try {
-              child.kill("SIGKILL");
-            } catch {
-              /* already exited */
-            }
+            killProcessTree(child, "SIGKILL");
+            // Same `close`-never-fires hazard as the timeout/abort paths.
+            settleTimer = setTimeout(
+              () => finishAfterKill(`[output exceeded ${MAX_BUFFER} bytes; process killed]`),
+              POST_KILL_SETTLE_MS,
+            );
           }
         };
         child.stdout?.on("data", (d: Buffer) => capture(outChunks, d));
@@ -207,17 +284,15 @@ export class BashTool {
         if (timeout && timeout > 0) {
           timeoutTimer = setTimeout(() => {
             timedOut = true;
-            try {
-              child.kill("SIGTERM");
-            } catch {
-              /* already exited */
-            }
+            killProcessTree(child, "SIGTERM");
             forceKillTimer = setTimeout(() => {
-              try {
-                child.kill("SIGKILL");
-              } catch {
-                /* already exited */
-              }
+              killProcessTree(child, "SIGKILL");
+              // Do NOT depend on `close` to settle: if anything in the tree
+              // survived holding our stdio, it never fires.
+              settleTimer = setTimeout(
+                () => finishAfterKill(`[command timed out after ${timeout}ms and was killed]`),
+                POST_KILL_SETTLE_MS,
+              );
             }, 1_000);
           }, timeout);
         }
@@ -299,19 +374,12 @@ export class BashTool {
 
         const onAbort = () => {
           aborted = true;
-          try {
-            child.kill("SIGTERM");
-          } catch {
-            finish({ success: false, error: "[Cancelled]" });
-            return;
-          }
-
+          killProcessTree(child, "SIGTERM");
           forceKillTimer = setTimeout(() => {
-            try {
-              child.kill("SIGKILL");
-            } catch {
-              /* already exited */
-            }
+            killProcessTree(child, "SIGKILL");
+            // Same backstop as the timeout path — an abort must not be able to
+            // leave the turn waiting on a `close` that will never arrive.
+            settleTimer = setTimeout(() => finishAfterKill("[Cancelled]"), POST_KILL_SETTLE_MS);
           }, 1_000);
         };
 
