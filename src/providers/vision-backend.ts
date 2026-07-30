@@ -31,6 +31,13 @@ export type VisionTaskKind = "default" | "ocr" | "design";
 
 const REQUEST_TIMEOUT_MS = 90_000;
 
+/**
+ * Required `anthropic-version` header for the Messages API. Anthropic rejects a
+ * request without it, so the OpenAI-compatible header set this module uses for
+ * every other backend is not enough for an anthropic vision slot.
+ */
+const ANTHROPIC_VERSION = "2023-06-01";
+
 const DEFAULT_VISION_PROXY: CatalogVisionProxyRouting = {
   default: { provider: "zai", model_id: "glm-4.6v-flash" },
   ocr: { provider: "zai", model_id: "glm-4.6v-flash" },
@@ -301,7 +308,7 @@ export async function callVisionBackend(
     }
     const { apiKey, base } = transport;
 
-    const result = await callVisionModelAt(base, wireModelId(slot), content, apiKey, signal, responseFormat);
+    const result = await callVisionModelAt(base, wireModelId(slot), content, apiKey, signal, responseFormat, provider);
     if (result.ok && isBlindResponse(result.text)) {
       // A 200 whose body says "I cannot see the image" is a FAILURE, not an
       // observation. The OpenCode Go proxy does exactly this: it accepts the
@@ -371,6 +378,42 @@ function isBlindResponse(text: string): boolean {
 
 type VisionHttpResult = { ok: true; text: string; usage?: VisionUsage } | { ok: false; reason: string };
 
+/**
+ * Translate this module's OpenAI-shaped content parts into Anthropic Messages
+ * blocks.
+ *
+ * Anthropic is NOT OpenAI-compatible: images are
+ * `{type:"image", source:{type:"base64", media_type, data}}`, not
+ * `{type:"image_url", image_url:{url:"data:…"}}`. Without this the anthropic
+ * vision slot was dead config — it POSTed an OpenAI body with a Bearer header to
+ * `/chat/completions` and could only ever 404.
+ *
+ * Returns null when a part cannot be represented (e.g. a remote http(s) image
+ * URL — Anthropic's base64 source needs the bytes, and this module always has
+ * data URIs), so the caller can fail the slot instead of silently dropping the
+ * image and getting a confident answer about a picture nobody looked at.
+ */
+export function toAnthropicContentBlocks(
+  content: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> | null {
+  const blocks: Array<Record<string, unknown>> = [];
+  for (const part of content) {
+    if (part.type === "text") {
+      blocks.push({ type: "text", text: String(part.text ?? "") });
+      continue;
+    }
+    if (part.type === "image_url") {
+      const url = String((part.image_url as { url?: string } | undefined)?.url ?? "");
+      const m = /^data:([^;,]+);base64,(.+)$/s.exec(url);
+      if (!m) return null; // not a data URI → cannot build a base64 source
+      blocks.push({ type: "image", source: { type: "base64", media_type: m[1], data: m[2] } });
+      continue;
+    }
+    return null; // unknown part kind — do not silently drop it
+  }
+  return blocks;
+}
+
 async function callVisionModelAt(
   baseURL: string,
   model: string,
@@ -378,6 +421,7 @@ async function callVisionModelAt(
   apiKey: string,
   signal?: AbortSignal,
   responseFormat?: { type: "json_object" },
+  provider?: string,
 ): Promise<VisionHttpResult> {
   const controller = new AbortController();
   let timedOut = false;
@@ -389,22 +433,53 @@ async function callVisionModelAt(
     signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
-  const url = `${baseURL.replace(/\/$/, "")}/chat/completions`;
+  const isAnthropic = provider === "anthropic";
+  const root = baseURL.replace(/\/$/, "");
+  let url: string;
+  let headers: Record<string, string>;
+  let body: string;
+
+  if (isAnthropic) {
+    const blocks = toAnthropicContentBlocks(content);
+    if (!blocks) {
+      clearTimeout(timeout);
+      return { ok: false, reason: "content parts cannot be expressed as Anthropic image blocks" };
+    }
+    url = `${root}/messages`;
+    headers = {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": ANTHROPIC_VERSION,
+    };
+    // `response_format` has no Anthropic equivalent; the JSON contract is already
+    // stated in the prompt by wrapAnalyzerInstructions ("Output ONLY valid JSON").
+    body = JSON.stringify({
+      model,
+      max_tokens: 3072,
+      temperature: 0.1,
+      messages: [{ role: "user", content: blocks }],
+    });
+  } else {
+    url = `${root}/chat/completions`;
+    headers = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    };
+    body = JSON.stringify({
+      model,
+      messages: [{ role: "user", content }],
+      max_tokens: 3072,
+      temperature: 0.1,
+      ...(responseFormat ? { response_format: responseFormat } : {}),
+    });
+  }
+
   let res: Response;
   try {
     res = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: "user", content }],
-        max_tokens: 3072,
-        temperature: 0.1,
-        ...(responseFormat ? { response_format: responseFormat } : {}),
-      }),
+      headers,
+      body,
       signal: controller.signal,
     });
   } catch (err) {
@@ -422,8 +497,37 @@ async function callVisionModelAt(
 
   const data = (await res.json().catch(() => null)) as {
     choices?: Array<{ message?: { content?: string } }>;
-    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+      input_tokens?: number;
+      output_tokens?: number;
+    };
+    // Anthropic Messages shape.
+    content?: Array<{ type?: string; text?: string }>;
   } | null;
+
+  if (isAnthropic) {
+    // Anthropic returns a content BLOCK array, not choices[].message.content. A
+    // response can lead with a thinking block, so take the text blocks.
+    const text = (data?.content ?? [])
+      .filter((b) => b?.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .join("")
+      .trim();
+    if (!text) return { ok: false, reason: "empty response body" };
+    const au = data?.usage;
+    const usage: VisionUsage | undefined = au
+      ? {
+          inputTokens: au.input_tokens ?? 0,
+          outputTokens: au.output_tokens ?? 0,
+          totalTokens: (au.input_tokens ?? 0) + (au.output_tokens ?? 0),
+        }
+      : undefined;
+    return { ok: true, text, usage };
+  }
+
   const text = data?.choices?.[0]?.message?.content;
   if (!text) return { ok: false, reason: "empty response body" };
   // OpenAI-compatible usage block (H2). Absent on some backends → omit.

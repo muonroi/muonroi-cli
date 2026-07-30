@@ -18,7 +18,13 @@ export interface ProviderEndpoints {
 
 export const PROVIDER_ENDPOINTS: Record<ProviderId, ProviderEndpoints> = {
   anthropic: {
-    apiBase: "https://api.anthropic.com",
+    // `/v1` is REQUIRED: the Messages endpoint is `/v1/messages`, and
+    // `@ai-sdk/anthropic` defaults to `https://api.anthropic.com/v1`. Without it,
+    // any caller that actually threads this value (a user-set
+    // `providers.anthropic.baseURL`, or the vision-proxy slot resolver) builds
+    // `https://api.anthropic.com/messages` and 404s. Harmless only while every
+    // caller happens to leave baseURL undefined — not a property worth relying on.
+    apiBase: "https://api.anthropic.com/v1",
     consoleUrl: "https://console.anthropic.com/settings/keys",
   },
   openai: {
