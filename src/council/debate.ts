@@ -1038,6 +1038,10 @@ export async function* runDebate(
   // and the post-debate unmet-flag know what is still open. Empty before round 1
   // → the round-1 directive treats every criterion as unmet.
   let lastCriteriaMet: boolean[] = [];
+  // Index-aligned to spec.successCriteria: criteria the leader judged closable
+  // only AFTER the debate. Kept beside lastCriteriaMet so the escalation
+  // boundary, the round receipt and the post-debate card all read one source.
+  let lastCriteriaDeferred: boolean[] = [];
   // Latest per-criterion stance rows, refreshed after each leader evaluation.
   // Carried out of the loop so the closing synthesis can name who ended the run
   // still opposing (the conclusion card's Dissent section) — a converged verdict
@@ -1678,9 +1682,14 @@ export async function* runDebate(
       // assignment below overwrites it. This is the round receipt's delta base.
       const prevRoundMet = lastCriteriaMet.slice();
       const aligned = hasPinned ? alignCriteriaMet(spec.successCriteria, evaluation.criteriaStatus) : [];
-      // Count of pinned criteria still open this round — used by both auto-remedy
-      // and the interactive escalation boundaries below.
-      const pinnedUnmet = hasPinned ? aligned.filter((m) => !m).length : 0;
+      const alignedDeferred = hasPinned ? alignCriteriaDeferred(spec.successCriteria, evaluation.criteriaStatus) : [];
+      if (hasPinned) lastCriteriaDeferred = alignedDeferred;
+      // Count of pinned criteria still open this round AND still movable by more
+      // debate — used by both auto-remedy and the interactive escalation
+      // boundaries below. Criteria the leader marked `deferred` are excluded on
+      // purpose: they are closable only after the debate (code landed, tests run),
+      // so counting them here makes the run extend itself against a wall.
+      const pinnedUnmet = hasPinned ? aligned.filter((m, i) => !m && !alignedDeferred[i]).length : 0;
       if (hasPinned) {
         // Stance rows are built from the SAME evaluation that produced `aligned`,
         // so the rail's ✓/○ marks and its "who is on which side" sigils can never
@@ -1845,7 +1854,11 @@ export async function* runDebate(
           // stop-with-unmet the leader itself signalled.
           !evaluation.allCriteriaMet
         ) {
-          const openList = spec.successCriteria.filter((_, i) => !aligned[i]).map((c) => shortCriterion(c, 56));
+          // Deferred criteria are excluded from the open list too — offering to
+          // "extend N rounds to close them" is an offer the debate cannot honour.
+          const openList = spec.successCriteria
+            .filter((_, i) => !aligned[i] && !alignedDeferred[i])
+            .map((c) => shortCriterion(c, 56));
           const outcome = yield* escalateStop(roundsSinceProgress >= 2, pinnedUnmet, openList);
           if (outcome === "extend") {
             userExtendedThisRound = true;
@@ -1981,7 +1994,9 @@ export async function* runDebate(
         !escalated &&
         spec.successCriteria.length > 0
       ) {
-        const unmetIdx = spec.successCriteria.map((_, i) => i).filter((i) => lastCriteriaMet[i] !== true);
+        const unmetIdx = spec.successCriteria
+          .map((_, i) => i)
+          .filter((i) => lastCriteriaMet[i] !== true && lastCriteriaDeferred[i] !== true);
         if (unmetIdx.length > 0) {
           const openList = unmetIdx.map((i) => shortCriterion(spec.successCriteria[i], 56));
           yield* escalateStop(true, unmetIdx.length, openList);
@@ -2245,6 +2260,7 @@ export async function* runDebate(
     // post-debate card can frame an unmet outcome as provisional. Undefined when
     // no round eval ever produced a criteria status (card treats as all-unmet).
     finalCriteriaMet: lastCriteriaMet.length > 0 ? lastCriteriaMet : undefined,
+    finalCriteriaDeferred: lastCriteriaDeferred.length > 0 ? lastCriteriaDeferred : undefined,
     // S8 — run receipt inputs. The ledger is snapshotted (not the live object)
     // so a later mutation cannot rewrite what the card already reported.
     panelLedger: panelLedger.snapshot(),
@@ -2446,15 +2462,36 @@ export function extractEvalJson(raw: string): string | null {
  * a hallucinated "all met" never silently marks an untouched criterion done.
  */
 export function alignCriteriaMet(pinned: string[], status: Array<{ criterion?: string; met?: boolean }>): boolean[] {
+  return alignCriteriaField(pinned, status, (s) => s?.met === true);
+}
+
+/**
+ * Same projection as `alignCriteriaMet`, but for the leader's `deferred` flag —
+ * "this criterion is only closable after the debate (code landed / tests run)".
+ * Defaults to FALSE on any drift: mis-labelling a debatable criterion as deferred
+ * would silently retire it from the debate's goals, which is the worse failure.
+ */
+export function alignCriteriaDeferred(
+  pinned: string[],
+  status: Array<{ criterion?: string; deferred?: boolean }>,
+): boolean[] {
+  return alignCriteriaField(pinned, status, (s) => s?.deferred === true);
+}
+
+function alignCriteriaField<T extends { criterion?: string }>(
+  pinned: string[],
+  status: T[],
+  pick: (s: T | undefined) => boolean,
+): boolean[] {
   const aligned = status.length === pinned.length;
   return pinned.map((crit, i) => {
-    if (aligned) return status[i]?.met === true;
+    if (aligned) return pick(status[i]);
     const norm = crit.trim().toLowerCase();
     const hit = status.find((s) => {
       const sc = (s.criterion ?? "").trim().toLowerCase();
       return sc.length > 0 && (sc.includes(norm) || norm.includes(sc));
     });
-    return hit?.met === true;
+    return pick(hit);
   });
 }
 

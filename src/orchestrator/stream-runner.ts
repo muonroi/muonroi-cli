@@ -63,6 +63,7 @@ import { logInteraction } from "../storage/interaction-log.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import type { AgentMode, TaskRequest, ToolResult, VerifyRecipe } from "../types/index";
+import { logger } from "../utils/logger.js";
 import { openUrl } from "../utils/open-url.js";
 import {
   getCurrentShellSettings,
@@ -791,7 +792,7 @@ export class StreamRunner {
       ...resolveTemperatureParam(childRuntime, isExplore ? 0.2 : 0.5),
       ...(childDropMaxOutput ? {} : { maxOutputTokens: Math.min(this.deps.getMaxTokens(), 8_192) }),
       ...(childProviderOptions ? { providerOptions: childProviderOptions } : {}),
-      onStepFinish: ({ usage }) => {
+      onStepFinish: ({ usage, toolCalls, toolResults }) => {
         const idx = subStepIndex++;
         if (!stepMeterEnabled) return;
         const sid = this.deps.getSessionId();
@@ -805,8 +806,50 @@ export class StreamRunner {
             outputTokens: data.outputTokens,
             data: { ...data },
           });
-        } catch {
-          /* fail-open — instrumentation must never break a sub-agent step */
+          // WHAT the sub-agent actually did — previously invisible. Sub-agent
+          // steps wrote a token meter and nothing else, so the delegation that
+          // dominates a session's cost (72% of input tokens in session
+          // 811336618ee0) left no record of which files it read or which
+          // searches it ran. Same event types as the top-level tool loop, so
+          // existing forensics queries pick these up unchanged; `subAgent` +
+          // `callId` distinguish them from parent-turn rows.
+          for (const tc of toolCalls ?? []) {
+            const call = tc as { toolCallId?: string; toolName?: string; input?: unknown };
+            logInteraction(sid, "tool_call", {
+              eventSubtype: call.toolName ?? "unknown",
+              data: {
+                toolCallId: call.toolCallId,
+                argsPreview: JSON.stringify(call.input ?? {}).slice(0, 200),
+                subAgent: prepared.agentKey,
+                callId: subCallId,
+                stepIndex: idx,
+              },
+            });
+          }
+          for (const tr of toolResults ?? []) {
+            const res = tr as { toolCallId?: string; toolName?: string; output?: unknown };
+            const rendered = typeof res.output === "string" ? res.output : JSON.stringify(res.output ?? null);
+            logInteraction(sid, "tool_result", {
+              eventSubtype: res.toolName ?? "unknown",
+              data: {
+                toolCallId: res.toolCallId,
+                outputChars: rendered.length,
+                outputPreview: rendered.slice(0, 200),
+                subAgent: prepared.agentKey,
+                callId: subCallId,
+                stepIndex: idx,
+              },
+            });
+          }
+        } catch (err) {
+          // Fail-open — instrumentation must never break a sub-agent step — but
+          // never silent: a logging path that dies quietly is how this blind spot
+          // would come back after being fixed.
+          logger.error("orchestrator", "[subagent-step] interaction logging failed", {
+            agent: prepared.agentKey,
+            stepIndex: idx,
+            error: (err as Error)?.message,
+          });
         }
       },
       onFinish: ({ totalUsage, finishReason }) => {

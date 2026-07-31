@@ -637,6 +637,18 @@ export function createCouncilLLM(
           textHead: "",
           error: err instanceof Error ? err.message : String(err),
         });
+        // Always-on (writeDebugRecord above is opt-in): a council call that dies
+        // must name its model + provider + elapsed in debug.log. The bare
+        // "The operation timed out." in crash.log for session 811336618ee0 could
+        // not be tied to a model, a phase, or even to the council at all.
+        logger.error("orchestrator", "[council.generate] call failed", {
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          provider: providerId,
+          durationMs: Date.now() - t0,
+          aborted: signal?.aborted === true,
+          error: err instanceof Error ? err.message : String(err),
+        });
         throw err;
       }
     },
@@ -825,6 +837,14 @@ export function createCouncilLLM(
           ok: false,
           textChars: 0,
           textHead: "",
+          error: errMsg,
+        });
+        logger.error("orchestrator", "[council.debate] call failed — panelist turn degraded", {
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          provider: providerId,
+          durationMs: Date.now() - t0,
+          aborted: signal?.aborted === true,
           error: errMsg,
         });
         return { text: `[debate failed: ${errMsg}]`, toolCalls: [] };

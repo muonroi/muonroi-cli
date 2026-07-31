@@ -12,6 +12,22 @@ import type { ModelRole } from "../utils/settings.js";
  */
 export type IsolatedTaskRunner = (request: TaskRequest) => Promise<ToolResult>;
 
+/**
+ * Sentinel a UI sends back through `respondToQuestion` when the user DISMISSED a
+ * council askcard (Esc) rather than submitting it.
+ *
+ * The distinction is load-bearing on the post-debate card: an empty SUBMIT means
+ * "take the recommended option" (the card pre-selects one and labels it
+ * Recommended), while a dismiss means "do nothing". Both used to arrive as `""`,
+ * so honouring the default for an empty submit would silently have turned Esc
+ * into "run the recommended action" — a worse bug than the one being fixed.
+ *
+ * Mirrors ASK_USER_DISMISSED for the ask_user tool. Consumers that do not send
+ * it are unaffected: an unknown value still routes as a free-text follow-up and
+ * `""` still resolves to the default.
+ */
+export const COUNCIL_ANSWER_DISMISSED = "(the user dismissed the council card without answering)";
+
 // ── Clarification Phase ─────────────────────────────────────────────────────
 
 export interface CouncilQuestion {
@@ -99,6 +115,19 @@ export interface LeaderEvaluation {
     stances?: Record<string, StanceMark>;
     /** One-line reason the panel is split, present only on a contested criterion. */
     split?: string;
+    /**
+     * True when this criterion cannot be satisfied by DEBATING at all — it is
+     * only closable by work that happens after the debate (landing the code,
+     * running the tests, observing the changed behaviour). Set by the leader.
+     *
+     * Load-bearing: such a criterion must never drive "extend N more rounds".
+     * Session 811336618ee0 pinned "thực hiện được thay đổi cụ thể trong code"
+     * and "sau thay đổi … vẫn giữ hành vi" — 2 of 4 criteria a debate structurally
+     * cannot meet. The escalation card offered "Extend 2 more rounds", the user
+     * took it, two extra rounds ran (~6 min, ~$0.05) and the count stayed 2/4,
+     * because more debate can never close a criterion that requires a mutation.
+     */
+    deferred?: boolean;
   }>;
   unresolvedPoints: string[];
   needsResearch: boolean;
@@ -159,6 +188,14 @@ export interface DebateState {
    * ever produced a criteria status (treated as all-unmet by the card).
    */
   finalCriteriaMet?: boolean[];
+  /**
+   * Index-aligned to `spec.successCriteria`: true when the leader judged that
+   * criterion closable only AFTER the debate (it needs the code landed / tests
+   * run), so no number of rounds can move it. The post-debate card reports these
+   * as "deferred to implementation" instead of counting them as failures, and
+   * the escalation boundary never offers to extend for them.
+   */
+  finalCriteriaDeferred?: boolean[];
   /**
    * B4 interactive escalation outcome. Set only when the user was prompted at a
    * stop-with-unmet boundary and chose an action: `extend` granted extra rounds

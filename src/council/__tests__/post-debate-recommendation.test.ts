@@ -104,7 +104,7 @@ describe("summarizeCriteriaOutcome (F1)", () => {
 
   it("counts met/unmet index-aligned and flags inconclusive when any is open", () => {
     const out = summarizeCriteriaOutcome(crit, [true, false, true]);
-    expect(out).toEqual({ total: 3, metCount: 2, unmetLabels: ["B"], inconclusive: true });
+    expect(out).toEqual({ total: 3, metCount: 2, unmetLabels: ["B"], deferredLabels: [], inconclusive: true });
   });
 
   it("is conclusive only when every criterion is met", () => {
@@ -118,6 +118,7 @@ describe("summarizeCriteriaOutcome (F1)", () => {
       total: 3,
       metCount: 0,
       unmetLabels: ["A", "B", "C"],
+      deferredLabels: [],
       inconclusive: true,
     });
     expect(summarizeCriteriaOutcome(crit, [true]).unmetLabels).toEqual(["B", "C"]);
@@ -126,5 +127,34 @@ describe("summarizeCriteriaOutcome (F1)", () => {
   it("is never inconclusive when there are no pinned criteria", () => {
     expect(summarizeCriteriaOutcome([], undefined).inconclusive).toBe(false);
     expect(summarizeCriteriaOutcome([], []).inconclusive).toBe(false);
+  });
+
+  // A criterion the leader marked `deferred` is only closable AFTER the debate
+  // (code landed, tests run). Counting it as "unmet" is what made session
+  // 811336618ee0 read as a failed 2/4 run and sold two extra debate rounds that
+  // could not possibly move the number.
+  it("splits deferred criteria out of unmet and does not call the outcome inconclusive", () => {
+    const out = summarizeCriteriaOutcome(crit, [true, false, false], [false, true, true]);
+    expect(out.metCount).toBe(1);
+    expect(out.unmetLabels).toEqual([]);
+    expect(out.deferredLabels).toEqual(["B", "C"]);
+    expect(out.inconclusive).toBe(false);
+  });
+
+  it("stays inconclusive when a genuinely-open criterion sits beside a deferred one", () => {
+    const out = summarizeCriteriaOutcome(crit, [true, false, false], [false, false, true]);
+    expect(out.unmetLabels).toEqual(["B"]);
+    expect(out.deferredLabels).toEqual(["C"]);
+    expect(out.inconclusive).toBe(true);
+  });
+
+  it("never counts a MET criterion as deferred", () => {
+    // met wins: a leader that marks a satisfied criterion deferred must not make
+    // it vanish from metCount or reappear as outstanding work.
+    const out = summarizeCriteriaOutcome(crit, [true, true, true], [true, true, true]);
+    expect(out.metCount).toBe(3);
+    expect(out.deferredLabels).toEqual([]);
+    expect(out.unmetLabels).toEqual([]);
+    expect(out.inconclusive).toBe(false);
   });
 });

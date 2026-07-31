@@ -45,7 +45,7 @@ import type {
   PreflightResponder,
   QuestionResponder,
 } from "./types.js";
-import { coerceIntentKind, isImplementationKind } from "./types.js";
+import { COUNCIL_ANSWER_DISMISSED, coerceIntentKind, isImplementationKind } from "./types.js";
 
 /**
  * Wrap a CouncilLLM so every `generate` call inherits the council-wide abort
@@ -211,12 +211,27 @@ export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_f
 export function summarizeCriteriaOutcome(
   pinned: string[],
   metFlags: boolean[] | undefined,
-): { total: number; metCount: number; unmetLabels: string[]; inconclusive: boolean } {
+  deferredFlags?: boolean[],
+): {
+  total: number;
+  metCount: number;
+  unmetLabels: string[];
+  deferredLabels: string[];
+  inconclusive: boolean;
+} {
   const flags = metFlags ?? [];
+  const deferred = deferredFlags ?? [];
   const total = pinned.length;
   const metCount = pinned.filter((_, i) => flags[i] === true).length;
-  const unmetLabels = pinned.filter((_, i) => flags[i] !== true);
-  return { total, metCount, unmetLabels, inconclusive: total > 0 && unmetLabels.length > 0 };
+  // A criterion the leader deferred (only closable once the change is landed and
+  // exercised) is NOT an unmet debate goal — it is out of the debate's reach by
+  // construction. Splitting them out is what stops the card from framing a good
+  // outcome as "provisional" and stops the escalation from selling extra rounds
+  // that cannot move the number (session 811336618ee0: 2/4 before AND after two
+  // user-granted rounds, because both open criteria required a code mutation).
+  const deferredLabels = pinned.filter((_, i) => flags[i] !== true && deferred[i] === true);
+  const unmetLabels = pinned.filter((_, i) => flags[i] !== true && deferred[i] !== true);
+  return { total, metCount, unmetLabels, deferredLabels, inconclusive: total > 0 && unmetLabels.length > 0 };
 }
 
 export function pickPostDebateRecommendation(input: {
@@ -1100,7 +1115,11 @@ export async function* runCouncil(
       // leave every criterion open). When criteria remain unmet on a successful
       // synthesis the outcome is provisional, and the card must not recommend
       // committing (implement/plan/save) as if it were settled.
-      const critOutcome = summarizeCriteriaOutcome(spec.successCriteria ?? [], debateState.finalCriteriaMet);
+      const critOutcome = summarizeCriteriaOutcome(
+        spec.successCriteria ?? [],
+        debateState.finalCriteriaMet,
+        debateState.finalCriteriaDeferred,
+      );
       const inconclusive = !synthesisFailed && critOutcome.inconclusive;
 
       // Recommendation surfaced to the user as the default action. The
@@ -1366,9 +1385,16 @@ export async function* runCouncil(
           : "## Debate Synthesis Complete";
       // F1 — an explicit provisional-outcome line so the user sees the unmet bar
       // even if they skim past the recommendation.
+      // Deferred criteria get their own line: they are the debate's OUTPUT (a
+      // spec for work that happens next), not its shortfall. Reporting them under
+      // "unmet" is what made a sound 2/4 run read as a failed one.
+      const deferredLine =
+        critOutcome.deferredLabels.length > 0
+          ? `\n\n→ Deferred to implementation (a debate cannot close these — they need the change landed and exercised): ${critOutcome.deferredLabels.join("; ")}.`
+          : "";
       const outcomeLine = inconclusive
-        ? `\n\n⚠ Outcome: ${critOutcome.metCount}/${critOutcome.total} criteria met. Unmet: ${critOutcome.unmetLabels.join("; ")}. Treat the synthesis as provisional — not a settled decision.`
-        : "";
+        ? `\n\n⚠ Outcome: ${critOutcome.metCount}/${critOutcome.total} criteria met. Unmet: ${critOutcome.unmetLabels.join("; ")}. Treat the synthesis as provisional — not a settled decision.${deferredLine}`
+        : deferredLine;
       const recommendLine = `**Recommended:** ${baseOptions[defaultIndex]?.label ?? recommendation.value} — ${recommendReason}`;
       // B — the live per-round transcript is cleared from the view at turn end
       // (it renders as a bottom block decoupled from the timeline, so keeping it
@@ -1420,6 +1446,9 @@ export async function* runCouncil(
               (runReceipt ? `${runReceipt}\n` : "") +
               `${confidenceBadge}\n${confidenceReason}` +
               (inconclusive ? `\nUnmet criteria: ${critOutcome.unmetLabels.join("; ")}` : "") +
+              (critOutcome.deferredLabels.length > 0
+                ? `\nDeferred to implementation: ${critOutcome.deferredLabels.join("; ")}`
+                : "") +
               (hasEmptySections ? `\nUnresolved areas: ${refinementTopics.join(", ")}` : "") +
               `\n→ ${recommendation.reason}`,
             isRequired: false,
@@ -1428,6 +1457,26 @@ export async function* runCouncil(
           },
         } as StreamChunk;
         answer = await respondToQuestion(questionId);
+        if (answer === COUNCIL_ANSWER_DISMISSED) {
+          // Esc — the user closed the card. Take NO action (the pre-existing
+          // fall-through to persistence). Distinguishing this from an empty
+          // SUBMIT is why the sentinel exists.
+          answer = "";
+          idealTrace("council.postDebate.dismissed", { sessionId });
+        } else if (answer.trim().length === 0) {
+          // An EMPTY submit on a card that has a pre-selected recommendation means
+          // "take the default", not "do nothing". The UI reports a freetext option
+          // submitted with no typed text as `""` (session 811336618ee0 logged
+          // answerKind:"freetext", answerText:"" against selectedOptionLabel
+          // "Keep working the 2 unmet criteria"), and `""` matched no branch below,
+          // so the council persisted and exited — silently discarding the only
+          // instruction the user gave it. Resolve `""` to the default option's value.
+          const fallback = baseOptions[defaultIndex]?.value ?? "";
+          if (fallback) {
+            idealTrace("council.postDebate.emptyAnswerDefaulted", { sessionId, defaultIndex, fallback });
+            answer = fallback;
+          }
+        }
       }
       postDebateAction = answer;
       idealTrace("council.postDebate.answer", { sessionId, answer });
@@ -1458,6 +1507,23 @@ export async function* runCouncil(
         answer === "ask_followup" ||
         (typeof answer === "string" && answer.trim().length > 0 && !knownValues.has(answer));
 
+      // `ask_followup` is the VALUE of the pinned "Keep working the N unmet
+      // criteria" / "Raise confidence" / dissent options. It arrives when the
+      // user picks one of those without typing a question of their own. It used
+      // to reach no branch at all — `isFollowupText` was true but the follow-up
+      // branch below is guarded `&& answer !== "ask_followup"` — so the run fell
+      // straight through to the save_exit tail. Build the follow-up topic from
+      // what the card itself said was open, so picking the recommended option
+      // does what its label promises.
+      const followupTopic =
+        answer === "ask_followup"
+          ? critOutcome.unmetLabels.length > 0
+            ? `Close the unmet success criteria: ${critOutcome.unmetLabels.join("; ")}. For each, state what would satisfy it, cite the concrete evidence, and say plainly if it cannot be settled by discussion alone.`
+            : dissent
+              ? `Re-argue ${dissent.role}'s standing objection to "${dissent.criterion}"${dissent.split ? `: ${dissent.split}` : ""}. Either resolve it against the evidence or record it as an accepted trade-off.`
+              : "Raise confidence in this outcome: name the load-bearing claims, back each against the codebase or sources, and mark any that could not be grounded."
+          : "";
+
       if (answer === "retry_synthesis") {
         yield { type: "content", content: "\n> Retrying synthesis with compact prompt (final positions only)…\n" };
         const refineGen = runPlanning(
@@ -1479,10 +1545,14 @@ export async function* runCouncil(
         outcome = refineResult.value.outcome;
         plan = refineResult.value.plan;
         synthesisText = refineResult.value.synthesisText;
-      } else if (isFollowupText && answer !== "ask_followup") {
-        // Re-synthesize with the follow-up framed as user input.
+      } else if (isFollowupText) {
+        // Re-synthesize with the follow-up framed as user input. `answer` carries
+        // the user's own text when they typed one; when they picked the pinned
+        // option instead (`answer === "ask_followup"`) we use the topic derived
+        // above from the still-open criteria / recorded dissent.
+        const followupQuestion = answer === "ask_followup" ? followupTopic : answer;
         yield { type: "content", content: `\n> Council answering follow-up using prior debate context...\n` };
-        const followupCtx = `### Follow-up question from user\n${answer}\n\n_Use the debate exchanges above and cite the role(s) whose position you draw from._`;
+        const followupCtx = `### Follow-up question from user\n${followupQuestion}\n\n_Use the debate exchanges above and cite the role(s) whose position you draw from._`;
         const refineGen = runPlanning(
           debateState,
           spec,
