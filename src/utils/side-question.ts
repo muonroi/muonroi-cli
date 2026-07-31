@@ -1,4 +1,4 @@
-import { resolveModelRuntime } from "../providers/runtime.js";
+import { resolveModelRuntime, shouldDropParam } from "../providers/runtime.js";
 import { generateTextStreamed } from "../providers/streamed-generate.js";
 
 export interface SideQuestionResult {
@@ -25,7 +25,10 @@ export async function runSideQuestion(
   const { text, usage } = await generateTextStreamed({
     model: runtime.model,
     abortSignal: signal,
-    ...(runtime.modelInfo?.supportsMaxOutputTokens === false ? {} : { maxOutputTokens: 2048 }),
+    // `shouldDropParam`, not the raw catalog flag: it mirrors
+    // `supportsMaxOutputTokens` AND honours the OAuth registry's
+    // `unsupportedParams`, which the flag alone cannot see.
+    ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 2048 }),
     ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     system,
     prompt: question,

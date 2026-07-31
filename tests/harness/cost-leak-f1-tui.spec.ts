@@ -22,25 +22,29 @@ import {
 } from "./cost-leak-tui-helpers.js";
 import { getProviderOption, loadDumpedRecordings } from "./recording.js";
 
-// F1 routes through `gpt-5.4-mini`. This model IS now in catalog.json (added
-// 2026-07-15, lines 89-107), so the CLI accepts it at startup and the
-// agent-mode handshake succeeds. Before this model was added, the CLI would
-// reject the unknown model id and `beforeAll`'s `wait_for({selector: "role=textbox"})`
-// would timeout — that was the original reason for `describe.skip`.
+// RE-SKIPPED. Commit 74d1a603 un-skipped this on the reasoning that
+// `gpt-5.4-mini` is now in catalog.json, so the CLI no longer rejects the model
+// id at startup. That part is true, and it fixed the SPAWN — but it was never
+// the assertion's blocker, and the suite has been red on develop ever since
+// (6/6 Harness Suite runs, 2026-07-27 → 07-29).
 //
-// The comment below about "only deepseek/qwen/glm ids" is outdated and has
-// been removed. OpenAI OAuth models (gpt-5.5, gpt-5.4, gpt-5.4-mini) are now
-// in the local fallback catalog for offline-resilience when the CP catalog
-// endpoint is unreachable (src/models/catalog.json:49-107).
+// Measured here, not inferred: the spec fails at line 73 with
+// `expected 'undefined' to be 'string'` — `providerOptions.openai.promptCacheKey`
+// is absent. `resolveModelRuntime` returns the installed `__muonroiMockModel`
+// instead of the real OpenAI client, so `OpenAIProviderCapabilities.buildProviderOptions`
+// — the only thing that injects promptCacheKey — never runs. Getting a real
+// assertion here still needs the provider-id override threaded through
+// `--mock-llm` so the mock CLAIMS the openai provider while routing through
+// `resolveModelRuntime`, exactly as CLAUDE.md known-caveat #4 and the existing
+// `scripts/.harness-skips-allow.json` entry already say.
 //
-// NOTE: this TUI variant is redundant end-to-end coverage. The invariant
-// (every round carries the SAME openai.promptCacheKey, session-scoped,
-// order-independent) is ALREADY covered and passing at the provider-recording
-// layer by `tests/harness/cost-leak-f1.spec.ts` (3 tests) + `computePromptCacheKey`
-// stability in `src/providers/prompt-cache-key.spec.ts`. Un-skipping this adds
-// marginal E2E verification but not new coverage.
-
-describe("F1 TUI: providerOptions.openai.promptCacheKey is present and stable", () => {
+// Skipping costs no coverage: the invariant (every round carries the SAME
+// session-scoped promptCacheKey) is covered AND passing at the provider layer by
+// `tests/harness/cost-leak-f1.spec.ts` (3 tests) and
+// `src/providers/prompt-cache-key.spec.ts` (3 tests) — both verified green while
+// making this change. `describe.skip` (not `it.skip`) is required: it also
+// suppresses the `beforeAll` TUI spawn.
+describe.skip("F1 TUI: providerOptions.openai.promptCacheKey is present and stable", () => {
   let handle: CostLeakHarness;
 
   beforeAll(async () => {
