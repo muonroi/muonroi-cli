@@ -1327,7 +1327,18 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 directAnswer: gsdDirectAnswer,
               });
               if (gate.blocked) {
-                return { success: false, output: gate.reason, error: gate.reason };
+                // Return the SAME shape the wrapped tool returns — a string. The
+                // guarded tools (write_file/edit_file/bash/…) all resolve to a
+                // string via formatResult, and the AI SDK feeds `execute`'s return
+                // value straight back as the tool-result the model reads. Returning
+                // a `{success,output,error}` object here made that value serialize
+                // to EMPTY: the gate still prevented the write (verified: target
+                // file absent), but the model was told nothing, so it could not act
+                // on "call gsd_status → gsd_discuss → gsd_plan → gsd_plan_review"
+                // and just saw a blank result. Measured in gsd-hard-gate: round 2's
+                // tool-result value was "\n\n[step 1 mirror] …" — only the
+                // convergence-mirror note appended to an empty string.
+                return gate.reason;
               }
               return await writeMutex.run(() => originalExecute(input, context));
             } finally {

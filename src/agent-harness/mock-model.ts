@@ -100,6 +100,40 @@ export interface MockModelFixture {
 const CLASSIFY_SIGNATURE = "Reply with ONE line of EIGHT lowercase words";
 
 /**
+ * Other ANCILLARY model calls a normal turn makes besides the agent round.
+ *
+ * These fire on their own schedule and are not what any E2E fixture is scripting,
+ * but they are still `doStream` calls — so without an intercept each one EATS a
+ * fixture round and the agent receives someone else's chunks. Measured in
+ * gsd-hard-gate: the recorded calls were
+ *   [0] session-naming  [1] classify  [2] compaction-proposer  [3] AGENT
+ * so the title call consumed the `write_file` tool-call round and the agent got a
+ * text-stop round instead — it never emitted the tool call, so the tool result and
+ * the follow-up round never happened and `agentCalls.length` stuck at 1. The same
+ * starvation is why bash-output-get and scope-adherence saw too few agent rounds.
+ *
+ * Each entry answers with a harmless canned line and, like the classifier above,
+ * does NOT advance the fixture cursor. Keep the signatures in sync with the
+ * prompts they name; a stale signature silently reintroduces the round theft.
+ */
+const ANCILLARY_SIGNATURES: ReadonlyArray<{ label: string; signature: string; reply: string }> = [
+  {
+    label: "title",
+    // src/orchestrator/orchestrator.ts TITLE_SYSTEM_PROMPT
+    signature: "You are a session-naming assistant",
+    reply: "Mock session",
+  },
+  {
+    label: "compaction-proposer",
+    // src/orchestrator/compaction-proposer-prompt.ts COMPACT_PROPOSER_SYSTEM_PROMPT
+    signature: "You are a conversation-compaction proposer",
+    // "do not compact" — keeps the transcript intact so specs assert on the real
+    // prompt rather than a summary of it.
+    reply: "NO_COMPACTION_NEEDED",
+  },
+];
+
+/**
  * Safe default classification: a non-chitchat coding task of standard depth.
  * `intent=task` keeps the toolset + gsd gate active; `standard` depth avoids
  * forcing heavy-only paths. First word MUST be a valid taskType.
@@ -186,6 +220,25 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
             chunkDelayInMs: null,
           }),
         };
+      }
+      // Ancillary calls (title, compaction proposer) — same contract as the
+      // classifier above: canned reply, cursor NOT advanced, so the fixture's
+      // rounds always reach the agent in the order the spec wrote them.
+      if (interceptClassify) {
+        const sys = systemPromptText(options);
+        const ancillary = ANCILLARY_SIGNATURES.find((a) => sys.includes(a.signature));
+        if (ancillary) {
+          if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
+            process.stderr.write(`[mock-model] doStream ${ancillary.label} → "${ancillary.reply}" (cursor held)\n`);
+          }
+          return {
+            stream: simulateReadableStream<LanguageModelV3StreamPart>({
+              chunks: textOnlyStream(ancillary.reply),
+              initialDelayInMs: null,
+              chunkDelayInMs: null,
+            }),
+          };
+        }
       }
       const chunks = streams[Math.min(callIdx, streams.length - 1)]!;
       callIdx += 1;
