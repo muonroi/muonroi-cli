@@ -314,3 +314,92 @@ describe("blind-backend + wire model id", () => {
     expect(result.ok).toBe(true);
   });
 });
+
+// The catalog gained an anthropic vision slot (routing.vision_proxy.fallback_chain
+// -> {provider: anthropic, model_id: claude-sonnet-5}), but this module speaks
+// ONLY the OpenAI shape: it POSTed `${base}/chat/completions` with
+// `Authorization: Bearer` and an `image_url` body. Against Anthropic that is the
+// wrong URL, the wrong auth header and the wrong body — the slot could only ever
+// 404, so it was dead config. These tests pin the Anthropic Messages translation.
+describe("callVisionBackend — anthropic slot speaks the Messages API", () => {
+  const PNG_B64 = "iVBORw0KGgoAAAANSUhEUg==";
+  const content = [
+    { type: "text", text: "describe this" },
+    { type: "image_url", image_url: { url: `data:image/png;base64,${PNG_B64}`, detail: "high" } },
+  ];
+
+  function captureAnthropic(responseBody: unknown): { calls: Array<{ url: string; init: RequestInit }> } {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ url, init });
+        return { ok: true, status: 200, json: async () => responseBody } as unknown as Response;
+      }),
+    );
+    return { calls };
+  }
+
+  it("POSTs /v1/messages with x-api-key + anthropic-version and base64 image blocks", async () => {
+    const { calls } = captureAnthropic({
+      content: [{ type: "text", text: "I see a login form." }],
+      usage: { input_tokens: 1500, output_tokens: 120 },
+    });
+
+    const result = await callVisionBackend([{ provider: "anthropic", model_id: "claude-sonnet-5" }], content);
+
+    expect(result.ok).toBe(true);
+    expect(result.ok === true && result.text).toBe("I see a login form.");
+    expect(calls).toHaveLength(1);
+    const { url, init } = calls[0];
+    // apiBaseFor("anthropic") already ends in /v1, so the path must be /v1/messages.
+    expect(url).toBe("https://api.anthropic.com/v1/messages");
+    const headers = init.headers as Record<string, string>;
+    expect(headers["x-api-key"]).toBe("sk-test");
+    expect(headers["anthropic-version"]).toBe("2023-06-01");
+    expect(headers.Authorization).toBeUndefined(); // Bearer is an OpenAI-ism
+
+    const body = JSON.parse(String(init.body));
+    expect(body.model).toBe("claude-sonnet-5");
+    expect(body.max_tokens).toBeGreaterThan(0); // Anthropic REQUIRES max_tokens
+    expect(body.messages[0].content).toEqual([
+      { type: "text", text: "describe this" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: PNG_B64 } },
+    ]);
+    // No OpenAI leftovers.
+    expect(JSON.stringify(body)).not.toContain("image_url");
+    expect(JSON.stringify(body)).not.toContain("response_format");
+  });
+
+  it("joins multiple text blocks and skips non-text blocks in the reply", async () => {
+    captureAnthropic({
+      content: [
+        { type: "thinking", thinking: "internal" },
+        { type: "text", text: "A dark header " },
+        { type: "text", text: "above a 3-column grid." },
+      ],
+    });
+    const result = await callVisionBackend([{ provider: "anthropic", model_id: "claude-sonnet-5" }], content);
+    expect(result.ok === true && result.text).toBe("A dark header above a 3-column grid.");
+  });
+
+  it("fails the slot instead of silently dropping a non-data-URI image", async () => {
+    // Anthropic's base64 source needs the bytes; a remote URL cannot be expressed.
+    // Dropping it would yield a confident answer about an image nobody looked at.
+    captureAnthropic({ content: [{ type: "text", text: "should never be reached" }] });
+    const result = await callVisionBackend(
+      [{ provider: "anthropic", model_id: "claude-sonnet-5" }],
+      [{ type: "image_url", image_url: { url: "https://example.com/a.png" } }],
+    );
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toContain("Anthropic image blocks");
+  });
+
+  it("leaves the OpenAI-shaped backends untouched", async () => {
+    const { calls } = captureAnthropic({ choices: [{ message: { content: "I see a chart." } }] });
+    const result = await callVisionBackend([{ provider: "zai", model_id: "glm-4.6v-flash" }], content);
+    expect(result.ok === true && result.text).toBe("I see a chart.");
+    expect(calls[0].url).toContain("/chat/completions");
+    expect((calls[0].init.headers as Record<string, string>).Authorization).toBe("Bearer sk-test");
+  });
+});

@@ -207,9 +207,14 @@ def test_real_catalog_provider_policies_peak_hour():
     assert ds.peak_hour.windows[1].start_hour == 14
     assert ds.peak_hour.windows[1].end_hour == 18
     assert cat.routing is not None
-    assert cat.routing.switch_provider_order == ["deepseek", "zai", "opencode-go", "xai"]
+    assert cat.routing.switch_provider_order == ["deepseek", "zai", "opencode-go", "xai", "anthropic"]
     assert cat.routing.council is not None
     assert cat.routing.council.prefer_multi_provider is True
+    # Three participants, one per allowed role. The catalog schema's role enum is
+    # exactly {implement, verify, research} (src/models/catalog-client.ts), so a
+    # fourth "leader" slot is not representable — it made loadCatalog() reject the
+    # whole document, leaving MODELS empty. anthropic is reachable through
+    # models[] + provider_policies, not through a council participant slot.
     assert len(cat.routing.council.participants or []) == 3
     roles = {p.role for p in (cat.routing.council.participants or [])}
     assert roles == {"implement", "verify", "research"}
@@ -238,7 +243,10 @@ def test_list_models_includes_provider_policies(client: TestClient, monkeypatch,
                 "input_price_per_million": 0.1,
                 "output_price_per_million": 0.2,
                 "reasoning": False,
+                "fixed_temperature": 1,
                 "description": "fast one",
+                "native_web_research": True,
+                "web_research_kind": "web-search",
             },
         ],
         "routing": {"switch_provider_order": ["acme", "globex"]},
@@ -265,6 +273,9 @@ def test_list_models_includes_provider_policies(client: TestClient, monkeypatch,
     body = r.json()
     assert body["routing"]["switch_provider_order"] == ["acme", "globex"]
     assert body["provider_policies"]["acme"]["peak_hour"]["start_hour"] == 14
+    assert body["models"][0]["fixed_temperature"] == 1
+    assert body["models"][0]["native_web_research"] is True
+    assert body["models"][0]["web_research_kind"] == "web-search"
 
 
 def test_real_catalog_zai_flash_excluded_from_tier_routing(monkeypatch):

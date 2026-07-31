@@ -12,7 +12,6 @@
 // transposition where the field/method originally lived on Agent.
 
 import { type ModelMessage, stepCountIs } from "ai";
-import { generateTextStreamed } from "../providers/streamed-generate.js";
 import { getModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {
@@ -22,6 +21,7 @@ import {
   resolveTemperatureParam,
   shouldDropParam,
 } from "../providers/runtime.js";
+import { generateTextStreamed } from "../providers/streamed-generate.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
 import { getRoutedModelByTier } from "../router/peak-hour.js";
 import { appendSystemMessage } from "../storage/index.js";
@@ -31,6 +31,7 @@ import type { AgentMode, StreamChunk } from "../types/index";
 import { isProviderDisabled, type ModelRole } from "../utils/settings";
 import { COUNCIL_COLOR_BG, COUNCIL_COLOR_RESET, COUNCIL_ROLE_COLORS, type CouncilOutcome } from "./agent-options";
 import { extractUserContent, getCompactionSummaryText, isCompactionSummaryMessage } from "./compaction";
+import { beginInteractivePause, endInteractivePause } from "./interactive-pause.js";
 
 /**
  * Dependency callbacks the CouncilManager needs to reach back into Agent state
@@ -76,6 +77,8 @@ export class CouncilManager {
   private _preflightResolvers = new Map<string, (approved: boolean) => void>();
   private _bufferedQuestionAnswers = new Map<string, string>();
   private _bufferedPreflightApprovals = new Map<string, boolean>();
+  /** One-shot watchdog-pause releasers for cards currently awaiting a human. */
+  private _pauseReleasers = new Set<() => void>();
   /** Council telemetry — counts API calls and tracks debate start time. */
   public stats: { calls: number; startMs: number } = { calls: 0, startMs: 0 };
 
@@ -164,7 +167,19 @@ export class CouncilManager {
             `[responder] register-resolver: ${JSON.stringify({ questionId, totalResolvers: this._questionResolvers.size + 1 })}\n`,
           );
         }
-        this._questionResolvers.set(questionId, resolve);
+        // A parked card blocks the turn on a HUMAN, and no chunks flow while
+        // they read it — so both watchdogs must be held open (see
+        // interactive-pause.ts). Without this the 120s turn-idle watchdog counts
+        // reading time as "no output" and kills a turn that is not hung: session
+        // d22397a9e47d had askcard_open 10:24:19.284 → error/watchdog
+        // 10:26:19.275 = 119.991s, discarding ~20.5 min of council work because
+        // the killed turn never reached appendMessages. Only the `ask_user` TOOL
+        // path was bracketed; every council card was not.
+        const release = this.holdWatchdogOpen();
+        this._questionResolvers.set(questionId, (answer) => {
+          release();
+          resolve(answer);
+        });
       });
   }
 
@@ -177,8 +192,43 @@ export class CouncilManager {
           resolve(buffered);
           return;
         }
-        this._preflightResolvers.set(preflightId, resolve);
+        // Same human-wait bracket as createQuestionResponder above.
+        const release = this.holdWatchdogOpen();
+        this._preflightResolvers.set(preflightId, (approved) => {
+          release();
+          resolve(approved);
+        });
       });
+  }
+
+  /**
+   * Bracket a blocking human wait: suppress both watchdogs now, and hand back a
+   * one-shot releaser. Registered in {@link _pauseReleasers} so an ABANDONED
+   * card (turn aborted, generator unwound by the watchdog) can still be released
+   * by {@link releasePendingWaits} — an abandoned card never resolves, and a
+   * leaked pauseDepth would suppress the turn watchdog for the whole process.
+   */
+  private holdWatchdogOpen(): () => void {
+    beginInteractivePause();
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      this._pauseReleasers.delete(release);
+      endInteractivePause();
+    };
+    this._pauseReleasers.add(release);
+    return release;
+  }
+
+  /**
+   * Release every outstanding human-wait pause. Call from the council run's
+   * `finally` so a turn that was aborted mid-card cannot leave the watchdog
+   * permanently suppressed. Idempotent.
+   */
+  releasePendingWaits(): void {
+    for (const release of [...this._pauseReleasers]) release();
+    this._pauseReleasers.clear();
   }
 
   // ---- Council sub-call helpers ----

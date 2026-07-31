@@ -132,6 +132,7 @@ import {
   markToolCallErrored,
   persistMessageWriteAhead,
   persistToolCallWriteAhead,
+  persistToolResultWriteAhead,
   type SessionStore,
 } from "../storage/index.js";
 import { persistSessionExperience } from "../storage/session-experience-store.js";
@@ -2913,6 +2914,19 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 }
               } catch {
                 /* fail-open */
+              }
+              // Durably record the finished call NOW, not at turn end. If the
+              // turn is aborted later (idle watchdog on a wedged tool), the
+              // end-of-turn appendMessages never runs and every result already
+              // produced would be lost — session 7ec700df5589 ended with 9
+              // tool_calls stuck 'pending' and 0 tool_results despite 8 recorded
+              // successes. appendMessages stays authoritative and overwrites this.
+              if (deps.sessionStore && deps.session) {
+                persistToolResultWriteAhead(deps.session.id, part.toolCallId, {
+                  success: tr.success,
+                  output: tr.output,
+                  error: tr.error,
+                });
               }
               yield { type: "tool_result", toolCall: tc, toolResult: tr };
               // Reset tool-repetition counter on any non-error result. A

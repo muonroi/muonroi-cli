@@ -349,6 +349,11 @@ export function appendMessages(sessionId: string, messages: ModelMessage[]): num
       INSERT INTO tool_results (tool_call_row_id, output_kind, output_json, success, created_at)
       VALUES (?, ?, ?, ?, ?)
     `);
+    // This path is AUTHORITATIVE over persistToolResultWriteAhead's row: it has
+    // the final payload. Clear first so a write-ahead + a final do not both land
+    // (loadStoredToolResults would keep only the last anyway, but forensics and
+    // row counts must not silently double).
+    const deleteToolResults = db.prepare(`DELETE FROM tool_results WHERE tool_call_row_id = ?`);
     const updateSession = db.prepare(`
       UPDATE sessions
       SET updated_at = ?
@@ -397,6 +402,7 @@ export function appendMessages(sessionId: string, messages: ModelMessage[]): num
           if (!toolCall) continue;
 
           const extracted = extractToolResultFromOutput(part.output);
+          deleteToolResults.run(toolCall.id);
           insertToolResult.run(
             toolCall.id,
             getOutputKind(part.output),
@@ -635,6 +641,59 @@ export function sweepStalePendingRows(staleAfterMs = 5 * 60 * 1000): { toolCalls
   } catch (err) {
     console.error(`[transcript] sweepStalePendingRows failed: ${(err as Error)?.message}`);
     return { toolCalls: 0, messages: 0 };
+  }
+}
+
+/**
+ * Write-ahead persistence for a FINISHED tool call — the missing half of
+ * {@link persistToolCallWriteAhead}.
+ *
+ * `tool_calls.status='completed'` and every `tool_results` row used to be written
+ * only by {@link appendMessages} at turn end. A turn killed before that point
+ * (the turn-idle watchdog aborting a wedged tool, session 7ec700df5589) lost the
+ * durable record of work that had ALREADY SUCCEEDED: 9 `tool_calls` left
+ * `pending`, 0 `tool_results`, and nothing for sub-session absorption to find
+ * ("No assistant messages found to absorb"), discarding ~20.5 min of council work.
+ *
+ * Called as each tool result lands, so the trail survives an aborted turn. The
+ * end-of-turn `appendMessages(...)` remains AUTHORITATIVE — it deletes and
+ * rewrites the row with the final payload — so this never double-writes.
+ *
+ * Fail-open: this sits in the orchestrator hot path and must never throw.
+ */
+export function persistToolResultWriteAhead(
+  sessionId: string,
+  toolCallId: string,
+  result: { success: boolean; output?: string; error?: string },
+): void {
+  const now = new Date().toISOString();
+  try {
+    const db = getDatabase();
+    const row = db
+      .prepare("SELECT id FROM tool_calls WHERE session_id = ? AND tool_call_id = ?")
+      .get(sessionId, toolCallId) as { id: number } | undefined;
+    if (!row) {
+      // The call write-ahead did not run (or the session/id is wrong). Nothing to
+      // hang a result off — log so a broken wiring is diagnosable, don't throw.
+      logger.error("storage", "[transcript] persistToolResultWriteAhead: no tool_calls row", {
+        sessionId,
+        toolCallId,
+      });
+      return;
+    }
+    db.prepare("UPDATE tool_calls SET status = 'completed', completed_at = ? WHERE id = ?").run(now, row.id);
+    // Idempotent: one result per call (loadStoredToolResults keys by
+    // tool_call_id, so a second row would just shadow the first).
+    db.prepare("DELETE FROM tool_results WHERE tool_call_row_id = ?").run(row.id);
+    db.prepare(`
+        INSERT INTO tool_results (tool_call_row_id, output_kind, output_json, success, created_at)
+        VALUES (?, 'text', ?, ?, ?)
+      `).run(row.id, JSON.stringify(result), Number(result.success), now);
+  } catch (err) {
+    logger.error("storage", `[transcript] persistToolResultWriteAhead failed: ${(err as Error).message}`, {
+      sessionId,
+      toolCallId,
+    });
   }
 }
 

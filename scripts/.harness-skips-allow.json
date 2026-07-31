@@ -1,9 +1,9 @@
 [
   {
     "path": "tests/harness/cost-leak-f1-tui.spec.ts",
-    "line": 34,
-    "reason": "openai.promptCacheKey branch not exercised under deepseek model (describe.skip)",
-    "issue": "src/agent-harness/mock-llm.ts needs provider-id override threaded through --mock-llm"
+    "line": 47,
+    "reason": "promptCacheKey never injected: resolveModelRuntime returns the installed __muonroiMockModel, so OpenAIProviderCapabilities.buildProviderOptions never runs (describe.skip also suppresses the beforeAll TUI spawn)",
+    "issue": "src/agent-harness/mock-llm.ts needs a provider-id override threaded through --mock-llm so the mock claims the openai provider; invariant already covered by tests/harness/cost-leak-f1.spec.ts + src/providers/prompt-cache-key.spec.ts"
   },
   {
     "path": "tests/harness/scroll.spec.ts",

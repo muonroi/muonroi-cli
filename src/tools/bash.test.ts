@@ -133,3 +133,68 @@ describe("BashTool exit-code reporting", () => {
     expect(r.error ?? "").toMatch(/\[exit code 1\]/);
   });
 });
+
+// Regression — session 7ec700df5589 (2026-07-29). `git status --short; bun test
+// src/providers --runInBand; bun run typecheck` (timeout 120000) NEVER returned:
+// the promise settles only from child.on("close"), and `close` waits for the
+// inherited stdio handles to close. A grandchild that outlives the shell keeps
+// them open, so the timeout handler killed nothing useful and `finish()` stayed
+// unreachable. Proven live: the bash.exe + bun.exe tree was STILL RUNNING 24h
+// later, having burned 59,244s (16.5h) of CPU, and had to be reaped by hand with
+// `taskkill /F /T`. Downstream that hung tool wedged the turn until the idle
+// watchdog killed it, which discarded the whole turn's history.
+describe("BashTool timeout must settle and reap the process tree", () => {
+  const bash = new BashTool(process.cwd(), { shellSettings: { kind: "bash" } });
+  const posix = bash.getResolvedShell().isPosix;
+
+  // The grandchild must outlive the whole test, otherwise "it stopped ticking"
+  // is satisfied by it simply finishing and the tree-kill assertion is a false
+  // green. The self-destruct only exists so a REGRESSION cannot leave an immortal
+  // process behind — it is far beyond every window asserted below.
+  const HOLD_MS = 60_000;
+
+  /** A grandchild that outlives the shell and holds the inherited stdio open. */
+  function outlivingGrandchild(dir: string): { cmd: string; tick: string } {
+    const tick = path.join(dir, "tick.txt");
+    const script = path.join(dir, "hold.js");
+    fs.writeFileSync(
+      script,
+      `const fs=require("fs");` +
+        `setInterval(()=>{fs.appendFileSync(${JSON.stringify(tick)},"x");},100);` +
+        `setTimeout(()=>process.exit(0),${HOLD_MS});`,
+    );
+    // `&` detaches it from the shell's foreground job; `sleep` keeps the shell
+    // itself alive so the timeout path is the one that fires.
+    return { cmd: `node ${JSON.stringify(script)} & sleep ${HOLD_MS / 1000}`, tick };
+  }
+
+  it("resolves at the timeout instead of hanging forever on a held-open pipe", async () => {
+    if (!posix) return;
+    const dir = makeTempDir("muonroi-bash-hang-");
+    const { cmd } = outlivingGrandchild(dir);
+    const startedAt = Date.now();
+    const r = await bash.execute(cmd, 1_500);
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(r.success).toBe(false);
+    expect(r.error ?? "").toMatch(/timed out after 1500ms/);
+    // Pre-fix this waited for the grandchild instead of the timeout (measured
+    // 22,469ms against a 20s holder; production held for 24h+). Generous slack
+    // for the SIGKILL escalation + tree kill, but nowhere near HOLD_MS.
+    expect(elapsedMs).toBeLessThan(10_000);
+  }, 25_000);
+
+  it("kills the whole tree so the grandchild cannot keep running", async () => {
+    if (!posix) return;
+    const dir = makeTempDir("muonroi-bash-tree-");
+    const { cmd, tick } = outlivingGrandchild(dir);
+    await bash.execute(cmd, 1_500);
+
+    const sizeOf = (): number => (fs.existsSync(tick) ? fs.statSync(tick).size : 0);
+    // It must have been ticking during the run — otherwise this asserts nothing.
+    expect(sizeOf()).toBeGreaterThan(0);
+    const settled = sizeOf();
+    await new Promise((r) => setTimeout(r, 2_000)); // ~20 ticks' worth of time
+    expect(sizeOf()).toBe(settled); // stopped ticking => reaped, not orphaned
+  }, 25_000);
+});

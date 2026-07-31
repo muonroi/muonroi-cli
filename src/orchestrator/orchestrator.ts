@@ -272,7 +272,13 @@ async function genTitle(
       system: TITLE_SYSTEM_PROMPT,
       prompt: `User's first message:\n\n${snippet}\n\nTitle:`,
       ...resolveTemperatureParam(runtime, 0.3),
-      ...(runtime.modelInfo?.supportsMaxOutputTokens === false ? {} : { maxOutputTokens: 64 }),
+      // `shouldDropParam` — NOT the raw catalog flag. It already mirrors
+      // `supportsMaxOutputTokens`, and additionally honours the OAuth registry's
+      // `unsupportedParams`, which the flag alone cannot see. Gating on the flag
+      // meant a title call still sent `maxOutputTokens` to a codex/OAuth endpoint
+      // that rejects it — a 400 swallowed by the catch below into a fallback
+      // title. Same bypass class as the council max_output_tokens 400.
+      ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 64 }),
       ...(titleProviderOptions ? { providerOptions: titleProviderOptions } : {}),
     });
 
@@ -2401,6 +2407,11 @@ export class Agent {
         yield { type: "done" };
       }
     } finally {
+      // A card abandoned mid-debate (turn aborted, or this generator unwound by
+      // the turn watchdog's it.return()) never resolves, so its
+      // beginInteractivePause() would leak and suppress the turn watchdog for the
+      // rest of the process. Runs on every exit path — normal, throw, unwind.
+      this.councilManager.releasePendingWaits();
       if (ownsController && this.abortController?.signal === signal) {
         this.abortController = null;
       }
