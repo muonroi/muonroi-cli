@@ -1,6 +1,6 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { isCouncilPlanExecution, isImplementationIntent } from "../../pil/layer6-output.js";
 import type { StreamChunk } from "../../types/index.js";

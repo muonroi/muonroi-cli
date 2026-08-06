@@ -209,9 +209,13 @@ export async function* runPlanExecution(
     } catch (err) {
       const message = (err as Error).message;
       console.error(`[council/plan-execution] could not read ${args.planPath}: ${message}`);
+      // null, not the last COMPLETED phase — that phase already passed its own
+      // verify; naming it here would send the reader to a phase that
+      // succeeded. The failure is at the plan-file level, before any phase
+      // for THIS iteration was even selected, so no phase id is implicated.
       return {
         completed,
-        haltedAt: completed[completed.length - 1] ?? null,
+        haltedAt: null,
         reason: `could not read ${args.planPath}: ${message}`,
       };
     }
