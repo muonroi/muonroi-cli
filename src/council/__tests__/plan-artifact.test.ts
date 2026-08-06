@@ -54,4 +54,39 @@ describe("plan artifact round-trip", () => {
     const body = renderPlanMarkdown("topic", [{ ...PHASES[0], verify: "" }]);
     expect(parsePlanMarkdown(body)[0].verify).toBe("");
   });
+
+  it("rounds trip CRLF line endings", () => {
+    const body = renderPlanMarkdown("topic", PHASES);
+    const crlfBody = body.replace(/\n/g, "\r\n");
+    expect(parsePlanMarkdown(crlfBody)).toEqual(PHASES);
+  });
+
+  it("rounds trip a phase title containing an em-dash", () => {
+    const phase = { ...PHASES[0], title: "Handle edge case — redux" };
+    const body = renderPlanMarkdown("topic", [phase]);
+    expect(parsePlanMarkdown(body)[0].title).toBe("Handle edge case — redux");
+  });
+
+  it("rounds trip bullet text that begins with a dash", () => {
+    const phase = { ...PHASES[0], steps: ["- but actually", "normal step"] };
+    const body = renderPlanMarkdown("topic", [phase]);
+    expect(parsePlanMarkdown(body)[0].steps).toEqual(["- but actually", "normal step"]);
+  });
+
+  it("rounds trip empty string in steps, files, or acceptance", () => {
+    const phase = {
+      id: "P0",
+      title: "Test empty items",
+      steps: ["first", "", "third"],
+      files: ["src/a.ts", "", "src/c.ts"],
+      acceptance: ["item 1", "", "item 3"],
+      verify: "",
+      done: false,
+    };
+    const body = renderPlanMarkdown("topic", [phase]);
+    const parsed = parsePlanMarkdown(body);
+    expect(parsed[0].steps).toEqual(["first", "", "third"]);
+    expect(parsed[0].files).toEqual(["src/a.ts", "", "src/c.ts"]);
+    expect(parsed[0].acceptance).toEqual(["item 1", "", "item 3"]);
+  });
 });

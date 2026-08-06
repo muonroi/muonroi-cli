@@ -19,7 +19,7 @@ export interface PlanPhase {
 }
 
 const PHASE_RE = /^##\s+(P\d+)\s+—\s+(.+)$/;
-const BULLET_RE = /^-\s+(.+)$/;
+const BULLET_RE = /^-\s*(.*)$/;
 
 function section(lines: string[], heading: string): string[] {
   const out: string[] = [];
@@ -32,20 +32,33 @@ function section(lines: string[], heading: string): string[] {
       continue;
     }
     if (inside) {
+      // Blank line ends the section.
+      if (!line.trim()) break;
+
+      // Next section heading ends the section.
+      if (line.trim().startsWith("**")) break;
+
+      // Try to match a bullet (allows empty content after dash).
       const m = BULLET_RE.exec(line.trim());
       if (m) {
         out.push(m[1]);
         continue;
       }
-      if (line.trim()) break;
+
+      // Non-bullet, non-blank line ends the section.
+      break;
     }
   }
   return out;
 }
 
 export function renderPlanMarkdown(topic: string, phases: PlanPhase[]): string {
-  const blocks = phases.map((p) =>
-    [
+  const blocks = phases.map((p) => {
+    // Guard: verify must be a single line (no embedded newlines).
+    if (p.verify.includes("\n") || p.verify.includes("\r")) {
+      throw new Error(`[plan-artifact] phase ${p.id}: verify command cannot contain newlines`);
+    }
+    return [
       `## ${p.id} — ${p.title}`,
       "",
       `**Files:**`,
@@ -60,8 +73,8 @@ export function renderPlanMarkdown(topic: string, phases: PlanPhase[]): string {
       `**Verify:** ${p.verify}`,
       "",
       `**Status:** ${p.done ? "done" : "pending"}`,
-    ].join("\n"),
-  );
+    ].join("\n");
+  });
   return [`# PLAN — ${topic}`, "", ...blocks].join("\n\n").trimEnd() + "\n";
 }
 
