@@ -1,4 +1,6 @@
 import type { CouncilQuestionOption } from "../types/index.js";
+import { buildIntentOptions, INTENT_COPY } from "./intent-card.js";
+import type { IntentKind } from "./types.js";
 
 /**
  * `council/launch-card` — design S1, the launch configurator.
@@ -39,6 +41,13 @@ export interface LaunchCardInput {
   usdPerRound?: number | null;
   /** Provider id per model, injected so this module stays free of runtime lookups. */
   providerOf?: (modelId: string) => string | undefined;
+  /**
+   * Intent gate (design 2026-08-04). When present, the card leads with "what do
+   * you want out of this run" and the answer LOCKS spec.intentKind before any
+   * spend. Absent on non-interactive paths (convenePath / sprintPlanningMode),
+   * which keep the shape-only card.
+   */
+  intent?: { proposedKind: IntentKind; intentSummary: string };
 }
 
 export interface LaunchCard {
@@ -108,6 +117,7 @@ export function cheapRunShape(input: { plannedRounds: number; panelSize: number 
 export function buildLaunchCard(input: LaunchCardInput): LaunchCard {
   const label = (p: LaunchPanelist) => p.stanceName ?? p.role;
   const rows: Array<[string, string]> = [];
+  if (input.intent) rows.push(["Intent", INTENT_COPY[input.intent.proposedKind].label]);
   rows.push(["Panel", input.participants.map(label).join(" · ") || "(none resolved)"]);
   const providers = summariseProviders(input.participants, input.providerOf);
   if (providers) rows.push(["Providers", providers]);
@@ -121,6 +131,7 @@ export function buildLaunchCard(input: LaunchCardInput): LaunchCard {
 
   const cheap = cheapRunShape({ plannedRounds: input.plannedRounds, panelSize: input.participants.length });
   const options: CouncilQuestionOption[] = [
+    ...(input.intent ? buildIntentOptions(input.intent.proposedKind, input.intent.intentSummary) : []),
     {
       label: "Start debate",
       description: `Run up to ${input.plannedRounds} round${input.plannedRounds === 1 ? "" : "s"} with the panel above`,

@@ -24,6 +24,7 @@ import { evaluateResearchNeed, MAX_OPENING_ATTEMPTS, runDebate } from "./debate.
 import { planDebate } from "./debate-planner.js";
 import { detectOutOfStackProposals, writeDecisionsLock } from "./decisions-lock.js";
 import { runExecution } from "./executor.js";
+import { INTENT_COPY, parseIntentAnswer } from "./intent-card.js";
 import { buildLaunchCard, cheapRunShape } from "./launch-card.js";
 import { buildCouncilCandidatePool, resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
 import { selectTaskAwarePanel } from "./panel-select.js";
@@ -817,6 +818,7 @@ export async function* runCouncil(
   let launchParticipants = active;
   let launchCostAware = costAware;
   if (sessionId && !options?.convenePath && !options?.sprintPlanningMode && !userAborted()) {
+    const proposedKind = coerceIntentKind(debatePlan.outputShape.kind);
     const card = buildLaunchCard({
       topic,
       leaderModelId,
@@ -826,12 +828,14 @@ export async function* runCouncil(
       costAware,
       language: getCouncilLanguage(),
       usdPerRound: historicalUsdPerRound(),
+      intent: { proposedKind, intentSummary: debatePlan.intentSummary },
       providerOf: (modelId) => {
         try {
           return detectProviderForModel(modelId);
-        } catch {
+        } catch (err) {
           // An unresolvable provider just drops out of the lineup summary —
           // better a shorter line than a fabricated vendor name.
+          console.error(`[council/index] providerOf lookup failed for model "${modelId}": ${(err as Error)?.message}`);
           return undefined;
         }
       },
@@ -851,6 +855,15 @@ export async function* runCouncil(
       },
     } as StreamChunk;
     const choice = (await respondToQuestion(setupQuestionId)).trim();
+    // An intent pick is not a run-shape pick: record it and keep the card's
+    // shape defaults (start). Anything else falls through to the existing
+    // start/cheap/refine/cancel handling untouched.
+    const pickedKind = parseIntentAnswer(choice, proposedKind);
+    const choseIntent = choice === pickedKind;
+    spec.intentKind = pickedKind;
+    if (choseIntent) {
+      yield { type: "content", content: `\n> Intent locked: ${INTENT_COPY[pickedKind].label}.\n` };
+    }
     if (choice === "cancel" || choice === "refine") {
       yield {
         type: "content",

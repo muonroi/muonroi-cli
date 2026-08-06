@@ -73,6 +73,13 @@ export interface ClarifiedSpec {
    * for backward compat — empty when the council runs with no prior context.
    */
   parentContext?: string;
+  /**
+   * Locked at the launch card (design 2026-08-04). Authoritative for the whole
+   * run: drives outputShape, whether the planner phase runs, and the post-debate
+   * transition. When absent (non-interactive paths, resumed pre-2026-08 specs)
+   * callers fall back to synthesisOutputKind.
+   */
+  intentKind?: IntentKind;
 }
 
 // ── Preflight ────────────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildIntentOptions, INTENT_COPY, parseIntentAnswer } from "../intent-card.js";
+import { buildLaunchCard } from "../launch-card.js";
 import { ANALYSIS_INTENT_KINDS, IMPLEMENTATION_INTENT_KINDS, type IntentKind } from "../types.js";
 
 const ALL_KINDS = [...ANALYSIS_INTENT_KINDS, ...IMPLEMENTATION_INTENT_KINDS] as IntentKind[];
@@ -30,5 +31,32 @@ describe("parseIntentAnswer", () => {
   it("falls back on junk rather than coercing to a build mandate", () => {
     expect(parseIntentAnswer("", "evaluation")).toBe("evaluation");
     expect(parseIntentAnswer("nonsense", "decision")).toBe("decision");
+  });
+});
+
+describe("buildLaunchCard intent block", () => {
+  const base = {
+    topic: "add a sentinel E2E",
+    leaderModelId: "leader-model",
+    participants: [{ role: "implement", model: "m1" }],
+    plannedRounds: 3,
+    researchOn: true,
+    costAware: false,
+  };
+
+  it("without an intent block the option set is unchanged", () => {
+    const card = buildLaunchCard(base);
+    expect(card.options.map((o) => o.value)).toEqual(["start", "cheap", "refine", "cancel"]);
+  });
+
+  it("with an intent block the intent options lead and start/cheap/refine/cancel follow", () => {
+    const card = buildLaunchCard({
+      ...base,
+      intent: { proposedKind: "implementation_plan", intentSummary: "Build the sentinel E2E" },
+    });
+    expect(card.options[0].value).toBe("implementation_plan");
+    const tail = card.options.slice(-4).map((o) => o.value);
+    expect(tail).toEqual(["start", "cheap", "refine", "cancel"]);
+    expect(card.defaultIndex).toBe(0);
   });
 });
