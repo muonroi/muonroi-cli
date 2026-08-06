@@ -19,6 +19,7 @@ import { planningArtifact } from "../../gsd/paths.js";
 import { readPlanVerifyVerdict } from "../../gsd/workflow-engine.js";
 import { isCouncilPlanExecution } from "../../pil/layer6-output.js";
 import type { StreamChunk } from "../../types/index.js";
+import { COUNCIL_ANSWER_DISMISSED } from "../types.js";
 
 vi.mock("../../storage/index", () => ({
   appendSystemMessage: vi.fn(),
@@ -172,6 +173,12 @@ const isPostPlanCard = (c: StreamChunk) => c?.type === "council_question" && c?.
 describe("implement -> plan draft -> review -> post-plan card -> execute_plan", () => {
   let cwd: string;
 
+  // Snapshot-and-restore, not delete — this repo adopted this convention
+  // after a fileParallelism env-leak flake (see leader-conductor.test.ts for
+  // the same pattern): a bare `delete` would clobber a value the surrounding
+  // shell or another concurrent file legitimately set.
+  let prevEscalate: string | undefined;
+
   beforeEach(() => {
     // The B4 interactive escalation card is orthogonal to what's under test
     // here (the "implement" -> plan -> review -> execute handoff), and the
@@ -179,11 +186,13 @@ describe("implement -> plan draft -> review -> post-plan card -> execute_plan", 
     // look "stuck" and hit the round ceiling — disable it so the run reaches a
     // clean, high-trust synthesis instead of a degraded one that would
     // legitimately reroute "implement" into a follow-up (resolvePhaseOutcomeTransition).
+    prevEscalate = process.env.MUONROI_COUNCIL_ESCALATE;
     process.env.MUONROI_COUNCIL_ESCALATE = "0";
   });
 
   afterEach(() => {
-    delete process.env.MUONROI_COUNCIL_ESCALATE;
+    if (prevEscalate === undefined) delete process.env.MUONROI_COUNCIL_ESCALATE;
+    else process.env.MUONROI_COUNCIL_ESCALATE = prevEscalate;
     if (cwd) rmSync(cwd, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
@@ -236,6 +245,79 @@ describe("implement -> plan draft -> review -> post-plan card -> execute_plan", 
     // PLAN-VERIFY.md exists and unlocks the GSD mutation gate — this is the
     // second half of the fix (Task 8's investigation into mutation-gate.ts).
     expect(readPlanVerifyVerdict(cwd)).toBe("pass");
+  });
+
+  it("pressing Esc on the post-plan card NEVER launches execution, even though execute_plan is the approve default", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "council-plan-exec-"));
+    const { runCouncil } = await import("../index.js");
+
+    const processMessageFn = vi.fn().mockImplementation(async function* () {
+      yield { type: "done" };
+    });
+    // On an approve verdict, buildPostPlanCard's defaultIndex IS execute_plan
+    // (index.ts:~527). Collapsing Esc into "take the default" here — as an
+    // empty-submit answer correctly does — would make closing the card start
+    // N agent turns that edit code and shell out. Esc must resolve to
+    // save_exit, mirroring the post-debate card's own dismiss handling.
+    const { chunks, respondToQuestion } = buildAnswerer(COUNCIL_ANSWER_DISMISSED);
+
+    await drain(
+      runCouncil(
+        "Add a sentinel",
+        "mock-model",
+        [],
+        "sess-esc-post-plan",
+        buildMockLLM(APPROVE_VERDICT),
+        respondToQuestion,
+        vi.fn().mockResolvedValue(true),
+        processMessageFn,
+        { skipClarification: true, cwd },
+      ),
+      chunks,
+    );
+
+    expect(chunks.some(isPostPlanCard)).toBe(true);
+    expect(processMessageFn).not.toHaveBeenCalled();
+    const planPath = planningArtifact(cwd, "PLAN.md");
+    expect(existsSync(planPath)).toBe(true);
+    expect(readFileSync(planPath, "utf8")).not.toContain("**Status:** done");
+  });
+
+  it("an empty submit on the post-plan card takes the card's default (execute_plan on approve)", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "council-plan-exec-"));
+    const { runCouncil } = await import("../index.js");
+
+    const seenPrompts: string[] = [];
+    const processMessageFn = vi.fn().mockImplementation(async function* (message: string) {
+      seenPrompts.push(message);
+      yield { type: "done" };
+    });
+    // "" is a real, distinct signal from COUNCIL_ANSWER_DISMISSED — a freetext
+    // option submitted with nothing typed. This must still resolve to the
+    // card's own recommended default, exactly like the post-debate card.
+    const { chunks, respondToQuestion } = buildAnswerer("");
+
+    await drain(
+      runCouncil(
+        "Add a sentinel",
+        "mock-model",
+        [],
+        "sess-empty-post-plan",
+        buildMockLLM(APPROVE_VERDICT),
+        respondToQuestion,
+        vi.fn().mockResolvedValue(true),
+        processMessageFn,
+        { skipClarification: true, cwd },
+      ),
+      chunks,
+    );
+
+    expect(chunks.some(isPostPlanCard)).toBe(true);
+    expect(processMessageFn).toHaveBeenCalledTimes(1);
+    expect(seenPrompts).toHaveLength(1);
+    expect(isCouncilPlanExecution(seenPrompts[0])).toBe(true);
+    const planPath = planningArtifact(cwd, "PLAN.md");
+    expect(readFileSync(planPath, "utf8")).toContain("**Status:** done");
   });
 
   it("save_exit on the post-plan card saves PLAN.md but does not execute", async () => {

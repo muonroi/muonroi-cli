@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { isCouncilPlanExecution, isImplementationIntent } from "../../pil/layer6-output.js";
-import type { PlanPhase } from "../plan-artifact.js";
-import { buildPhasePrompt, verifyPhase } from "../plan-execution.js";
+import type { StreamChunk } from "../../types/index.js";
+import { type PlanPhase, renderPlanMarkdown } from "../plan-artifact.js";
+import { buildPhasePrompt, type ExecutionArgs, runPlanExecution, verifyPhase } from "../plan-execution.js";
 
 const PHASE: PlanPhase = {
   id: "P0",
@@ -50,5 +54,196 @@ describe("verifyPhase", () => {
     const r = verifyPhase({ ...PHASE, verify: "" }, "/tmp", () => ({ stdout: "", stderr: "", status: 0 }));
     expect(r.ok).toBe(false);
     expect(r.output).toContain("no verify command");
+  });
+});
+
+// ── runPlanExecution — the destructive half: halt paths, multi-phase advance,
+// exhausted plans, and the terminal-chunk / no-progress / fs guards added on
+// code-review round 2. ────────────────────────────────────────────────────
+function phase(id: string, verify = "exit 0"): PlanPhase {
+  return {
+    id,
+    title: `Title ${id}`,
+    steps: [`step ${id}`],
+    files: [],
+    acceptance: [`accept ${id}`],
+    verify,
+    done: false,
+  };
+}
+
+function seedPlan(cwd: string, phases: PlanPhase[]): string {
+  const planPath = join(cwd, "PLAN.md");
+  writeFileSync(planPath, renderPlanMarkdown("test", phases), "utf8");
+  return planPath;
+}
+
+const okExec: ExecutionArgs["exec"] = () => ({ stdout: "ok", stderr: "", status: 0 });
+const failExec: ExecutionArgs["exec"] = () => ({ stdout: "", stderr: "2 failed", status: 1 });
+
+function passthroughMessage(seen: string[]): ExecutionArgs["processMessage"] {
+  return async function* (message: string) {
+    seen.push(message);
+    yield { type: "content", content: "did the work" } as StreamChunk;
+  };
+}
+
+async function drain<T>(gen: AsyncGenerator<StreamChunk, T, unknown>): Promise<{ chunks: StreamChunk[]; result: T }> {
+  const chunks: StreamChunk[] = [];
+  let step = await gen.next();
+  while (!step.done) {
+    chunks.push(step.value);
+    step = await gen.next();
+  }
+  return { chunks, result: step.value };
+}
+
+describe("runPlanExecution", () => {
+  let cwd: string;
+
+  afterEach(() => {
+    if (cwd) rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("advances multiple phases in order, marking each done on disk", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-exec-"));
+    const planPath = seedPlan(cwd, [phase("P0"), phase("P1")]);
+    const seen: string[] = [];
+
+    const { result } = await drain(
+      runPlanExecution({ cwd, planPath, processMessage: passthroughMessage(seen), exec: okExec }),
+    );
+
+    expect(result).toEqual({ completed: ["P0", "P1"], haltedAt: null, reason: "plan complete" });
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toContain("P0");
+    expect(seen[1]).toContain("P1");
+    const body = readFileSync(planPath, "utf8");
+    expect(body.match(/\*\*Status:\*\* done/g)).toHaveLength(2);
+  });
+
+  it("a failing verify halts and does NOT advance to the next phase", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-exec-"));
+    const planPath = seedPlan(cwd, [phase("P0"), phase("P1")]);
+    const seen: string[] = [];
+
+    const { result, chunks } = await drain(
+      runPlanExecution({ cwd, planPath, processMessage: passthroughMessage(seen), exec: failExec }),
+    );
+
+    expect(result.completed).toEqual([]);
+    expect(result.haltedAt).toBe("P0");
+    expect(result.reason).toContain("2 failed");
+    // Only phase P0 ran — the loop stopped, it did not march on to P1.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain("P0");
+    expect(chunks.some((c) => c.type === "content" && c.content?.includes("Halted at P0"))).toBe(true);
+    // Nothing was marked done — P0 stays pending on disk.
+    expect(readFileSync(planPath, "utf8")).not.toContain("**Status:** done");
+  });
+
+  it("a plan whose phases are already all done returns immediately without a turn", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-exec-"));
+    const planPath = seedPlan(cwd, [{ ...phase("P0"), done: true }]);
+    const seen: string[] = [];
+
+    const { result } = await drain(
+      runPlanExecution({ cwd, planPath, processMessage: passthroughMessage(seen), exec: okExec }),
+    );
+
+    expect(result).toEqual({ completed: [], haltedAt: null, reason: "plan complete" });
+    expect(seen).toHaveLength(0);
+  });
+
+  it("a no-progress write-back (hand-edited plan missing the Status line) halts instead of looping forever", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-exec-"));
+    const planPath = join(cwd, "PLAN.md");
+    // No `**Status:**` line at all — markPhaseDone (plan-artifact.ts) returns the
+    // body UNCHANGED for a phase shaped like this. Without the no-progress guard
+    // this would re-select P0 forever: unbounded turns, unbounded verify runs.
+    writeFileSync(
+      planPath,
+      ["# PLAN — test", "", "## P0 — Do it", "", "**Acceptance:**", "- it works", "", "**Verify:** exit 0"].join("\n"),
+      "utf8",
+    );
+    const seen: string[] = [];
+
+    const { result } = await drain(
+      runPlanExecution({ cwd, planPath, processMessage: passthroughMessage(seen), exec: okExec }),
+    );
+
+    expect(result.haltedAt).toBe("P0");
+    expect(result.reason).toContain("could not mark P0 done");
+    // The loop ran the phase turn exactly ONCE, not forever.
+    expect(seen).toHaveLength(1);
+  });
+
+  it("an unreadable plan path halts with a reason instead of throwing out of the generator", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-exec-"));
+    const planPath = join(cwd, "does-not-exist", "PLAN.md");
+    const seen: string[] = [];
+
+    const { result } = await drain(
+      runPlanExecution({ cwd, planPath, processMessage: passthroughMessage(seen), exec: okExec }),
+    );
+
+    expect(result.haltedAt).toBeNull();
+    expect(result.reason).toContain("could not read");
+    expect(seen).toHaveLength(0);
+  });
+
+  it("the plan disappearing between verify and the write-back halts instead of throwing", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-exec-"));
+    const planPath = seedPlan(cwd, [phase("P0")]);
+    const seen: string[] = [];
+    // A verify command that "passes" but, as a side effect, removes the plan
+    // file — simulates the plan disappearing mid-run (deleted, renamed, made
+    // unwritable) between the phase turn finishing and the write-back.
+    const vanishingExec: ExecutionArgs["exec"] = () => {
+      rmSync(planPath, { force: true });
+      return { stdout: "ok", stderr: "", status: 0 };
+    };
+
+    const { result } = await drain(
+      runPlanExecution({ cwd, planPath, processMessage: passthroughMessage(seen), exec: vanishingExec }),
+    );
+
+    expect(result.haltedAt).toBe("P0");
+    expect(result.reason).toContain("could not re-read");
+  });
+
+  it("filters the inner turn's terminal done chunk so a later phase is never stranded", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-exec-"));
+    const planPath = seedPlan(cwd, [phase("P0"), phase("P1")]);
+    const processMessage: ExecutionArgs["processMessage"] = async function* (message: string) {
+      yield { type: "content", content: `worked on ${message.includes("P0") ? "P0" : "P1"}` } as StreamChunk;
+      // Every real processMessage call ends with a turn-terminal done chunk
+      // (orchestrator.ts) — runPlanExecution must swallow it, not forward it,
+      // or the stream consumer stops pulling after phase 1 (blocker-5 class bug).
+      yield { type: "done" } as StreamChunk;
+    };
+
+    const { chunks, result } = await drain(runPlanExecution({ cwd, planPath, processMessage, exec: okExec }));
+
+    expect(result.completed).toEqual(["P0", "P1"]);
+    expect(chunks.some((c) => c.type === "done")).toBe(false);
+    expect(chunks.some((c) => c.type === "content" && c.content?.includes("worked on P0"))).toBe(true);
+    expect(chunks.some((c) => c.type === "content" && c.content?.includes("worked on P1"))).toBe(true);
+  });
+
+  it("a phase the turn itself already marked done on disk is accepted, not treated as no-progress", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-exec-"));
+    const planPath = seedPlan(cwd, [phase("P0")]);
+    // Simulate a sub-agent turn that (unusually, but not an error) writes
+    // PLAN.md itself, marking P0 done before verify even runs.
+    const processMessage: ExecutionArgs["processMessage"] = async function* () {
+      const body = readFileSync(planPath, "utf8");
+      writeFileSync(planPath, body.replace("**Status:** pending", "**Status:** done"), "utf8");
+      yield { type: "content", content: "did it and self-marked" } as StreamChunk;
+    };
+
+    const { result } = await drain(runPlanExecution({ cwd, planPath, processMessage, exec: okExec }));
+
+    expect(result).toEqual({ completed: ["P0"], haltedAt: null, reason: "plan complete" });
   });
 });

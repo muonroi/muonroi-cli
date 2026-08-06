@@ -2014,7 +2014,18 @@ export async function* runCouncil(
             },
           } as StreamChunk;
           let planAnswer = await respondToQuestion(planQuestionId);
-          if (planAnswer === COUNCIL_ANSWER_DISMISSED || planAnswer.trim().length === 0) {
+          if (planAnswer === COUNCIL_ANSWER_DISMISSED) {
+            // Esc — the user closed the card. Take NO action, mirroring the
+            // post-debate card's dismiss handling (:1640-1645) — an approved
+            // plan's own defaultIndex is `execute_plan`, so collapsing dismiss
+            // into "take the default" here would let closing the card with Esc
+            // silently start N agent turns that edit code and shell out. "save_exit"
+            // is the equivalent no-op: keep the plan on disk, execute nothing.
+            planAnswer = "save_exit";
+          } else if (planAnswer.trim().length === 0) {
+            // An EMPTY submit means "take the recommended default" — same
+            // rationale as the post-debate card (:1646-1658). Distinct from
+            // dismiss above precisely so Esc can never resolve to execute_plan.
             planAnswer = card.options[card.defaultIndex]?.value ?? "save_exit";
           }
           const planAnswerLabel = card.options.find((o) => o.value === planAnswer)?.label ?? planAnswer;

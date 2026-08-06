@@ -20,7 +20,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { COUNCIL_PLAN_EXECUTION_MARKER } from "../pil/layer6-output.js";
 import type { StreamChunk } from "../types/index.js";
-import { markPhaseDone, nextPendingPhase, type PlanPhase } from "./plan-artifact.js";
+import { markPhaseDone, nextPendingPhase, type PlanPhase, parsePlanMarkdown } from "./plan-artifact.js";
 
 export type ExecFn = (
   cmd: string,
@@ -34,11 +34,32 @@ export type ExecFn = (
 };
 
 const VERIFY_TIMEOUT_MS = 600_000;
+// spawnSync's default maxBuffer is 1 MB — a verify command (e.g. a test suite
+// with a failing assertion dump) can trivially exceed that, and when it does
+// the overflow surfaces ONLY via r.error (ENOBUFS), not via stdout/stderr
+// truncation you'd notice. Set deliberately rather than inheriting the default.
+const VERIFY_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
-/** Mirrors the injectable-exec pattern in src/scaffold/bb-quality-gate.ts:39. */
+/**
+ * Mirrors the injectable-exec pattern in src/scaffold/bb-quality-gate.ts:39.
+ *
+ * spawnSync surfaces a timeout (ETIMEDOUT), a spawn failure (ENOENT — bad
+ * shell/cmd), and stdout/stderr overflow (ENOBUFS) ONLY via `r.error`, and all
+ * three also leave `status: null`. Without folding `r.error.message` into the
+ * output, `verifyPhase` still correctly fails the gate, but the halt reason —
+ * the entire diagnostic value of this gate — is empty or silently truncated.
+ */
 function defaultExec(cmd: string, args: string[], cwd: string, timeoutMs: number) {
-  const r = spawnSync(cmd, args, { cwd, timeout: timeoutMs, encoding: "utf8", shell: true });
-  return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", status: r.status };
+  const r = spawnSync(cmd, args, {
+    cwd,
+    timeout: timeoutMs,
+    encoding: "utf8",
+    shell: true,
+    maxBuffer: VERIFY_MAX_BUFFER_BYTES,
+  });
+  const stdout = r.stdout ?? "";
+  const stderr = r.error ? `${r.stderr ?? ""}\n[exec error] ${r.error.message}` : (r.stderr ?? "");
+  return { stdout, stderr, status: r.status };
 }
 
 export function buildPhasePrompt(planPath: string, phase: PlanPhase): string {
@@ -100,12 +121,36 @@ export async function* runPlanExecution(
 ): AsyncGenerator<StreamChunk, { completed: string[]; haltedAt: string | null; reason: string }, unknown> {
   const completed: string[] = [];
   for (;;) {
-    const body = readFileSync(args.planPath, "utf8");
+    let body: string;
+    try {
+      body = readFileSync(args.planPath, "utf8");
+    } catch (err) {
+      const message = (err as Error).message;
+      console.error(`[council/plan-execution] could not read ${args.planPath}: ${message}`);
+      return {
+        completed,
+        haltedAt: completed[completed.length - 1] ?? null,
+        reason: `could not read ${args.planPath}: ${message}`,
+      };
+    }
     const phase = nextPendingPhase(body);
     if (!phase) return { completed, haltedAt: null, reason: "plan complete" };
 
     yield { type: "content", content: `\n## ${phase.id} — ${phase.title}\n` };
-    yield* args.processMessage(buildPhasePrompt(args.planPath, phase));
+
+    // Filter the inner turn's OWN terminal `{type:"done"}` chunk(s) rather than
+    // forwarding them verbatim. runCouncil (the caller of runPlanExecution)
+    // emits its own done at the true end of the turn, after every phase — a
+    // done chunk surfacing after phase 1 tells the stream consumer the turn
+    // ended there, which previously made this exact class of consumer stop
+    // pulling and suspend the generator (see the blocker-5 comment above Phase
+    // E's call site in council/index.ts). With N phases this would strand
+    // every phase after the first — precisely the "only the first step ever
+    // landed" defect this module exists to fix, one layer up.
+    for await (const chunk of args.processMessage(buildPhasePrompt(args.planPath, phase))) {
+      if (chunk.type === "done") continue;
+      yield chunk;
+    }
 
     const result = verifyPhase(phase, args.cwd, args.exec);
     if (!result.ok) {
@@ -115,7 +160,53 @@ export async function* runPlanExecution(
       };
       return { completed, haltedAt: phase.id, reason: result.output };
     }
-    writeFileSync(args.planPath, markPhaseDone(body, phase.id), "utf8");
+
+    // Re-read rather than reusing the pre-turn `body`: the phase's own agent
+    // turn holds write tools pointed at the plan path itself, and may have
+    // touched PLAN.md (e.g. to annotate progress) — writing back the STALE
+    // pre-turn body would silently clobber that edit.
+    let freshBody: string;
+    try {
+      freshBody = readFileSync(args.planPath, "utf8");
+    } catch (err) {
+      const message = (err as Error).message;
+      console.error(
+        `[council/plan-execution] verify passed for ${phase.id} but could not re-read ${args.planPath}: ${message}`,
+      );
+      return { completed, haltedAt: phase.id, reason: `verify passed but could not re-read the plan: ${message}` };
+    }
+
+    // The phase turn may have already marked itself done in PLAN.md — not an
+    // error, just nothing further to write.
+    const alreadyDone = parsePlanMarkdown(freshBody).find((p) => p.id === phase.id)?.done === true;
+    if (!alreadyDone) {
+      const next = markPhaseDone(freshBody, phase.id);
+      // markPhaseDone returns the body UNCHANGED when the phase's `**Status:**`
+      // line is missing or the id no longer matches (plan-artifact.ts) — almost
+      // always a hand-edited plan, since the planner's own renderPlanMarkdown
+      // always emits one. Without this check a no-op write-back means the next
+      // loop iteration re-reads the SAME pending phase and runs another full
+      // agent turn plus another verify — unbounded, with no iteration cap.
+      if (next === freshBody) {
+        const reason = `could not mark ${phase.id} done — the plan on disk no longer matches the phase that was just verified`;
+        console.error(`[council/plan-execution] ${reason}`);
+        yield { type: "content", content: `\n> Halted at ${phase.id}: ${reason}\n` };
+        return { completed, haltedAt: phase.id, reason };
+      }
+      try {
+        writeFileSync(args.planPath, next, "utf8");
+      } catch (err) {
+        const message = (err as Error).message;
+        console.error(
+          `[council/plan-execution] verify passed for ${phase.id} but could not write ${args.planPath}: ${message}`,
+        );
+        return {
+          completed,
+          haltedAt: phase.id,
+          reason: `verify passed but could not persist plan progress: ${message}`,
+        };
+      }
+    }
     completed.push(phase.id);
   }
 }

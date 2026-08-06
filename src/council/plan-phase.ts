@@ -7,9 +7,10 @@
  * verify command so the executor (Task 8) can gate phases one at a time
  * instead of trusting one giant "implement everything" step.
  *
- * NOT wired into the council flow yet — that lands in a later task. This
- * module only builds the prompt, parses the model's phases, and writes the
- * artifact when called.
+ * Wired into the council flow at src/council/index.ts (the "implement" branch
+ * of runCouncil's post-debate switch drafts the plan via runPlannerPhase, then
+ * reviews it via runPlanReview, then shows buildPostPlanCard) and its
+ * runPlanExecution follow-on in src/council/plan-execution.ts.
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -367,6 +368,16 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
       // read — mirrors applyVerdict's pass→yes / everything-else→no convention
       // (src/gsd/plan-council.ts:176-185).
       setStateField(args.cwd, "Plan Verified", "no");
+      // Without this write, a PRIOR run's "verdict: pass" survives on disk in
+      // PLAN-VERIFY.md and the GSD mutation gate (canExecute) stays open even
+      // though this review just returned "block" — the artifact the gate
+      // actually reads must agree with the verdict this function returns.
+      const concerns = [`Could not read ${planPath}: ${msg}`];
+      try {
+        writeFileSync(planVerifyPath, formatPlanVerify("block", concerns, args.leaderModelId), "utf8");
+      } catch (writeErr) {
+        console.error(`[council/plan-phase] writing ${planVerifyPath} failed: ${(writeErr as Error).message}`);
+      }
       yield phaseError({
         phaseId: "phase:plan-review",
         kind: "evaluation",
@@ -374,7 +385,7 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
         startedAt,
         errorMessage: msg,
       });
-      return { verdict: "block", concerns: [`Could not read ${planPath}: ${msg}`], reviewPath, planVerified: false };
+      return { verdict: "block", concerns, reviewPath, planVerified: false, planVerifyPath };
     }
 
     const results: Array<{ role: string; stanceName: string; verdict: PerspectiveVerdict; concerns: string[] }> = [];

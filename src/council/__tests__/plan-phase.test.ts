@@ -836,4 +836,36 @@ describe("runPlanReview — PLAN-VERIFY.md (the artifact the GSD mutation gate r
     expect(readState(cwd).phase).toBe("execute");
     expect(canExecute(cwd, "heavy")).toEqual({ allowed: true });
   });
+
+  it("a missing PLAN.md still writes PLAN-VERIFY.md so a stale prior 'pass' cannot survive", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-verify-"));
+    // No seedPlan(cwd) — PLAN.md does not exist, but the planning dir must, or
+    // setStateField/writeFileSync below fail on a missing parent directory
+    // (seedPlan is normally what creates it as a side effect).
+    mkdirSync(dirname(planningArtifact(cwd, "PLAN-VERIFY.md")), { recursive: true });
+    // Seed a stale prior approval: without the write under test, the gate
+    // would stay OPEN on a plan that can no longer even be read, which is the
+    // exact bug this write closes.
+    setStateField(cwd, "Plan Verified", "yes");
+    writeFileSync(planningArtifact(cwd, "PLAN-VERIFY.md"), "# PLAN-VERIFY\n\nverdict: pass\n", "utf8");
+    expect(canExecute(cwd, "heavy")).toEqual({ allowed: true });
+
+    const { result } = await drain(
+      runPlanReview({
+        cwd,
+        topic: "topic",
+        synthesis: "SYNTHESIS-BODY",
+        exchanges: "EXCHANGES",
+        plannerModelId: "planner-model",
+        leaderModelId: "leader-model",
+        participants: [participant("architect", "model-a", "Architect", "structure")],
+        llm: queuedLlm([]),
+      }),
+    );
+
+    expect(result.verdict).toBe("block");
+    expect(result.planVerifyPath).toBe(planningArtifact(cwd, "PLAN-VERIFY.md"));
+    expect(readPlanVerifyVerdict(cwd)).toBe("block");
+    expect(canExecute(cwd, "heavy").allowed).toBe(false);
+  });
 });
