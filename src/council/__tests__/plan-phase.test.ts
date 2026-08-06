@@ -1,11 +1,19 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { dirname, join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { planningArtifact } from "../../gsd/paths.js";
+import { readState } from "../../gsd/workflow-engine.js";
 import type { StreamChunk } from "../../types/index.js";
-import { buildPlannerPrompt, parsePlannerPhases, runPlannerPhase } from "../plan-phase.js";
-import type { CouncilLLM } from "../types.js";
+import {
+  buildPlannerPrompt,
+  buildReviewPrompt,
+  mergeReviewVerdicts,
+  parsePlannerPhases,
+  runPlannerPhase,
+  runPlanReview,
+} from "../plan-phase.js";
+import type { CouncilLLM, CouncilParticipant } from "../types.js";
 
 const MODEL_OUTPUT = `Here is the plan.
 
@@ -218,5 +226,364 @@ describe("runPlannerPhase", () => {
     expect(existsSync(planningArtifact(cwd, "PLAN.md"))).toBe(false);
     const errorChunk = chunks.find((c) => c.type === "council_phase" && c.councilPhase?.state === "error");
     expect(errorChunk?.councilPhase?.errorMessage).toContain("upstream 500");
+  });
+});
+
+describe("mergeReviewVerdicts", () => {
+  it("any block blocks, and its concerns survive", () => {
+    const m = mergeReviewVerdicts([
+      { role: "a", verdict: "approve", concerns: [] },
+      { role: "b", verdict: "block", concerns: ["unsafe migration"] },
+    ]);
+    expect(m.verdict).toBe("block");
+    expect(m.concerns).toContain("unsafe migration");
+  });
+
+  it("any revise (absent a block) means revise", () => {
+    const m = mergeReviewVerdicts([
+      { role: "a", verdict: "approve", concerns: [] },
+      { role: "b", verdict: "revise", concerns: ["no rollback"] },
+    ]);
+    expect(m.verdict).toBe("revise");
+  });
+
+  it("unanimous approve approves", () => {
+    const m = mergeReviewVerdicts([
+      { role: "a", verdict: "approve", concerns: [] },
+      { role: "b", verdict: "approve", concerns: [] },
+    ]);
+    expect(m.verdict).toBe("approve");
+    expect(m.concerns).toEqual([]);
+  });
+
+  it("no reviewers is a revise, never a silent approve", () => {
+    expect(mergeReviewVerdicts([]).verdict).toBe("revise");
+  });
+});
+
+describe("buildReviewPrompt", () => {
+  it("carries the plan body, the stance name/lens, and the verdict output contract", () => {
+    const p = buildReviewPrompt("PLAN-BODY-TEXT", "Cost Skeptic", "does this cost too much?");
+    expect(p).toContain("PLAN-BODY-TEXT");
+    expect(p).toContain("Cost Skeptic");
+    expect(p).toContain("does this cost too much?");
+    expect(p).toContain("council-verdict");
+  });
+});
+
+/** Minimal CouncilLLM fake that returns a scripted queue of replies, one per generate() call, in call order. */
+function queuedLlm(replies: string[]): CouncilLLM {
+  const queue = [...replies];
+  return {
+    generate: async () => queue.shift() ?? "",
+    research: async () => {
+      throw new Error("not implemented in queuedLlm");
+    },
+    debate: async () => {
+      throw new Error("not implemented in queuedLlm");
+    },
+  };
+}
+
+function participant(role: string, model: string, stanceName: string, lens: string): CouncilParticipant {
+  return { role: role as CouncilParticipant["role"], model, position: "", stance: { name: stanceName, lens } };
+}
+
+function verdictBlock(verdict: "approve" | "revise" | "block", concerns: string[] = []): string {
+  return ["```council-verdict", JSON.stringify({ verdict, concerns, evidence: [], rationale: "test" }), "```"].join(
+    "\n",
+  );
+}
+
+function seedPlan(cwd: string, body = "# PLAN — test\n\n## P0 — Do it\n\n**Acceptance:**\n- it works\n"): string {
+  const planPath = planningArtifact(cwd, "PLAN.md");
+  mkdirSync(dirname(planPath), { recursive: true });
+  writeFileSync(planPath, body, "utf8");
+  return planPath;
+}
+
+describe("runPlanReview", () => {
+  let cwd: string;
+
+  afterEach(() => {
+    if (cwd) rmSync(cwd, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it("unanimous approve writes PLAN-REVIEW.md and sets Plan Verified so readState round-trips true", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
+    seedPlan(cwd);
+    const { chunks, result } = await drain(
+      runPlanReview({
+        cwd,
+        topic: "topic",
+        synthesis: "SYNTHESIS-BODY",
+        exchanges: "EXCHANGES",
+        plannerModelId: "planner-model",
+        leaderModelId: "leader-model",
+        participants: [participant("architect", "model-a", "Architect", "structure")],
+        llm: queuedLlm([verdictBlock("approve")]),
+      }),
+    );
+
+    expect(result.verdict).toBe("approve");
+    expect(result.planVerified).toBe(true);
+    expect(result.reviewPath).toBe(planningArtifact(cwd, "PLAN-REVIEW.md"));
+    expect(existsSync(result.reviewPath)).toBe(true);
+    expect(readFileSync(result.reviewPath, "utf8")).toContain("architect");
+
+    // The field name is "Plan Verified" — confirm it round-trips through readState,
+    // not just that setStateField was called with some string.
+    expect(readState(cwd).planVerified).toBe(true);
+
+    const doneChunk = chunks.find(
+      (c) =>
+        c.type === "council_phase" &&
+        c.councilPhase?.phaseId === "phase:plan-review" &&
+        c.councilPhase?.state === "done",
+    );
+    expect(doneChunk).toBeDefined();
+  });
+
+  it("any block stops immediately, writes no verified state, and does not re-enter the planner", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
+    seedPlan(cwd);
+    const llm = queuedLlm([verdictBlock("approve"), verdictBlock("block", ["unsafe migration"])]);
+    const { result } = await drain(
+      runPlanReview({
+        cwd,
+        topic: "topic",
+        synthesis: "SYNTHESIS-BODY",
+        exchanges: "EXCHANGES",
+        plannerModelId: "planner-model",
+        leaderModelId: "leader-model",
+        participants: [
+          participant("architect", "model-a", "Architect", "structure"),
+          participant("skeptic", "model-b", "Skeptic", "risk"),
+        ],
+        llm,
+      }),
+    );
+
+    expect(result.verdict).toBe("block");
+    expect(result.planVerified).toBe(false);
+    expect(result.concerns).toContain("unsafe migration");
+    expect(readState(cwd).planVerified).toBe(false);
+  });
+
+  it("a reviewer with no extractable structured verdict counts as revise with a recorded concern", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
+    seedPlan(cwd);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    // Only one reviewer, budget exhausted after the default retry — the raw text
+    // below has no fenced council-verdict / json block extractStructuredVerdict can parse.
+    process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES = "0";
+    try {
+      const { result } = await drain(
+        runPlanReview({
+          cwd,
+          topic: "topic",
+          synthesis: "SYNTHESIS-BODY",
+          exchanges: "EXCHANGES",
+          plannerModelId: "planner-model",
+          leaderModelId: "leader-model",
+          participants: [participant("architect", "model-a", "Architect", "structure")],
+          llm: queuedLlm(["I have opinions but no verdict block."]),
+        }),
+      );
+
+      expect(result.verdict).toBe("revise");
+      expect(result.concerns.some((c) => c.includes("did not emit a structured verdict"))).toBe(true);
+      expect(result.planVerified).toBe(false);
+      expect(errSpy).toHaveBeenCalled();
+    } finally {
+      delete process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES;
+    }
+  });
+
+  it("a reviewer call that throws is logged and counted as revise, never crashes the run", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
+    seedPlan(cwd);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES = "0";
+    try {
+      const llm: CouncilLLM = {
+        generate: async () => {
+          throw new Error("upstream 500");
+        },
+        research: async () => {
+          throw new Error("not implemented");
+        },
+        debate: async () => {
+          throw new Error("not implemented");
+        },
+      };
+      const { result } = await drain(
+        runPlanReview({
+          cwd,
+          topic: "topic",
+          synthesis: "SYNTHESIS-BODY",
+          exchanges: "EXCHANGES",
+          plannerModelId: "planner-model",
+          leaderModelId: "leader-model",
+          participants: [participant("architect", "model-a", "Architect", "structure")],
+          llm,
+        }),
+      );
+
+      expect(result.verdict).toBe("revise");
+      expect(result.concerns.some((c) => c.includes("upstream 500"))).toBe(true);
+      const loggedStanceName = errSpy.mock.calls.some((call) => String(call[0]).includes("Architect"));
+      expect(loggedStanceName).toBe(true);
+    } finally {
+      delete process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES;
+    }
+  });
+
+  it("an empty reviewer set merges to revise and never sets Plan Verified", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
+    seedPlan(cwd);
+    process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES = "0";
+    try {
+      const { result } = await drain(
+        runPlanReview({
+          cwd,
+          topic: "topic",
+          synthesis: "SYNTHESIS-BODY",
+          exchanges: "EXCHANGES",
+          plannerModelId: "planner-model",
+          leaderModelId: "leader-model",
+          participants: [],
+          llm: queuedLlm([]),
+        }),
+      );
+
+      expect(result.verdict).toBe("revise");
+      expect(result.planVerified).toBe(false);
+      expect(readState(cwd).planVerified).toBe(false);
+    } finally {
+      delete process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES;
+    }
+  });
+
+  it("on revise, re-enters the planner with the merged concerns folded in, bounded by the retry budget", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
+    seedPlan(cwd, "# PLAN — test\n\n## P0 — Original\n\n**Acceptance:**\n- original\n");
+    // Default retry budget is 1 (2 total review attempts): revise, then approve.
+    // The 2nd generate() call is the planner re-entry (queued between the two
+    // review calls) and must echo the concern text back so we can prove it
+    // was folded into the planner prompt.
+    const seenPlannerPrompts: string[] = [];
+    let call = 0;
+    const llm: CouncilLLM = {
+      generate: async (_modelId, _system, prompt) => {
+        call += 1;
+        if (call === 1) return verdictBlock("revise", ["no rollback plan"]);
+        if (call === 2) {
+          seenPlannerPrompts.push(prompt);
+          return [
+            "```json",
+            JSON.stringify({
+              phases: [
+                {
+                  id: "P0",
+                  title: "Revised",
+                  steps: ["s"],
+                  files: [],
+                  acceptance: ["revised acceptance"],
+                  verify: "",
+                },
+              ],
+            }),
+            "```",
+          ].join("\n");
+        }
+        return verdictBlock("approve");
+      },
+      research: async () => {
+        throw new Error("not implemented");
+      },
+      debate: async () => {
+        throw new Error("not implemented");
+      },
+    };
+
+    const { result } = await drain(
+      runPlanReview({
+        cwd,
+        topic: "topic",
+        synthesis: "SYNTHESIS-BODY",
+        exchanges: "EXCHANGES",
+        plannerModelId: "planner-model",
+        leaderModelId: "leader-model",
+        participants: [participant("architect", "model-a", "Architect", "structure")],
+        llm,
+      }),
+    );
+
+    expect(result.verdict).toBe("approve");
+    expect(result.planVerified).toBe(true);
+    expect(seenPlannerPrompts[0]).toContain("no rollback plan");
+    // The plan was actually rewritten by the re-entered planner.
+    expect(readFileSync(planningArtifact(cwd, "PLAN.md"), "utf8")).toContain("Revised");
+  });
+
+  it("revise repeated past the retry budget stops and reports revise without an unbounded loop", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
+    seedPlan(cwd);
+    process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES = "1";
+    try {
+      let generateCalls = 0;
+      let plannerCalls = 0;
+      const llm: CouncilLLM = {
+        generate: async (_modelId, _system, prompt) => {
+          generateCalls += 1;
+          // Planner re-entry prompts ask for the json phase contract; reviewer
+          // prompts ask for the council-verdict contract. Route on that so this
+          // fake can serve an unbounded number of rounds without going out of sync.
+          if (prompt.includes("Emit ONE fenced json block")) {
+            plannerCalls += 1;
+            return [
+              "```json",
+              JSON.stringify({
+                phases: [
+                  { id: "P0", title: `Round ${plannerCalls}`, steps: [], files: [], acceptance: ["a"], verify: "" },
+                ],
+              }),
+              "```",
+            ].join("\n");
+          }
+          return verdictBlock("revise", ["still not good enough"]);
+        },
+        research: async () => {
+          throw new Error("not implemented");
+        },
+        debate: async () => {
+          throw new Error("not implemented");
+        },
+      };
+
+      const { result } = await drain(
+        runPlanReview({
+          cwd,
+          topic: "topic",
+          synthesis: "SYNTHESIS-BODY",
+          exchanges: "EXCHANGES",
+          plannerModelId: "planner-model",
+          leaderModelId: "leader-model",
+          participants: [participant("architect", "model-a", "Architect", "structure")],
+          llm,
+        }),
+      );
+
+      expect(result.verdict).toBe("revise");
+      expect(result.planVerified).toBe(false);
+      // Retry budget 1 → 2 review passes, each with 1 participant → 2 review
+      // calls + 1 planner re-entry call = 3 generate() calls, never unbounded.
+      expect(generateCalls).toBe(3);
+      expect(plannerCalls).toBe(1);
+    } finally {
+      delete process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES;
+    }
   });
 });
