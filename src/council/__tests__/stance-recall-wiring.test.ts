@@ -114,7 +114,7 @@ async function runOnce() {
       vi.fn().mockImplementation(async function* () {
         yield { type: "done" };
       }),
-      { skipClarification: true, convenePath: true },
+      { skipClarification: true, suppressPreDebateCards: true, suppressPostDebate: true },
     ),
   );
   return llm;

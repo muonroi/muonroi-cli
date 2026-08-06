@@ -7,7 +7,7 @@
  * contract, which is otherwise unasserted by any other test (code review
  * finding on task-2, 2026-08-06).
  */
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../storage/index", () => ({
   appendSystemMessage: vi.fn(),
@@ -140,13 +140,20 @@ async function runWithSetupAnswer(setupAnswer: string, sessionId: string) {
 const INTENT_LOCKED_PREFIX = "Intent locked:";
 
 /**
- * Task 10 — the S1 launch card must be reachable from the `/council` slash
- * path. Before this fix, `/council` dispatched `runCouncilV2(topic, {
- * convenePath: true })` (use-app-logic.tsx, commit 56b39a0b) and the S1 gate
- * was `!options?.convenePath`, so the slash command never showed the card at
- * all — only auto-council (which runs WITHOUT convenePath) did. These pin the
- * fix: a new `allowLaunchCard` option lets a convenePath caller opt back into
- * S1 while leaving post-debate suppression (convene-path.test.ts) untouched.
+ * Task 10 + C2 — the S1 launch card must be reachable from the `/council` slash
+ * path, AND the lock it takes must reach its consumers.
+ *
+ * Task 10 fixed only the first half with `allowLaunchCard`, which showed the
+ * card while `convenePath` still skipped the whole post-debate block — the only
+ * place `spec.intentKind` is ever read (`resolveRunKind`, and the
+ * planner/plan-review/post-plan-card path). So the gate was cosmetic: the user
+ * picked "Implement — plan it, review it, then build", paid for the debate, and
+ * got the neutral continuation.
+ *
+ * C2 replaced the combined flag with `suppressPreDebateCards` (no human to
+ * answer a blocking card) and `suppressPostDebate` (the CLI must not hardcode
+ * the next step). `/council` now sets NEITHER — the same shape auto-council
+ * uses — and the agent-convened callers set BOTH.
  */
 async function runWithGateOptions(options: Record<string, unknown>, sessionId: string) {
   const { runCouncil } = await import("../index.js");
@@ -177,19 +184,47 @@ async function runWithGateOptions(options: Record<string, unknown>, sessionId: s
 const isSetupCard = (c: any) => c?.type === "council_question" && c?.councilQuestion?.phase === "council-setup";
 const isPostDebateCard = (c: any) => c?.type === "council_question" && c?.councilQuestion?.phase === "post-debate";
 
-describe("launch card reachable via /council (task 10)", () => {
-  it("slash-path shape (convenePath + allowLaunchCard) emits the council-setup card", async () => {
-    const { chunks } = await runWithGateOptions({ convenePath: true, allowLaunchCard: true }, "sess-slash-reach");
+describe("launch card reachable via /council (task 10 + C2)", () => {
+  // The B4 mid-debate escalation card deliberately REUSES phase "post-debate"
+  // (debate.ts:~2708), so `isPostDebateCard` cannot tell the two apart. It is
+  // also auto-accepted under `suppressPreDebateCards`, which would make the
+  // suppression assertions below depend on which flag happened to silence it.
+  // Turn it off so "a post-debate card appeared" means the real one.
+  let prevEscalate: string | undefined;
+  beforeEach(() => {
+    prevEscalate = process.env.MUONROI_COUNCIL_ESCALATE;
+    process.env.MUONROI_COUNCIL_ESCALATE = "0";
+  });
+  afterEach(() => {
+    if (prevEscalate === undefined) delete process.env.MUONROI_COUNCIL_ESCALATE;
+    else process.env.MUONROI_COUNCIL_ESCALATE = prevEscalate;
+  });
+
+  it("slash-path shape (no suppressions) emits the council-setup card", async () => {
+    const { chunks } = await runWithGateOptions({}, "sess-slash-reach");
     expect(chunks.some(isSetupCard)).toBe(true);
   });
 
-  it("agent-convened shape (convenePath alone) emits NO council-setup card", async () => {
-    const { chunks } = await runWithGateOptions({ convenePath: true }, "sess-agent-convened");
+  it("agent-convened shape (suppressPreDebateCards) emits NO council-setup card", async () => {
+    const { chunks } = await runWithGateOptions(
+      { suppressPreDebateCards: true, suppressPostDebate: true },
+      "sess-agent-convened",
+    );
     expect(chunks.some(isSetupCard)).toBe(false);
   });
 
-  it("slash-path shape still emits NO post-debate card (convenePath invariant preserved)", async () => {
-    const { chunks } = await runWithGateOptions({ convenePath: true, allowLaunchCard: true }, "sess-slash-postdebate");
+  it("C2 — the slash-path shape now REACHES the post-debate block, so the lock has a consumer", async () => {
+    // The regression this pins: with the old combined flag the slash path
+    // emitted the setup card and then suppressed the post-debate block, which
+    // holds the ONLY two readers of spec.intentKind. The card was decoration.
+    const { chunks } = await runWithGateOptions({}, "sess-slash-postdebate");
+    expect(chunks.some(isSetupCard)).toBe(true);
+    expect(chunks.some(isPostDebateCard)).toBe(true);
+  });
+
+  it("the two suppressions are independent — post-debate can be suppressed while S1 still shows", async () => {
+    const { chunks } = await runWithGateOptions({ suppressPostDebate: true }, "sess-split-flags");
+    expect(chunks.some(isSetupCard)).toBe(true);
     expect(chunks.some(isPostDebateCard)).toBe(false);
   });
 });

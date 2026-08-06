@@ -126,9 +126,9 @@ export interface RunCouncilOptions {
    * auto-council path in tool-engine) relay the lock across the same seam
    * `onPostDebateAction` uses, so `postDebateContinuation` outside this module
    * can resolve the run's kind through `resolveRunKind` instead of falling
-   * back to the post-hoc synthesis regex. Never fired on `convenePath` /
-   * `sprintPlanningMode` (the card doesn't run there) — callers correctly see
-   * no lock and fall back.
+   * back to the post-hoc synthesis regex. Never fired under
+   * `suppressPreDebateCards` / `sprintPlanningMode` (the card doesn't run
+   * there) — callers correctly see no lock and fall back.
    */
   onIntentLocked?: (kind: IntentKind) => void;
   /**
@@ -179,34 +179,47 @@ export interface RunCouncilOptions {
    */
   sprintPlanningMode?: boolean;
   /**
-   * Convene-tool path (the `convene_council` builtin). When true, render
-   * clarify(optional)+debate+synthesis exactly as normal, then RETURN the
-   * synthesis string WITHOUT any post-debate decision surface: NO
-   * `pickPostDebateRecommendation`, NO option set, NO `council_question`
-   * post-debate card, NO `onPostDebateAction`, NO `postDebateContinuation`
-   * routing. The calling AGENT decides what happens next (continue silently,
-   * ask the user via `ask_user`, or hand off to `/ideal`) — the CLI hardcodes
-   * none of it (user directive: no CLI-hardcoded post-council branch). The
-   * persistence block (decisions.lock, judge, council record) still runs — it
-   * is an audit trail, not a decision.
+   * PRE-debate suppression: **no human is present to answer a blocking card
+   * before the debate concludes.** Three consumers, all of which would hang an
+   * autonomous mid-agent-turn council:
+   *   1. the S1 launch card (intent + spend shape),
+   *   2. the preflight discussion-plan approval (auto-approved instead),
+   *   3. the mid-debate B4 escalation card (auto-accepted instead).
+   *
+   * Set by the agent-convened callers only — `convene_council`
+   * (tool-engine ~:3691) and the `runDebate` builtin (~:1077). The `/council`
+   * slash path and the auto-council path both leave it false: a human is at the
+   * composer in both cases.
+   *
+   * Replaces `convenePath` (2026-08-06, C2). `convenePath` named the caller, not
+   * the condition, and had accreted a FOURTH meaning — it also skipped the whole
+   * post-debate block, which since 2026-08-04 contains the only two consumers of
+   * the launch card's intent lock (`resolveRunKind` and the planner/review/
+   * post-plan-card block). `/council` set `convenePath: true` + `allowLaunchCard`,
+   * so it showed the user "Implement — plan it, review it, then build", locked
+   * the kind, paid for the debate, and then skipped every consumer of that lock:
+   * no planner, no PLAN.md, no review, no card, no phase loop. Splitting the flag
+   * is what makes the intent gate real on that path.
    */
-  convenePath?: boolean;
+  suppressPreDebateCards?: boolean;
   /**
-   * Task 10 — `convenePath` conflates two unrelated suppressions: (1) POST-debate
-   * (the CLI must not hardcode what happens after the debate — the flag's actual
-   * purpose, see the doc above) and (2) PRE-debate, i.e. the S1 launch card that
-   * asks what the run is for and what it may spend, BEFORE any money is spent.
-   * The `/council` slash path sets `convenePath: true` too (so it also gets
-   * suppression 1 — no hardcoded post-debate card), but a human just typed the
-   * command, so unlike `convene_council`/`runDebate` there IS someone present to
-   * answer the launch card. `allowLaunchCard: true` opts back into suppression-1-
-   * only: the S1 gate shows the card despite `convenePath`, while every other
-   * `convenePath` consumer (post-debate card, neutral continuation,
-   * autoApprovePreflight, per-stance recall) is untouched. Only the `/council`
-   * slash dispatch (orchestrator.runCouncilV2) sets this; convene_council and the
-   * runDebate builtin have no human turn and correctly never set it.
+   * POST-debate suppression: **the CLI must not hardcode what happens after the
+   * debate.** When true, render clarify(optional)+debate+synthesis exactly as
+   * normal, then RETURN the synthesis string WITHOUT any post-debate decision
+   * surface: NO `pickPostDebateRecommendation`, NO option set, NO
+   * `council_question` post-debate card, NO planner/plan-review/post-plan card,
+   * NO `onPostDebateAction`, NO `postDebateContinuation` routing. The calling
+   * AGENT decides what happens next (continue silently, ask the user via
+   * `ask_user`, or hand off to `/ideal`) — user directive: no CLI-hardcoded
+   * post-council branch. The persistence block (decisions.lock, judge, council
+   * record) still runs — it is an audit trail, not a decision.
+   *
+   * Independent of `suppressPreDebateCards`: today both are set together (only
+   * the agent-convened callers set either), but they answer different questions
+   * — "is anyone there to answer?" vs "whose decision is the next step?" — and
+   * conflating them is what produced the cosmetic intent gate documented above.
    */
-  allowLaunchCard?: boolean;
+  suppressPostDebate?: boolean;
   /**
    * #2 — isolated sub-agent bridge (orchestrator.runTaskRequest). When wired,
    * the debate's research phase runs in a budget-capped explore sub-agent
@@ -363,7 +376,7 @@ function synthesisOutputKind(synthesis: string): IntentKind | undefined {
 /**
  * The run's authoritative intent kind. The launch-card lock wins; the synthesis
  * JSON regex is only the fallback for runs that never saw the card
- * (convenePath, sprintPlanningMode, resumed pre-2026-08 specs).
+ * (suppressPreDebateCards, sprintPlanningMode, resumed pre-2026-08 specs).
  *
  * Before the lock existed this inference decided the whole downstream shape:
  * session 3a8378db4adf debated a yes/no question, the regex returned
@@ -549,8 +562,8 @@ export function buildPostPlanCard(input: PostPlanCardInput): PostPlanCard {
 /**
  * Neutral post-council continuation. Used by the auto-council path (tool-engine)
  * and the `/council` slash path (runCouncilV2) once they run with
- * `convenePath: true` — the hardcoded post-debate option card is suppressed, so
- * there is no `chosenAction` to branch on. Instead of the CLI deciding the next
+ * `suppressPostDebate: true` — the hardcoded post-debate option card is
+ * suppressed, so there is no `chosenAction` to branch on. Instead of the CLI deciding the next
  * step, we hand the synthesis back to a normal agent turn with a NON-BINDING
  * nudge and let the agent's own intent drive the follow-up (respond / ask_user /
  * implement). Returns "" for an empty synthesis so the caller skips re-entry.
@@ -799,11 +812,13 @@ export async function* runCouncil(
     const preflightGen = runPreflight(spec, participants, researchNeeded, respondToPreflight, {
       repoEmpty: internetFirst,
       researchOverridable: true,
-      // convenePath auto-approves the pre-debate plan card too: the agent
-      // already decided to convene, so re-gating the discussion plan is a
-      // redundant interruption of the autonomous tool call (same rationale as
-      // sprintPlanningMode). The brief is still shown; it just isn't blocking.
-      autoApprove: spec.ready === true || options?.autoApprovePreflight === true || options?.convenePath === true,
+      // An agent-convened run auto-approves the pre-debate plan card too: the
+      // agent already decided to convene and no human is there to answer, so a
+      // blocking re-gate of the discussion plan would hang the tool call (same
+      // rationale as sprintPlanningMode). The brief is still shown; it just
+      // isn't blocking.
+      autoApprove:
+        spec.ready === true || options?.autoApprovePreflight === true || options?.suppressPreDebateCards === true,
     });
     let preflightResult: IteratorResult<StreamChunk, boolean>;
     do {
@@ -956,22 +971,15 @@ export async function* runCouncil(
   }
 
   // ── S1: launch configurator ─────────────────────────────────────────────────
-  // The last point before money is spent. Shown only on the interactive path:
-  // convenePath (the agent already decided to convene) and sprintPlanningMode
-  // (no human turn at all) would both be blocked by a card nobody can answer —
-  // the same gating the preflight approval card uses. `allowLaunchCard` opts a
-  // convenePath caller back into showing THIS card only (Task 10 — the /council
-  // slash path sets both: a human is present to answer S1 even though the
-  // post-debate card below stays suppressed). See `allowLaunchCard`'s doc above.
+  // The last point before money is spent. Shown only when a human is there to
+  // answer: `suppressPreDebateCards` (agent-convened — convene_council /
+  // runDebate) and sprintPlanningMode (no human turn at all) would both be
+  // blocked by a card nobody can answer — the same gating the preflight approval
+  // card uses. Both the `/council` slash path and auto-council DO show it.
   let launchRounds = debatePlan.plannedRounds ?? 3;
   let launchParticipants = active;
   let launchCostAware = costAware;
-  if (
-    sessionId &&
-    (!options?.convenePath || options?.allowLaunchCard) &&
-    !options?.sprintPlanningMode &&
-    !userAborted()
-  ) {
+  if (sessionId && !options?.suppressPreDebateCards && !options?.sprintPlanningMode && !userAborted()) {
     const proposedKind = coerceIntentKind(debatePlan.outputShape.kind);
     const card = buildLaunchCard({
       topic,
@@ -1069,7 +1077,7 @@ export async function* runCouncil(
       runId: sessionId,
       // Sprint-2 item 3 — per-stance recall at debate opening. Only the product
       // loop wired this (loop-driver.ts); runCouncil (interactive /council,
-      // convenePath, and sprint-planning via sprint-runner) got no per-stance
+      // agent-convened runs, and sprint-planning via sprint-runner) got no per-stance
       // seed. Gate on experienceMode to mirror the queryExperience gate above;
       // makeStanceRecall returns undefined for a null client so debate.ts's
       // `if (config.stanceRecall)` guard still holds. cwd: projectCwd is
@@ -1089,9 +1097,9 @@ export async function* runCouncil(
       // unmet, runDebate asks the user (extend / accept / rescope) instead of
       // silently synthesizing a partial outcome.
       respondToQuestion,
-      // convene_council path — auto-accept escalation (no blocking card) since
-      // the council runs autonomously mid-agent-turn with no interactive user.
-      convenePath: options?.convenePath,
+      // Agent-convened run — auto-accept escalation (no blocking card) since the
+      // council runs autonomously mid-agent-turn with no interactive user.
+      autoAcceptEscalation: options?.suppressPreDebateCards,
     },
     llm,
   );
@@ -1228,9 +1236,9 @@ export async function* runCouncil(
   // Set only when the user picks "execute_plan" on the post-plan card below —
   // Phase E (bottom of this function) gates the new per-phase runPlanExecution
   // loop on this, never on the old flat ActionPlan `plan` variable. null under
-  // convenePath too: that path skips this whole interactive block by design
-  // (the calling agent decides what happens next, not the CLI — see
-  // "convenePath" doc comments below), so it correctly never auto-executes.
+  // `suppressPostDebate` too: that path skips this whole interactive block by
+  // design (the calling agent decides what happens next, not the CLI — see the
+  // option's doc comment above), so it correctly never auto-executes.
   let executePlanPath: string | null = null;
   /**
    * C1 — the TERMINAL action the post-debate block resolved to, when that
@@ -1256,13 +1264,20 @@ export async function* runCouncil(
   });
 
   // ── Post-Debate AskCard: What next? ─────────────────────────────────────────
-  // convenePath skips this ENTIRE interactive block (recommendation, option set,
-  // card, respondToQuestion, postDebateAction, onPostDebateAction, and the whole
-  // routing tree). On that path the agent that called `convene_council` decides
-  // what happens next — the CLI must not hardcode a post-council pick. The
+  // `suppressPostDebate` skips this ENTIRE interactive block (recommendation,
+  // option set, card, respondToQuestion, the planner/plan-review/post-plan-card
+  // path, postDebateAction, onPostDebateAction, and the whole routing tree). On
+  // that path the agent that called `convene_council` / `runDebate` decides what
+  // happens next — the CLI must not hardcode a post-council pick. The
   // persistence block below still runs (audit trail, not a decision), and the
   // function returns synthesisText as usual.
-  if (sessionId && !options?.convenePath) {
+  //
+  // NOTE this block holds the ONLY two consumers of the launch card's intent
+  // lock: `resolveRunKind(spec.intentKind, …)` below, and the `implement` branch
+  // that runs the planner + review + post-plan card. Suppressing it therefore
+  // makes the intent gate cosmetic — which is exactly what `/council` did while
+  // it passed the old combined `convenePath` flag (C2, 2026-08-06).
+  if (sessionId && !options?.suppressPostDebate) {
     try {
       const { randomUUID } = await import("crypto");
       const refinementTopics: string[] = [];
@@ -2276,7 +2291,7 @@ export async function* runCouncil(
     });
 
   // ── Phase E: Execute (gated per-phase — set only by "execute_plan" on the
-  // post-plan card above; never auto-fires, and never under convenePath since
+  // post-plan card above; never auto-fires, and never under suppressPostDebate since
   // that path skips the interactive block entirely by design) ────────────────
   if (executePlanPath) {
     const execStart = Date.now();

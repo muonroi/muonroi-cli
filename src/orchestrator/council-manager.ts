@@ -79,7 +79,7 @@ export class CouncilManager {
    * (tool-engine) alongside `lastPostDebateAction` so `postDebateContinuation`
    * resolves the run's authoritative kind (`resolveRunKind`) instead of
    * falling back to the post-hoc synthesis regex. `null` when the launch card
-   * never ran (convenePath / sprintPlanningMode) — the fallback is correct
+   * never ran (suppressPreDebateCards / sprintPlanningMode) — the fallback is correct
    * there.
    */
   private _lastIntentKind: IntentKind | null = null;

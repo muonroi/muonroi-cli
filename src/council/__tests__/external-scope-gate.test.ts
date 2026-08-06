@@ -195,7 +195,8 @@ describe("Gate A fires in production via runCouncil self-classification", () => 
       processMessageFn,
       {
         skipClarification: true,
-        convenePath: true,
+        suppressPreDebateCards: true,
+        suppressPostDebate: true,
         runIsolatedTask: async () => {
           isolatedCalled = true;
           return { success: true, output: "ignored" };
@@ -248,7 +249,8 @@ describe("Gate A fires in production via runCouncil self-classification", () => 
       processMessageFn,
       {
         skipClarification: true,
-        convenePath: true,
+        suppressPreDebateCards: true,
+        suppressPostDebate: true,
         externalTopic: true,
         runIsolatedTask: async () => {
           isolatedCalled = true;

@@ -2136,22 +2136,21 @@ export class Agent {
       observer?: ProcessMessageObserver;
       userModelMessage?: ModelMessage;
       /**
-       * convene_council path — forwarded into runCouncil so the post-debate
-       * decision surface is suppressed and the synthesis is returned to the
-       * calling agent (no CLI-hardcoded post-council branch).
+       * Agent-convened run — forwarded into `RunCouncilOptions
+       * .suppressPreDebateCards`: no human is at the composer, so the launch
+       * card, the preflight approval and the mid-debate escalation card are all
+       * suppressed rather than left to hang the tool call.
        */
-      convenePath?: boolean;
+      suppressPreDebateCards?: boolean;
       /**
-       * Task 10 — forwarded into runCouncil's `RunCouncilOptions.allowLaunchCard`.
-       * The `/council` slash dispatch (use-app-logic.tsx) sets this alongside
-       * `convenePath: true`: a human just typed the command, so the S1 launch
-       * card should show even though `convenePath` also suppresses the (agent-
-       * decided) post-debate card. Undefined everywhere else — the auto-council
-       * and convene_council/runDebate paths that reach runCouncilV2 via
-       * `MessageProcessorDeps` have no human turn and never set it, so the
-       * launch card stays suppressed for them as before.
+       * Forwarded into `RunCouncilOptions.suppressPostDebate`: the CLI must not
+       * hardcode what happens after the debate — the calling agent decides.
+       * Set only by `convene_council` and the `runDebate` builtin. Both the
+       * `/council` slash dispatch and auto-council leave it false so the
+       * post-debate surface (and the planner/plan-review/post-plan-card path
+       * behind it) actually runs (C2, 2026-08-06).
        */
-      allowLaunchCard?: boolean;
+      suppressPostDebate?: boolean;
       /**
        * Gate A — caller-threaded out-of-repo ("external") scope, forwarded into
        * runCouncil's `RunCouncilOptions.externalTopic`. Set by the auto-council
@@ -2227,13 +2226,12 @@ export class Agent {
           cwd: this.bash.getCwd(),
           councilStats, // NEW — share orchestrator's stats object with runCouncil (Phase 14 CQ-01)
           signal,
-          // convene_council path — suppress ALL hardcoded post-debate decision
+          // Agent-convened run — no human to answer the launch card, the
+          // preflight approval or the mid-debate escalation card.
+          suppressPreDebateCards: options?.suppressPreDebateCards,
+          // Agent-convened run — suppress ALL hardcoded post-debate decision
           // surface; the agent decides what happens after the synthesis.
-          convenePath: options?.convenePath,
-          // Task 10 — the /council slash path sets this alongside convenePath so
-          // the S1 launch card still shows for the human who just typed the
-          // command; post-debate suppression above is unaffected.
-          allowLaunchCard: options?.allowLaunchCard,
+          suppressPostDebate: options?.suppressPostDebate,
           // Gate A — thread the caller's already-classified scope so runCouncil
           // doesn't pay for a second self-classify round-trip.
           externalTopic: options?.externalTopic,
@@ -2316,78 +2314,36 @@ export class Agent {
       // fires ONLY on the top-level slash path, never when nested inside
       // processMessage (auto-council) or drained by the runDebate tool — those
       // callers manage their own continuation.
-      // convenePath suppresses the hardcoded card (chosenAction stays undefined),
-      // so always hand the synthesis to a normal agent turn via the neutral
-      // continuation and let the agent decide. ownsController scopes this to the
-      // top-level /council slash path (auto-council nests with ownsController
-      // false and continues in tool-engine instead).
+      // The neutral continuation is the fallback for a run whose post-debate
+      // surface was SUPPRESSED (`suppressPostDebate` — convene_council /
+      // runDebate): with no card there is no chosenAction, so the synthesis is
+      // handed to a normal agent turn and the agent decides.
+      //
+      // C1/C2 (2026-08-06): when the post-debate surface DID run, `chosenAction`
+      // is the terminal action runCouncil resolved (`execute_plan` — the gated
+      // per-phase loop already ran inside runCouncil; `save_exit`; a refine /
+      // follow-up already re-synthesized in there). Re-entering here on top of
+      // that is the same double-implementation defect as C1, one layer up: the
+      // phase loop would finish and then a full ungated turn would run on the
+      // raw synthesis — including right after a verify HALT. So a resolved
+      // action means: nothing more to start here.
+      const councilResolvedNext = chosenAction !== undefined;
       const continuationPrompt =
-        ownsController && synthesis ? buildNeutralPostCouncilContinuation(synthesis) || null : null;
-      const isBuildContinuation = chosenAction === "implement";
-      if (continuationPrompt && isBuildContinuation && process.env.MUONROI_COUNCIL_ISOLATE_IMPL !== "0") {
-        // #1 — build the council decision in an ISOLATED sub-agent instead of
-        // re-entering the full processMessage turn. The flat turn inherited the
-        // entire multi-round debate history and could overflow the context window
-        // (the exact wedge 97bc9d12 fixed for the /ideal sprint-runner but that
-        // /council never got). runTaskRequest starts near-empty and returns a
-        // compact ToolResult. ANTI-MÙ: the child is NOT blind — it is seeded with
-        // (a) the approved synthesis-as-spec (already in continuationPrompt) and
-        // (b) councilManager.buildContext(), the same compaction-summary + Recent
-        // Conversation + [Council Decision]/[Council Memory] "Key Decisions"
-        // checkpoint the anti-mù layer surfaces — so it has the decision + its
-        // rationale without carrying the raw transcript. Opt out with
-        // MUONROI_COUNCIL_ISOLATE_IMPL=0 (falls back to the processMessage path).
-        yield { type: "content", content: "\n[Implementing the council decision in an isolated context…]\n" };
-        this.councilManager.setContinuation(true);
-        try {
-          let councilCheckpoint = "";
-          try {
-            councilCheckpoint = this.councilManager.buildContext();
-          } catch {
-            /* anti-mù bundle is best-effort — the synthesis alone still grounds the build */
-          }
-          const seededPrompt = councilCheckpoint
-            ? `${continuationPrompt}\n\n## Council context (decision + recent session — do NOT re-debate, just build)\n${councilCheckpoint}`
-            : continuationPrompt;
-          let result: import("../types/index.js").ToolResult;
-          try {
-            result = await this.runTaskRequest(
-              { agent: "general", description: "Council implementation", prompt: seededPrompt, modelId: this.modelId },
-              undefined,
-              signal,
-            );
-          } catch (err) {
-            // A throw (vs a returned {success:false}) must not escape and take the
-            // whole /council run down — surface it in-band like the processMessage
-            // path's TurnStallError handling and end the turn cleanly.
-            yield {
-              type: "error",
-              content: `Council implementation failed: ${err instanceof Error ? err.message : String(err)}`,
-            };
-            yield { type: "done" };
-            return;
-          }
-          if (result.success && result.output?.trim()) {
-            yield { type: "content", content: `\n${result.output.trim()}\n` };
-          } else if (result.error) {
-            yield { type: "error", content: `Council implementation failed: ${result.error}` };
-          }
-          // Persist a COMPACT record so the /council slash session stays resumable
-          // (the processMessage path wrote rows for this) WITHOUT re-inheriting the
-          // debate bloat the isolated child deliberately avoided.
-          try {
-            this.appendCompletedTurn(
-              { role: "user", content: "[Council implementation of the debate decision]" } as ModelMessage,
-              [{ role: "assistant", content: (result.output ?? result.error ?? "(no output)").trim() } as ModelMessage],
-            );
-          } catch {
-            /* non-critical persistence */
-          }
-          yield { type: "done" };
-        } finally {
-          this.councilManager.setContinuation(false);
-        }
-      } else if (continuationPrompt) {
+        ownsController && synthesis && !councilResolvedNext
+          ? buildNeutralPostCouncilContinuation(synthesis) || null
+          : null;
+      // REMOVED 2026-08-06 (C1/C2): the `chosenAction === "implement"` branch
+      // that re-built the council decision in an isolated `runTaskRequest`
+      // sub-agent (env `MUONROI_COUNCIL_ISOLATE_IMPL`). `implement` is no longer
+      // relayed at all — runCouncil resolves it to `execute_plan` / `save_exit`
+      // before firing `onPostDebateAction` — and any resolved action nulls
+      // `continuationPrompt` above, so the branch was provably unreachable.
+      // Implementation of a council conclusion now runs as the gated per-phase
+      // loop INSIDE runCouncil (src/council/plan-execution.ts), one turn per
+      // phase, each gated on that phase's own verify command. Keeping a second
+      // implementation entry point alive "just in case" is exactly how C1
+      // shipped, so it is deleted rather than left armed.
+      if (continuationPrompt) {
         yield { type: "content", content: "\n[Continuing with the debate conclusion…]\n" };
         this.councilManager.setContinuation(true);
         try {

@@ -81,19 +81,19 @@ describe("council intent gate + plan card", () => {
   });
 
   it("the launch card leads with the intent options", async () => {
-    // Deliberately NOT the `/council <topic>` slash command. Traced live via
-    // MUONROI_DEBUG_MOCK_MODEL=1: the composer's `/council` handler
-    // (src/ui/use-app-logic.tsx, commit 56b39a0b "/council slash uses
-    // convenePath + neutral continuation", pre-dating this branch) calls
-    // `agent.runCouncilV2(topic, { convenePath: true })` — and the S1 launch
-    // card in council/index.ts is gated on `!options?.convenePath`, so the
-    // literal slash command NEVER shows this card; it runs straight through
-    // to the debate. The reachable interactive path is auto-council (a plain
-    // chat message PIL classifies as taskType=plan / depth=heavy), which
-    // tool-engine.ts's auto-council dispatch runs "deliberately NOT
-    // convenePath" (see the comment at that call site) specifically so "the
-    // launch card DOES fire and lock spec.intentKind". This spec drives that
-    // path — the one a real interactive user actually sees.
+    // Drives AUTO-council (a plain chat message PIL classifies as
+    // taskType=plan / depth=heavy), not the `/council <topic>` slash command.
+    //
+    // History, since the original note here is now wrong: the `/council`
+    // handler used to call `agent.runCouncilV2(topic, { convenePath: true })`
+    // and the S1 gate was `!options?.convenePath`, so the slash command never
+    // showed this card at all. Task 10 added `allowLaunchCard` (card shown, but
+    // `convenePath` still skipped every consumer of the lock), and C2
+    // (2026-08-06) split the flag into `suppressPreDebateCards` /
+    // `suppressPostDebate` and made `/council` set NEITHER — so both entry
+    // points now show this card and both reach the plan gate behind it.
+    // Auto-council is kept as the driver here because it needs no slash parsing
+    // and is the path a user hits without asking for a debate.
     driver.type("design the council intent-gate sentinel transition test");
     driver.press("Enter");
 

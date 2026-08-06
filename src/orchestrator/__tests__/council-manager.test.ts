@@ -48,7 +48,7 @@ describe("CouncilManager — state isolation", () => {
   // seam as lastPostDebateAction so the auto-council caller (tool-engine) can
   // resolve the run's authoritative kind instead of falling back to the
   // post-hoc synthesis regex (task-3). Defaults to null (no card ran yet /
-  // convenePath / sprintPlanningMode), and — like lastSynthesis — is
+  // suppressPreDebateCards / sprintPlanningMode), and — like lastSynthesis — is
   // per-instance state, not shared/global.
   it("locked intent kind defaults to null and is per-instance", () => {
     const a = new CouncilManager(makeDeps());

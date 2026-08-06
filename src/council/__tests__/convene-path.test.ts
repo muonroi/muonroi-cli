@@ -1,11 +1,15 @@
 /**
- * convenePath — the `convene_council` builtin runs the full debate+synthesis but
+ * suppressPostDebate — the `convene_council` builtin runs the full debate+synthesis but
  * MUST NOT emit any post-debate decision surface (no card, no recommendation, no
  * onPostDebateAction, no continuation). The agent that called the tool decides
  * what happens next; the CLI hardcodes nothing (user directive).
  *
- * Guards both directions: convenePath:true suppresses the post-debate card and
- * returns the synthesis; convenePath:false still shows it (no over-suppression).
+ * Guards both directions: suppressPostDebate:true suppresses the post-debate card
+ * and returns the synthesis; false still shows it (no over-suppression). Renamed
+ * from `convenePath` in C2 (2026-08-06) — the old flag ALSO skipped the launch
+ * card, the preflight approval and the mid-debate escalation card, which is what
+ * made the `/council` intent gate cosmetic. The invariant guarded here is
+ * unchanged in both directions.
  */
 import { describe, expect, it, vi } from "vitest";
 import { buildNeutralPostCouncilContinuation, postDebateContinuation } from "../index.js";
@@ -101,8 +105,8 @@ async function runToEnd(gen: AsyncGenerator<unknown, unknown, unknown>): Promise
 
 const isPostDebateCard = (c: any) => c?.type === "council_question" && c?.councilQuestion?.phase === "post-debate";
 
-describe("convenePath post-debate suppression", () => {
-  it("convenePath:true emits NO post-debate card, never calls respondToQuestion, returns the synthesis", async () => {
+describe("suppressPostDebate post-debate suppression", () => {
+  it("suppressPostDebate:true emits NO post-debate card, never calls respondToQuestion, returns the synthesis", async () => {
     const { runCouncil } = await import("../index.js");
     const respondToQuestion = vi.fn().mockResolvedValue("save_exit");
     const processMessageFn = vi.fn().mockImplementation(async function* () {
@@ -118,7 +122,7 @@ describe("convenePath post-debate suppression", () => {
         respondToQuestion,
         vi.fn().mockResolvedValue(true),
         processMessageFn,
-        { skipClarification: true, convenePath: true },
+        { skipClarification: true, suppressPreDebateCards: true, suppressPostDebate: true },
       ),
     );
     expect(chunks.some(isPostDebateCard)).toBe(false);
@@ -127,7 +131,7 @@ describe("convenePath post-debate suppression", () => {
     expect(ret as string).toContain("clear recommendation");
   });
 
-  it("convenePath:false (default) DOES emit the post-debate card (no over-suppression)", async () => {
+  it("suppressPostDebate:false (default) DOES emit the post-debate card (no over-suppression)", async () => {
     const { runCouncil } = await import("../index.js");
     const respondToQuestion = vi.fn().mockResolvedValue("save_exit");
     const processMessageFn = vi.fn().mockImplementation(async function* () {
@@ -151,7 +155,7 @@ describe("convenePath post-debate suppression", () => {
   });
 });
 
-describe("/council convenePath continuation source", () => {
+describe("agent-convened continuation source (post-debate suppressed)", () => {
   const SYNTH = '```json\n{"type":"analysis","conclusion":"x"}\n```';
   it("neutral builder returns a prompt where postDebateContinuation(undefined) returns null", () => {
     // Card suppressed → chosenAction undefined → the OLD path stopped (null).

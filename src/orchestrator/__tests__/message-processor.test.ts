@@ -206,11 +206,12 @@ describe("MessageProcessor — DI surface invariants", () => {
   it("auto-council does NOT suppress the post-debate card (the user decides what happens next)", async () => {
     // The auto-council path is convened by the CLI: the user never asked for a
     // debate and no model called one, so there is no agent to hand the
-    // post-debate decision to. a72731e6 passed convenePath:true here, which did
+    // post-debate decision to. a72731e6 passed the (now-split) convenePath flag
+    // here, which did
     // not delegate the choice — it replaced "ask the user" with "always
     // implement", and work began the moment the council converged (user report
     // 2026-07-27, session 3f998bfef7db seq 21-22). Only the model-callable
-    // paths (convene_council / the runDebate tool) may set convenePath.
+    // paths (convene_council / the runDebate tool) may set the suppressions.
     let capturedOpts: Record<string, unknown> | undefined;
     const deps = makeDeps({
       councilManager: makeCouncilStub({
@@ -232,7 +233,8 @@ describe("MessageProcessor — DI surface invariants", () => {
     for await (const _ of iter) {
       /* drain */
     }
-    expect(capturedOpts?.convenePath).toBeUndefined();
+    expect(capturedOpts?.suppressPostDebate).toBeUndefined();
+    expect(capturedOpts?.suppressPreDebateCards).toBeUndefined();
   });
 
   it("nothing auto-runs after an auto-council unless the user picked an action", async () => {
@@ -256,7 +258,7 @@ describe("MessageProcessor — DI surface invariants", () => {
     expect(postDebateContinuation("continue_session", synthesis)).toContain(synthesis);
   });
 
-  // tool-engine.ts's auto-council dispatch is deliberately NOT convenePath
+  // tool-engine.ts's auto-council dispatch deliberately sets NEITHER suppression
   // (see its comment near the shouldAutoCouncil branch), so the launch card
   // DOES fire and lock spec.intentKind. tool-engine.ts:851-870 reads that lock
   // off `councilManager.lastIntentKind` (relayed by orchestrator.ts's

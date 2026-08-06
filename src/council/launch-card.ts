@@ -44,8 +44,10 @@ export interface LaunchCardInput {
   /**
    * Intent gate (design 2026-08-04). When present, the card leads with "what do
    * you want out of this run" and the answer LOCKS spec.intentKind before any
-   * spend. Absent on non-interactive paths (convenePath / sprintPlanningMode),
-   * which keep the shape-only card.
+   * spend. Absent only where no human is present to answer
+   * (`suppressPreDebateCards` — the agent-convened convene_council / runDebate
+   * callers — or `sprintPlanningMode`), which keep the shape-only card. BOTH
+   * the `/council` slash path and auto-council DO show the intent block.
    */
   intent?: { proposedKind: IntentKind; intentSummary: string };
 }

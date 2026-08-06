@@ -438,7 +438,10 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
       skipClarification: boolean;
       observer?: ProcessMessageObserver;
       userModelMessage: ModelMessage;
-      convenePath?: boolean;
+      /** Agent-convened run: no human to answer the launch / preflight / escalation cards. */
+      suppressPreDebateCards?: boolean;
+      /** Agent-convened run: the CLI must not hardcode what happens after the debate. */
+      suppressPostDebate?: boolean;
       /** Gate A — thread the main turn's already-classified scopeKind so runCouncil skips a redundant self-classify round-trip. */
       externalTopic?: boolean;
     },
@@ -1088,10 +1091,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             const gen = deps.runCouncilV2(topic, {
               skipClarification: true,
               userModelMessage: { role: "user", content: `/council ${topic}` },
-              // Model-callable debate: the synthesis is returned to the model as
-              // the tool result and the model decides the follow-up — so suppress
-              // the CLI-hardcoded post-debate card, same as convene_council.
-              convenePath: true,
+              // Model-callable debate: no human is at the composer mid-tool-call
+              // (suppressPreDebateCards) and the synthesis is returned to the
+              // model as the tool result so the model decides the follow-up
+              // (suppressPostDebate) — same as convene_council. Both stay on:
+              // this call site's behaviour is unchanged by the C2 flag split.
+              suppressPreDebateCards: true,
+              suppressPostDebate: true,
             });
             // Capture a tail of content chunks so an empty-synthesis failure
             // (provider unreachable / sub-phase fail-open / abort — all of which
@@ -3631,8 +3637,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Consume it here in the OUTER loop after every stream drain — NOT solely
         // via dynamicStopWhen, because a phase-1 SAMR step ends on stepCountIs(1)
         // and never evaluates the stop hook (design-debate BUG 2). Runs the
-        // council autonomously (convenePath suppresses ALL post-debate decision
-        // surface — no card, no continuation), splices the synthesis into the
+        // council autonomously (suppressPreDebateCards + suppressPostDebate: no
+        // blocking card before the debate, no decision surface after it — no
+        // card, no continuation), splices the synthesis into the
         // convene tool_result, grafts into deps.messages, and restarts the step
         // so the model reads the conclusion as the tool result and continues.
         if (hasPendingCouncilConvene()) {
@@ -3705,7 +3712,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // rendered). We continue the SAME turn ourselves via the splice +
               // `continue` restart, so the council's `done` must not propagate.
               for await (const chunk of deps.runCouncilV2(userMessage, {
-                convenePath: true,
+                // convene_council: the model called this mid-turn with no human
+                // waiting at the composer, and the synthesis is spliced back as
+                // the tool result for the model to reason about. Both
+                // suppressions stay on — behaviour unchanged by the C2 split.
+                suppressPreDebateCards: true,
+                suppressPostDebate: true,
                 skipClarification: true,
                 observer,
                 userModelMessage,
