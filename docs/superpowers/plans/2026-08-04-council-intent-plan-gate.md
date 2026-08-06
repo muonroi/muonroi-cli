@@ -1415,3 +1415,71 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 **Known gap to resolve during Task 6:** the exact `STATE.md` field name `setStateField(cwd, field, value)` writes for plan verification is not pinned in this plan. Read `src/gsd/workflow-engine.ts:161-198` and `:157` (where `readState` parses `planVerified`) and use the name that round-trips — do not guess it.
 
 **Harness E2E scope:** Task 9 asserts the intent gate only. The post-plan card and the phase loop are covered by unit tests (Tasks 7, 8); extending the spec to drive a full debate through a mock panel is worthwhile but is a separate task, not a silent omission.
+
+---
+
+### Task 10: Make the intent gate reachable from `/council`
+
+Added after Task 9 surfaced that the feature is unreachable by the most obvious route. Verified by the controller: `src/ui/use-app-logic.tsx:5323` dispatches the slash command as `agent.runCouncilV2(topic, { convenePath: true })` (commit `56b39a0b`, predating this branch), and the launch card is gated on `!options?.convenePath` — so typing `/council <topic>` has never shown the launch card at all, neither the new intent block nor the pre-existing panel / rounds / cost configurator. The only interactive path that shows it is auto-council, which `src/orchestrator/tool-engine.ts:834-850` deliberately runs WITHOUT `convenePath` for exactly this reason.
+
+**The distinction to encode.** `convenePath` currently conflates two unrelated suppressions:
+
+1. *post-debate* — the CLI must not hardcode what happens after the debate; the agent that convened it decides. This is the flag's real purpose and must be preserved everywhere it applies today.
+2. *pre-debate* — the launch card, which asks the user what the run is for and what it may spend, BEFORE any money is spent.
+
+On the `/council` slash path a human just typed the command, so there is someone present to answer (2). On the genuinely agent-convened paths — the `convene_council` tool and the `runDebate` builtin — there is no human turn, and both suppressions must stay.
+
+**Files:**
+- Modify: `src/council/index.ts` — the launch-card gate and the options type
+- Modify: `src/ui/use-app-logic.tsx:5323` — the slash dispatch
+- Modify: whichever option types thread it (`src/orchestrator/message-processor.ts` and the `runCouncilV2` signature — locate them; do not assume line numbers, they have drifted)
+- Test: `src/council/__tests__/` — extend an existing council test file rather than adding a new one if a natural home exists
+
+**Interfaces:**
+- Consumes: the existing `convenePath` option and the launch-card gate `sessionId && !options?.convenePath && !options?.sprintPlanningMode && !userAborted()`.
+- Produces: a new option on `RunCouncilOptions` that permits the pre-debate card while leaving post-debate suppression intact.
+
+- [ ] **Step 1: Write the failing tests**
+
+Three cases, in whichever existing council test file is the natural home:
+- the slash-path shape (convenePath + the new flag) EMITS a `council-setup` `council_question` chunk;
+- the agent-convened shape (convenePath alone) emits NONE;
+- the slash-path shape still emits NO `post-debate` card — the existing `convene-path.test.ts` invariant must not regress.
+
+- [ ] **Step 2: Run them and confirm they fail for the stated reason**
+
+Run: `bunx vitest run src/council/__tests__/`
+Expected: the first case FAILS because the gate suppresses the card whenever `convenePath` is set.
+
+- [ ] **Step 3: Implement**
+
+Add the option, widen only the launch-card gate to honour it, and pass it from the slash dispatch. Do NOT change `convenePath`'s effect on the post-debate card, on the neutral continuation, or on `autoApprovePreflight` — the blast radius is the launch card and nothing else.
+
+- [ ] **Step 4: Run the tests and confirm they pass**
+
+Run: `bunx vitest run src/council/__tests__/` then the FULL `bunx vitest run`
+Expected: all green, `convene-path.test.ts` still passing unchanged.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A
+git commit -m "fix(council): let /council show the pre-debate card it never showed
+
+Typing /council <topic> dispatched runCouncilV2 with convenePath:true
+(use-app-logic.tsx:5323, commit 56b39a0b), and the launch card is gated on
+!convenePath — so the slash command never showed the launch card at all,
+neither the intent block nor the pre-existing panel/rounds/cost configurator.
+The only path that showed it was auto-council.
+
+convenePath conflated two suppressions: the CLI must not hardcode the
+POST-debate decision when an agent convened the run, and the PRE-debate card.
+Only the first is what the flag exists for. A human who just typed /council is
+present to answer the second.
+
+Post-debate suppression, the neutral continuation and autoApprovePreflight are
+unchanged on every path; convene_council and the runDebate builtin still
+suppress both.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
