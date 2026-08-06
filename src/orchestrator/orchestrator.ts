@@ -2249,6 +2249,13 @@ export class Agent {
             // the user's choice instead of always continuing.
             this.councilManager.setLastPostDebateAction(action);
           },
+          onIntentLocked: (kind) => {
+            // Relay the launch-card lock across the same seam as
+            // onPostDebateAction, so the auto-council caller (tool-engine) can
+            // resolve the run's authoritative kind instead of falling back to
+            // the post-hoc synthesis regex.
+            this.councilManager.setLastIntentKind(kind);
+          },
         },
       );
 

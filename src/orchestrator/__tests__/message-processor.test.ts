@@ -24,11 +24,21 @@ function makeBashStub(): BashTool {
 }
 
 function makeCouncilStub(extra: Partial<CouncilManager> = {}): CouncilManager {
+  // Mutable so setLastIntentKind (below) can be observed back via
+  // councilManager.lastIntentKind, mirroring the real CouncilManager's
+  // getter/setter pair without pulling in the real class.
+  let lastIntentKind: CouncilManager["lastIntentKind"] = null;
   return {
     isContinuation: false,
     lastSynthesis: null,
     setContinuation: () => {},
     setLastSynthesis: () => {},
+    get lastIntentKind() {
+      return lastIntentKind;
+    },
+    setLastIntentKind: (v: CouncilManager["lastIntentKind"]) => {
+      lastIntentKind = v;
+    },
     resolveNonDisabledFallback: async () => ({ modelId: "deepseek-v4-flash" }),
     createQuestionResponder: () => async () => "",
     ...extra,
@@ -233,6 +243,34 @@ describe("MessageProcessor — DI surface invariants", () => {
     expect(postDebateContinuation(undefined, synthesis)).toBeNull();
     // Explicit pick → and only then does an implementing turn start.
     expect(postDebateContinuation("implement", synthesis)).toContain(synthesis);
+  });
+
+  // tool-engine.ts's auto-council dispatch is deliberately NOT convenePath
+  // (see its comment near the shouldAutoCouncil branch), so the launch card
+  // DOES fire and lock spec.intentKind. tool-engine.ts:851-870 reads that lock
+  // off `councilManager.lastIntentKind` (relayed by orchestrator.ts's
+  // `onIntentLocked` the same way `chosenAction` is relayed via
+  // `onPostDebateAction`) and passes it as postDebateContinuation's third
+  // argument. This proves the exact call shape tool-engine.ts uses honors the
+  // lock over the synthesis-JSON regex (task-3; session 3a8378db4adf had no
+  // lock available and the regex alone mis-shaped the whole post-debate flow).
+  it("the auto-council path's locked intent kind (CouncilManager relay) overrides the synthesis regex", async () => {
+    const { postDebateContinuation } = await import("../../council/index.js");
+    const synthesis = ["```json", '{"type":"implementation_plan","conclusion":"build it"}', "```"].join("\n");
+
+    // Baseline — no lock available (e.g. a resumed pre-2026-08 spec): the
+    // regex alone decides, and an implementation-shaped synthesis carries the
+    // original task forward.
+    expect(postDebateContinuation("continue_session", synthesis)).toContain("Continue the original task");
+
+    // The user locked "decision" on the launch card before the debate ever
+    // started. Simulate CouncilManager relaying it exactly as tool-engine.ts
+    // reads it (`councilManager.lastIntentKind`) — the lock must win even
+    // though the synthesis JSON itself says "implementation_plan".
+    const councilManager = makeCouncilStub();
+    councilManager.setLastIntentKind("decision");
+    const lockedIntentKind = councilManager.lastIntentKind;
+    expect(postDebateContinuation("continue_session", synthesis, lockedIntentKind ?? undefined)).toBeNull();
   });
 
   it("respects observer callbacks via notifyObserver (smoke)", () => {

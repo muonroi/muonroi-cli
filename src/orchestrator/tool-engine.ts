@@ -850,8 +850,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     });
     const synthesis = deps.councilManager.lastSynthesis;
     const chosenAction = deps.councilManager.lastPostDebateAction;
+    // This auto-council dispatch is deliberately NOT convenePath (see the
+    // comment above), so the launch card DOES fire and lock spec.intentKind —
+    // relay it the same way chosenAction is relayed, so postDebateContinuation
+    // resolves the run's authoritative kind instead of falling back to the
+    // post-hoc synthesis regex.
+    const lockedIntentKind = deps.councilManager.lastIntentKind;
     deps.councilManager.setLastSynthesis(null);
     deps.councilManager.setLastPostDebateAction(null);
+    deps.councilManager.setLastIntentKind(null);
     // Honour the user's post-debate choice. `postDebateContinuation` returns
     // null when no action was picked (card dismissed) and for an
     // analysis/evaluation/decision debate whose deliverable IS the conclusion —
@@ -859,7 +866,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     // on an explicit implement / generate_plan / continue_session pick.
     // Shared with the /council slash path (orchestrator.runCouncilV2).
     const { postDebateContinuation } = await import("../council/index.js");
-    const continuationPrompt = synthesis ? postDebateContinuation(chosenAction ?? undefined, synthesis) : null;
+    const continuationPrompt = synthesis
+      ? postDebateContinuation(chosenAction ?? undefined, synthesis, lockedIntentKind ?? undefined)
+      : null;
     if (continuationPrompt) {
       // Collapse the live debate block BEFORE the continuation streams. It is
       // rendered below the transcript and is otherwise only torn down at a turn

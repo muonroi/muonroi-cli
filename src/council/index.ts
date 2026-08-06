@@ -116,6 +116,17 @@ export interface RunCouncilOptions {
    */
   onPostDebateAction?: (action: string) => void;
   /**
+   * Fired once the user locks `spec.intentKind` on the launch card (task-2 —
+   * the "before any spend" gate). Lets the caller (runCouncilV2 / the
+   * auto-council path in tool-engine) relay the lock across the same seam
+   * `onPostDebateAction` uses, so `postDebateContinuation` outside this module
+   * can resolve the run's kind through `resolveRunKind` instead of falling
+   * back to the post-hoc synthesis regex. Never fired on `convenePath` /
+   * `sprintPlanningMode` (the card doesn't run there) — callers correctly see
+   * no lock and fall back.
+   */
+  onIntentLocked?: (kind: IntentKind) => void;
+  /**
    * When true, the leader-auto-promote note and the `Leader: … · Panel: …`
    * summary are NOT emitted as inline `content` chunks — the same data still
    * rides the structured `council_meta` patch, which the TUI Context Rail
@@ -889,6 +900,7 @@ export async function* runCouncil(
     // proceeding — a cancelled/refine run terminates above and the write
     // would otherwise be discarded on a spec that never leaves this scope.
     spec.intentKind = pickedKind;
+    options?.onIntentLocked?.(pickedKind);
     if (choseIntent) {
       yield { type: "content", content: `\n> Intent locked: ${INTENT_COPY[pickedKind].label}.\n` };
     }

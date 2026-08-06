@@ -12,6 +12,7 @@
 // transposition where the field/method originally lived on Agent.
 
 import { type ModelMessage, stepCountIs } from "ai";
+import type { IntentKind } from "../council/types.js";
 import { getModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {
@@ -72,6 +73,16 @@ export class CouncilManager {
    * (tool-engine) so it can honor the choice instead of always continuing.
    */
   private _lastPostDebateAction: string | null = null;
+  /**
+   * The intent kind the user locked on the last runCouncilV2's launch card
+   * (`spec.intentKind`, task-2). Relayed to the auto-council caller
+   * (tool-engine) alongside `lastPostDebateAction` so `postDebateContinuation`
+   * resolves the run's authoritative kind (`resolveRunKind`) instead of
+   * falling back to the post-hoc synthesis regex. `null` when the launch card
+   * never ran (convenePath / sprintPlanningMode) — the fallback is correct
+   * there.
+   */
+  private _lastIntentKind: IntentKind | null = null;
   private _isContinuation = false;
   private _questionResolvers = new Map<string, (answer: string) => void>();
   private _preflightResolvers = new Map<string, (approved: boolean) => void>();
@@ -96,6 +107,12 @@ export class CouncilManager {
   }
   setLastPostDebateAction(v: string | null): void {
     this._lastPostDebateAction = v;
+  }
+  get lastIntentKind(): IntentKind | null {
+    return this._lastIntentKind;
+  }
+  setLastIntentKind(v: IntentKind | null): void {
+    this._lastIntentKind = v;
   }
   get isContinuation(): boolean {
     return this._isContinuation;
