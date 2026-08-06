@@ -94,7 +94,7 @@ import {
   runPipeline,
   shouldHaltOnResponseTool,
 } from "../pil/index.js";
-import { isMetaAnalysisPrompt, isSprintPlanExecution } from "../pil/layer6-output.js";
+import { isMetaAnalysisPrompt, isPlanExecution } from "../pil/layer6-output.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
 import { mentionsEcosystemScope } from "../playbook/directives.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
@@ -259,22 +259,28 @@ import {
  * Resolve the per-turn `maxOutputTokens` budget.
  *
  * Normally the budget is derived from the PIL-classified `taskType`
- * (`taskTypeToMaxTokens`). But a sprint IMPLEMENTATION turn — the /ideal
- * loop's handoff into the host orchestrator via `processMessageFn`, marked
- * with `SPRINT_EXECUTION_MARKER` — is a KNOWN code-writing task that must not
+ * (`taskTypeToMaxTokens`). But a PLAN-EXECUTION turn — a handoff into the host
+ * orchestrator via `processMessageFn` carrying an already-reviewed plan, marked
+ * with `SPRINT_EXECUTION_MARKER` (/ideal) or `COUNCIL_PLAN_EXECUTION_MARKER`
+ * (the council's per-phase loop) — is a KNOWN code-writing task that must not
  * be starved by a noisy classify. Observed live (2026-07-10, gsd-core
  * migration): the impl prompt was classified `analyze`/default → capped at
  * 4_096 output → the model spent the whole budget narrating its plan, hit
  * `finishReason:"length"` mid-word, produced ZERO code, and the turn wedged.
  *
- * Fix: for a sprint-execution turn, floor the budget at the build/generate
- * tier (12_288) regardless of the classified type. Scoped to the marker only
+ * Fix: for a plan-execution turn, floor the budget at the build/generate
+ * tier (12_288) regardless of the classified type. Scoped to the markers only
  * (NOT the broad `isImplementationIntent`) so ordinary refactor/debug turns
  * keep their intentionally tighter L6 budgets.
+ *
+ * I3: this used to call `isSprintPlanExecution` directly, so when the council
+ * marker was added it landed in pipeline.ts alone — `pipeline.ts` forces
+ * `deliverableKind:"code"` but leaves `taskType` alone, so a council phase turn
+ * classified `analyze` got exactly the 4,096-token cap described above.
  */
 export function resolveTurnMaxOutputTokens(pilCtx: { taskType: string | null; raw?: string }): number {
   const base = taskTypeToMaxTokens(pilCtx.taskType);
-  if (isSprintPlanExecution(pilCtx.raw ?? "")) {
+  if (isPlanExecution(pilCtx.raw ?? "")) {
     return Math.max(base, taskTypeToMaxTokens("build"));
   }
   return base;
