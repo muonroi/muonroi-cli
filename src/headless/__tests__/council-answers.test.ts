@@ -89,6 +89,43 @@ describe("createCouncilAutoAnswerer", () => {
     expect(a!.answerQuestion(q({ phase: "clarify" }))).toBe("");
   });
 
+  describe("post-plan is the one card whose default is destructive", () => {
+    const postPlan = () =>
+      q({
+        phase: "post-plan",
+        // buildPostPlanCard's defaultIndex on an approve verdict.
+        defaultIndex: 0,
+        options: [
+          { label: "Implement the whole plan", value: "execute_plan", kind: "choice" },
+          { label: "Revise the plan", value: "revise_plan", kind: "freetext" },
+          { label: "Save & Exit", value: "save_exit", kind: "choice" },
+        ],
+      });
+
+    it("--yes does NOT auto-execute the plan (that would edit the repo unattended)", () => {
+      // Taking the card's own default here means a headless `/council --yes`
+      // runs N agent turns that edit files and shell out per phase, with no
+      // human anywhere. The plan is still drafted and reviewed on disk; it just
+      // is not executed without someone asking for it.
+      const a = createCouncilAutoAnswerer({ enabled: true });
+      expect(a!.answerQuestion(postPlan())).toBe("save_exit");
+    });
+
+    it("headless (no file, no --yes) also defaults to save_exit", () => {
+      const a = createHeadlessCouncilAutoAnswerer({});
+      expect(a.answerQuestion(postPlan())).toBe("save_exit");
+    });
+
+    it("a --council-answers file can still opt IN explicitly", () => {
+      // An explicit per-run choice is exactly the bar an unattended repo
+      // mutation should have to clear.
+      const a = createCouncilAutoAnswerer({ enabled: true, file: { "post-plan": ["execute_plan"] } });
+      expect(a!.answerQuestion(postPlan())).toBe("execute_plan");
+      // Queue exhausted → back to the safe default, never the card's default.
+      expect(a!.answerQuestion(postPlan())).toBe("save_exit");
+    });
+  });
+
   it("scripted answers consume FIFO per phase", () => {
     const a = createCouncilAutoAnswerer({
       enabled: false,

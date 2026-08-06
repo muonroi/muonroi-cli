@@ -38,8 +38,10 @@ export function createCouncilAutoAnswerer(opts: {
   const queues: Record<CouncilQuestionPhase, string[]> = {
     // No file queue: the launch card is suppressed on every non-interactive
     // path, so a headless run should never see one. If one does arrive,
-    // defaultAnswerFor picks option 0 — "Start debate" — which is the only
-    // answer that keeps a headless run moving.
+    // defaultAnswerFor picks option 0. Since the 2026-08-04 intent gate that is
+    // an IntentKind (buildIntentOptions reorders the leader's recommended kind
+    // into slot 0), NOT "Start debate" — which is still the right fallback: it
+    // records the leader's own recommendation and keeps the run moving.
     "council-setup": [],
     clarify: [...(opts.file?.clarify ?? [])],
     preflight: [...(opts.file?.preflight ?? [])],
@@ -63,6 +65,16 @@ export function createCouncilAutoAnswerer(opts: {
       if (phase && queues[phase].length > 0) {
         return queues[phase].shift() as string;
       }
+      // post-plan is the ONE card whose default is destructive. On an approve
+      // verdict buildPostPlanCard's defaultIndex is `execute_plan`, so
+      // auto-answering the default would make a headless `/council --yes`
+      // autonomously edit the repo and shell out once per plan phase, with no
+      // human anywhere in the loop. Default to `save_exit` instead: the plan is
+      // still written to .planning/PLAN.md and reviewed, it just is not executed.
+      // A `--council-answers` file can still opt IN explicitly via the
+      // "post-plan" queue above — an explicit, per-run choice, which is exactly
+      // the bar an unattended repo mutation should have to clear.
+      if (phase === "post-plan") return "save_exit";
       return defaultAnswerFor(q);
     },
     approvePreflight(): boolean {

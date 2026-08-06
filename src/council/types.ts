@@ -75,9 +75,16 @@ export interface ClarifiedSpec {
   parentContext?: string;
   /**
    * Locked at the launch card (design 2026-08-04). Authoritative for the whole
-   * run: drives outputShape, whether the planner phase runs, and the post-debate
-   * transition. When absent (non-interactive paths, resumed pre-2026-08 specs)
-   * callers fall back to synthesisOutputKind.
+   * run — but be precise about WHAT it actually drives, because the design doc's
+   * D1 over-claims and this comment used to repeat it: the card fires AFTER
+   * `debatePlan` (and therefore outputShape and panel composition) is already
+   * computed, so the lock cannot influence either. Its one real consumer is the
+   * POST-DEBATE transition: `resolveRunKind` (which feeds
+   * `pickPostDebateRecommendation`) and, through it, whether the planner /
+   * plan-review / post-plan-card path runs at all.
+   *
+   * When absent (non-interactive paths, resumed pre-2026-08 specs) callers fall
+   * back to synthesisOutputKind.
    */
   intentKind?: IntentKind;
 }
@@ -281,13 +288,11 @@ export interface ActionPlan {
   }>;
   estimatedComplexity: "trivial" | "moderate" | "complex";
   prerequisites: string[];
-  /**
-   * Phased form written to `.planning/PLAN.md` (design 2026-08-04). `steps` is
-   * kept for the legacy callers; the executor reads `phases` because a flat step
-   * list cannot carry per-phase acceptance criteria or a per-phase verify
-   * command — which is why the old flow could only ever execute one step.
-   */
-  phases?: import("./plan-artifact.js").PlanPhase[];
+  // NOTE: no `phases` field. It was added by the 2026-08-04 branch and was never
+  // written and never read — the phased plan lives on DISK as `.planning/PLAN.md`
+  // and is parsed by `plan-artifact.ts`; the executor reads that file, not this
+  // object. Removed rather than left as a dead field by the same branch that
+  // deleted `generate_plan` for being dead.
 }
 
 // ── Council Outcome (extends existing for backward compat) ───────────────────

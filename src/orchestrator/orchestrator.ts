@@ -2210,6 +2210,17 @@ export class Agent {
     // "continue_session" (user chose to keep working with the debate result).
     let chosenAction: string | undefined;
 
+    // Clear the CouncilManager relay fields BEFORE the run, not after. Only
+    // tool-engine's auto-council branch cleared them (read-then-null at
+    // :851-861), so a `/council` slash run left `lastIntentKind` (and
+    // `lastPostDebateAction`) set for the rest of the process — and the next
+    // reader could not tell "this run locked nothing" from "the previous run
+    // locked evaluation". Clearing here (not in `finally`) is deliberate: the
+    // auto-council caller reads these AFTER draining this generator, so a
+    // finally-clear would wipe the values it is waiting for.
+    this.councilManager.setLastPostDebateAction(null);
+    this.councilManager.setLastIntentKind(null);
+
     try {
       const gen = runCouncil(
         topic,

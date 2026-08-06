@@ -125,8 +125,17 @@ One screen, one extra choice, no second modal.
   council topic at all (chitchat) resolves through the existing `Cancel` option.
 - `Cheap run / Refine the topic first / Cancel` are unchanged.
 
-The answer **locks `spec.intentKind` for the whole run**. It drives `outputShape`, panel
-composition, whether the planner phase runs, and the post-debate transition.
+The answer **locks `spec.intentKind` for the whole run**.
+
+> **Correction (2026-08-06, whole-branch review).** This paragraph originally claimed the lock
+> drives "`outputShape`, panel composition, whether the planner phase runs, and the post-debate
+> transition". Only the last is true as built, and it is not worth building the rest: the launch
+> card fires **after** `debatePlan` is computed (`src/council/index.ts`, S1 gate), so both
+> `outputShape` and the panel are already decided by the time the user answers. The lock's real
+> and only consumers are in the post-debate block — `resolveRunKind`, which feeds
+> `pickPostDebateRecommendation`, and through it whether the planner / plan-review / post-plan-card
+> path runs. `src/council/types.ts` carries the same correction at the field. If a future change
+> wants the lock to shape the debate itself, the card has to move before `planDebate`.
 
 `synthesisOutputKind` (`index.ts:318-323`) stops being the source of truth. It remains only as a
 fallback for runs that bypass the card (headless answers, `sprintPlanningMode`, resumed runs
