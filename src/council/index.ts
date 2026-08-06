@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { ModelMessage } from "ai";
 import type { CouncilExperienceResult } from "../ee/council-bridge.js";
 import { queryExperience } from "../ee/council-bridge.js";
@@ -23,14 +24,16 @@ import { buildSpecFromTopic, runClarification } from "./clarifier.js";
 import { buildCouncilContext, buildProjectSnapshot } from "./context.js";
 import { evaluateResearchNeed, MAX_OPENING_ATTEMPTS, runDebate } from "./debate.js";
 import { planDebate } from "./debate-planner.js";
+import { resolveDebateSummary } from "./debate-summary.js";
 import { detectOutOfStackProposals, writeDecisionsLock } from "./decisions-lock.js";
-import { runExecution } from "./executor.js";
 import { INTENT_COPY, parseIntentAnswer } from "./intent-card.js";
 import { buildLaunchCard, cheapRunShape } from "./launch-card.js";
 import { buildCouncilCandidatePool, resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
 import { selectTaskAwarePanel } from "./panel-select.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
-import type { PlanPhase } from "./plan-artifact.js";
+import { type PlanPhase, parsePlanMarkdown } from "./plan-artifact.js";
+import { runPlanExecution } from "./plan-execution.js";
+import { runPlannerPhase, runPlanReview } from "./plan-phase.js";
 import { runPlanning } from "./planner.js";
 import { runPreflight } from "./preflight.js";
 import { formatRunReceipt, pickLoudestDissent } from "./run-receipt.js";
@@ -1199,6 +1202,13 @@ export async function* runCouncil(
   // the caller's auto-continue can both read it). Undefined until the card is
   // answered.
   let postDebateAction: string | undefined;
+  // Set only when the user picks "execute_plan" on the post-plan card below —
+  // Phase E (bottom of this function) gates the new per-phase runPlanExecution
+  // loop on this, never on the old flat ActionPlan `plan` variable. null under
+  // convenePath too: that path skips this whole interactive block by design
+  // (the calling agent decides what happens next, not the CLI — see
+  // "convenePath" doc comments below), so it correctly never auto-executes.
+  let executePlanPath: string | null = null;
   stats.phases.push({ name: "planning", durationMs: Date.now() - planStart });
 
   // Log interaction: synthesis
@@ -1844,11 +1854,11 @@ export async function* runCouncil(
             synthesisLen: synthesisText?.length ?? 0,
           });
         }
-        // Do NOT call runExecution here. Return synthesisText to the sprint-runner
-        // caller so it drives the full sprint lifecycle (Step 4–8 in sprint-runner.ts).
-        // Clear plan so Phase E's runExecution guard below does not fire — the plan
-        // content has already been serialized into synthesisText above.
-        plan = null;
+        // sprintPlanningMode does not execute here — it returns synthesisText to
+        // the sprint-runner caller, which drives the full sprint lifecycle
+        // (Step 4-8 in sprint-runner.ts). Phase E below gates the new per-phase
+        // runPlanExecution loop on `executePlanPath`, which is never set on this
+        // branch, so it correctly does not fire either — no suppression needed.
       } else if (answer === "refine" && hasEmptySections) {
         yield { type: "content", content: "\n> Let's clarify the unresolved aspects...\n" };
         const refinedAnswers: Array<{ section: string; answer: string }> = [];
@@ -1911,8 +1921,134 @@ export async function* runCouncil(
         outcome = refineResult.value.outcome;
         plan = refineResult.value.plan;
         synthesisText = refineResult.value.synthesisText;
+      } else if (answer === "implement") {
+        // D3/Task 8 — the reviewed-plan handoff. Previously "implement" fell
+        // through to normal persistence and postDebateContinuation fed the RAW
+        // synthesis prose back through processMessage on the next turn; PIL
+        // classified that prose taskType=analyze/deliverable=report
+        // (interaction_logs id 2498, session 3a8378db4adf) and the turn ran as a
+        // report against planVerified:false. Fix: draft a phased PLAN.md
+        // (runPlannerPhase), have the panel that just argued the topic review it
+        // (runPlanReview — also writes PLAN-VERIFY.md, satisfying the GSD
+        // mutation gate at heavy depth), then hand the user buildPostPlanCard's
+        // own execute_plan/revise_plan/save_exit choice. Only execute_plan sets
+        // executePlanPath, which Phase E below turns into the gated per-phase
+        // runPlanExecution loop.
+        const planCwd = options?.cwd ?? process.cwd();
+        const exchangesText = resolveDebateSummary(debateState);
+        let draftSynthesis = synthesisText;
+        const MAX_MANUAL_PLAN_REVISIONS = 3;
+        for (let manualRevision = 0; ; manualRevision += 1) {
+          yield { type: "content", content: "\n> Drafting an implementation plan from the approved conclusion...\n" };
+          const plannerGen = runPlannerPhase({
+            cwd: planCwd,
+            topic,
+            synthesis: draftSynthesis,
+            exchanges: exchangesText,
+            plannerModelId: leaderModelId,
+            llm,
+          });
+          // biome-ignore lint/suspicious/noImplicitAnyLet: shape inferred from runPlannerPhase generator
+          let plannerStep;
+          do {
+            plannerStep = await plannerGen.next();
+            if (!plannerStep.done && plannerStep.value) yield plannerStep.value;
+          } while (!plannerStep.done);
+          const plannerOutcome = plannerStep.value;
+          if (!plannerOutcome) {
+            yield {
+              type: "content",
+              content: "\n> The planner could not produce a gateable plan — saving the conclusion without executing.\n",
+            };
+            break;
+          }
+
+          const reviewGen = runPlanReview({
+            cwd: planCwd,
+            topic,
+            synthesis: draftSynthesis,
+            exchanges: exchangesText,
+            plannerModelId: leaderModelId,
+            leaderModelId,
+            participants: debateState.active,
+            llm,
+          });
+          // biome-ignore lint/suspicious/noImplicitAnyLet: shape inferred from runPlanReview generator
+          let reviewStep;
+          do {
+            reviewStep = await reviewGen.next();
+            if (!reviewStep.done && reviewStep.value) yield reviewStep.value;
+          } while (!reviewStep.done);
+          const reviewOutcome = reviewStep.value;
+
+          // Re-read PLAN.md rather than trusting plannerOutcome.phases: runPlanReview
+          // may have redrafted it internally (revise loop) before returning.
+          let reviewedPhases: PlanPhase[];
+          try {
+            reviewedPhases = parsePlanMarkdown(readFileSync(plannerOutcome.planPath, "utf8"));
+          } catch (err) {
+            console.error(
+              `[council] could not re-read ${plannerOutcome.planPath} after review: ${(err as Error).message}`,
+            );
+            reviewedPhases = plannerOutcome.phases;
+          }
+
+          const card = buildPostPlanCard({
+            planPath: plannerOutcome.planPath,
+            phases: reviewedPhases,
+            verdict: reviewOutcome.verdict,
+            concerns: reviewOutcome.concerns,
+          });
+          const planQuestionId = randomUUID();
+          yield {
+            type: "council_question",
+            content: `## ${card.question}`,
+            councilQuestion: {
+              questionId: planQuestionId,
+              phase: "post-plan",
+              question: card.question,
+              context: card.context,
+              isRequired: false,
+              options: card.options,
+              defaultIndex: card.defaultIndex,
+            },
+          } as StreamChunk;
+          let planAnswer = await respondToQuestion(planQuestionId);
+          if (planAnswer === COUNCIL_ANSWER_DISMISSED || planAnswer.trim().length === 0) {
+            planAnswer = card.options[card.defaultIndex]?.value ?? "save_exit";
+          }
+          const planAnswerLabel = card.options.find((o) => o.value === planAnswer)?.label ?? planAnswer;
+          yield { type: "content", content: `\n  ↳ ${planAnswerLabel}\n` };
+
+          if (planAnswer === "execute_plan") {
+            executePlanPath = plannerOutcome.planPath;
+            break;
+          }
+          if (planAnswer === "save_exit") {
+            break;
+          }
+
+          // Anything else is a revise: either the bare "revise_plan" value (the
+          // option picked with nothing typed) or free-text comments. Bounded —
+          // user-driven, never automatic, but an unbounded loop would still let
+          // repeated picks burn cost forever.
+          if (manualRevision + 1 >= MAX_MANUAL_PLAN_REVISIONS) {
+            console.error(
+              `[council] manual plan revision budget (${MAX_MANUAL_PLAN_REVISIONS}) exhausted — saving without executing`,
+            );
+            yield {
+              type: "content",
+              content: `\n> Revision budget exhausted — plan saved at ${plannerOutcome.planPath} without executing.\n`,
+            };
+            break;
+          }
+          const comments =
+            planAnswer === "revise_plan" ? reviewOutcome.concerns.join("; ") || "Please revise the plan." : planAnswer;
+          draftSynthesis = [draftSynthesis, "", "User-requested revision:", comments].join("\n");
+        }
       }
-      // "save_exit" and "implement" fall through to normal persistence
+      // "save_exit" falls through to normal persistence — "implement" is now
+      // handled above (D3/Task 8 plan draft → review → post-plan card).
     } catch (err) {
       // Post-debate interaction (menu, follow-up re-synthesis, refine) is
       // non-critical to the persisted outcome, so we swallow — but NEVER
@@ -2065,11 +2201,22 @@ export async function* runCouncil(
       /* non-critical */
     });
 
-  // ── Phase E: Execute (if plan approved) ─────────────────────────────────────
-  if (plan && plan.steps.length > 0) {
+  // ── Phase E: Execute (gated per-phase — set only by "execute_plan" on the
+  // post-plan card above; never auto-fires, and never under convenePath since
+  // that path skips the interactive block entirely by design) ────────────────
+  if (executePlanPath) {
     const execStart = Date.now();
-    yield* runExecution(plan, processMessageFn);
+    const execResult = yield* runPlanExecution({
+      cwd: options?.cwd ?? process.cwd(),
+      planPath: executePlanPath,
+      processMessage: processMessageFn,
+    });
     stats.phases.push({ name: "execution", durationMs: Date.now() - execStart });
+    idealTrace("council.execution.done", {
+      sessionId,
+      completed: execResult.completed.length,
+      haltedAt: execResult.haltedAt,
+    });
   }
 
   // ── Stats ───────────────────────────────────────────────────────────────────

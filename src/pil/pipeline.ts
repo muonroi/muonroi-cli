@@ -28,7 +28,7 @@ import { layer2Personality } from "./layer2-personality.js";
 import { layer3EeInjection, surfaceCompactionArtifacts } from "./layer3-ee-injection.js";
 import { layer4Gsd } from "./layer4-gsd.js";
 import { layer5Context } from "./layer5-context.js";
-import { isMetaAnalysisPrompt, isSprintPlanExecution, layer6Output } from "./layer6-output.js";
+import { isCouncilPlanExecution, isMetaAnalysisPrompt, isSprintPlanExecution, layer6Output } from "./layer6-output.js";
 import { getRepoStructureHints } from "./repo-structure-hints.js";
 import { PipelineContextSchema } from "./schema.js";
 import { injectSessionExperience, isSelfExperiencePrompt } from "./session-experience-injection.js";
@@ -164,7 +164,9 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
   // Sprint-plan execution: the orchestrator deliberately pipes a locked plan
   // through processMessageFn. It MUST keep write tools and MUST be treated as
   // a code deliverable regardless of how the classifier tags the long plan text.
-  const sprintPlanExecution = isSprintPlanExecution(ctx.raw);
+  // The council's own per-phase execution envelope (plan-execution.ts) hits the
+  // same branch via COUNCIL_PLAN_EXECUTION_MARKER — see its module doc.
+  const sprintPlanExecution = isSprintPlanExecution(ctx.raw) || isCouncilPlanExecution(ctx.raw);
   if (sprintPlanExecution) {
     ctx = {
       ...ctx,

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { planningArtifact } from "../../gsd/paths.js";
-import { readState, setStateField } from "../../gsd/workflow-engine.js";
+import { canExecute, readPlanVerifyVerdict, readState, setStateField } from "../../gsd/workflow-engine.js";
 import type { StreamChunk } from "../../types/index.js";
 import {
   buildPlannerPrompt,
@@ -718,5 +718,122 @@ describe("runPlanReview", () => {
     } finally {
       delete process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES;
     }
+  });
+});
+
+// ── PLAN-VERIFY.md — the GSD mutation gate's actual read target ─────────────
+//
+// src/gsd/mutation-gate.ts hard-blocks every non-read-only tool call at heavy
+// depth via canExecute(cwd, depth), which reads ONLY PLAN-VERIFY.md
+// (readPlanVerifyVerdict) — never PLAN-REVIEW.md and never the "Plan Verified"
+// STATE.md field runPlanReview also sets. Before this fix, a council-approved
+// plan wrote "Plan Verified: yes" and PLAN-REVIEW.md but never PLAN-VERIFY.md,
+// so canExecute kept returning "plan-verify pending" — every edit tool call in
+// the execution phase that follows would have been blocked at heavy depth,
+// even immediately after a unanimous panel approval.
+describe("runPlanReview — PLAN-VERIFY.md (the artifact the GSD mutation gate reads)", () => {
+  let cwd: string;
+
+  afterEach(() => {
+    if (cwd) rmSync(cwd, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it("an approve writes PLAN-VERIFY.md with verdict: pass and unlocks canExecute at heavy depth", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-verify-"));
+    seedPlan(cwd);
+    const { result } = await drain(
+      runPlanReview({
+        cwd,
+        topic: "topic",
+        synthesis: "SYNTHESIS-BODY",
+        exchanges: "EXCHANGES",
+        plannerModelId: "planner-model",
+        leaderModelId: "leader-model",
+        participants: [participant("architect", "model-a", "Architect", "structure")],
+        llm: queuedLlm([verdictBlock("approve")]),
+      }),
+    );
+
+    expect(result.planVerifyPath).toBe(planningArtifact(cwd, "PLAN-VERIFY.md"));
+    expect(existsSync(result.planVerifyPath!)).toBe(true);
+    expect(readFileSync(result.planVerifyPath!, "utf8")).toMatch(/verdict:\s*pass/i);
+
+    // The exact function the mutation gate calls (src/gsd/mutation-gate.ts:43)
+    // — proves this is not just "a file with the right regex" but the real
+    // integration point actually unlocking.
+    expect(readPlanVerifyVerdict(cwd)).toBe("pass");
+    expect(canExecute(cwd, "heavy")).toEqual({ allowed: true });
+  });
+
+  it("a block writes PLAN-VERIFY.md with verdict: block, and canExecute stays blocked at heavy depth", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-verify-"));
+    seedPlan(cwd);
+    const { result } = await drain(
+      runPlanReview({
+        cwd,
+        topic: "topic",
+        synthesis: "SYNTHESIS-BODY",
+        exchanges: "EXCHANGES",
+        plannerModelId: "planner-model",
+        leaderModelId: "leader-model",
+        participants: [participant("architect", "model-a", "Architect", "structure")],
+        llm: queuedLlm([verdictBlock("block", ["unsafe migration"])]),
+      }),
+    );
+
+    expect(readPlanVerifyVerdict(cwd)).toBe("block");
+    expect(canExecute(cwd, "heavy").allowed).toBe(false);
+    expect(result.planVerifyPath).toBe(planningArtifact(cwd, "PLAN-VERIFY.md"));
+  });
+
+  it("a revise-budget-exhausted outcome writes PLAN-VERIFY.md with verdict: revise", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-verify-"));
+    seedPlan(cwd);
+    process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES = "0";
+    try {
+      const { result } = await drain(
+        runPlanReview({
+          cwd,
+          topic: "topic",
+          synthesis: "SYNTHESIS-BODY",
+          exchanges: "EXCHANGES",
+          plannerModelId: "planner-model",
+          leaderModelId: "leader-model",
+          participants: [participant("architect", "model-a", "Architect", "structure")],
+          llm: queuedLlm([verdictBlock("revise", ["no rollback"])]),
+        }),
+      );
+
+      expect(result.verdict).toBe("revise");
+      expect(readPlanVerifyVerdict(cwd)).toBe("revise");
+      expect(canExecute(cwd, "heavy").allowed).toBe(false);
+    } finally {
+      delete process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES;
+    }
+  });
+
+  it("an approve advances STATE.md Phase to execute, satisfying canExecute's own phase check", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-verify-"));
+    seedPlan(cwd);
+    // Seed a STATE.md phase left over from a prior /ideal run in this cwd — without
+    // this, readState(cwd).phase is null before this review runs and the "phase
+    // must equal execute" branch in canExecute is trivially skipped either way.
+    setStateField(cwd, "Phase", "plan");
+    await drain(
+      runPlanReview({
+        cwd,
+        topic: "topic",
+        synthesis: "SYNTHESIS-BODY",
+        exchanges: "EXCHANGES",
+        plannerModelId: "planner-model",
+        leaderModelId: "leader-model",
+        participants: [participant("architect", "model-a", "Architect", "structure")],
+        llm: queuedLlm([verdictBlock("approve")]),
+      }),
+    );
+
+    expect(readState(cwd).phase).toBe("execute");
+    expect(canExecute(cwd, "heavy")).toEqual({ allowed: true });
   });
 });

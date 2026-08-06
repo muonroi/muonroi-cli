@@ -268,6 +268,13 @@ export type CouncilQuestionPhase =
   | "preflight"
   | "plan-confirm"
   | "post-debate"
+  /**
+   * D3/Task 8 — shown after "implement" is chosen on the post-debate card, once
+   * the planner has drafted `.planning/PLAN.md` and the debate panel has
+   * reviewed it (buildPostPlanCard). Distinct from "plan-confirm", which is the
+   * older council_preflight review of the flat pre-debate ActionPlan.
+   */
+  | "post-plan"
   | "pil-interview"
   | "pil-acceptance"
   | "tool-loop-cap"

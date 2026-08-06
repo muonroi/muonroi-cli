@@ -20,6 +20,7 @@ export interface CouncilAnswersFile {
   preflight?: string[];
   "plan-confirm"?: string[];
   "post-debate"?: string[];
+  "post-plan"?: string[];
   /** Default approval for every council_preflight chunk. Omitted → true. */
   preflightApprove?: boolean;
 }
@@ -44,6 +45,7 @@ export function createCouncilAutoAnswerer(opts: {
     preflight: [...(opts.file?.preflight ?? [])],
     "plan-confirm": [...(opts.file?.["plan-confirm"] ?? [])],
     "post-debate": [...(opts.file?.["post-debate"] ?? [])],
+    "post-plan": [...(opts.file?.["post-plan"] ?? [])],
     "pil-interview": [],
     "pil-acceptance": [],
     "tool-loop-cap": [],
@@ -144,7 +146,7 @@ export function parseCouncilAnswersFile(raw: string): CouncilAnswersFile {
   }
   const obj = parsed as Record<string, unknown>;
   const out: CouncilAnswersFile = {};
-  for (const phase of ["clarify", "preflight", "plan-confirm", "post-debate"] as const) {
+  for (const phase of ["clarify", "preflight", "plan-confirm", "post-debate", "post-plan"] as const) {
     const v = obj[phase];
     if (v === undefined) continue;
     if (!Array.isArray(v) || !v.every((x): x is string => typeof x === "string")) {

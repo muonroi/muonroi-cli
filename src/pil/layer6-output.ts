@@ -324,8 +324,19 @@ export function isSprintPlanExecution(raw: string): boolean {
   return raw.includes(SPRINT_EXECUTION_MARKER) || raw.includes("--- SPRINT PLAN TO IMPLEMENT ---");
 }
 
+/**
+ * Council plan execution (design 2026-08-04). Kept DISTINCT from
+ * SPRINT_EXECUTION_MARKER so council and /ideal stay separable in telemetry,
+ * while both hit the same pipeline branch.
+ */
+export const COUNCIL_PLAN_EXECUTION_MARKER = "[COUNCIL-PLAN-EXECUTION: locked]";
+
+export function isCouncilPlanExecution(raw: string): boolean {
+  return raw.includes(COUNCIL_PLAN_EXECUTION_MARKER);
+}
+
 const IMPLEMENTATION_INTENT_RE =
-  /\b(implement|edit|wire(?:\s+up)?|rewrite|rename|scaffold|refactor)\b|\bimprove(?:ment)?\b|\bmake\s+(the\s+)?(change|edit|modification)s?\b|\bapply\s+(the\s+)?(fix|change|patch|edit|diff)\b|(?:^|\s)(triển\s*khai|trien\s*khai|chỉnh\s*sửa|chinh\s*sua|viết\s*lại|viet\s*lai|đổi\s*tên|doi\s*ten|cải\s*thiện|cai\s*thien)\b|\[SPRINT-PLAN-EXECUTION:\s*locked\]/i;
+  /\b(implement|edit|wire(?:\s+up)?|rewrite|rename|scaffold|refactor)\b|\bimprove(?:ment)?\b|\bmake\s+(the\s+)?(change|edit|modification)s?\b|\bapply\s+(the\s+)?(fix|change|patch|edit|diff)\b|(?:^|\s)(triển\s*khai|trien\s*khai|chỉnh\s*sửa|chinh\s*sua|viết\s*lại|viet\s*lai|đổi\s*tên|doi\s*ten|cải\s*thiện|cai\s*thien)\b|\[SPRINT-PLAN-EXECUTION:\s*locked\]|\[COUNCIL-PLAN-EXECUTION:\s*locked\]/i;
 
 export function isImplementationIntent(raw: string): boolean {
   return !!raw && IMPLEMENTATION_INTENT_RE.test(raw);

@@ -17,7 +17,7 @@ import { getPlanReviewDebateRetries } from "../gsd/flags.js";
 import { planningArtifact } from "../gsd/paths.js";
 import type { PerspectiveVerdict } from "../gsd/plan-council.js";
 import { extractStructuredVerdict, VERDICT_OUTPUT_CONTRACT } from "../gsd/verdict-schema.js";
-import { setStateField } from "../gsd/workflow-engine.js";
+import { advancePhase, setStateField } from "../gsd/workflow-engine.js";
 import type { StreamChunk } from "../types/index.js";
 import { tracedGenerate } from "./llm.js";
 import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
@@ -185,6 +185,18 @@ export interface PlanReviewOutcome {
   concerns: string[];
   reviewPath: string;
   planVerified: boolean;
+  /**
+   * `.planning/PLAN-VERIFY.md`, written alongside `reviewPath` whenever the panel
+   * actually reached a merged verdict. Absent only on the early "could not read
+   * PLAN.md" failure, where there is nothing to verify. This is the SAME artifact
+   * `src/gsd/workflow-engine.ts`'s `readPlanVerifyVerdict`/`canExecute` read — a
+   * panel-reviewed, leader-merged plan IS the plan verification the GSD mutation
+   * gate requires at heavy depth (src/gsd/mutation-gate.ts), so this review must
+   * write it or the gate blocks every edit tool call in the execution phase that
+   * follows, even after an `approve`. Mirrors `src/gsd/plan-council.ts`'s
+   * `planVerifyPath` convention rather than inventing a new one.
+   */
+  planVerifyPath?: string;
 }
 
 /**
@@ -253,6 +265,33 @@ export function buildReviewPrompt(
   ].join("\n");
 }
 
+/**
+ * `.planning/PLAN-VERIFY.md` — the artifact `readPlanVerifyVerdict` (gsd/
+ * workflow-engine.ts) actually parses (`verdict:\s*(pass|revise|block)`), so the
+ * verdict line here is intentionally `pass`, not `approve` — `PerspectiveVerdict`
+ * uses "approve" but the GSD gate's vocabulary is "pass" (mirrors
+ * plan-council.ts's own `rawVerdict === "approve" ? "pass" : rawVerdict`).
+ */
+function formatPlanVerify(verdict: PerspectiveVerdict, concerns: string[], leaderModelId: string): string {
+  const gateVerdict = verdict === "approve" ? "pass" : verdict;
+  return [
+    "# PLAN-VERIFY",
+    "",
+    `verdict: ${gateVerdict}`,
+    `revisionRequired: ${verdict === "revise" || verdict === "block" ? "yes" : "no"}`,
+    `verdictSource: council-plan-review`,
+    `leader: ${leaderModelId}`,
+    "",
+    "## Summary",
+    verdict === "approve"
+      ? "The debate panel reviewed the plan and approved it — execute gate unlocked."
+      : `Panel review raised ${concerns.length} concern(s) — ${verdict === "block" ? "blocked" : "revision required"}.`,
+    "",
+    "## Concerns",
+    concerns.length ? concerns.map((c) => `- ${c}`).join("\n") : "- (none)",
+  ].join("\n");
+}
+
 function formatReviewMarkdown(
   results: Array<{ role: string; stanceName: string; verdict: PerspectiveVerdict; concerns: string[] }>,
   merged: { verdict: PerspectiveVerdict; concerns: string[] },
@@ -315,6 +354,7 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
   const maxRetries = getPlanReviewDebateRetries();
   let planPath = planningArtifact(args.cwd, "PLAN.md");
   let synthesis = args.synthesis;
+  const planVerifyPath = planningArtifact(args.cwd, "PLAN-VERIFY.md");
 
   for (let attempt = 0; ; attempt += 1) {
     let planBody: string;
@@ -389,19 +429,31 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
     try {
       mkdirSync(dirname(reviewPath), { recursive: true });
       writeFileSync(reviewPath, formatReviewMarkdown(results, merged, args.leaderModelId, attempt), "utf8");
+      // PLAN-VERIFY.md is the artifact src/gsd/workflow-engine.ts's canExecute
+      // actually reads (see PlanReviewOutcome.planVerifyPath doc above) — write
+      // it alongside PLAN-REVIEW.md on every attempt so the GSD mutation gate
+      // never sees a stale or missing verdict for this cwd.
+      writeFileSync(planVerifyPath, formatPlanVerify(merged.verdict, merged.concerns, args.leaderModelId), "utf8");
     } catch (err) {
-      console.error(`[council/plan-phase] writing ${reviewPath} failed: ${(err as Error).message}`);
+      console.error(
+        `[council/plan-phase] writing ${reviewPath} or ${planVerifyPath} failed: ${(err as Error).message}`,
+      );
     }
 
     if (merged.verdict === "approve") {
       setStateField(args.cwd, "Plan Verified", "yes");
+      // Mirror applyVerdict (src/gsd/plan-council.ts:176-185): an approve also
+      // advances STATE.md Phase to "execute" — canExecute's OWN phase check
+      // (workflow-engine.ts:239) blocks on any non-"execute", non-null phase
+      // left over from a prior /ideal run in the same cwd.
+      advancePhase(args.cwd, "execute");
       yield phaseDone({
         phaseId: "phase:plan-review",
         kind: "evaluation",
         label: "Plan review — approved",
         startedAt,
       });
-      return { verdict: "approve", concerns: merged.concerns, reviewPath, planVerified: true };
+      return { verdict: "approve", concerns: merged.concerns, reviewPath, planVerified: true, planVerifyPath };
     }
 
     if (merged.verdict === "block") {
@@ -417,7 +469,7 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
         startedAt,
         errorMessage: merged.concerns.join("; ") || "Plan blocked by review.",
       });
-      return { verdict: "block", concerns: merged.concerns, reviewPath, planVerified: false };
+      return { verdict: "block", concerns: merged.concerns, reviewPath, planVerified: false, planVerifyPath };
     }
 
     // revise — re-enter the planner if the retry budget allows another round.
@@ -430,7 +482,7 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
         startedAt,
         errorMessage: merged.concerns.join("; ") || "Plan needs revision.",
       });
-      return { verdict: "revise", concerns: merged.concerns, reviewPath, planVerified: false };
+      return { verdict: "revise", concerns: merged.concerns, reviewPath, planVerified: false, planVerifyPath };
     }
 
     synthesis = [
