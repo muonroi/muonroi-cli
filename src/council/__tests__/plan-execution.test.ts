@@ -39,21 +39,74 @@ describe("execution envelope", () => {
 });
 
 describe("verifyPhase", () => {
-  it("a zero exit status passes", () => {
-    const r = verifyPhase(PHASE, "/tmp", () => ({ stdout: "ok", stderr: "", status: 0 }));
+  it("a zero exit status passes", async () => {
+    const r = await verifyPhase(PHASE, "/tmp", async () => ({ stdout: "ok", stderr: "", status: 0 }));
     expect(r.ok).toBe(true);
   });
 
-  it("a non-zero exit status fails and keeps the output for the halt reason", () => {
-    const r = verifyPhase(PHASE, "/tmp", () => ({ stdout: "", stderr: "2 failed", status: 1 }));
+  it("a non-zero exit status fails and keeps the output for the halt reason", async () => {
+    const r = await verifyPhase(PHASE, "/tmp", async () => ({ stdout: "", stderr: "2 failed", status: 1 }));
     expect(r.ok).toBe(false);
     expect(r.output).toContain("2 failed");
   });
 
-  it("a phase with no verify command does NOT auto-pass", () => {
-    const r = verifyPhase({ ...PHASE, verify: "" }, "/tmp", () => ({ stdout: "", stderr: "", status: 0 }));
+  it("a phase with no verify command does NOT auto-pass", async () => {
+    const r = await verifyPhase({ ...PHASE, verify: "" }, "/tmp", async () => ({ stdout: "", stderr: "", status: 0 }));
     expect(r.ok).toBe(false);
     expect(r.output).toContain("no verify command");
+  });
+
+  // Round 3 (code review): the injected ExecFn can reproduce exactly the
+  // shape spawn/spawnSync produce on a timeout, a spawn failure, or output
+  // overflow — {status: null, error: {message}} — without any real process.
+  // A gate whose entire diagnostic value is the halt reason needs each of
+  // these three under test, not just the "OS never fails" happy path.
+  it("a timeout (status: null, error set) fails and the message reaches the halt reason", async () => {
+    const r = await verifyPhase(PHASE, "/tmp", async () => ({
+      stdout: "partial output before the timeout",
+      stderr: "",
+      status: null,
+      error: { message: "verify command timed out after 600000ms" },
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.output).toContain("verify command timed out after 600000ms");
+    expect(r.output).toContain("partial output before the timeout");
+  });
+
+  it("a spawn failure (ENOENT-class) fails and the message reaches the halt reason", async () => {
+    const r = await verifyPhase(PHASE, "/tmp", async () => ({
+      stdout: "",
+      stderr: "",
+      status: null,
+      error: { message: "spawn bunx ENOENT" },
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.output).toContain("spawn bunx ENOENT");
+  });
+
+  it("an output overflow fails and the message reaches the halt reason", async () => {
+    const r = await verifyPhase(PHASE, "/tmp", async () => ({
+      stdout: "the first 10MB of a runaway test dump",
+      stderr: "",
+      status: null,
+      error: { message: "verify command output exceeded 10485760 bytes" },
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.output).toContain("verify command output exceeded 10485760 bytes");
+    expect(r.output).toContain("the first 10MB of a runaway test dump");
+  });
+
+  it("error set alongside a coincidental zero status still fails — error always wins", async () => {
+    // Defensive: no real spawn/spawnSync path produces both at once (error
+    // implies status stays null), but the gate's OWN condition must not
+    // silently trust a stray status:0 over a set error.
+    const r = await verifyPhase(PHASE, "/tmp", async () => ({
+      stdout: "ok",
+      stderr: "",
+      status: 0,
+      error: { message: "should never both be set, but must still fail if it happens" },
+    }));
+    expect(r.ok).toBe(false);
   });
 });
 
@@ -78,8 +131,8 @@ function seedPlan(cwd: string, phases: PlanPhase[]): string {
   return planPath;
 }
 
-const okExec: ExecutionArgs["exec"] = () => ({ stdout: "ok", stderr: "", status: 0 });
-const failExec: ExecutionArgs["exec"] = () => ({ stdout: "", stderr: "2 failed", status: 1 });
+const okExec: ExecutionArgs["exec"] = async () => ({ stdout: "ok", stderr: "", status: 0 });
+const failExec: ExecutionArgs["exec"] = async () => ({ stdout: "", stderr: "2 failed", status: 1 });
 
 function passthroughMessage(seen: string[]): ExecutionArgs["processMessage"] {
   return async function* (message: string) {
@@ -199,7 +252,7 @@ describe("runPlanExecution", () => {
     // A verify command that "passes" but, as a side effect, removes the plan
     // file — simulates the plan disappearing mid-run (deleted, renamed, made
     // unwritable) between the phase turn finishing and the write-back.
-    const vanishingExec: ExecutionArgs["exec"] = () => {
+    const vanishingExec: ExecutionArgs["exec"] = async () => {
       rmSync(planPath, { force: true });
       return { stdout: "ok", stderr: "", status: 0 };
     };
