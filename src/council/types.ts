@@ -391,6 +391,100 @@ export interface EnhancedCouncilOutcome {
   nextActions?: Array<{ action: PostDebateActionId; label: string; reason?: string }>;
 }
 
+export type CouncilTrustLevel = "high" | "degraded" | "invalidated";
+export type CouncilFailureClass = "none" | "synthesis_failed" | "partial_panel" | "criteria_unmet" | "ungrounded";
+export type CouncilDegradationKind = "partial_panel" | "accepted_open_criteria" | "evidence_gap";
+export type CouncilTransitionAction = "continue" | "degrade" | "hard_stop";
+
+export interface PhaseOutcomeEnvelope {
+  outcome: EnhancedCouncilOutcome | null;
+  trustLevel: CouncilTrustLevel;
+  failureClass: CouncilFailureClass;
+  degradationKinds: CouncilDegradationKind[];
+  canContinueNominally: boolean;
+  decisionBasis: "debate" | "fallback" | "none";
+  visibilityMessage?: string;
+}
+
+export function buildPhaseOutcomeEnvelope(input: {
+  outcome: EnhancedCouncilOutcome | null;
+  synthesisFailReason?: string;
+  participantCount: number;
+  activeCount: number;
+  evidenceDensity?: number;
+  taggedClaims?: number;
+  unmetCriteriaCount?: number;
+  acceptedEscalation?: boolean;
+}): PhaseOutcomeEnvelope {
+  if (!input.outcome) {
+    return {
+      outcome: input.outcome,
+      trustLevel: "invalidated",
+      failureClass: "synthesis_failed",
+      degradationKinds: [],
+      canContinueNominally: false,
+      decisionBasis: "none",
+      visibilityMessage: input.synthesisFailReason
+        ? `Council could not produce a validated structured outcome: ${input.synthesisFailReason}`
+        : "Council could not produce a validated structured outcome.",
+    };
+  }
+
+  const degradationKinds: CouncilDegradationKind[] = [];
+  let failureClass: CouncilFailureClass = "none";
+
+  if (input.activeCount < input.participantCount) {
+    degradationKinds.push("partial_panel");
+    failureClass = "partial_panel";
+  }
+  if ((input.unmetCriteriaCount ?? 0) > 0 && input.acceptedEscalation) {
+    degradationKinds.push("accepted_open_criteria");
+    failureClass = failureClass === "none" ? "criteria_unmet" : failureClass;
+  }
+  if ((input.taggedClaims ?? 0) > 0 && (input.evidenceDensity ?? 0) <= 0) {
+    degradationKinds.push("evidence_gap");
+    failureClass = failureClass === "none" ? "ungrounded" : failureClass;
+  }
+
+  const trustLevel: CouncilTrustLevel = degradationKinds.length > 0 ? "degraded" : "high";
+  const notes: string[] = [];
+  if (degradationKinds.includes("partial_panel")) {
+    notes.push("one or more panelists failed, so the decision was synthesized from a partial panel");
+  }
+  if (degradationKinds.includes("accepted_open_criteria")) {
+    notes.push("the debate ended with accepted open success criteria");
+  }
+  if (degradationKinds.includes("evidence_gap")) {
+    notes.push("grounding stayed weak: tagged claims were not backed by confirmed evidence");
+  }
+
+  return {
+    outcome: input.outcome,
+    trustLevel,
+    failureClass,
+    degradationKinds,
+    canContinueNominally: trustLevel === "high",
+    decisionBasis: degradationKinds.length > 0 ? "fallback" : "debate",
+    visibilityMessage: notes.length > 0 ? `Decision quality degraded: ${notes.join("; ")}.` : undefined,
+  };
+}
+
+export function resolvePhaseOutcomeTransition(
+  envelope: PhaseOutcomeEnvelope,
+  requestedAction: PostDebateActionId | "retry_synthesis" | "refine" | "" | undefined,
+): CouncilTransitionAction {
+  if (envelope.trustLevel === "invalidated") return "hard_stop";
+  // `!requestedAction` already covers both "" and undefined — an explicit
+  // `=== ""` after it is a dead branch (TS2367).
+  if (!requestedAction || requestedAction === "save_exit" || requestedAction === "ask_followup") {
+    return "continue";
+  }
+  if (requestedAction === "retry_synthesis" || requestedAction === "refine") {
+    return envelope.trustLevel === "high" ? "continue" : "degrade";
+  }
+  return envelope.canContinueNominally ? "continue" : "degrade";
+}
+
 /**
  * Post-debate actions the leader may recommend. Bounded to handlers wired in
  * index.ts's post-debate switch — the model selects/orders/labels FROM this

@@ -42,10 +42,17 @@ import type {
   EnhancedCouncilOutcome,
   IntentKind,
   IsolatedTaskRunner,
+  PhaseOutcomeEnvelope,
   PreflightResponder,
   QuestionResponder,
 } from "./types.js";
-import { COUNCIL_ANSWER_DISMISSED, coerceIntentKind, isImplementationKind } from "./types.js";
+import {
+  buildPhaseOutcomeEnvelope,
+  COUNCIL_ANSWER_DISMISSED,
+  coerceIntentKind,
+  isImplementationKind,
+  resolvePhaseOutcomeTransition,
+} from "./types.js";
 
 /**
  * Wrap a CouncilLLM so every `generate` call inherits the council-wide abort
@@ -1021,6 +1028,27 @@ export async function* runCouncil(
   } while (!planResult.done);
   let { outcome, plan, synthesisText } = planResult.value;
   const synthesisFailReason = planResult.value.synthesisFailReason;
+  const criteriaOutcome = summarizeCriteriaOutcome(
+    spec.successCriteria,
+    debateState.finalCriteriaMet,
+    debateState.finalCriteriaDeferred,
+  );
+  const outcomeEnvelope: PhaseOutcomeEnvelope = buildPhaseOutcomeEnvelope({
+    outcome,
+    synthesisFailReason,
+    participantCount: launchParticipants.length,
+    activeCount: debateState.active.length,
+    evidenceDensity: debateState.finalEvidenceDensity,
+    taggedClaims: debateState.finalTaggedClaims,
+    unmetCriteriaCount: criteriaOutcome.unmetLabels.length,
+    acceptedEscalation: debateState.escalation?.action === "accept",
+  });
+  if (outcomeEnvelope.visibilityMessage) {
+    yield { type: "content", content: `\n> ${outcomeEnvelope.visibilityMessage}\n` };
+    if (synthesisText.trim()) {
+      synthesisText = `${synthesisText}\n\n## Decision Quality\n- ${outcomeEnvelope.visibilityMessage}`;
+    }
+  }
   // Post-debate action the user picked (hoisted so the completed-status guard +
   // the caller's auto-continue can both read it). Undefined until the card is
   // answered.
@@ -1476,6 +1504,35 @@ export async function* runCouncil(
             idealTrace("council.postDebate.emptyAnswerDefaulted", { sessionId, defaultIndex, fallback });
             answer = fallback;
           }
+        }
+      }
+      const transition = resolvePhaseOutcomeTransition(
+        outcomeEnvelope,
+        answer === "ask_followup" ||
+          answer === "generate_plan" ||
+          answer === "implement" ||
+          answer === "save_exit" ||
+          answer === "continue_session" ||
+          answer === "retry_synthesis" ||
+          answer === "refine"
+          ? answer
+          : undefined,
+      );
+      if (transition !== "continue") {
+        const fallbackAction =
+          outcomeEnvelope.trustLevel === "invalidated"
+            ? synthesisFailReason
+              ? "retry_synthesis"
+              : "save_exit"
+            : "ask_followup";
+        if (answer !== fallbackAction) {
+          yield {
+            type: "content",
+            content:
+              `\n> Council transition gate blocked \`${answer || "(empty)"}\` ` +
+              `because trust is ${outcomeEnvelope.trustLevel}. Routing to \`${fallbackAction}\` instead.\n`,
+          };
+          answer = fallbackAction;
         }
       }
       postDebateAction = answer;
