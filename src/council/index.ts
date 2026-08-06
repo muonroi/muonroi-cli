@@ -192,6 +192,22 @@ export interface RunCouncilOptions {
    */
   convenePath?: boolean;
   /**
+   * Task 10 — `convenePath` conflates two unrelated suppressions: (1) POST-debate
+   * (the CLI must not hardcode what happens after the debate — the flag's actual
+   * purpose, see the doc above) and (2) PRE-debate, i.e. the S1 launch card that
+   * asks what the run is for and what it may spend, BEFORE any money is spent.
+   * The `/council` slash path sets `convenePath: true` too (so it also gets
+   * suppression 1 — no hardcoded post-debate card), but a human just typed the
+   * command, so unlike `convene_council`/`runDebate` there IS someone present to
+   * answer the launch card. `allowLaunchCard: true` opts back into suppression-1-
+   * only: the S1 gate shows the card despite `convenePath`, while every other
+   * `convenePath` consumer (post-debate card, neutral continuation,
+   * autoApprovePreflight, per-stance recall) is untouched. Only the `/council`
+   * slash dispatch (orchestrator.runCouncilV2) sets this; convene_council and the
+   * runDebate builtin have no human turn and correctly never set it.
+   */
+  allowLaunchCard?: boolean;
+  /**
    * #2 — isolated sub-agent bridge (orchestrator.runTaskRequest). When wired,
    * the debate's research phase runs in a budget-capped explore sub-agent
    * instead of an in-process 15-step generateText. Forwarded onto CouncilConfig
@@ -944,11 +960,19 @@ export async function* runCouncil(
   // The last point before money is spent. Shown only on the interactive path:
   // convenePath (the agent already decided to convene) and sprintPlanningMode
   // (no human turn at all) would both be blocked by a card nobody can answer —
-  // the same gating the preflight approval card uses.
+  // the same gating the preflight approval card uses. `allowLaunchCard` opts a
+  // convenePath caller back into showing THIS card only (Task 10 — the /council
+  // slash path sets both: a human is present to answer S1 even though the
+  // post-debate card below stays suppressed). See `allowLaunchCard`'s doc above.
   let launchRounds = debatePlan.plannedRounds ?? 3;
   let launchParticipants = active;
   let launchCostAware = costAware;
-  if (sessionId && !options?.convenePath && !options?.sprintPlanningMode && !userAborted()) {
+  if (
+    sessionId &&
+    (!options?.convenePath || options?.allowLaunchCard) &&
+    !options?.sprintPlanningMode &&
+    !userAborted()
+  ) {
     const proposedKind = coerceIntentKind(debatePlan.outputShape.kind);
     const card = buildLaunchCard({
       topic,

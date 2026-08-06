@@ -2142,6 +2142,17 @@ export class Agent {
        */
       convenePath?: boolean;
       /**
+       * Task 10 — forwarded into runCouncil's `RunCouncilOptions.allowLaunchCard`.
+       * The `/council` slash dispatch (use-app-logic.tsx) sets this alongside
+       * `convenePath: true`: a human just typed the command, so the S1 launch
+       * card should show even though `convenePath` also suppresses the (agent-
+       * decided) post-debate card. Undefined everywhere else — the auto-council
+       * and convene_council/runDebate paths that reach runCouncilV2 via
+       * `MessageProcessorDeps` have no human turn and never set it, so the
+       * launch card stays suppressed for them as before.
+       */
+      allowLaunchCard?: boolean;
+      /**
        * Gate A — caller-threaded out-of-repo ("external") scope, forwarded into
        * runCouncil's `RunCouncilOptions.externalTopic`. Set by the auto-council
        * caller (tool-engine) from the main turn's already-classified
@@ -2219,6 +2230,10 @@ export class Agent {
           // convene_council path — suppress ALL hardcoded post-debate decision
           // surface; the agent decides what happens after the synthesis.
           convenePath: options?.convenePath,
+          // Task 10 — the /council slash path sets this alongside convenePath so
+          // the S1 launch card still shows for the human who just typed the
+          // command; post-debate suppression above is unaffected.
+          allowLaunchCard: options?.allowLaunchCard,
           // Gate A — thread the caller's already-classified scope so runCouncil
           // doesn't pay for a second self-classify round-trip.
           externalTopic: options?.externalTopic,

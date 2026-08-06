@@ -139,6 +139,61 @@ async function runWithSetupAnswer(setupAnswer: string, sessionId: string) {
 
 const INTENT_LOCKED_PREFIX = "Intent locked:";
 
+/**
+ * Task 10 — the S1 launch card must be reachable from the `/council` slash
+ * path. Before this fix, `/council` dispatched `runCouncilV2(topic, {
+ * convenePath: true })` (use-app-logic.tsx, commit 56b39a0b) and the S1 gate
+ * was `!options?.convenePath`, so the slash command never showed the card at
+ * all — only auto-council (which runs WITHOUT convenePath) did. These pin the
+ * fix: a new `allowLaunchCard` option lets a convenePath caller opt back into
+ * S1 while leaving post-debate suppression (convene-path.test.ts) untouched.
+ */
+async function runWithGateOptions(options: Record<string, unknown>, sessionId: string) {
+  const { runCouncil } = await import("../index.js");
+  const respondToQuestion = vi
+    .fn()
+    .mockImplementation(async (questionId: string) =>
+      questionId.startsWith("council-setup-") ? "start" : "save_exit",
+    );
+  const processMessageFn = vi.fn().mockImplementation(async function* () {
+    yield { type: "done" };
+  });
+  const { chunks } = await runToEnd(
+    runCouncil(
+      "Should we use gRPC internally?",
+      "mock-model",
+      [],
+      sessionId,
+      buildMockLLM(),
+      respondToQuestion,
+      vi.fn().mockResolvedValue(true),
+      processMessageFn,
+      { skipClarification: true, ...options },
+    ),
+  );
+  return { chunks, respondToQuestion };
+}
+
+const isSetupCard = (c: any) => c?.type === "council_question" && c?.councilQuestion?.phase === "council-setup";
+const isPostDebateCard = (c: any) => c?.type === "council_question" && c?.councilQuestion?.phase === "post-debate";
+
+describe("launch card reachable via /council (task 10)", () => {
+  it("slash-path shape (convenePath + allowLaunchCard) emits the council-setup card", async () => {
+    const { chunks } = await runWithGateOptions({ convenePath: true, allowLaunchCard: true }, "sess-slash-reach");
+    expect(chunks.some(isSetupCard)).toBe(true);
+  });
+
+  it("agent-convened shape (convenePath alone) emits NO council-setup card", async () => {
+    const { chunks } = await runWithGateOptions({ convenePath: true }, "sess-agent-convened");
+    expect(chunks.some(isSetupCard)).toBe(false);
+  });
+
+  it("slash-path shape still emits NO post-debate card (convenePath invariant preserved)", async () => {
+    const { chunks } = await runWithGateOptions({ convenePath: true, allowLaunchCard: true }, "sess-slash-postdebate");
+    expect(chunks.some(isPostDebateCard)).toBe(false);
+  });
+});
+
 describe("launch card intent-lock transcript chunk", () => {
   it("picking an intent option emits the Intent locked confirmation", async () => {
     // "action_items" is a real IntentKind, distinct from the mocked

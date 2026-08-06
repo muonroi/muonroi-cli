@@ -5320,7 +5320,12 @@ export function useAppLogic(props: AppLogicProps) {
               isProcessingRef.current = true;
               setIsProcessing(true);
               try {
-                const gen = agent.runCouncilV2(topic, { convenePath: true });
+                // Task 10 — convenePath alone (pre-existing) also hid the S1
+                // launch card, so /council never showed it. allowLaunchCard
+                // opts back into showing it: a human just typed this command,
+                // unlike convene_council/runDebate. Post-debate stays
+                // suppressed by convenePath (see council/index.ts doc).
+                const gen = agent.runCouncilV2(topic, { convenePath: true, allowLaunchCard: true });
                 for await (const chunk of gen) {
                   // Council emitted a chunk — clear the "Waiting for next phase"
                   // inter-card heartbeat started after the last askcard answer.
