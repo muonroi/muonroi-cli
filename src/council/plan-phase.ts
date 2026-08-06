@@ -290,6 +290,10 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
     } catch (err) {
       const msg = (err as Error).message;
       console.error(`[council/plan-phase] plan review could not read ${planPath}: ${msg}`);
+      // A prior run's "yes" must not survive a plan that can no longer even be
+      // read — mirrors applyVerdict's pass→yes / everything-else→no convention
+      // (src/gsd/plan-council.ts:176-185).
+      setStateField(args.cwd, "Plan Verified", "no");
       yield phaseError({
         phaseId: "phase:plan-review",
         kind: "evaluation",
@@ -303,7 +307,12 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
     const results: Array<{ role: string; stanceName: string; verdict: PerspectiveVerdict; concerns: string[] }> = [];
     for (const p of args.participants) {
       const stanceName = p.stance?.name ?? p.role;
-      const lens = p.stance?.lens ?? p.role;
+      // Fold the stance's concrete focus (e.g. "Cite numbers with sources only")
+      // into the lens text so it actually reaches the reviewer — buildReviewPrompt's
+      // signature takes only (planBody, stanceName, lens), so this is the one place
+      // that instruction can be carried without dropping it. Falls back exactly as
+      // before when the participant has no stance.
+      const lens = p.stance ? (p.stance.focus ? `${p.stance.lens} — ${p.stance.focus}` : p.stance.lens) : p.role;
       try {
         const raw = yield* tracedGenerate(args.llm, {
           modelId: p.model,
@@ -358,6 +367,11 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
     }
 
     if (merged.verdict === "block") {
+      // Mirror applyVerdict (src/gsd/plan-council.ts:176-185): pass → "yes",
+      // everything else → "no". Without this, a `block` after a prior `approve`
+      // in the same cwd leaves a stale "yes" that canExecute/gsd_status/
+      // council-context all still read as true.
+      setStateField(args.cwd, "Plan Verified", "no");
       yield phaseError({
         phaseId: "phase:plan-review",
         kind: "evaluation",
@@ -370,6 +384,7 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
 
     // revise — re-enter the planner if the retry budget allows another round.
     if (attempt >= maxRetries) {
+      setStateField(args.cwd, "Plan Verified", "no");
       yield phaseError({
         phaseId: "phase:plan-review",
         kind: "evaluation",
@@ -397,6 +412,7 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
     });
     if (!plannerResult) {
       console.error("[council/plan-phase] plan review revise: planner failed to produce a revised plan");
+      setStateField(args.cwd, "Plan Verified", "no");
       yield phaseError({
         phaseId: "phase:plan-review",
         kind: "evaluation",

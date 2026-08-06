@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { planningArtifact } from "../../gsd/paths.js";
-import { readState } from "../../gsd/workflow-engine.js";
+import { readState, setStateField } from "../../gsd/workflow-engine.js";
 import type { StreamChunk } from "../../types/index.js";
 import {
   buildPlannerPrompt,
@@ -310,6 +310,45 @@ describe("runPlanReview", () => {
     vi.restoreAllMocks();
   });
 
+  it("folds the stance's concrete focus into the reviewer prompt when present", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
+    seedPlan(cwd);
+    let seenPrompt = "";
+    const llm: CouncilLLM = {
+      generate: async (_modelId, _system, prompt) => {
+        seenPrompt = prompt;
+        return verdictBlock("approve");
+      },
+      research: async () => {
+        throw new Error("not implemented");
+      },
+      debate: async () => {
+        throw new Error("not implemented");
+      },
+    };
+    await drain(
+      runPlanReview({
+        cwd,
+        topic: "topic",
+        synthesis: "SYNTHESIS-BODY",
+        exchanges: "EXCHANGES",
+        plannerModelId: "planner-model",
+        leaderModelId: "leader-model",
+        participants: [
+          {
+            role: "architect" as CouncilParticipant["role"],
+            model: "model-a",
+            position: "",
+            stance: { name: "Cost Skeptic", lens: "does this cost too much?", focus: "Cite numbers with sources only" },
+          },
+        ],
+        llm,
+      }),
+    );
+
+    expect(seenPrompt).toContain("Cite numbers with sources only");
+  });
+
   it("unanimous approve writes PLAN-REVIEW.md and sets Plan Verified so readState round-trips true", async () => {
     cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
     seedPlan(cwd);
@@ -345,9 +384,14 @@ describe("runPlanReview", () => {
     expect(doneChunk).toBeDefined();
   });
 
-  it("any block stops immediately, writes no verified state, and does not re-enter the planner", async () => {
+  it("any block stops immediately, clears a stale Plan Verified: yes, and does not re-enter the planner", async () => {
     cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
     seedPlan(cwd);
+    // Seed a stale "yes" from a hypothetical prior approved run in this same cwd —
+    // without this, readState(cwd).planVerified is false-by-default (no STATE.md
+    // yet) and the assertion below cannot distinguish "correctly cleared" from
+    // "never got set in the first place".
+    setStateField(cwd, "Plan Verified", "yes");
     const llm = queuedLlm([verdictBlock("approve"), verdictBlock("block", ["unsafe migration"])]);
     const { result } = await drain(
       runPlanReview({
@@ -440,9 +484,12 @@ describe("runPlanReview", () => {
     }
   });
 
-  it("an empty reviewer set merges to revise and never sets Plan Verified", async () => {
+  it("an empty reviewer set merges to revise and clears a stale Plan Verified: yes", async () => {
     cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
     seedPlan(cwd);
+    // Seed a stale "yes" — see the "any block" test above for why this is required
+    // to make the readState assertion below capable of failing.
+    setStateField(cwd, "Plan Verified", "yes");
     process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES = "0";
     try {
       const { result } = await drain(
@@ -469,68 +516,79 @@ describe("runPlanReview", () => {
   it("on revise, re-enters the planner with the merged concerns folded in, bounded by the retry budget", async () => {
     cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
     seedPlan(cwd, "# PLAN — test\n\n## P0 — Original\n\n**Acceptance:**\n- original\n");
-    // Default retry budget is 1 (2 total review attempts): revise, then approve.
-    // The 2nd generate() call is the planner re-entry (queued between the two
-    // review calls) and must echo the concern text back so we can prove it
-    // was folded into the planner prompt.
-    const seenPlannerPrompts: string[] = [];
-    let call = 0;
-    const llm: CouncilLLM = {
-      generate: async (_modelId, _system, prompt) => {
-        call += 1;
-        if (call === 1) return verdictBlock("revise", ["no rollback plan"]);
-        if (call === 2) {
-          seenPlannerPrompts.push(prompt);
-          return [
-            "```json",
-            JSON.stringify({
-              phases: [
-                {
-                  id: "P0",
-                  title: "Revised",
-                  steps: ["s"],
-                  files: [],
-                  acceptance: ["revised acceptance"],
-                  verify: "",
-                },
-              ],
-            }),
-            "```",
-          ].join("\n");
-        }
-        return verdictBlock("approve");
-      },
-      research: async () => {
-        throw new Error("not implemented");
-      },
-      debate: async () => {
-        throw new Error("not implemented");
-      },
-    };
+    // Pin the retry budget explicitly rather than relying on the ambient default
+    // (1) — a developer with MUONROI_PLAN_REVIEW_DEBATE_RETRIES exported to
+    // something else in their shell would otherwise get a spurious failure here.
+    process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES = "1";
+    try {
+      // Budget 1 → 2 total review attempts: revise, then approve. The 2nd
+      // generate() call is the planner re-entry (queued between the two review
+      // calls) and must echo the concern text back so we can prove it was
+      // folded into the planner prompt.
+      const seenPlannerPrompts: string[] = [];
+      let call = 0;
+      const llm: CouncilLLM = {
+        generate: async (_modelId, _system, prompt) => {
+          call += 1;
+          if (call === 1) return verdictBlock("revise", ["no rollback plan"]);
+          if (call === 2) {
+            seenPlannerPrompts.push(prompt);
+            return [
+              "```json",
+              JSON.stringify({
+                phases: [
+                  {
+                    id: "P0",
+                    title: "Revised",
+                    steps: ["s"],
+                    files: [],
+                    acceptance: ["revised acceptance"],
+                    verify: "",
+                  },
+                ],
+              }),
+              "```",
+            ].join("\n");
+          }
+          return verdictBlock("approve");
+        },
+        research: async () => {
+          throw new Error("not implemented");
+        },
+        debate: async () => {
+          throw new Error("not implemented");
+        },
+      };
 
-    const { result } = await drain(
-      runPlanReview({
-        cwd,
-        topic: "topic",
-        synthesis: "SYNTHESIS-BODY",
-        exchanges: "EXCHANGES",
-        plannerModelId: "planner-model",
-        leaderModelId: "leader-model",
-        participants: [participant("architect", "model-a", "Architect", "structure")],
-        llm,
-      }),
-    );
+      const { result } = await drain(
+        runPlanReview({
+          cwd,
+          topic: "topic",
+          synthesis: "SYNTHESIS-BODY",
+          exchanges: "EXCHANGES",
+          plannerModelId: "planner-model",
+          leaderModelId: "leader-model",
+          participants: [participant("architect", "model-a", "Architect", "structure")],
+          llm,
+        }),
+      );
 
-    expect(result.verdict).toBe("approve");
-    expect(result.planVerified).toBe(true);
-    expect(seenPlannerPrompts[0]).toContain("no rollback plan");
-    // The plan was actually rewritten by the re-entered planner.
-    expect(readFileSync(planningArtifact(cwd, "PLAN.md"), "utf8")).toContain("Revised");
+      expect(result.verdict).toBe("approve");
+      expect(result.planVerified).toBe(true);
+      expect(seenPlannerPrompts[0]).toContain("no rollback plan");
+      // The plan was actually rewritten by the re-entered planner.
+      expect(readFileSync(planningArtifact(cwd, "PLAN.md"), "utf8")).toContain("Revised");
+    } finally {
+      delete process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES;
+    }
   });
 
-  it("revise repeated past the retry budget stops and reports revise without an unbounded loop", async () => {
+  it("revise repeated past the retry budget stops, reports revise, and clears a stale Plan Verified: yes", async () => {
     cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
     seedPlan(cwd);
+    // Seed a stale "yes" — see the "any block" test above for why this is required
+    // to make the readState assertion below capable of failing.
+    setStateField(cwd, "Plan Verified", "yes");
     process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES = "1";
     try {
       let generateCalls = 0;
@@ -578,6 +636,10 @@ describe("runPlanReview", () => {
 
       expect(result.verdict).toBe("revise");
       expect(result.planVerified).toBe(false);
+      // The outcome's own `planVerified: false` is hardcoded on every non-approve
+      // return, so it proves nothing about the actual on-disk state — assert
+      // readState directly to prove the stale "yes" seeded above was really cleared.
+      expect(readState(cwd).planVerified).toBe(false);
       // Retry budget 1 → 2 review passes, each with 1 participant → 2 review
       // calls + 1 planner re-entry call = 3 generate() calls, never unbounded.
       expect(generateCalls).toBe(3);
