@@ -202,8 +202,13 @@ describe("implement -> plan draft -> review -> post-plan card -> execute_plan", 
     const { runCouncil } = await import("../index.js");
 
     const seenPrompts: string[] = [];
+    // I5 — sample the gate token from INSIDE a phase turn. That is the only
+    // moment it is supposed to be open, and the only way to tell "the unlock
+    // worked" apart from "the unlock leaked" once it is restored below.
+    const verdictDuringPhase: Array<string | null> = [];
     const processMessageFn = vi.fn().mockImplementation(async function* (message: string) {
       seenPrompts.push(message);
+      verdictDuringPhase.push(readPlanVerifyVerdict(cwd));
       yield { type: "done" };
     });
 
@@ -242,9 +247,63 @@ describe("implement -> plan draft -> review -> post-plan card -> execute_plan", 
     expect(existsSync(planPath)).toBe(true);
     expect(readFileSync(planPath, "utf8")).toContain("**Status:** done");
 
-    // PLAN-VERIFY.md exists and unlocks the GSD mutation gate — this is the
-    // second half of the fix (Task 8's investigation into mutation-gate.ts).
-    expect(readPlanVerifyVerdict(cwd)).toBe("pass");
+    // PLAN-VERIFY.md unlocked the GSD mutation gate WHILE the phase turn ran —
+    // the second half of the fix (Task 8's investigation into mutation-gate.ts).
+    expect(verdictDuringPhase).toEqual(["pass"]);
+
+    // I5 — …and the unlock is SCOPED to this run. These are cwd-scoped files
+    // that canExecute reads on every later turn in the repo
+    // (workflow-engine.ts:227-243); leaving them would hold the heavy-depth
+    // mutation gate open indefinitely for any subsequent turn in this project,
+    // including one that never ran a council. The cwd had no PLAN-VERIFY.md
+    // before the run, so it must have none after it.
+    expect(readPlanVerifyVerdict(cwd)).toBeNull();
+    expect(existsSync(planningArtifact(cwd, "PLAN-VERIFY.md"))).toBe(false);
+    // The REVIEW itself is the audit trail and is deliberately kept.
+    expect(existsSync(planningArtifact(cwd, "PLAN-REVIEW.md"))).toBe(true);
+    // The plan the phases executed also stays on disk.
+    expect(existsSync(planningArtifact(cwd, "PLAN.md"))).toBe(true);
+  });
+
+  it("I7 — a throw from a phase turn is contained: the run still emits its terminal done", async () => {
+    // Phase E sits AFTER the post-debate try/catch closes and now drives N full
+    // agent turns. An escaping throw would skip the stats block AND the terminal
+    // `{type:"done"}` — and on the slash path orchestrator.ts's `innerDoneSeen`
+    // re-emit too, so the TUI consumer's `for await` would never see its break
+    // boundary and the turn would hang mounted.
+    cwd = mkdtempSync(join(tmpdir(), "council-plan-exec-"));
+    const { runCouncil } = await import("../index.js");
+
+    const processMessageFn = vi.fn().mockImplementation(async function* () {
+      yield { type: "content", content: "starting" };
+      throw new Error("provider exploded mid-phase");
+    });
+    const { chunks, respondToQuestion } = buildAnswerer("execute_plan");
+
+    await expect(
+      drain(
+        runCouncil(
+          "Add a sentinel",
+          "mock-model",
+          [],
+          "sess-exec-throw",
+          buildMockLLM(APPROVE_VERDICT),
+          respondToQuestion,
+          vi.fn().mockResolvedValue(true),
+          processMessageFn,
+          { skipClarification: true, cwd },
+        ),
+        chunks,
+      ),
+    ).resolves.toBeDefined();
+
+    expect(processMessageFn).toHaveBeenCalled();
+    // Terminal chunk reached the consumer.
+    expect(chunks.some((c) => c.type === "done")).toBe(true);
+    // The failure is reported, not swallowed, and points at the saved plan.
+    expect(chunks.some((c) => c.type === "content" && c.content?.includes("provider exploded mid-phase"))).toBe(true);
+    // I5 still runs on the throw path — the gate must not be left open.
+    expect(readPlanVerifyVerdict(cwd)).toBeNull();
   });
 
   it("pressing Esc on the post-plan card NEVER launches execution, even though execute_plan is the approve default", async () => {

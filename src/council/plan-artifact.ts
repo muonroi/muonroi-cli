@@ -18,7 +18,16 @@ export interface PlanPhase {
   done: boolean;
 }
 
-const PHASE_RE = /^##\s+(P\d+)\s+—\s+(.+)$/;
+/**
+ * Phase heading: `## P0 — Title`.
+ *
+ * The separator accepts an em dash (U+2014, what `renderPlanMarkdown` emits), an
+ * en dash (U+2013) or a plain hyphen. It used to require U+2014 exactly, so a
+ * hand-edited PLAN.md typed with `-` parsed as ZERO phases — and `runPlanExecution`
+ * then returned `reason: "plan complete"` having run nothing at all. A dash
+ * variant is not a reason to silently declare a plan finished.
+ */
+const PHASE_RE = /^##\s+(P\d+)\s*[—–-]\s*(.+)$/;
 const BULLET_RE = /^-\s*(.*)$/;
 
 function section(lines: string[], heading: string): string[] {

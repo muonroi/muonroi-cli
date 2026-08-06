@@ -90,3 +90,37 @@ describe("plan artifact round-trip", () => {
     expect(parsed[0].acceptance).toEqual(["item 1", "", "item 3"]);
   });
 });
+
+describe("phase heading dash tolerance (hand-edited plans)", () => {
+  // PHASE_RE used to require U+2014 exactly — what renderPlanMarkdown emits. A
+  // human editing PLAN.md types a plain hyphen, which parsed as ZERO phases, and
+  // runPlanExecution then reported reason:"plan complete" having executed
+  // nothing. Fail-silent-SUCCESS is the wrong direction for a gate.
+  const DASHES: Array<[string, string]> = [
+    ["em dash (what renderPlanMarkdown emits)", "—"],
+    ["en dash", "–"],
+    ["plain hyphen (hand-typed)", "-"],
+  ];
+
+  for (const [name, dash] of DASHES) {
+    it(`parses a phase heading written with a ${name}`, () => {
+      const body = ["# PLAN", "", `## P0 ${dash} Sentinel`, "", "**Verify:** exit 0", "", "**Status:** pending"].join(
+        "\n",
+      );
+      const phases = parsePlanMarkdown(body);
+      expect(phases).toHaveLength(1);
+      expect(phases[0].id).toBe("P0");
+      expect(phases[0].title).toBe("Sentinel");
+      expect(nextPendingPhase(body)?.id).toBe("P0");
+    });
+  }
+
+  it("markPhaseDone works on a hand-typed hyphen heading too", () => {
+    const body = ["## P0 - Sentinel", "", "**Status:** pending"].join("\n");
+    expect(markPhaseDone(body, "P0")).toContain("**Status:** done");
+  });
+
+  it("still finds NO phases in a file that genuinely has none", () => {
+    expect(parsePlanMarkdown("# PLAN\n\nsome prose, no headings\n")).toHaveLength(0);
+  });
+});

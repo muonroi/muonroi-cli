@@ -35,6 +35,21 @@ vi.mock("../../storage/index", () => ({
   loadTranscript: vi.fn().mockReturnValue([]),
   logInteraction: vi.fn(),
 }));
+
+/**
+ * I8 — an ordered log of "a phase turn ran" vs "the session was marked
+ * completed". Hoisted so the SessionStore mock factory (which vitest lifts above
+ * every import) can push into the same array the assertions read.
+ */
+const { timeline } = vi.hoisted(() => ({ timeline: [] as string[] }));
+vi.mock("../../storage/sessions.js", () => ({
+  SessionStore: class {
+    constructor(_cwd: string) {}
+    setStatus(_id: string, status: string) {
+      timeline.push(`session:${status}`);
+    }
+  },
+}));
 vi.mock("../../ee/council-bridge.js", () => ({ queryExperience: vi.fn().mockResolvedValue({ warnings: [] }) }));
 vi.mock("../../ee/intercept.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../ee/intercept.js")>();
@@ -201,6 +216,7 @@ describe("C1 — no ungated implement turn after the gated phase loop", () => {
     prevEscalate = process.env.MUONROI_COUNCIL_ESCALATE;
     process.env.MUONROI_COUNCIL_ESCALATE = "0";
     cwd = mkdtempSync(join(tmpdir(), "council-seam-"));
+    timeline.length = 0;
   });
 
   afterEach(() => {
@@ -219,6 +235,7 @@ describe("C1 — no ungated implement turn after the gated phase loop", () => {
     const calls: string[] = [];
     const processMessageFn = vi.fn().mockImplementation(async function* (message: string) {
       calls.push(message);
+      timeline.push(`phase:${calls.length}`);
       yield { type: "done" };
     });
     const { chunks, respondToQuestion } = buildAnswerer(opts.planCardAnswer);
@@ -295,6 +312,17 @@ describe("C1 — no ungated implement turn after the gated phase loop", () => {
     // The relayed action must describe what the run ACTUALLY ended on, not the
     // "implement" pick that only requested a plan.
     expect(relayedAction).not.toBe("implement");
+  }, 30_000);
+
+  it("I8 — the session is marked completed AFTER the last phase, not before the first", async () => {
+    // `postDebateAction` on this path is "execute_plan"/"implement", never
+    // "continue_session", so the completed-status block (which used to sit ABOVE
+    // Phase E) fired first and every message the N phase turns then wrote landed
+    // on a session already flagged done — it dropped out of the resume picker
+    // mid-run.
+    const { calls } = await runSeam({ planCardAnswer: "execute_plan", p0Verify: "exit 0", p1Verify: "exit 0" });
+    expect(calls).toHaveLength(2);
+    expect(timeline).toEqual(["phase:1", "phase:2", "session:completed"]);
   }, 30_000);
 
   it("Esc on the post-plan card runs nothing at all", async () => {

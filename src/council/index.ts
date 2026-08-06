@@ -1,12 +1,14 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { ModelMessage } from "ai";
 import type { CouncilExperienceResult } from "../ee/council-bridge.js";
 import { queryExperience } from "../ee/council-bridge.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { judgeCouncilOutcome } from "../ee/judge.js";
 import { recordCouncilOutcome } from "../ee/phase-outcome.js";
-import { isTaskAwarePanelEnabled } from "../gsd/flags.js";
+import { isGsdHardGateEnabled, isTaskAwarePanelEnabled } from "../gsd/flags.js";
+import { planningArtifact } from "../gsd/paths.js";
 import type { PerspectiveVerdict } from "../gsd/plan-council.js";
+import { advancePhase, canExecute, readState, setStateField } from "../gsd/workflow-engine.js";
 import { runPipeline } from "../pil/pipeline.js";
 import type { PipelineContext } from "../pil/types.js";
 import { idealTrace } from "../product-loop/ideal-trace.js";
@@ -475,6 +477,17 @@ export interface PostPlanCardInput {
    * must not read that as unresolved dissent (see the "Notes" line below).
    */
   concerns: string[];
+  /**
+   * I9 — true when the GSD mutation gate would BLOCK every write tool inside the
+   * phase turns this card is about to authorise. That is the case at heavy depth
+   * when `PLAN-VERIFY.md` does not say `pass` (`canExecute`,
+   * src/gsd/workflow-engine.ts:227-243), i.e. exactly the `revise`/`block`
+   * verdicts. Offering "Execute anyway" there is a near-silent no-op: the phases
+   * run, write nothing, fail their own verify, and the loop halts at P0 — after
+   * paying for a full agent turn. The caller computes it from the real
+   * `canExecute` rather than re-deriving the rule here.
+   */
+  gateBlocksExecution?: boolean;
 }
 
 export interface PostPlanCard {
@@ -504,11 +517,26 @@ export interface PostPlanCard {
  * this card. So `revise` still offers `execute_plan` — labeled to admit the
  * review did not clear — but is NOT the default; only `approve` defaults to
  * `execute_plan`, `block`/`revise` both default to `revise_plan`.
+ *
+ * I9 (2026-08-06) narrows that one case: when `gateBlocksExecution` is set the
+ * option is withdrawn anyway, because the GSD mutation gate would block every
+ * write inside the phase turns and "Execute anyway" would be a paid no-op. The
+ * card says so instead of silently offering a dead button.
+ *
+ * I4 (2026-08-06): each phase line now carries its VERIFY COMMAND. Picking
+ * execute authorises `spawn(cmd, [], { cwd, shell: true })` of an LLM-authored
+ * string, once per phase (plan-execution.ts:85). This card is the consent gate;
+ * the commands being consented to have to be on it.
  */
 export function buildPostPlanCard(input: PostPlanCardInput): PostPlanCard {
-  const phaseLines = input.phases.map((p) => `${p.id} — ${p.title} · ${p.acceptance.length} acceptance criteria`);
+  const phaseLines = input.phases.flatMap((p) => [
+    `${p.id} — ${p.title} · ${p.acceptance.length} acceptance criteria`,
+    // Never elide: an empty verify is itself the decision-relevant fact (that
+    // phase cannot be gated at all — verifyPhase fails it rather than passing).
+    `    verify: ${p.verify.trim() ? `\`${p.verify.trim()}\`` : "(none — this phase cannot be gated)"}`,
+  ]);
 
-  const offersExecute = input.verdict !== "block";
+  const offersExecute = input.verdict !== "block" && input.gateBlocksExecution !== true;
 
   const options: CouncilQuestionOption[] = [
     ...(offersExecute
@@ -516,7 +544,7 @@ export function buildPostPlanCard(input: PostPlanCardInput): PostPlanCard {
           {
             label:
               input.verdict === "revise" ? "Execute anyway — the review asked for changes" : "Implement the whole plan",
-            description: `Execute every phase in order (${input.phases.length} phase${input.phases.length === 1 ? "" : "s"}), gating each on its own acceptance criteria and verify command.`,
+            description: `Execute every phase in order (${input.phases.length} phase${input.phases.length === 1 ? "" : "s"}), gating each on its own acceptance criteria and running the verify command shown above it. Those commands run in a shell in this project directory.`,
             value: "execute_plan",
             kind: "choice" as const,
           },
@@ -543,14 +571,24 @@ export function buildPostPlanCard(input: PostPlanCardInput): PostPlanCard {
   const concernsBlock =
     input.concerns.length > 0 ? `\n\n${concernsLabel}:\n${input.concerns.map((c) => `- ${c}`).join("\n")}` : "";
 
+  // I9 — say WHY execute is missing. Without this the card just silently loses
+  // an option the user was told about the last time they saw it.
+  const gateBlock =
+    input.gateBlocksExecution === true && input.verdict !== "block"
+      ? "\n\nExecute is unavailable: depth is heavy and plan review did not approve, so the GSD mutation gate would block every edit inside the phase turns (see .planning/PLAN-VERIFY.md). Running it would burn a turn per phase and write nothing."
+      : "";
+
   return {
     question:
       input.verdict === "block"
         ? "Plan review blocked this plan. Revise it or save and stop?"
-        : input.verdict === "revise"
-          ? "Plan review asked for changes. Revise it, execute anyway, or save and stop?"
-          : "Plan reviewed and approved. Implement it now?",
-    context: [`Plan: ${input.planPath}`, ...phaseLines, `Verdict: ${input.verdict}`].join("\n") + concernsBlock,
+        : input.gateBlocksExecution === true
+          ? "Plan review asked for changes, and the mutation gate would block execution. Revise it, or save and stop?"
+          : input.verdict === "revise"
+            ? "Plan review asked for changes. Revise it, execute anyway, or save and stop?"
+            : "Plan reviewed and approved. Implement it now?",
+    context:
+      [`Plan: ${input.planPath}`, ...phaseLines, `Verdict: ${input.verdict}`].join("\n") + concernsBlock + gateBlock,
     options,
     defaultIndex:
       input.verdict === "approve"
@@ -1253,6 +1291,35 @@ export async function* runCouncil(
    * after Esc). null = the pick was already terminal; relay it verbatim.
    */
   let resolvedPostDebateAction: string | null = null;
+  /**
+   * I5 — the GSD workflow state as it stood BEFORE this council touched it.
+   *
+   * `runPlanReview` writes `Plan Verified: yes` + `advancePhase(cwd,"execute")`
+   * + `PLAN-VERIFY.md verdict: pass` (plan-phase.ts:454-460). Those are
+   * CWD-SCOPED files that `canExecute(cwd, depth)` reads for EVERY subsequent
+   * turn in that repo (workflow-engine.ts:227-243), and they persist after the
+   * run — so a debate launched merely to discuss would leave the heavy-depth
+   * mutation gate open indefinitely, and `advancePhase("execute")` silently
+   * overwrites the `Phase` of an in-flight `/ideal` run in the same cwd.
+   *
+   * Captured before the plan block writes, restored after Phase E finishes, so
+   * the unlock is scoped to the run that earned it. null when the snapshot
+   * itself failed — then nothing is restored (better than restoring a guess).
+   *
+   * `PLAN-VERIFY.md` is snapshotted as raw content because it — not STATE.md's
+   * `Plan Verified` — is what `canExecute` checks FIRST
+   * (workflow-engine.ts:229-237, via `readPlanVerifyVerdict`). Restoring only
+   * the STATE.md field would leave the gate wide open. The REVIEW itself is not
+   * lost by this: the full reviewer output stays in `PLAN-REVIEW.md`;
+   * `PLAN-VERIFY.md` is purely the gate token.
+   */
+  let gsdStateBefore: {
+    phase: import("../gsd/types.js").GsdPhase | null;
+    planVerified: boolean;
+    planVerifyPath: string;
+    /** Raw prior content, or null when the file did not exist. */
+    planVerifyDoc: string | null;
+  } | null = null;
   stats.phases.push({ name: "planning", durationMs: Date.now() - planStart });
 
   // Log interaction: synthesis
@@ -1996,6 +2063,20 @@ export async function* runCouncil(
         // override it, so no exit path can leave the caller holding the
         // non-terminal "implement".
         resolvedPostDebateAction = "save_exit";
+        // I5 — snapshot BEFORE runPlannerPhase/runPlanReview mutate STATE.md
+        // and PLAN-VERIFY.md.
+        try {
+          const s = readState(planCwd);
+          const planVerifyPath = planningArtifact(planCwd, "PLAN-VERIFY.md");
+          gsdStateBefore = {
+            phase: s.phase,
+            planVerified: s.planVerified,
+            planVerifyPath,
+            planVerifyDoc: existsSync(planVerifyPath) ? readFileSync(planVerifyPath, "utf8") : null,
+          };
+        } catch (err) {
+          console.error(`[council] could not snapshot GSD state before the plan phase: ${(err as Error)?.message}`);
+        }
         const exchangesText = resolveDebateSummary(debateState);
         let draftSynthesis = synthesisText;
         const MAX_MANUAL_PLAN_REVISIONS = 3;
@@ -2054,11 +2135,31 @@ export async function* runCouncil(
             reviewedPhases = plannerOutcome.phases;
           }
 
+          // I9 — ask the REAL gate, not a re-derived rule: `canExecute` is what
+          // the tool-engine write-mutex wrapper consults before every mutation
+          // tool, and `evaluateMutationGate` only arms it at explicit heavy
+          // depth (quick/standard/null fail open). If it would block, the phase
+          // turns would run, write nothing, fail verify and halt at P0 — so the
+          // card withdraws execute rather than selling a paid no-op.
+          let gateBlocksExecution = false;
+          try {
+            const gsdDepth = readState(planCwd).depth;
+            gateBlocksExecution =
+              isGsdHardGateEnabled() && gsdDepth === "heavy" && !canExecute(planCwd, gsdDepth).allowed;
+          } catch (err) {
+            // Fail OPEN, exactly like evaluateMutationGate does on a corrupt
+            // .planning — a state-read fault must not remove the user's only
+            // path forward. Logged so it is never a silent behaviour change.
+            console.error(
+              `[council] post-plan gate probe failed (offering execute anyway): ${(err as Error)?.message}`,
+            );
+          }
           const card = buildPostPlanCard({
             planPath: plannerOutcome.planPath,
             phases: reviewedPhases,
             verdict: reviewOutcome.verdict,
             concerns: reviewOutcome.concerns,
+            gateBlocksExecution,
           });
           const planQuestionId = randomUUID();
           yield {
@@ -2254,16 +2355,24 @@ export async function* runCouncil(
   }
   idealTrace("council.persist.done", { sessionId });
 
-  // Update session status to completed — EXCEPT when the user chose
-  // "continue_session", where the agent keeps working in this session; marking
-  // it completed here is what dropped it from the resume picker.
-  if (sessionId && postDebateAction !== "continue_session") {
+  // I8 — the session is marked completed AFTER Phase E, not before it. This
+  // block used to sit here, above the execution loop: `postDebateAction` is
+  // "execute_plan"/"implement", never "continue_session", so the session was
+  // flagged completed and every message the N phase turns then wrote landed on
+  // a session already marked done — it dropped out of the resume picker
+  // mid-run. See `markSessionCompleted` below, called once execution is over.
+  const markSessionCompleted = () => {
+    // EXCEPT on "continue_session", where the agent keeps working in this
+    // session; marking it completed is what dropped it from the resume picker.
+    if (!sessionId || postDebateAction === "continue_session") return;
     try {
       new SessionStore(options?.cwd ?? process.cwd()).setStatus(sessionId, "completed");
-    } catch {
-      /* non-critical */
+    } catch (err) {
+      // Non-critical (the run is over either way) but never silent: a storage
+      // fault here is what makes a finished session look abandoned.
+      console.error(`[council] could not mark session ${sessionId} completed: ${(err as Error)?.message}`);
     }
-  }
+  };
 
   // CQ-16: Judge synthesis quality; confidence < 0.5 → [NEEDS HUMAN REVIEW] flag
   // CQ-17: Record council outcome to EE brain (fire-and-forget)
@@ -2293,20 +2402,77 @@ export async function* runCouncil(
   // ── Phase E: Execute (gated per-phase — set only by "execute_plan" on the
   // post-plan card above; never auto-fires, and never under suppressPostDebate since
   // that path skips the interactive block entirely by design) ────────────────
+  //
+  // I7 — this block is now inside its own try/catch/finally. It sits AFTER the
+  // post-debate try/catch closes, and it was near-inert before this branch; it
+  // now drives N full agent turns. A throw from `processMessage` inside the
+  // `for await` would escape runCouncil entirely, skipping the stats block and
+  // the terminal `{type:"done"}` below — and on the slash path also skipping
+  // orchestrator.ts's `innerDoneSeen` re-emit, so the TUI consumer's `for await`
+  // would never see its break boundary and the turn would hang mounted.
   if (executePlanPath) {
     const execStart = Date.now();
-    const execResult = yield* runPlanExecution({
-      cwd: options?.cwd ?? process.cwd(),
-      planPath: executePlanPath,
-      processMessage: processMessageFn,
-    });
-    stats.phases.push({ name: "execution", durationMs: Date.now() - execStart });
-    idealTrace("council.execution.done", {
-      sessionId,
-      completed: execResult.completed.length,
-      haltedAt: execResult.haltedAt,
-    });
+    try {
+      const execResult = yield* runPlanExecution({
+        cwd: options?.cwd ?? process.cwd(),
+        planPath: executePlanPath,
+        processMessage: processMessageFn,
+      });
+      idealTrace("council.execution.done", {
+        sessionId,
+        completed: execResult.completed.length,
+        haltedAt: execResult.haltedAt,
+      });
+    } catch (err) {
+      const message = (err as Error)?.message ?? String(err);
+      console.error(`[council] plan execution threw at ${executePlanPath}: ${message}`);
+      idealTrace("council.execution.threw", { sessionId, err: message });
+      yield {
+        type: "content",
+        content: `\n> Plan execution stopped: ${message}\n> The plan is still on disk at ${executePlanPath} — re-run it after fixing the cause.\n`,
+      };
+    } finally {
+      stats.phases.push({ name: "execution", durationMs: Date.now() - execStart });
+    }
   }
+
+  // I5 — hand the repo's GSD workflow state back. `runPlanReview` wrote
+  // `PLAN-VERIFY.md verdict: pass`, `Plan Verified: yes` and
+  // `Phase: execute` (plan-phase.ts:454-460) into CWD-scoped files that
+  // `canExecute` reads on every later turn in this repo. Leaving them set would
+  // (a) hold the heavy-depth mutation gate open indefinitely — for a debate that
+  // may have only discussed something — and (b) leave an in-flight /ideal run in
+  // the same cwd on a Phase this council chose. Restore what was there before
+  // the plan block, now that execution (if any) is over: the unlock is scoped to
+  // the run that earned it. `PLAN-REVIEW.md` (the actual review content) is
+  // deliberately left in place — it is the audit trail, not the gate token.
+  if (gsdStateBefore) {
+    const restoreCwd = options?.cwd ?? process.cwd();
+    try {
+      if (gsdStateBefore.planVerifyDoc === null) {
+        if (existsSync(gsdStateBefore.planVerifyPath)) rmSync(gsdStateBefore.planVerifyPath, { force: true });
+      } else {
+        writeFileSync(gsdStateBefore.planVerifyPath, gsdStateBefore.planVerifyDoc, "utf8");
+      }
+      setStateField(restoreCwd, "Plan Verified", gsdStateBefore.planVerified ? "yes" : "no");
+      // Only restorable when a phase existed: `advancePhase` cannot express
+      // "there was no Phase field". Leaving the council's `execute` in that case
+      // is harmless — canExecute checks the PLAN-VERIFY verdict FIRST
+      // (workflow-engine.ts:229-237) and that is now back to its prior value.
+      if (gsdStateBefore.phase) advancePhase(restoreCwd, gsdStateBefore.phase);
+      idealTrace("council.gsdState.restored", {
+        sessionId,
+        phase: gsdStateBefore.phase,
+        planVerified: gsdStateBefore.planVerified,
+        hadPlanVerifyDoc: gsdStateBefore.planVerifyDoc !== null,
+      });
+    } catch (err) {
+      console.error(`[council] could not restore GSD state in ${restoreCwd}: ${(err as Error)?.message}`);
+    }
+  }
+
+  // I8 — only now is the run actually over.
+  markSessionCompleted();
 
   // ── Stats ───────────────────────────────────────────────────────────────────
   idealTrace("council.stats", { sessionId });

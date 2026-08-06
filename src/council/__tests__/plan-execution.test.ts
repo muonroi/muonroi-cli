@@ -299,4 +299,28 @@ describe("runPlanExecution", () => {
 
     expect(result).toEqual({ completed: ["P0"], haltedAt: null, reason: "plan complete" });
   });
+
+  it("an UNPARSEABLE plan reports 'no phases found', never 'plan complete'", async () => {
+    // "no phases in the file" and "every phase is done" are different outcomes.
+    // Collapsing them made a malformed (e.g. hand-edited) PLAN.md report success
+    // having run nothing at all — fail-silent-SUCCESS on a gate.
+    cwd = mkdtempSync(join(tmpdir(), "plan-exec-"));
+    const planPath = join(cwd, "PLAN.md");
+    writeFileSync(planPath, "# PLAN\n\nA prose plan with no `## P0 —` headings at all.\n", "utf8");
+
+    let turns = 0;
+    const processMessage: ExecutionArgs["processMessage"] = async function* () {
+      turns += 1;
+      yield { type: "done" } as StreamChunk;
+    };
+
+    const { result, chunks } = await drain(runPlanExecution({ cwd, planPath, processMessage, exec: okExec }));
+
+    expect(result.completed).toEqual([]);
+    expect(result.reason).toContain("no phases found");
+    expect(result.reason).not.toContain("plan complete");
+    expect(turns).toBe(0);
+    // And it must SAY so — a silent no-op read as a finished run.
+    expect(chunks.some((c) => c.type === "content" && c.content?.includes("no phases found"))).toBe(true);
+  });
 });

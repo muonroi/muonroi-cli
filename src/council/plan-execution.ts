@@ -20,7 +20,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { COUNCIL_PLAN_EXECUTION_MARKER } from "../pil/layer6-output.js";
 import type { StreamChunk } from "../types/index.js";
-import { markPhaseDone, nextPendingPhase, type PlanPhase, parsePlanMarkdown } from "./plan-artifact.js";
+import { markPhaseDone, type PlanPhase, parsePlanMarkdown } from "./plan-artifact.js";
 
 /**
  * `error` mirrors what `child_process.spawn`/`spawnSync` actually surface for a
@@ -82,13 +82,55 @@ function defaultExec(cmd: string, args: string[], cwd: string, timeoutMs: number
 
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(cmd, args, { cwd, shell: true });
+      // I6 — `detached` on POSIX makes the shell a process-GROUP leader so the
+      // kill below can reap the whole tree. Without it, `child.kill()` under
+      // `shell: true` kills only the `/bin/sh` wrapper: the real verify command
+      // (`bunx vitest run`, minutes long) keeps running unreaped for the rest of
+      // the session, holding file locks — and VERIFY_TIMEOUT_MS is ten minutes,
+      // so a single hung phase leaves a full test run behind. Not set on win32:
+      // Windows has no process groups in this sense and `detached` there means
+      // "new console window", which is wrong for a background verify — the tree
+      // kill uses `taskkill /T` instead (see killTree).
+      child = spawn(cmd, args, { cwd, shell: true, detached: process.platform !== "win32" });
     } catch (err) {
       // A handful of platforms throw synchronously on a malformed spawn
       // request instead of emitting 'error' — treat identically.
       resolve({ stdout: "", stderr: "", status: null, error: { message: (err as Error).message } });
       return;
     }
+
+    /**
+     * Kill the shell AND everything it spawned. POSIX: negative pid = the whole
+     * process group (possible only because of `detached` above). win32: no
+     * process groups, so shell out to `taskkill /T /F`, the documented way to
+     * kill a process tree there.
+     */
+    const killTree = () => {
+      const pid = child.pid;
+      if (pid === undefined) return;
+      try {
+        if (process.platform === "win32") {
+          // Detached + ignored stdio so this reaper cannot itself become a
+          // dangling child holding pipes open.
+          spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { detached: true, stdio: "ignore" }).unref();
+        } else {
+          process.kill(-pid, "SIGKILL");
+        }
+      } catch (err) {
+        // ESRCH = it already exited between the decision and the signal, which
+        // is the common benign case. Log rather than swallow: any OTHER errno
+        // here means a verify tree really was left running.
+        console.error(
+          `[council/plan-execution] could not kill verify process tree (pid ${pid}): ${(err as Error).message}`,
+        );
+        // Last resort — at least take the shell down.
+        try {
+          child.kill("SIGKILL");
+        } catch (fallbackErr) {
+          console.error(`[council/plan-execution] fallback child.kill also failed: ${(fallbackErr as Error).message}`);
+        }
+      }
+    };
 
     const finish = (result: ExecResult) => {
       if (settled) return;
@@ -101,7 +143,7 @@ function defaultExec(cmd: string, args: string[], cwd: string, timeoutMs: number
 
     const timer = setTimeout(() => {
       finish({ stdout, stderr, status: null, error: { message: `verify command timed out after ${timeoutMs}ms` } });
-      child.kill("SIGKILL");
+      killTree();
     }, timeoutMs);
 
     const onOverflow = () => {
@@ -111,7 +153,7 @@ function defaultExec(cmd: string, args: string[], cwd: string, timeoutMs: number
         status: null,
         error: { message: `verify command output exceeded ${VERIFY_MAX_BUFFER_BYTES} bytes` },
       });
-      child.kill("SIGKILL");
+      killTree();
     };
 
     child.stdout?.on("data", (chunk: Buffer) => {
@@ -219,7 +261,18 @@ export async function* runPlanExecution(
         reason: `could not read ${args.planPath}: ${message}`,
       };
     }
-    const phase = nextPendingPhase(body);
+    // "No phases in the file" and "every phase is done" are NOT the same
+    // outcome, and collapsing them made a malformed plan report success having
+    // run nothing (fail-silent-SUCCESS is the wrong direction for a gate). Only
+    // an actually-parsed, actually-exhausted plan may say "plan complete".
+    const parsed = parsePlanMarkdown(body);
+    if (parsed.length === 0) {
+      const reason = `no phases found in ${args.planPath} — expected \`## P0 — Title\` headings; nothing was executed`;
+      console.error(`[council/plan-execution] ${reason}`);
+      yield { type: "content", content: `\n> ${reason}\n` };
+      return { completed, haltedAt: null, reason };
+    }
+    const phase = parsed.find((p) => !p.done) ?? null;
     if (!phase) return { completed, haltedAt: null, reason: "plan complete" };
 
     yield { type: "content", content: `\n## ${phase.id} — ${phase.title}\n` };
