@@ -122,10 +122,17 @@ describe("postDebateContinuation — continue_session + analysis → null (5c18d
     }
   });
 
-  it("implement always carries forward regardless of kind", () => {
-    // The user explicitly chose to build — kind does not gate this branch.
-    expect(postDebateContinuation("implement", "x", "evaluation")).toContain("x");
-    expect(postDebateContinuation("implement", "x", "decision")).toContain("x");
+  it("implement never carries prose forward, for any kind (C1)", () => {
+    // Used to assert the opposite ("implement always carries forward regardless
+    // of kind"). That branch was the C1 defect: runCouncil relayed "implement"
+    // before its own plan block ran, so tool-engine turned this string into a
+    // second, UNGATED implementation turn on the raw synthesis — on top of the
+    // gated per-phase loop, and even after that loop halted on a failed verify.
+    // The arm is deleted; runCouncil resolves an implement pick to
+    // execute_plan / save_exit before relaying.
+    expect(postDebateContinuation("implement", "x", "evaluation")).toBeNull();
+    expect(postDebateContinuation("implement", "x", "decision")).toBeNull();
+    expect(postDebateContinuation("implement", "x", "implementation_plan")).toBeNull();
   });
 
   it("generate_plan is no longer a valid action — dropped as a dead alias to implement", () => {

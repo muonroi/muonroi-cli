@@ -343,9 +343,13 @@ export function pickPostDebateRecommendation(input: {
  *     mandate (session 578b2eae7099: "Continue the original task using this
  *     conclusion" on an evaluation made the model invent phantom Phase-1..7 todos
  *     and start editing files, then the rogue turn wedged the UI).
- *   - implement → execute the recommended action items.
- *   - save_exit / refine / retry_synthesis / follow-up / undefined → stop (those
- *     either already re-synthesized inside runCouncil or are terminal by intent).
+ *   - implement → NOTHING here (C1). runCouncil owns the implement path end to
+ *     end: plan draft → panel review → post-plan card → gated per-phase loop.
+ *     It resolves the pick to `execute_plan` / `save_exit` before relaying, and
+ *     both stop below. See the deleted-arm note in the body.
+ *   - execute_plan / save_exit / refine / retry_synthesis / follow-up /
+ *     undefined → stop (those either already ran or re-synthesized inside
+ *     runCouncil, or are terminal by intent).
  */
 
 /** Recover the output-shape kind the synthesis was produced under (```json { "type": … }). */
@@ -407,29 +411,24 @@ export function postDebateContinuation(
   outputKind?: IntentKind,
 ): string | null {
   if (!synthesis || !action) return null;
-  // IMPLEMENT — still returns the synthesis as prose below, and that is a KNOWN
-  // gap, not the fixed state. The previous design (see git history for this
-  // comment) treated the synthesis as a sufficient spec fed back as prose; PIL
-  // then classified that prose as taskType=analyze / deliverable=report
-  // (session 3a8378db4adf, interaction_logs id 2498) and the "implement" turn
-  // ran as a report against planVerified:false. That position is reversed: a
-  // reviewed plan, not raw prose, is the correct handoff — but the fix lands in
-  // a later task, which replaces this body with the marked envelope in
-  // plan-execution.ts (does not exist yet). See
-  // docs/superpowers/specs/2026-08-04-council-intent-plan-gate-design.md.
+  // IMPLEMENT is DELETED, not merely unused (C1, 2026-08-06). It used to return
+  // the raw synthesis as prose — "Implement this now … carry it out through your
+  // normal workflow". PIL classified that prose taskType=analyze /
+  // deliverable=report (session 3a8378db4adf, interaction_logs id 2498) and the
+  // turn ran as a report against planVerified:false, covering one step.
+  //
+  // The replacement now exists and runs INSIDE runCouncil: the plan block
+  // (index.ts, `answer === "implement"`) drafts a phased .planning/PLAN.md, the
+  // panelists cross-review it, and the post-plan card's `execute_plan` drives
+  // src/council/plan-execution.ts one phase per turn, each gated on its own
+  // verify command. `implement` therefore never reaches this function any more —
+  // runCouncil resolves it to `execute_plan`/`save_exit` before relaying.
+  //
+  // Keeping the arm "as a fallback" is precisely how the double-implement bug
+  // (C1) survived: the resolved action and the stale prose branch both existed,
+  // so a single missed reset re-armed a full ungated implementation turn.
   // `generate_plan` was a separate, always-identical alias to this branch — dead
-  // code, removed outright rather than repurposed (see the same spec, D5).
-  if (action === "implement") {
-    return (
-      `Council debate completed. Approved conclusion:\n\n${synthesis}\n\n` +
-      `Implement this now. Treat the council conclusion above as the approved spec ` +
-      `— load it as your working context and carry it out through your normal ` +
-      `workflow: plan the concrete steps, make the changes in the smallest correct ` +
-      `increments, and verify (build/tests) as you go. Do NOT re-litigate the ` +
-      `decision or expand scope beyond it. If a required detail is genuinely ` +
-      `ambiguous, ask ONE focused question before editing.`
-    );
-  }
+  // code, removed outright rather than repurposed (2026-08-04 design, D5).
   if (action === "continue_session") {
     const kind = resolveRunKind(outputKind, synthesis);
     // Only an implementation-shaped debate has an "original task" left to build
@@ -1233,6 +1232,19 @@ export async function* runCouncil(
   // (the calling agent decides what happens next, not the CLI — see
   // "convenePath" doc comments below), so it correctly never auto-executes.
   let executePlanPath: string | null = null;
+  /**
+   * C1 — the TERMINAL action the post-debate block resolved to, when that
+   * differs from the value the user picked on the card. `implement` is not a
+   * terminal action: it only REQUESTS a plan. The plan block below resolves it
+   * to `execute_plan` (the gated per-phase loop ran) or `save_exit` (the plan
+   * was saved and nothing ran) — and it is that resolution, never the raw
+   * `implement`, that gets relayed to the caller. Relaying `implement` is what
+   * made tool-engine.ts build `postDebateContinuation("implement", …)` and run
+   * a SECOND, ungated implementation turn on the raw synthesis after the phase
+   * loop had already finished (and after a halt, and after save_exit, and
+   * after Esc). null = the pick was already terminal; relay it verbatim.
+   */
+  let resolvedPostDebateAction: string | null = null;
   stats.phases.push({ name: "planning", durationMs: Date.now() - planStart });
 
   // Log interaction: synthesis
@@ -1710,9 +1722,13 @@ export async function* runCouncil(
           answer = fallbackAction;
         }
       }
-      postDebateAction = answer;
       idealTrace("council.postDebate.answer", { sessionId, answer });
-      options?.onPostDebateAction?.(answer);
+      // C1 — `postDebateAction` / `onPostDebateAction` are NOT set here. The
+      // relay fires once, AFTER the branch tree below, with the action the run
+      // actually ended on (see `resolvedPostDebateAction`). Firing it at the
+      // pick meant "implement" reached tool-engine.ts:852 while the plan block
+      // 200 lines below was still running, and the caller then ran an ungated
+      // prose implementation turn on top of the gated per-phase loop.
       // Echo the human-readable option label, never the raw action id
       // (`continue_session`, `save_exit`, …) — the id is an internal routing
       // token users should never see. Free-text follow-ups (no matching option)
@@ -1959,6 +1975,12 @@ export async function* runCouncil(
         // executePlanPath, which Phase E below turns into the gated per-phase
         // runPlanExecution loop.
         const planCwd = options?.cwd ?? process.cwd();
+        // C1 — every exit from this block that is NOT "execute_plan" (planner
+        // failed, user saved, user pressed Esc, revision budget exhausted) is a
+        // save-and-stop. Default to that and let the execute_plan pick below
+        // override it, so no exit path can leave the caller holding the
+        // non-terminal "implement".
+        resolvedPostDebateAction = "save_exit";
         const exchangesText = resolveDebateSummary(debateState);
         let draftSynthesis = synthesisText;
         const MAX_MANUAL_PLAN_REVISIONS = 3;
@@ -2057,6 +2079,7 @@ export async function* runCouncil(
 
           if (planAnswer === "execute_plan") {
             executePlanPath = plannerOutcome.planPath;
+            resolvedPostDebateAction = "execute_plan";
             break;
           }
           if (planAnswer === "save_exit") {
@@ -2084,6 +2107,22 @@ export async function* runCouncil(
       }
       // "save_exit" falls through to normal persistence — "implement" is now
       // handled above (D3/Task 8 plan draft → review → post-plan card).
+
+      // ── C1: the single, terminal post-debate relay ────────────────────────
+      // Fires exactly once, here, AFTER every branch has run — so what the
+      // caller sees is what the run actually ended on. `resolvedPostDebateAction`
+      // is set only by the plan block (implement → execute_plan | save_exit);
+      // every other pick is already terminal and relays verbatim.
+      //
+      // Measured defect this closes: index.ts fired this callback at the pick,
+      // before the plan block, and never re-fired. tool-engine.ts:852 read
+      // "implement" and ran postDebateContinuation's ~14K-char prose through
+      // processMessage — an ungated second implementation turn that fired even
+      // when the phase loop had HALTED on a failed verify.
+      const effectiveAction = resolvedPostDebateAction ?? answer;
+      postDebateAction = effectiveAction;
+      idealTrace("council.postDebate.effectiveAction", { sessionId, picked: answer, effectiveAction });
+      options?.onPostDebateAction?.(effectiveAction);
     } catch (err) {
       // Post-debate interaction (menu, follow-up re-synthesis, refine) is
       // non-critical to the persisted outcome, so we swallow — but NEVER

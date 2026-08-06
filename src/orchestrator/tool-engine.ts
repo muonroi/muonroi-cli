@@ -820,6 +820,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       ? `complexity=heavy${pilCtx.taskType ? ` task=${pilCtx.taskType}` : ""}`
       : `${pilCtx.taskType} task detected with ${(pilCtx.confidence * 100).toFixed(0)}% confidence`;
     yield { type: "content", content: `\n[Auto-council triggered: ${reason}]\n` };
+    // Reset the three relay fields BEFORE draining, mirroring the runDebate
+    // builtin (~:1077). A generator that throws before the post-debate block
+    // runs — or an analysis run that never reaches it at all — would otherwise
+    // leave the PREVIOUS council's synthesis / action / intent kind in place,
+    // and the continuation below would act on them as if they belonged to this
+    // debate. The reads at :851-858 clear them again after use; this closes the
+    // window before the run, which only runDebate was doing.
+    deps.councilManager.setLastSynthesis(null);
+    deps.councilManager.setLastPostDebateAction(null);
+    deps.councilManager.setLastIntentKind(null);
     // Pre-debate interview: unless disabled, run the model-designed clarification
     // askcards BEFORE the debate so a broadly-scoped "debate mode" request is
     // chốt-ed first (each card's options carry a recommended default + per-option
@@ -862,8 +872,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     // Honour the user's post-debate choice. `postDebateContinuation` returns
     // null when no action was picked (card dismissed) and for an
     // analysis/evaluation/decision debate whose deliverable IS the conclusion —
-    // so nothing runs unless the user asked for it. Implementation only starts
-    // on an explicit implement / continue_session pick.
+    // so nothing runs unless the user asked for it.
+    //
+    // C1: an IMPLEMENT pick never reaches here as "implement". runCouncil owns
+    // that path (plan → review → post-plan card → gated per-phase loop) and
+    // relays the TERMINAL outcome instead — `execute_plan` (the phases already
+    // ran, gated) or `save_exit` (nothing ran). Both return null below, so this
+    // block can no longer start a second, ungated implementation turn on the raw
+    // synthesis after the phase loop already finished. Only `continue_session`
+    // still re-enters, and only for an implementation-shaped debate (/ideal).
     // Shared with the /council slash path (orchestrator.runCouncilV2).
     const { postDebateContinuation } = await import("../council/index.js");
     const continuationPrompt = synthesis

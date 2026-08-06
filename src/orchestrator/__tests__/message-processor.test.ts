@@ -241,8 +241,19 @@ describe("MessageProcessor — DI surface invariants", () => {
 
     // Card dismissed / no pick → the turn ends at the composer.
     expect(postDebateContinuation(undefined, synthesis)).toBeNull();
-    // Explicit pick → and only then does an implementing turn start.
-    expect(postDebateContinuation("implement", synthesis)).toContain(synthesis);
+    // C1 (2026-08-06): this line used to assert
+    // `postDebateContinuation("implement", synthesis)).toContain(synthesis)` —
+    // i.e. it PINNED the defect. runCouncil relayed "implement" before its own
+    // plan block ran, so this branch built the ~14K-char prose and tool-engine
+    // ran it through processMessage as a SECOND, ungated implementation turn on
+    // top of the gated per-phase loop (and after a halt, and after save_exit).
+    // The arm is deleted; runCouncil now resolves the implement pick to
+    // execute_plan / save_exit before relaying, and both stop here.
+    expect(postDebateContinuation("implement", synthesis)).toBeNull();
+    expect(postDebateContinuation("execute_plan", synthesis)).toBeNull();
+    expect(postDebateContinuation("save_exit", synthesis)).toBeNull();
+    // continue_session is untouched — the /ideal build flow depends on it.
+    expect(postDebateContinuation("continue_session", synthesis)).toContain(synthesis);
   });
 
   // tool-engine.ts's auto-council dispatch is deliberately NOT convenePath
