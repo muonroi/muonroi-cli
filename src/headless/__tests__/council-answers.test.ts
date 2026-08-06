@@ -21,12 +21,12 @@ describe("parseCouncilAnswersFile", () => {
     const out = parseCouncilAnswersFile(
       JSON.stringify({
         clarify: ["python", "mongo"],
-        "post-debate": ["generate_plan"],
+        "post-debate": ["implement"],
         preflightApprove: false,
       }),
     );
     expect(out.clarify).toEqual(["python", "mongo"]);
-    expect(out["post-debate"]).toEqual(["generate_plan"]);
+    expect(out["post-debate"]).toEqual(["implement"]);
     expect(out.preflightApprove).toBe(false);
   });
 

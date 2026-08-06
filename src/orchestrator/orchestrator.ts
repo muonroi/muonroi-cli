@@ -2292,8 +2292,8 @@ export class Agent {
       }
 
       // Keep working in THIS session when the chosen action calls for it
-      // (continue_session → carry the conclusion; generate_plan/implement →
-      // execute action items). postDebateContinuation is the single source of
+      // (continue_session → carry the conclusion; implement → execute action
+      // items). postDebateContinuation is the single source of
       // truth shared with the auto-council caller (tool-engine). Re-entering
       // processMessage also writes real message rows, which is what makes the
       // session resumable (the /council slash path otherwise leaves no messages
@@ -2308,7 +2308,7 @@ export class Agent {
       // false and continues in tool-engine instead).
       const continuationPrompt =
         ownsController && synthesis ? buildNeutralPostCouncilContinuation(synthesis) || null : null;
-      const isBuildContinuation = chosenAction === "implement" || chosenAction === "generate_plan";
+      const isBuildContinuation = chosenAction === "implement";
       if (continuationPrompt && isBuildContinuation && process.env.MUONROI_COUNCIL_ISOLATE_IMPL !== "0") {
         // #1 — build the council decision in an ISOLATED sub-agent instead of
         // re-entering the full processMessage turn. The flat turn inherited the

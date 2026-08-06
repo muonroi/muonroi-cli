@@ -15,8 +15,10 @@
  *
  * Session 8191ecaee149 (user-driven redesign): the three post-analysis choices
  * are now IMPLEMENT / CONTINUE / SAVE.
- *  - implement (+ generate_plan): load the conclusion as the approved spec and
- *    build it through the normal workflow — for ANY kind, no plan artifact needed.
+ *  - implement: load the conclusion as the approved spec and build it through
+ *    the normal workflow — for ANY kind. `generate_plan` used to return the
+ *    IDENTICAL string (a dead alias) and was removed outright 2026-08-04 — see
+ *    docs/superpowers/specs/2026-08-04-council-intent-plan-gate-design.md.
  *  - continue_session on analysis: STOP at the composer (return null). The
  *    synthesis is persisted as [Council Decision]/[Council Memory], so the user's
  *    next message inherits the council context — no wasteful re-present turn, no
@@ -54,15 +56,17 @@ describe("postDebateContinuation", () => {
     expect(p).toContain("Continue the original task");
   });
 
-  it("implement / generate_plan load the conclusion as the approved spec and build it", () => {
-    for (const action of ["generate_plan", "implement"]) {
-      const p = postDebateContinuation(action, EVAL_SYNTH);
-      expect(p).toContain(EVAL_SYNTH);
-      expect(p?.toLowerCase()).toContain("implement this now");
-      expect(p?.toLowerCase()).toContain("approved spec");
-      // Scoped so it can't balloon into phantom phases.
-      expect(p?.toLowerCase()).toMatch(/do not.*expand scope|smallest correct/);
-    }
+  it("implement loads the conclusion as the approved spec and builds it", () => {
+    const p = postDebateContinuation("implement", EVAL_SYNTH);
+    expect(p).toContain(EVAL_SYNTH);
+    expect(p?.toLowerCase()).toContain("implement this now");
+    expect(p?.toLowerCase()).toContain("approved spec");
+    // Scoped so it can't balloon into phantom phases.
+    expect(p?.toLowerCase()).toMatch(/do not.*expand scope|smallest correct/);
+  });
+
+  it("generate_plan is a dead alias — it is dropped and returns null", () => {
+    expect(postDebateContinuation("generate_plan", EVAL_SYNTH)).toBeNull();
   });
 
   it("save_exit stops at the composer (deliverable is the conclusion)", () => {

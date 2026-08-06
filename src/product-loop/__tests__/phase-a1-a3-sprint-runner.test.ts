@@ -1,9 +1,17 @@
 /**
  * phase-a1-a3-sprint-runner.test.ts — Phase A unit tests (A1 + A3).
  *
- * A1: generate_plan no longer exits sprint-runner.
- *     After council selects generate_plan, runSprint continues with
- *     implementation → verification → judgment, emitting all 4 sprint_stage events.
+ * A1: the sprint plan lock no longer exits sprint-runner.
+ *     After council locks the sprint plan (originally reached via the
+ *     `generate_plan` action id; that id was a dead alias to `implement` and
+ *     was removed 2026-08-04 — see
+ *     docs/superpowers/specs/2026-08-04-council-intent-plan-gate-design.md —
+ *     the sprintPlanningMode auto-lock branch it named is unaffected and still
+ *     runs), runSprint continues with implementation → verification →
+ *     judgment, emitting all 4 sprint_stage events. `runCouncil` is fully
+ *     mocked below, so these tests exercise ONLY sprint-runner's own
+ *     black-box contract with whatever `runCouncil` returns — they are
+ *     agnostic to the internal action id council used to get there.
  *
  * A3: sprint-runner emits phaseDone for implementation even when
  *     processMessageFn throws (try/finally guard).

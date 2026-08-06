@@ -18,7 +18,7 @@ describe("PhaseOutcomeEnvelope", () => {
 
     expect(envelope.trustLevel).toBe("invalidated");
     expect(envelope.failureClass).toBe("synthesis_failed");
-    expect(resolvePhaseOutcomeTransition(envelope, "generate_plan")).toBe("hard_stop");
+    expect(resolvePhaseOutcomeTransition(envelope, "implement")).toBe("hard_stop");
     expect(envelope.visibilityMessage).toContain("validated structured outcome");
   });
 
@@ -73,7 +73,7 @@ describe("PhaseOutcomeEnvelope", () => {
     });
 
     expect(envelope.trustLevel).toBe("high");
-    expect(resolvePhaseOutcomeTransition(envelope, "generate_plan")).toBe("continue");
+    expect(resolvePhaseOutcomeTransition(envelope, "implement")).toBe("continue");
     expect(resolvePhaseOutcomeTransition(envelope, "save_exit")).toBe("continue");
   });
 });

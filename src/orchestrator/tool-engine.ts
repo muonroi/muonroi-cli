@@ -863,7 +863,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     // null when no action was picked (card dismissed) and for an
     // analysis/evaluation/decision debate whose deliverable IS the conclusion —
     // so nothing runs unless the user asked for it. Implementation only starts
-    // on an explicit implement / generate_plan / continue_session pick.
+    // on an explicit implement / continue_session pick.
     // Shared with the /council slash path (orchestrator.runCouncilV2).
     const { postDebateContinuation } = await import("../council/index.js");
     const continuationPrompt = synthesis

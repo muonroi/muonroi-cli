@@ -352,7 +352,12 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
           phase: "evaluate",
           label: `Review — ${stanceName}`,
           role: p.role,
-          system: "You review the plan against the debate you already took part in.",
+          // This call is stateless (see the module note above buildReviewPrompt) —
+          // the model carries nothing over from the debate itself. Say so
+          // truthfully: the synthesis and the reviewer's own final position are
+          // supplied IN the prompt below, not recalled from a shared turn.
+          system:
+            "You review a plan against a debate synthesis and your own recorded final position from that debate, both supplied in the prompt below — not live memory of the exchange.",
           prompt: buildReviewPrompt(planBody, stanceName, lens, args.topic, args.synthesis, p.position),
         });
         const parsed = extractStructuredVerdict(raw);

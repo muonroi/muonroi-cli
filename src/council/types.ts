@@ -508,7 +508,6 @@ export function resolvePhaseOutcomeTransition(
  */
 export type PostDebateActionId =
   | "ask_followup"
-  | "generate_plan"
   | "implement"
   | "save_exit"
   /**

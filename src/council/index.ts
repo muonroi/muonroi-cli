@@ -5,13 +5,14 @@ import { getDefaultEEClient } from "../ee/intercept.js";
 import { judgeCouncilOutcome } from "../ee/judge.js";
 import { recordCouncilOutcome } from "../ee/phase-outcome.js";
 import { isTaskAwarePanelEnabled } from "../gsd/flags.js";
+import type { PerspectiveVerdict } from "../gsd/plan-council.js";
 import { runPipeline } from "../pil/pipeline.js";
 import type { PipelineContext } from "../pil/types.js";
 import { idealTrace } from "../product-loop/ideal-trace.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { appendSystemMessage, logInteraction } from "../storage/index.js";
 import { SessionStore } from "../storage/sessions.js";
-import type { StreamChunk } from "../types/index.js";
+import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
 import {
   getCouncilExperienceMode,
   getCouncilLanguage,
@@ -29,6 +30,7 @@ import { buildLaunchCard, cheapRunShape } from "./launch-card.js";
 import { buildCouncilCandidatePool, resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
 import { selectTaskAwarePanel } from "./panel-select.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
+import type { PlanPhase } from "./plan-artifact.js";
 import { runPlanning } from "./planner.js";
 import { runPreflight } from "./preflight.js";
 import { formatRunReceipt, pickLoudestDissent } from "./run-receipt.js";
@@ -204,7 +206,7 @@ export interface RunCouncilOptions {
   externalTopic?: boolean;
 }
 
-export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis";
+export type PostDebateAction = "save_exit" | "implement" | "refine" | "ask_followup" | "retry_synthesis";
 
 /**
  * Decide the DEFAULT post-debate action surfaced as the recommended option.
@@ -212,11 +214,12 @@ export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_f
  *
  * Issue #3 (post-debate default mismatch): when synthesis succeeded and no plan
  * exists yet, only an `implementation_plan`-shaped debate should default to
- * "generate_plan" (Lock plan & execute Sprint 1). For a `decision`, `evaluation`,
- * `investigation`, or `exploration` debate the synthesis IS the deliverable — the
- * user asked a question, not for code — so the default is `save_exit`. The
- * generate_plan OPTION is still offered downstream; it's just no longer the
- * pre-selected default for non-build topics.
+ * "implement" (Start Implementation — `generate_plan` was a separate, dead-code
+ * "Lock plan and execute Sprint 1" action removed in 2026-08-04, see
+ * docs/superpowers/specs/2026-08-04-council-intent-plan-gate-design.md). For a
+ * `decision`, `evaluation`, `investigation`, or `exploration` debate the
+ * synthesis IS the deliverable — the user asked a question, not for code — so
+ * the default is `save_exit`.
  */
 /**
  * F1 — summarize how the debate did against its PINNED success criteria, so the
@@ -293,7 +296,7 @@ export function pickPostDebateRecommendation(input: {
   }
   if (!input.hasPlan) {
     return isImplementationKind(input.outputKind)
-      ? { value: "generate_plan", reason: "Convert the agreed outcome into concrete steps." }
+      ? { value: "implement", reason: "Convert the agreed outcome into concrete steps." }
       : {
           value: "save_exit",
           reason: `This was a ${input.outputKind} debate — the synthesis above is the deliverable; save it.`,
@@ -321,7 +324,7 @@ export function pickPostDebateRecommendation(input: {
  *     mandate (session 578b2eae7099: "Continue the original task using this
  *     conclusion" on an evaluation made the model invent phantom Phase-1..7 todos
  *     and start editing files, then the rogue turn wedged the UI).
- *   - generate_plan / implement → execute the recommended action items.
+ *   - implement → execute the recommended action items.
  *   - save_exit / refine / retry_synthesis / follow-up / undefined → stop (those
  *     either already re-synthesized inside runCouncil or are terminal by intent).
  */
@@ -385,13 +388,16 @@ export function postDebateContinuation(
   outputKind?: IntentKind,
 ): string | null {
   if (!synthesis || !action) return null;
-  // IMPLEMENT — the user decided there is enough to build. Load the council
-  // conclusion back as the approved spec and carry it out through the normal
-  // workflow (the native GSD depth pipeline plans → executes → verifies). Works
-  // for ANY output kind: an analysis/decision synthesis is itself a sufficient
-  // spec, so this no longer needs a separate plan artifact. Scoped so the agent
-  // builds exactly what was decided and cannot balloon into phantom phases.
-  if (action === "generate_plan" || action === "implement") {
+  // IMPLEMENT — carry the REVIEWED PLAN, not the synthesis. The previous design
+  // (see git history for this comment) treated the synthesis as a sufficient
+  // spec and fed it back as prose; PIL then classified that prose as
+  // taskType=analyze / deliverable=report (session 3a8378db4adf, interaction_logs
+  // id 2498) and the "implement" turn ran as a report against
+  // planVerified:false. Execution now goes through the marked envelope in
+  // plan-execution.ts. See docs/superpowers/specs/2026-08-04-council-intent-plan-gate-design.md.
+  // `generate_plan` was a separate, always-identical alias to this branch — dead
+  // code, removed outright rather than repurposed (see the same spec, D5).
+  if (action === "implement") {
     return (
       `Council debate completed. Approved conclusion:\n\n${synthesis}\n\n` +
       `Implement this now. Treat the council conclusion above as the approved spec ` +
@@ -422,6 +428,88 @@ export function postDebateContinuation(
     return null;
   }
   return null;
+}
+
+export interface PostPlanCardInput {
+  planPath: string;
+  phases: PlanPhase[];
+  verdict: PerspectiveVerdict;
+  /**
+   * Every reviewer's concerns, flattened by `mergeReviewVerdicts` — including
+   * concerns from reviewers who themselves voted `approve`. An `approve`
+   * verdict can therefore still carry a non-empty `concerns` array; the card
+   * must not read that as unresolved dissent (see the "Notes" line below).
+   */
+  concerns: string[];
+}
+
+export interface PostPlanCard {
+  question: string;
+  context: string;
+  options: CouncilQuestionOption[];
+  defaultIndex: number;
+}
+
+/**
+ * D3 — the post-plan card (design 2026-08-04). Replaces the post-debate card
+ * for implementation-shape runs once the planner phase (Task 5) and the
+ * panelist cross-review (Task 6) have produced a reviewed `.planning/PLAN.md`.
+ * Pure builder — no I/O — mirroring `buildLaunchCard`'s shape so both cards are
+ * unit-testable independent of the streaming plumbing that renders them.
+ *
+ * `execute_plan` is offered only when the plan cleared review (`verdict !==
+ * "block"`) — a blocked plan must not be executable from this card. `revise`
+ * behaves the same as `block` here: neither has an approved plan to execute,
+ * so both default to `revise_plan` and neither shows `execute_plan`.
+ */
+export function buildPostPlanCard(input: PostPlanCardInput): PostPlanCard {
+  const phaseLines = input.phases.map((p) => `${p.id} — ${p.title} · ${p.acceptance.length} acceptance criteria`);
+
+  const canExecute = input.verdict !== "block" && input.verdict !== "revise";
+
+  const options: CouncilQuestionOption[] = [
+    ...(canExecute
+      ? [
+          {
+            label: "Implement the whole plan",
+            description: `Execute every phase in order (${input.phases.length} phase${input.phases.length === 1 ? "" : "s"}), gating each on its own acceptance criteria and verify command.`,
+            value: "execute_plan",
+            kind: "choice" as const,
+          },
+        ]
+      : []),
+    {
+      label: "Revise the plan",
+      description: "Send comments back to the planner — the plan is redrafted and re-reviewed.",
+      value: "revise_plan",
+      kind: "freetext",
+    },
+    {
+      label: "Save & Exit",
+      description: "Keep the plan on disk and stop here without executing it.",
+      value: "save_exit",
+      kind: "choice",
+    },
+  ];
+
+  // Concerns are shown as informational notes, never as blocking dissent, on an
+  // approved plan — mergeReviewVerdicts flattens concerns from every reviewer
+  // (approving ones included), so `approve` can still carry a non-empty list.
+  const concernsLabel = input.verdict === "approve" ? "Notes from review" : "Concerns from review";
+  const concernsBlock =
+    input.concerns.length > 0 ? `\n\n${concernsLabel}:\n${input.concerns.map((c) => `- ${c}`).join("\n")}` : "";
+
+  return {
+    question:
+      input.verdict === "block"
+        ? "Plan review blocked this plan. Revise it or save and stop?"
+        : input.verdict === "revise"
+          ? "Plan review asked for changes. Revise it or save and stop?"
+          : "Plan reviewed and approved. Implement it now?",
+    context: [`Plan: ${input.planPath}`, ...phaseLines, `Verdict: ${input.verdict}`].join("\n") + concernsBlock,
+    options,
+    defaultIndex: canExecute ? 0 : options.findIndex((o) => o.value === "revise_plan"),
+  };
 }
 
 /**
@@ -1275,16 +1363,6 @@ export async function* runCouncil(
           kind: "choice",
         });
 
-        if (!hasPlan && !synthesisFailed) {
-          baseOptions.push({
-            label: "Lock plan and execute Sprint 1",
-            description:
-              "Commit the council outcome as the sprint plan and hand control to the sprint runner (planning → implementation → verification → judgment). Does NOT exit to /gsd.",
-            value: "generate_plan",
-            kind: "choice",
-          });
-        }
-
         if (hasEmptySections && !synthesisFailed) {
           baseOptions.push({
             label: `Refine: ${refinementTopics.join(", ")}`,
@@ -1488,9 +1566,12 @@ export async function* runCouncil(
         // per-sprint planning. Presenting it stranded the sprint before
         // implementation — picking "Save & Exit" ended the run with no Sprint
         // Implementation, and "Refine" (the default) looped back into more
-        // debate. Auto-lock the synthesized plan (== "Lock plan and execute
-        // Sprint 1") and hand control back to the sprint runner.
-        answer = "generate_plan";
+        // debate. Auto-lock the synthesized plan and hand control back to the
+        // sprint runner. The actual auto-lock branch below is gated on
+        // `options?.sprintPlanningMode`, not on this value, so any build action
+        // works here — "implement" is the sole one left after `generate_plan`
+        // was removed as a dead alias (2026-08-04).
+        answer = "implement";
         idealTrace("council.postDebate.autoLock", { sessionId });
         yield {
           type: "content",
@@ -1554,7 +1635,6 @@ export async function* runCouncil(
       const transition = resolvePhaseOutcomeTransition(
         outcomeEnvelope,
         answer === "ask_followup" ||
-          answer === "generate_plan" ||
           answer === "implement" ||
           answer === "save_exit" ||
           answer === "continue_session" ||
@@ -1598,7 +1678,6 @@ export async function* runCouncil(
       const knownValues = new Set([
         "save_exit",
         "continue_session",
-        "generate_plan",
         "refine",
         "ask_followup",
         "implement",
@@ -1675,8 +1754,16 @@ export async function* runCouncil(
         outcome = refineResult.value.outcome;
         plan = refineResult.value.plan;
         synthesisText = refineResult.value.synthesisText;
-      } else if (answer === "generate_plan") {
+      } else if (options?.sprintPlanningMode) {
         // A1 FIX: "Lock plan and execute Sprint 1" — stay within sprint-runner.
+        //
+        // Gated on sprintPlanningMode itself, not on a specific `answer` value —
+        // this branch used to key on the now-removed `generate_plan` action id
+        // (a separate, always-identical alias to `implement`; dead code removed
+        // 2026-08-04, see docs/superpowers/specs/2026-08-04-council-intent-plan-gate-design.md).
+        // sprintPlanningMode is the ONLY caller of this branch (its answer is
+        // always auto-set above, never user-chosen), so keying on the mode
+        // itself is both simpler and immune to the action-id vocabulary churn.
         //
         // Previously this branch called runExecution(plan, processMessageFn) which
         // bypassed sprint-runner's verification/judgment/done-gate stages entirely.
@@ -1813,9 +1900,10 @@ export async function* runCouncil(
     } catch (err) {
       // Post-debate interaction (menu, follow-up re-synthesis, refine) is
       // non-critical to the persisted outcome, so we swallow — but NEVER
-      // silently: a throw here previously vanished, hiding a "generate_plan
-      // stalled" root cause. Log it and breadcrumb it so blocker-5 forensics
-      // can see whether the tail was reached via an exception.
+      // silently: a throw here previously vanished, hiding a "sprint plan lock
+      // stalled" root cause (originally traced under the now-removed
+      // `generate_plan` action id). Log it and breadcrumb it so blocker-5
+      // forensics can see whether the tail was reached via an exception.
       console.error(`[council] post-debate interaction failed: ${(err as Error)?.message}`);
       idealTrace("council.postDebate.threw", { sessionId, err: (err as Error)?.message });
     }

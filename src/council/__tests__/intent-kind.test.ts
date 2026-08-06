@@ -76,7 +76,7 @@ describe("isImplementationKind — the only build-mandate kinds", () => {
   });
 });
 
-describe("pickPostDebateRecommendation — analysis kind never suggests generate_plan (12d3022b)", () => {
+describe("pickPostDebateRecommendation — analysis kind never suggests a build action (12d3022b)", () => {
   const base = {
     synthesisFailed: false,
     hasEmptySections: false,
@@ -85,20 +85,20 @@ describe("pickPostDebateRecommendation — analysis kind never suggests generate
     hasPlan: false,
   };
 
-  it("an analysis kind with no plan defaults to save_exit, not generate_plan", () => {
+  it("an analysis kind with no plan defaults to save_exit, not implement", () => {
     const r = pickPostDebateRecommendation({ ...base, outputKind: "evaluation" });
     expect(r.value).toBe("save_exit");
-    expect(r.value).not.toBe("generate_plan");
+    expect(r.value).not.toBe("implement");
   });
 
-  it("only implementation_plan/action_items can default to generate_plan", () => {
+  it("only implementation_plan/action_items can default to implement", () => {
     for (const k of IMPLEMENTATION_INTENT_KINDS) {
       const r = pickPostDebateRecommendation({ ...base, outputKind: k });
-      expect(r.value).toBe("generate_plan");
+      expect(r.value).toBe("implement");
     }
     for (const k of ANALYSIS_INTENT_KINDS) {
       const r = pickPostDebateRecommendation({ ...base, outputKind: k });
-      expect(r.value).not.toBe("generate_plan");
+      expect(r.value).not.toBe("implement");
     }
   });
 });
@@ -122,9 +122,13 @@ describe("postDebateContinuation — continue_session + analysis → null (5c18d
     }
   });
 
-  it("generate_plan / implement always carry forward regardless of kind", () => {
+  it("implement always carries forward regardless of kind", () => {
     // The user explicitly chose to build — kind does not gate this branch.
-    expect(postDebateContinuation("generate_plan", "x", "evaluation")).toContain("x");
+    expect(postDebateContinuation("implement", "x", "evaluation")).toContain("x");
     expect(postDebateContinuation("implement", "x", "decision")).toContain("x");
+  });
+
+  it("generate_plan is no longer a valid action — dropped as a dead alias to implement", () => {
+    expect(postDebateContinuation("generate_plan", "x", "evaluation")).toBeNull();
   });
 });

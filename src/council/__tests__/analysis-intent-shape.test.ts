@@ -4,7 +4,7 @@
  * PIL is the authoritative intent classifier. For "đánh giá sâu cơ chế harness
  * TUI…" it correctly classified taskType=analyze. The leader LLM, however, chose
  * outputShape.kind="implementation_plan" with an implement-role roster, which made
- * the post-debate AskCard default to "generate_plan" (build a plan) — wrong for a
+ * the post-debate AskCard default to "implement" (build it) — wrong for a
  * pure analysis request.
  *
  * planDebate now applies a deterministic backstop: when PIL taskType is
