@@ -323,6 +323,20 @@ function synthesisOutputKind(synthesis: string): IntentKind | undefined {
   return m ? coerceIntentKind(m[1]) : undefined;
 }
 
+/**
+ * The run's authoritative intent kind. The launch-card lock wins; the synthesis
+ * JSON regex is only the fallback for runs that never saw the card
+ * (convenePath, sprintPlanningMode, resumed pre-2026-08 specs).
+ *
+ * Before the lock existed this inference decided the whole downstream shape:
+ * session 3a8378db4adf debated a yes/no question, the regex returned
+ * "evaluation", and pickPostDebateRecommendation + postDebateContinuation both
+ * keyed on it.
+ */
+export function resolveRunKind(locked: IntentKind | undefined, synthesis: string): IntentKind {
+  return locked ?? synthesisOutputKind(synthesis) ?? "evaluation";
+}
+
 /** The literal separator between the machine-JSON and the human prose in a synthesis. */
 const READABLE_SEPARATOR = "---READABLE---";
 
@@ -350,9 +364,8 @@ export function extractReadableSynthesis(synthesis: string): string {
  * readable synthesis itself IS the answer, so the post-council flow presents it
  * directly instead of re-entering a fragile follow-up turn.
  */
-export function synthesisIsImplementation(synthesis: string): boolean {
-  const kind = synthesisOutputKind(synthesis);
-  return !!kind && isImplementationKind(kind);
+export function synthesisIsImplementation(synthesis: string, outputKind?: IntentKind): boolean {
+  return isImplementationKind(resolveRunKind(outputKind, synthesis));
 }
 
 export function postDebateContinuation(
@@ -379,10 +392,10 @@ export function postDebateContinuation(
     );
   }
   if (action === "continue_session") {
-    const kind = outputKind ?? synthesisOutputKind(synthesis);
+    const kind = resolveRunKind(outputKind, synthesis);
     // Only an implementation-shaped debate has an "original task" left to build
     // (the /ideal build flow relies on this carry-forward — do NOT null it out).
-    if (kind && isImplementationKind(kind)) {
+    if (isImplementationKind(kind)) {
       return `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`;
     }
     // Analysis/evaluation/decision/investigation (or unknown → analysis): the
@@ -1170,13 +1183,16 @@ export async function* runCouncil(
       // Recommendation surfaced to the user as the default action. The
       // implementation_plan-vs-decision/evaluation split lives in
       // pickPostDebateRecommendation (issue #3 — see its doc comment).
+      // outputKind goes through resolveRunKind: the launch-card lock (spec.intentKind)
+      // is authoritative over debatePlan.outputShape.kind's pre-debate proposal and
+      // over the synthesis-JSON regex — see resolveRunKind's doc comment.
       const recommendation = pickPostDebateRecommendation({
         synthesisFailed,
         hasEmptySections,
         refinementTopics,
         confidenceLevel,
         hasPlan: !!hasPlan,
-        outputKind: debatePlan.outputShape.kind,
+        outputKind: resolveRunKind(spec.intentKind, synthesisText),
         criteriaUnmet: inconclusive ? critOutcome.unmetLabels.length : 0,
       });
 
