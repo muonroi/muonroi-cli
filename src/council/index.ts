@@ -860,11 +860,8 @@ export async function* runCouncil(
     // start/cheap/refine/cancel handling untouched.
     const pickedKind = parseIntentAnswer(choice, proposedKind);
     const choseIntent = choice === pickedKind;
-    spec.intentKind = pickedKind;
-    if (choseIntent) {
-      yield { type: "content", content: `\n> Intent locked: ${INTENT_COPY[pickedKind].label}.\n` };
-    }
-    if (choice === "cancel" || choice === "refine") {
+    const isTerminalChoice = choice === "cancel" || choice === "refine";
+    if (isTerminalChoice) {
       yield {
         type: "content",
         content:
@@ -874,6 +871,13 @@ export async function* runCouncil(
       };
       yield { type: "done" };
       return null;
+    }
+    // Only lock spec.intentKind (and confirm it) once the run is actually
+    // proceeding — a cancelled/refine run terminates above and the write
+    // would otherwise be discarded on a spec that never leaves this scope.
+    spec.intentKind = pickedKind;
+    if (choseIntent) {
+      yield { type: "content", content: `\n> Intent locked: ${INTENT_COPY[pickedKind].label}.\n` };
     }
     if (choice === "cheap") {
       const shape = cheapRunShape({ plannedRounds: launchRounds, panelSize: active.length });
