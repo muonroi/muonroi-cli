@@ -262,12 +262,35 @@ describe("mergeReviewVerdicts", () => {
 });
 
 describe("buildReviewPrompt", () => {
-  it("carries the plan body, the stance name/lens, and the verdict output contract", () => {
-    const p = buildReviewPrompt("PLAN-BODY-TEXT", "Cost Skeptic", "does this cost too much?");
+  it("carries the plan body, the stance name/lens, the topic, the synthesis, the participant's own position, and the verdict output contract", () => {
+    const p = buildReviewPrompt(
+      "PLAN-BODY-TEXT",
+      "Cost Skeptic",
+      "does this cost too much?",
+      "TOPIC-DISTINCTIVE-MARKER",
+      "SYNTHESIS-DISTINCTIVE-MARKER",
+      "POSITION-DISTINCTIVE-MARKER",
+    );
     expect(p).toContain("PLAN-BODY-TEXT");
     expect(p).toContain("Cost Skeptic");
     expect(p).toContain("does this cost too much?");
+    expect(p).toContain("TOPIC-DISTINCTIVE-MARKER");
+    expect(p).toContain("SYNTHESIS-DISTINCTIVE-MARKER");
+    expect(p).toContain("POSITION-DISTINCTIVE-MARKER");
     expect(p).toContain("council-verdict");
+    // The prompt must not claim a memory it does not have — the debate exchange
+    // transcript is deliberately NOT injected (Finding 3: lowest marginal value
+    // for the highest token cost, running once per panelist per revision cycle).
+    expect(p).not.toContain("already hold the debate context");
+  });
+
+  it("bounds an oversized synthesis and position instead of shipping them unbounded", () => {
+    const hugeSynthesis = "S".repeat(20_000);
+    const hugePosition = "P".repeat(20_000);
+    const p = buildReviewPrompt("plan", "stance", "lens", "topic", hugeSynthesis, hugePosition);
+    // Both blocks were truncated — the full prompt is nowhere near the ~40,000
+    // chars it would be if either injected block were passed through unbounded.
+    expect(p.length).toBeLessThan(20_000);
   });
 });
 
@@ -285,8 +308,8 @@ function queuedLlm(replies: string[]): CouncilLLM {
   };
 }
 
-function participant(role: string, model: string, stanceName: string, lens: string): CouncilParticipant {
-  return { role: role as CouncilParticipant["role"], model, position: "", stance: { name: stanceName, lens } };
+function participant(role: string, model: string, stanceName: string, lens: string, position = ""): CouncilParticipant {
+  return { role: role as CouncilParticipant["role"], model, position, stance: { name: stanceName, lens } };
 }
 
 function verdictBlock(verdict: "approve" | "revise" | "block", concerns: string[] = []): string {
@@ -347,6 +370,54 @@ describe("runPlanReview", () => {
     );
 
     expect(seenPrompt).toContain("Cite numbers with sources only");
+  });
+
+  it("threads the topic and synthesis into every reviewer's prompt, and each participant's OWN position — not another's", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
+    seedPlan(cwd);
+    const seenPrompts: string[] = [];
+    const llm: CouncilLLM = {
+      generate: async (_modelId, _system, prompt) => {
+        seenPrompts.push(prompt);
+        return verdictBlock("approve");
+      },
+      research: async () => {
+        throw new Error("not implemented");
+      },
+      debate: async () => {
+        throw new Error("not implemented");
+      },
+    };
+    await drain(
+      runPlanReview({
+        cwd,
+        topic: "TOPIC-DISTINCTIVE-MARKER",
+        synthesis: "SYNTHESIS-DISTINCTIVE-MARKER",
+        exchanges: "EXCHANGES",
+        plannerModelId: "planner-model",
+        leaderModelId: "leader-model",
+        participants: [
+          participant("architect", "model-a", "Architect", "structure", "ARCHITECT-POSITION-MARKER"),
+          participant("skeptic", "model-b", "Skeptic", "risk", "SKEPTIC-POSITION-MARKER"),
+        ],
+        llm,
+      }),
+    );
+
+    expect(seenPrompts).toHaveLength(2);
+
+    // Both reviewers see the same topic and synthesis...
+    expect(seenPrompts[0]).toContain("TOPIC-DISTINCTIVE-MARKER");
+    expect(seenPrompts[0]).toContain("SYNTHESIS-DISTINCTIVE-MARKER");
+    expect(seenPrompts[1]).toContain("TOPIC-DISTINCTIVE-MARKER");
+    expect(seenPrompts[1]).toContain("SYNTHESIS-DISTINCTIVE-MARKER");
+
+    // ...but each sees only ITS OWN position, never the other's — a reviewer
+    // must not be shown a debate position it did not itself argue.
+    expect(seenPrompts[0]).toContain("ARCHITECT-POSITION-MARKER");
+    expect(seenPrompts[0]).not.toContain("SKEPTIC-POSITION-MARKER");
+    expect(seenPrompts[1]).toContain("SKEPTIC-POSITION-MARKER");
+    expect(seenPrompts[1]).not.toContain("ARCHITECT-POSITION-MARKER");
   });
 
   it("unanimous approve writes PLAN-REVIEW.md and sets Plan Verified so readState round-trips true", async () => {

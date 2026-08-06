@@ -202,12 +202,45 @@ export function mergeReviewVerdicts(
   return { verdict: "approve", concerns };
 }
 
-export function buildReviewPrompt(planBody: string, stanceName: string, lens: string): string {
+// A stateless `CouncilLLM.generate` call carries nothing over from the debate
+// (see src/council/llm.ts's `generate`) — so the reviewer's only debate context
+// is whatever this prompt actually injects. Passing the full exchange transcript
+// would be the largest token block for the lowest marginal value here (this runs
+// once per panelist per revision cycle); the topic + the approved synthesis +
+// the participant's OWN final position is the grounding that is both true and
+// affordable. Bounds mirror existing per-block caps elsewhere in this module
+// (buildPlannerPrompt's `exchanges.slice(0, 12_000)`) and in the codebase
+// (`PER_POSITION_CHARS = 4000` in debate-summary.ts) so neither an unusually
+// long synthesis nor an unusually long position can blow the prompt up.
+const REVIEW_SYNTHESIS_CHARS = 8_000;
+const REVIEW_POSITION_CHARS = 4_000;
+
+export function buildReviewPrompt(
+  planBody: string,
+  stanceName: string,
+  lens: string,
+  topic: string,
+  synthesis: string,
+  position: string,
+): string {
+  const boundedSynthesis =
+    synthesis.length > REVIEW_SYNTHESIS_CHARS ? `${synthesis.slice(0, REVIEW_SYNTHESIS_CHARS)}…` : synthesis;
+  const boundedPosition =
+    position.length > REVIEW_POSITION_CHARS ? `${position.slice(0, REVIEW_POSITION_CHARS)}…` : position;
   return [
-    `You reviewed this topic in the debate as "${stanceName}" (${lens}).`,
-    "Review the plan below through that same lens. You already hold the debate context —",
-    "judge whether the plan actually delivers what the council agreed, whether each phase",
-    "is independently verifiable, and whether anything was smuggled in that was not agreed.",
+    `You reviewed "${topic}" in the debate as "${stanceName}" (${lens}). Below is the synthesis the`,
+    "council approved and your own final position from that debate — not the full exchange transcript.",
+    "Review the plan against what you actually have in front of you: judge whether it delivers what",
+    "the council agreed, whether each phase is independently verifiable, and whether anything was",
+    "smuggled in that was not agreed.",
+    "",
+    "--- Approved synthesis ---",
+    boundedSynthesis,
+    "--- end synthesis ---",
+    "",
+    "--- Your position in the debate ---",
+    boundedPosition,
+    "--- end your position ---",
     "",
     "--- PLAN.md ---",
     planBody,
@@ -320,7 +353,7 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
           label: `Review — ${stanceName}`,
           role: p.role,
           system: "You review the plan against the debate you already took part in.",
-          prompt: buildReviewPrompt(planBody, stanceName, lens),
+          prompt: buildReviewPrompt(planBody, stanceName, lens, args.topic, args.synthesis, p.position),
         });
         const parsed = extractStructuredVerdict(raw);
         if (!parsed) {
