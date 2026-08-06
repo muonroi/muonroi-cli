@@ -281,6 +281,13 @@ export interface ActionPlan {
   }>;
   estimatedComplexity: "trivial" | "moderate" | "complex";
   prerequisites: string[];
+  /**
+   * Phased form written to `.planning/PLAN.md` (design 2026-08-04). `steps` is
+   * kept for the legacy callers; the executor reads `phases` because a flat step
+   * list cannot carry per-phase acceptance criteria or a per-phase verify
+   * command — which is why the old flow could only ever execute one step.
+   */
+  phases?: import("./plan-artifact.js").PlanPhase[];
 }
 
 // ── Council Outcome (extends existing for backward compat) ───────────────────
