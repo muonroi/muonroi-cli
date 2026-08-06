@@ -64,7 +64,11 @@ export function parsePlannerPhases(raw: string): PlanPhase[] {
   if (!Array.isArray(rows)) return [];
   const asStrings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
   return rows
-    .map((r) => {
+    .map((r): PlanPhase | null => {
+      // A malformed element (`null`, a bare string, an array, ...) is an ordinary
+      // LLM slip (truncation, stray comma) — drop it rather than crash reading
+      // `.id` off it. Only real objects proceed to field coercion below.
+      if (typeof r !== "object" || r === null || Array.isArray(r)) return null;
       const row = r as Record<string, unknown>;
       return {
         id: typeof row.id === "string" ? row.id : "",
@@ -74,9 +78,9 @@ export function parsePlannerPhases(raw: string): PlanPhase[] {
         acceptance: asStrings(row.acceptance),
         verify: typeof row.verify === "string" ? row.verify : "",
         done: false,
-      } satisfies PlanPhase;
+      };
     })
-    .filter((p) => p.id && p.title && p.acceptance.length > 0);
+    .filter((p): p is PlanPhase => p !== null && p.id !== "" && p.title !== "" && p.acceptance.length > 0);
 }
 
 export interface PlannerArgs {
@@ -86,15 +90,6 @@ export interface PlannerArgs {
   exchanges: string;
   plannerModelId: string;
   llm: CouncilLLM;
-  /**
-   * User-abort signal. Not yet threaded into the generate call: `tracedGenerate`
-   * (src/council/llm.ts) does not accept one — `TracedGenerateArgs` has no
-   * `signal` field and its internal `llm.generate(...)` call omits the trailing
-   * signal argument entirely. Kept on this interface so the caller's shape is
-   * ready once that gap in `tracedGenerate` closes; wiring it through is out of
-   * scope for this task.
-   */
-  signal?: AbortSignal;
 }
 
 export async function* runPlannerPhase(

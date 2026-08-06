@@ -42,6 +42,63 @@ describe("parsePlannerPhases", () => {
       '```json\n{"phases":[{"id":"P0","title":"t","steps":["s"],"files":[],"acceptance":[],"verify":""}]}\n```';
     expect(parsePlannerPhases(raw)).toEqual([]);
   });
+
+  it("drops a null element inside a well-formed phases array instead of throwing", () => {
+    const raw =
+      '```json\n{"phases":[null,{"id":"P0","title":"t","steps":[],"files":[],"acceptance":["a"],"verify":""}]}\n```';
+    expect(() => parsePlannerPhases(raw)).not.toThrow();
+    const phases = parsePlannerPhases(raw);
+    expect(phases).toHaveLength(1);
+    expect(phases[0].id).toBe("P0");
+  });
+
+  it("drops an undefined/array/primitive element inside phases instead of throwing", () => {
+    const raw = JSON.stringify({
+      phases: [
+        undefined,
+        ["not", "an", "object"],
+        "just a string",
+        42,
+        { id: "P0", title: "t", steps: [], files: [], acceptance: ["a"], verify: "" },
+      ],
+    });
+    expect(() => parsePlannerPhases("```json\n" + raw + "\n```")).not.toThrow();
+    const phases = parsePlannerPhases("```json\n" + raw + "\n```");
+    expect(phases).toHaveLength(1);
+    expect(phases[0].id).toBe("P0");
+  });
+
+  it("returns an empty array when phases is present but not an array", () => {
+    const raw = '```json\n{"phases":"not-an-array"}\n```';
+    expect(parsePlannerPhases(raw)).toEqual([]);
+  });
+
+  it("coerces a non-array steps/files field to an empty array rather than throwing", () => {
+    const raw = JSON.stringify({
+      phases: [
+        {
+          id: "P0",
+          title: "t",
+          steps: "do the thing", // malformed: string instead of string[]
+          files: "src/x.ts", // malformed: string instead of string[]
+          acceptance: ["it works"],
+          verify: "",
+        },
+      ],
+    });
+    const phases = parsePlannerPhases("```json\n" + raw + "\n```");
+    expect(phases).toHaveLength(1);
+    expect(phases[0].steps).toEqual([]);
+    expect(phases[0].files).toEqual([]);
+    expect(phases[0].acceptance).toEqual(["it works"]);
+  });
+
+  it("drops a phase whose id is a number rather than a string", () => {
+    const raw = JSON.stringify({
+      phases: [{ id: 0, title: "t", steps: [], files: [], acceptance: ["a"], verify: "" }],
+    });
+    expect(parsePlannerPhases("```json\n" + raw + "\n```")).toEqual([]);
+  });
 });
 
 describe("buildPlannerPrompt", () => {
