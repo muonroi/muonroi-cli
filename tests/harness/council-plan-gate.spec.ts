@@ -95,12 +95,11 @@ describe("council intent gate + plan card", () => {
     // launch card DOES fire and lock spec.intentKind". This spec drives that
     // path — the one a real interactive user actually sees.
     driver.type("design the council intent-gate sentinel transition test");
-    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
     driver.press("Enter");
 
     // The S1 launch configurator (council/index.ts) is the FIRST askcard-open
-    // in this run: the clarifier asks zero questions (fixture entry 1) so the
-    // spec is judged ready and the preflight approve card auto-approves
+    // in this run: the clarifier asks zero questions (fixture's clarify entry)
+    // so the spec is judged ready and the preflight approve card auto-approves
     // (preflight.ts only emits its own askcard-open when NOT auto-approved).
     await driver.wait_for({ event: "askcard-open", timeoutMs: 60_000 });
     const e = driver.last_event("askcard-open");
@@ -117,10 +116,22 @@ describe("council intent gate + plan card", () => {
     // askcard-open fires synchronously with the state setter, but render_text()
     // reads the current frame and could otherwise race React's commit.
     await driver.wait_for({ selector: "id=askcard", timeoutMs: 5_000 });
-    const card = driver.render_text();
-    // debatePlan.outputShape.kind is "implementation_plan" in this fixture
-    // (entry 4), which buildIntentOptions puts FIRST (the recommended pick),
-    // labelled "Implement — plan it, review it, then build (recommended)".
-    expect(card).toMatch(/implement/i);
-  }, 70_000);
+
+    // buildIntentOptions (src/council/intent-card.ts) renders ALL 6 IntentKind
+    // labels on every S1 card — it only REORDERS so the leader's proposed kind
+    // (debatePlan.outputShape.kind, "implementation_plan" in the fixture's
+    // debate-planner-retry entry) comes first and gets " (recommended)"
+    // appended to its label. That means
+    // asserting the rendered text merely CONTAINS "implement" proves nothing:
+    // the label is present at some position regardless of which kind won the
+    // recommended slot, so a regression in coerceIntentKind or in the
+    // reordering itself (the leader's pick silently not driving the
+    // recommendation) would leave "implement" on screen and this test green.
+    // Anchor to the specific option node instead — each option gets a stable
+    // Semantic id of `askcard-option-${value}` (council-question-card.tsx) —
+    // and assert its OWN rendered name carries the "(recommended)" suffix,
+    // which intent-card.ts only appends to the option at index 0 post-reorder.
+    const implementOption = driver.query("id=askcard-option-implementation_plan");
+    expect(implementOption?.name).toMatch(/implement.*\(recommended\)/i);
+  });
 });

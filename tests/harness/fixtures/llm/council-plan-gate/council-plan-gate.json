@@ -12,11 +12,19 @@
   },
   "sequence": [
     {
+      "text": "No JSON here on purpose.",
+      "___comment": "selectTaskAwarePanel's 'Leader selecting debate panel' call (src/council/panel-select.ts) — fires whenever >=2 participants resolve and isTaskAwarePanelEnabled() (default on). A response with no {...} object makes it fail its own parse and return null, which is fail-open by design: the caller just keeps its default roster. This was the entry MISSING from the first version of this fixture — its absence silently shifted every later entry by one position, which a loose 'does render_text() contain the word implement anywhere' assertion could not catch (implementation_plan is always rendered somewhere in the 6-option list; the shift only showed up once the assertion was pinned to which option is RECOMMENDED)."
+    },
+    {
+      "text": "No additional scope findings needed for this self-contained harness spec.",
+      "___comment": "researchScopeForClarification's 'Scope research' call (runs before the clarify round unless MUONROI_CLARIFY_RESEARCH_FIRST=0, which this spec does not set). Its return value is appended to conversationContext as free text — no JSON shape required."
+    },
+    {
       "text": "[]",
       "___comment": "Clarifier round-0 question generation (runClarification's tracedGenerate call). Empty array = zero clarify questions, which sets gateReady=true and breaks the clarify loop without a readiness-judge call."
     },
     {
-      "text": "{\"problemStatement\":\"Add a harness E2E spec that asserts the council intent gate renders as the first card of a real /council run, before any debate spend.\",\"constraints\":[\"Deterministic — no live network calls, no timing races\"],\"successCriteria\":[\"askcard-open fires with phase=council-setup\",\"optionCount is 10 (6 intent kinds + 4 shape options)\",\"the rendered card surfaces the Implement option\"],\"scope\":\"in-scope: the council-setup launch card. out-of-scope: driving the debate or the plan phases.\"}",
+      "text": "{\"problemStatement\":\"Add a harness E2E spec that asserts the council intent gate renders as the first card of a real council run, before any debate spend.\",\"constraints\":[\"Deterministic — no live network calls, no timing races\"],\"successCriteria\":[\"askcard-open fires with phase=council-setup\",\"optionCount is 10 (6 intent kinds + 4 shape options)\",\"the Implement option carries the recommended tag\"],\"scope\":\"in-scope: the council-setup launch card. out-of-scope: driving the debate or the plan phases.\"}",
       "___comment": "inferSpecFromTopicOnly's spec-synthesis call — fires because the clarifier asked zero questions (qa.length === 0)."
     },
     {
@@ -25,11 +33,11 @@
     },
     {
       "text": "{\"intentSummary\":\"Add an E2E harness spec proving the council intent gate renders before any debate spend.\",\"stances\":[{\"name\":\"Primary Engineer\",\"lens\":\"Drive the real launch-card flow through the mock LLM deterministically.\"},{\"name\":\"Skeptical Reviewer\",\"lens\":\"Stress-test whether the assertion would actually catch a regression in the intent gate.\"}],\"outputShape\":{\"kind\":\"implementation_plan\",\"sections\":[{\"key\":\"steps\",\"heading\":\"Steps\",\"prompt\":\"ordered implementation steps\",\"shape\":\"list\"}],\"guardrails\":[\"Keep the spec deterministic — no live network calls.\"]}}",
-      "___comment": "planDebate's RETRY attempt (tracedGenerate via llm.generate). Attempt 1 always fails here: it calls generateObject directly against the AI-SDK mock (not this sequence), whose doGenerate defaults to '{}' with no 'generate' field configured on the model block above, and '{}' fails DebatePlanSchema validation. outputShape.kind='implementation_plan' makes the Implement option the RECOMMENDED (first) intent option, which is what the spec asserts against render_text()."
+      "___comment": "planDebate's RETRY attempt (tracedGenerate via llm.generate). Attempt 1 always fails here: it calls generateObject directly against the AI-SDK mock (not this sequence), whose doGenerate defaults to '{}' with no 'generate' field configured on the model block above, and '{}' fails DebatePlanSchema validation. outputShape.kind='implementation_plan' makes the Implement option the RECOMMENDED (first) intent option, which is what the spec asserts via the askcard-option-implementation_plan Semantic node."
     },
     {
       "text": "Council acknowledged — generic fallback for any remaining calls.",
-      "___comment": "Safety net if an unaccounted-for call consumes the sequence past entry 4 — matches council.json's convention. The council-setup card is built purely from debatePlan (no further LLM calls), so this should never actually be reached."
+      "___comment": "Safety net if an unaccounted-for call consumes the sequence past entry 5 — matches council.json's convention. The council-setup card is built purely from debatePlan (no further LLM calls), so this should never actually be reached."
     }
   ]
 }
