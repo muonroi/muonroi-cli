@@ -152,17 +152,17 @@ afterEach(() => {
   delete (globalThis as Record<string, unknown>).__muonroiAgentRuntime;
 });
 
-// ── A1: generate_plan stays within sprint-runner ───────────────────────────
+// ── A1: the sprint plan lock stays within sprint-runner ─────────────────────
 
-describe("A1: generate_plan no longer exits sprint-runner", () => {
-  it("after council returns synthesisText from generate_plan, sprint-runner emits all 4 phase events", async () => {
+describe("A1: the sprint plan lock no longer exits sprint-runner", () => {
+  it("after council returns synthesisText from the sprint plan lock, sprint-runner emits all 4 phase events", async () => {
     const processMessageFn = vi.fn(async function* () {
       yield { type: "content", content: "implementing..." };
     });
 
     (runCouncil as ReturnType<typeof vi.fn>).mockImplementation(async function* () {
       yield { type: "content", content: "council planning..." };
-      // Simulate council returning synthesisText from generate_plan
+      // Simulate council returning synthesisText from the sprint plan lock
       return "Sprint plan locked (3 steps):\n- [high] Setup auth\n- [high] Build API\n- [medium] Tests";
     });
 

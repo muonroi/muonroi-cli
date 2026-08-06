@@ -388,13 +388,16 @@ export function postDebateContinuation(
   outputKind?: IntentKind,
 ): string | null {
   if (!synthesis || !action) return null;
-  // IMPLEMENT — carry the REVIEWED PLAN, not the synthesis. The previous design
-  // (see git history for this comment) treated the synthesis as a sufficient
-  // spec and fed it back as prose; PIL then classified that prose as
-  // taskType=analyze / deliverable=report (session 3a8378db4adf, interaction_logs
-  // id 2498) and the "implement" turn ran as a report against
-  // planVerified:false. Execution now goes through the marked envelope in
-  // plan-execution.ts. See docs/superpowers/specs/2026-08-04-council-intent-plan-gate-design.md.
+  // IMPLEMENT — still returns the synthesis as prose below, and that is a KNOWN
+  // gap, not the fixed state. The previous design (see git history for this
+  // comment) treated the synthesis as a sufficient spec fed back as prose; PIL
+  // then classified that prose as taskType=analyze / deliverable=report
+  // (session 3a8378db4adf, interaction_logs id 2498) and the "implement" turn
+  // ran as a report against planVerified:false. That position is reversed: a
+  // reviewed plan, not raw prose, is the correct handoff — but the fix lands in
+  // a later task, which replaces this body with the marked envelope in
+  // plan-execution.ts (does not exist yet). See
+  // docs/superpowers/specs/2026-08-04-council-intent-plan-gate-design.md.
   // `generate_plan` was a separate, always-identical alias to this branch — dead
   // code, removed outright rather than repurposed (see the same spec, D5).
   if (action === "implement") {
@@ -457,21 +460,31 @@ export interface PostPlanCard {
  * Pure builder — no I/O — mirroring `buildLaunchCard`'s shape so both cards are
  * unit-testable independent of the streaming plumbing that renders them.
  *
- * `execute_plan` is offered only when the plan cleared review (`verdict !==
- * "block"`) — a blocked plan must not be executable from this card. `revise`
- * behaves the same as `block` here: neither has an approved plan to execute,
- * so both default to `revise_plan` and neither shows `execute_plan`.
+ * `execute_plan` is offered whenever the verdict is not `block` — `block` is a
+ * deliberate "do not run this" and must not be executable from this card.
+ * `revise` is different: `mergeReviewVerdicts` is severity-wins, so a single
+ * reviewer whose output fails `extractStructuredVerdict` records a synthetic
+ * "did not emit a structured verdict" concern at `revise` severity, which is
+ * enough to force the merged verdict to `revise` even when nobody raised a
+ * substantive objection — and a retry-exhausted `revise` (the retry budget in
+ * `getPlanReviewDebateRetries` ran out without ever reaching `approve` or
+ * `block`) is the terminal state in that case. Refusing to execute here would
+ * leave the user with no path forward except hand-editing the plan outside
+ * this card. So `revise` still offers `execute_plan` — labeled to admit the
+ * review did not clear — but is NOT the default; only `approve` defaults to
+ * `execute_plan`, `block`/`revise` both default to `revise_plan`.
  */
 export function buildPostPlanCard(input: PostPlanCardInput): PostPlanCard {
   const phaseLines = input.phases.map((p) => `${p.id} — ${p.title} · ${p.acceptance.length} acceptance criteria`);
 
-  const canExecute = input.verdict !== "block" && input.verdict !== "revise";
+  const offersExecute = input.verdict !== "block";
 
   const options: CouncilQuestionOption[] = [
-    ...(canExecute
+    ...(offersExecute
       ? [
           {
-            label: "Implement the whole plan",
+            label:
+              input.verdict === "revise" ? "Execute anyway — the review asked for changes" : "Implement the whole plan",
             description: `Execute every phase in order (${input.phases.length} phase${input.phases.length === 1 ? "" : "s"}), gating each on its own acceptance criteria and verify command.`,
             value: "execute_plan",
             kind: "choice" as const,
@@ -504,11 +517,14 @@ export function buildPostPlanCard(input: PostPlanCardInput): PostPlanCard {
       input.verdict === "block"
         ? "Plan review blocked this plan. Revise it or save and stop?"
         : input.verdict === "revise"
-          ? "Plan review asked for changes. Revise it or save and stop?"
+          ? "Plan review asked for changes. Revise it, execute anyway, or save and stop?"
           : "Plan reviewed and approved. Implement it now?",
     context: [`Plan: ${input.planPath}`, ...phaseLines, `Verdict: ${input.verdict}`].join("\n") + concernsBlock,
     options,
-    defaultIndex: canExecute ? 0 : options.findIndex((o) => o.value === "revise_plan"),
+    defaultIndex:
+      input.verdict === "approve"
+        ? options.findIndex((o) => o.value === "execute_plan")
+        : options.findIndex((o) => o.value === "revise_plan"),
   };
 }
 
