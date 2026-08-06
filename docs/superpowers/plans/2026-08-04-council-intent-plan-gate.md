@@ -1285,7 +1285,7 @@ export async function* runPlanExecution(
 }
 ```
 
-Delete `src/council/executor.ts` and its `runExecution` import in `src/council/index.ts`; wire the `execute_plan` answer from Task 7's card to `runPlanExecution`.
+Delete `src/council/executor.ts` and replace **all three** of its touch points in `src/council/index.ts` — the import at `:26`, the Phase E call `yield* runExecution(plan, processMessageFn)` at `:1921`, and the "clear plan so Phase E's runExecution guard does not fire" logic at `:1698-1700`, which exists only to suppress that call and becomes dead once it is gone. Read `:1630-1640` and `:1690-1705` before editing: the comments there record why the post-debate branch already stopped calling `runExecution`, and the Phase E call is the one that still runs. Wire the `execute_plan` answer from Task 7's card to `runPlanExecution` at the Phase E site.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1352,7 +1352,13 @@ describe("council intent gate + plan card", () => {
     await h.driver.wait_for({ event: "askcard-open", timeoutMs: 60_000 });
     const e = h.driver.last_event("askcard-open");
     expect(e?.phase).toBe("council-setup");
-    expect(String(e?.optionLabels?.[0])).toMatch(/implement/i);
+    // 4 shape options + 6 IntentKind options. The askcard-open LiveEvent
+    // carries optionCount but NOT the labels (protocol.ts:221-230) — the DB
+    // row has optionLabels, the event does not. Read the labels off the
+    // rendered card instead of inventing a protocol field.
+    expect(e?.optionCount).toBe(10);
+    const card = h.driver.render_text();
+    expect(card).toMatch(/implement/i);
   });
 });
 ```
