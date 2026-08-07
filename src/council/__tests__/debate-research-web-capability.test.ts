@@ -215,6 +215,68 @@ describe("runDebate research phase — web-capability routing (real generator)",
     expect(warning).toBeDefined();
   });
 
+  it("warns exactly ONCE across a multi-round debate that hits webTier 'none' at both initial and every mid-debate research call", async () => {
+    // Same "no native-web model, no Tavily key" condition as the single-shot
+    // warning test above, but driven through TWO full rounds so the initial
+    // research phase AND both rounds' mid-debate research phase each hit the
+    // webTier==="none" branch — three separate opportunities to warn. Only
+    // the shared `researchWebWarned` flag (debate.ts) keeps this to one.
+    mockGetWebResearchModel.mockReturnValue(undefined);
+    mockHasTavilyKey.mockResolvedValue(false);
+
+    let evalCallCount = 0;
+    const llm = {
+      generate: async (_model: string, system: string) => {
+        if (system.includes("evaluating whether")) {
+          evalCallCount++;
+          // Round 1: continue (so a round 2 happens). Round 2: stop. Both
+          // rounds report needsResearch:true so mid-debate research fires twice.
+          return JSON.stringify({
+            allCriteriaMet: true,
+            criteriaStatus: [],
+            unresolvedPoints: [],
+            needsResearch: true,
+            researchQuery: `Verify claim, round ${evalCallCount}`,
+            shouldContinue: evalCallCount < 2,
+            reason: `round ${evalCallCount} eval`,
+          });
+        }
+        return GOOD_TEXT;
+      },
+      debate: async () => ({ text: GOOD_TEXT, toolCalls: [] }),
+      research: async () => "## Research Findings\n- codebase only",
+    } as unknown as CouncilLLM;
+
+    const participants = [
+      { role: "research", model: "text-only-model", position: "", stance: { name: "research", lens: "evidence" } },
+      { role: "architect", model: "deepseek-chat", position: "", stance: { name: "architect", lens: "design" } },
+    ] as unknown as CouncilParticipant[];
+
+    const config = {
+      ...makeConfig(participants),
+      debatePlan: {
+        ...makeConfig(participants).debatePlan,
+        plannedRounds: 2,
+      },
+      runId: "sess-debate-research-web-multiround-test",
+    } as unknown as CouncilConfig;
+
+    const gen = runDebate(makeSpec(), config, llm);
+    const { chunks } = await drainResearchMessage(gen);
+
+    // At least two rounds actually ran (proves the mid-debate site was
+    // reached more than once, not just the initial phase).
+    expect(evalCallCount).toBe(2);
+
+    const warnings = chunks.filter(
+      (c) =>
+        (c as { type?: string }).type === "content" &&
+        typeof (c as { content?: string }).content === "string" &&
+        (c as { content: string }).content.includes("no web-research-native model is reachable"),
+    );
+    expect(warnings).toHaveLength(1);
+  });
+
   it("does not break the existing provider-crash fallback: a web-selected model that crashes still recovers via a different-provider pooled model", async () => {
     // "web-native-model" is preferred by web-capability policy, but its
     // provider crashes for THIS call — pickDebateFallbackModel's existing

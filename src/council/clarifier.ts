@@ -2,6 +2,7 @@ import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
 import { getMcpKey } from "../mcp/mcp-keychain.js";
 import { getWebResearchModel } from "../models/registry.js";
 import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
+import { logger } from "../utils/logger.js";
 import { getCouncilLanguage } from "../utils/settings.js";
 import { pickCouncilTaskModel } from "./leader.js";
 import { tracedAsync, tracedGenerate, tracedGenerateWithFallback } from "./llm.js";
@@ -293,7 +294,10 @@ async function hasTavilyKey(): Promise<boolean> {
   try {
     const k = ((await getMcpKey("tavily")) || process.env.TAVILY_API_KEY || "").trim();
     return k.length >= 10;
-  } catch {
+  } catch (err) {
+    logger.error("mcp", `clarifier: hasTavilyKey check failed: ${(err as Error)?.message}`, {
+      stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+    });
     return (process.env.TAVILY_API_KEY ?? "").trim().length >= 10;
   }
 }
