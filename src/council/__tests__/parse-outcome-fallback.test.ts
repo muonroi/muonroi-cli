@@ -142,7 +142,7 @@ describe("parseOutcome — raw log + shape-based fallback (CQ-20)", () => {
       summary: "The rerender cascade originates in the shared root context.",
       nextActions: [
         { action: "continue_session", label: "Keep working with this", reason: "Deliverable is the conclusion." },
-        { action: "generate_plan", label: "Draft the fix plan" }, // no reason — still valid
+        { action: "implement", label: "Draft the fix plan" }, // no reason — still valid
         { action: "nuke_everything", label: "Invalid action" }, // not in vocabulary → dropped
         { action: "save_exit", reason: "no label" }, // missing label → dropped
         "not-an-object", // malformed → dropped
@@ -151,10 +151,10 @@ describe("parseOutcome — raw log + shape-based fallback (CQ-20)", () => {
     const result = await runPlanningWith(json);
     const actions = result?.outcome?.nextActions;
     expect(actions).toBeDefined();
-    expect(actions?.map((a: { action: string }) => a.action)).toEqual(["continue_session", "generate_plan"]);
+    expect(actions?.map((a: { action: string }) => a.action)).toEqual(["continue_session", "implement"]);
     // Terse action (no reason) survives; reason stays undefined for index.ts to
     // fall back to the label.
-    expect(actions?.[1]).toEqual({ action: "generate_plan", label: "Draft the fix plan", reason: undefined });
+    expect(actions?.[1]).toEqual({ action: "implement", label: "Draft the fix plan", reason: undefined });
   });
 
   it("Test 8: no nextActions field → outcome.nextActions is undefined (fallback options)", async () => {

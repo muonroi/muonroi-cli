@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { alignCriteriaMet } from "../debate.js";
+import { alignCriteriaDeferred, alignCriteriaMet } from "../debate.js";
 
 describe("alignCriteriaMet (B3: grade rounds against pinned criteria)", () => {
   const pinned = ["Renders without OCR", "Colors captured", "No mojibake"];
@@ -33,5 +33,39 @@ describe("alignCriteriaMet (B3: grade rounds against pinned criteria)", () => {
 
   it("returns all-false for empty status", () => {
     expect(alignCriteriaMet(pinned, [])).toEqual([false, false, false]);
+  });
+});
+
+describe("alignCriteriaDeferred (criteria a debate cannot close)", () => {
+  const pinned = ["Identify the overlapping layers", "Land the code change", "Behaviour preserved after the change"];
+
+  it("index-aligns the leader's deferred flags when counts match", () => {
+    const status = [
+      { criterion: "identify layers", deferred: false },
+      { criterion: "land the change", deferred: true },
+      { criterion: "behaviour preserved", deferred: true },
+    ];
+    expect(alignCriteriaDeferred(pinned, status)).toEqual([false, true, true]);
+  });
+
+  it("falls back to substring match when the model drifts", () => {
+    const status = [
+      { criterion: "Behaviour preserved after the change is in", deferred: true },
+      { criterion: "Identify the overlapping layers properly", deferred: false },
+    ];
+    expect(alignCriteriaDeferred(pinned, status)).toEqual([false, false, true]);
+  });
+
+  it("defaults to NOT deferred on any drift or omission", () => {
+    // Deliberately asymmetric with alignCriteriaMet's default: wrongly marking a
+    // debatable criterion "deferred" would silently retire it from the debate's
+    // goals, which is worse than briefly over-reporting it as open.
+    expect(alignCriteriaDeferred(pinned, [{ criterion: "unrelated", deferred: true }])).toEqual([false, false, false]);
+    expect(alignCriteriaDeferred(pinned, [])).toEqual([false, false, false]);
+    expect(alignCriteriaDeferred(pinned, [{ criterion: "a" }, { criterion: "b" }, { criterion: "c" }])).toEqual([
+      false,
+      false,
+      false,
+    ]);
   });
 });

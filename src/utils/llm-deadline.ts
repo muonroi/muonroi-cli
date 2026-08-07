@@ -87,7 +87,31 @@ export async function withDeadlineRace<T>(
       reject(new Error(`${label} exceeded ${deadlineMs}ms deadline (timeout)`));
     }, deadlineMs);
   });
-  const racers: Array<Promise<T>> = [fn(), deadline as Promise<T>];
+  // Losing the race does NOT cancel `fn()` — it keeps running and may reject
+  // later, with nobody attached. That rejection escapes to the process-level
+  // handler, which knows only `err.message`: crash.log for session
+  // 811336618ee0 recorded a bare `REJECTION: The operation timed out.` with no
+  // model, phase or label, next to a 4m07s stall in council round 2 that was
+  // therefore unattributable. Settle the work promise here so a late rejection
+  // is always observed and always carries the label; `work` (not the raw
+  // promise) is what races, so the caller's semantics are unchanged.
+  let raceSettled = false;
+  const work = fn().catch((err: unknown) => {
+    if (raceSettled) {
+      // The caller already moved on — log with context instead of leaking an
+      // unattributable unhandled rejection, then swallow (No-Silent-Catch: the
+      // error IS reported, just not rethrown into a race nobody is awaiting).
+      console.error(
+        `[llm-deadline] ${label}: abandoned call rejected after the race settled: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        { label, deadlineMs, stack: (err as Error)?.stack?.split("\n").slice(0, 3) },
+      );
+      return undefined as T;
+    }
+    throw err;
+  });
+  const racers: Array<Promise<T>> = [work, deadline as Promise<T>];
   if (abortSignal) {
     const abortRace = new Promise<never>((_, reject) => {
       const arm = () => {
@@ -104,6 +128,7 @@ export async function withDeadlineRace<T>(
   try {
     return await Promise.race(racers);
   } finally {
+    raceSettled = true;
     if (timer) clearTimeout(timer);
     if (abortTimer) clearTimeout(abortTimer);
     if (abortListener && abortSignal) abortSignal.removeEventListener("abort", abortListener);

@@ -616,7 +616,8 @@ export function buildLeaderEvaluationPrompt(ctx: {
       `{\n` +
       `  "nextRoundFocus": "one short phrase naming the single most important point the NEXT round should resolve (empty string if you are stopping)",\n` +
       `  "allCriteriaMet": true/false,\n` +
-      `  "criteriaStatus": [{"criterion": "...", "met": true/false, "evidence": "..."${stanceSchemaField}}],  // EXACTLY one entry per Success Criterion above, IN THE SAME ORDER. Do not merge, split, reorder, or invent criteria — the user pins these and watches each one.\n` +
+      `  "criteriaStatus": [{"criterion": "...", "met": true/false, "deferred": true/false, "evidence": "..."${stanceSchemaField}}],  // EXACTLY one entry per Success Criterion above, IN THE SAME ORDER. Do not merge, split, reorder, or invent criteria — the user pins these and watches each one.\n` +
+      `    // "deferred": set TRUE only when the criterion cannot be closed by DEBATING at all — it requires the change to be landed, a command/test to be run, or the changed behaviour to be observed. A deferred criterion is NOT a failure of the debate and NOT something more rounds can fix; the debate's job for it is to specify it precisely enough to be verified later. Set FALSE when the panel could in principle settle it by argument and evidence (a decision, an inventory, a design, a trade-off, an acceptance criterion). Never mark a criterion both met=false and deferred=false unless another round could genuinely move it.\n` +
       `  "unresolvedPoints": ["point 1"],\n` +
       `  "needsResearch": false,\n` +
       `  "researchQuery": null,\n` +

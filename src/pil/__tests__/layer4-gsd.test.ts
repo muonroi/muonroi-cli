@@ -309,8 +309,8 @@ describe("layer4Gsd (playbook)", () => {
   it("sprint-plan execution bypasses plan-review and emits an execution-only directive", async () => {
     const raw = "[SPRINT-PLAN-EXECUTION: locked]\n\n--- SPRINT PLAN TO IMPLEMENT ---\n1. Create foo.ts";
     const result = await layer4Gsd(makeCtx({ raw, enriched: raw, modelDepthTier: "heavy" }));
-    expect(result.enriched).toContain("[sprint-execution]");
-    expect(result.enriched).toContain("APPROVED sprint plan");
+    expect(result.enriched).toContain("[plan-execution]");
+    expect(result.enriched).toContain("APPROVED, already-reviewed plan");
     expect(result.enriched).toContain("EXECUTE it directly");
     expect(result.enriched).not.toContain("MANDATORY");
     expect(result.enriched).not.toContain("BLOCKED");
@@ -355,11 +355,40 @@ describe("layer4Gsd — sprint-plan execution", () => {
           modelDepthTier: "heavy",
         }),
       );
-      expect(result.enriched).toContain("[sprint-execution]");
+      expect(result.enriched).toContain("[plan-execution]");
       expect(result.enriched).toContain("EXECUTE");
       expect(result.enriched).toContain("Do NOT call gsd_discuss");
       // The heavy MANDATORY plan-review gate must NOT fire for an approved plan.
       expect(result.enriched).not.toContain("BLOCKED");
+    } finally {
+      if (prev === undefined) delete process.env.MUONROI_GSD_NATIVE;
+      else process.env.MUONROI_GSD_NATIVE = prev;
+    }
+  });
+  it("I3 — a COUNCIL per-phase execution turn gets the same directive, not the heavy re-plan gate", async () => {
+    // The council plan-execution envelope carries its OWN marker so /ideal and
+    // council stay separable in telemetry. Before the shared `isPlanExecution`
+    // predicate, only the SPRINT marker was checked here, so a council phase turn
+    // fell into the native branch and at heavy tier was told
+    // "MANDATORY ... gsd_plan_review BEFORE any edit_file/write_file/bash" —
+    // re-plan a plan the debate panelists had just cross-reviewed, with mutation
+    // tools BLOCKED until it complied.
+    const prev = process.env.MUONROI_GSD_NATIVE;
+    delete process.env.MUONROI_GSD_NATIVE;
+    try {
+      const { COUNCIL_PLAN_EXECUTION_MARKER } = await import("../layer6-output.js");
+      const result = await layer4Gsd(
+        makeCtx({
+          raw: `${COUNCIL_PLAN_EXECUTION_MARKER}
+
+Execute phase P0 — Sentinel — from the approved plan.`,
+          modelDepthTier: "heavy",
+        }),
+      );
+      expect(result.enriched).toContain("[plan-execution]");
+      expect(result.enriched).toContain("Do NOT call gsd_discuss");
+      expect(result.enriched).not.toContain("BLOCKED");
+      expect(result.enriched).not.toContain("MANDATORY");
     } finally {
       if (prev === undefined) delete process.env.MUONROI_GSD_NATIVE;
       else process.env.MUONROI_GSD_NATIVE = prev;

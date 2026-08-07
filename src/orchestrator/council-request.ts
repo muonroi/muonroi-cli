@@ -7,7 +7,7 @@
  * the model decides THIS request warrants a multi-model debate; the tool-engine
  * consumes it from the OUTER restart loop after a stream drain (NOT solely via
  * dynamicStopWhen — a phase-1 SAMR step ends on stepCountIs(1) and never
- * evaluates the stop hook), runs `runCouncilV2({ convenePath: true })`, splices
+ * evaluates the stop hook), runs `runCouncilV2({ suppressPreDebateCards: true, suppressPostDebate: true })`, splices
  * the synthesis into the convene tool's tool_result, and restarts streamText so
  * the model reads the conclusion as the tool's result and continues the turn.
  *

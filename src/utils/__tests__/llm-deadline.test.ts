@@ -32,6 +32,40 @@ describe("withDeadlineRace", () => {
     await advanceTimersAsync(600);
     await assertion;
   });
+
+  it("observes a LATE rejection from the abandoned call instead of leaking it", async () => {
+    // Losing the race does not cancel fn(). When the abandoned call later
+    // rejects, nothing is attached to it — that became a process-level
+    // unhandled rejection carrying only `err.message`, which is how
+    // crash.log for session 811336618ee0 ended up with a bare
+    // "REJECTION: The operation timed out." next to a 4-minute council stall
+    // that could not be tied to a model or a phase.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let rejectLate: (e: Error) => void = () => {};
+      const p = withDeadlineRace(() => new Promise<string>((_res, rej) => (rejectLate = rej)), 500, "council.generate");
+      const assertion = expect(p).rejects.toThrow(/council.generate exceeded 500ms deadline/);
+      await advanceTimersAsync(600);
+      await assertion;
+
+      // The provider gives up AFTER the race already settled.
+      rejectLate(new Error("The operation timed out."));
+      await advanceTimersAsync(10);
+
+      expect(unhandled).toEqual([]);
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining("council.generate"),
+        expect.objectContaining({ label: "council.generate" }),
+      );
+      expect(errSpy.mock.calls[0]?.[0]).toContain("The operation timed out.");
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      errSpy.mockRestore();
+    }
+  });
 });
 
 describe("getIsolatedTaskDeadlineMs", () => {

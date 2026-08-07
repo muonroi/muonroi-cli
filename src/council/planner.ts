@@ -379,7 +379,7 @@ function parseOutcome(synthesisText: string, debatePlan?: DebatePlan): EnhancedC
       // Model-first post-debate options. Keep only entries whose action is in
       // the wired vocabulary; drop malformed items so a hallucinated action id
       // can't reach the handler switch. Empty → index.ts uses its fallback set.
-      const VALID_ACTIONS = new Set(["ask_followup", "generate_plan", "implement", "save_exit", "continue_session"]);
+      const VALID_ACTIONS = new Set(["ask_followup", "implement", "save_exit", "continue_session"]);
       const nextActions = Array.isArray(parsed.nextActions)
         ? (parsed.nextActions as unknown[])
             .filter(

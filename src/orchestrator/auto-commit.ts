@@ -201,7 +201,10 @@ export function isAutoCommitEnabled(): boolean {
   return true;
 }
 
-async function git(cwd: string, args: string[]): Promise<{ stdout: string; ok: boolean }> {
+async function git(
+  cwd: string,
+  args: string[],
+): Promise<{ stdout: string; ok: boolean; stderr: string; code: number | null }> {
   try {
     const { stdout } = await pexecFile("git", args, {
       cwd,
@@ -209,11 +212,17 @@ async function git(cwd: string, args: string[]): Promise<{ stdout: string; ok: b
       maxBuffer: 16 * 1024 * 1024,
       windowsHide: true,
     });
-    return { stdout, ok: true };
-  } catch {
+    return { stdout, ok: true, stderr: "", code: 0 };
+  } catch (err) {
     // Expected for non-repos / hook rejections / nothing-to-commit — caller maps
-    // !ok to a skip reason; no throw escapes (fail-soft by contract).
-    return { stdout: "", ok: false };
+    // !ok to a skip reason; no throw escapes (fail-soft by contract). We do NOT
+    // log here (an expected !ok on `rev-parse` is not an error), but we DO carry
+    // git's own stderr + exit code out so the callers that treat !ok as a real
+    // failure can say WHY. Without this a failed `git add` was unattributable:
+    // session 811336618ee0 logged "git add failed for 1 path(s)" and nothing else.
+    const e = err as { stderr?: string | Buffer; code?: number; message?: string };
+    const stderr = (typeof e?.stderr === "string" ? e.stderr : e?.stderr?.toString()) ?? e?.message ?? "";
+    return { stdout: "", ok: false, stderr: stderr.trim(), code: typeof e?.code === "number" ? e.code : null };
   }
 }
 
@@ -308,8 +317,14 @@ export async function maybeAutoCommitTurn(opts: {
 
   const add = await git(cwd, ["add", "--", ...newPaths]);
   if (!add.ok) {
-    logger.error("orchestrator", `[auto-commit] git add failed for ${newPaths.length} path(s) in ${cwd}`);
-    return { committed: false, reason: "add-failed" };
+    // Log the paths AND git's own stderr — "failed for N path(s)" alone is not
+    // diagnosable after the fact (the usual causes — an ignored path, a lock
+    // file, a permission error — are only distinguishable from stderr).
+    logger.error(
+      "orchestrator",
+      `[auto-commit] git add failed (exit ${add.code ?? "?"}) for ${newPaths.length} path(s) in ${cwd}: ${newPaths.join(", ")}${add.stderr ? ` — ${add.stderr.slice(0, 500)}` : " — (git produced no stderr)"}`,
+    );
+    return { committed: false, reason: "add-failed", detail: add.stderr || undefined };
   }
 
   // G1 quality gate: do NOT auto-commit code that fails LSP error checks. The
@@ -336,9 +351,9 @@ export async function maybeAutoCommitTurn(opts: {
   if (!commit.ok) {
     logger.error(
       "orchestrator",
-      `[auto-commit] git commit failed in ${cwd} (a pre-commit/commit-msg hook may have rejected it)`,
+      `[auto-commit] git commit failed (exit ${commit.code ?? "?"}) in ${cwd} (a pre-commit/commit-msg hook may have rejected it)${commit.stderr ? `: ${commit.stderr.slice(0, 500)}` : " — (git produced no stderr)"}`,
     );
-    return { committed: false, reason: "commit-failed" };
+    return { committed: false, reason: "commit-failed", detail: commit.stderr || undefined };
   }
 
   const head = await git(cwd, ["rev-parse", "--short", "HEAD"]);
@@ -361,8 +376,11 @@ export async function commitSpecificPaths(cwd: string, paths: string[], message:
 
   const add = await git(cwd, ["add", "--", ...safe]);
   if (!add.ok) {
-    logger.error("orchestrator", `[git_commit] git add failed for ${safe.length} path(s) in ${cwd}`);
-    return { committed: false, reason: "add-failed" };
+    logger.error(
+      "orchestrator",
+      `[git_commit] git add failed (exit ${add.code ?? "?"}) for ${safe.length} path(s) in ${cwd}: ${safe.join(", ")}${add.stderr ? ` — ${add.stderr.slice(0, 500)}` : " — (git produced no stderr)"}`,
+    );
+    return { committed: false, reason: "add-failed", detail: add.stderr || undefined };
   }
   // Only commit if these paths actually have staged changes (idempotent across
   // repeat calls — already-committed files stage nothing).
@@ -385,9 +403,9 @@ export async function commitSpecificPaths(cwd: string, paths: string[], message:
   if (!commit.ok) {
     logger.error(
       "orchestrator",
-      `[git_commit] git commit failed in ${cwd} (a pre-commit/commit-msg hook may have rejected it)`,
+      `[git_commit] git commit failed (exit ${commit.code ?? "?"}) in ${cwd} (a pre-commit/commit-msg hook may have rejected it)${commit.stderr ? `: ${commit.stderr.slice(0, 500)}` : " — (git produced no stderr)"}`,
     );
-    return { committed: false, reason: "commit-failed" };
+    return { committed: false, reason: "commit-failed", detail: commit.stderr || undefined };
   }
   const head = await git(cwd, ["rev-parse", "--short", "HEAD"]);
   return {

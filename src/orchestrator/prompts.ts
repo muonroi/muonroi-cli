@@ -235,7 +235,13 @@ function buildEnvironmentBlock(): string {
 
 const ENVIRONMENT = buildEnvironmentBlock();
 
-const MODE_PROMPTS: Record<AgentMode, string> = {
+/**
+ * Exported for the Explore-prompt invariant test: the read-only rule for
+ * read-only sub-agents lives in `ask`'s BEHAVIOR block, and `stripToolsSection`
+ * deletes TOOLS for every non-anthropic provider — so WHERE the rule sits is
+ * itself load-bearing and needs a direct assertion.
+ */
+export const MODE_PROMPTS: Record<AgentMode, string> = {
   agent: `You are muonroi-cli in Agent mode — a powerful AI coding agent. You execute tasks directly using tools.
 
 ${ENVIRONMENT}
@@ -691,7 +697,8 @@ export function buildSubagentPrompt(
 
   const rules = isExplore
     ? [
-        "Do not create, modify, or delete files.",
+        // Read-only is enforced by MODE_PROMPTS["ask"] ("NEVER create, modify, or
+        // delete files") appended via buildSystemPrompt below — no local duplicate.
         "Prefer `read_file` and search commands over broad shell exploration.",
         // RETURN CONTRACT — the parent only ingests your FINAL message (capped at
         // ~32K, head+tail), never your tool output. Make that message a tight

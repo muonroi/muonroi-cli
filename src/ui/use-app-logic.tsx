@@ -7,6 +7,7 @@ import { decodePasteBytes, type PasteEvent, parseKeypress } from "@opentui/core"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { COUNCIL_ANSWER_DISMISSED } from "../council/types.js";
 import { clearLastSurfacedMatches, getDefaultEEClient, getLastSurfacedMatches } from "../ee/intercept.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import { type CompactProgress, stageProgress } from "../flow/compaction/progress.js";
@@ -663,6 +664,22 @@ function shouldOpenApiKeyModalForKey(key: {
   if (key.name === "return" || key.name === "backspace") return true;
   return !!(key.sequence && key.sequence.length === 1);
 }
+
+/**
+ * Shape of the inter-card heartbeat entry ("⏳ <label>... elapsed Ns"). Module
+ * scope so both the tick and the teardown match on exactly the same pattern —
+ * they drifted apart before, which is how frozen copies survived a clear.
+ */
+const HEARTBEAT_RE = /^⏳ .*\.\.\. elapsed \d+s\s*$/;
+
+/**
+ * Hard ceiling on how long a heartbeat may tick. It exists to bound the damage
+ * of a MISSED clear, not to replace one: past this the run is either finished
+ * or genuinely wedged, and either way "elapsed 8113s" tells the user nothing
+ * true. Session 0e2ef2d2b869 ticked for 2h15m after its council had already
+ * completed, which read as a hang.
+ */
+const HEARTBEAT_MAX_MS = 10 * 60 * 1000;
 
 export function useAppLogic(props: AppLogicProps) {
   const { agent, startupConfig, initialMessage, onExit, onRelaunch } = props;
@@ -1360,10 +1377,13 @@ export function useAppLogic(props: AppLogicProps) {
     // shape (`⏳ ... elapsed Ns`) and remove it wherever it landed in the tail —
     // the shape is distinctive enough not to hit real assistant content.
     setMessages((prev) => {
-      const HEARTBEAT_RE = /^⏳ .*\.\.\. elapsed \d+s\s*$/;
-      const idx = prev.findIndex((e) => e.type === "assistant" && HEARTBEAT_RE.test((e.content ?? "").trim()));
-      if (idx === -1) return prev;
-      return [...prev.slice(0, idx), ...prev.slice(idx + 1)];
+      // Strip EVERY heartbeat entry, not just the first. The tick below appends a
+      // NEW entry whenever the tail is no longer the heartbeat (an askcard answer
+      // or a fresh user message lands after it), so a stalled run can leave more
+      // than one frozen "⏳ … elapsed Ns" row in scrollback — that is exactly what
+      // session 0e2ef2d2b869 showed (8113s above the user message, 8132s below).
+      const next = prev.filter((e) => !(e.type === "assistant" && HEARTBEAT_RE.test((e.content ?? "").trim())));
+      return next.length === prev.length ? prev : next;
     });
   }, []);
 
@@ -1376,20 +1396,29 @@ export function useAppLogic(props: AppLogicProps) {
       // frequently sub-second, and an entry that flashes "elapsed 0s" for every
       // short gap is pure noise (this is exactly the "meaningless elapsed 0s" the
       // user reported). Only surface the ticking entry once a gap is long enough
-      // to warrant a "still working" reassurance — and never show "0s". The tail
-      // is stripped by clearInterCardHeartbeat() at the top of the next chunk
-      // iteration, so the heartbeat is always the last entry while active; that
-      // invariant lets us detect-or-create idempotently on each tick.
+      // to warrant a "still working" reassurance — and never show "0s".
       const MIN_VISIBLE_S = 3;
       const interval = setInterval(() => {
-        const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+        const elapsedMs = Date.now() - startedAt;
+        // Self-terminate rather than tick forever when nobody cleared us. The
+        // entry is removed too: a stale "still working" claim is worse than no
+        // claim, because it is indistinguishable from a live run.
+        if (elapsedMs >= HEARTBEAT_MAX_MS) {
+          clearInterCardHeartbeat();
+          return;
+        }
+        const elapsed = Math.floor(elapsedMs / 1000);
         if (elapsed < MIN_VISIBLE_S) return;
         const line = `${marker}${label}... elapsed ${elapsed}s\n`;
         setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          const hasHeartbeat = last?.type === "assistant" && !!last.content?.includes(marker);
-          if (!hasHeartbeat) return [...prev, buildAssistantEntry(line)];
-          return [...prev.slice(0, -1), { ...last, content: line }];
+          // Update the EXISTING heartbeat wherever it sits — do not assume it is
+          // the tail. The old code only matched `prev[len-1]`, so anything
+          // appended after it (an askcard answer echo, the next user message)
+          // made this branch append a SECOND heartbeat and freeze the first.
+          const idx = prev.findIndex((e) => e.type === "assistant" && HEARTBEAT_RE.test((e.content ?? "").trim()));
+          if (idx === -1) return [...prev, buildAssistantEntry(line)];
+          const hit = prev[idx];
+          return [...prev.slice(0, idx), { ...hit, content: line }, ...prev.slice(idx + 1)];
         });
       }, 1_000);
       interCardHeartbeatRef.current = { interval, marker };
@@ -4015,6 +4044,13 @@ export function useAppLogic(props: AppLogicProps) {
             }
           });
           for await (const chunk of agent.processMessage(text.trim(), undefined, images)) {
+            // A council spliced into a NORMAL agent turn (convene_council /
+            // auto-council route through tool-engine's runCouncilV2, not through
+            // the /council or /ideal slash loops) delivers its chunks here. This
+            // was the one chunk loop that never tore down the "Waiting for next
+            // phase" heartbeat started by the askcard-answer handler, so it
+            // ticked past the end of the run — 2h15m in session 0e2ef2d2b869.
+            clearInterCardHeartbeat();
             if (isStale()) {
               break;
             }
@@ -4359,6 +4395,9 @@ export function useAppLogic(props: AppLogicProps) {
           // forever-active. Failed items keep the group expanded via state.
           closeCurrentToolGroup();
           setActiveEeYield(null);
+          // The turn is over — nothing can arrive to clear a heartbeat that the
+          // last askcard answer armed. Mirrors the /council loop's finally.
+          clearInterCardHeartbeat();
         }
         const wasInterrupted = interruptedRunIdRef.current === runId;
         if (isStale()) {
@@ -5281,7 +5320,18 @@ export function useAppLogic(props: AppLogicProps) {
               isProcessingRef.current = true;
               setIsProcessing(true);
               try {
-                const gen = agent.runCouncilV2(topic, { convenePath: true });
+                // C2 (2026-08-06) — a human just typed this command, so NEITHER
+                // suppression applies: the S1 launch card asks what the run is
+                // for, and the post-debate surface (which holds the only two
+                // consumers of that intent lock — resolveRunKind and the
+                // planner/plan-review/post-plan-card path) must actually run.
+                // The old `convenePath: true, allowLaunchCard: true` showed the
+                // intent card and then skipped everything downstream of it, so
+                // picking "Implement — plan it, review it, then build" produced
+                // no planner, no PLAN.md, no review and no phase loop.
+                // Passing NO options is deliberate, not an omission — it is the
+                // same shape auto-council uses (src/orchestrator/tool-engine.ts).
+                const gen = agent.runCouncilV2(topic);
                 for await (const chunk of gen) {
                   // Council emitted a chunk — clear the "Waiting for next phase"
                   // inter-card heartbeat started after the last askcard answer.
@@ -5629,7 +5679,24 @@ export function useAppLogic(props: AppLogicProps) {
           break;
         }
         default: {
-          // Dispatch to slash registry for registered commands (compact, cost, ee, route, plan, execute, discuss, expand, optimize, debug, council)
+          // `council` is routed through handleCommand — the SAME path a typed
+          // `/council` takes — instead of being handled again below. Two
+          // `__COUNCIL__` handlers used to exist in this file with DIFFERENT
+          // behaviour: the typed one drives `agent.runCouncilV2` (launch card,
+          // intent lock, debate UI wiring, post-debate/post-plan cards), while
+          // the one in this branch called the legacy `agent.runCouncilRound`
+          // generator (orchestrator.ts:~2690), which never reaches `runCouncil`
+          // at all — so picking "council" from the menu silently ran a different,
+          // gate-less council. It also parsed the topic wrong: the sentinel is
+          // `__COUNCIL__\n<rounds>\n<topic>` (src/ui/slash/council.ts:48) and
+          // that branch stripped only the first line, leaking the rounds line
+          // into the topic. Reachable in practice: with no args the handler falls
+          // back to `ctx.lastPrompt`, so it does return the sentinel.
+          if (item.id === "council") {
+            handleCommand("/council");
+            break;
+          }
+          // Dispatch to slash registry for registered commands (compact, cost, ee, route, plan, execute, discuss, expand, optimize, debug)
           dispatchSlash(item.id, [], {
             cwd: agent.getCwd(),
             tenantId: "local",
@@ -5741,33 +5808,10 @@ export function useAppLogic(props: AppLogicProps) {
                 ]);
                 return;
               }
-              if (result.startsWith("__COUNCIL__")) {
-                const topic = result.replace(/^__COUNCIL__\n/, "");
-                // No "Council convening..." placeholder — see the branch above:
-                // the content handler creates a fresh assistant entry on demand,
-                // so seeding one only produced 0s-noise + prepended the real reply.
-                setMessages((prev) => [...prev, buildUserEntry(`/council ${topic}`)]);
-                try {
-                  const gen = agent.runCouncilRound(topic);
-                  for await (const chunk of gen) {
-                    if (chunk.type === "content") {
-                      const cText = maybeStripCouncilContent(chunk.content ?? "");
-                      if (cText)
-                        setMessages((prev) => {
-                          const last = prev[prev.length - 1];
-                          if (last?.type === "assistant") {
-                            return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + cText }];
-                          }
-                          return [...prev, buildAssistantEntry(cText)];
-                        });
-                    }
-                    if (chunk.type === "done") break;
-                  }
-                } catch (e: unknown) {
-                  setMessages((prev) => [...prev, buildAssistantEntry(`Council error: ${e}`)]);
-                }
-                return;
-              }
+              // No `__COUNCIL__` branch here — `council` is intercepted above and
+              // routed through handleCommand so both entry points share ONE
+              // implementation. See that comment for what the removed branch did
+              // differently (legacy runCouncilRound, wrong topic parse).
               setMessages((prev) => [...prev, buildAssistantEntry(result)]);
             })
             .catch((err: unknown) => {
@@ -5788,11 +5832,15 @@ export function useAppLogic(props: AppLogicProps) {
     [
       agent,
       handleExit,
-      // Both are useCallback-stable, so listing them costs no extra
-      // re-creation — it only stops the callback from closing over a stale
-      // one. This file is @ts-nocheck, so the lint rule is the only thing
-      // watching for that drift.
-      maybeStripCouncilContent,
+      // `council` from the slash menu delegates to the typed-slash handler so
+      // both entry points share one implementation — it must not close over a
+      // stale one.
+      handleCommand,
+      // useCallback-stable, so listing it costs no extra re-creation — it only
+      // stops the callback from closing over a stale one. This file is
+      // @ts-nocheck, so the lint rule is the only thing watching for that drift.
+      // (`maybeStripCouncilContent` left the list with the duplicate
+      // `__COUNCIL__` branch that used to consume it.)
       runUpdateFromUi,
       model,
       messages,
@@ -6749,7 +6797,11 @@ export function useAppLogic(props: AppLogicProps) {
             setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
             clearInterCardHeartbeat();
-            agent.respondToCouncilQuestion(qid, "", pendingQuestion.question);
+            // Send the DISMISSED sentinel, not "". The post-debate switch now
+            // reads an empty submit as "take the recommended option" (that is the
+            // fix for the answer silently vanishing); an Esc must stay a no-op,
+            // and both used to be indistinguishable at the council side.
+            agent.respondToCouncilQuestion(qid, COUNCIL_ANSWER_DISMISSED, pendingQuestion.question);
             // Task 2.4 — emit askcard-cancel harness event (agent-mode only).
             try {
               agentRuntime?.emitEvent({
