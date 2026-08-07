@@ -5320,7 +5320,18 @@ export function useAppLogic(props: AppLogicProps) {
               isProcessingRef.current = true;
               setIsProcessing(true);
               try {
-                const gen = agent.runCouncilV2(topic, { convenePath: true });
+                // C2 (2026-08-06) — a human just typed this command, so NEITHER
+                // suppression applies: the S1 launch card asks what the run is
+                // for, and the post-debate surface (which holds the only two
+                // consumers of that intent lock — resolveRunKind and the
+                // planner/plan-review/post-plan-card path) must actually run.
+                // The old `convenePath: true, allowLaunchCard: true` showed the
+                // intent card and then skipped everything downstream of it, so
+                // picking "Implement — plan it, review it, then build" produced
+                // no planner, no PLAN.md, no review and no phase loop.
+                // Passing NO options is deliberate, not an omission — it is the
+                // same shape auto-council uses (src/orchestrator/tool-engine.ts).
+                const gen = agent.runCouncilV2(topic);
                 for await (const chunk of gen) {
                   // Council emitted a chunk — clear the "Waiting for next phase"
                   // inter-card heartbeat started after the last askcard answer.
@@ -5668,7 +5679,24 @@ export function useAppLogic(props: AppLogicProps) {
           break;
         }
         default: {
-          // Dispatch to slash registry for registered commands (compact, cost, ee, route, plan, execute, discuss, expand, optimize, debug, council)
+          // `council` is routed through handleCommand — the SAME path a typed
+          // `/council` takes — instead of being handled again below. Two
+          // `__COUNCIL__` handlers used to exist in this file with DIFFERENT
+          // behaviour: the typed one drives `agent.runCouncilV2` (launch card,
+          // intent lock, debate UI wiring, post-debate/post-plan cards), while
+          // the one in this branch called the legacy `agent.runCouncilRound`
+          // generator (orchestrator.ts:~2690), which never reaches `runCouncil`
+          // at all — so picking "council" from the menu silently ran a different,
+          // gate-less council. It also parsed the topic wrong: the sentinel is
+          // `__COUNCIL__\n<rounds>\n<topic>` (src/ui/slash/council.ts:48) and
+          // that branch stripped only the first line, leaking the rounds line
+          // into the topic. Reachable in practice: with no args the handler falls
+          // back to `ctx.lastPrompt`, so it does return the sentinel.
+          if (item.id === "council") {
+            handleCommand("/council");
+            break;
+          }
+          // Dispatch to slash registry for registered commands (compact, cost, ee, route, plan, execute, discuss, expand, optimize, debug)
           dispatchSlash(item.id, [], {
             cwd: agent.getCwd(),
             tenantId: "local",
@@ -5780,33 +5808,10 @@ export function useAppLogic(props: AppLogicProps) {
                 ]);
                 return;
               }
-              if (result.startsWith("__COUNCIL__")) {
-                const topic = result.replace(/^__COUNCIL__\n/, "");
-                // No "Council convening..." placeholder — see the branch above:
-                // the content handler creates a fresh assistant entry on demand,
-                // so seeding one only produced 0s-noise + prepended the real reply.
-                setMessages((prev) => [...prev, buildUserEntry(`/council ${topic}`)]);
-                try {
-                  const gen = agent.runCouncilRound(topic);
-                  for await (const chunk of gen) {
-                    if (chunk.type === "content") {
-                      const cText = maybeStripCouncilContent(chunk.content ?? "");
-                      if (cText)
-                        setMessages((prev) => {
-                          const last = prev[prev.length - 1];
-                          if (last?.type === "assistant") {
-                            return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + cText }];
-                          }
-                          return [...prev, buildAssistantEntry(cText)];
-                        });
-                    }
-                    if (chunk.type === "done") break;
-                  }
-                } catch (e: unknown) {
-                  setMessages((prev) => [...prev, buildAssistantEntry(`Council error: ${e}`)]);
-                }
-                return;
-              }
+              // No `__COUNCIL__` branch here — `council` is intercepted above and
+              // routed through handleCommand so both entry points share ONE
+              // implementation. See that comment for what the removed branch did
+              // differently (legacy runCouncilRound, wrong topic parse).
               setMessages((prev) => [...prev, buildAssistantEntry(result)]);
             })
             .catch((err: unknown) => {
@@ -5827,11 +5832,15 @@ export function useAppLogic(props: AppLogicProps) {
     [
       agent,
       handleExit,
-      // Both are useCallback-stable, so listing them costs no extra
-      // re-creation — it only stops the callback from closing over a stale
-      // one. This file is @ts-nocheck, so the lint rule is the only thing
-      // watching for that drift.
-      maybeStripCouncilContent,
+      // `council` from the slash menu delegates to the typed-slash handler so
+      // both entry points share one implementation — it must not close over a
+      // stale one.
+      handleCommand,
+      // useCallback-stable, so listing it costs no extra re-creation — it only
+      // stops the callback from closing over a stale one. This file is
+      // @ts-nocheck, so the lint rule is the only thing watching for that drift.
+      // (`maybeStripCouncilContent` left the list with the duplicate
+      // `__COUNCIL__` branch that used to consume it.)
       runUpdateFromUi,
       model,
       messages,

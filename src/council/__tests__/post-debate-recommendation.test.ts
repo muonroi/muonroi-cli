@@ -6,9 +6,12 @@
  * ignoring `debatePlan.outputShape.kind`. For a pure decision/evaluation topic the
  * user wanted a decision, not to build, so defaulting to "kick off a sprint" was
  * the wrong next step. `pickPostDebateRecommendation` now only defaults to
- * generate_plan for `implementation_plan`-shaped debates; everything else defaults
- * to `save_exit` (the synthesis IS the deliverable). The generate_plan OPTION is
- * still offered — only the pre-selected default changed.
+ * `implement` for `implementation_plan`-shaped debates; everything else defaults
+ * to `save_exit` (the synthesis IS the deliverable). `generate_plan` itself was a
+ * separate, always-identical alias to `implement` and was removed outright
+ * (2026-08-04, see docs/superpowers/specs/2026-08-04-council-intent-plan-gate-design.md)
+ * — the Start Implementation OPTION is still offered; only the pre-selected
+ * default and the action's name changed.
  */
 import { describe, expect, it } from "vitest";
 import { pickPostDebateRecommendation, summarizeCriteriaOutcome } from "../index.js";
@@ -22,13 +25,13 @@ const base = {
 };
 
 describe("pickPostDebateRecommendation — issue #3 default", () => {
-  it("defaults implementation_plan (no plan yet) to generate_plan", () => {
+  it("defaults implementation_plan (no plan yet) to implement", () => {
     const r = pickPostDebateRecommendation({ ...base, outputKind: "implementation_plan" });
-    expect(r.value).toBe("generate_plan");
+    expect(r.value).toBe("implement");
   });
 
   for (const kind of ["decision", "evaluation", "investigation", "resolve_question"] as const) {
-    it(`defaults ${kind} (no plan) to save_exit, not generate_plan`, () => {
+    it(`defaults ${kind} (no plan) to save_exit, not implement`, () => {
       const r = pickPostDebateRecommendation({ ...base, outputKind: kind });
       expect(r.value).toBe("save_exit");
       // Reason names the shape so the card explains WHY save is the default.

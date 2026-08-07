@@ -15,8 +15,12 @@
  *
  * Session 8191ecaee149 (user-driven redesign): the three post-analysis choices
  * are now IMPLEMENT / CONTINUE / SAVE.
- *  - implement (+ generate_plan): load the conclusion as the approved spec and
- *    build it through the normal workflow — for ANY kind, no plan artifact needed.
+ *  - implement: NO LONGER a continuation at all (C1, 2026-08-06). The reviewed
+ *    plan → post-plan card → gated per-phase loop inside runCouncil owns
+ *    implementation; feeding the raw synthesis back as prose was the measured
+ *    defect (session 3a8378db4adf). `generate_plan` used to return the IDENTICAL
+ *    string (a dead alias) and was removed outright 2026-08-04 — see
+ *    docs/superpowers/specs/2026-08-04-council-intent-plan-gate-design.md.
  *  - continue_session on analysis: STOP at the composer (return null). The
  *    synthesis is persisted as [Council Decision]/[Council Memory], so the user's
  *    next message inherits the council context — no wasteful re-present turn, no
@@ -54,15 +58,36 @@ describe("postDebateContinuation", () => {
     expect(p).toContain("Continue the original task");
   });
 
-  it("implement / generate_plan load the conclusion as the approved spec and build it", () => {
-    for (const action of ["generate_plan", "implement"]) {
-      const p = postDebateContinuation(action, EVAL_SYNTH);
-      expect(p).toContain(EVAL_SYNTH);
-      expect(p?.toLowerCase()).toContain("implement this now");
-      expect(p?.toLowerCase()).toContain("approved spec");
-      // Scoped so it can't balloon into phantom phases.
-      expect(p?.toLowerCase()).toMatch(/do not.*expand scope|smallest correct/);
-    }
+  // C1 (2026-08-06) — this test used to assert the OPPOSITE: that "implement"
+  // returns the synthesis wrapped in "Implement this now … approved spec" prose.
+  // That is the defect, not the contract. runCouncil fired
+  // onPostDebateAction("implement") BEFORE its own plan block ran and never
+  // re-fired, so tool-engine.ts:852 built exactly this prose and ran it through
+  // processMessage — a second, UNGATED implementation turn on the raw synthesis,
+  // on top of the gated per-phase loop that had just executed the reviewed plan.
+  // It fired identically after a verify HALT and after save_exit/Esc.
+  //
+  // The arm is deleted, not disabled. runCouncil now resolves "implement" to
+  // `execute_plan` (the phase loop ran) or `save_exit` (nothing ran) before it
+  // relays anything, so "implement" cannot reach this function from production
+  // code at all. Asserting null here is the contract that keeps it that way: any
+  // future caller that resurrects a prose implement handoff fails this test.
+  // Seam coverage: src/council/__tests__/plan-execution-seam.test.ts.
+  it("implement is NOT a prose handoff — the gated plan loop owns implementation now", () => {
+    expect(postDebateContinuation("implement", EVAL_SYNTH)).toBeNull();
+    expect(postDebateContinuation("implement", IMPL_SYNTH)).toBeNull();
+    expect(postDebateContinuation("implement", IMPL_SYNTH, "implementation_plan")).toBeNull();
+  });
+
+  it("the terminal actions runCouncil now relays for an implement pick both stop", () => {
+    // execute_plan → runPlanExecution already ran every phase inside runCouncil.
+    // save_exit    → the plan is on disk and the user chose not to run it.
+    expect(postDebateContinuation("execute_plan", IMPL_SYNTH, "implementation_plan")).toBeNull();
+    expect(postDebateContinuation("save_exit", IMPL_SYNTH, "implementation_plan")).toBeNull();
+  });
+
+  it("generate_plan is a dead alias — it is dropped and returns null", () => {
+    expect(postDebateContinuation("generate_plan", EVAL_SYNTH)).toBeNull();
   });
 
   it("save_exit stops at the composer (deliverable is the conclusion)", () => {

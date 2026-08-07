@@ -1,33 +1,48 @@
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { ModelMessage } from "ai";
 import type { CouncilExperienceResult } from "../ee/council-bridge.js";
 import { queryExperience } from "../ee/council-bridge.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { judgeCouncilOutcome } from "../ee/judge.js";
 import { recordCouncilOutcome } from "../ee/phase-outcome.js";
-import { isTaskAwarePanelEnabled } from "../gsd/flags.js";
+import { isGsdHardGateEnabled, isTaskAwarePanelEnabled } from "../gsd/flags.js";
+import { planningArtifact } from "../gsd/paths.js";
+import type { PerspectiveVerdict } from "../gsd/plan-council.js";
+import { advancePhase, canExecute, readState, setStateField } from "../gsd/workflow-engine.js";
 import { runPipeline } from "../pil/pipeline.js";
 import type { PipelineContext } from "../pil/types.js";
 import { idealTrace } from "../product-loop/ideal-trace.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { appendSystemMessage, logInteraction } from "../storage/index.js";
 import { SessionStore } from "../storage/sessions.js";
-import type { StreamChunk } from "../types/index.js";
+import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
+import { logger } from "../utils/logger.js";
 import {
   getCouncilExperienceMode,
   getCouncilLanguage,
   isCouncilCostAware,
   isCouncilMultiProviderPreferred,
 } from "../utils/settings.js";
-import { buildSpecFromTopic, runClarification } from "./clarifier.js";
+import { buildSpecFromTopic, inferSpecFromTopicOnly, runClarification } from "./clarifier.js";
 import { buildCouncilContext, buildProjectSnapshot } from "./context.js";
 import { evaluateResearchNeed, MAX_OPENING_ATTEMPTS, runDebate } from "./debate.js";
 import { planDebate } from "./debate-planner.js";
+import { resolveDebateSummary } from "./debate-summary.js";
 import { detectOutOfStackProposals, writeDecisionsLock } from "./decisions-lock.js";
-import { runExecution } from "./executor.js";
-import { buildLaunchCard, cheapRunShape } from "./launch-card.js";
+import { INTENT_COPY, parseIntentAnswer } from "./intent-card.js";
+import { buildLaunchCard, cheapRunShape, EDIT_SPEC_OPTION_VALUE } from "./launch-card.js";
 import { buildCouncilCandidatePool, resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
 import { selectTaskAwarePanel } from "./panel-select.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
+import { type PlanPhase, parsePlanMarkdown } from "./plan-artifact.js";
+import { runPlanExecution } from "./plan-execution.js";
+import {
+  describePlannerFailure,
+  plannerFailureSignature,
+  reviewOutcomeSignature,
+  runPlannerPhase,
+  runPlanReview,
+} from "./plan-phase.js";
 import { runPlanning } from "./planner.js";
 import { runPreflight } from "./preflight.js";
 import { formatRunReceipt, pickLoudestDissent } from "./run-receipt.js";
@@ -42,10 +57,18 @@ import type {
   EnhancedCouncilOutcome,
   IntentKind,
   IsolatedTaskRunner,
+  PhaseOutcomeEnvelope,
   PreflightResponder,
   QuestionResponder,
 } from "./types.js";
-import { COUNCIL_ANSWER_DISMISSED, coerceIntentKind, isImplementationKind } from "./types.js";
+import {
+  buildPhaseOutcomeEnvelope,
+  COUNCIL_ANSWER_DISMISSED,
+  coerceIntentKind,
+  isDefaultEligiblePostDebateAction,
+  isImplementationKind,
+  resolvePhaseOutcomeTransition,
+} from "./types.js";
 
 /**
  * Wrap a CouncilLLM so every `generate` call inherits the council-wide abort
@@ -81,6 +104,58 @@ export function withCouncilSignal(llm: CouncilLLM, signal: AbortSignal | undefin
  */
 const EXPLICIT_COUNCIL_CLARIFY_ROUNDS = 1;
 
+/**
+ * Amendment A2 — hard cap on how many times the S1 launch card can be edited
+ * (topic/outcome) before it starts. Bounds a pathological loop (a user, or a
+ * misbehaving headless caller, repeatedly picking "Edit"): once the cap is
+ * reached the card stops offering the edit option (`allowEdit: false`,
+ * launch-card.ts), forcing the run toward start/cheap/refine/cancel.
+ */
+export const MAX_LAUNCH_CARD_EDIT_ROUNDS = 3;
+
+/**
+ * Amendment A2 — the ONE condition for "will a human see the S1 launch
+ * card?". Shared by the auto-council spec-inference call (pay for
+ * `inferSpecFromTopicOnly` only when its result will actually be rendered)
+ * and the S1 block itself. A drift between the two would either burn a
+ * leader call nobody sees, or render the card without ever having paid for
+ * the real spec — the brief calls this out explicitly as load-bearing.
+ *
+ * Written as a type predicate (`sessionId is string`), not a closure, so
+ * `if (willShowLaunchCard(sessionId, ...))` narrows the CALLER's `sessionId`
+ * to `string` for the rest of that block — TypeScript only narrows a checked
+ * identifier through a user-defined type guard, not through an opaque
+ * boolean-returning closure, and both call sites need that narrowing to pass
+ * `sessionId` on to functions that require `string`.
+ */
+function willShowLaunchCard(
+  sessionId: string | undefined,
+  suppressPreDebateCards: boolean | undefined,
+  sprintPlanningMode: boolean | undefined,
+  aborted: boolean,
+): sessionId is string {
+  return Boolean(sessionId) && !suppressPreDebateCards && !sprintPlanningMode && !aborted;
+}
+
+/**
+ * Amendment A2 — the S1 edit loop's cap-exit edge case. The loop's break
+ * condition is `choice !== EDIT_SPEC_OPTION_VALUE || editRounds >=
+ * MAX_LAUNCH_CARD_EDIT_ROUNDS`, so it CAN exit with `choice` still equal to
+ * the sentinel — that happens only if a caller returns a value the rendered
+ * card never actually offered (once the cap is hit the card renders with
+ * `allowEdit: false`, which drops the option from `options` entirely — see
+ * `launch-card.ts`). `parseIntentAnswer` would incidentally absorb that case
+ * today (an unrecognised value falls back to the caller's proposed kind), but
+ * relying on that is fragile: a future change to `parseIntentAnswer`'s
+ * fallback rule could silently reopen this path to being read as a genuine
+ * run-shape/intent value. Clamp explicitly instead, as its own pure function
+ * so the clamp is unit-testable independent of whatever `parseIntentAnswer`
+ * does today.
+ */
+export function resolveCappedChoice(choice: string): string {
+  return choice === EDIT_SPEC_OPTION_VALUE ? "start" : choice;
+}
+
 export interface RunCouncilOptions {
   skipClarification?: boolean;
   userModelMessage?: ModelMessage;
@@ -107,6 +182,17 @@ export interface RunCouncilOptions {
    * "continue_session" instead of ending at the composer. Called at most once.
    */
   onPostDebateAction?: (action: string) => void;
+  /**
+   * Fired once the user locks `spec.intentKind` on the launch card (task-2 —
+   * the "before any spend" gate). Lets the caller (runCouncilV2 / the
+   * auto-council path in tool-engine) relay the lock across the same seam
+   * `onPostDebateAction` uses, so `postDebateContinuation` outside this module
+   * can resolve the run's kind through `resolveRunKind` instead of falling
+   * back to the post-hoc synthesis regex. Never fired under
+   * `suppressPreDebateCards` / `sprintPlanningMode` (the card doesn't run
+   * there) — callers correctly see no lock and fall back.
+   */
+  onIntentLocked?: (kind: IntentKind) => void;
   /**
    * When true, the leader-auto-promote note and the `Leader: … · Panel: …`
    * summary are NOT emitted as inline `content` chunks — the same data still
@@ -155,18 +241,47 @@ export interface RunCouncilOptions {
    */
   sprintPlanningMode?: boolean;
   /**
-   * Convene-tool path (the `convene_council` builtin). When true, render
-   * clarify(optional)+debate+synthesis exactly as normal, then RETURN the
-   * synthesis string WITHOUT any post-debate decision surface: NO
-   * `pickPostDebateRecommendation`, NO option set, NO `council_question`
-   * post-debate card, NO `onPostDebateAction`, NO `postDebateContinuation`
-   * routing. The calling AGENT decides what happens next (continue silently,
-   * ask the user via `ask_user`, or hand off to `/ideal`) — the CLI hardcodes
-   * none of it (user directive: no CLI-hardcoded post-council branch). The
-   * persistence block (decisions.lock, judge, council record) still runs — it
-   * is an audit trail, not a decision.
+   * PRE-debate suppression: **no human is present to answer a blocking card
+   * before the debate concludes.** Three consumers, all of which would hang an
+   * autonomous mid-agent-turn council:
+   *   1. the S1 launch card (intent + spend shape),
+   *   2. the preflight discussion-plan approval (auto-approved instead),
+   *   3. the mid-debate B4 escalation card (auto-accepted instead).
+   *
+   * Set by the agent-convened callers only — `convene_council`
+   * (tool-engine ~:3691) and the `runDebate` builtin (~:1077). The `/council`
+   * slash path and the auto-council path both leave it false: a human is at the
+   * composer in both cases.
+   *
+   * Replaces `convenePath` (2026-08-06, C2). `convenePath` named the caller, not
+   * the condition, and had accreted a FOURTH meaning — it also skipped the whole
+   * post-debate block, which since 2026-08-04 contains the only two consumers of
+   * the launch card's intent lock (`resolveRunKind` and the planner/review/
+   * post-plan-card block). `/council` set `convenePath: true` + `allowLaunchCard`,
+   * so it showed the user "Implement — plan it, review it, then build", locked
+   * the kind, paid for the debate, and then skipped every consumer of that lock:
+   * no planner, no PLAN.md, no review, no card, no phase loop. Splitting the flag
+   * is what makes the intent gate real on that path.
    */
-  convenePath?: boolean;
+  suppressPreDebateCards?: boolean;
+  /**
+   * POST-debate suppression: **the CLI must not hardcode what happens after the
+   * debate.** When true, render clarify(optional)+debate+synthesis exactly as
+   * normal, then RETURN the synthesis string WITHOUT any post-debate decision
+   * surface: NO `pickPostDebateRecommendation`, NO option set, NO
+   * `council_question` post-debate card, NO planner/plan-review/post-plan card,
+   * NO `onPostDebateAction`, NO `postDebateContinuation` routing. The calling
+   * AGENT decides what happens next (continue silently, ask the user via
+   * `ask_user`, or hand off to `/ideal`) — user directive: no CLI-hardcoded
+   * post-council branch. The persistence block (decisions.lock, judge, council
+   * record) still runs — it is an audit trail, not a decision.
+   *
+   * Independent of `suppressPreDebateCards`: today both are set together (only
+   * the agent-convened callers set either), but they answer different questions
+   * — "is anyone there to answer?" vs "whose decision is the next step?" — and
+   * conflating them is what produced the cosmetic intent gate documented above.
+   */
+  suppressPostDebate?: boolean;
   /**
    * #2 — isolated sub-agent bridge (orchestrator.runTaskRequest). When wired,
    * the debate's research phase runs in a budget-capped explore sub-agent
@@ -185,7 +300,7 @@ export interface RunCouncilOptions {
   externalTopic?: boolean;
 }
 
-export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis";
+export type PostDebateAction = "save_exit" | "implement" | "refine" | "ask_followup" | "retry_synthesis";
 
 /**
  * Decide the DEFAULT post-debate action surfaced as the recommended option.
@@ -193,11 +308,12 @@ export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_f
  *
  * Issue #3 (post-debate default mismatch): when synthesis succeeded and no plan
  * exists yet, only an `implementation_plan`-shaped debate should default to
- * "generate_plan" (Lock plan & execute Sprint 1). For a `decision`, `evaluation`,
- * `investigation`, or `exploration` debate the synthesis IS the deliverable — the
- * user asked a question, not for code — so the default is `save_exit`. The
- * generate_plan OPTION is still offered downstream; it's just no longer the
- * pre-selected default for non-build topics.
+ * "implement" (Start Implementation — `generate_plan` was a separate, dead-code
+ * "Lock plan and execute Sprint 1" action removed in 2026-08-04, see
+ * docs/superpowers/specs/2026-08-04-council-intent-plan-gate-design.md). For a
+ * `decision`, `evaluation`, `investigation`, or `exploration` debate the
+ * synthesis IS the deliverable — the user asked a question, not for code — so
+ * the default is `save_exit`.
  */
 /**
  * F1 — summarize how the debate did against its PINNED success criteria, so the
@@ -274,7 +390,7 @@ export function pickPostDebateRecommendation(input: {
   }
   if (!input.hasPlan) {
     return isImplementationKind(input.outputKind)
-      ? { value: "generate_plan", reason: "Convert the agreed outcome into concrete steps." }
+      ? { value: "implement", reason: "Convert the agreed outcome into concrete steps." }
       : {
           value: "save_exit",
           reason: `This was a ${input.outputKind} debate — the synthesis above is the deliverable; save it.`,
@@ -302,9 +418,13 @@ export function pickPostDebateRecommendation(input: {
  *     mandate (session 578b2eae7099: "Continue the original task using this
  *     conclusion" on an evaluation made the model invent phantom Phase-1..7 todos
  *     and start editing files, then the rogue turn wedged the UI).
- *   - generate_plan / implement → execute the recommended action items.
- *   - save_exit / refine / retry_synthesis / follow-up / undefined → stop (those
- *     either already re-synthesized inside runCouncil or are terminal by intent).
+ *   - implement → NOTHING here (C1). runCouncil owns the implement path end to
+ *     end: plan draft → panel review → post-plan card → gated per-phase loop.
+ *     It resolves the pick to `execute_plan` / `save_exit` before relaying, and
+ *     both stop below. See the deleted-arm note in the body.
+ *   - execute_plan / save_exit / refine / retry_synthesis / follow-up /
+ *     undefined → stop (those either already ran or re-synthesized inside
+ *     runCouncil, or are terminal by intent).
  */
 
 /** Recover the output-shape kind the synthesis was produced under (```json { "type": … }). */
@@ -313,6 +433,54 @@ function synthesisOutputKind(synthesis: string): IntentKind | undefined {
   // Coerce at the boundary: a synthesizer LLM can emit any free-form string here.
   // Unknown values resolve to "evaluation" (analysis-shape, safe default).
   return m ? coerceIntentKind(m[1]) : undefined;
+}
+
+/**
+ * The run's authoritative intent kind. The launch-card lock wins; the synthesis
+ * JSON regex is only the fallback for runs that never saw the card
+ * (suppressPreDebateCards, sprintPlanningMode, resumed pre-2026-08 specs).
+ *
+ * Before the lock existed this inference decided the whole downstream shape:
+ * session 3a8378db4adf debated a yes/no question, the regex returned
+ * "evaluation", and pickPostDebateRecommendation + postDebateContinuation both
+ * keyed on it.
+ */
+export function resolveRunKind(locked: IntentKind | undefined, synthesis: string): IntentKind {
+  return locked ?? synthesisOutputKind(synthesis) ?? "evaluation";
+}
+
+/**
+ * Amendment A1 (session 947db934b573) — resolve the post-debate DEFAULT index
+ * without ever landing on a default-ineligible option (isDefaultEligiblePostDebateAction)
+ * when an eligible one exists elsewhere in the list. Never filters `options` —
+ * every entry stays visible; this only picks which one is pre-selected.
+ *
+ * Returns the first default-eligible option in `options`' own order — this IS
+ * the model's own best-first ranking on the model-first path (baseOptions is
+ * built straight from outcome.nextActions), and the deterministic build order
+ * on the fallback path — or 0 if none is eligible.
+ *
+ * That "0 if none is eligible" floor is deliberately NOT a recommendation-value
+ * lookup or an explicit save_exit/continue_session search. With the current
+ * predicate, isDefaultEligiblePostDebateAction gates ONLY "implement", and only
+ * for analysis-shape kinds — so `eligibleIndex === -1` can happen ONLY when
+ * every single entry in `options` has value "implement" (any other value is
+ * always eligible, so its presence would have already satisfied the findIndex
+ * above). In that situation there is no non-"implement" entry anywhere in the
+ * list to fall back to, so a recommendation-value or escape-hatch lookup could
+ * only ever re-find the same ineligible "implement" entry or come up empty —
+ * it cannot produce an answer this floor doesn't already give. An earlier
+ * version of this function carried those two extra lookup tiers; code review
+ * (2026-08-07) found no input that could make them return anything different
+ * from this floor, so no test could fail without them — removed per YAGNI.
+ * If isDefaultEligiblePostDebateAction is ever widened to gate more than
+ * "implement", that widening is exactly when a recommendation/escape-hatch
+ * fallback becomes meaningful again — re-add it there, together with a test
+ * that is provably impossible to write against today's narrower predicate.
+ */
+export function resolvePostDebateDefaultIndex(options: Array<{ value: string }>, intentKind: IntentKind): number {
+  const eligibleIndex = options.findIndex((o) => isDefaultEligiblePostDebateAction(intentKind, o.value));
+  return eligibleIndex >= 0 ? eligibleIndex : 0;
 }
 
 /** The literal separator between the machine-JSON and the human prose in a synthesis. */
@@ -342,9 +510,8 @@ export function extractReadableSynthesis(synthesis: string): string {
  * readable synthesis itself IS the answer, so the post-council flow presents it
  * directly instead of re-entering a fragile follow-up turn.
  */
-export function synthesisIsImplementation(synthesis: string): boolean {
-  const kind = synthesisOutputKind(synthesis);
-  return !!kind && isImplementationKind(kind);
+export function synthesisIsImplementation(synthesis: string, outputKind?: IntentKind): boolean {
+  return isImplementationKind(resolveRunKind(outputKind, synthesis));
 }
 
 export function postDebateContinuation(
@@ -353,28 +520,29 @@ export function postDebateContinuation(
   outputKind?: IntentKind,
 ): string | null {
   if (!synthesis || !action) return null;
-  // IMPLEMENT — the user decided there is enough to build. Load the council
-  // conclusion back as the approved spec and carry it out through the normal
-  // workflow (the native GSD depth pipeline plans → executes → verifies). Works
-  // for ANY output kind: an analysis/decision synthesis is itself a sufficient
-  // spec, so this no longer needs a separate plan artifact. Scoped so the agent
-  // builds exactly what was decided and cannot balloon into phantom phases.
-  if (action === "generate_plan" || action === "implement") {
-    return (
-      `Council debate completed. Approved conclusion:\n\n${synthesis}\n\n` +
-      `Implement this now. Treat the council conclusion above as the approved spec ` +
-      `— load it as your working context and carry it out through your normal ` +
-      `workflow: plan the concrete steps, make the changes in the smallest correct ` +
-      `increments, and verify (build/tests) as you go. Do NOT re-litigate the ` +
-      `decision or expand scope beyond it. If a required detail is genuinely ` +
-      `ambiguous, ask ONE focused question before editing.`
-    );
-  }
+  // IMPLEMENT is DELETED, not merely unused (C1, 2026-08-06). It used to return
+  // the raw synthesis as prose — "Implement this now … carry it out through your
+  // normal workflow". PIL classified that prose taskType=analyze /
+  // deliverable=report (session 3a8378db4adf, interaction_logs id 2498) and the
+  // turn ran as a report against planVerified:false, covering one step.
+  //
+  // The replacement now exists and runs INSIDE runCouncil: the plan block
+  // (index.ts, `answer === "implement"`) drafts a phased .planning/PLAN.md, the
+  // panelists cross-review it, and the post-plan card's `execute_plan` drives
+  // src/council/plan-execution.ts one phase per turn, each gated on its own
+  // verify command. `implement` therefore never reaches this function any more —
+  // runCouncil resolves it to `execute_plan`/`save_exit` before relaying.
+  //
+  // Keeping the arm "as a fallback" is precisely how the double-implement bug
+  // (C1) survived: the resolved action and the stale prose branch both existed,
+  // so a single missed reset re-armed a full ungated implementation turn.
+  // `generate_plan` was a separate, always-identical alias to this branch — dead
+  // code, removed outright rather than repurposed (2026-08-04 design, D5).
   if (action === "continue_session") {
-    const kind = outputKind ?? synthesisOutputKind(synthesis);
+    const kind = resolveRunKind(outputKind, synthesis);
     // Only an implementation-shaped debate has an "original task" left to build
     // (the /ideal build flow relies on this carry-forward — do NOT null it out).
-    if (kind && isImplementationKind(kind)) {
+    if (isImplementationKind(kind)) {
       return `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`;
     }
     // Analysis/evaluation/decision/investigation (or unknown → analysis): the
@@ -392,11 +560,178 @@ export function postDebateContinuation(
   return null;
 }
 
+export interface PostPlanCardInput {
+  planPath: string;
+  phases: PlanPhase[];
+  verdict: PerspectiveVerdict;
+  /**
+   * Every reviewer's concerns, flattened by `mergeReviewVerdicts` — including
+   * concerns from reviewers who themselves voted `approve`. An `approve`
+   * verdict can therefore still carry a non-empty `concerns` array; the card
+   * must not read that as unresolved dissent (see the "Notes" line below).
+   */
+  concerns: string[];
+  /**
+   * I9 — true when the GSD mutation gate would BLOCK every write tool inside the
+   * phase turns this card is about to authorise. That is the case at heavy depth
+   * when `PLAN-VERIFY.md` does not say `pass` (`canExecute`,
+   * src/gsd/workflow-engine.ts:227-243), i.e. exactly the `revise`/`block`
+   * verdicts. Offering "Execute anyway" there is a near-silent no-op: the phases
+   * run, write nothing, fail their own verify, and the loop halts at P0 — after
+   * paying for a full agent turn. The caller computes it from the real
+   * `canExecute` rather than re-deriving the rule here.
+   */
+  gateBlocksExecution?: boolean;
+  /**
+   * D-3 (2026-08-07) — true when this round's outcome is IDENTICAL to the
+   * round before it (same {@link reviewOutcomeSignature}), and the revise
+   * that produced this round carried no new user input (the bare "Revise the
+   * plan" pick, nothing typed). Withdraws `revise_plan` and says why: another
+   * blind revise cannot produce a different result than the one that just
+   * happened. session 947db934b573 — two empty-freetext "Revise the plan"
+   * picks, ~5 min and ~15 calls each, before a third attempt finally failed
+   * outright with no more information than the first.
+   */
+  revisionConverged?: boolean;
+}
+
+export interface PostPlanCard {
+  question: string;
+  context: string;
+  options: CouncilQuestionOption[];
+  defaultIndex: number;
+}
+
+/**
+ * D3 — the post-plan card (design 2026-08-04). Replaces the post-debate card
+ * for implementation-shape runs once the planner phase (Task 5) and the
+ * panelist cross-review (Task 6) have produced a reviewed `.planning/PLAN.md`.
+ * Pure builder — no I/O — mirroring `buildLaunchCard`'s shape so both cards are
+ * unit-testable independent of the streaming plumbing that renders them.
+ *
+ * `execute_plan` is offered whenever the verdict is not `block` — `block` is a
+ * deliberate "do not run this" and must not be executable from this card.
+ * `revise` is different: `mergeReviewVerdicts` is severity-wins, so a single
+ * reviewer whose output fails `extractStructuredVerdict` records a synthetic
+ * "did not emit a structured verdict" concern at `revise` severity, which is
+ * enough to force the merged verdict to `revise` even when nobody raised a
+ * substantive objection — and a retry-exhausted `revise` (the retry budget in
+ * `getPlanReviewDebateRetries` ran out without ever reaching `approve` or
+ * `block`) is the terminal state in that case. Refusing to execute here would
+ * leave the user with no path forward except hand-editing the plan outside
+ * this card. So `revise` still offers `execute_plan` — labeled to admit the
+ * review did not clear — but is NOT the default; only `approve` defaults to
+ * `execute_plan`, `block`/`revise` both default to `revise_plan`.
+ *
+ * I9 (2026-08-06) narrows that one case: when `gateBlocksExecution` is set the
+ * option is withdrawn anyway, because the GSD mutation gate would block every
+ * write inside the phase turns and "Execute anyway" would be a paid no-op. The
+ * card says so instead of silently offering a dead button.
+ *
+ * I4 (2026-08-06): each phase line now carries its VERIFY COMMAND. Picking
+ * execute authorises `spawn(cmd, [], { cwd, shell: true })` of an LLM-authored
+ * string, once per phase (plan-execution.ts:85). This card is the consent gate;
+ * the commands being consented to have to be on it.
+ */
+export function buildPostPlanCard(input: PostPlanCardInput): PostPlanCard {
+  const phaseLines = input.phases.flatMap((p) => [
+    `${p.id} — ${p.title} · ${p.acceptance.length} acceptance criteria`,
+    // Never elide: an empty verify is itself the decision-relevant fact (that
+    // phase cannot be gated at all — verifyPhase fails it rather than passing).
+    `    verify: ${p.verify.trim() ? `\`${p.verify.trim()}\`` : "(none — this phase cannot be gated)"}`,
+  ]);
+
+  const offersExecute = input.verdict !== "block" && input.gateBlocksExecution !== true;
+  const revisionConverged = input.revisionConverged === true;
+
+  const options: CouncilQuestionOption[] = [
+    ...(offersExecute
+      ? [
+          {
+            label:
+              input.verdict === "revise" ? "Execute anyway — the review asked for changes" : "Implement the whole plan",
+            description: `Execute every phase in order (${input.phases.length} phase${input.phases.length === 1 ? "" : "s"}), gating each on its own acceptance criteria and running the verify command shown above it. Those commands run in a shell in this project directory.`,
+            value: "execute_plan",
+            kind: "choice" as const,
+          },
+        ]
+      : []),
+    // D-3 — withdrawn when this round reproduced the last round's outcome AND
+    // the revise that led here carried no new input: offering it again would
+    // just spend another full drafting + review cycle to relearn what the
+    // card already knows.
+    ...(revisionConverged
+      ? []
+      : [
+          {
+            label: "Revise the plan",
+            description: "Send comments back to the planner — the plan is redrafted and re-reviewed.",
+            value: "revise_plan",
+            kind: "freetext" as const,
+          },
+        ]),
+    {
+      label: "Save & Exit",
+      description: "Keep the plan on disk and stop here without executing it.",
+      value: "save_exit",
+      kind: "choice",
+    },
+  ];
+
+  // Concerns are shown as informational notes, never as blocking dissent, on an
+  // approved plan — mergeReviewVerdicts flattens concerns from every reviewer
+  // (approving ones included), so `approve` can still carry a non-empty list.
+  const concernsLabel = input.verdict === "approve" ? "Notes from review" : "Concerns from review";
+  const concernsBlock =
+    input.concerns.length > 0 ? `\n\n${concernsLabel}:\n${input.concerns.map((c) => `- ${c}`).join("\n")}` : "";
+
+  // I9 — say WHY execute is missing. Without this the card just silently loses
+  // an option the user was told about the last time they saw it.
+  const gateBlock =
+    input.gateBlocksExecution === true && input.verdict !== "block"
+      ? "\n\nExecute is unavailable: depth is heavy and plan review did not approve, so the GSD mutation gate would block every edit inside the phase turns (see .planning/PLAN-VERIFY.md). Running it would burn a turn per phase and write nothing."
+      : "";
+
+  // D-3 — say WHY revise is missing, with the concrete next step (specific
+  // guidance, not another blank submit).
+  const convergedBlock = revisionConverged
+    ? "\n\nRevise is unavailable: the last revision carried no new instructions and reproduced this exact outcome — another blind revise would not change it. Execute anyway or save; typing specific guidance on a future attempt would."
+    : "";
+
+  return {
+    question: revisionConverged
+      ? offersExecute
+        ? "Revising without new instructions changed nothing. Execute anyway or save and stop?"
+        : "Revising without new instructions changed nothing, and execute is unavailable. Save and stop?"
+      : input.verdict === "block"
+        ? "Plan review blocked this plan. Revise it or save and stop?"
+        : input.gateBlocksExecution === true
+          ? "Plan review asked for changes, and the mutation gate would block execution. Revise it, or save and stop?"
+          : input.verdict === "revise"
+            ? "Plan review asked for changes. Revise it, execute anyway, or save and stop?"
+            : "Plan reviewed and approved. Implement it now?",
+    context:
+      [`Plan: ${input.planPath}`, ...phaseLines, `Verdict: ${input.verdict}`].join("\n") +
+      concernsBlock +
+      gateBlock +
+      convergedBlock,
+    options,
+    defaultIndex: revisionConverged
+      ? // Conservative: don't default to executing an un-approved plan just
+        // because revise is off the table — the user still explicitly picks
+        // execute_plan if they want it.
+        options.findIndex((o) => o.value === "save_exit")
+      : input.verdict === "approve"
+        ? options.findIndex((o) => o.value === "execute_plan")
+        : options.findIndex((o) => o.value === "revise_plan"),
+  };
+}
+
 /**
  * Neutral post-council continuation. Used by the auto-council path (tool-engine)
  * and the `/council` slash path (runCouncilV2) once they run with
- * `convenePath: true` — the hardcoded post-debate option card is suppressed, so
- * there is no `chosenAction` to branch on. Instead of the CLI deciding the next
+ * `suppressPostDebate: true` — the hardcoded post-debate option card is
+ * suppressed, so there is no `chosenAction` to branch on. Instead of the CLI deciding the next
  * step, we hand the synthesis back to a normal agent turn with a NON-BINDING
  * nudge and let the agent's own intent drive the follow-up (respond / ask_user /
  * implement). Returns "" for an empty synthesis so the caller skips re-entry.
@@ -418,6 +753,86 @@ export function buildNeutralPostCouncilContinuation(synthesis: string): string {
     `implement it now through your normal workflow — do NOT re-litigate the ` +
     `decision or expand scope beyond it.`
   );
+}
+
+/**
+ * Amendment A2 — the S1 "Edit topic or outcome" round. Collects the
+ * correction as TWO dedicated freetext questions (topic, then outcome) rather
+ * than folding a freetext option into the launch card's own answer.
+ *
+ * This is deliberate, not incidental — see "Trap 2" in the A2 design doc.
+ * `QuestionResponder` (`(questionId) => Promise<string>`) returns ONLY the
+ * final text; the `CouncilQuestionOption.kind` the user picked ("choice" vs
+ * "freetext") never reaches this module (council-manager.ts's
+ * `respondToQuestion` drops it — see `CouncilQuestionAnswer.kind` in
+ * council-question-card.tsx). So if the S1 card itself carried a freetext
+ * option, a user typing e.g. "evaluation" as their corrected topic would
+ * return the string "evaluation" — indistinguishable, at this call site, from
+ * a `kind:"choice"` pick whose `value` happens to be the IntentKind
+ * "evaluation". `parseIntentAnswer`/`coerceIntentKind` would silently accept
+ * it as an intent pick and the edit would vanish with no error.
+ *
+ * The fix is structural, not a string check: the S1 card offers only a
+ * `kind:"choice"` option (`EDIT_SPEC_OPTION_VALUE`, a sentinel outside the
+ * `IntentKind` union and outside {"start","cheap","refine","cancel"}).
+ * Picking it is recognised by exact equality BEFORE `parseIntentAnswer` is
+ * ever called (see the S1 loop below), and routes here — a SEPARATE
+ * question/answer round whose text is applied directly to `spec` and never
+ * passed through `parseIntentAnswer` at all. A valid intent pick on the S1
+ * card therefore still parses as an intent pick (this function is never
+ * invoked), and freetext collected here — however it reads — can never be
+ * misread as an intent pick (this function's result never reaches that
+ * parser). The two paths cannot collide because they are different
+ * question/answer round-trips, not different branches of the same one.
+ */
+async function* collectSpecEdit(
+  spec: ClarifiedSpec,
+  sessionId: string,
+  round: number,
+  respondToQuestion: QuestionResponder,
+): AsyncGenerator<StreamChunk, { problemStatement: string; successCriteria: string[] }, unknown> {
+  const topicQuestionId = `council-edit-topic-${sessionId}-${round}`;
+  yield {
+    type: "council_question",
+    content: "",
+    councilQuestion: {
+      questionId: topicQuestionId,
+      phase: "council-setup",
+      question: "What should the topic / problem statement actually be?",
+      context: `Current: ${spec.problemStatement}\n\nLeave blank to keep it unchanged.`,
+      isRequired: false,
+      options: [{ label: "Type the corrected topic", value: "", kind: "freetext" }],
+      defaultIndex: 0,
+    },
+  } as StreamChunk;
+  const topicAnswer = (await respondToQuestion(topicQuestionId)).trim();
+
+  const outcomeQuestionId = `council-edit-outcome-${sessionId}-${round}`;
+  yield {
+    type: "council_question",
+    content: "",
+    councilQuestion: {
+      questionId: outcomeQuestionId,
+      phase: "council-setup",
+      question: "What outcome should this run aim for?",
+      context: `Current:\n${spec.successCriteria.map((c) => `- ${c}`).join("\n")}\n\nOne per line. Leave blank to keep unchanged.`,
+      isRequired: false,
+      options: [{ label: "Type the corrected outcome", value: "", kind: "freetext" }],
+      defaultIndex: 0,
+    },
+  } as StreamChunk;
+  const outcomeAnswer = (await respondToQuestion(outcomeQuestionId)).trim();
+  const successCriteria = outcomeAnswer
+    ? outcomeAnswer
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+    : [...spec.successCriteria];
+
+  return {
+    problemStatement: topicAnswer || spec.problemStatement,
+    successCriteria,
+  };
 }
 
 export async function* runCouncil(
@@ -603,6 +1018,55 @@ export async function* runCouncil(
       spec = clarifyResult.value;
     } else {
       spec = buildSpecFromTopic(topic, conversationContext);
+      // Amendment A2 — auto-council skips the clarifier interview entirely, so
+      // without this call `spec` stays at buildSpecFromTopic's degenerate
+      // default (problemStatement = raw topic, successCriteria = ["Address the
+      // topic: <first 100 chars>"]). The S1 card is about to render that as
+      // "what the council understood" — boilerplate there is worse than
+      // nothing. inferSpecFromTopicOnly does the same one-shot extraction the
+      // clarifier itself falls back to when the user answers zero questions,
+      // and it already fails open to buildSpecFromTopic on any parse/LLM
+      // failure (clarifier.ts). Gated on willShowLaunchCard so a run whose
+      // card never renders (suppressPreDebateCards / sprintPlanningMode) never
+      // pays for this call.
+      if (willShowLaunchCard(sessionId, options?.suppressPreDebateCards, options?.sprintPlanningMode, userAborted())) {
+        try {
+          const inferGen = inferSpecFromTopicOnly(
+            topic,
+            conversationContext,
+            leaderModelId,
+            llm,
+            costAware,
+            participants.map((p) => p.model),
+          );
+          let inferResult: IteratorResult<StreamChunk, ClarifiedSpec>;
+          do {
+            inferResult = await inferGen.next();
+            if (!inferResult.done && inferResult.value) yield inferResult.value;
+          } while (!inferResult.done);
+          spec = inferResult.value;
+        } catch (err) {
+          // No-Silent-Catch: log with context, keep the buildSpecFromTopic
+          // default assigned above — a failed inference must never block or
+          // abort the run. logger.error (not console.error, and not swept
+          // across the rest of this file's pre-existing console.error calls —
+          // just this new catch): a bare console.error is silently dropped
+          // whenever the TUI owns the terminal (isTuiActive(),
+          // src/utils/logger.ts), the same defect commit 62129f5f fixed for
+          // orchestrator/*.ts. "orchestrator" is the namespace every other
+          // council-module logger.error call uses (there is no "council"
+          // LogNamespace) — matched here for the same reason.
+          logger.error(
+            "orchestrator",
+            "[council] inferSpecFromTopicOnly call failed (fail-open, keeping topic-only spec)",
+            {
+              topic: topic.slice(0, 80),
+              error: (err as Error)?.message,
+              stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+            },
+          );
+        }
+      }
       yield { type: "content", content: `\n> Auto-council: skipping clarification (PIL pre-classified).\n` };
     }
 
@@ -645,11 +1109,13 @@ export async function* runCouncil(
     const preflightGen = runPreflight(spec, participants, researchNeeded, respondToPreflight, {
       repoEmpty: internetFirst,
       researchOverridable: true,
-      // convenePath auto-approves the pre-debate plan card too: the agent
-      // already decided to convene, so re-gating the discussion plan is a
-      // redundant interruption of the autonomous tool call (same rationale as
-      // sprintPlanningMode). The brief is still shown; it just isn't blocking.
-      autoApprove: spec.ready === true || options?.autoApprovePreflight === true || options?.convenePath === true,
+      // An agent-convened run auto-approves the pre-debate plan card too: the
+      // agent already decided to convene and no human is there to answer, so a
+      // blocking re-gate of the discussion plan would hang the tool call (same
+      // rationale as sprintPlanningMode). The brief is still shown; it just
+      // isn't blocking.
+      autoApprove:
+        spec.ready === true || options?.autoApprovePreflight === true || options?.suppressPreDebateCards === true,
     });
     let preflightResult: IteratorResult<StreamChunk, boolean>;
     do {
@@ -802,49 +1268,120 @@ export async function* runCouncil(
   }
 
   // ── S1: launch configurator ─────────────────────────────────────────────────
-  // The last point before money is spent. Shown only on the interactive path:
-  // convenePath (the agent already decided to convene) and sprintPlanningMode
-  // (no human turn at all) would both be blocked by a card nobody can answer —
-  // the same gating the preflight approval card uses.
+  // The last point before money is spent. Shown only when a human is there to
+  // answer: `suppressPreDebateCards` (agent-convened — convene_council /
+  // runDebate) and sprintPlanningMode (no human turn at all) would both be
+  // blocked by a card nobody can answer — the same gating the preflight approval
+  // card uses. Both the `/council` slash path and auto-council DO show it.
+  //
+  // Ordering limitation (Amendment A2, same class as the D1 correction above
+  // `runCouncil` in the design doc): this card — and its edit round below —
+  // fire AFTER `debatePlan` was already computed a few lines up from the
+  // PRE-edit `topic`/`spec`. An edit here corrects `topic` and `spec` for
+  // everything from `runDebate` onward (research, opening statements, debate,
+  // synthesis, persistence — see Trap 1), but it does NOT retroactively
+  // change what was already decided from the misread topic: the panel
+  // (`active`, resolved earlier), the debate stances and `outputShape.kind`
+  // (`debatePlan`, computed at the `planDebate` call above), the PIL
+  // classification (`pilCtx`), the EE warnings prefetch (`eePromise`), or the
+  // leader's research-need verdict (`evaluateResearchNeed`). A user who fixes
+  // a badly-misread topic here still gets a panel and a debate shape chosen
+  // for the misreading — the debate argues the corrected problem through a
+  // lens picked for the wrong one. Moving the card before `planDebate` would
+  // fix this but is a materially larger change (also re-running PIL/EE/
+  // research-need per edit round) than this task — see the design doc's
+  // Amendment A2 section for the fuller writeup. Not fixed here.
   let launchRounds = debatePlan.plannedRounds ?? 3;
   let launchParticipants = active;
   let launchCostAware = costAware;
-  if (sessionId && !options?.convenePath && !options?.sprintPlanningMode && !userAborted()) {
-    const card = buildLaunchCard({
-      topic,
-      leaderModelId,
-      participants: active.map((p) => ({ role: p.role, model: p.model, stanceName: p.stance?.name })),
-      plannedRounds: launchRounds,
-      researchOn: !researchSkipOverride,
-      costAware,
-      language: getCouncilLanguage(),
-      usdPerRound: historicalUsdPerRound(),
-      providerOf: (modelId) => {
-        try {
-          return detectProviderForModel(modelId);
-        } catch {
-          // An unresolvable provider just drops out of the lineup summary —
-          // better a shorter line than a fabricated vendor name.
-          return undefined;
-        }
-      },
-    });
-    const setupQuestionId = `council-setup-${sessionId}`;
-    yield {
-      type: "council_question",
-      content: "",
-      councilQuestion: {
-        questionId: setupQuestionId,
-        phase: "council-setup",
-        question: card.question,
-        context: card.context,
-        isRequired: true,
-        options: card.options,
-        defaultIndex: card.defaultIndex,
-      },
-    } as StreamChunk;
-    const choice = (await respondToQuestion(setupQuestionId)).trim();
-    if (choice === "cancel" || choice === "refine") {
+  if (willShowLaunchCard(sessionId, options?.suppressPreDebateCards, options?.sprintPlanningMode, userAborted())) {
+    const proposedKind = coerceIntentKind(debatePlan.outputShape.kind);
+    // Amendment A2 — the card is rendered in a loop so "Edit topic or outcome"
+    // can re-render it with the corrected values instead of starting the run.
+    // `choice` is read after the loop breaks; `editRounds` bounds the loop
+    // (MAX_LAUNCH_CARD_EDIT_ROUNDS) so a pathological "always edit" answer
+    // (real user or a misbehaving headless caller) cannot spin forever — once
+    // the cap is hit the card stops OFFERING the edit option
+    // (`allowEdit: editRounds < MAX_LAUNCH_CARD_EDIT_ROUNDS`), which forces
+    // the next answer down the start/cheap/refine/cancel path below.
+    let choice = "";
+    let editRounds = 0;
+    for (;;) {
+      const card = buildLaunchCard({
+        topic,
+        leaderModelId,
+        participants: active.map((p) => ({ role: p.role, model: p.model, stanceName: p.stance?.name })),
+        plannedRounds: launchRounds,
+        researchOn: !researchSkipOverride,
+        costAware,
+        language: getCouncilLanguage(),
+        usdPerRound: historicalUsdPerRound(),
+        intent: { proposedKind, intentSummary: debatePlan.intentSummary },
+        problemStatement: spec.problemStatement,
+        successCriteria: spec.successCriteria,
+        allowEdit: editRounds < MAX_LAUNCH_CARD_EDIT_ROUNDS,
+        providerOf: (modelId) => {
+          try {
+            return detectProviderForModel(modelId);
+          } catch (err) {
+            // An unresolvable provider just drops out of the lineup summary —
+            // better a shorter line than a fabricated vendor name.
+            console.error(
+              `[council/index] providerOf lookup failed for model "${modelId}": ${(err as Error)?.message}`,
+            );
+            return undefined;
+          }
+        },
+      });
+      const setupQuestionId = `council-setup-${sessionId}-${editRounds}`;
+      yield {
+        type: "council_question",
+        content: "",
+        councilQuestion: {
+          questionId: setupQuestionId,
+          phase: "council-setup",
+          question: card.question,
+          context: card.context,
+          isRequired: true,
+          options: card.options,
+          defaultIndex: card.defaultIndex,
+        },
+      } as StreamChunk;
+      choice = (await respondToQuestion(setupQuestionId)).trim();
+
+      // Trap 2 — this check runs BEFORE parseIntentAnswer and is an exact-
+      // string match against a sentinel that is not a member of IntentKind
+      // and not "start"/"cheap"/"refine"/"cancel" (see EDIT_SPEC_OPTION_VALUE
+      // doc comment + collectSpecEdit doc comment above). It can only be
+      // reached by picking the dedicated `kind:"choice"` edit option — never
+      // by freetext typed elsewhere — so it cannot collide with a genuine
+      // intent pick.
+      if (choice !== EDIT_SPEC_OPTION_VALUE || editRounds >= MAX_LAUNCH_CARD_EDIT_ROUNDS) break;
+      editRounds++;
+      const edited = yield* collectSpecEdit(spec, sessionId, editRounds, respondToQuestion);
+      spec.problemStatement = edited.problemStatement;
+      spec.successCriteria = edited.successCriteria;
+      // Trap 1 — index.ts passes BOTH `spec` and `topic` to runDebate (the
+      // `runDebate(spec, { topic, ... }, llm)` call further below in this
+      // function). `topic` is a plain function parameter (not const), so it
+      // is directly reassignable; writing only spec.problemStatement would
+      // leave the raw original topic flowing into the debate config and
+      // silently diverge from what the card just showed the user.
+      topic = edited.problemStatement;
+      yield { type: "content", content: "\n> Topic/outcome updated — showing the corrected card.\n" };
+      // Loop back: re-render, do NOT start the run.
+    }
+    // See resolveCappedChoice's doc comment: the loop can exit via the cap
+    // disjunct with `choice` still holding the sentinel; clamp it explicitly
+    // rather than leaning on parseIntentAnswer's unknown-value fallback.
+    choice = resolveCappedChoice(choice);
+    // An intent pick is not a run-shape pick: record it and keep the card's
+    // shape defaults (start). Anything else falls through to the existing
+    // start/cheap/refine/cancel handling untouched.
+    const pickedKind = parseIntentAnswer(choice, proposedKind);
+    const choseIntent = choice === pickedKind;
+    const isTerminalChoice = choice === "cancel" || choice === "refine";
+    if (isTerminalChoice) {
       yield {
         type: "content",
         content:
@@ -854,6 +1391,14 @@ export async function* runCouncil(
       };
       yield { type: "done" };
       return null;
+    }
+    // Only lock spec.intentKind (and confirm it) once the run is actually
+    // proceeding — a cancelled/refine run terminates above and the write
+    // would otherwise be discarded on a spec that never leaves this scope.
+    spec.intentKind = pickedKind;
+    options?.onIntentLocked?.(pickedKind);
+    if (choseIntent) {
+      yield { type: "content", content: `\n> Intent locked: ${INTENT_COPY[pickedKind].label}.\n` };
     }
     if (choice === "cheap") {
       const shape = cheapRunShape({ plannedRounds: launchRounds, panelSize: active.length });
@@ -890,7 +1435,7 @@ export async function* runCouncil(
       runId: sessionId,
       // Sprint-2 item 3 — per-stance recall at debate opening. Only the product
       // loop wired this (loop-driver.ts); runCouncil (interactive /council,
-      // convenePath, and sprint-planning via sprint-runner) got no per-stance
+      // agent-convened runs, and sprint-planning via sprint-runner) got no per-stance
       // seed. Gate on experienceMode to mirror the queryExperience gate above;
       // makeStanceRecall returns undefined for a null client so debate.ts's
       // `if (config.stanceRecall)` guard still holds. cwd: projectCwd is
@@ -910,9 +1455,9 @@ export async function* runCouncil(
       // unmet, runDebate asks the user (extend / accept / rescope) instead of
       // silently synthesizing a partial outcome.
       respondToQuestion,
-      // convene_council path — auto-accept escalation (no blocking card) since
-      // the council runs autonomously mid-agent-turn with no interactive user.
-      convenePath: options?.convenePath,
+      // Agent-convened run — auto-accept escalation (no blocking card) since the
+      // council runs autonomously mid-agent-turn with no interactive user.
+      autoAcceptEscalation: options?.suppressPreDebateCards,
     },
     llm,
   );
@@ -1021,10 +1566,80 @@ export async function* runCouncil(
   } while (!planResult.done);
   let { outcome, plan, synthesisText } = planResult.value;
   const synthesisFailReason = planResult.value.synthesisFailReason;
+  const criteriaOutcome = summarizeCriteriaOutcome(
+    spec.successCriteria,
+    debateState.finalCriteriaMet,
+    debateState.finalCriteriaDeferred,
+  );
+  const outcomeEnvelope: PhaseOutcomeEnvelope = buildPhaseOutcomeEnvelope({
+    outcome,
+    synthesisFailReason,
+    participantCount: launchParticipants.length,
+    activeCount: debateState.active.length,
+    evidenceDensity: debateState.finalEvidenceDensity,
+    taggedClaims: debateState.finalTaggedClaims,
+    unmetCriteriaCount: criteriaOutcome.unmetLabels.length,
+    acceptedEscalation: debateState.escalation?.action === "accept",
+  });
+  if (outcomeEnvelope.visibilityMessage) {
+    yield { type: "content", content: `\n> ${outcomeEnvelope.visibilityMessage}\n` };
+    if (synthesisText.trim()) {
+      synthesisText = `${synthesisText}\n\n## Decision Quality\n- ${outcomeEnvelope.visibilityMessage}`;
+    }
+  }
   // Post-debate action the user picked (hoisted so the completed-status guard +
   // the caller's auto-continue can both read it). Undefined until the card is
   // answered.
   let postDebateAction: string | undefined;
+  // Set only when the user picks "execute_plan" on the post-plan card below —
+  // Phase E (bottom of this function) gates the new per-phase runPlanExecution
+  // loop on this, never on the old flat ActionPlan `plan` variable. null under
+  // `suppressPostDebate` too: that path skips this whole interactive block by
+  // design (the calling agent decides what happens next, not the CLI — see the
+  // option's doc comment above), so it correctly never auto-executes.
+  let executePlanPath: string | null = null;
+  /**
+   * C1 — the TERMINAL action the post-debate block resolved to, when that
+   * differs from the value the user picked on the card. `implement` is not a
+   * terminal action: it only REQUESTS a plan. The plan block below resolves it
+   * to `execute_plan` (the gated per-phase loop ran) or `save_exit` (the plan
+   * was saved and nothing ran) — and it is that resolution, never the raw
+   * `implement`, that gets relayed to the caller. Relaying `implement` is what
+   * made tool-engine.ts build `postDebateContinuation("implement", …)` and run
+   * a SECOND, ungated implementation turn on the raw synthesis after the phase
+   * loop had already finished (and after a halt, and after save_exit, and
+   * after Esc). null = the pick was already terminal; relay it verbatim.
+   */
+  let resolvedPostDebateAction: string | null = null;
+  /**
+   * I5 — the GSD workflow state as it stood BEFORE this council touched it.
+   *
+   * `runPlanReview` writes `Plan Verified: yes` + `advancePhase(cwd,"execute")`
+   * + `PLAN-VERIFY.md verdict: pass` (plan-phase.ts:454-460). Those are
+   * CWD-SCOPED files that `canExecute(cwd, depth)` reads for EVERY subsequent
+   * turn in that repo (workflow-engine.ts:227-243), and they persist after the
+   * run — so a debate launched merely to discuss would leave the heavy-depth
+   * mutation gate open indefinitely, and `advancePhase("execute")` silently
+   * overwrites the `Phase` of an in-flight `/ideal` run in the same cwd.
+   *
+   * Captured before the plan block writes, restored after Phase E finishes, so
+   * the unlock is scoped to the run that earned it. null when the snapshot
+   * itself failed — then nothing is restored (better than restoring a guess).
+   *
+   * `PLAN-VERIFY.md` is snapshotted as raw content because it — not STATE.md's
+   * `Plan Verified` — is what `canExecute` checks FIRST
+   * (workflow-engine.ts:229-237, via `readPlanVerifyVerdict`). Restoring only
+   * the STATE.md field would leave the gate wide open. The REVIEW itself is not
+   * lost by this: the full reviewer output stays in `PLAN-REVIEW.md`;
+   * `PLAN-VERIFY.md` is purely the gate token.
+   */
+  let gsdStateBefore: {
+    phase: import("../gsd/types.js").GsdPhase | null;
+    planVerified: boolean;
+    planVerifyPath: string;
+    /** Raw prior content, or null when the file did not exist. */
+    planVerifyDoc: string | null;
+  } | null = null;
   stats.phases.push({ name: "planning", durationMs: Date.now() - planStart });
 
   // Log interaction: synthesis
@@ -1036,13 +1651,20 @@ export async function* runCouncil(
   });
 
   // ── Post-Debate AskCard: What next? ─────────────────────────────────────────
-  // convenePath skips this ENTIRE interactive block (recommendation, option set,
-  // card, respondToQuestion, postDebateAction, onPostDebateAction, and the whole
-  // routing tree). On that path the agent that called `convene_council` decides
-  // what happens next — the CLI must not hardcode a post-council pick. The
+  // `suppressPostDebate` skips this ENTIRE interactive block (recommendation,
+  // option set, card, respondToQuestion, the planner/plan-review/post-plan-card
+  // path, postDebateAction, onPostDebateAction, and the whole routing tree). On
+  // that path the agent that called `convene_council` / `runDebate` decides what
+  // happens next — the CLI must not hardcode a post-council pick. The
   // persistence block below still runs (audit trail, not a decision), and the
   // function returns synthesisText as usual.
-  if (sessionId && !options?.convenePath) {
+  //
+  // NOTE this block holds the ONLY two consumers of the launch card's intent
+  // lock: `resolveRunKind(spec.intentKind, …)` below, and the `implement` branch
+  // that runs the planner + review + post-plan card. Suppressing it therefore
+  // makes the intent gate cosmetic — which is exactly what `/council` did while
+  // it passed the old combined `convenePath` flag (C2, 2026-08-06).
+  if (sessionId && !options?.suppressPostDebate) {
     try {
       const { randomUUID } = await import("crypto");
       const refinementTopics: string[] = [];
@@ -1122,6 +1744,12 @@ export async function* runCouncil(
       );
       const inconclusive = !synthesisFailed && critOutcome.inconclusive;
 
+      // The run's authoritative intent kind (launch-card lock wins — see
+      // resolveRunKind's doc comment). Reused below by resolvePostDebateDefaultIndex
+      // (Amendment A1) so the default-index resolution reads the same lock the
+      // recommendation itself was computed from — a single source, not two.
+      const runKind = resolveRunKind(spec.intentKind, synthesisText);
+
       // Recommendation surfaced to the user as the default action. The
       // implementation_plan-vs-decision/evaluation split lives in
       // pickPostDebateRecommendation (issue #3 — see its doc comment).
@@ -1131,7 +1759,7 @@ export async function* runCouncil(
         refinementTopics,
         confidenceLevel,
         hasPlan: !!hasPlan,
-        outputKind: debatePlan.outputShape.kind,
+        outputKind: runKind,
         criteriaUnmet: inconclusive ? critOutcome.unmetLabels.length : 0,
       });
 
@@ -1202,16 +1830,6 @@ export async function* runCouncil(
           kind: "choice",
         });
 
-        if (!hasPlan && !synthesisFailed) {
-          baseOptions.push({
-            label: "Lock plan and execute Sprint 1",
-            description:
-              "Commit the council outcome as the sprint plan and hand control to the sprint runner (planning → implementation → verification → judgment). Does NOT exit to /gsd.",
-            value: "generate_plan",
-            kind: "choice",
-          });
-        }
-
         if (hasEmptySections && !synthesisFailed) {
           baseOptions.push({
             label: `Refine: ${refinementTopics.join(", ")}`,
@@ -1266,10 +1884,11 @@ export async function* runCouncil(
         }
         if (!baseOptions.some((o) => o.value === "continue_session")) baseOptions.push({ ...CONTINUE_OPT });
         if (!synthesisFailed && !inconclusive && !baseOptions.some((o) => o.value === "implement")) {
-          // Insert at index 1, NOT 0 — the model's own best-first pick stays the
-          // default (defaultIndex is 0 for model-first). We only GUARANTEE the
-          // build path is present + prominent; we don't override the model's
-          // judgment that building wasn't the recommended next move.
+          // Insert at index 1, NOT 0 — the model's own best-first pick (index 0)
+          // stays first in the ranking that resolvePostDebateDefaultIndex reads
+          // below (Amendment A1). We only GUARANTEE the build path is present +
+          // prominent; we don't override the model's judgment that building
+          // wasn't the recommended next move.
           baseOptions.splice(1, 0, {
             label: "Start Implementation",
             description: "Load the council conclusion as the spec and build it (plan → change → verify)",
@@ -1350,24 +1969,42 @@ export async function* runCouncil(
         });
       }
 
-      // Model orders actions best-first (index 0 = recommended default); the
-      // fallback set uses the deterministic recommendation. When inconclusive,
-      // the pinned criteria option at index 0 is the honest default regardless of
-      // path.
-      const defaultIndex =
-        inconclusive || lowGrounding
-          ? 0
-          : modelActions
-            ? 0
-            : Math.max(
-                0,
-                baseOptions.findIndex((o) => o.value === recommendation.value),
-              );
+      // Amendment A1 (session 947db934b573) — defaultIndex must never select an
+      // action inconsistent with the locked runKind (isDefaultEligiblePostDebateAction),
+      // even though the model orders baseOptions best-first. See
+      // resolvePostDebateDefaultIndex's doc comment for the fallback order.
+      //
+      // inconclusive/lowGrounding keep the hardcoded 0 they had before this
+      // amendment: both branches unshift an `ask_followup` option ("Keep
+      // working the N unmet criteria" / "Raise confidence — have the council
+      // cite & verify", built in the two `if` blocks directly above this one)
+      // as the honest default regardless of intent. ask_followup is never
+      // default-ineligible — only "implement" is, and only for analysis-shape
+      // kinds — so that forced index 0 is itself always a legal default under
+      // the new predicate and does not need to route through
+      // resolvePostDebateDefaultIndex. If a future option ever became the
+      // pinned index-0 choice in this branch AND were default-ineligible, this
+      // comment is your signal to re-derive the ordering instead of trusting it.
+      const defaultIndex = inconclusive || lowGrounding ? 0 : resolvePostDebateDefaultIndex(baseOptions, runKind);
+      // recommendReason's TEXT SOURCE (code review round 1): inconclusive/
+      // lowGrounding and the model-first path both PIN the default to an
+      // option index.ts itself constructed/ranked for this exact turn (the
+      // criteria/confidence follow-up, or the model's own best-first pick), so
+      // that option's own `description` is the right explanation — read via
+      // `baseOptions[defaultIndex]`, NOT the literal index 0, since defaultIndex
+      // is no longer necessarily 0 on the model-first path (that's the whole
+      // point of this amendment). The deterministic fallback path has no such
+      // freshly-authored option — its options are a fixed, reusable menu — so
+      // it keeps using `recommendation.reason`, the curated per-recommendation
+      // text pickPostDebateRecommendation already produced. Do not swap the
+      // deterministic branch to `baseOptions[defaultIndex]?.description`: that
+      // trades curated reasoning for generic option copy with no test coverage
+      // for the regression (this was flagged in round 1 review).
       const recommendReason =
         inconclusive || lowGrounding
-          ? (baseOptions[0]?.description ?? recommendation.reason)
+          ? (baseOptions[defaultIndex]?.description ?? recommendation.reason)
           : modelActions
-            ? (baseOptions[0]?.description ?? recommendation.reason)
+            ? (baseOptions[defaultIndex]?.description ?? recommendation.reason)
             : recommendation.reason;
 
       const runReceipt = formatRunReceipt({
@@ -1415,9 +2052,12 @@ export async function* runCouncil(
         // per-sprint planning. Presenting it stranded the sprint before
         // implementation — picking "Save & Exit" ended the run with no Sprint
         // Implementation, and "Refine" (the default) looped back into more
-        // debate. Auto-lock the synthesized plan (== "Lock plan and execute
-        // Sprint 1") and hand control back to the sprint runner.
-        answer = "generate_plan";
+        // debate. Auto-lock the synthesized plan and hand control back to the
+        // sprint runner. The actual auto-lock branch below is gated on
+        // `options?.sprintPlanningMode`, not on this value, so any build action
+        // works here — "implement" is the sole one left after `generate_plan`
+        // was removed as a dead alias (2026-08-04).
+        answer = "implement";
         idealTrace("council.postDebate.autoLock", { sessionId });
         yield {
           type: "content",
@@ -1478,9 +2118,41 @@ export async function* runCouncil(
           }
         }
       }
-      postDebateAction = answer;
+      const transition = resolvePhaseOutcomeTransition(
+        outcomeEnvelope,
+        answer === "ask_followup" ||
+          answer === "implement" ||
+          answer === "save_exit" ||
+          answer === "continue_session" ||
+          answer === "retry_synthesis" ||
+          answer === "refine"
+          ? answer
+          : undefined,
+      );
+      if (transition !== "continue") {
+        const fallbackAction =
+          outcomeEnvelope.trustLevel === "invalidated"
+            ? synthesisFailReason
+              ? "retry_synthesis"
+              : "save_exit"
+            : "ask_followup";
+        if (answer !== fallbackAction) {
+          yield {
+            type: "content",
+            content:
+              `\n> Council transition gate blocked \`${answer || "(empty)"}\` ` +
+              `because trust is ${outcomeEnvelope.trustLevel}. Routing to \`${fallbackAction}\` instead.\n`,
+          };
+          answer = fallbackAction;
+        }
+      }
       idealTrace("council.postDebate.answer", { sessionId, answer });
-      options?.onPostDebateAction?.(answer);
+      // C1 — `postDebateAction` / `onPostDebateAction` are NOT set here. The
+      // relay fires once, AFTER the branch tree below, with the action the run
+      // actually ended on (see `resolvedPostDebateAction`). Firing it at the
+      // pick meant "implement" reached tool-engine.ts:852 while the plan block
+      // 200 lines below was still running, and the caller then ran an ungated
+      // prose implementation turn on top of the gated per-phase loop.
       // Echo the human-readable option label, never the raw action id
       // (`continue_session`, `save_exit`, …) — the id is an internal routing
       // token users should never see. Free-text follow-ups (no matching option)
@@ -1496,7 +2168,6 @@ export async function* runCouncil(
       const knownValues = new Set([
         "save_exit",
         "continue_session",
-        "generate_plan",
         "refine",
         "ask_followup",
         "implement",
@@ -1573,8 +2244,16 @@ export async function* runCouncil(
         outcome = refineResult.value.outcome;
         plan = refineResult.value.plan;
         synthesisText = refineResult.value.synthesisText;
-      } else if (answer === "generate_plan") {
+      } else if (options?.sprintPlanningMode) {
         // A1 FIX: "Lock plan and execute Sprint 1" — stay within sprint-runner.
+        //
+        // Gated on sprintPlanningMode itself, not on a specific `answer` value —
+        // this branch used to key on the now-removed `generate_plan` action id
+        // (a separate, always-identical alias to `implement`; dead code removed
+        // 2026-08-04, see docs/superpowers/specs/2026-08-04-council-intent-plan-gate-design.md).
+        // sprintPlanningMode is the ONLY caller of this branch (its answer is
+        // always auto-set above, never user-chosen), so keying on the mode
+        // itself is both simpler and immune to the action-id vocabulary churn.
         //
         // Previously this branch called runExecution(plan, processMessageFn) which
         // bypassed sprint-runner's verification/judgment/done-gate stages entirely.
@@ -1639,11 +2318,11 @@ export async function* runCouncil(
             synthesisLen: synthesisText?.length ?? 0,
           });
         }
-        // Do NOT call runExecution here. Return synthesisText to the sprint-runner
-        // caller so it drives the full sprint lifecycle (Step 4–8 in sprint-runner.ts).
-        // Clear plan so Phase E's runExecution guard below does not fire — the plan
-        // content has already been serialized into synthesisText above.
-        plan = null;
+        // sprintPlanningMode does not execute here — it returns synthesisText to
+        // the sprint-runner caller, which drives the full sprint lifecycle
+        // (Step 4-8 in sprint-runner.ts). Phase E below gates the new per-phase
+        // runPlanExecution loop on `executePlanPath`, which is never set on this
+        // branch, so it correctly does not fire either — no suppression needed.
       } else if (answer === "refine" && hasEmptySections) {
         yield { type: "content", content: "\n> Let's clarify the unresolved aspects...\n" };
         const refinedAnswers: Array<{ section: string; answer: string }> = [];
@@ -1706,14 +2385,252 @@ export async function* runCouncil(
         outcome = refineResult.value.outcome;
         plan = refineResult.value.plan;
         synthesisText = refineResult.value.synthesisText;
+      } else if (answer === "implement") {
+        // D3/Task 8 — the reviewed-plan handoff. Previously "implement" fell
+        // through to normal persistence and postDebateContinuation fed the RAW
+        // synthesis prose back through processMessage on the next turn; PIL
+        // classified that prose taskType=analyze/deliverable=report
+        // (interaction_logs id 2498, session 3a8378db4adf) and the turn ran as a
+        // report against planVerified:false. Fix: draft a phased PLAN.md
+        // (runPlannerPhase), have the panel that just argued the topic review it
+        // (runPlanReview — also writes PLAN-VERIFY.md, satisfying the GSD
+        // mutation gate at heavy depth), then hand the user buildPostPlanCard's
+        // own execute_plan/revise_plan/save_exit choice. Only execute_plan sets
+        // executePlanPath, which Phase E below turns into the gated per-phase
+        // runPlanExecution loop.
+        const planCwd = options?.cwd ?? process.cwd();
+        // C1 — every exit from this block that is NOT "execute_plan" (planner
+        // failed, user saved, user pressed Esc, revision budget exhausted) is a
+        // save-and-stop. Default to that and let the execute_plan pick below
+        // override it, so no exit path can leave the caller holding the
+        // non-terminal "implement".
+        resolvedPostDebateAction = "save_exit";
+        // I5 — snapshot BEFORE runPlannerPhase/runPlanReview mutate STATE.md
+        // and PLAN-VERIFY.md.
+        try {
+          const s = readState(planCwd);
+          const planVerifyPath = planningArtifact(planCwd, "PLAN-VERIFY.md");
+          gsdStateBefore = {
+            phase: s.phase,
+            planVerified: s.planVerified,
+            planVerifyPath,
+            planVerifyDoc: existsSync(planVerifyPath) ? readFileSync(planVerifyPath, "utf8") : null,
+          };
+        } catch (err) {
+          console.error(`[council] could not snapshot GSD state before the plan phase: ${(err as Error)?.message}`);
+        }
+        const exchangesText = resolveDebateSummary(debateState);
+        let draftSynthesis = synthesisText;
+        const MAX_MANUAL_PLAN_REVISIONS = 3;
+        // D-3 — the manual revision loop's own convergence tracking, distinct
+        // from runPlanReview's INTERNAL bounded retry (getPlanReviewDebateRetries):
+        // that one re-enters the planner automatically on a `revise` verdict,
+        // bounded by its own retry budget, before ever returning here. This one
+        // is entered ONLY when the user explicitly picks "Revise the plan" on
+        // the card below. `prevRoundSignature` is this OUTER loop's last-seen
+        // outcome; `prevRevisionHadNewInput` is whether the pick that led to the
+        // CURRENT round carried freetext (vs. the bare option with nothing
+        // typed). When a round reproduces the prior round's signature AND the
+        // revise that led to it had no new input, another blind revise is
+        // predictable, not useful — see PostPlanCardInput.revisionConverged.
+        let prevRoundSignature: string | null = null;
+        let prevRevisionHadNewInput = false;
+        for (let manualRevision = 0; ; manualRevision += 1) {
+          yield { type: "content", content: "\n> Drafting an implementation plan from the approved conclusion...\n" };
+          const plannerGen = runPlannerPhase({
+            cwd: planCwd,
+            topic,
+            synthesis: draftSynthesis,
+            exchanges: exchangesText,
+            plannerModelId: leaderModelId,
+            llm,
+            sessionId,
+          });
+          // biome-ignore lint/suspicious/noImplicitAnyLet: shape inferred from runPlannerPhase generator
+          let plannerStep;
+          do {
+            plannerStep = await plannerGen.next();
+            if (!plannerStep.done && plannerStep.value) yield plannerStep.value;
+          } while (!plannerStep.done);
+          const plannerOutcome = plannerStep.value;
+          if (!plannerOutcome.ok) {
+            // D-2 — name WHICH of the three causes happened instead of the bare
+            // "could not produce a gateable plan" category (session 947db934b573
+            // ran this exact path three times with no way to tell them apart).
+            const causeMessage = describePlannerFailure(plannerOutcome);
+            const stagnant =
+              prevRoundSignature !== null &&
+              !prevRevisionHadNewInput &&
+              plannerFailureSignature(plannerOutcome) === prevRoundSignature;
+            yield {
+              type: "content",
+              content: stagnant
+                ? `\n> ${causeMessage} This is the identical failure the last blind revision produced — another one would not help. Saving the conclusion without executing.\n`
+                : `\n> ${causeMessage} Saving the conclusion without executing.\n`,
+            };
+            break;
+          }
+
+          const reviewGen = runPlanReview({
+            cwd: planCwd,
+            topic,
+            synthesis: draftSynthesis,
+            exchanges: exchangesText,
+            plannerModelId: leaderModelId,
+            leaderModelId,
+            participants: debateState.active,
+            llm,
+            sessionId,
+          });
+          // biome-ignore lint/suspicious/noImplicitAnyLet: shape inferred from runPlanReview generator
+          let reviewStep;
+          do {
+            reviewStep = await reviewGen.next();
+            if (!reviewStep.done && reviewStep.value) yield reviewStep.value;
+          } while (!reviewStep.done);
+          const reviewOutcome = reviewStep.value;
+          const thisRoundSignature = reviewOutcomeSignature(reviewOutcome);
+          // D-3 — see the loop-level comment above: converged only when this
+          // round's outcome is the SAME as last round's AND the revise that led
+          // here added nothing new to act on.
+          const revisionConverged =
+            reviewOutcome.verdict !== "approve" &&
+            prevRoundSignature !== null &&
+            !prevRevisionHadNewInput &&
+            thisRoundSignature === prevRoundSignature;
+
+          // Re-read PLAN.md rather than trusting plannerOutcome.phases: runPlanReview
+          // may have redrafted it internally (revise loop) before returning.
+          let reviewedPhases: PlanPhase[];
+          try {
+            reviewedPhases = parsePlanMarkdown(readFileSync(plannerOutcome.planPath, "utf8"));
+          } catch (err) {
+            console.error(
+              `[council] could not re-read ${plannerOutcome.planPath} after review: ${(err as Error).message}`,
+            );
+            reviewedPhases = plannerOutcome.phases;
+          }
+
+          // I9 — ask the REAL gate, not a re-derived rule: `canExecute` is what
+          // the tool-engine write-mutex wrapper consults before every mutation
+          // tool, and `evaluateMutationGate` only arms it at explicit heavy
+          // depth (quick/standard/null fail open). If it would block, the phase
+          // turns would run, write nothing, fail verify and halt at P0 — so the
+          // card withdraws execute rather than selling a paid no-op.
+          let gateBlocksExecution = false;
+          try {
+            const gsdDepth = readState(planCwd).depth;
+            gateBlocksExecution =
+              isGsdHardGateEnabled() && gsdDepth === "heavy" && !canExecute(planCwd, gsdDepth).allowed;
+          } catch (err) {
+            // Fail OPEN, exactly like evaluateMutationGate does on a corrupt
+            // .planning — a state-read fault must not remove the user's only
+            // path forward. Logged so it is never a silent behaviour change.
+            console.error(
+              `[council] post-plan gate probe failed (offering execute anyway): ${(err as Error)?.message}`,
+            );
+          }
+          const card = buildPostPlanCard({
+            planPath: plannerOutcome.planPath,
+            phases: reviewedPhases,
+            verdict: reviewOutcome.verdict,
+            concerns: reviewOutcome.concerns,
+            gateBlocksExecution,
+            revisionConverged,
+          });
+          const planQuestionId = randomUUID();
+          yield {
+            type: "council_question",
+            content: `## ${card.question}`,
+            councilQuestion: {
+              questionId: planQuestionId,
+              phase: "post-plan",
+              question: card.question,
+              context: card.context,
+              isRequired: false,
+              options: card.options,
+              defaultIndex: card.defaultIndex,
+            },
+          } as StreamChunk;
+          let planAnswer = await respondToQuestion(planQuestionId);
+          if (planAnswer === COUNCIL_ANSWER_DISMISSED) {
+            // Esc — the user closed the card. Take NO action, mirroring the
+            // post-debate card's dismiss handling (:1640-1645) — an approved
+            // plan's own defaultIndex is `execute_plan`, so collapsing dismiss
+            // into "take the default" here would let closing the card with Esc
+            // silently start N agent turns that edit code and shell out. "save_exit"
+            // is the equivalent no-op: keep the plan on disk, execute nothing.
+            planAnswer = "save_exit";
+          } else if (planAnswer.trim().length === 0) {
+            // An EMPTY submit means "take the recommended default" — same
+            // rationale as the post-debate card (:1646-1658). Distinct from
+            // dismiss above precisely so Esc can never resolve to execute_plan.
+            planAnswer = card.options[card.defaultIndex]?.value ?? "save_exit";
+          }
+          const planAnswerLabel = card.options.find((o) => o.value === planAnswer)?.label ?? planAnswer;
+          yield { type: "content", content: `\n  ↳ ${planAnswerLabel}\n` };
+
+          if (planAnswer === "execute_plan") {
+            executePlanPath = plannerOutcome.planPath;
+            resolvedPostDebateAction = "execute_plan";
+            break;
+          }
+          if (planAnswer === "save_exit") {
+            break;
+          }
+
+          // Anything else is a revise: either the bare "revise_plan" value (the
+          // option picked with nothing typed) or free-text comments. Bounded —
+          // user-driven, never automatic, but an unbounded loop would still let
+          // repeated picks burn cost forever.
+          if (manualRevision + 1 >= MAX_MANUAL_PLAN_REVISIONS) {
+            console.error(
+              `[council] manual plan revision budget (${MAX_MANUAL_PLAN_REVISIONS}) exhausted — saving without executing`,
+            );
+            yield {
+              type: "content",
+              content: `\n> Revision budget exhausted — plan saved at ${plannerOutcome.planPath} without executing.\n`,
+            };
+            break;
+          }
+          const comments =
+            planAnswer === "revise_plan" ? reviewOutcome.concerns.join("; ") || "Please revise the plan." : planAnswer;
+          draftSynthesis = [draftSynthesis, "", "User-requested revision:", comments].join("\n");
+          // D-3 — record what THIS round produced and whether the pick that
+          // continues the loop carried new input, so the NEXT iteration can
+          // detect a repeat. `revisionConverged` above already withdrew
+          // "revise_plan" whenever this was true, so `planAnswer` reaching here
+          // as the literal "revise_plan" can only mean the bare pick (no
+          // freetext) — never a converged round the user tried to push through.
+          prevRoundSignature = thisRoundSignature;
+          prevRevisionHadNewInput = planAnswer !== "revise_plan";
+        }
       }
-      // "save_exit" and "implement" fall through to normal persistence
+      // "save_exit" falls through to normal persistence — "implement" is now
+      // handled above (D3/Task 8 plan draft → review → post-plan card).
+
+      // ── C1: the single, terminal post-debate relay ────────────────────────
+      // Fires exactly once, here, AFTER every branch has run — so what the
+      // caller sees is what the run actually ended on. `resolvedPostDebateAction`
+      // is set only by the plan block (implement → execute_plan | save_exit);
+      // every other pick is already terminal and relays verbatim.
+      //
+      // Measured defect this closes: index.ts fired this callback at the pick,
+      // before the plan block, and never re-fired. tool-engine.ts:852 read
+      // "implement" and ran postDebateContinuation's ~14K-char prose through
+      // processMessage — an ungated second implementation turn that fired even
+      // when the phase loop had HALTED on a failed verify.
+      const effectiveAction = resolvedPostDebateAction ?? answer;
+      postDebateAction = effectiveAction;
+      idealTrace("council.postDebate.effectiveAction", { sessionId, picked: answer, effectiveAction });
+      options?.onPostDebateAction?.(effectiveAction);
     } catch (err) {
       // Post-debate interaction (menu, follow-up re-synthesis, refine) is
       // non-critical to the persisted outcome, so we swallow — but NEVER
-      // silently: a throw here previously vanished, hiding a "generate_plan
-      // stalled" root cause. Log it and breadcrumb it so blocker-5 forensics
-      // can see whether the tail was reached via an exception.
+      // silently: a throw here previously vanished, hiding a "sprint plan lock
+      // stalled" root cause (originally traced under the now-removed
+      // `generate_plan` action id). Log it and breadcrumb it so blocker-5
+      // forensics can see whether the tail was reached via an exception.
       console.error(`[council] post-debate interaction failed: ${(err as Error)?.message}`);
       idealTrace("council.postDebate.threw", { sessionId, err: (err as Error)?.message });
     }
@@ -1823,16 +2740,24 @@ export async function* runCouncil(
   }
   idealTrace("council.persist.done", { sessionId });
 
-  // Update session status to completed — EXCEPT when the user chose
-  // "continue_session", where the agent keeps working in this session; marking
-  // it completed here is what dropped it from the resume picker.
-  if (sessionId && postDebateAction !== "continue_session") {
+  // I8 — the session is marked completed AFTER Phase E, not before it. This
+  // block used to sit here, above the execution loop: `postDebateAction` is
+  // "execute_plan"/"implement", never "continue_session", so the session was
+  // flagged completed and every message the N phase turns then wrote landed on
+  // a session already marked done — it dropped out of the resume picker
+  // mid-run. See `markSessionCompleted` below, called once execution is over.
+  const markSessionCompleted = () => {
+    // EXCEPT on "continue_session", where the agent keeps working in this
+    // session; marking it completed is what dropped it from the resume picker.
+    if (!sessionId || postDebateAction === "continue_session") return;
     try {
       new SessionStore(options?.cwd ?? process.cwd()).setStatus(sessionId, "completed");
-    } catch {
-      /* non-critical */
+    } catch (err) {
+      // Non-critical (the run is over either way) but never silent: a storage
+      // fault here is what makes a finished session look abandoned.
+      console.error(`[council] could not mark session ${sessionId} completed: ${(err as Error)?.message}`);
     }
-  }
+  };
 
   // CQ-16: Judge synthesis quality; confidence < 0.5 → [NEEDS HUMAN REVIEW] flag
   // CQ-17: Record council outcome to EE brain (fire-and-forget)
@@ -1859,12 +2784,81 @@ export async function* runCouncil(
       /* non-critical */
     });
 
-  // ── Phase E: Execute (if plan approved) ─────────────────────────────────────
-  if (plan && plan.steps.length > 0) {
+  // ── Phase E: Execute (gated per-phase — set only by "execute_plan" on the
+  // post-plan card above; never auto-fires, and never under suppressPostDebate since
+  // that path skips the interactive block entirely by design) ────────────────
+  //
+  // I7 — this block is now inside its own try/catch/finally. It sits AFTER the
+  // post-debate try/catch closes, and it was near-inert before this branch; it
+  // now drives N full agent turns. A throw from `processMessage` inside the
+  // `for await` would escape runCouncil entirely, skipping the stats block and
+  // the terminal `{type:"done"}` below — and on the slash path also skipping
+  // orchestrator.ts's `innerDoneSeen` re-emit, so the TUI consumer's `for await`
+  // would never see its break boundary and the turn would hang mounted.
+  if (executePlanPath) {
     const execStart = Date.now();
-    yield* runExecution(plan, processMessageFn);
-    stats.phases.push({ name: "execution", durationMs: Date.now() - execStart });
+    try {
+      const execResult = yield* runPlanExecution({
+        cwd: options?.cwd ?? process.cwd(),
+        planPath: executePlanPath,
+        processMessage: processMessageFn,
+        sessionId,
+      });
+      idealTrace("council.execution.done", {
+        sessionId,
+        completed: execResult.completed.length,
+        haltedAt: execResult.haltedAt,
+      });
+    } catch (err) {
+      const message = (err as Error)?.message ?? String(err);
+      console.error(`[council] plan execution threw at ${executePlanPath}: ${message}`);
+      idealTrace("council.execution.threw", { sessionId, err: message });
+      yield {
+        type: "content",
+        content: `\n> Plan execution stopped: ${message}\n> The plan is still on disk at ${executePlanPath} — re-run it after fixing the cause.\n`,
+      };
+    } finally {
+      stats.phases.push({ name: "execution", durationMs: Date.now() - execStart });
+    }
   }
+
+  // I5 — hand the repo's GSD workflow state back. `runPlanReview` wrote
+  // `PLAN-VERIFY.md verdict: pass`, `Plan Verified: yes` and
+  // `Phase: execute` (plan-phase.ts:454-460) into CWD-scoped files that
+  // `canExecute` reads on every later turn in this repo. Leaving them set would
+  // (a) hold the heavy-depth mutation gate open indefinitely — for a debate that
+  // may have only discussed something — and (b) leave an in-flight /ideal run in
+  // the same cwd on a Phase this council chose. Restore what was there before
+  // the plan block, now that execution (if any) is over: the unlock is scoped to
+  // the run that earned it. `PLAN-REVIEW.md` (the actual review content) is
+  // deliberately left in place — it is the audit trail, not the gate token.
+  if (gsdStateBefore) {
+    const restoreCwd = options?.cwd ?? process.cwd();
+    try {
+      if (gsdStateBefore.planVerifyDoc === null) {
+        if (existsSync(gsdStateBefore.planVerifyPath)) rmSync(gsdStateBefore.planVerifyPath, { force: true });
+      } else {
+        writeFileSync(gsdStateBefore.planVerifyPath, gsdStateBefore.planVerifyDoc, "utf8");
+      }
+      setStateField(restoreCwd, "Plan Verified", gsdStateBefore.planVerified ? "yes" : "no");
+      // Only restorable when a phase existed: `advancePhase` cannot express
+      // "there was no Phase field". Leaving the council's `execute` in that case
+      // is harmless — canExecute checks the PLAN-VERIFY verdict FIRST
+      // (workflow-engine.ts:229-237) and that is now back to its prior value.
+      if (gsdStateBefore.phase) advancePhase(restoreCwd, gsdStateBefore.phase);
+      idealTrace("council.gsdState.restored", {
+        sessionId,
+        phase: gsdStateBefore.phase,
+        planVerified: gsdStateBefore.planVerified,
+        hadPlanVerifyDoc: gsdStateBefore.planVerifyDoc !== null,
+      });
+    } catch (err) {
+      console.error(`[council] could not restore GSD state in ${restoreCwd}: ${(err as Error)?.message}`);
+    }
+  }
+
+  // I8 — only now is the run actually over.
+  markSessionCompleted();
 
   // ── Stats ───────────────────────────────────────────────────────────────────
   idealTrace("council.stats", { sessionId });

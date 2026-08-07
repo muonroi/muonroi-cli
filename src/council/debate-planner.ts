@@ -135,8 +135,8 @@ function isAnalysisTaskType(taskType?: string): boolean {
  * PIL is the authoritative intent classifier. When it says the request is
  * analysis/evaluation, the leader LLM must not be allowed to silently reshape the
  * debate into an `implementation_plan` — that shape makes the post-debate AskCard
- * default to "generate_plan" (build a plan) via pickPostDebateRecommendation,
- * which is the wrong next step for a request that only wanted an assessment.
+ * default to "implement" (build it) via pickPostDebateRecommendation, which is
+ * the wrong next step for a request that only wanted an assessment.
  *
  * The prompt already asks the leader to honor the intent (soft), but LLMs drift;
  * this coerces a drifted shape back to "evaluation" so the synthesis stays the

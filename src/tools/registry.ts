@@ -293,7 +293,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // when THIS request genuinely warrants a cross-provider debate (conflicting
   // design tradeoffs, high-stakes decision). The request is queued here; the
   // tool-engine consumes it from the outer restart loop, runs runCouncilV2 with
-  // convenePath:true (which suppresses ALL hardcoded post-debate decision
+  // suppressPostDebate:true (which suppresses ALL hardcoded post-debate decision
   // surface — no card, no continuation), splices the synthesis into THIS tool's
   // tool_result, and restarts the step so the model reads the conclusion as the
   // result and continues. Registered only when the council is usable so the

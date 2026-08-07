@@ -94,7 +94,7 @@ import {
   runPipeline,
   shouldHaltOnResponseTool,
 } from "../pil/index.js";
-import { isMetaAnalysisPrompt, isSprintPlanExecution } from "../pil/layer6-output.js";
+import { isMetaAnalysisPrompt, isPlanExecution } from "../pil/layer6-output.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
 import { mentionsEcosystemScope } from "../playbook/directives.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
@@ -259,22 +259,28 @@ import {
  * Resolve the per-turn `maxOutputTokens` budget.
  *
  * Normally the budget is derived from the PIL-classified `taskType`
- * (`taskTypeToMaxTokens`). But a sprint IMPLEMENTATION turn — the /ideal
- * loop's handoff into the host orchestrator via `processMessageFn`, marked
- * with `SPRINT_EXECUTION_MARKER` — is a KNOWN code-writing task that must not
+ * (`taskTypeToMaxTokens`). But a PLAN-EXECUTION turn — a handoff into the host
+ * orchestrator via `processMessageFn` carrying an already-reviewed plan, marked
+ * with `SPRINT_EXECUTION_MARKER` (/ideal) or `COUNCIL_PLAN_EXECUTION_MARKER`
+ * (the council's per-phase loop) — is a KNOWN code-writing task that must not
  * be starved by a noisy classify. Observed live (2026-07-10, gsd-core
  * migration): the impl prompt was classified `analyze`/default → capped at
  * 4_096 output → the model spent the whole budget narrating its plan, hit
  * `finishReason:"length"` mid-word, produced ZERO code, and the turn wedged.
  *
- * Fix: for a sprint-execution turn, floor the budget at the build/generate
- * tier (12_288) regardless of the classified type. Scoped to the marker only
+ * Fix: for a plan-execution turn, floor the budget at the build/generate
+ * tier (12_288) regardless of the classified type. Scoped to the markers only
  * (NOT the broad `isImplementationIntent`) so ordinary refactor/debug turns
  * keep their intentionally tighter L6 budgets.
+ *
+ * I3: this used to call `isSprintPlanExecution` directly, so when the council
+ * marker was added it landed in pipeline.ts alone — `pipeline.ts` forces
+ * `deliverableKind:"code"` but leaves `taskType` alone, so a council phase turn
+ * classified `analyze` got exactly the 4,096-token cap described above.
  */
 export function resolveTurnMaxOutputTokens(pilCtx: { taskType: string | null; raw?: string }): number {
   const base = taskTypeToMaxTokens(pilCtx.taskType);
-  if (isSprintPlanExecution(pilCtx.raw ?? "")) {
+  if (isPlanExecution(pilCtx.raw ?? "")) {
     return Math.max(base, taskTypeToMaxTokens("build"));
   }
   return base;
@@ -438,7 +444,10 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
       skipClarification: boolean;
       observer?: ProcessMessageObserver;
       userModelMessage: ModelMessage;
-      convenePath?: boolean;
+      /** Agent-convened run: no human to answer the launch / preflight / escalation cards. */
+      suppressPreDebateCards?: boolean;
+      /** Agent-convened run: the CLI must not hardcode what happens after the debate. */
+      suppressPostDebate?: boolean;
       /** Gate A — thread the main turn's already-classified scopeKind so runCouncil skips a redundant self-classify round-trip. */
       externalTopic?: boolean;
     },
@@ -820,6 +829,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       ? `complexity=heavy${pilCtx.taskType ? ` task=${pilCtx.taskType}` : ""}`
       : `${pilCtx.taskType} task detected with ${(pilCtx.confidence * 100).toFixed(0)}% confidence`;
     yield { type: "content", content: `\n[Auto-council triggered: ${reason}]\n` };
+    // Reset the three relay fields BEFORE draining, mirroring the runDebate
+    // builtin (~:1077). A generator that throws before the post-debate block
+    // runs — or an analysis run that never reaches it at all — would otherwise
+    // leave the PREVIOUS council's synthesis / action / intent kind in place,
+    // and the continuation below would act on them as if they belonged to this
+    // debate. The reads at :851-858 clear them again after use; this closes the
+    // window before the run, which only runDebate was doing.
+    deps.councilManager.setLastSynthesis(null);
+    deps.councilManager.setLastPostDebateAction(null);
+    deps.councilManager.setLastIntentKind(null);
     // Pre-debate interview: unless disabled, run the model-designed clarification
     // askcards BEFORE the debate so a broadly-scoped "debate mode" request is
     // chốt-ed first (each card's options carry a recommended default + per-option
@@ -850,16 +869,32 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     });
     const synthesis = deps.councilManager.lastSynthesis;
     const chosenAction = deps.councilManager.lastPostDebateAction;
+    // This auto-council dispatch is deliberately NOT convenePath (see the
+    // comment above), so the launch card DOES fire and lock spec.intentKind —
+    // relay it the same way chosenAction is relayed, so postDebateContinuation
+    // resolves the run's authoritative kind instead of falling back to the
+    // post-hoc synthesis regex.
+    const lockedIntentKind = deps.councilManager.lastIntentKind;
     deps.councilManager.setLastSynthesis(null);
     deps.councilManager.setLastPostDebateAction(null);
+    deps.councilManager.setLastIntentKind(null);
     // Honour the user's post-debate choice. `postDebateContinuation` returns
     // null when no action was picked (card dismissed) and for an
     // analysis/evaluation/decision debate whose deliverable IS the conclusion —
-    // so nothing runs unless the user asked for it. Implementation only starts
-    // on an explicit implement / generate_plan / continue_session pick.
+    // so nothing runs unless the user asked for it.
+    //
+    // C1: an IMPLEMENT pick never reaches here as "implement". runCouncil owns
+    // that path (plan → review → post-plan card → gated per-phase loop) and
+    // relays the TERMINAL outcome instead — `execute_plan` (the phases already
+    // ran, gated) or `save_exit` (nothing ran). Both return null below, so this
+    // block can no longer start a second, ungated implementation turn on the raw
+    // synthesis after the phase loop already finished. Only `continue_session`
+    // still re-enters, and only for an implementation-shaped debate (/ideal).
     // Shared with the /council slash path (orchestrator.runCouncilV2).
     const { postDebateContinuation } = await import("../council/index.js");
-    const continuationPrompt = synthesis ? postDebateContinuation(chosenAction ?? undefined, synthesis) : null;
+    const continuationPrompt = synthesis
+      ? postDebateContinuation(chosenAction ?? undefined, synthesis, lockedIntentKind ?? undefined)
+      : null;
     if (continuationPrompt) {
       // Collapse the live debate block BEFORE the continuation streams. It is
       // rendered below the transcript and is otherwise only torn down at a turn
@@ -1062,10 +1097,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             const gen = deps.runCouncilV2(topic, {
               skipClarification: true,
               userModelMessage: { role: "user", content: `/council ${topic}` },
-              // Model-callable debate: the synthesis is returned to the model as
-              // the tool result and the model decides the follow-up — so suppress
-              // the CLI-hardcoded post-debate card, same as convene_council.
-              convenePath: true,
+              // Model-callable debate: no human is at the composer mid-tool-call
+              // (suppressPreDebateCards) and the synthesis is returned to the
+              // model as the tool result so the model decides the follow-up
+              // (suppressPostDebate) — same as convene_council. Both stay on:
+              // this call site's behaviour is unchanged by the C2 flag split.
+              suppressPreDebateCards: true,
+              suppressPostDebate: true,
             });
             // Capture a tail of content chunks so an empty-synthesis failure
             // (provider unreachable / sub-phase fail-open / abort — all of which
@@ -3605,8 +3643,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Consume it here in the OUTER loop after every stream drain — NOT solely
         // via dynamicStopWhen, because a phase-1 SAMR step ends on stepCountIs(1)
         // and never evaluates the stop hook (design-debate BUG 2). Runs the
-        // council autonomously (convenePath suppresses ALL post-debate decision
-        // surface — no card, no continuation), splices the synthesis into the
+        // council autonomously (suppressPreDebateCards + suppressPostDebate: no
+        // blocking card before the debate, no decision surface after it — no
+        // card, no continuation), splices the synthesis into the
         // convene tool_result, grafts into deps.messages, and restarts the step
         // so the model reads the conclusion as the tool result and continues.
         if (hasPendingCouncilConvene()) {
@@ -3679,7 +3718,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // rendered). We continue the SAME turn ourselves via the splice +
               // `continue` restart, so the council's `done` must not propagate.
               for await (const chunk of deps.runCouncilV2(userMessage, {
-                convenePath: true,
+                // convene_council: the model called this mid-turn with no human
+                // waiting at the composer, and the synthesis is spliced back as
+                // the tool result for the model to reason about. Both
+                // suppressions stay on — behaviour unchanged by the C2 split.
+                suppressPreDebateCards: true,
+                suppressPostDebate: true,
                 skipClarification: true,
                 observer,
                 userModelMessage,

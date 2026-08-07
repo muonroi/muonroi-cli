@@ -8,6 +8,7 @@ const PHASE_LABEL: Record<CouncilQuestionPhase, string> = {
   preflight: "Pre-flight check",
   "plan-confirm": "Plan review",
   "post-debate": "Debate wrap-up",
+  "post-plan": "Reviewed plan",
   "pil-interview": "Understanding your idea",
   "pil-acceptance": "Confirm the goal",
   "tool-loop-cap": "Tool-loop checkpoint",

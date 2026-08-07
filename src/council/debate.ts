@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { getModelInfo } from "../models/registry.js";
+import { hasTavilyKey } from "../mcp/mcp-keychain.js";
+import { getModelInfo, getWebResearchModel } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import {
   clearCouncilSteer,
@@ -337,7 +338,7 @@ async function openingWithRetry(
  * provider keeps that voice in the discussion. Returns undefined when every
  * pooled model resolves to the same provider (nothing to fall back to).
  */
-function pickDebateFallbackModel(failedModel: string, pool: string[]): string | undefined {
+function pickDebateFallbackModel(failedModel: string, pool: string[], llm?: CouncilLLM): string | undefined {
   let failedProvider: string | undefined;
   try {
     failedProvider = detectProviderForModel(failedModel);
@@ -346,6 +347,10 @@ function pickDebateFallbackModel(failedModel: string, pool: string[]): string | 
   }
   for (const candidate of pool) {
     if (candidate === failedModel) continue;
+    // Fix 2 — don't pick a candidate that already failed non-retryably
+    // (401/403 + SDK isRetryable:false) earlier in this session; it would
+    // just burn the same rejected call again instead of recovering the turn.
+    if (llm?.isModelBlocked?.(candidate)) continue;
     let candidateProvider: string | undefined;
     try {
       candidateProvider = detectProviderForModel(candidate);
@@ -355,6 +360,55 @@ function pickDebateFallbackModel(failedModel: string, pool: string[]): string | 
     if (candidateProvider && candidateProvider !== failedProvider) return candidate;
   }
   return undefined;
+}
+
+/**
+ * Web-capability policy applied to the council debate's OWN research phase
+ * (owner's Part E rule, documented at clarifier.ts:278-284 and mirrored there
+ * at clarifier.ts:315-325 — this follows that site's exact decision order).
+ * Loop-driver.ts:606-641 applies the same rule to the product-loop Researcher
+ * stance. Before this, `researchWithFallback` had zero concept of web
+ * capability: it ran `llm.research(primaryModel, …)` on whatever model the
+ * caller passed, and its only recovery — {@link pickDebateFallbackModel} —
+ * swaps PROVIDER on a crash, not web capability on a text-only model.
+ * Session 947db934b573 researched on `opencode/glm-5.2` (native-web) only by
+ * coincidence of panel composition; a panel that seated a text-only model
+ * would have researched blind with no warning.
+ *
+ * Order (mirrors clarifier.ts, NOT loop-driver.ts's "keep current if it
+ * already qualifies" optimization — see debate-research-web-report.md for
+ * why the two source sites disagree on that point): (1) the first reachable,
+ * non-blocked native-web model in catalog order — even when `candidateModel`
+ * itself already qualifies, so the choice is deterministic and catalog-driven
+ * like clarifier.ts, not "sticky" like loop-driver.ts; (2) Tavily, if
+ * configured — `candidateModel` is kept, its builtin web tools + the Tavily
+ * key do the work; (3) neither — `candidateModel` is kept and the caller MUST
+ * warn (`webTier: "none"`), never research silently blind.
+ *
+ * "Reachable" = `reachablePool` (callers pass `fallbackPool`, the models
+ * actually seated in this debate — leader + participants) plus
+ * `candidateModel`, filtered by the session model blocklist
+ * (`model-blocklist.ts`): a model blocked earlier this session for a
+ * non-retryable 401/403 is not a candidate — the same check
+ * `pickDebateFallbackModel` above already applies, and neither clarifier.ts
+ * nor loop-driver.ts consult the blocklist (it postdates both call sites).
+ * Swapping in an unreachable id would fail participant/tool creation and
+ * wedge research — see loop-driver.ts:620-626 for the same reasoning applied
+ * to the Researcher stance.
+ */
+export async function pickResearchWebModel(
+  candidateModel: string,
+  reachablePool: string[],
+  llm: CouncilLLM,
+): Promise<{ model: string; webTier: "native" | "tavily" | "none" }> {
+  const isBlocked = (id: string) => llm.isModelBlocked?.(id) === true;
+  const reachable = new Set([candidateModel, ...reachablePool].filter((id) => !!id && !isBlocked(id)));
+  const nativeModel = getWebResearchModel(reachable);
+  if (nativeModel) {
+    return { model: nativeModel.id, webTier: "native" };
+  }
+  const tavily = await hasTavilyKey();
+  return { model: candidateModel, webTier: tavily ? "tavily" : "none" };
 }
 
 /**
@@ -453,7 +507,7 @@ export async function researchWithFallback(
   const primary = await llm.research(primaryModel, topic, conversationContext, signal, traceCb, options);
   if (!primary.includes(RESEARCH_FAILED_MARKER) || signal?.aborted) return primary;
 
-  const fallbackModel = pickDebateFallbackModel(primaryModel, fallbackPool);
+  const fallbackModel = pickDebateFallbackModel(primaryModel, fallbackPool, llm);
   if (!fallbackModel) return primary;
 
   traceCb(`[research] ${primaryModel} failed; retrying via ${fallbackModel} (different provider)`);
@@ -598,7 +652,7 @@ async function debateWithRetryInner(
   // a third same-model hit would just fail identically. Skip when the caller
   // aborted (user cancellation must not be papered over by a fallback call).
   if (!signal?.aborted) {
-    const fallbackModel = pickDebateFallbackModel(model, fallbackPool);
+    const fallbackModel = pickDebateFallbackModel(model, fallbackPool, llm);
     if (fallbackModel) {
       try {
         const fb = await llm.debate(
@@ -686,6 +740,11 @@ export async function* runDebate(
   // Track which models we've already announced as tool-disabled so we don't
   // emit the same "circuit breaker tripped" message every round.
   const announcedDisabled = new Set<string>();
+  // Owner's Part E rule — warn at most once per debate run when NEITHER a
+  // native-web model nor a Tavily key is reachable (initial research + any
+  // number of mid-debate research calls would otherwise repeat the identical
+  // warning every round).
+  let researchWebWarned = false;
 
   // C — restore accumulated state before any phase runs when resuming.
   if (resumeCp) {
@@ -737,11 +796,27 @@ export async function* runDebate(
   if (needsResearch) {
     const p0Start = Date.now();
     const researchCandidate = participants.find((c) => c.role === "research") ?? participants[0];
+    // Owner's Part E rule — route THIS research call to a reachable, non-blocked
+    // native-web model when one exists; fall back to Tavily; warn once when
+    // neither is reachable. `researchCandidate` (a live reference into
+    // `participants`) is intentionally left untouched: the swap applies to the
+    // research call only, not to the stance's model for the rest of the debate.
+    const { model: researchModel, webTier } = await pickResearchWebModel(researchCandidate.model, fallbackPool, llm);
+    if (webTier === "none" && !researchWebWarned) {
+      researchWebWarned = true;
+      yield {
+        type: "content",
+        content:
+          `\n> ⚠ Council research: no web-research-native model is reachable and no Tavily key is configured. ` +
+          `Researching from the codebase + model knowledge only — no live web findings. ` +
+          `Configure a native-web model or a Tavily API key for grounded web research.\n`,
+      } as StreamChunk;
+    }
     yield phaseStart({
       phaseId: "phase:research",
       kind: "research",
       label: internetFirst ? "Research (internet-first)" : "Research",
-      detail: `via ${researchCandidate.model}`,
+      detail: `via ${researchModel}`,
     });
 
     const researchTraces: string[] = [];
@@ -750,7 +825,7 @@ export async function* runDebate(
       () =>
         researchWithFallback(
           llm,
-          researchCandidate.model,
+          researchModel,
           spec.problemStatement,
           conversationContext,
           signal,
@@ -779,7 +854,7 @@ export async function* runDebate(
       kind: "research",
       label: "Research",
       startedAt: p0Start,
-      detail: `via ${researchCandidate.model}`,
+      detail: `via ${researchModel}`,
     });
     // A failed research call returns a "[Research failed: …]" placeholder once
     // both primary and fallback providers are exhausted. It is a truthy string,
@@ -791,7 +866,7 @@ export async function* runDebate(
       type: "council_message" as const,
       councilMessage: {
         kind: "research" as const,
-        speaker: { role: researchCandidate.role, model: researchCandidate.model },
+        speaker: { role: researchCandidate.role, model: researchModel },
         text: researchFailed
           ? "⚠ Research unavailable — both providers failed. The council proceeds on the panel's own knowledge (no external findings injected)."
           : (researchFindings ?? ""),
@@ -1093,11 +1168,11 @@ export async function* runDebate(
     openList: string[],
   ): AsyncGenerator<StreamChunk, "extend" | "stop", unknown> {
     escalated = true;
-    // convene_council path: no interactive user is answering mid-tool-call, so a
+    // No interactive user is answering mid-tool-call (agent-convened run), so a
     // blocking escalation card would hang the council. Auto-accept (= conclude
     // with the best synthesis so far) without emitting the card. Mirrors the
     // "empty/failed answer → accept" fallback runEscalationPrompt already uses.
-    if (config.convenePath) {
+    if (config.autoAcceptEscalation) {
       escalation = { action: "accept" };
       return "stop";
     }
@@ -1650,6 +1725,10 @@ export async function* runDebate(
       if (firstTried) {
         for (const fallbackModel of fallbackPool) {
           if (fallbackModel === firstTried) continue;
+          // Fix 2 — skip a candidate that already failed non-retryably
+          // (401/403 + SDK isRetryable:false) earlier in this session rather
+          // than repeat the identical rejected eval call.
+          if (llm.isModelBlocked?.(fallbackModel)) continue;
           evaluation = yield* evaluateDebate(
             spec,
             allExchangeText,
@@ -1776,19 +1855,37 @@ export async function* runDebate(
       if (evaluation.needsResearch && evaluation.researchQuery && !externalTopic) {
         const midPhaseId = `phase:mid-research-${round}`;
         const midStart = Date.now();
+        const researchCandidate = participants.find((c) => c.role === "research") ?? participants[0];
+        // Owner's Part E rule — same web-capability routing as the initial
+        // research phase above (pickResearchWebModel), applied to every
+        // mid-debate research call too, not just the first one.
+        const { model: midResearchModel, webTier: midWebTier } = await pickResearchWebModel(
+          researchCandidate.model,
+          fallbackPool,
+          llm,
+        );
+        if (midWebTier === "none" && !researchWebWarned) {
+          researchWebWarned = true;
+          yield {
+            type: "content",
+            content:
+              `\n> ⚠ Council research: no web-research-native model is reachable and no Tavily key is configured. ` +
+              `Researching from the codebase + model knowledge only — no live web findings. ` +
+              `Configure a native-web model or a Tavily API key for grounded web research.\n`,
+          } as StreamChunk;
+        }
         yield phaseStart({
           phaseId: midPhaseId,
           kind: "mid_research",
           label: "Mid-debate research",
           detail: evaluation.researchQuery.slice(0, 80),
         });
-        const researchCandidate = participants.find((c) => c.role === "research") ?? participants[0];
         const midTraces: string[] = [];
         const findings = yield* tracedAsync(
           () =>
             researchWithFallback(
               llm,
-              researchCandidate.model,
+              midResearchModel,
               evaluation.researchQuery!,
               enrichedContext,
               signal,

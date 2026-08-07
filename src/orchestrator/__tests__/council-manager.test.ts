@@ -44,6 +44,22 @@ describe("CouncilManager — state isolation", () => {
     expect(b.lastSynthesis).toBe("from-b");
   });
 
+  // The launch-card lock (spec.intentKind, task-2) is relayed across the same
+  // seam as lastPostDebateAction so the auto-council caller (tool-engine) can
+  // resolve the run's authoritative kind instead of falling back to the
+  // post-hoc synthesis regex (task-3). Defaults to null (no card ran yet /
+  // suppressPreDebateCards / sprintPlanningMode), and — like lastSynthesis — is
+  // per-instance state, not shared/global.
+  it("locked intent kind defaults to null and is per-instance", () => {
+    const a = new CouncilManager(makeDeps());
+    const b = new CouncilManager(makeDeps());
+    expect(a.lastIntentKind).toBeNull();
+    a.setLastIntentKind("implementation_plan");
+    b.setLastIntentKind("evaluation");
+    expect(a.lastIntentKind).toBe("implementation_plan");
+    expect(b.lastIntentKind).toBe("evaluation");
+  });
+
   it("continuation flag is per-instance", () => {
     const a = new CouncilManager(makeDeps());
     const b = new CouncilManager(makeDeps());

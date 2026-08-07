@@ -25,12 +25,7 @@ import type { ComplexityTier } from "../playbook/complexity.js";
 import { buildDirective } from "../playbook/directives.js";
 import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
 import { truncateToBudget } from "./budget.js";
-import {
-  isImplementationIntent,
-  isMetaAnalysisPrompt,
-  isQuestionLike,
-  isSprintPlanExecution,
-} from "./layer6-output.js";
+import { isImplementationIntent, isMetaAnalysisPrompt, isPlanExecution, isQuestionLike } from "./layer6-output.js";
 import type { PipelineContext } from "./types.js";
 
 function mapRouteToPhase(route: string): GsdPhase | null {
@@ -169,17 +164,24 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
   const ecosystem = ctx.ecosystemScope === true;
   const replyLanguage = ctx.replyLanguage ?? undefined;
   const native = isGsdNativeEnabled();
-  const sprintExecution = isSprintPlanExecution(ctx.raw);
+  // I3 — the shared predicate, so a COUNCIL phase turn gets this directive too.
+  // Before, only `isSprintPlanExecution` was checked here: a council phase turn
+  // fell into the `native && !informational` branch below and at heavy tier was
+  // told "MANDATORY: gsd_status -> gsd_discuss -> gsd_plan -> gsd_plan_review
+  // BEFORE any edit_file/write_file/bash" — i.e. re-plan a plan the debate
+  // panelists had just cross-reviewed, with mutation tools blocked until it did.
+  const planExecution = isPlanExecution(ctx.raw);
   let trimmed: string;
   let blocking = false;
   let appliedTier = tier;
 
-  if (sprintExecution) {
-    // Sprint plan execution: the plan has already been debated and reviewed by
-    // the council. The impl turn must APPLY it, not re-enter gsd_plan_review.
+  if (planExecution) {
+    // Plan execution (/ideal sprint OR council per-phase): the plan has already
+    // been debated and reviewed. The impl turn must APPLY it, not re-enter
+    // gsd_plan_review.
     // Override any depth-tier hint that would tell the model to plan first.
     const execDirective = [
-      "[sprint-execution] The attached text is an APPROVED sprint plan.",
+      "[plan-execution] The attached text is an APPROVED, already-reviewed plan.",
       "EXECUTE it directly with edit_file/write_file/bash tools.",
       "Do NOT call gsd_discuss, gsd_plan, or gsd_plan_review — the plan is already reviewed.",
       "After edits, run gsd_verify if verification steps are listed, otherwise finish.",

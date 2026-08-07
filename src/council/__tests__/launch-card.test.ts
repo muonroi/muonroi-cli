@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   buildLaunchCard,
   cheapRunShape,
+  EDIT_SPEC_OPTION_VALUE,
   type LaunchPanelist,
+  MAX_RENDERED_SUCCESS_CRITERIA,
   summariseEstimate,
   summariseProviders,
   summariseRoundBudget,
@@ -95,9 +97,9 @@ describe("buildLaunchCard", () => {
     expect(buildLaunchCard({ ...base, usdPerRound: 0.05 }).context).toContain("Est. cost");
   });
 
-  it("offers start / cheap / refine / cancel with start recommended", () => {
+  it("offers start / cheap / edit / refine / cancel with start recommended", () => {
     const card = buildLaunchCard(base);
-    expect(card.options.map((o) => o.value)).toEqual(["start", "cheap", "refine", "cancel"]);
+    expect(card.options.map((o) => o.value)).toEqual(["start", "cheap", EDIT_SPEC_OPTION_VALUE, "refine", "cancel"]);
     expect(card.defaultIndex).toBe(0);
     expect(card.options[1]?.description).toContain("2 rounds · 3 panelists");
   });
@@ -105,5 +107,57 @@ describe("buildLaunchCard", () => {
   it("still renders with an empty panel rather than an empty line", () => {
     const card = buildLaunchCard({ ...base, participants: [] });
     expect(card.context).toContain("Panel: (none resolved)");
+  });
+
+  // Amendment A2 — Topic + Outcome block (task A2).
+  describe("Topic + Outcome (Amendment A2)", () => {
+    it("falls back to the raw topic as the headline when no problemStatement is given", () => {
+      expect(buildLaunchCard(base).question).toBe("REST vs gRPC for our microservices");
+    });
+
+    it("uses the problem statement as the headline when present, not the raw topic", () => {
+      const card = buildLaunchCard({
+        ...base,
+        topic: "should we use grpc",
+        problemStatement: "Decide whether internal microservices should communicate over gRPC or REST.",
+      });
+      expect(card.question).toBe("Decide whether internal microservices should communicate over gRPC or REST.");
+    });
+
+    it("renders successCriteria as an Outcome row", () => {
+      const card = buildLaunchCard({
+        ...base,
+        successCriteria: ["Latency stays under 50ms p99", "No breaking change to the public API"],
+      });
+      expect(card.context).toContain("Outcome: - Latency stays under 50ms p99");
+      expect(card.context).toContain("- No breaking change to the public API");
+    });
+
+    it("omits the Outcome row when there is no success criteria", () => {
+      expect(buildLaunchCard(base).context).not.toContain("Outcome:");
+      expect(buildLaunchCard({ ...base, successCriteria: [] }).context).not.toContain("Outcome:");
+    });
+
+    it("caps rendered criteria at MAX_RENDERED_SUCCESS_CRITERIA and says how many were left out", () => {
+      const many = Array.from({ length: MAX_RENDERED_SUCCESS_CRITERIA + 4 }, (_, i) => `Criterion ${i + 1}`);
+      const card = buildLaunchCard({ ...base, successCriteria: many });
+      for (let i = 0; i < MAX_RENDERED_SUCCESS_CRITERIA; i++) {
+        expect(card.context).toContain(`Criterion ${i + 1}`);
+      }
+      expect(card.context).not.toContain(`Criterion ${MAX_RENDERED_SUCCESS_CRITERIA + 1}`);
+      expect(card.context).toContain("…and 4 more");
+    });
+
+    it("the edit option is present alongside refine and cancel, not instead of them", () => {
+      const values = buildLaunchCard(base).options.map((o) => o.value);
+      expect(values).toContain(EDIT_SPEC_OPTION_VALUE);
+      expect(values).toContain("refine");
+      expect(values).toContain("cancel");
+    });
+
+    it("allowEdit:false hides the edit option while leaving everything else intact", () => {
+      const values = buildLaunchCard({ ...base, allowEdit: false }).options.map((o) => o.value);
+      expect(values).toEqual(["start", "cheap", "refine", "cancel"]);
+    });
   });
 });

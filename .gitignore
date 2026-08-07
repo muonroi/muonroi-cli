@@ -85,3 +85,6 @@ council.json
 /test-stream2.ts
 .claude/
 transcript/
+
+# Scratch plans written by other local tooling — never part of a branch
+.zcode/
