@@ -7,6 +7,7 @@ import { getMcpKey } from "../mcp/mcp-keychain.js";
 import type { McpToolBundle } from "../mcp/runtime.js";
 import { buildMcpToolSet } from "../mcp/runtime.js";
 import { getModelInfo } from "../models/registry.js";
+import { isAuthenticationError, summarizeApiErrorForLog } from "../orchestrator/error-utils.js";
 import { getProviderCapabilities, resolveTemperature } from "../providers/capabilities.js";
 import { loadKeyForProvider, ProviderKeyMissingError } from "../providers/keychain.js";
 import {
@@ -19,7 +20,7 @@ import {
 import type { ProviderId } from "../providers/types.js";
 import { wireDebug } from "../providers/wire-debug.js";
 import { statusBarStore } from "../state/status-bar-store.js";
-import { recordUsageEvent } from "../storage/index.js";
+import { logInteraction, recordUsageEvent } from "../storage/index.js";
 import type { BashTool } from "../tools/bash.js";
 import { createBuiltinTools as createTools } from "../tools/registry.js";
 import type { AgentMode, CouncilStatusPhase, StreamChunk } from "../types/index.js";
@@ -29,6 +30,14 @@ import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
 import { loadMcpServers } from "../utils/settings.js";
 import { withVisibleRetry } from "../utils/visible-retry.js";
+import {
+  blockModel,
+  consumeBlockNotification,
+  formatBlockedModelWarning,
+  getBlockedModel,
+  isModelBlocked as isModelBlockedInScope,
+  isNonRetryableAuthFailure,
+} from "./model-blocklist.js";
 import { buildResearchSystemPrompt } from "./prompts.js";
 import { stripThinkBlocks } from "./strip-think.js";
 import type { CouncilLLM, CouncilStats, ToolTraceEmitter, UsageCallback } from "./types.js";
@@ -521,6 +530,76 @@ async function collectStreamText(args: {
  */
 export const __testCollectStreamText = collectStreamText;
 
+/**
+ * Persist a council provider-call failure into `interaction_logs`, ALONGSIDE
+ * the existing `logger.error` — before this, the council path's only writer
+ * for a provider failure was debug.log, so `usage forensics` and every
+ * DB-based analysis were structurally blind to this entire failure class
+ * (confirmed: `SELECT … WHERE event_type='error' AND metadata_json LIKE
+ * '%China%'` over the whole DB returns exactly one row, and only because that
+ * one happened to hit the MAIN orchestrator path instead). Reuses the exact
+ * `summarizeApiErrorForLog` envelope the main path already writes
+ * (tool-engine.ts) so status code / url host / response body / isRetryable
+ * land in the SAME shape next to main-path rows — `event_type='error'` is
+ * shared, `event_subtype` is prefixed `council_<kind>_` so the three call
+ * sites (generate/debate/research) stay distinguishable within that shared
+ * type.
+ *
+ * Best-effort: a DB failure here must never break a council run (No-Silent-
+ * Catch — the write failure is still logged, once, with context).
+ *
+ * Also drives Fix 2: when the failure classifies as non-retryable
+ * entitlement/auth (401/403 + SDK isRetryable:false), the model is recorded
+ * in the session-scoped blocklist (model-blocklist.ts) so later calls in the
+ * same session skip it instead of repeating the same rejected call.
+ */
+function recordCouncilProviderFailure(args: {
+  sessionId: string | undefined;
+  kind: "generate" | "debate" | "research";
+  modelId: string;
+  resolvedModelId: string | undefined;
+  providerId: string;
+  durationMs: number;
+  aborted: boolean;
+  err: unknown;
+}): void {
+  const { sessionId, kind, modelId, resolvedModelId, providerId, durationMs, aborted, err } = args;
+  const forensics = summarizeApiErrorForLog(err);
+  const message = err instanceof Error ? err.message : String(err);
+  try {
+    const authError = isAuthenticationError(err) || forensics?.statusCode === 401 || forensics?.statusCode === 403;
+    logInteraction(sessionId ?? "unknown", "error", {
+      eventSubtype: `council_${kind}_${authError ? "auth" : "api"}`,
+      model: modelId,
+      durationMs,
+      data: {
+        message: message.slice(0, 200),
+        resolvedModelId,
+        provider: providerId,
+        aborted,
+        ...(forensics ? { forensics } : {}),
+      },
+    });
+  } catch (logErr) {
+    console.error(
+      `[council/llm] interaction-log write for provider failure failed: ${logErr instanceof Error ? logErr.message : String(logErr)}`,
+      { modelId, kind },
+    );
+  }
+
+  if (isNonRetryableAuthFailure(forensics) && forensics) {
+    blockModel(sessionId, modelId, { statusCode: forensics.statusCode as number, reason: message.slice(0, 300) });
+  }
+}
+
+/**
+ * Test-only handle on the private failure recorder, so Fix 1 (DB write) and
+ * Fix 2 (blocklist) are directly assertable without driving a full streamText
+ * call through `generate`/`debate`/`research`. Not for production use.
+ * @internal
+ */
+export const __testRecordCouncilProviderFailure = recordCouncilProviderFailure;
+
 export function createCouncilLLM(
   bash: BashTool,
   mode: AgentMode,
@@ -528,6 +607,15 @@ export function createCouncilLLM(
   stats: CouncilStats,
 ): CouncilLLM {
   return {
+    isModelBlocked(modelId: string): boolean {
+      return isModelBlockedInScope(sessionId, modelId);
+    },
+    takeModelBlockWarning(modelId: string): string | undefined {
+      const info = getBlockedModel(sessionId, modelId);
+      if (!info) return undefined;
+      if (!consumeBlockNotification(sessionId, modelId)) return undefined;
+      return formatBlockedModelWarning(info);
+    },
     async generate(
       modelId: string,
       system: string,
@@ -648,6 +736,18 @@ export function createCouncilLLM(
           durationMs: Date.now() - t0,
           aborted: signal?.aborted === true,
           error: err instanceof Error ? err.message : String(err),
+        });
+        // Fix 1 (DB-blind council failures) + Fix 2 (non-retryable entitlement
+        // blocklist) — see recordCouncilProviderFailure doc comment.
+        recordCouncilProviderFailure({
+          sessionId,
+          kind: "generate",
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          providerId,
+          durationMs: Date.now() - t0,
+          aborted: signal?.aborted === true,
+          err,
         });
         throw err;
       }
@@ -847,6 +947,16 @@ export function createCouncilLLM(
           aborted: signal?.aborted === true,
           error: errMsg,
         });
+        recordCouncilProviderFailure({
+          sessionId,
+          kind: "debate",
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          providerId,
+          durationMs: Date.now() - t0,
+          aborted: signal?.aborted === true,
+          err,
+        });
         return { text: `[debate failed: ${errMsg}]`, toolCalls: [] };
       } finally {
         await mcpBundleForDebate?.close().catch(() => {});
@@ -1042,6 +1152,28 @@ export function createCouncilLLM(
           textHead: "",
           error: errMsg,
         });
+        // Unlike generate/debate above, this catch previously had NO
+        // unconditional logger call (writeDebugRecord above is opt-in,
+        // MUONROI_COUNCIL_DEBUG_LOG-gated) — a research-phase provider failure
+        // was invisible outside that opt-in file. Add both per No-Silent-Catch.
+        logger.error("orchestrator", "[council.research] call failed — research phase degraded", {
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          provider: providerId,
+          durationMs: Date.now() - t0,
+          aborted: signal?.aborted === true,
+          error: errMsg,
+        });
+        recordCouncilProviderFailure({
+          sessionId,
+          kind: "research",
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          providerId,
+          durationMs: Date.now() - t0,
+          aborted: signal?.aborted === true,
+          err,
+        });
         return (
           `## Source Code Findings\n[Research failed: ${errMsg}]\n\n` +
           `## Internet Findings\n_Not performed._\n\n` +
@@ -1192,11 +1324,24 @@ export async function* tracedGenerateWithFallback(
   const seen = new Set<string>();
   const models = args.models.filter((m) => m && !seen.has(m) && (seen.add(m), true));
   for (let i = 0; i < models.length; i++) {
+    const modelId = models[i];
+    // Fix 2 — skip a candidate that already failed non-retryably (401/403 +
+    // SDK isRetryable:false) earlier in this session instead of burning the
+    // same rejected call again. Surface the reason once per model (not once
+    // per call): `takeModelBlockWarning` returns text only the FIRST time
+    // it's asked about a given blocked model in this scope.
+    if (llm.isModelBlocked?.(modelId)) {
+      const warning = llm.takeModelBlockWarning?.(modelId);
+      if (warning) {
+        yield { type: "toast", toastLevel: "warn", content: warning };
+      }
+      continue;
+    }
     try {
       const raw = yield* tracedGenerate(llm, {
         ...args,
-        modelId: models[i],
-        label: i > 0 ? `${args.label} (fallback: ${models[i]})` : args.label,
+        modelId,
+        label: i > 0 ? `${args.label} (fallback: ${modelId})` : args.label,
       });
       if (raw?.trim()) return raw;
     } catch {

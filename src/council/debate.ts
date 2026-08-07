@@ -337,7 +337,7 @@ async function openingWithRetry(
  * provider keeps that voice in the discussion. Returns undefined when every
  * pooled model resolves to the same provider (nothing to fall back to).
  */
-function pickDebateFallbackModel(failedModel: string, pool: string[]): string | undefined {
+function pickDebateFallbackModel(failedModel: string, pool: string[], llm?: CouncilLLM): string | undefined {
   let failedProvider: string | undefined;
   try {
     failedProvider = detectProviderForModel(failedModel);
@@ -346,6 +346,10 @@ function pickDebateFallbackModel(failedModel: string, pool: string[]): string | 
   }
   for (const candidate of pool) {
     if (candidate === failedModel) continue;
+    // Fix 2 — don't pick a candidate that already failed non-retryably
+    // (401/403 + SDK isRetryable:false) earlier in this session; it would
+    // just burn the same rejected call again instead of recovering the turn.
+    if (llm?.isModelBlocked?.(candidate)) continue;
     let candidateProvider: string | undefined;
     try {
       candidateProvider = detectProviderForModel(candidate);
@@ -453,7 +457,7 @@ export async function researchWithFallback(
   const primary = await llm.research(primaryModel, topic, conversationContext, signal, traceCb, options);
   if (!primary.includes(RESEARCH_FAILED_MARKER) || signal?.aborted) return primary;
 
-  const fallbackModel = pickDebateFallbackModel(primaryModel, fallbackPool);
+  const fallbackModel = pickDebateFallbackModel(primaryModel, fallbackPool, llm);
   if (!fallbackModel) return primary;
 
   traceCb(`[research] ${primaryModel} failed; retrying via ${fallbackModel} (different provider)`);
@@ -598,7 +602,7 @@ async function debateWithRetryInner(
   // a third same-model hit would just fail identically. Skip when the caller
   // aborted (user cancellation must not be papered over by a fallback call).
   if (!signal?.aborted) {
-    const fallbackModel = pickDebateFallbackModel(model, fallbackPool);
+    const fallbackModel = pickDebateFallbackModel(model, fallbackPool, llm);
     if (fallbackModel) {
       try {
         const fb = await llm.debate(
@@ -1650,6 +1654,10 @@ export async function* runDebate(
       if (firstTried) {
         for (const fallbackModel of fallbackPool) {
           if (fallbackModel === firstTried) continue;
+          // Fix 2 — skip a candidate that already failed non-retryably
+          // (401/403 + SDK isRetryable:false) earlier in this session rather
+          // than repeat the identical rejected eval call.
+          if (llm.isModelBlocked?.(fallbackModel)) continue;
           evaluation = yield* evaluateDebate(
             spec,
             allExchangeText,

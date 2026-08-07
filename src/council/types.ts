@@ -713,6 +713,25 @@ export interface CouncilLLM {
     options?: { enableVerificationTools?: boolean },
     onUsage?: UsageCallback,
   ): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }>;
+  /**
+   * Session-scoped entitlement/auth blocklist (see model-blocklist.ts) — true
+   * when `modelId` just failed non-retryably (401/403 + SDK isRetryable:false)
+   * earlier in this session, so callers walking a candidate list should skip
+   * it rather than burn the same rejected call again. Optional so every
+   * existing literal `CouncilLLM` test mock (which never implements it) keeps
+   * compiling — `llm.isModelBlocked?.(id)` reads as `undefined` (falsy) there,
+   * i.e. "not blocked", which is the correct default for a mock with no
+   * blocklist wired up.
+   */
+  isModelBlocked?(modelId: string): boolean;
+  /**
+   * Consume the one-shot "tell the user about this block" flag for `modelId`.
+   * Returns the warning text the FIRST time it's called for a blocked model in
+   * this scope, and `undefined` on every call after that (or when the model
+   * isn't blocked) — so a run that retries the same model across many calls
+   * surfaces the warning once, not once per call.
+   */
+  takeModelBlockWarning?(modelId: string): string | undefined;
 }
 
 export type QuestionResponder = (questionId: string) => Promise<string>;
