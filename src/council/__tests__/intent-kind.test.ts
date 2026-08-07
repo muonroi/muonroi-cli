@@ -9,11 +9,12 @@
  * These tests pin that contract so a future loosening of the type fails here.
  */
 import { describe, expect, it } from "vitest";
-import { pickPostDebateRecommendation, postDebateContinuation } from "../index.js";
+import { pickPostDebateRecommendation, postDebateContinuation, resolvePostDebateDefaultIndex } from "../index.js";
 import {
   ANALYSIS_INTENT_KINDS,
   coerceIntentKind,
   IMPLEMENTATION_INTENT_KINDS,
+  isDefaultEligiblePostDebateAction,
   isImplementationKind,
 } from "../types.js";
 
@@ -137,5 +138,112 @@ describe("postDebateContinuation — continue_session + analysis → null (5c18d
 
   it("generate_plan is no longer a valid action — dropped as a dead alias to implement", () => {
     expect(postDebateContinuation("generate_plan", "x", "evaluation")).toBeNull();
+  });
+});
+
+describe("isDefaultEligiblePostDebateAction — Amendment A1 default-eligibility (947db934b573)", () => {
+  // Off-intent actions stay VISIBLE (this predicate never filters the option
+  // list — see resolvePostDebateDefaultIndex below); it only answers whether an
+  // action is allowed to be the pre-selected DEFAULT.
+
+  it("implement is default-ineligible for every analysis-shape kind", () => {
+    for (const k of ANALYSIS_INTENT_KINDS) {
+      expect(isDefaultEligiblePostDebateAction(k, "implement")).toBe(false);
+    }
+  });
+
+  it("implement is default-eligible for both implementation-shape kinds", () => {
+    for (const k of IMPLEMENTATION_INTENT_KINDS) {
+      expect(isDefaultEligiblePostDebateAction(k, "implement")).toBe(true);
+    }
+  });
+
+  it("every other action id is default-eligible regardless of locked kind", () => {
+    // ask_followup / save_exit / continue_session are the real PostDebateActionId
+    // vocabulary minus "implement"; refine / retry_synthesis are the context-only
+    // values index.ts adds itself. "implement" is the ONLY build action, so it is
+    // the only one this predicate ever gates — pinning that here catches a future
+    // regression that widens the gate to actions it was never meant to cover.
+    const allKinds = [...ANALYSIS_INTENT_KINDS, ...IMPLEMENTATION_INTENT_KINDS];
+    const otherActions = ["ask_followup", "save_exit", "continue_session", "refine", "retry_synthesis"];
+    for (const k of allKinds) {
+      for (const action of otherActions) {
+        expect(isDefaultEligiblePostDebateAction(k, action)).toBe(true);
+      }
+    }
+  });
+
+  it("ask_followup — the option the inconclusive/lowGrounding branches pin at index 0 — is default-eligible for every kind", () => {
+    // index.ts hardcodes defaultIndex = 0 when inconclusive || lowGrounding
+    // (bypassing resolvePostDebateDefaultIndex entirely) because both branches
+    // unshift an ask_followup option ("Keep working the N unmet criteria" /
+    // "Raise confidence — have the council cite & verify") as the honest
+    // default. That short-circuit is only safe because ask_followup can never
+    // be the one gated action — pin the premise here so it fails loudly if the
+    // predicate is ever widened past "implement" without updating index.ts.
+    for (const k of [...ANALYSIS_INTENT_KINDS, ...IMPLEMENTATION_INTENT_KINDS]) {
+      expect(isDefaultEligiblePostDebateAction(k, "ask_followup")).toBe(true);
+    }
+  });
+});
+
+describe("resolvePostDebateDefaultIndex — the lock must constrain the DEFAULT, not the list (A1, session 947db934b573)", () => {
+  // Live defect this closes: intent locked to "evaluation",
+  // pickPostDebateRecommendation correctly returned save_exit, the leader
+  // ranked "implement" first, and the card defaulted to implement anyway
+  // because the old code set defaultIndex = 0 whenever modelActions existed,
+  // discarding both the lock and `recommendation`.
+
+  it("a model ranking with implement at index 0 does NOT produce defaultIndex 0 for any analysis kind — and implement stays present, not filtered", () => {
+    for (const k of ANALYSIS_INTENT_KINDS) {
+      const options = [{ value: "implement" }, { value: "save_exit" }, { value: "continue_session" }];
+      const idx = resolvePostDebateDefaultIndex(options, k, "save_exit");
+
+      expect(idx).not.toBe(0);
+      expect(options[idx].value).not.toBe("implement");
+      // The ruling is "not default", not "not offered" — the option must still
+      // be in the list the resolver was given (resolvePostDebateDefaultIndex
+      // never mutates/filters `options`).
+      expect(options.some((o) => o.value === "implement")).toBe(true);
+    }
+  });
+
+  it("for both implementation kinds, implement at index 0 IS the default", () => {
+    for (const k of IMPLEMENTATION_INTENT_KINDS) {
+      const options = [{ value: "implement" }, { value: "save_exit" }, { value: "continue_session" }];
+      expect(resolvePostDebateDefaultIndex(options, k, "save_exit")).toBe(0);
+    }
+  });
+
+  it("when the model's ranking has no default-eligible action of its own, the guaranteed escape hatch is the default", () => {
+    // "implement" is the only action isDefaultEligiblePostDebateAction ever
+    // rejects, so the only way for a model's proposed ranking to contain zero
+    // eligible actions is for it to have proposed nothing but "implement" —
+    // exactly what index.ts's own escape-hatch guarantee (":1561-1569" — "Save &
+    // Exit" appended when the model omitted one) exists to cover. Pass a
+    // recommendation.value the resolver must NOT fall back to ("implement"
+    // itself) to prove the eligible escape hatch wins over it.
+    for (const k of ANALYSIS_INTENT_KINDS) {
+      const options = [{ value: "implement" }, { value: "save_exit" }];
+      const idx = resolvePostDebateDefaultIndex(options, k, "implement");
+      expect(options[idx].value).toBe("save_exit");
+    }
+  });
+
+  it("never lands on a default-ineligible option when an eligible one exists, even when recommendation.value points at the ineligible one", () => {
+    // Defensive: recommendation is computed via pickPostDebateRecommendation,
+    // which is itself intent-aware and should never do this in practice — but
+    // the resolver's own contract ("never land on ineligible when eligible
+    // exists") must hold even if a caller passes a stale/wrong recommendation.
+    const options = [{ value: "save_exit" }, { value: "implement" }];
+    const idx = resolvePostDebateDefaultIndex(options, "evaluation", "implement");
+    expect(options[idx].value).toBe("save_exit");
+  });
+
+  it("falls back to index 0 when no option is eligible, recommendation.value isn't in the list, and there's no escape hatch", () => {
+    // recommendationValue deliberately doesn't match any entry in `options` so
+    // this actually reaches the final floor, not the recommendation-match tier.
+    const options = [{ value: "implement" }];
+    expect(resolvePostDebateDefaultIndex(options, "evaluation", "save_exit")).toBe(0);
   });
 });

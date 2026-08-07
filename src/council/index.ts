@@ -64,6 +64,7 @@ import {
   buildPhaseOutcomeEnvelope,
   COUNCIL_ANSWER_DISMISSED,
   coerceIntentKind,
+  isDefaultEligiblePostDebateAction,
   isImplementationKind,
   resolvePhaseOutcomeTransition,
 } from "./types.js";
@@ -393,6 +394,41 @@ function synthesisOutputKind(synthesis: string): IntentKind | undefined {
  */
 export function resolveRunKind(locked: IntentKind | undefined, synthesis: string): IntentKind {
   return locked ?? synthesisOutputKind(synthesis) ?? "evaluation";
+}
+
+/**
+ * Amendment A1 (session 947db934b573) — resolve the post-debate DEFAULT index
+ * without ever landing on a default-ineligible option (isDefaultEligiblePostDebateAction)
+ * when an eligible one exists elsewhere in the list. Never filters `options` —
+ * every entry stays visible; this only picks which one is pre-selected.
+ *
+ * Resolution order:
+ *   1. the first default-eligible option in `options`' own order — this IS the
+ *      model's own best-first ranking on the model-first path (baseOptions is
+ *      built straight from outcome.nextActions), and the deterministic build
+ *      order on the fallback path;
+ *   2. else the option matching `recommendationValue` (pickPostDebateRecommendation's
+ *      pick, already intent-aware — see resolveRunKind's doc comment);
+ *   3. else the escape hatch (`save_exit` / `continue_session`), guaranteed
+ *      present by the option-building code above;
+ *   4. else 0 — should be unreachable given (3)'s guarantee, kept as a safe
+ *      floor rather than returning -1.
+ */
+export function resolvePostDebateDefaultIndex(
+  options: Array<{ value: string }>,
+  intentKind: IntentKind,
+  recommendationValue: string,
+): number {
+  const eligibleIndex = options.findIndex((o) => isDefaultEligiblePostDebateAction(intentKind, o.value));
+  if (eligibleIndex >= 0) return eligibleIndex;
+
+  const recommendationIndex = options.findIndex((o) => o.value === recommendationValue);
+  if (recommendationIndex >= 0) return recommendationIndex;
+
+  const escapeIndex = options.findIndex((o) => o.value === "save_exit" || o.value === "continue_session");
+  if (escapeIndex >= 0) return escapeIndex;
+
+  return 0;
 }
 
 /** The literal separator between the machine-JSON and the human prose in a synthesis. */
@@ -1466,19 +1502,22 @@ export async function* runCouncil(
       );
       const inconclusive = !synthesisFailed && critOutcome.inconclusive;
 
+      // The run's authoritative intent kind (launch-card lock wins — see
+      // resolveRunKind's doc comment). Reused below by resolvePostDebateDefaultIndex
+      // (Amendment A1) so the default-index resolution reads the same lock the
+      // recommendation itself was computed from — a single source, not two.
+      const runKind = resolveRunKind(spec.intentKind, synthesisText);
+
       // Recommendation surfaced to the user as the default action. The
       // implementation_plan-vs-decision/evaluation split lives in
       // pickPostDebateRecommendation (issue #3 — see its doc comment).
-      // outputKind goes through resolveRunKind: the launch-card lock (spec.intentKind)
-      // is authoritative over debatePlan.outputShape.kind's pre-debate proposal and
-      // over the synthesis-JSON regex — see resolveRunKind's doc comment.
       const recommendation = pickPostDebateRecommendation({
         synthesisFailed,
         hasEmptySections,
         refinementTopics,
         confidenceLevel,
         hasPlan: !!hasPlan,
-        outputKind: resolveRunKind(spec.intentKind, synthesisText),
+        outputKind: runKind,
         criteriaUnmet: inconclusive ? critOutcome.unmetLabels.length : 0,
       });
 
@@ -1603,10 +1642,11 @@ export async function* runCouncil(
         }
         if (!baseOptions.some((o) => o.value === "continue_session")) baseOptions.push({ ...CONTINUE_OPT });
         if (!synthesisFailed && !inconclusive && !baseOptions.some((o) => o.value === "implement")) {
-          // Insert at index 1, NOT 0 — the model's own best-first pick stays the
-          // default (defaultIndex is 0 for model-first). We only GUARANTEE the
-          // build path is present + prominent; we don't override the model's
-          // judgment that building wasn't the recommended next move.
+          // Insert at index 1, NOT 0 — the model's own best-first pick (index 0)
+          // stays first in the ranking that resolvePostDebateDefaultIndex reads
+          // below (Amendment A1). We only GUARANTEE the build path is present +
+          // prominent; we don't override the model's judgment that building
+          // wasn't the recommended next move.
           baseOptions.splice(1, 0, {
             label: "Start Implementation",
             description: "Load the council conclusion as the spec and build it (plan → change → verify)",
@@ -1687,25 +1727,25 @@ export async function* runCouncil(
         });
       }
 
-      // Model orders actions best-first (index 0 = recommended default); the
-      // fallback set uses the deterministic recommendation. When inconclusive,
-      // the pinned criteria option at index 0 is the honest default regardless of
-      // path.
+      // Amendment A1 (session 947db934b573) — defaultIndex must never select an
+      // action inconsistent with the locked runKind (isDefaultEligiblePostDebateAction),
+      // even though the model orders baseOptions best-first. See
+      // resolvePostDebateDefaultIndex's doc comment for the fallback order.
+      //
+      // inconclusive/lowGrounding keep the hardcoded 0 they had before this
+      // amendment: both branches unshift an `ask_followup` option ("Keep
+      // working the N unmet criteria" / "Raise confidence — have the council
+      // cite & verify", built in the two `if` blocks directly above this one)
+      // as the honest default regardless of intent. ask_followup is never
+      // default-ineligible — only "implement" is, and only for analysis-shape
+      // kinds — so that forced index 0 is itself always a legal default under
+      // the new predicate and does not need to route through
+      // resolvePostDebateDefaultIndex. If a future option ever became the
+      // pinned index-0 choice in this branch AND were default-ineligible, this
+      // comment is your signal to re-derive the ordering instead of trusting it.
       const defaultIndex =
-        inconclusive || lowGrounding
-          ? 0
-          : modelActions
-            ? 0
-            : Math.max(
-                0,
-                baseOptions.findIndex((o) => o.value === recommendation.value),
-              );
-      const recommendReason =
-        inconclusive || lowGrounding
-          ? (baseOptions[0]?.description ?? recommendation.reason)
-          : modelActions
-            ? (baseOptions[0]?.description ?? recommendation.reason)
-            : recommendation.reason;
+        inconclusive || lowGrounding ? 0 : resolvePostDebateDefaultIndex(baseOptions, runKind, recommendation.value);
+      const recommendReason = baseOptions[defaultIndex]?.description ?? recommendation.reason;
 
       const runReceipt = formatRunReceipt({
         rounds: debateState.roundCount,

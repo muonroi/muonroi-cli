@@ -348,6 +348,29 @@ export function isImplementationKind(kind: IntentKind): boolean {
 }
 
 /**
+ * Amendment A1 (2026-08-07, session 947db934b573) — may `action` be the
+ * post-debate DEFAULT selection under the locked `kind`?
+ *
+ * This is a DEFAULT-eligibility check only — never a filter. The ruling is
+ * "not default", not "not offered": an action this returns false for must
+ * stay visible in the option list (the model-first option policy exists so a
+ * debate can surface build work the user did not know to ask for — see
+ * session 8191ecaee149 — and suppressing the option would re-break that).
+ *
+ * Derived from the existing ANALYSIS/IMPLEMENTATION_INTENT_KINDS split via
+ * isImplementationKind — no new hardcoded kind list. "implement" is the only
+ * build action in PostDebateActionId, so it is the only action gated: for an
+ * analysis-shape kind (the synthesis IS the deliverable, never a build
+ * mandate) it is not default-eligible; for an implementation-shape kind, or
+ * for every other action id (including the context-only "refine" /
+ * "retry_synthesis" values index.ts adds), it is.
+ */
+export function isDefaultEligiblePostDebateAction(kind: IntentKind, action: string): boolean {
+  if (action !== "implement") return true;
+  return isImplementationKind(kind);
+}
+
+/**
  * Output shape proposed by the leader LLM per topic.
  * Drives both the synthesis JSON schema and the human-readable Markdown sections.
  */
