@@ -1,11 +1,20 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// recordPlanExecutionHalt (plan-execution.ts) writes an interaction_logs row
+// on every halt path below — mock logInteraction so those rows never hit the
+// real DB, same pattern as plan-phase.test.ts / provider-failure-blocklist.test.ts.
+vi.mock("../../storage/index.js", () => ({ logInteraction: vi.fn() }));
+
 import { isCouncilPlanExecution, isImplementationIntent } from "../../pil/layer6-output.js";
+import { logInteraction } from "../../storage/index.js";
 import type { StreamChunk } from "../../types/index.js";
 import { type PlanPhase, renderPlanMarkdown } from "../plan-artifact.js";
 import { buildPhasePrompt, type ExecutionArgs, runPlanExecution, verifyPhase } from "../plan-execution.js";
+
+const mockLogInteraction = logInteraction as ReturnType<typeof vi.fn>;
 
 const PHASE: PlanPhase = {
   id: "P0",
@@ -175,13 +184,20 @@ describe("runPlanExecution", () => {
     expect(body.match(/\*\*Status:\*\* done/g)).toHaveLength(2);
   });
 
-  it("a failing verify halts and does NOT advance to the next phase", async () => {
+  it("a failing verify halts, does NOT advance to the next phase, and records the halt", async () => {
     cwd = mkdtempSync(join(tmpdir(), "plan-exec-"));
     const planPath = seedPlan(cwd, [phase("P0"), phase("P1")]);
     const seen: string[] = [];
+    mockLogInteraction.mockClear();
 
     const { result, chunks } = await drain(
-      runPlanExecution({ cwd, planPath, processMessage: passthroughMessage(seen), exec: failExec }),
+      runPlanExecution({
+        cwd,
+        planPath,
+        processMessage: passthroughMessage(seen),
+        exec: failExec,
+        sessionId: "sess-halt",
+      }),
     );
 
     expect(result.completed).toEqual([]);
@@ -193,6 +209,14 @@ describe("runPlanExecution", () => {
     expect(chunks.some((c) => c.type === "content" && c.content?.includes("Halted at P0"))).toBe(true);
     // Nothing was marked done — P0 stays pending on disk.
     expect(readFileSync(planPath, "utf8")).not.toContain("**Status:** done");
+
+    // The halt this whole gate exists to enforce must land somewhere a
+    // forensic reader can find it — the exact gap this fix closes.
+    expect(mockLogInteraction).toHaveBeenCalledWith(
+      "sess-halt",
+      "error",
+      expect.objectContaining({ eventSubtype: "council_plan_execution_verify_failed" }),
+    );
   });
 
   it("a plan whose phases are already all done returns immediately without a turn", async () => {

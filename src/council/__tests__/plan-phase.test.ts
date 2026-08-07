@@ -2,18 +2,31 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+// recordPlanPhaseFailure (plan-phase.ts) writes interaction_logs rows on the
+// failure paths exercised below — mock logInteraction so those rows never hit
+// the real DB, same pattern as provider-failure-blocklist.test.ts /
+// council-usage.test.ts for the sibling recordCouncilProviderFailure.
+vi.mock("../../storage/index.js", () => ({ logInteraction: vi.fn() }));
+
 import { planningArtifact } from "../../gsd/paths.js";
 import { canExecute, readPlanVerifyVerdict, readState, setStateField } from "../../gsd/workflow-engine.js";
+import { logInteraction } from "../../storage/index.js";
 import type { StreamChunk } from "../../types/index.js";
 import {
   buildPlannerPrompt,
   buildReviewPrompt,
+  describePlannerFailure,
   mergeReviewVerdicts,
   parsePlannerPhases,
+  plannerFailureSignature,
+  reviewOutcomeSignature,
   runPlannerPhase,
   runPlanReview,
 } from "../plan-phase.js";
 import type { CouncilLLM, CouncilParticipant } from "../types.js";
+
+const mockLogInteraction = logInteraction as ReturnType<typeof vi.fn>;
 
 const MODEL_OUTPUT = `Here is the plan.
 
@@ -161,11 +174,12 @@ describe("runPlannerPhase", () => {
       }),
     );
 
-    expect(result).not.toBeNull();
-    expect(result?.phases).toHaveLength(1);
-    expect(result?.planPath).toBe(planningArtifact(cwd, "PLAN.md"));
-    expect(existsSync(result!.planPath)).toBe(true);
-    expect(readFileSync(result!.planPath, "utf8")).toContain("Sentinel E2E");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    expect(result.phases).toHaveLength(1);
+    expect(result.planPath).toBe(planningArtifact(cwd, "PLAN.md"));
+    expect(existsSync(result.planPath)).toBe(true);
+    expect(readFileSync(result.planPath, "utf8")).toContain("Sentinel E2E");
 
     const doneChunk = chunks.find(
       (c) => c.type === "council_phase" && c.councilPhase?.phaseId === "phase:plan" && c.councilPhase?.state === "done",
@@ -173,7 +187,7 @@ describe("runPlannerPhase", () => {
     expect(doneChunk).toBeDefined();
   });
 
-  it("writes NO plan and returns null when every phase is dropped for missing acceptance criteria", async () => {
+  it("writes NO plan and reports no-acceptance-criteria when every phase is dropped for missing acceptance criteria", async () => {
     cwd = mkdtempSync(join(tmpdir(), "plan-phase-"));
     const noCriteria =
       '```json\n{"phases":[{"id":"P0","title":"t","steps":["s"],"files":[],"acceptance":[],"verify":""}]}\n```';
@@ -188,7 +202,11 @@ describe("runPlannerPhase", () => {
       }),
     );
 
-    expect(result).toBeNull();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    // Distinguishable cause: the phase WAS shaped correctly, it just had no
+    // acceptance criteria — a plan-quality problem, not a model-contract one.
+    expect(result.reason).toBe("no-acceptance-criteria");
     expect(existsSync(planningArtifact(cwd, "PLAN.md"))).toBe(false);
 
     const errorChunk = chunks.find(
@@ -198,7 +216,27 @@ describe("runPlannerPhase", () => {
     expect(errorChunk).toBeDefined();
   });
 
-  it("returns null and emits a phase error when the planner call throws", async () => {
+  it("reports unparseable-output when the planner's text has no JSON phases block at all", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-phase-"));
+    const { result } = await drain(
+      runPlannerPhase({
+        cwd,
+        topic: "topic",
+        synthesis: "SYNTHESIS-BODY",
+        exchanges: "EXCHANGES",
+        plannerModelId: "test-model",
+        llm: fakeLlm("the model rambled about the plan without ever emitting json"),
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    // Distinguishable cause: nothing shaped like a phase at all — a model-contract
+    // problem, not a plan-quality one, so the message points at the MODEL, not the plan.
+    expect(result.reason).toBe("unparseable-output");
+  });
+
+  it("returns generate-failed and emits a phase error when the planner call throws", async () => {
     cwd = mkdtempSync(join(tmpdir(), "plan-phase-"));
     const llm: CouncilLLM = {
       generate: async () => {
@@ -222,10 +260,61 @@ describe("runPlannerPhase", () => {
       }),
     );
 
-    expect(result).toBeNull();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.reason).toBe("generate-failed");
+    expect(result.message).toContain("upstream 500");
     expect(existsSync(planningArtifact(cwd, "PLAN.md"))).toBe(false);
     const errorChunk = chunks.find((c) => c.type === "council_phase" && c.councilPhase?.state === "error");
     expect(errorChunk?.councilPhase?.errorMessage).toContain("upstream 500");
+  });
+
+  it("records an interaction_logs row (via logInteraction) on a planner failure — the diagnostic that was previously destroyed", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-phase-"));
+    mockLogInteraction.mockClear();
+    await drain(
+      runPlannerPhase({
+        cwd,
+        topic: "topic",
+        synthesis: "SYNTHESIS-BODY",
+        exchanges: "EXCHANGES",
+        plannerModelId: "test-model",
+        sessionId: "sess-plan-fail",
+        llm: fakeLlm("the model rambled"),
+      }),
+    );
+
+    expect(mockLogInteraction).toHaveBeenCalledWith(
+      "sess-plan-fail",
+      "error",
+      expect.objectContaining({ eventSubtype: "council_plan_draft_unparseable" }),
+    );
+  });
+});
+
+describe("describePlannerFailure", () => {
+  it("gives a distinguishable, actionable message per failure reason", () => {
+    const generateFailed = describePlannerFailure({ ok: false, reason: "generate-failed", message: "503" });
+    const unparseable = describePlannerFailure({ ok: false, reason: "unparseable-output", message: "" });
+    const noAcceptance = describePlannerFailure({ ok: false, reason: "no-acceptance-criteria", message: "" });
+
+    // Each message is genuinely distinct text, not the same category string —
+    // and each names its own next step so the user isn't left with a category.
+    expect(generateFailed).toMatch(/provider/i);
+    expect(unparseable).toMatch(/model|contract/i);
+    expect(noAcceptance).toMatch(/acceptance|gate/i);
+    expect(new Set([generateFailed, unparseable, noAcceptance]).size).toBe(3);
+  });
+});
+
+describe("plannerFailureSignature", () => {
+  it("is stable for the same reason and differs across reasons", () => {
+    expect(plannerFailureSignature({ ok: false, reason: "unparseable-output", message: "a" })).toBe(
+      plannerFailureSignature({ ok: false, reason: "unparseable-output", message: "b" }),
+    );
+    expect(plannerFailureSignature({ ok: false, reason: "unparseable-output", message: "a" })).not.toBe(
+      plannerFailureSignature({ ok: false, reason: "no-acceptance-criteria", message: "a" }),
+    );
   });
 });
 
@@ -718,6 +807,106 @@ describe("runPlanReview", () => {
     } finally {
       delete process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES;
     }
+  });
+
+  it("records ONE interaction_logs row per non-approve round, carrying the per-reviewer breakdown", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
+    seedPlan(cwd);
+    mockLogInteraction.mockClear();
+    process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES = "0";
+    try {
+      await drain(
+        runPlanReview({
+          cwd,
+          topic: "topic",
+          synthesis: "SYNTHESIS-BODY",
+          exchanges: "EXCHANGES",
+          plannerModelId: "planner-model",
+          leaderModelId: "leader-model",
+          sessionId: "sess-round",
+          participants: [participant("architect", "model-a", "Architect", "structure")],
+          llm: queuedLlm([verdictBlock("revise", ["no rollback plan"])]),
+        }),
+      );
+
+      const roundCalls = mockLogInteraction.mock.calls.filter(
+        (c) => c[2]?.eventSubtype === "council_plan_review_round",
+      );
+      // Exactly one row for the one round that ran (budget 0 → 1 review pass),
+      // not one row per reviewer.
+      expect(roundCalls).toHaveLength(1);
+      expect(roundCalls[0][0]).toBe("sess-round");
+      expect(roundCalls[0][2].data.verdict).toBe("revise");
+      expect(roundCalls[0][2].data.reviewers).toEqual([
+        { role: "architect", stanceName: "Architect", verdict: "revise" },
+      ]);
+    } finally {
+      delete process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES;
+    }
+  });
+
+  it("folds the re-entered planner's specific failure reason into the returned concerns when it fails to redraft", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "plan-review-"));
+    seedPlan(cwd);
+    mockLogInteraction.mockClear();
+    process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES = "1";
+    try {
+      const llm: CouncilLLM = {
+        generate: async (_modelId, _system, prompt) => {
+          // Reviewer call → revise once; planner re-entry → unparseable output
+          // (no json block at all), reproducing the exact class of failure the
+          // session that motivated this fix hit blind.
+          if (prompt.includes("Emit ONE fenced json block")) return "the model rambled instead of emitting json";
+          return verdictBlock("revise", ["needs work"]);
+        },
+        research: async () => {
+          throw new Error("not implemented");
+        },
+        debate: async () => {
+          throw new Error("not implemented");
+        },
+      };
+
+      const { result } = await drain(
+        runPlanReview({
+          cwd,
+          topic: "topic",
+          synthesis: "SYNTHESIS-BODY",
+          exchanges: "EXCHANGES",
+          plannerModelId: "planner-model",
+          leaderModelId: "leader-model",
+          sessionId: "sess-revise-fail",
+          participants: [participant("architect", "model-a", "Architect", "structure")],
+          llm,
+        }),
+      );
+
+      expect(result.verdict).toBe("revise");
+      // The card the user sees next renders `concerns` — the SPECIFIC planner
+      // failure (not just the generic review concern that triggered the
+      // revise attempt) must be in there so the message names a cause.
+      expect(result.concerns.some((c) => /model likely cannot hold that contract/i.test(c))).toBe(true);
+
+      const plannerFailRows = mockLogInteraction.mock.calls.filter(
+        (c) => c[2]?.eventSubtype === "council_plan_review_revise_planner_failed",
+      );
+      expect(plannerFailRows).toHaveLength(1);
+      expect(plannerFailRows[0][0]).toBe("sess-revise-fail");
+    } finally {
+      delete process.env.MUONROI_PLAN_REVIEW_DEBATE_RETRIES;
+    }
+  });
+});
+
+describe("reviewOutcomeSignature", () => {
+  it("is stable for the same verdict+concerns regardless of concern order, and differs when either changes", () => {
+    const a = reviewOutcomeSignature({ verdict: "revise", concerns: ["x", "y"] });
+    const b = reviewOutcomeSignature({ verdict: "revise", concerns: ["y", "x"] });
+    const c = reviewOutcomeSignature({ verdict: "revise", concerns: ["x"] });
+    const d = reviewOutcomeSignature({ verdict: "block", concerns: ["x", "y"] });
+    expect(a).toBe(b);
+    expect(a).not.toBe(c);
+    expect(a).not.toBe(d);
   });
 });
 

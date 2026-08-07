@@ -35,7 +35,13 @@ import { selectTaskAwarePanel } from "./panel-select.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
 import { type PlanPhase, parsePlanMarkdown } from "./plan-artifact.js";
 import { runPlanExecution } from "./plan-execution.js";
-import { runPlannerPhase, runPlanReview } from "./plan-phase.js";
+import {
+  describePlannerFailure,
+  plannerFailureSignature,
+  reviewOutcomeSignature,
+  runPlannerPhase,
+  runPlanReview,
+} from "./plan-phase.js";
 import { runPlanning } from "./planner.js";
 import { runPreflight } from "./preflight.js";
 import { formatRunReceipt, pickLoudestDissent } from "./run-receipt.js";
@@ -488,6 +494,17 @@ export interface PostPlanCardInput {
    * `canExecute` rather than re-deriving the rule here.
    */
   gateBlocksExecution?: boolean;
+  /**
+   * D-3 (2026-08-07) — true when this round's outcome is IDENTICAL to the
+   * round before it (same {@link reviewOutcomeSignature}), and the revise
+   * that produced this round carried no new user input (the bare "Revise the
+   * plan" pick, nothing typed). Withdraws `revise_plan` and says why: another
+   * blind revise cannot produce a different result than the one that just
+   * happened. session 947db934b573 — two empty-freetext "Revise the plan"
+   * picks, ~5 min and ~15 calls each, before a third attempt finally failed
+   * outright with no more information than the first.
+   */
+  revisionConverged?: boolean;
 }
 
 export interface PostPlanCard {
@@ -537,6 +554,7 @@ export function buildPostPlanCard(input: PostPlanCardInput): PostPlanCard {
   ]);
 
   const offersExecute = input.verdict !== "block" && input.gateBlocksExecution !== true;
+  const revisionConverged = input.revisionConverged === true;
 
   const options: CouncilQuestionOption[] = [
     ...(offersExecute
@@ -550,12 +568,20 @@ export function buildPostPlanCard(input: PostPlanCardInput): PostPlanCard {
           },
         ]
       : []),
-    {
-      label: "Revise the plan",
-      description: "Send comments back to the planner — the plan is redrafted and re-reviewed.",
-      value: "revise_plan",
-      kind: "freetext",
-    },
+    // D-3 — withdrawn when this round reproduced the last round's outcome AND
+    // the revise that led here carried no new input: offering it again would
+    // just spend another full drafting + review cycle to relearn what the
+    // card already knows.
+    ...(revisionConverged
+      ? []
+      : [
+          {
+            label: "Revise the plan",
+            description: "Send comments back to the planner — the plan is redrafted and re-reviewed.",
+            value: "revise_plan",
+            kind: "freetext" as const,
+          },
+        ]),
     {
       label: "Save & Exit",
       description: "Keep the plan on disk and stop here without executing it.",
@@ -578,9 +604,18 @@ export function buildPostPlanCard(input: PostPlanCardInput): PostPlanCard {
       ? "\n\nExecute is unavailable: depth is heavy and plan review did not approve, so the GSD mutation gate would block every edit inside the phase turns (see .planning/PLAN-VERIFY.md). Running it would burn a turn per phase and write nothing."
       : "";
 
+  // D-3 — say WHY revise is missing, with the concrete next step (specific
+  // guidance, not another blank submit).
+  const convergedBlock = revisionConverged
+    ? "\n\nRevise is unavailable: the last revision carried no new instructions and reproduced this exact outcome — another blind revise would not change it. Execute anyway or save; typing specific guidance on a future attempt would."
+    : "";
+
   return {
-    question:
-      input.verdict === "block"
+    question: revisionConverged
+      ? offersExecute
+        ? "Revising without new instructions changed nothing. Execute anyway or save and stop?"
+        : "Revising without new instructions changed nothing, and execute is unavailable. Save and stop?"
+      : input.verdict === "block"
         ? "Plan review blocked this plan. Revise it or save and stop?"
         : input.gateBlocksExecution === true
           ? "Plan review asked for changes, and the mutation gate would block execution. Revise it, or save and stop?"
@@ -588,10 +623,17 @@ export function buildPostPlanCard(input: PostPlanCardInput): PostPlanCard {
             ? "Plan review asked for changes. Revise it, execute anyway, or save and stop?"
             : "Plan reviewed and approved. Implement it now?",
     context:
-      [`Plan: ${input.planPath}`, ...phaseLines, `Verdict: ${input.verdict}`].join("\n") + concernsBlock + gateBlock,
+      [`Plan: ${input.planPath}`, ...phaseLines, `Verdict: ${input.verdict}`].join("\n") +
+      concernsBlock +
+      gateBlock +
+      convergedBlock,
     options,
-    defaultIndex:
-      input.verdict === "approve"
+    defaultIndex: revisionConverged
+      ? // Conservative: don't default to executing an un-approved plan just
+        // because revise is off the table — the user still explicitly picks
+        // execute_plan if they want it.
+        options.findIndex((o) => o.value === "save_exit")
+      : input.verdict === "approve"
         ? options.findIndex((o) => o.value === "execute_plan")
         : options.findIndex((o) => o.value === "revise_plan"),
   };
@@ -2080,6 +2122,19 @@ export async function* runCouncil(
         const exchangesText = resolveDebateSummary(debateState);
         let draftSynthesis = synthesisText;
         const MAX_MANUAL_PLAN_REVISIONS = 3;
+        // D-3 — the manual revision loop's own convergence tracking, distinct
+        // from runPlanReview's INTERNAL bounded retry (getPlanReviewDebateRetries):
+        // that one re-enters the planner automatically on a `revise` verdict,
+        // bounded by its own retry budget, before ever returning here. This one
+        // is entered ONLY when the user explicitly picks "Revise the plan" on
+        // the card below. `prevRoundSignature` is this OUTER loop's last-seen
+        // outcome; `prevRevisionHadNewInput` is whether the pick that led to the
+        // CURRENT round carried freetext (vs. the bare option with nothing
+        // typed). When a round reproduces the prior round's signature AND the
+        // revise that led to it had no new input, another blind revise is
+        // predictable, not useful — see PostPlanCardInput.revisionConverged.
+        let prevRoundSignature: string | null = null;
+        let prevRevisionHadNewInput = false;
         for (let manualRevision = 0; ; manualRevision += 1) {
           yield { type: "content", content: "\n> Drafting an implementation plan from the approved conclusion...\n" };
           const plannerGen = runPlannerPhase({
@@ -2089,6 +2144,7 @@ export async function* runCouncil(
             exchanges: exchangesText,
             plannerModelId: leaderModelId,
             llm,
+            sessionId,
           });
           // biome-ignore lint/suspicious/noImplicitAnyLet: shape inferred from runPlannerPhase generator
           let plannerStep;
@@ -2097,10 +2153,20 @@ export async function* runCouncil(
             if (!plannerStep.done && plannerStep.value) yield plannerStep.value;
           } while (!plannerStep.done);
           const plannerOutcome = plannerStep.value;
-          if (!plannerOutcome) {
+          if (!plannerOutcome.ok) {
+            // D-2 — name WHICH of the three causes happened instead of the bare
+            // "could not produce a gateable plan" category (session 947db934b573
+            // ran this exact path three times with no way to tell them apart).
+            const causeMessage = describePlannerFailure(plannerOutcome);
+            const stagnant =
+              prevRoundSignature !== null &&
+              !prevRevisionHadNewInput &&
+              plannerFailureSignature(plannerOutcome) === prevRoundSignature;
             yield {
               type: "content",
-              content: "\n> The planner could not produce a gateable plan — saving the conclusion without executing.\n",
+              content: stagnant
+                ? `\n> ${causeMessage} This is the identical failure the last blind revision produced — another one would not help. Saving the conclusion without executing.\n`
+                : `\n> ${causeMessage} Saving the conclusion without executing.\n`,
             };
             break;
           }
@@ -2114,6 +2180,7 @@ export async function* runCouncil(
             leaderModelId,
             participants: debateState.active,
             llm,
+            sessionId,
           });
           // biome-ignore lint/suspicious/noImplicitAnyLet: shape inferred from runPlanReview generator
           let reviewStep;
@@ -2122,6 +2189,15 @@ export async function* runCouncil(
             if (!reviewStep.done && reviewStep.value) yield reviewStep.value;
           } while (!reviewStep.done);
           const reviewOutcome = reviewStep.value;
+          const thisRoundSignature = reviewOutcomeSignature(reviewOutcome);
+          // D-3 — see the loop-level comment above: converged only when this
+          // round's outcome is the SAME as last round's AND the revise that led
+          // here added nothing new to act on.
+          const revisionConverged =
+            reviewOutcome.verdict !== "approve" &&
+            prevRoundSignature !== null &&
+            !prevRevisionHadNewInput &&
+            thisRoundSignature === prevRoundSignature;
 
           // Re-read PLAN.md rather than trusting plannerOutcome.phases: runPlanReview
           // may have redrafted it internally (revise loop) before returning.
@@ -2160,6 +2236,7 @@ export async function* runCouncil(
             verdict: reviewOutcome.verdict,
             concerns: reviewOutcome.concerns,
             gateBlocksExecution,
+            revisionConverged,
           });
           const planQuestionId = randomUUID();
           yield {
@@ -2219,6 +2296,14 @@ export async function* runCouncil(
           const comments =
             planAnswer === "revise_plan" ? reviewOutcome.concerns.join("; ") || "Please revise the plan." : planAnswer;
           draftSynthesis = [draftSynthesis, "", "User-requested revision:", comments].join("\n");
+          // D-3 — record what THIS round produced and whether the pick that
+          // continues the loop carried new input, so the NEXT iteration can
+          // detect a repeat. `revisionConverged` above already withdrew
+          // "revise_plan" whenever this was true, so `planAnswer` reaching here
+          // as the literal "revise_plan" can only mean the bare pick (no
+          // freetext) — never a converged round the user tried to push through.
+          prevRoundSignature = thisRoundSignature;
+          prevRevisionHadNewInput = planAnswer !== "revise_plan";
         }
       }
       // "save_exit" falls through to normal persistence — "implement" is now
@@ -2417,6 +2502,7 @@ export async function* runCouncil(
         cwd: options?.cwd ?? process.cwd(),
         planPath: executePlanPath,
         processMessage: processMessageFn,
+        sessionId,
       });
       idealTrace("council.execution.done", {
         sessionId,

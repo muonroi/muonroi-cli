@@ -19,8 +19,39 @@
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { COUNCIL_PLAN_EXECUTION_MARKER } from "../pil/layer6-output.js";
+import { logInteraction } from "../storage/index.js";
 import type { StreamChunk } from "../types/index.js";
+import { logger } from "../utils/logger.js";
 import { markPhaseDone, type PlanPhase, parsePlanMarkdown } from "./plan-artifact.js";
+
+/**
+ * Persist a plan-EXECUTION halt into `interaction_logs` — the plan-phase.ts
+ * sibling to `recordCouncilProviderFailure` (council/llm.ts) and this file's
+ * own `recordPlanPhaseFailure`, same `sessionId ?? "unknown"` fallback, same
+ * event_type "error", same best-effort discipline. Called exactly at each
+ * terminal `return` in `runPlanExecution` below — every one of them already IS
+ * the run's outcome (the phase loop halted) — not at the two `killTree`
+ * cleanup failures, which are a best-effort side observation after the
+ * verify's own ok/fail already decided the outcome.
+ */
+function recordPlanExecutionHalt(args: {
+  sessionId: string | undefined;
+  eventSubtype: string;
+  message: string;
+  data?: Record<string, unknown>;
+}): void {
+  try {
+    logInteraction(args.sessionId ?? "unknown", "error", {
+      eventSubtype: args.eventSubtype,
+      data: { message: args.message.slice(0, 500), ...args.data },
+    });
+  } catch (logErr) {
+    console.error(
+      `[council/plan-execution] interaction-log write for execution halt failed: ${logErr instanceof Error ? logErr.message : String(logErr)}`,
+      { eventSubtype: args.eventSubtype },
+    );
+  }
+}
 
 /**
  * `error` mirrors what `child_process.spawn`/`spawnSync` actually surface for a
@@ -119,15 +150,22 @@ function defaultExec(cmd: string, args: string[], cwd: string, timeoutMs: number
       } catch (err) {
         // ESRCH = it already exited between the decision and the signal, which
         // is the common benign case. Log rather than swallow: any OTHER errno
-        // here means a verify tree really was left running.
-        console.error(
-          `[council/plan-execution] could not kill verify process tree (pid ${pid}): ${(err as Error).message}`,
-        );
+        // here means a verify tree really was left running. No DB row: the
+        // verify's own ok/fail already decided the run's outcome by the time
+        // this cleanup runs — a leaked process is a side observation, not a
+        // second outcome.
+        logger.error("orchestrator", "[council/plan-execution] could not kill verify process tree", {
+          pid,
+          message: (err as Error).message,
+        });
         // Last resort — at least take the shell down.
         try {
           child.kill("SIGKILL");
         } catch (fallbackErr) {
-          console.error(`[council/plan-execution] fallback child.kill also failed: ${(fallbackErr as Error).message}`);
+          logger.error("orchestrator", "[council/plan-execution] fallback child.kill also failed", {
+            pid,
+            message: (fallbackErr as Error).message,
+          });
         }
       }
     };
@@ -228,7 +266,12 @@ export async function verifyPhase(
     return { ok: r.status === 0 && !r.error, output };
   } catch (err) {
     const message = (err as Error).message;
-    console.error(`[council/plan-execution] verify threw for ${phase.id}: ${message}`);
+    // No DB row here: `runPlanExecution` records the halt once, at the point
+    // it receives this `{ok:false}` back — whether verifyPhase failed via a
+    // non-zero exit or (this branch) exec() throwing outright, the caller's
+    // halt reason already folds the message in, so one row covers both shapes
+    // instead of this leaf and its caller each writing one.
+    logger.error("orchestrator", "[council/plan-execution] verify threw", { phaseId: phase.id, message });
     return { ok: false, output: message };
   }
 }
@@ -238,6 +281,8 @@ export interface ExecutionArgs {
   planPath: string;
   processMessage: (message: string) => AsyncGenerator<StreamChunk, void, unknown>;
   exec?: ExecFn;
+  /** Threaded through to `interaction_logs` on a halt — see recordPlanExecutionHalt. */
+  sessionId?: string;
 }
 
 export async function* runPlanExecution(
@@ -250,16 +295,22 @@ export async function* runPlanExecution(
       body = readFileSync(args.planPath, "utf8");
     } catch (err) {
       const message = (err as Error).message;
-      console.error(`[council/plan-execution] could not read ${args.planPath}: ${message}`);
+      logger.error("orchestrator", "[council/plan-execution] could not read plan file", {
+        planPath: args.planPath,
+        message,
+      });
       // null, not the last COMPLETED phase — that phase already passed its own
       // verify; naming it here would send the reader to a phase that
       // succeeded. The failure is at the plan-file level, before any phase
       // for THIS iteration was even selected, so no phase id is implicated.
-      return {
-        completed,
-        haltedAt: null,
-        reason: `could not read ${args.planPath}: ${message}`,
-      };
+      const reason = `could not read ${args.planPath}: ${message}`;
+      recordPlanExecutionHalt({
+        sessionId: args.sessionId,
+        eventSubtype: "council_plan_execution_read_failed",
+        message: reason,
+        data: { planPath: args.planPath },
+      });
+      return { completed, haltedAt: null, reason };
     }
     // "No phases in the file" and "every phase is done" are NOT the same
     // outcome, and collapsing them made a malformed plan report success having
@@ -268,7 +319,13 @@ export async function* runPlanExecution(
     const parsed = parsePlanMarkdown(body);
     if (parsed.length === 0) {
       const reason = `no phases found in ${args.planPath} — expected \`## P0 — Title\` headings; nothing was executed`;
-      console.error(`[council/plan-execution] ${reason}`);
+      logger.error("orchestrator", "[council/plan-execution] no phases found in plan", { planPath: args.planPath });
+      recordPlanExecutionHalt({
+        sessionId: args.sessionId,
+        eventSubtype: "council_plan_execution_no_phases",
+        message: reason,
+        data: { planPath: args.planPath },
+      });
       yield { type: "content", content: `\n> ${reason}\n` };
       return { completed, haltedAt: null, reason };
     }
@@ -293,6 +350,12 @@ export async function* runPlanExecution(
 
     const result = await verifyPhase(phase, args.cwd, args.exec);
     if (!result.ok) {
+      recordPlanExecutionHalt({
+        sessionId: args.sessionId,
+        eventSubtype: "council_plan_execution_verify_failed",
+        message: result.output,
+        data: { phaseId: phase.id },
+      });
       yield {
         type: "content",
         content: `\n> Halted at ${phase.id}: verify failed.\n\n${result.output.slice(0, 2000)}\n`,
@@ -309,10 +372,19 @@ export async function* runPlanExecution(
       freshBody = readFileSync(args.planPath, "utf8");
     } catch (err) {
       const message = (err as Error).message;
-      console.error(
-        `[council/plan-execution] verify passed for ${phase.id} but could not re-read ${args.planPath}: ${message}`,
-      );
-      return { completed, haltedAt: phase.id, reason: `verify passed but could not re-read the plan: ${message}` };
+      logger.error("orchestrator", "[council/plan-execution] verify passed but could not re-read plan", {
+        phaseId: phase.id,
+        planPath: args.planPath,
+        message,
+      });
+      const reason = `verify passed but could not re-read the plan: ${message}`;
+      recordPlanExecutionHalt({
+        sessionId: args.sessionId,
+        eventSubtype: "council_plan_execution_reread_failed",
+        message: reason,
+        data: { phaseId: phase.id, planPath: args.planPath },
+      });
+      return { completed, haltedAt: phase.id, reason };
     }
 
     // The phase turn may have already marked itself done in PLAN.md — not an
@@ -328,7 +400,16 @@ export async function* runPlanExecution(
       // agent turn plus another verify — unbounded, with no iteration cap.
       if (next === freshBody) {
         const reason = `could not mark ${phase.id} done — the plan on disk no longer matches the phase that was just verified`;
-        console.error(`[council/plan-execution] ${reason}`);
+        logger.error("orchestrator", "[council/plan-execution] could not mark phase done", {
+          phaseId: phase.id,
+          planPath: args.planPath,
+        });
+        recordPlanExecutionHalt({
+          sessionId: args.sessionId,
+          eventSubtype: "council_plan_execution_mark_done_failed",
+          message: reason,
+          data: { phaseId: phase.id, planPath: args.planPath },
+        });
         yield { type: "content", content: `\n> Halted at ${phase.id}: ${reason}\n` };
         return { completed, haltedAt: phase.id, reason };
       }
@@ -336,14 +417,19 @@ export async function* runPlanExecution(
         writeFileSync(args.planPath, next, "utf8");
       } catch (err) {
         const message = (err as Error).message;
-        console.error(
-          `[council/plan-execution] verify passed for ${phase.id} but could not write ${args.planPath}: ${message}`,
-        );
-        return {
-          completed,
-          haltedAt: phase.id,
-          reason: `verify passed but could not persist plan progress: ${message}`,
-        };
+        logger.error("orchestrator", "[council/plan-execution] verify passed but could not write plan", {
+          phaseId: phase.id,
+          planPath: args.planPath,
+          message,
+        });
+        const reason = `verify passed but could not persist plan progress: ${message}`;
+        recordPlanExecutionHalt({
+          sessionId: args.sessionId,
+          eventSubtype: "council_plan_execution_write_failed",
+          message: reason,
+          data: { phaseId: phase.id, planPath: args.planPath },
+        });
+        return { completed, haltedAt: phase.id, reason };
       }
     }
     completed.push(phase.id);

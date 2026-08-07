@@ -176,4 +176,72 @@ describe("buildPostPlanCard", () => {
       expect(card.context).not.toContain("Execute is unavailable");
     });
   });
+
+  // ── D-3: a revision that reproduced the last round's outcome with no new
+  // user input must stop offering the option that just failed ────────────────
+  describe("revisionConverged withdraws revise_plan and says why (D-3)", () => {
+    it("a revise verdict under revisionConverged offers NO revise_plan", () => {
+      const card = buildPostPlanCard({
+        planPath: "p",
+        phases: PHASES,
+        verdict: "revise",
+        concerns: ["needs work"],
+        revisionConverged: true,
+      });
+      expect(card.options.some((o) => o.value === "revise_plan")).toBe(false);
+      // Execute is still offered — the user can act, they just can't blindly retry.
+      expect(card.options.some((o) => o.value === "execute_plan")).toBe(true);
+      expect(card.options.some((o) => o.value === "save_exit")).toBe(true);
+    });
+
+    it("says WHY revise is missing rather than silently dropping the option", () => {
+      const card = buildPostPlanCard({
+        planPath: "p",
+        phases: PHASES,
+        verdict: "revise",
+        concerns: ["needs work"],
+        revisionConverged: true,
+      });
+      expect(card.context).toContain("Revise is unavailable");
+      expect(card.question).toMatch(/changed nothing/i);
+    });
+
+    it("defaults to save_exit, not execute, even though execute is offered", () => {
+      // Conservative: revise being off the table should not make an
+      // un-approved plan the DEFAULT action — the user still has to pick it.
+      const card = buildPostPlanCard({
+        planPath: "p",
+        phases: PHASES,
+        verdict: "revise",
+        concerns: ["needs work"],
+        revisionConverged: true,
+      });
+      expect(card.options[card.defaultIndex].value).toBe("save_exit");
+    });
+
+    it("a block verdict under revisionConverged still offers only save_exit", () => {
+      const card = buildPostPlanCard({
+        planPath: "p",
+        phases: PHASES,
+        verdict: "block",
+        concerns: ["unsafe"],
+        revisionConverged: true,
+      });
+      expect(card.options.map((o) => o.value)).toEqual(["save_exit"]);
+      expect(card.options[card.defaultIndex].value).toBe("save_exit");
+    });
+
+    it("revisionConverged is a no-op on a fresh (non-converged) round", () => {
+      const converged = buildPostPlanCard({
+        planPath: "p",
+        phases: PHASES,
+        verdict: "revise",
+        concerns: ["needs work"],
+        revisionConverged: false,
+      });
+      const omitted = buildPostPlanCard({ planPath: "p", phases: PHASES, verdict: "revise", concerns: ["needs work"] });
+      expect(converged.options.map((o) => o.value)).toEqual(omitted.options.map((o) => o.value));
+      expect(converged.defaultIndex).toBe(omitted.defaultIndex);
+    });
+  });
 });

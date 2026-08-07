@@ -448,4 +448,68 @@ describe("implement -> plan draft -> review -> post-plan card -> execute_plan", 
     expect(execOption).toBeUndefined();
     expect(processMessageFn).not.toHaveBeenCalled();
   });
+
+  // ── D-3: two empty-freetext "Revise the plan" picks reproduced the SAME
+  // revise outcome (session 947db934b573: ~5 min and ~15 calls each, before a
+  // third round finally failed outright with no more information than the
+  // first). The card must stop offering the option that just failed instead
+  // of running a third identical cycle.
+  it("D-3: a second empty-freetext revise that reproduces the same outcome withdraws revise_plan instead of looping a third time", async () => {
+    cwd = mkdtempSync(join(tmpdir(), "council-plan-exec-"));
+    const { runCouncil } = await import("../index.js");
+
+    const reviseVerdict = [
+      "```council-verdict",
+      JSON.stringify({ verdict: "revise", concerns: ["needs a rollback step"] }),
+      "```",
+    ].join("\n");
+
+    const processMessageFn = vi.fn().mockImplementation(async function* () {
+      yield { type: "done" };
+    });
+
+    const planCards: StreamChunk[] = [];
+    const chunks: StreamChunk[] = [];
+    const respondToQuestion = vi.fn(async (_id: string) => {
+      const last = chunks[chunks.length - 1];
+      if (last?.type === "council_question" && last.councilQuestion?.phase === "post-plan") {
+        planCards.push(last);
+        // Always pick the bare "Revise the plan" option with nothing typed —
+        // the exact empty-freetext pick the live session made twice.
+        const values = (last.councilQuestion?.options ?? []).map((o) => o.value);
+        if (values.includes("revise_plan")) return "revise_plan";
+        // revise_plan has been withdrawn (converged) — take whatever
+        // non-destructive option remains so the run terminates.
+        return "save_exit";
+      }
+      if ((last?.councilQuestion?.options ?? []).some((o) => o.value === "implement")) return "implement";
+      return "save_exit";
+    });
+
+    await drain(
+      runCouncil(
+        "Add a sentinel",
+        "mock-model",
+        [],
+        "sess-revise-converge",
+        buildMockLLM(reviseVerdict),
+        respondToQuestion as unknown as (id: string) => Promise<string>,
+        vi.fn().mockResolvedValue(true),
+        processMessageFn,
+        { skipClarification: true, cwd },
+      ),
+      chunks,
+    );
+
+    // Exactly 2 post-plan cards: round 1 (fresh, revise offered) and round 2
+    // (converged — same outcome, no new input — revise withdrawn). NOT a 3rd.
+    expect(planCards).toHaveLength(2);
+    const round1Values = (planCards[0].councilQuestion?.options ?? []).map((o) => o.value);
+    const round2Values = (planCards[1].councilQuestion?.options ?? []).map((o) => o.value);
+    expect(round1Values).toContain("revise_plan");
+    expect(round2Values).not.toContain("revise_plan");
+    expect(planCards[1].councilQuestion?.context).toContain("Revise is unavailable");
+    // The phase loop never ran — the user picked save_exit off the converged card.
+    expect(processMessageFn).not.toHaveBeenCalled();
+  });
 });
