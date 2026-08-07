@@ -700,8 +700,14 @@ export function buildSpecFromTopic(topic: string, conversationContext: string): 
  *
  * We LLM-extract criteria/constraints/scope from the topic when QA is empty.
  * Falls back to the original buildSpecFromTopic if the LLM call fails.
+ *
+ * Exported (Amendment A2, 2026-08-07) so the auto-council path in
+ * council/index.ts — which sets `skipClarification: true` and never calls
+ * `synthesizeSpec` at all — can call this directly to get a real spec for the
+ * S1 launch card, instead of leaving `spec` at `buildSpecFromTopic`'s
+ * degenerate default (`successCriteria = ["Address the topic: …"]`).
  */
-async function* inferSpecFromTopicOnly(
+export async function* inferSpecFromTopicOnly(
   topic: string,
   conversationContext: string,
   leaderModelId: string,
@@ -765,8 +771,14 @@ async function* inferSpecFromTopicOnly(
         rawQA: [],
       };
     }
-  } catch {
-    // Fall through to original buildSpecFromTopic shape
+  } catch (err) {
+    // No-Silent-Catch: this is the LLM call the auto-council path (index.ts)
+    // relies on for a real spec on the S1 launch card. Log with context, then
+    // fall through to the degenerate buildSpecFromTopic shape below — a failed
+    // inference must never block or abort the run.
+    console.error(
+      `[council/clarifier] inferSpecFromTopicOnly failed for topic "${topic.slice(0, 80)}": ${(err as Error)?.message}`,
+    );
   }
   return buildSpecFromTopic(topic, conversationContext);
 }

@@ -22,14 +22,14 @@ import {
   isCouncilCostAware,
   isCouncilMultiProviderPreferred,
 } from "../utils/settings.js";
-import { buildSpecFromTopic, runClarification } from "./clarifier.js";
+import { buildSpecFromTopic, inferSpecFromTopicOnly, runClarification } from "./clarifier.js";
 import { buildCouncilContext, buildProjectSnapshot } from "./context.js";
 import { evaluateResearchNeed, MAX_OPENING_ATTEMPTS, runDebate } from "./debate.js";
 import { planDebate } from "./debate-planner.js";
 import { resolveDebateSummary } from "./debate-summary.js";
 import { detectOutOfStackProposals, writeDecisionsLock } from "./decisions-lock.js";
 import { INTENT_COPY, parseIntentAnswer } from "./intent-card.js";
-import { buildLaunchCard, cheapRunShape } from "./launch-card.js";
+import { buildLaunchCard, cheapRunShape, EDIT_SPEC_OPTION_VALUE } from "./launch-card.js";
 import { buildCouncilCandidatePool, resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
 import { selectTaskAwarePanel } from "./panel-select.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
@@ -102,6 +102,39 @@ export function withCouncilSignal(llm: CouncilLLM, signal: AbortSignal | undefin
  * Round 0 still runs, so the user is asked the key questions exactly once.
  */
 const EXPLICIT_COUNCIL_CLARIFY_ROUNDS = 1;
+
+/**
+ * Amendment A2 — hard cap on how many times the S1 launch card can be edited
+ * (topic/outcome) before it starts. Bounds a pathological loop (a user, or a
+ * misbehaving headless caller, repeatedly picking "Edit"): once the cap is
+ * reached the card stops offering the edit option (`allowEdit: false`,
+ * launch-card.ts), forcing the run toward start/cheap/refine/cancel.
+ */
+export const MAX_LAUNCH_CARD_EDIT_ROUNDS = 3;
+
+/**
+ * Amendment A2 — the ONE condition for "will a human see the S1 launch
+ * card?". Shared by the auto-council spec-inference call (pay for
+ * `inferSpecFromTopicOnly` only when its result will actually be rendered)
+ * and the S1 block itself. A drift between the two would either burn a
+ * leader call nobody sees, or render the card without ever having paid for
+ * the real spec — the brief calls this out explicitly as load-bearing.
+ *
+ * Written as a type predicate (`sessionId is string`), not a closure, so
+ * `if (willShowLaunchCard(sessionId, ...))` narrows the CALLER's `sessionId`
+ * to `string` for the rest of that block — TypeScript only narrows a checked
+ * identifier through a user-defined type guard, not through an opaque
+ * boolean-returning closure, and both call sites need that narrowing to pass
+ * `sessionId` on to functions that require `string`.
+ */
+function willShowLaunchCard(
+  sessionId: string | undefined,
+  suppressPreDebateCards: boolean | undefined,
+  sprintPlanningMode: boolean | undefined,
+  aborted: boolean,
+): sessionId is string {
+  return Boolean(sessionId) && !suppressPreDebateCards && !sprintPlanningMode && !aborted;
+}
 
 export interface RunCouncilOptions {
   skipClarification?: boolean;
@@ -702,6 +735,86 @@ export function buildNeutralPostCouncilContinuation(synthesis: string): string {
   );
 }
 
+/**
+ * Amendment A2 — the S1 "Edit topic or outcome" round. Collects the
+ * correction as TWO dedicated freetext questions (topic, then outcome) rather
+ * than folding a freetext option into the launch card's own answer.
+ *
+ * This is deliberate, not incidental — see "Trap 2" in the A2 design doc.
+ * `QuestionResponder` (`(questionId) => Promise<string>`) returns ONLY the
+ * final text; the `CouncilQuestionOption.kind` the user picked ("choice" vs
+ * "freetext") never reaches this module (council-manager.ts's
+ * `respondToQuestion` drops it — see `CouncilQuestionAnswer.kind` in
+ * council-question-card.tsx). So if the S1 card itself carried a freetext
+ * option, a user typing e.g. "evaluation" as their corrected topic would
+ * return the string "evaluation" — indistinguishable, at this call site, from
+ * a `kind:"choice"` pick whose `value` happens to be the IntentKind
+ * "evaluation". `parseIntentAnswer`/`coerceIntentKind` would silently accept
+ * it as an intent pick and the edit would vanish with no error.
+ *
+ * The fix is structural, not a string check: the S1 card offers only a
+ * `kind:"choice"` option (`EDIT_SPEC_OPTION_VALUE`, a sentinel outside the
+ * `IntentKind` union and outside {"start","cheap","refine","cancel"}).
+ * Picking it is recognised by exact equality BEFORE `parseIntentAnswer` is
+ * ever called (see the S1 loop below), and routes here — a SEPARATE
+ * question/answer round whose text is applied directly to `spec` and never
+ * passed through `parseIntentAnswer` at all. A valid intent pick on the S1
+ * card therefore still parses as an intent pick (this function is never
+ * invoked), and freetext collected here — however it reads — can never be
+ * misread as an intent pick (this function's result never reaches that
+ * parser). The two paths cannot collide because they are different
+ * question/answer round-trips, not different branches of the same one.
+ */
+async function* collectSpecEdit(
+  spec: ClarifiedSpec,
+  sessionId: string,
+  round: number,
+  respondToQuestion: QuestionResponder,
+): AsyncGenerator<StreamChunk, { problemStatement: string; successCriteria: string[] }, unknown> {
+  const topicQuestionId = `council-edit-topic-${sessionId}-${round}`;
+  yield {
+    type: "council_question",
+    content: "",
+    councilQuestion: {
+      questionId: topicQuestionId,
+      phase: "council-setup",
+      question: "What should the topic / problem statement actually be?",
+      context: `Current: ${spec.problemStatement}\n\nLeave blank to keep it unchanged.`,
+      isRequired: false,
+      options: [{ label: "Type the corrected topic", value: "", kind: "freetext" }],
+      defaultIndex: 0,
+    },
+  } as StreamChunk;
+  const topicAnswer = (await respondToQuestion(topicQuestionId)).trim();
+
+  const outcomeQuestionId = `council-edit-outcome-${sessionId}-${round}`;
+  yield {
+    type: "council_question",
+    content: "",
+    councilQuestion: {
+      questionId: outcomeQuestionId,
+      phase: "council-setup",
+      question: "What outcome should this run aim for?",
+      context: `Current:\n${spec.successCriteria.map((c) => `- ${c}`).join("\n")}\n\nOne per line. Leave blank to keep unchanged.`,
+      isRequired: false,
+      options: [{ label: "Type the corrected outcome", value: "", kind: "freetext" }],
+      defaultIndex: 0,
+    },
+  } as StreamChunk;
+  const outcomeAnswer = (await respondToQuestion(outcomeQuestionId)).trim();
+  const successCriteria = outcomeAnswer
+    ? outcomeAnswer
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+    : [...spec.successCriteria];
+
+  return {
+    problemStatement: topicAnswer || spec.problemStatement,
+    successCriteria,
+  };
+}
+
 export async function* runCouncil(
   topic: string,
   sessionModelId: string,
@@ -885,6 +998,42 @@ export async function* runCouncil(
       spec = clarifyResult.value;
     } else {
       spec = buildSpecFromTopic(topic, conversationContext);
+      // Amendment A2 — auto-council skips the clarifier interview entirely, so
+      // without this call `spec` stays at buildSpecFromTopic's degenerate
+      // default (problemStatement = raw topic, successCriteria = ["Address the
+      // topic: <first 100 chars>"]). The S1 card is about to render that as
+      // "what the council understood" — boilerplate there is worse than
+      // nothing. inferSpecFromTopicOnly does the same one-shot extraction the
+      // clarifier itself falls back to when the user answers zero questions,
+      // and it already fails open to buildSpecFromTopic on any parse/LLM
+      // failure (clarifier.ts). Gated on willShowLaunchCard so a run whose
+      // card never renders (suppressPreDebateCards / sprintPlanningMode) never
+      // pays for this call.
+      if (willShowLaunchCard(sessionId, options?.suppressPreDebateCards, options?.sprintPlanningMode, userAborted())) {
+        try {
+          const inferGen = inferSpecFromTopicOnly(
+            topic,
+            conversationContext,
+            leaderModelId,
+            llm,
+            costAware,
+            participants.map((p) => p.model),
+          );
+          let inferResult: IteratorResult<StreamChunk, ClarifiedSpec>;
+          do {
+            inferResult = await inferGen.next();
+            if (!inferResult.done && inferResult.value) yield inferResult.value;
+          } while (!inferResult.done);
+          spec = inferResult.value;
+        } catch (err) {
+          // No-Silent-Catch: log with context, keep the buildSpecFromTopic
+          // default assigned above — a failed inference must never block or
+          // abort the run.
+          console.error(
+            `[council] inferSpecFromTopicOnly call failed (fail-open, keeping topic-only spec): ${(err as Error)?.message}`,
+          );
+        }
+      }
       yield { type: "content", content: `\n> Auto-council: skipping clarification (PIL pre-classified).\n` };
     }
 
@@ -1094,44 +1243,83 @@ export async function* runCouncil(
   let launchRounds = debatePlan.plannedRounds ?? 3;
   let launchParticipants = active;
   let launchCostAware = costAware;
-  if (sessionId && !options?.suppressPreDebateCards && !options?.sprintPlanningMode && !userAborted()) {
+  if (willShowLaunchCard(sessionId, options?.suppressPreDebateCards, options?.sprintPlanningMode, userAborted())) {
     const proposedKind = coerceIntentKind(debatePlan.outputShape.kind);
-    const card = buildLaunchCard({
-      topic,
-      leaderModelId,
-      participants: active.map((p) => ({ role: p.role, model: p.model, stanceName: p.stance?.name })),
-      plannedRounds: launchRounds,
-      researchOn: !researchSkipOverride,
-      costAware,
-      language: getCouncilLanguage(),
-      usdPerRound: historicalUsdPerRound(),
-      intent: { proposedKind, intentSummary: debatePlan.intentSummary },
-      providerOf: (modelId) => {
-        try {
-          return detectProviderForModel(modelId);
-        } catch (err) {
-          // An unresolvable provider just drops out of the lineup summary —
-          // better a shorter line than a fabricated vendor name.
-          console.error(`[council/index] providerOf lookup failed for model "${modelId}": ${(err as Error)?.message}`);
-          return undefined;
-        }
-      },
-    });
-    const setupQuestionId = `council-setup-${sessionId}`;
-    yield {
-      type: "council_question",
-      content: "",
-      councilQuestion: {
-        questionId: setupQuestionId,
-        phase: "council-setup",
-        question: card.question,
-        context: card.context,
-        isRequired: true,
-        options: card.options,
-        defaultIndex: card.defaultIndex,
-      },
-    } as StreamChunk;
-    const choice = (await respondToQuestion(setupQuestionId)).trim();
+    // Amendment A2 — the card is rendered in a loop so "Edit topic or outcome"
+    // can re-render it with the corrected values instead of starting the run.
+    // `choice` is read after the loop breaks; `editRounds` bounds the loop
+    // (MAX_LAUNCH_CARD_EDIT_ROUNDS) so a pathological "always edit" answer
+    // (real user or a misbehaving headless caller) cannot spin forever — once
+    // the cap is hit the card stops OFFERING the edit option
+    // (`allowEdit: editRounds < MAX_LAUNCH_CARD_EDIT_ROUNDS`), which forces
+    // the next answer down the start/cheap/refine/cancel path below.
+    let choice = "";
+    let editRounds = 0;
+    for (;;) {
+      const card = buildLaunchCard({
+        topic,
+        leaderModelId,
+        participants: active.map((p) => ({ role: p.role, model: p.model, stanceName: p.stance?.name })),
+        plannedRounds: launchRounds,
+        researchOn: !researchSkipOverride,
+        costAware,
+        language: getCouncilLanguage(),
+        usdPerRound: historicalUsdPerRound(),
+        intent: { proposedKind, intentSummary: debatePlan.intentSummary },
+        problemStatement: spec.problemStatement,
+        successCriteria: spec.successCriteria,
+        allowEdit: editRounds < MAX_LAUNCH_CARD_EDIT_ROUNDS,
+        providerOf: (modelId) => {
+          try {
+            return detectProviderForModel(modelId);
+          } catch (err) {
+            // An unresolvable provider just drops out of the lineup summary —
+            // better a shorter line than a fabricated vendor name.
+            console.error(
+              `[council/index] providerOf lookup failed for model "${modelId}": ${(err as Error)?.message}`,
+            );
+            return undefined;
+          }
+        },
+      });
+      const setupQuestionId = `council-setup-${sessionId}-${editRounds}`;
+      yield {
+        type: "council_question",
+        content: "",
+        councilQuestion: {
+          questionId: setupQuestionId,
+          phase: "council-setup",
+          question: card.question,
+          context: card.context,
+          isRequired: true,
+          options: card.options,
+          defaultIndex: card.defaultIndex,
+        },
+      } as StreamChunk;
+      choice = (await respondToQuestion(setupQuestionId)).trim();
+
+      // Trap 2 — this check runs BEFORE parseIntentAnswer and is an exact-
+      // string match against a sentinel that is not a member of IntentKind
+      // and not "start"/"cheap"/"refine"/"cancel" (see EDIT_SPEC_OPTION_VALUE
+      // doc comment + collectSpecEdit doc comment above). It can only be
+      // reached by picking the dedicated `kind:"choice"` edit option — never
+      // by freetext typed elsewhere — so it cannot collide with a genuine
+      // intent pick.
+      if (choice !== EDIT_SPEC_OPTION_VALUE || editRounds >= MAX_LAUNCH_CARD_EDIT_ROUNDS) break;
+      editRounds++;
+      const edited = yield* collectSpecEdit(spec, sessionId, editRounds, respondToQuestion);
+      spec.problemStatement = edited.problemStatement;
+      spec.successCriteria = edited.successCriteria;
+      // Trap 1 — index.ts passes BOTH `spec` and `topic` to runDebate (the
+      // `runDebate(spec, { topic, ... }, llm)` call further below in this
+      // function). `topic` is a plain function parameter (not const), so it
+      // is directly reassignable; writing only spec.problemStatement would
+      // leave the raw original topic flowing into the debate config and
+      // silently diverge from what the card just showed the user.
+      topic = edited.problemStatement;
+      yield { type: "content", content: "\n> Topic/outcome updated — showing the corrected card.\n" };
+      // Loop back: re-render, do NOT start the run.
+    }
     // An intent pick is not a run-shape pick: record it and keep the card's
     // shape defaults (start). Anything else falls through to the existing
     // start/cheap/refine/cancel handling untouched.

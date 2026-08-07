@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildIntentOptions, INTENT_COPY, parseIntentAnswer } from "../intent-card.js";
-import { buildLaunchCard } from "../launch-card.js";
+import { buildLaunchCard, EDIT_SPEC_OPTION_VALUE } from "../launch-card.js";
 import { ANALYSIS_INTENT_KINDS, IMPLEMENTATION_INTENT_KINDS, type IntentKind } from "../types.js";
 
 const ALL_KINDS = [...ANALYSIS_INTENT_KINDS, ...IMPLEMENTATION_INTENT_KINDS] as IntentKind[];
@@ -44,19 +44,19 @@ describe("buildLaunchCard intent block", () => {
     costAware: false,
   };
 
-  it("without an intent block the option set is unchanged", () => {
+  it("without an intent block the option set is unchanged (plus the A2 edit option)", () => {
     const card = buildLaunchCard(base);
-    expect(card.options.map((o) => o.value)).toEqual(["start", "cheap", "refine", "cancel"]);
+    expect(card.options.map((o) => o.value)).toEqual(["start", "cheap", EDIT_SPEC_OPTION_VALUE, "refine", "cancel"]);
   });
 
-  it("with an intent block the intent options lead and start/cheap/refine/cancel follow", () => {
+  it("with an intent block the intent options lead and start/cheap/edit/refine/cancel follow", () => {
     const card = buildLaunchCard({
       ...base,
       intent: { proposedKind: "implementation_plan", intentSummary: "Build the sentinel E2E" },
     });
     expect(card.options[0].value).toBe("implementation_plan");
-    const tail = card.options.slice(-4).map((o) => o.value);
-    expect(tail).toEqual(["start", "cheap", "refine", "cancel"]);
+    const tail = card.options.slice(-5).map((o) => o.value);
+    expect(tail).toEqual(["start", "cheap", EDIT_SPEC_OPTION_VALUE, "refine", "cancel"]);
     expect(card.defaultIndex).toBe(0);
   });
 });

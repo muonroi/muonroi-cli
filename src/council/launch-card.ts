@@ -50,6 +50,31 @@ export interface LaunchCardInput {
    * the `/council` slash path and auto-council DO show the intent block.
    */
   intent?: { proposedKind: IntentKind; intentSummary: string };
+  /**
+   * Amendment A2 (2026-08-07). The council's understanding of the problem —
+   * `ClarifiedSpec.problemStatement`. When present it becomes the card's
+   * HEADLINE instead of the raw `topic` argument, which is the defect this
+   * amendment fixes (the old headline showed verbatim user input, never what
+   * the council actually concluded the problem was). Optional so callers that
+   * build a card without a resolved spec (older tests, direct callers) keep
+   * the previous "topic verbatim" headline.
+   */
+  problemStatement?: string;
+  /**
+   * Amendment A2. `ClarifiedSpec.successCriteria` — rendered as a capped
+   * "Outcome" row above Panel/Providers/etc so the user sees what the council
+   * is aiming for, not just how the run is shaped. Absent/empty omits the row
+   * entirely (mirrors the Est. cost omission pattern below).
+   */
+  successCriteria?: readonly string[];
+  /**
+   * Amendment A2. Whether the "edit topic/outcome" option is offered. Defaults
+   * to true (shown) when omitted. The caller (index.ts) sets this to false
+   * once `MAX_LAUNCH_CARD_EDIT_ROUNDS` edit rounds have been used, so a
+   * pathological edit loop cannot recur forever — the card itself stops
+   * offering the option rather than relying on the caller to refuse it.
+   */
+  allowEdit?: boolean;
 }
 
 export interface LaunchCard {
@@ -105,6 +130,26 @@ export function summariseEstimate(usdPerRound: number | null | undefined, planne
 const CHEAP_ROUNDS = 2;
 const CHEAP_PANEL = 3;
 
+/**
+ * Amendment A2. Success criteria can be long and numerous (the clarifier /
+ * `inferSpecFromTopicOnly` both target ≥3, uncapped above that); rendering all
+ * of them would make the card scroll past readability. Cap what's shown and
+ * say how many were left out rather than silently truncating.
+ */
+export const MAX_RENDERED_SUCCESS_CRITERIA = 5;
+
+/**
+ * Amendment A2 — sentinel choice value for "edit the topic/outcome before
+ * spending". Exported so index.ts can recognise it via exact string equality
+ * BEFORE the answer ever reaches `parseIntentAnswer` (Trap 2 in the A2 design
+ * doc: `parseIntentAnswer` coerces any string that happens to match a valid
+ * `IntentKind` into that kind, so a freetext edit whose text collided with an
+ * intent value would otherwise vanish with no error). Deliberately not a
+ * member of `IntentKind` and not equal to "start" / "cheap" / "refine" /
+ * "cancel", so it cannot collide with any existing option value.
+ */
+export const EDIT_SPEC_OPTION_VALUE = "edit_topic_outcome";
+
 /** Round budget + panel size a "cheap run" collapses to. Exported for the caller. */
 export function cheapRunShape(input: { plannedRounds: number; panelSize: number }): {
   rounds: number;
@@ -119,6 +164,15 @@ export function cheapRunShape(input: { plannedRounds: number; panelSize: number 
 export function buildLaunchCard(input: LaunchCardInput): LaunchCard {
   const label = (p: LaunchPanelist) => p.stanceName ?? p.role;
   const rows: Array<[string, string]> = [];
+  // Amendment A2 — Outcome block, above every other row, so what the council
+  // is aiming for is the first thing after the Topic headline.
+  const criteria = (input.successCriteria ?? []).filter((c) => c.trim().length > 0);
+  if (criteria.length > 0) {
+    const shown = criteria.slice(0, MAX_RENDERED_SUCCESS_CRITERIA);
+    const hidden = criteria.length - shown.length;
+    const body = shown.map((c) => `- ${c}`).join("\n") + (hidden > 0 ? `\n- …and ${hidden} more` : "");
+    rows.push(["Outcome", body]);
+  }
   if (input.intent) rows.push(["Intent", INTENT_COPY[input.intent.proposedKind].label]);
   rows.push(["Panel", input.participants.map(label).join(" · ") || "(none resolved)"]);
   const providers = summariseProviders(input.participants, input.providerOf);
@@ -146,6 +200,21 @@ export function buildLaunchCard(input: LaunchCardInput): LaunchCard {
       value: "cheap",
       kind: "choice",
     },
+    // Amendment A2 — distinct from "Refine the topic first": refine aborts
+    // back to the composer and spends nothing further this turn; this option
+    // stays in the flow and re-renders the card with the corrected values so
+    // the user can then start (or edit again). `allowEdit` defaults to shown;
+    // the caller (index.ts) turns it off once the edit-round cap is spent.
+    ...(input.allowEdit === false
+      ? []
+      : [
+          {
+            label: "Edit topic or outcome",
+            description: "Correct what the council understood before anything is spent",
+            value: EDIT_SPEC_OPTION_VALUE,
+            kind: "choice" as const,
+          },
+        ]),
     {
       label: "Refine the topic first",
       description: "Go back to the composer — nothing is spent",
@@ -155,8 +224,14 @@ export function buildLaunchCard(input: LaunchCardInput): LaunchCard {
     { label: "Cancel", description: "Drop this council run", value: "cancel", kind: "choice" },
   ];
 
+  // Amendment A2 — Topic headline. `problemStatement` is the council's own
+  // understanding (from the clarifier interview or inferSpecFromTopicOnly);
+  // falling back to the raw topic keeps callers that build a card without a
+  // resolved spec (older tests, direct callers) on the previous behaviour.
+  const topicHeadline = input.problemStatement?.trim() || input.topic.trim() || "Start the council debate?";
+
   return {
-    question: input.topic.trim() || "Start the council debate?",
+    question: topicHeadline,
     context: [
       `${input.leaderModelId} will lead · ${input.participants.length} panelist${
         input.participants.length === 1 ? "" : "s"
