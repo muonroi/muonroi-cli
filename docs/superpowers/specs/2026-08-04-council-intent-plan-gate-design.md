@@ -125,7 +125,8 @@ One screen, one extra choice, no second modal.
   council topic at all (chitchat) resolves through the existing `Cancel` option.
 - `Cheap run / Refine the topic first / Cancel` are unchanged.
 
-The answer **locks `spec.intentKind` for the whole run**.
+The answer **locks `spec.intentKind` for the whole run**. See Amendment A1 — as originally built the
+lock was read by the recommendation but not by the option set, so it did not hold.
 
 > **Correction (2026-08-06, whole-branch review).** This paragraph originally claimed the lock
 > drives "`outputShape`, panel composition, whether the planner phase runs, and the post-debate
@@ -204,6 +205,94 @@ a no-op alias. It becomes the real trigger for D2, or is removed if D3's card su
 The intent comment at `index.ts:366-368` is reversed, and the reversal is documented in place
 with a pointer to this spec — the old position was deliberate and a future reader must see why it
 changed.
+
+---
+
+# Amendment A (2026-08-07) — what the user declares must govern the run
+
+Both items below come from live session `947db934b573` and were found after PR #123 opened. They
+share one premise the original spec never stated: **a declaration the user made on the launch card
+outranks anything a model proposes later.** D1 encoded that premise for the intent lock but did
+not defend it, and never mentioned the topic at all.
+
+### A1 — the intent lock must constrain the option set, not just the recommendation
+
+D1 says the answer "locks `spec.intentKind` for the whole run". As built it does not.
+
+- `index.ts:1481` computes `recommendation` through `resolveRunKind(spec.intentKind, …)` — correct,
+  the lock is honoured here.
+- `index.ts:1694-1702` then sets `defaultIndex = 0` **whenever `modelActions` exists**, discarding
+  `recommendation` entirely. It is consulted only on the deterministic fallback path.
+- The option list itself (`index.ts:1492-1511`) is copied straight from `outcome.nextActions`
+  (parsed at `planner.ts:383`) with **no intent filtering anywhere**. `spec.intentKind` has exactly
+  two readers in `index.ts`; neither touches the options.
+
+Net effect, and exactly what session `947db934b573` did: intent locked to `evaluation`,
+`pickPostDebateRecommendation` correctly returned `save_exit`, the leader put `implement` at index
+0, and the card defaulted to implement.
+
+**This is a hole in this spec, not an implementation slip.** The spec never mentions `nextActions`
+or the model-first option policy (grep: zero matches), so it never resolved the collision between
+that pre-existing policy — options are leader-authored, no hardcoded menu, introduced to fix
+session `8191ecaee149` where a decision-shape debate had no build path — and D1's new claim that
+the user's locked intent is authoritative. Implementer and reviewer both followed the spec; the
+lock leaked anyway.
+
+**Ruling.** Off-intent actions stay **visible** but may never be **default**. Suppressing them
+outright would discard the case the model-first policy exists to serve: a debate legitimately
+surfaces work the user did not know to ask for. Concretely: `defaultIndex` must resolve to an
+option whose action is consistent with the locked kind, falling back to `recommendation.value` and
+then to the escape hatch; if no listed action is intent-consistent, the escape hatch is the
+default, never index 0.
+
+### A2 — the topic and its outcome are confirmed before any spend
+
+`/council <something>` today takes the whole argument verbatim as the topic. `launch-card.ts:159`
+renders `input.topic.trim()` as the card headline, and the card's rows (`:122-132`) carry no
+problem statement and no success criteria. The user answers clarification questions and never sees
+what the council concluded the problem and the desired outcome are.
+
+`Refine the topic first` (`launch-card.ts:150-154`) is not an edit — it aborts back to the composer
+("nothing is spent"). There is no path that shows a proposed topic and lets the user correct it.
+
+**Design.** The launch card gains a **Topic** and an **Outcome** block above the existing rows,
+sourced from `spec.problemStatement` and `spec.successCriteria`, plus an option that edits them as
+freetext. `Refine the topic first` and `Cancel` keep their current meanings.
+
+Per path:
+
+| Path | Where the spec comes from | Card |
+|---|---|---|
+| `/council …` | clarifier interview (`index.ts:823` — today the only caller that runs it) | Topic + Outcome, editable |
+| auto-council | `inferSpecFromTopicOnly` — one leader call, no interview | identical |
+| `suppressPreDebateCards` (`convene_council`, sprint planning) | unchanged | no card — no human is present |
+
+The auto-council row is the load-bearing one. It passes `skipClarification: true`
+(`index.ts:95`), so `spec` stays at the degenerate `buildSpecFromTopic` default (`index.ts:781`),
+which per `clarifier.ts:683` is `problemStatement` = the raw string and
+`successCriteria = ["Address the topic: <first 100 chars>"]`. Rendering that would be worse than
+rendering nothing — it would present boilerplate as derived understanding. `inferSpecFromTopicOnly`
+(`clarifier.ts:704`) already does the real extraction but is reachable only from inside
+`runClarification` (`:787`); it must be callable on the auto path. Cost: one extra leader-tier call
+per auto-council, subject to `costAware` like every other non-debate call.
+
+**Constraint that must not be missed.** `index.ts:1142` passes **both** `spec` and `topic` to
+`runDebate`. An edit that writes only `spec.problemStatement` leaves the raw `topic` flowing
+downstream and the two silently diverge. Both are written, or the edit is not applied.
+
+### Amendment testing
+
+- `defaultIndex` never lands on an action inconsistent with the locked kind, for every
+  `IntentKind`, including when the leader ranks such an action first
+- an off-intent action is still present in the option list — the ruling is "not default", not
+  "not offered"
+- launch card renders `problemStatement` and `successCriteria`; editing both rewrites `spec` **and**
+  `topic`, asserted at the `runDebate` call boundary
+- auto-council reaches the card with a spec from `inferSpecFromTopicOnly`, never with
+  `"Address the topic: …"`
+- `suppressPreDebateCards` still shows no card and still spends nothing on spec inference
+
+---
 
 ## Out of scope
 
