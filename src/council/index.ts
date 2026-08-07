@@ -402,33 +402,32 @@ export function resolveRunKind(locked: IntentKind | undefined, synthesis: string
  * when an eligible one exists elsewhere in the list. Never filters `options` —
  * every entry stays visible; this only picks which one is pre-selected.
  *
- * Resolution order:
- *   1. the first default-eligible option in `options`' own order — this IS the
- *      model's own best-first ranking on the model-first path (baseOptions is
- *      built straight from outcome.nextActions), and the deterministic build
- *      order on the fallback path;
- *   2. else the option matching `recommendationValue` (pickPostDebateRecommendation's
- *      pick, already intent-aware — see resolveRunKind's doc comment);
- *   3. else the escape hatch (`save_exit` / `continue_session`), guaranteed
- *      present by the option-building code above;
- *   4. else 0 — should be unreachable given (3)'s guarantee, kept as a safe
- *      floor rather than returning -1.
+ * Returns the first default-eligible option in `options`' own order — this IS
+ * the model's own best-first ranking on the model-first path (baseOptions is
+ * built straight from outcome.nextActions), and the deterministic build order
+ * on the fallback path — or 0 if none is eligible.
+ *
+ * That "0 if none is eligible" floor is deliberately NOT a recommendation-value
+ * lookup or an explicit save_exit/continue_session search. With the current
+ * predicate, isDefaultEligiblePostDebateAction gates ONLY "implement", and only
+ * for analysis-shape kinds — so `eligibleIndex === -1` can happen ONLY when
+ * every single entry in `options` has value "implement" (any other value is
+ * always eligible, so its presence would have already satisfied the findIndex
+ * above). In that situation there is no non-"implement" entry anywhere in the
+ * list to fall back to, so a recommendation-value or escape-hatch lookup could
+ * only ever re-find the same ineligible "implement" entry or come up empty —
+ * it cannot produce an answer this floor doesn't already give. An earlier
+ * version of this function carried those two extra lookup tiers; code review
+ * (2026-08-07) found no input that could make them return anything different
+ * from this floor, so no test could fail without them — removed per YAGNI.
+ * If isDefaultEligiblePostDebateAction is ever widened to gate more than
+ * "implement", that widening is exactly when a recommendation/escape-hatch
+ * fallback becomes meaningful again — re-add it there, together with a test
+ * that is provably impossible to write against today's narrower predicate.
  */
-export function resolvePostDebateDefaultIndex(
-  options: Array<{ value: string }>,
-  intentKind: IntentKind,
-  recommendationValue: string,
-): number {
+export function resolvePostDebateDefaultIndex(options: Array<{ value: string }>, intentKind: IntentKind): number {
   const eligibleIndex = options.findIndex((o) => isDefaultEligiblePostDebateAction(intentKind, o.value));
-  if (eligibleIndex >= 0) return eligibleIndex;
-
-  const recommendationIndex = options.findIndex((o) => o.value === recommendationValue);
-  if (recommendationIndex >= 0) return recommendationIndex;
-
-  const escapeIndex = options.findIndex((o) => o.value === "save_exit" || o.value === "continue_session");
-  if (escapeIndex >= 0) return escapeIndex;
-
-  return 0;
+  return eligibleIndex >= 0 ? eligibleIndex : 0;
 }
 
 /** The literal separator between the machine-JSON and the human prose in a synthesis. */
@@ -1743,9 +1742,27 @@ export async function* runCouncil(
       // resolvePostDebateDefaultIndex. If a future option ever became the
       // pinned index-0 choice in this branch AND were default-ineligible, this
       // comment is your signal to re-derive the ordering instead of trusting it.
-      const defaultIndex =
-        inconclusive || lowGrounding ? 0 : resolvePostDebateDefaultIndex(baseOptions, runKind, recommendation.value);
-      const recommendReason = baseOptions[defaultIndex]?.description ?? recommendation.reason;
+      const defaultIndex = inconclusive || lowGrounding ? 0 : resolvePostDebateDefaultIndex(baseOptions, runKind);
+      // recommendReason's TEXT SOURCE (code review round 1): inconclusive/
+      // lowGrounding and the model-first path both PIN the default to an
+      // option index.ts itself constructed/ranked for this exact turn (the
+      // criteria/confidence follow-up, or the model's own best-first pick), so
+      // that option's own `description` is the right explanation — read via
+      // `baseOptions[defaultIndex]`, NOT the literal index 0, since defaultIndex
+      // is no longer necessarily 0 on the model-first path (that's the whole
+      // point of this amendment). The deterministic fallback path has no such
+      // freshly-authored option — its options are a fixed, reusable menu — so
+      // it keeps using `recommendation.reason`, the curated per-recommendation
+      // text pickPostDebateRecommendation already produced. Do not swap the
+      // deterministic branch to `baseOptions[defaultIndex]?.description`: that
+      // trades curated reasoning for generic option copy with no test coverage
+      // for the regression (this was flagged in round 1 review).
+      const recommendReason =
+        inconclusive || lowGrounding
+          ? (baseOptions[defaultIndex]?.description ?? recommendation.reason)
+          : modelActions
+            ? (baseOptions[defaultIndex]?.description ?? recommendation.reason)
+            : recommendation.reason;
 
       const runReceipt = formatRunReceipt({
         rounds: debateState.roundCount,

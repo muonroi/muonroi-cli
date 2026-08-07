@@ -193,11 +193,19 @@ describe("resolvePostDebateDefaultIndex — the lock must constrain the DEFAULT,
   // ranked "implement" first, and the card defaulted to implement anyway
   // because the old code set defaultIndex = 0 whenever modelActions existed,
   // discarding both the lock and `recommendation`.
+  //
+  // Signature note (code review round 1): resolvePostDebateDefaultIndex takes
+  // only (options, intentKind) — no recommendationValue. An earlier version
+  // also tried a recommendation-value lookup and an explicit escape-hatch
+  // lookup as fallback tiers; review proved no input could ever reach either
+  // one with a different answer than the eligible-option lookup already gives
+  // (see the function's doc comment for why), so no test could fail without
+  // them. Removed per YAGNI rather than kept as untestable dead code.
 
   it("a model ranking with implement at index 0 does NOT produce defaultIndex 0 for any analysis kind — and implement stays present, not filtered", () => {
     for (const k of ANALYSIS_INTENT_KINDS) {
       const options = [{ value: "implement" }, { value: "save_exit" }, { value: "continue_session" }];
-      const idx = resolvePostDebateDefaultIndex(options, k, "save_exit");
+      const idx = resolvePostDebateDefaultIndex(options, k);
 
       expect(idx).not.toBe(0);
       expect(options[idx].value).not.toBe("implement");
@@ -211,39 +219,19 @@ describe("resolvePostDebateDefaultIndex — the lock must constrain the DEFAULT,
   it("for both implementation kinds, implement at index 0 IS the default", () => {
     for (const k of IMPLEMENTATION_INTENT_KINDS) {
       const options = [{ value: "implement" }, { value: "save_exit" }, { value: "continue_session" }];
-      expect(resolvePostDebateDefaultIndex(options, k, "save_exit")).toBe(0);
+      expect(resolvePostDebateDefaultIndex(options, k)).toBe(0);
     }
   });
 
-  it("when the model's ranking has no default-eligible action of its own, the guaranteed escape hatch is the default", () => {
+  it("falls back to 0 when every option is ineligible — the only way that happens is a list containing nothing but 'implement' entries", () => {
     // "implement" is the only action isDefaultEligiblePostDebateAction ever
-    // rejects, so the only way for a model's proposed ranking to contain zero
-    // eligible actions is for it to have proposed nothing but "implement" —
-    // exactly what index.ts's own escape-hatch guarantee (":1561-1569" — "Save &
-    // Exit" appended when the model omitted one) exists to cover. Pass a
-    // recommendation.value the resolver must NOT fall back to ("implement"
-    // itself) to prove the eligible escape hatch wins over it.
+    // rejects, so eligibleIndex === -1 requires every entry's value to be
+    // "implement" (any other value would already have matched). This is the
+    // one remaining edge the floor exists for, distinct from the two tests
+    // above (which both have a non-"implement" entry present and eligible).
     for (const k of ANALYSIS_INTENT_KINDS) {
-      const options = [{ value: "implement" }, { value: "save_exit" }];
-      const idx = resolvePostDebateDefaultIndex(options, k, "implement");
-      expect(options[idx].value).toBe("save_exit");
+      expect(resolvePostDebateDefaultIndex([{ value: "implement" }], k)).toBe(0);
+      expect(resolvePostDebateDefaultIndex([{ value: "implement" }, { value: "implement" }], k)).toBe(0);
     }
-  });
-
-  it("never lands on a default-ineligible option when an eligible one exists, even when recommendation.value points at the ineligible one", () => {
-    // Defensive: recommendation is computed via pickPostDebateRecommendation,
-    // which is itself intent-aware and should never do this in practice — but
-    // the resolver's own contract ("never land on ineligible when eligible
-    // exists") must hold even if a caller passes a stale/wrong recommendation.
-    const options = [{ value: "save_exit" }, { value: "implement" }];
-    const idx = resolvePostDebateDefaultIndex(options, "evaluation", "implement");
-    expect(options[idx].value).toBe("save_exit");
-  });
-
-  it("falls back to index 0 when no option is eligible, recommendation.value isn't in the list, and there's no escape hatch", () => {
-    // recommendationValue deliberately doesn't match any entry in `options` so
-    // this actually reaches the final floor, not the recommendation-match tier.
-    const options = [{ value: "implement" }];
-    expect(resolvePostDebateDefaultIndex(options, "evaluation", "save_exit")).toBe(0);
   });
 });
