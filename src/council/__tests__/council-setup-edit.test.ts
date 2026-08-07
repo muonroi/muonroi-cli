@@ -292,4 +292,26 @@ describe("S1 edit round — the edit-round cap terminates", () => {
     const lastOptionValues = lastCard.councilQuestion.options.map((o: any) => o.value);
     expect(lastOptionValues).not.toContain(EDIT_SPEC_OPTION_VALUE);
   });
+
+  // Code-review finding (MINOR, task A2 review): the loop's break condition
+  // (`choice !== EDIT_SPEC_OPTION_VALUE || editRounds >= MAX_LAUNCH_CARD_EDIT_ROUNDS`)
+  // can exit with `choice` still equal to the sentinel — reachable only if a
+  // caller returns a value the rendered card never actually offered (the cap
+  // already dropped the edit option via `allowEdit: false`). Downstream,
+  // `parseIntentAnswer`'s unknown-value fallback happens to absorb that case
+  // TODAY, which is exactly why relying on it is fragile: nothing pins the
+  // sentinel-at-the-run-shape-handling case if that parser's fallback rule
+  // ever changes. `resolveCappedChoice` is the explicit guard extracted so
+  // this is testable on its own, independent of `parseIntentAnswer`.
+  it("resolveCappedChoice clamps the sentinel to 'start' and leaves every other value untouched", async () => {
+    const { resolveCappedChoice } = await import("../index.js");
+    // This is the exact scenario the cap can leave behind: the loop exits via
+    // the cap disjunct while `choice` still holds the sentinel.
+    expect(resolveCappedChoice(EDIT_SPEC_OPTION_VALUE)).toBe("start");
+    // Every real run-shape/intent/terminal value must pass through unchanged
+    // — this guard must not perturb any value it wasn't built for.
+    for (const untouched of ["start", "cheap", "refine", "cancel", "action_items", "evaluation", ""]) {
+      expect(resolveCappedChoice(untouched)).toBe(untouched);
+    }
+  });
 });

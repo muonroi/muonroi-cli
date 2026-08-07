@@ -775,10 +775,20 @@ export async function* inferSpecFromTopicOnly(
     // No-Silent-Catch: this is the LLM call the auto-council path (index.ts)
     // relies on for a real spec on the S1 launch card. Log with context, then
     // fall through to the degenerate buildSpecFromTopic shape below — a failed
-    // inference must never block or abort the run.
-    console.error(
-      `[council/clarifier] inferSpecFromTopicOnly failed for topic "${topic.slice(0, 80)}": ${(err as Error)?.message}`,
-    );
+    // inference must never block or abort the run. logger.error, not
+    // console.error: a bare console.error is silently dropped whenever the
+    // TUI owns the terminal (isTuiActive(), src/utils/logger.ts) — the exact
+    // defect commit 62129f5f migrated orchestrator/*.ts away from, and this
+    // file already has the same-shape precedent at hasTavilyKey above. There
+    // is no "council" LogNamespace (see the union in utils/logger.ts); every
+    // other council-module logger.error call uses "orchestrator" for the same
+    // reason — matched here, not "mcp" (that precedent above is specific to
+    // the MCP-key lookup it wraps).
+    logger.error("orchestrator", "[council/clarifier] inferSpecFromTopicOnly failed", {
+      topic: topic.slice(0, 80),
+      error: (err as Error)?.message,
+      stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+    });
   }
   return buildSpecFromTopic(topic, conversationContext);
 }

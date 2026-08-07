@@ -280,6 +280,21 @@ per auto-council, subject to `costAware` like every other non-debate call.
 `runDebate`. An edit that writes only `spec.problemStatement` leaves the raw `topic` flowing
 downstream and the two silently diverge. Both are written, or the edit is not applied.
 
+> **Limitation (2026-08-07, task A2 review).** Same class of gap as the D1 correction above: the
+> edit round this amendment adds also fires **after** `debatePlan` is computed, for the identical
+> reason — the S1 card (now including its edit loop) sits after the `planDebate` call in
+> `runCouncil`. An edit rewrites `topic` and `spec` for everything from `runDebate` onward
+> (research, opening statements, debate, synthesis, persistence — the constraint above), but it
+> does **not** retroactively change what was already decided from the pre-edit topic: the resolved
+> panel, the debate stances and `outputShape.kind` (`debatePlan`), the PIL classification
+> (`pilCtx`), the EE warnings prefetch, or the leader's research-need verdict. A user who uses the
+> edit option to correct a badly-misread topic still gets a panel and a debate shape chosen for the
+> misreading — the debate argues the corrected problem through a lens picked for the wrong one.
+> Fixing this the way D1's correction implies (move the card earlier) is a materially larger change
+> here too — it would also mean re-running PIL/EE/research-need per edit round, not just
+> `planDebate` — and is out of scope for task A2. Documented, not fixed; see the matching comment
+> at the S1 loop in `index.ts`.
+
 ### Amendment testing
 
 - `defaultIndex` never lands on an action inconsistent with the locked kind, for every

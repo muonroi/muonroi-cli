@@ -16,6 +16,7 @@ import { detectProviderForModel } from "../providers/runtime.js";
 import { appendSystemMessage, logInteraction } from "../storage/index.js";
 import { SessionStore } from "../storage/sessions.js";
 import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
+import { logger } from "../utils/logger.js";
 import {
   getCouncilExperienceMode,
   getCouncilLanguage,
@@ -134,6 +135,25 @@ function willShowLaunchCard(
   aborted: boolean,
 ): sessionId is string {
   return Boolean(sessionId) && !suppressPreDebateCards && !sprintPlanningMode && !aborted;
+}
+
+/**
+ * Amendment A2 — the S1 edit loop's cap-exit edge case. The loop's break
+ * condition is `choice !== EDIT_SPEC_OPTION_VALUE || editRounds >=
+ * MAX_LAUNCH_CARD_EDIT_ROUNDS`, so it CAN exit with `choice` still equal to
+ * the sentinel — that happens only if a caller returns a value the rendered
+ * card never actually offered (once the cap is hit the card renders with
+ * `allowEdit: false`, which drops the option from `options` entirely — see
+ * `launch-card.ts`). `parseIntentAnswer` would incidentally absorb that case
+ * today (an unrecognised value falls back to the caller's proposed kind), but
+ * relying on that is fragile: a future change to `parseIntentAnswer`'s
+ * fallback rule could silently reopen this path to being read as a genuine
+ * run-shape/intent value. Clamp explicitly instead, as its own pure function
+ * so the clamp is unit-testable independent of whatever `parseIntentAnswer`
+ * does today.
+ */
+export function resolveCappedChoice(choice: string): string {
+  return choice === EDIT_SPEC_OPTION_VALUE ? "start" : choice;
 }
 
 export interface RunCouncilOptions {
@@ -1028,9 +1048,22 @@ export async function* runCouncil(
         } catch (err) {
           // No-Silent-Catch: log with context, keep the buildSpecFromTopic
           // default assigned above — a failed inference must never block or
-          // abort the run.
-          console.error(
-            `[council] inferSpecFromTopicOnly call failed (fail-open, keeping topic-only spec): ${(err as Error)?.message}`,
+          // abort the run. logger.error (not console.error, and not swept
+          // across the rest of this file's pre-existing console.error calls —
+          // just this new catch): a bare console.error is silently dropped
+          // whenever the TUI owns the terminal (isTuiActive(),
+          // src/utils/logger.ts), the same defect commit 62129f5f fixed for
+          // orchestrator/*.ts. "orchestrator" is the namespace every other
+          // council-module logger.error call uses (there is no "council"
+          // LogNamespace) — matched here for the same reason.
+          logger.error(
+            "orchestrator",
+            "[council] inferSpecFromTopicOnly call failed (fail-open, keeping topic-only spec)",
+            {
+              topic: topic.slice(0, 80),
+              error: (err as Error)?.message,
+              stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+            },
           );
         }
       }
@@ -1240,6 +1273,24 @@ export async function* runCouncil(
   // runDebate) and sprintPlanningMode (no human turn at all) would both be
   // blocked by a card nobody can answer — the same gating the preflight approval
   // card uses. Both the `/council` slash path and auto-council DO show it.
+  //
+  // Ordering limitation (Amendment A2, same class as the D1 correction above
+  // `runCouncil` in the design doc): this card — and its edit round below —
+  // fire AFTER `debatePlan` was already computed a few lines up from the
+  // PRE-edit `topic`/`spec`. An edit here corrects `topic` and `spec` for
+  // everything from `runDebate` onward (research, opening statements, debate,
+  // synthesis, persistence — see Trap 1), but it does NOT retroactively
+  // change what was already decided from the misread topic: the panel
+  // (`active`, resolved earlier), the debate stances and `outputShape.kind`
+  // (`debatePlan`, computed at the `planDebate` call above), the PIL
+  // classification (`pilCtx`), the EE warnings prefetch (`eePromise`), or the
+  // leader's research-need verdict (`evaluateResearchNeed`). A user who fixes
+  // a badly-misread topic here still gets a panel and a debate shape chosen
+  // for the misreading — the debate argues the corrected problem through a
+  // lens picked for the wrong one. Moving the card before `planDebate` would
+  // fix this but is a materially larger change (also re-running PIL/EE/
+  // research-need per edit round) than this task — see the design doc's
+  // Amendment A2 section for the fuller writeup. Not fixed here.
   let launchRounds = debatePlan.plannedRounds ?? 3;
   let launchParticipants = active;
   let launchCostAware = costAware;
@@ -1320,6 +1371,10 @@ export async function* runCouncil(
       yield { type: "content", content: "\n> Topic/outcome updated — showing the corrected card.\n" };
       // Loop back: re-render, do NOT start the run.
     }
+    // See resolveCappedChoice's doc comment: the loop can exit via the cap
+    // disjunct with `choice` still holding the sentinel; clamp it explicitly
+    // rather than leaning on parseIntentAnswer's unknown-value fallback.
+    choice = resolveCappedChoice(choice);
     // An intent pick is not a run-shape pick: record it and keep the card's
     // shape defaults (start). Anything else falls through to the existing
     // start/cheap/refine/cancel handling untouched.
