@@ -161,6 +161,24 @@ export function cheapRunShape(input: { plannedRounds: number; panelSize: number 
   };
 }
 
+/** Longest raw-topic headline rendered when no distilled problemStatement exists. */
+const MAX_HEADLINE_CHARS = 240;
+
+/**
+ * First non-empty line of `topic`, clamped. Takes the first line because a
+ * pasted brief usually opens with its own title; clamps because the rest of a
+ * multi-KB spec is not a headline.
+ */
+export function clampHeadline(topic: string): string {
+  const firstLine =
+    topic
+      .split("\n")
+      .find((l) => l.trim().length > 0)
+      ?.trim() ?? "";
+  if (firstLine.length <= MAX_HEADLINE_CHARS) return firstLine;
+  return `${firstLine.slice(0, MAX_HEADLINE_CHARS).trimEnd()}…`;
+}
+
 export function buildLaunchCard(input: LaunchCardInput): LaunchCard {
   const label = (p: LaunchPanelist) => p.stanceName ?? p.role;
   const rows: Array<[string, string]> = [];
@@ -228,7 +246,15 @@ export function buildLaunchCard(input: LaunchCardInput): LaunchCard {
   // understanding (from the clarifier interview or inferSpecFromTopicOnly);
   // falling back to the raw topic keeps callers that build a card without a
   // resolved spec (older tests, direct callers) on the previous behaviour.
-  const topicHeadline = input.problemStatement?.trim() || input.topic.trim() || "Start the council debate?";
+  //
+  // The raw-topic fallback is CLAMPED. When the spec step produces no
+  // problemStatement — measured on a deepseek-v4-flash run, session
+  // 770cc78e13cc — the fallback rendered the user's entire 7.5KB pasted brief
+  // as the card's headline. A headline that IS the whole brief tells the user
+  // nothing and hides the fact that the council never distilled the ask; the
+  // ellipsis makes that visible instead of disguising it as a topic.
+  const topicHeadline =
+    input.problemStatement?.trim() || clampHeadline(input.topic.trim()) || "Start the council debate?";
 
   return {
     question: topicHeadline,

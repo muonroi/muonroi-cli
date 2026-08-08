@@ -4828,9 +4828,23 @@ export function useAppLogic(props: AppLogicProps) {
       }
       // Plan 06: fallback to slash registry (dispatchSlash) for custom commands like /route
       if (c.startsWith("/")) {
-        const parts = c.slice(1).split(/\s+/);
-        const name = parts[0] ?? "";
-        const args = parts.slice(1);
+        // Parse the ARGUMENTS off the raw input, not off `c`. `c` is
+        // lowercased so `/Council` matches `/council` — but deriving args from
+        // it lowercased every argument of every slash command too. Measured
+        // live (session 770cc78e13cc): a `/council` brief citing
+        // `/mnt/data/Personal/Core/shipd-challenges/...` reached the council as
+        // `/mnt/data/personal/core/...`, which does not exist on a
+        // case-sensitive filesystem — the debate ran with ZERO tool calls
+        // because every read of the reference implementation missed. It also
+        // flattened `RetryCallState` → `retrycallstate`. Only the command NAME
+        // needs case folding.
+        const rawBody = cmd.trim().slice(1);
+        const split = rawBody.match(/^(\S+)(?:[^\S\n]*([\s\S]*))?$/);
+        const name = (split?.[1] ?? "").toLowerCase();
+        // `argsText` keeps the remainder verbatim (line breaks included);
+        // `args` stays whitespace-split for handlers that match on tokens.
+        const argsText = (split?.[2] ?? "").trim();
+        const args = argsText.length > 0 ? argsText.split(/\s+/) : [];
         dispatchSlash(name, args, {
           cwd: agent.getCwd(),
           tenantId: "local",
@@ -4839,6 +4853,7 @@ export function useAppLogic(props: AppLogicProps) {
           lastPrompt: messages[messages.length - 1]?.content,
           sessionId: agent.getSessionId() ?? undefined,
           getLiveEntries: () => messages,
+          argsText,
         })
           .then(async (result) => {
             if (result === null) {

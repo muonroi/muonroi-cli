@@ -160,4 +160,26 @@ describe("buildLaunchCard", () => {
       expect(values).toEqual(["start", "cheap", "refine", "cancel"]);
     });
   });
+
+  // Session 770cc78e13cc: the spec step produced no problemStatement, and the
+  // raw-topic fallback rendered a 7.5KB pasted brief as the card headline.
+  describe("headline fallback when no problemStatement was distilled", () => {
+    it("uses the distilled problemStatement whenever there is one", () => {
+      const card = buildLaunchCard({ ...base, problemStatement: "Decide the retry-budget decomposition." });
+      expect(card.question).toBe("Decide the retry-budget decomposition.");
+    });
+
+    it("clamps a long raw topic to its first line instead of dumping the whole brief", () => {
+      const brief = `${"# Council question: how many independent things does this task require".repeat(6)}\nline two\nline three`;
+      const card = buildLaunchCard({ ...base, problemStatement: undefined, topic: brief });
+      expect(card.question.length).toBeLessThanOrEqual(241); // 240 + the ellipsis
+      expect(card.question.endsWith("…")).toBe(true);
+      expect(card.question).not.toContain("line two");
+    });
+
+    it("leaves a short topic untouched — no gratuitous ellipsis", () => {
+      const card = buildLaunchCard({ ...base, problemStatement: undefined, topic: "REST vs gRPC" });
+      expect(card.question).toBe("REST vs gRPC");
+    });
+  });
 });
