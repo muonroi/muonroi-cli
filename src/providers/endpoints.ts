@@ -64,6 +64,23 @@ export function consoleUrlFor(provider: ProviderId): string {
 }
 
 /**
+ * True when `url` is some provider's built-in default apiBase.
+ *
+ * The distinction it encodes: a base URL equal to a default is *derived* state
+ * (it came from `getBaseURL()` at startup and belongs to whichever provider was
+ * current then), so it must be dropped when the provider changes. Anything else
+ * is a deliberate user override (a third-party gateway / proxy) and is treated
+ * as such by `createProviderFactory`.
+ */
+export function isProviderDefaultApiBase(url: string | null | undefined): boolean {
+  if (!url) return false;
+  for (const endpoint of Object.values(PROVIDER_ENDPOINTS)) {
+    if (url === endpoint.apiBase) return true;
+  }
+  return false;
+}
+
+/**
  * Default base URLs for OpenAI-compatible providers only. Used by adapters
  * that share the OpenAI SDK shape (deepseek, xai).
  */

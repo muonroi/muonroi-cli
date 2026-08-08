@@ -181,7 +181,12 @@ export function loadValidSubAgents(): CustomSubagentConfig[] {
 }
 
 export interface ProviderKeyConfig {
-  apiKey: string;
+  /**
+   * Optional: keys live in the env-store (`~/.muonroi-cli/.env`) since
+   * `keysMigratedToEnv`. A provider entry that only sets `baseURL` (pointing at
+   * a third-party gateway) is a valid, complete config.
+   */
+  apiKey?: string;
   baseURL?: string;
 }
 

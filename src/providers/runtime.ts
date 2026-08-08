@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
 import type { ModelInfo } from "../types/index.js";
-import { getReasoningEffortForModel } from "../utils/settings.js";
+import { getReasoningEffortForModel, loadUserSettings } from "../utils/settings.js";
 import { getProviderCapabilities } from "./capabilities.js";
+import { isProviderDefaultApiBase } from "./endpoints.js";
 import { ceilingForCall, type GateStage, wrapModelWithGate } from "./model-gate.js";
 import { getProviderStrategy } from "./strategies/registry.js";
 import type { ProviderId } from "./types.js";
@@ -79,6 +80,27 @@ export function registeredProviderIds(): ProviderId[] {
 }
 
 /**
+ * Resolve the base URL a factory should actually be built with, folding in a
+ * user-set `providers.<id>.baseURL` (a third-party gateway / proxy).
+ *
+ * This lives at the factory choke point on purpose. Before, the override was
+ * honored only inside the OAuth branch of `createProviderFactoryAsync`, so a
+ * provider without OAuth (anthropic) silently fell back to its default apiBase
+ * — and council sub-calls, which call `createProviderFactory(id, {apiKey})`
+ * with no baseURL at all, bypassed it on every provider. Resolving here means
+ * every path (orchestrator, council, warm-up) lands on the same URL.
+ *
+ * Precedence: an explicit caller override (`--base-url`, or the OAuth backend
+ * URL) wins, because a value that is not any provider's default apiBase is a
+ * deliberate per-run choice. A caller value that IS a default is derived state
+ * and yields to the user's setting.
+ */
+function resolveFactoryBaseURL(id: ProviderId, callerBaseURL?: string): string | undefined {
+  if (callerBaseURL && !isProviderDefaultApiBase(callerBaseURL)) return callerBaseURL;
+  return loadUserSettings()?.providers?.[id]?.baseURL ?? callerBaseURL;
+}
+
+/**
  * Phase 12.2-G4: thin dispatcher delegating to the provider strategy registry.
  * Each provider's SDK wiring + `factory.responses` + `defaultProviderOptions`
  * baseline lives in `src/providers/strategies/<provider>.strategy.ts`.
@@ -88,7 +110,7 @@ export function createProviderFactory(
   opts: { apiKey?: string; baseURL?: string; headers?: Record<string, string> },
 ): ProviderFactoryResult {
   const strategy = getProviderStrategy(id);
-  const factory = strategy.createFactory(opts);
+  const factory = strategy.createFactory({ ...opts, baseURL: resolveFactoryBaseURL(id, opts.baseURL) });
   factory.providerId = id;
   providerFactoryRegistry.set(id, factory);
   return { id, factory };

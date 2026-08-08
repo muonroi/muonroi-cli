@@ -34,7 +34,7 @@ import { ensureDefaultMcpServers } from "../mcp/auto-setup.js";
 import { getModelInfo, normalizeModelId } from "../models/registry.js";
 import { IDEAL_LOOP_DEFAULTS } from "../product-loop/loop-defaults.js";
 import { getProviderCapabilities, minimalReasoningProviderOptions } from "../providers/capabilities.js";
-import { apiBaseFor } from "../providers/endpoints.js";
+import { apiBaseFor, isProviderDefaultApiBase } from "../providers/endpoints.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {
   createProviderFactory,
@@ -207,14 +207,12 @@ function createProvider(providerId: ProviderId, apiKey: string, baseURL?: string
  * True iff `url` equals the default apiBase of ANY registered provider.
  * Used to detect stale carryover of one provider's default URL into another
  * provider's factory after a /model switch (see setModel + setApiKey).
+ *
+ * Delegates to the endpoints module so the rule has one definition — it also
+ * gates the user-override precedence in `resolveFactoryBaseURL`, and the two
+ * drifting apart would silently re-break custom gateways.
  */
-function isAnyProviderApiBase(url: string | null | undefined): boolean {
-  if (!url) return false;
-  for (const id of ALL_PROVIDER_IDS) {
-    if (url === apiBaseFor(id)) return true;
-  }
-  return false;
-}
+const isAnyProviderApiBase = isProviderDefaultApiBase;
 
 const TITLE_SYSTEM_PROMPT = `You are a session-naming assistant. Given the first message a user sent to an AI coding assistant, produce a short session title.
 
@@ -643,11 +641,14 @@ export class Agent {
       // startup, the rebuilt strategy factory was created with that stale
       // baseURL, and requests landed at the wrong host which rejected the
       // model id.
-      // A user-supplied custom baseURL is preserved only when it does NOT
-      // match any known provider's apiBase (i.e. it's a real override, not
-      // a stale default).
-      const staleBaseURL = isAnyProviderApiBase(this.baseURL) && this.baseURL !== apiBaseFor(this.providerId);
-      if (staleBaseURL) this.baseURL = null;
+      // A custom (non-default) URL is dropped too: a base URL always belongs to
+      // ONE provider, so a third-party gateway configured for anthropic is not
+      // a valid endpoint for deepseek. Keeping it sent every post-switch request
+      // to the gateway with the new provider's key. The new provider's own URL
+      // is re-resolved when the factory is rebuilt — `resolveFactoryBaseURL`
+      // reads `providers.<id>.baseURL`, and each strategy falls back to its
+      // default apiBase — so clearing here loses nothing.
+      this.baseURL = null;
       // Provider changed — DEFER factory construction. The current this.apiKey
       // belongs to the PREVIOUS provider (or is the "oauth" OAuth sentinel) and
       // is invalid for the new one. Rebuilding here with it sent provider A's

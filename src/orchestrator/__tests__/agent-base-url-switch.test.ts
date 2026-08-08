@@ -34,7 +34,14 @@ describe("Agent provider switch — baseURL hygiene", () => {
     expect((agent as unknown as { baseURL: string | null }).baseURL).toBeNull();
   });
 
-  it("setModel preserves a genuine custom baseURL (not a known provider apiBase)", () => {
+  it("setModel drops a custom baseURL too — a gateway URL belongs to ONE provider", () => {
+    // A third-party gateway configured for provider A is not a valid endpoint
+    // for provider B. Preserving it (the old behaviour) sent every post-switch
+    // request to A's gateway carrying B's key: a user proxying anthropic through
+    // api.<gateway>/v1 had their deepseek role-models (leader/implement) POSTed
+    // there too. The new provider's URL is re-resolved when its factory is
+    // rebuilt — `resolveFactoryBaseURL` reads `providers.<id>.baseURL` and each
+    // strategy falls back to its own apiBase — so dropping here loses nothing.
     const customURL = "https://proxy.internal.example.com/v1";
     const agent = new Agent("sk-test", customURL, "deepseek-v4-flash", undefined, {
       persistSession: false,
@@ -42,6 +49,18 @@ describe("Agent provider switch — baseURL hygiene", () => {
     expect((agent as unknown as { baseURL: string | null }).baseURL).toBe(customURL);
 
     agent.setModel("glm-4.7");
+    expect((agent as unknown as { baseURL: string | null }).baseURL).toBeNull();
+  });
+
+  it("setApiKey preserves a custom baseURL for the CURRENT provider", () => {
+    // The drop above is scoped to provider CHANGES. Within one provider a custom
+    // gateway must survive, or the anthropic-via-proxy setup would silently
+    // revert to api.anthropic.com on the first key (re)binding.
+    const customURL = "https://proxy.internal.example.com/v1";
+    const agent = new Agent(undefined, undefined, "glm-4.7", undefined, {
+      persistSession: false,
+    });
+    agent.setApiKey("sk-test", customURL);
     expect((agent as unknown as { baseURL: string | null }).baseURL).toBe(customURL);
   });
 
