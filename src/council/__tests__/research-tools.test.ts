@@ -1,6 +1,30 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildResearchSystemPrompt } from "../prompts.js";
 
+const FINISH = { type: "finish", finishReason: "stop", totalUsage: { inputTokens: 1, outputTokens: 1 } };
+
+/**
+ * Minimal `streamText` mock replaying `text` as a single delta, optionally
+ * capturing the call args.
+ *
+ * research() streams (via collectStreamText) rather than calling generateText:
+ * non-streaming left it blind to a stalled provider, so a dead socket burned
+ * the full 600s deadline instead of tripping the stall watchdog. These mocks
+ * follow that migration — a generateText mock would leave research with an
+ * empty result and the assertions below would fail for the wrong reason.
+ */
+function streamTextMock(text: string, onArgs?: (args: { tools?: Record<string, unknown> }) => void) {
+  return vi.fn().mockImplementation((args: { tools?: Record<string, unknown> }) => {
+    onArgs?.(args);
+    return {
+      fullStream: (async function* () {
+        yield { type: "text-delta", text };
+        yield FINISH;
+      })(),
+    };
+  });
+}
+
 // ── CQ-05: buildResearchSystemPrompt pure-function tests ─────────────────────
 
 describe("CQ-05: buildResearchSystemPrompt", () => {
@@ -42,13 +66,11 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
   });
 
   it("appends gap annotation when topic contains URL but no browser tool invoked", async () => {
-    // Mock ai generateText to return result with no browser tool calls
+    // Stream a report with no browser tool calls.
     vi.doMock("ai", () => ({
-      generateText: vi.fn().mockResolvedValue({
-        text: "## Source Code Findings\nFound nothing.\n\n## Internet Findings\nFound nothing.\n\n## Frontend Findings (live)\nNot performed.",
-        toolCalls: [],
-        steps: [],
-      }),
+      streamText: streamTextMock(
+        "## Source Code Findings\nFound nothing.\n\n## Internet Findings\nFound nothing.\n\n## Frontend Findings (live)\nNot performed.",
+      ),
       stepCountIs: vi.fn().mockReturnValue({}),
     }));
 
@@ -80,6 +102,8 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
     }));
     vi.doMock("../../utils/settings.js", () => ({
       loadMcpServers: vi.fn().mockReturnValue([]),
+      // Watchdog off: these tests assert call shape, not stall behaviour.
+      getProviderStallTimeoutMs: vi.fn().mockReturnValue(0),
     }));
 
     const { createCouncilLLM } = await import("../llm.js");
@@ -96,11 +120,9 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
 
   it("does NOT append gap annotation when topic has no URL", async () => {
     vi.doMock("ai", () => ({
-      generateText: vi.fn().mockResolvedValue({
-        text: "## Source Code Findings\nFound something.\n\n## Internet Findings\nNone.\n\n## Frontend Findings (live)\nNone.",
-        toolCalls: [],
-        steps: [],
-      }),
+      streamText: streamTextMock(
+        "## Source Code Findings\nFound something.\n\n## Internet Findings\nNone.\n\n## Frontend Findings (live)\nNone.",
+      ),
       stepCountIs: vi.fn().mockReturnValue({}),
     }));
 
@@ -126,6 +148,8 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
     }));
     vi.doMock("../../utils/settings.js", () => ({
       loadMcpServers: vi.fn().mockReturnValue([]),
+      // Watchdog off: these tests assert call shape, not stall behaviour.
+      getProviderStallTimeoutMs: vi.fn().mockReturnValue(0),
     }));
 
     const { createCouncilLLM } = await import("../llm.js");
@@ -148,16 +172,12 @@ describe("CQ-03: research() MCP tool merge", () => {
     const capturedTools: Record<string, unknown> = {};
 
     vi.doMock("ai", () => ({
-      generateText: vi.fn().mockImplementation(async (args: { tools?: Record<string, unknown> }) => {
-        if (args.tools) {
-          Object.assign(capturedTools, args.tools);
-        }
-        return {
-          text: "## Source Code Findings\nNone.\n\n## Internet Findings\nNone.\n\n## Frontend Findings (live)\nNone.",
-          toolCalls: [],
-          steps: [],
-        };
-      }),
+      streamText: streamTextMock(
+        "## Source Code Findings\nNone.\n\n## Internet Findings\nNone.\n\n## Frontend Findings (live)\nNone.",
+        (args) => {
+          if (args.tools) Object.assign(capturedTools, args.tools);
+        },
+      ),
       stepCountIs: vi.fn().mockReturnValue({}),
     }));
 
@@ -183,6 +203,8 @@ describe("CQ-03: research() MCP tool merge", () => {
     }));
     vi.doMock("../../utils/settings.js", () => ({
       loadMcpServers: vi.fn().mockReturnValue([{ id: "tavily", enabled: true }]),
+      // Watchdog off: these tests assert call shape, not stall behaviour.
+      getProviderStallTimeoutMs: vi.fn().mockReturnValue(0),
     }));
 
     const { createCouncilLLM } = await import("../llm.js");
@@ -191,7 +213,7 @@ describe("CQ-03: research() MCP tool merge", () => {
 
     await llm.research("gpt-4o", "What are best practices for TypeScript?", "", undefined);
 
-    // Both builtin and MCP tools must be present in the generateText call
+    // Both builtin and MCP tools must be present in the streamText call
     expect(capturedTools).toHaveProperty("builtin_bash");
     expect(capturedTools).toHaveProperty("mcp_tavily__search");
   });
@@ -200,16 +222,12 @@ describe("CQ-03: research() MCP tool merge", () => {
     const capturedTools: Record<string, unknown> = {};
 
     vi.doMock("ai", () => ({
-      generateText: vi.fn().mockImplementation(async (args: { tools?: Record<string, unknown> }) => {
-        if (args.tools) {
-          Object.assign(capturedTools, args.tools);
-        }
-        return {
-          text: "## Source Code Findings\nNone.\n\n## Internet Findings\nNone.\n\n## Frontend Findings (live)\nNone.",
-          toolCalls: [],
-          steps: [],
-        };
-      }),
+      streamText: streamTextMock(
+        "## Source Code Findings\nNone.\n\n## Internet Findings\nNone.\n\n## Frontend Findings (live)\nNone.",
+        (args) => {
+          if (args.tools) Object.assign(capturedTools, args.tools);
+        },
+      ),
       stepCountIs: vi.fn().mockReturnValue({}),
     }));
 
@@ -231,6 +249,8 @@ describe("CQ-03: research() MCP tool merge", () => {
     }));
     vi.doMock("../../utils/settings.js", () => ({
       loadMcpServers: vi.fn().mockReturnValue([{ id: "tavily", enabled: true }]),
+      // Watchdog off: these tests assert call shape, not stall behaviour.
+      getProviderStallTimeoutMs: vi.fn().mockReturnValue(0),
     }));
 
     const { createCouncilLLM } = await import("../llm.js");
