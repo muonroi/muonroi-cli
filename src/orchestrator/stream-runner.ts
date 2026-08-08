@@ -108,6 +108,7 @@ import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { applyAnthropicPromptCaching, compactSubAgentMessages } from "./subagent-compactor.js";
 import { buildSubAgentStepData, isSubAgentStepMeterEnabled } from "./subagent-step-meter.js";
+import { foldMidConversationSystemMessages } from "./system-message-fold.js";
 import { combineAbortSignals, firstLine, formatSubagentActivity } from "./tool-utils";
 
 /**
@@ -783,7 +784,12 @@ export class StreamRunner {
           : finalMessages;
 
         if (childRuntime.modelId.startsWith("claude")) {
-          return { messages: applyAnthropicPromptCaching(finalMessagesWithMirror, childRuntime.modelId) };
+          return {
+            messages: applyAnthropicPromptCaching(
+              foldMidConversationSystemMessages(finalMessagesWithMirror),
+              childRuntime.modelId,
+            ),
+          };
         }
 
         if (compacted === stripped && stripped === messages && !_subMirrorNote) return undefined;

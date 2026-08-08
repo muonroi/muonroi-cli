@@ -719,6 +719,18 @@ export function applyCompactionHysteresis(args: {
  * Injects Anthropic prompt caching (cacheControl) into the last message's content
  * block(s) if the model is Claude (starts with 'claude').
  * Creates a copy of the messages array and the last message to avoid mutating in-place.
+ *
+ * The breakpoint is placed on the last message that can CARRY content parts.
+ * A `system` message may only have string content in the AI SDK's ModelMessage
+ * schema, so rewriting one into `[{type:"text",…}]` — which the string branch
+ * below does unconditionally — made `streamText` throw
+ * `AI_InvalidPromptError: The messages do not match the ModelMessage[] schema`
+ * before any request went out. That is not hypothetical: the EE recall-ledger
+ * nag ("N earlier EE hint(s) still unrated") is pushed as a trailing
+ * `{role:"system", content: <string>}`, so on any claude model a turn that had
+ * pending unrated hints died with a schema error and zero output (session
+ * e8a11770b19b, reproduced headlessly). Skipping past trailing system messages
+ * keeps the cache prefix valid — it just ends one message earlier.
  */
 export function applyAnthropicPromptCaching(messages: readonly ModelMessage[], modelId: string): ModelMessage[] {
   if (!modelId.startsWith("claude")) {
@@ -729,7 +741,11 @@ export function applyAnthropicPromptCaching(messages: readonly ModelMessage[], m
   }
 
   const newMessages = [...messages];
-  const lastIndex = newMessages.length - 1;
+  let lastIndex = newMessages.length - 1;
+  while (lastIndex >= 0 && newMessages[lastIndex]?.role === "system") lastIndex--;
+  // Nothing but system messages — there is no parts-capable message to anchor
+  // the breakpoint on, so leave the prompt exactly as it came in.
+  if (lastIndex < 0) return messages as ModelMessage[];
   const originalLastMsg = newMessages[lastIndex];
   if (!originalLastMsg) return messages as ModelMessage[];
 

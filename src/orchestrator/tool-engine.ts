@@ -245,6 +245,7 @@ import {
   cumulativeMessageChars,
   initCompactionHysteresisState,
 } from "./subagent-compactor.js";
+import { foldMidConversationSystemMessages } from "./system-message-fold.js";
 import { detectTextEmittedToolCall, parseLeakedToolCalls } from "./text-tool-call-detector.js";
 import { beginToolActivity, endToolActivity } from "./tool-activity.js";
 import { getToolLimitAutoRecoverCap, shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
@@ -1647,8 +1648,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // for future provider-specific quirks). Reasoning round-trips
         // natively via @ai-sdk/openai-compatible — see
         // src/providers/__tests__/reasoning-roundtrip.test.ts.
+        // Fold BEFORE caching so the cache breakpoint lands on the final user
+        // message rather than on a trailing system note. See
+        // system-message-fold.ts: a system message after user/assistant turns
+        // is unrepresentable for Anthropic and the API rejects the request.
         const _topMessagesForCall = applyAnthropicPromptCaching(
-          turnCaps.sanitizeHistory(_messagesForCall) as typeof deps.messages,
+          foldMidConversationSystemMessages(
+            turnCaps.sanitizeHistory(_messagesForCall) as typeof deps.messages,
+          ) as typeof deps.messages,
           runtime.modelId,
         );
         // Closure-mutable cap for the tool-loop askcard rescue.
@@ -2067,7 +2074,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
 
               if (baseRes.messages) {
                 baseRes.messages = applyAnthropicPromptCaching(
-                  baseRes.messages,
+                  foldMidConversationSystemMessages(baseRes.messages),
                   runtime.modelId,
                 ) as typeof stepMessages;
               }
