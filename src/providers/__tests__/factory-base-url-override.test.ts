@@ -16,7 +16,9 @@ vi.mock("../../utils/settings.js", () => ({
   getReasoningEffortForModel: () => undefined,
 }));
 
-const createFactory = vi.hoisted(() => vi.fn(() => vi.fn()));
+// Typed arg: an untyped `vi.fn(() => …)` infers a 0-tuple for `mock.calls`, so
+// indexing [0] is a tsc error even though the mock records the argument.
+const createFactory = vi.hoisted(() => vi.fn((_opts: { baseURL?: string }) => vi.fn()));
 vi.mock("../strategies/registry.js", () => ({
   getProviderStrategy: () => ({ id: "anthropic", createFactory }),
 }));
