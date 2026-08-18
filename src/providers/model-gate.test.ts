@@ -3,7 +3,10 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import {
+const mockLog = vi.fn();
+vi.mock("../storage/interaction-log.js", () => ({ logInteraction: mockLog }));
+
+const {
   analyzePrompt,
   ceilingForCall,
   ceilingMode,
@@ -12,10 +15,7 @@ import {
   meterCall,
   throwCeilingTokens,
   wrapModelWithGate,
-} from "./model-gate.js";
-
-const mockLog = vi.hoisted(() => vi.fn());
-vi.mock("../storage/interaction-log.js", () => ({ logInteraction: mockLog }));
+} = await import("./model-gate.js");
 
 afterEach(() => {
   mockLog.mockReset();

@@ -2,12 +2,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const callVisionBackend = vi.fn();
 
-vi.mock("./vision-backend.js", async () => {
-  const actual = await vi.importActual<typeof import("./vision-backend.js")>("./vision-backend.js");
+vi.mock("./vision-backend.js", () => {
   return {
-    ...actual,
     callVisionBackend: (...args: unknown[]) => callVisionBackend(...args),
+    formatNativeVisionObservation: (text: string, options: { visionSessionId?: string }) =>
+      `<vision-observation>${text}\nvision_done: ${options.visionSessionId ?? ""}</vision-observation>`,
+    formatNativeVisionUnavailable: () => "The image could not be analyzed.",
+    looksLikeOcrIntent: () => false,
     resolveAvailableVisionChain: async () => [{ provider: "test", model_id: "test-vl" }],
+    wrapAnalyzerInstructions: (text: string) => text,
   };
 });
 

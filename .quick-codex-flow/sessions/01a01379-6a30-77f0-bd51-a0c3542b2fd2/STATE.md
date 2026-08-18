@@ -1,7 +1,7 @@
 # Quick Codex Flow State
 
-- Last completed run: `runs/catalog-stepfun-models.md`
-- Current gate: `closed`
-- Current phase / wave: `P1 / W1 complete`
+- Active run: `runs/deploy-catalog-api-vps.md`
+- Current gate: `research`
+- Current phase / wave: `P1 / deployment-preflight`
 - Execution mode: `auto`
-- Status: `complete`
+- Status: `active`
