@@ -15,7 +15,7 @@ Constraints:
 - Do not expose credentials, tokens, or private host details in user-facing output.
 
 Current gate:
-- research
+- closed
 
 ## Gray Area Register
 | ID | Type | Question | Resolution path | Status |
@@ -43,5 +43,16 @@ Current gate:
 - Configured full unit suite (`bun run test` → `bunx vitest run`) passed: 712 files passed, 6 skipped; 6,144 tests passed, 10 skipped, 2 todo.
 - The public health endpoint before deployment reports catalog version `2.16`, dated `2026-07-29`.
 
+## Deployment Result
+- Pushed `develop` through commit `e3539406`; remote CLI worktree fast-forwarded from `0806be0a` to `e3539406`.
+- Rebuilt and restarted only the `catalog` compose service. The broad `/opt/muonroi/update.sh` was not run.
+- Created rollback image tag `muonroi-catalog:rollback-20260818070922` before replacing the live image.
+- The first immediate health probe raced Uvicorn startup and received a connection reset; retry verification succeeded after startup.
+
+## Production Verification
+- Local VPS health: version `2.18`, updated `2026-08-18`, 42 models; container healthy on `127.0.0.1:8086`.
+- Authenticated in-container API query: version `2.18`, exactly 9 StepFun models, including every requested ID.
+- Public `https://catalog.muonroi.com/health`: version `2.18`, confirming reverse proxy delivery.
+
 ## Next Action
-- Push the release commits, pull `develop` in the CLI worktree, build/restart only `catalog`, and verify `/health` plus `/api/v1/models?provider=stepfun`.
+- None. Deployment is complete and rollback image is retained on the VPS.
