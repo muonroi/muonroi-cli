@@ -1,7 +1,7 @@
 # Quick Codex Flow State
 
-- Active run: `runs/integrate-stepfun-provider.md`
-- Current gate: `done`
+- Last completed run: `runs/catalog-stepfun-models.md`
+- Current gate: `closed`
 - Current phase / wave: `P1 / W1 complete`
 - Execution mode: `auto`
-- Status: `done`
+- Status: `complete`

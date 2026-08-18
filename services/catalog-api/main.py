@@ -73,6 +73,9 @@ class CatalogModel(BaseModel):
     output_price_per_million: float
     cached_input_price_per_million: Optional[float] = None
     cache_write_price_per_million: Optional[float] = None
+    pricing_unit: Optional[str] = None
+    unit_price: Optional[float] = None
+    rate_limits: Optional["CatalogRateLimits"] = None
     reasoning: bool
     thinking_type: Optional[str] = None
     supports_effort: Optional[bool] = None
@@ -87,6 +90,12 @@ class CatalogModel(BaseModel):
     roles: Optional[list[str]] = None
     native_web_research: Optional[bool] = None
     web_research_kind: Optional[str] = None
+
+
+class CatalogRateLimits(BaseModel):
+    concurrency: Optional[int] = None
+    requests_per_minute: Optional[int] = None
+    tokens_per_minute: Optional[int] = None
 
 
 class CatalogPeakHourWindow(BaseModel):

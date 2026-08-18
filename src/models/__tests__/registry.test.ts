@@ -59,7 +59,14 @@ describe("MODELS catalog", () => {
     for (const m of MODELS) {
       expect(m.id).toBeTruthy();
       expect(m.name).toBeTruthy();
-      expect(m.contextWindow).toBeGreaterThan(0);
+      // Explicit-only media endpoints do not publish a token context window.
+      // They use 0 as the catalog's documented N/A value and never participate
+      // in text-tier routing. Every auto-routable text model must retain a
+      // positive context window.
+      expect(m.contextWindow).toBeGreaterThanOrEqual(0);
+      if (m.tierRouting !== false) {
+        expect(m.contextWindow).toBeGreaterThan(0);
+      }
       expect(typeof m.inputPrice).toBe("number");
       expect(typeof m.outputPrice).toBe("number");
       expect(typeof m.reasoning).toBe("boolean");
@@ -177,6 +184,13 @@ describe("isReasoningModel", () => {
 });
 
 describe("tier_routing catalog flag", () => {
+  test("StepFun routes text models by tier and leaves specialized media models explicit-only", () => {
+    expect(getModelByTier("fast", "stepfun")?.id).toBe("step-3.5-flash");
+    expect(getModelByTier("premium", "stepfun")?.id).toBe("step-3.7-flash");
+    expect(getModelInfo("stepaudio-2.5-tts")?.tierRouting).toBe(false);
+    expect(getModelInfo("step-image-edit-2")?.tierRouting).toBe(false);
+  });
+
   test("glm-4.7-flash is still addressable but excluded from tier routing", () => {
     const flash = getModelInfo("glm-4.7-flash");
     expect(flash).toBeDefined();

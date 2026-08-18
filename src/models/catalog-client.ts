@@ -126,6 +126,12 @@ export interface CatalogModel {
   output_price_per_million: number;
   cached_input_price_per_million?: number;
   cache_write_price_per_million?: number;
+  /** Unit used by `unit_price` when the model is not billed per token. */
+  pricing_unit?: string;
+  /** Official price for `pricing_unit`, expressed in USD. */
+  unit_price?: number;
+  /** Provider account limits for this model, when published. */
+  rate_limits?: CatalogRateLimits;
   reasoning: boolean;
   thinking_type?: string | null;
   supports_effort?: boolean;
@@ -156,6 +162,12 @@ export interface CatalogModel {
   web_research_kind?: string | null;
 }
 
+export interface CatalogRateLimits {
+  concurrency?: number;
+  requests_per_minute?: number;
+  tokens_per_minute?: number;
+}
+
 // ─── Schema validation (catalog drift / corruption guard) ───────────────────
 const CatalogModelSchema = z
   .object({
@@ -169,6 +181,15 @@ const CatalogModelSchema = z
     output_price_per_million: z.number(),
     cached_input_price_per_million: z.number().optional(),
     cache_write_price_per_million: z.number().optional(),
+    pricing_unit: z.string().optional(),
+    unit_price: z.number().optional(),
+    rate_limits: z
+      .object({
+        concurrency: z.number().int().positive().optional(),
+        requests_per_minute: z.number().int().positive().optional(),
+        tokens_per_minute: z.number().int().positive().optional(),
+      })
+      .optional(),
     reasoning: z.boolean(),
     thinking_type: z.string().nullable().optional(),
     supports_effort: z.boolean().optional(),

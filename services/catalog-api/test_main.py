@@ -295,3 +295,34 @@ def test_real_catalog_zai_flash_excluded_from_tier_routing(monkeypatch):
     assert g51.tier_routing is False
     v5 = next(m for m in cat.models if m.id == "glm-5v-turbo")
     assert v5.tier_routing is False
+
+
+def test_real_catalog_serves_every_stepfun_model_with_billing_and_limits(monkeypatch):
+    real = Path(__file__).resolve().parents[2] / "src" / "models" / "catalog.json"
+    monkeypatch.setenv("CATALOG_JSON_PATH", str(real))
+    catalog_main.load_catalog.cache_clear()
+    c = TestClient(catalog_main.app)
+
+    response = c.get("/api/v1/models", params={"provider": "stepfun"})
+
+    assert response.status_code == 200
+    models = response.json()["models"]
+    assert [model["id"] for model in models] == [
+        "step-3.5-flash",
+        "step-3.5-flash-2603",
+        "step-3.7-flash",
+        "stepaudio-2.5-chat",
+        "stepaudio-2.5-realtime",
+        "stepaudio-2.5-tts",
+        "stepaudio-2.5-asr",
+        "stepaudio-2.5-asr-stream",
+        "step-image-edit-2",
+    ]
+    tts = next(model for model in models if model["id"] == "stepaudio-2.5-tts")
+    assert tts["pricing_unit"] == "per_10000_characters"
+    assert tts["unit_price"] == 0.85
+    assert tts["rate_limits"] == {
+        "concurrency": 5,
+        "requests_per_minute": 10,
+        "tokens_per_minute": 5000000,
+    }

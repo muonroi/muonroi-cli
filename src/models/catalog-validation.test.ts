@@ -37,6 +37,27 @@ describe("catalog schema validation", () => {
     }
   });
 
+  it("includes every published StepFun model with its specialized billing metadata", () => {
+    const models = safeValidateCatalog(realCatalog);
+    const stepfun = models?.filter((model) => model.provider === "stepfun") ?? [];
+
+    expect(stepfun.map((model) => model.id)).toEqual([
+      "step-3.5-flash",
+      "step-3.5-flash-2603",
+      "step-3.7-flash",
+      "stepaudio-2.5-chat",
+      "stepaudio-2.5-realtime",
+      "stepaudio-2.5-tts",
+      "stepaudio-2.5-asr",
+      "stepaudio-2.5-asr-stream",
+      "step-image-edit-2",
+    ]);
+
+    const tts = stepfun.find((model) => model.id === "stepaudio-2.5-tts");
+    expect(tts).toMatchObject({ pricing_unit: "per_10000_characters", unit_price: 0.85 });
+    expect(tts?.rate_limits).toEqual({ concurrency: 5, requests_per_minute: 10, tokens_per_minute: 5_000_000 });
+  });
+
   // Part E — drift guard: every bundled model MUST declare native_web_research
   // explicitly (true/false, never absent). A new model added without a decision
   // fails here, forcing the author to audit its real web-research capability
