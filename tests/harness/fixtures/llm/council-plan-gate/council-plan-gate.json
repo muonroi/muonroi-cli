@@ -24,7 +24,7 @@
       "___comment": "Clarifier round-0 question generation (runClarification's tracedGenerate call). Empty array = zero clarify questions, which sets gateReady=true and breaks the clarify loop without a readiness-judge call."
     },
     {
-      "text": "{\"problemStatement\":\"Add a harness E2E spec that asserts the council intent gate renders as the first card of a real council run, before any debate spend.\",\"constraints\":[\"Deterministic — no live network calls, no timing races\"],\"successCriteria\":[\"askcard-open fires with phase=council-setup\",\"optionCount is 10 (6 intent kinds + 4 shape options)\",\"the Implement option carries the recommended tag\"],\"scope\":\"in-scope: the council-setup launch card. out-of-scope: driving the debate or the plan phases.\"}",
+      "text": "{\"problemStatement\":\"Add a harness E2E spec that asserts the council intent gate renders as the first card of a real council run, before any debate spend.\",\"constraints\":[\"Deterministic — no live network calls, no timing races\"],\"successCriteria\":[\"askcard-open fires with phase=council-setup\",\"optionCount is 11 (6 intent kinds + 5 shape options)\",\"the Implement option carries the recommended tag\"],\"scope\":\"in-scope: the council-setup launch card. out-of-scope: driving the debate or the plan phases.\"}",
       "___comment": "inferSpecFromTopicOnly's spec-synthesis call — fires because the clarifier asked zero questions (qa.length === 0)."
     },
     {

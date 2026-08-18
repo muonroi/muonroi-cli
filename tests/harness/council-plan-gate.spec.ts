@@ -104,13 +104,13 @@ describe("council intent gate + plan card", () => {
     await driver.wait_for({ event: "askcard-open", timeoutMs: 60_000 });
     const e = driver.last_event("askcard-open");
     expect(e?.phase).toBe("council-setup");
-    // 6 IntentKind options (intent-card.ts buildIntentOptions) + 4 existing
-    // shape options (start / cheap / refine / cancel from launch-card.ts).
+    // 6 IntentKind options (intent-card.ts buildIntentOptions) + 5 shape
+    // options (start / cheap / edit / refine / cancel from launch-card.ts).
     // The askcard-open LiveEvent carries optionCount but NOT the labels
     // (protocol.ts:221-230) — the interaction_logs DB row has optionLabels,
     // the event does not. Read the labels off the rendered card instead of
     // inventing a protocol field.
-    expect(e?.optionCount).toBe(10);
+    expect(e?.optionCount).toBe(11);
 
     // Wait for the card to actually be on screen before reading it back —
     // askcard-open fires synchronously with the state setter, but render_text()

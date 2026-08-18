@@ -5,6 +5,16 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { planningArtifact } from "../../src/gsd/paths.js";
 import { type HarnessContext, spawnHarness } from "./helpers.js";
 
+async function waitForFiles(paths: string[], timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!paths.every(existsSync)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for planning artifacts: ${paths.join(", ")}`);
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 /**
  * GSD native bootstrap E2E — verifies the turn-sync path in
  * message-processor actually creates the `.planning/` workspace in a
@@ -30,6 +40,12 @@ describe("gsd-native greenfield bootstrap", () => {
       extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-v4-flash"],
       env: {
         MUONROI_GSD_NATIVE: "1",
+        // This spec verifies the native turn-sync bootstrap. Keep PIL routing
+        // local, skip interactive discovery, and bypass the optional assessor
+        // so no unrelated card or model round can prevent turn sync.
+        MUONROI_EE_BASE_URL: "http://127.0.0.1:1",
+        MUONROI_PIL_DISCOVERY: "0",
+        MUONROI_GSD_ASSESSOR: "0",
         MUONROI_TEST_NO_KEYCHAIN: "1",
       },
       idleTimeoutMs: 30_000,
@@ -69,6 +85,10 @@ describe("gsd-native greenfield bootstrap", () => {
     // this spec tracking the canonical location instead of the legacy split dir.
     const statePath = planningArtifact(greenfield, "STATE.md");
     const configPath = planningArtifact(greenfield, "config.json");
+    // An idle event only says the TUI has been quiet. It can arrive between
+    // submitting input and the turn-start GSD bootstrap, so wait for the
+    // artifacts that this test is actually responsible for proving.
+    await waitForFiles([statePath, configPath]);
     expect(existsSync(statePath)).toBe(true);
     expect(existsSync(configPath)).toBe(true);
 
