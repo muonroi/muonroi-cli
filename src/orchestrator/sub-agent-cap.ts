@@ -40,6 +40,21 @@
 import { createHash } from "node:crypto";
 import type { ToolSet } from "ai";
 
+/**
+ * H5: the cross-turn dedup (C3) wraps this cap on the OUTSIDE, so it would
+ * otherwise hash the cap's already-trimmed output — whose tier-dependent
+ * truncation and live `cumulative` markers are non-deterministic, so identical
+ * source content never produces a matching hash and dedup silently never fires.
+ *
+ * To let C3 key off the RAW pre-cap content while still SERVING the capped
+ * output, the cap stashes the raw string under this Symbol on its result object.
+ * A Symbol key is invisible to `JSON.stringify` (and thus to the provider wire),
+ * so it can never leak into the model payload even if the dedup layer is
+ * disabled and never strips it. `cross-turn-dedup.ts` reads it as the hash
+ * source.
+ */
+export const RAW_FOR_DEDUP: unique symbol = Symbol("muonroi.rawForDedup");
+
 export interface SubAgentCapOptions {
   /** Total chars of tool output the sub-agent may receive before the cap kicks in fully. */
   maxCumulativeChars?: number;
@@ -174,7 +189,11 @@ function compressResult(state: SubAgentCapState, raw: unknown): unknown {
   if (raw && typeof raw === "object") {
     const obj = raw as Record<string, unknown>;
     if (typeof obj.output === "string") {
-      return { ...obj, output: compressForCap(state, obj.output) };
+      const rawOutput = obj.output;
+      // H5: stash the RAW pre-cap output under a Symbol so the outer cross-turn
+      // dedup keys off it (not the trimmed, marker-bearing capped output). The
+      // Symbol never serializes to the model wire.
+      return { ...obj, output: compressForCap(state, rawOutput), [RAW_FOR_DEDUP]: rawOutput };
     }
     // MCP tool result shape: { type: "content", value: [{type:"text", text}, ...] }.
     // Without this branch the whole payload escaped the cumulative tracker —

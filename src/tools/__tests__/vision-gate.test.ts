@@ -42,8 +42,8 @@ describe("visionToolsNeeded", () => {
     expect(visionToolsNeeded({ userMessage: "continue", priorTurnHadTools: true })).toBe(true);
   });
 
-  it("exports exactly the three vision tool ids (todo_write / core tools excluded)", () => {
-    expect([...VISION_TOOL_NAMES]).toEqual(["analyze_image", "ask_vision_proxy", "list_vision_cache"]);
+  it("exports exactly the four vision tool ids (todo_write / core tools excluded)", () => {
+    expect([...VISION_TOOL_NAMES]).toEqual(["analyze_image", "ask_vision_proxy", "list_vision_cache", "vision_done"]);
     expect(VISION_TOOL_NAMES).not.toContain("todo_write");
     expect(VISION_TOOL_NAMES).not.toContain("read_file");
   });

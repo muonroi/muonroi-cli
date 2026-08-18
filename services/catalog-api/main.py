@@ -73,9 +73,13 @@ class CatalogModel(BaseModel):
     output_price_per_million: float
     cached_input_price_per_million: Optional[float] = None
     cache_write_price_per_million: Optional[float] = None
+    pricing_unit: Optional[str] = None
+    unit_price: Optional[float] = None
+    rate_limits: Optional["CatalogRateLimits"] = None
     reasoning: bool
     thinking_type: Optional[str] = None
     supports_effort: Optional[bool] = None
+    fixed_temperature: Optional[float] = None
     description: str
     aliases: Optional[list[str]] = None
     default_reasoning_effort: Optional[str] = None
@@ -84,6 +88,14 @@ class CatalogModel(BaseModel):
     routing_tiers: Optional[list[str]] = None
     # Mirrors CatalogModel.roles in src/models/catalog-client.ts (role routing).
     roles: Optional[list[str]] = None
+    native_web_research: Optional[bool] = None
+    web_research_kind: Optional[str] = None
+
+
+class CatalogRateLimits(BaseModel):
+    concurrency: Optional[int] = None
+    requests_per_minute: Optional[int] = None
+    tokens_per_minute: Optional[int] = None
 
 
 class CatalogPeakHourWindow(BaseModel):
@@ -136,6 +148,15 @@ class CatalogCouncilRouting(BaseModel):
 class CatalogVisionProxySlot(BaseModel):
     provider: str
     model_id: str
+    # Mirrors CatalogVisionProxySlot in src/models/catalog-client.ts. A slot may
+    # name a vision-only backend that is NOT a first-class ProviderId in the CLI
+    # (SiliconFlow Qwen-VL), carrying its own endpoint + key env var. Without
+    # these fields declared here, Pydantic DROPS them on serialization and the
+    # served catalog silently degrades that slot to an unresolvable provider —
+    # i.e. the CLI's vision fallback works from the bundled static catalog and
+    # breaks the moment the remote catalog is reachable.
+    api_base: Optional[str] = None
+    api_key_env: Optional[str] = None
 
 
 class CatalogVisionProxyRouting(BaseModel):
@@ -469,7 +490,23 @@ def health() -> dict:
     }
 
 
-@app.get("/api/v1/models", response_model=CatalogResponse, dependencies=[Depends(require_api_key)])
+@app.get(
+    "/api/v1/models",
+    response_model=CatalogResponse,
+    # Omit unset optionals instead of serializing them as JSON null.
+    #
+    # This is not cosmetic. The CLI validates the remote payload with a Zod
+    # schema whose optional fields are `.optional()` — which accepts a MISSING
+    # key but REJECTS an explicit null. Pydantic was emitting
+    # `cached_input_price_per_million: null`, `routing_tiers: null`,
+    # `peak_hour.windows: null`, etc., so `safeValidateCatalogDocument` returned
+    # null for the whole document and every CLI silently fell back to its
+    # BUNDLED static catalog. The remote catalog was being served correctly and
+    # consumed by nobody — verified by replaying this endpoint's own response
+    # through the CLI validator: invalid as served, valid with nulls stripped.
+    response_model_exclude_none=True,
+    dependencies=[Depends(require_api_key)],
+)
 def list_models(
     response: Response,
     tier: Optional[str] = Query(default=None, description="Filter by tier (fast|balanced|premium)"),

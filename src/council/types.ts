@@ -1,6 +1,6 @@
 import type { ModelMessage } from "ai";
 import type { ProcessMessageObserver } from "../orchestrator/agent-options.js";
-import type { TaskRequest, ToolResult } from "../types/index.js";
+import type { CouncilPanelLedgerEntry, CouncilStanceRow, TaskRequest, ToolResult } from "../types/index.js";
 import type { ModelRole } from "../utils/settings.js";
 
 /**
@@ -11,6 +11,22 @@ import type { ModelRole } from "../utils/settings.js";
  * closure captures the council abort signal, so callers pass only the request.
  */
 export type IsolatedTaskRunner = (request: TaskRequest) => Promise<ToolResult>;
+
+/**
+ * Sentinel a UI sends back through `respondToQuestion` when the user DISMISSED a
+ * council askcard (Esc) rather than submitting it.
+ *
+ * The distinction is load-bearing on the post-debate card: an empty SUBMIT means
+ * "take the recommended option" (the card pre-selects one and labels it
+ * Recommended), while a dismiss means "do nothing". Both used to arrive as `""`,
+ * so honouring the default for an empty submit would silently have turned Esc
+ * into "run the recommended action" — a worse bug than the one being fixed.
+ *
+ * Mirrors ASK_USER_DISMISSED for the ask_user tool. Consumers that do not send
+ * it are unaffected: an unknown value still routes as a free-text follow-up and
+ * `""` still resolves to the default.
+ */
+export const COUNCIL_ANSWER_DISMISSED = "(the user dismissed the council card without answering)";
 
 // ── Clarification Phase ─────────────────────────────────────────────────────
 
@@ -57,6 +73,20 @@ export interface ClarifiedSpec {
    * for backward compat — empty when the council runs with no prior context.
    */
   parentContext?: string;
+  /**
+   * Locked at the launch card (design 2026-08-04). Authoritative for the whole
+   * run — but be precise about WHAT it actually drives, because the design doc's
+   * D1 over-claims and this comment used to repeat it: the card fires AFTER
+   * `debatePlan` (and therefore outputShape and panel composition) is already
+   * computed, so the lock cannot influence either. Its one real consumer is the
+   * POST-DEBATE transition: `resolveRunKind` (which feeds
+   * `pickPostDebateRecommendation`) and, through it, whether the planner /
+   * plan-review / post-plan-card path runs at all.
+   *
+   * When absent (non-interactive paths, resumed pre-2026-08 specs) callers fall
+   * back to synthesisOutputKind.
+   */
+  intentKind?: IntentKind;
 }
 
 // ── Preflight ────────────────────────────────────────────────────────────────
@@ -73,9 +103,46 @@ export interface CouncilPreflight {
 
 // ── Debate Phase ─────────────────────────────────────────────────────────────
 
+/**
+ * One panelist's position on a single success criterion, as graded by the leader
+ * during its per-round evaluation.
+ *
+ *   "+"  supports      "-"  opposes      "~"  conditional      null  has not spoken
+ *
+ * `null` is load-bearing: a panelist who never argued a criterion must NEVER be
+ * folded into the agreeing majority, or a 4/5 with one abstention reads as
+ * opposition (and a 3/5 with two abstentions reads as consensus).
+ */
+export type StanceMark = "+" | "-" | "~" | null;
+
 export interface LeaderEvaluation {
   allCriteriaMet: boolean;
-  criteriaStatus: Array<{ criterion: string; met: boolean; evidence: string }>;
+  criteriaStatus: Array<{
+    criterion: string;
+    met: boolean;
+    evidence: string;
+    /**
+     * Per-panelist stance keyed by role label. Absent when the leader's model
+     * omitted the field or emitted an unparseable shape — callers must treat
+     * absence as "unknown", never as agreement.
+     */
+    stances?: Record<string, StanceMark>;
+    /** One-line reason the panel is split, present only on a contested criterion. */
+    split?: string;
+    /**
+     * True when this criterion cannot be satisfied by DEBATING at all — it is
+     * only closable by work that happens after the debate (landing the code,
+     * running the tests, observing the changed behaviour). Set by the leader.
+     *
+     * Load-bearing: such a criterion must never drive "extend N more rounds".
+     * Session 811336618ee0 pinned "thực hiện được thay đổi cụ thể trong code"
+     * and "sau thay đổi … vẫn giữ hành vi" — 2 of 4 criteria a debate structurally
+     * cannot meet. The escalation card offered "Extend 2 more rounds", the user
+     * took it, two extra rounds ran (~6 min, ~$0.05) and the count stayed 2/4,
+     * because more debate can never close a criterion that requires a mutation.
+     */
+    deferred?: boolean;
+  }>;
   unresolvedPoints: string[];
   needsResearch: boolean;
   researchQuery?: string;
@@ -118,6 +185,15 @@ export interface DebateState {
   /** Role-indexed per-round positions for follow-up citations. */
   archive?: DebateArchiveEntry[];
   /**
+   * Per-participant opening failures (model + last error) for every speaker that
+   * never produced a position. Populated even when SOME openings succeed, so the
+   * caller can report a partial panel; when it accounts for the whole panel the
+   * run is aborted rather than synthesized (see council/index.ts). Exists because
+   * the provider error string was previously unreachable outside an opt-in debug
+   * log — see session e74e820c6417.
+   */
+  openingFailures?: Array<{ model: string; role: string; error: string }>;
+  /**
    * F1 — the last successful round's per-criterion met flags, index-aligned to
    * `spec.successCriteria`. Lets the post-debate card tell whether the debate
    * actually satisfied the pinned success criteria (distinct from evidence
@@ -127,6 +203,14 @@ export interface DebateState {
    */
   finalCriteriaMet?: boolean[];
   /**
+   * Index-aligned to `spec.successCriteria`: true when the leader judged that
+   * criterion closable only AFTER the debate (it needs the code landed / tests
+   * run), so no number of rounds can move it. The post-debate card reports these
+   * as "deferred to implementation" instead of counting them as failures, and
+   * the escalation boundary never offers to extend for them.
+   */
+  finalCriteriaDeferred?: boolean[];
+  /**
    * B4 interactive escalation outcome. Set only when the user was prompted at a
    * stop-with-unmet boundary and chose an action: `extend` granted extra rounds
    * past the ceiling, `accept` proceeded with criteria open, `rescope` asked to
@@ -134,6 +218,21 @@ export interface DebateState {
    * or all criteria met). Lets synthesis/caller react to a user-driven partial stop.
    */
   escalation?: { action: "extend" | "accept" | "rescope"; grantedRounds?: number };
+  /**
+   * S8 — the run receipt inputs the post-debate card reports back ("2 rounds ·
+   * 14 turns · 3/4 criteria met · $0.19 · 4m12s"). Measured by the debate loop;
+   * the caller has no other way to see per-speaker spend or wall clock, and the
+   * numbers users ask for first should not have to be reconstructed.
+   */
+  panelLedger?: CouncilPanelLedgerEntry[];
+  /** Wall-clock duration of the debate loop, ms. */
+  elapsedMs?: number;
+  /**
+   * The final per-criterion stance snapshot, so the post-debate card can offer
+   * "re-run with <role>'s objection as the topic" against a position that was
+   * actually recorded rather than an invented one.
+   */
+  finalStanceRows?: CouncilStanceRow[];
 }
 
 /**
@@ -189,9 +288,87 @@ export interface ActionPlan {
   }>;
   estimatedComplexity: "trivial" | "moderate" | "complex";
   prerequisites: string[];
+  // NOTE: no `phases` field. It was added by the 2026-08-04 branch and was never
+  // written and never read — the phased plan lives on DISK as `.planning/PLAN.md`
+  // and is parsed by `plan-artifact.ts`; the executor reads that file, not this
+  // object. Removed rather than left as a dead field by the same branch that
+  // deleted `generate_plan` for being dead.
 }
 
 // ── Council Outcome (extends existing for backward compat) ───────────────────
+
+/**
+ * Bounded output-intent kind. The leader LLM selects FROM this vocabulary; an
+ * out-of-set value is coerced to "evaluation" at the planner/consumer boundary
+ * (see coerceIntentKind). This makes "drifted intent" unrepresentable at the
+ * type level — three prior bugs (bab91d29, 5c18d1d5, 12d3022b) all branched on
+ * a free-form string the model emitted and the code trusted.
+ *
+ * Two clusters:
+ *   - ANALYSIS kinds — the synthesis IS the deliverable; never a build mandate:
+ *     decision | evaluation | investigation | resolve_question
+ *   - IMPLEMENTATION kinds — carry an "original task" forward through the build
+ *     workflow: implementation_plan | action_items
+ */
+export type IntentKind =
+  | "decision"
+  | "evaluation"
+  | "investigation"
+  | "resolve_question"
+  | "implementation_plan"
+  | "action_items";
+
+/** Analysis-shape kinds. Synthesis is self-contained — no build carry-forward. */
+export const ANALYSIS_INTENT_KINDS = new Set<IntentKind>([
+  "decision",
+  "evaluation",
+  "investigation",
+  "resolve_question",
+]);
+
+/** Implementation-shape kinds. The post-debate flow may carry the conclusion forward. */
+export const IMPLEMENTATION_INTENT_KINDS = new Set<IntentKind>(["implementation_plan", "action_items"]);
+
+/**
+ * Coerce any LLM-emitted value into a valid IntentKind. Unknown / empty / non-string
+ * → "evaluation" (the safe analysis default — never a build mandate). Call this at
+ * every boundary where untrusted model output becomes an IntentKind.
+ */
+export function coerceIntentKind(raw: unknown): IntentKind {
+  if (typeof raw !== "string") return "evaluation";
+  const trimmed = raw.trim();
+  return ANALYSIS_INTENT_KINDS.has(trimmed as IntentKind) || IMPLEMENTATION_INTENT_KINDS.has(trimmed as IntentKind)
+    ? (trimmed as IntentKind)
+    : "evaluation";
+}
+
+/** True for implementation-shape kinds (the post-debate flow may carry forward). */
+export function isImplementationKind(kind: IntentKind): boolean {
+  return IMPLEMENTATION_INTENT_KINDS.has(kind);
+}
+
+/**
+ * Amendment A1 (2026-08-07, session 947db934b573) — may `action` be the
+ * post-debate DEFAULT selection under the locked `kind`?
+ *
+ * This is a DEFAULT-eligibility check only — never a filter. The ruling is
+ * "not default", not "not offered": an action this returns false for must
+ * stay visible in the option list (the model-first option policy exists so a
+ * debate can surface build work the user did not know to ask for — see
+ * session 8191ecaee149 — and suppressing the option would re-break that).
+ *
+ * Derived from the existing ANALYSIS/IMPLEMENTATION_INTENT_KINDS split via
+ * isImplementationKind — no new hardcoded kind list. "implement" is the only
+ * build action in PostDebateActionId, so it is the only action gated: for an
+ * analysis-shape kind (the synthesis IS the deliverable, never a build
+ * mandate) it is not default-eligible; for an implementation-shape kind, or
+ * for every other action id (including the context-only "refine" /
+ * "retry_synthesis" values index.ts adds), it is.
+ */
+export function isDefaultEligiblePostDebateAction(kind: IntentKind, action: string): boolean {
+  if (action !== "implement") return true;
+  return isImplementationKind(kind);
+}
 
 /**
  * Output shape proposed by the leader LLM per topic.
@@ -209,8 +386,8 @@ export interface OutputSection {
 }
 
 export interface OutputShape {
-  /** Free-form label (e.g. "evaluation", "implementation_plan", "decision"). */
-  kind: string;
+  /** Authoritative intent kind — bounded by {@link IntentKind}. LLM output is coerced. */
+  kind: IntentKind;
   sections: OutputSection[];
   /** Behavioural rules the synthesizer must obey. */
   guardrails: string[];
@@ -232,8 +409,8 @@ export interface DebatePlan {
 }
 
 export interface EnhancedCouncilOutcome {
-  /** Free-form (drives by leader plan). Common: decision, action_items, plan_update, evaluation, resolve_question. */
-  type: string;
+  /** Authoritative intent kind — bounded by {@link IntentKind}. Source: debatePlan.outputShape.kind. */
+  type: IntentKind;
   summary: string;
   /** Dynamic sections — keys mirror {@link OutputShape.sections}. */
   sections?: Record<string, unknown>;
@@ -256,6 +433,100 @@ export interface EnhancedCouncilOutcome {
   nextActions?: Array<{ action: PostDebateActionId; label: string; reason?: string }>;
 }
 
+export type CouncilTrustLevel = "high" | "degraded" | "invalidated";
+export type CouncilFailureClass = "none" | "synthesis_failed" | "partial_panel" | "criteria_unmet" | "ungrounded";
+export type CouncilDegradationKind = "partial_panel" | "accepted_open_criteria" | "evidence_gap";
+export type CouncilTransitionAction = "continue" | "degrade" | "hard_stop";
+
+export interface PhaseOutcomeEnvelope {
+  outcome: EnhancedCouncilOutcome | null;
+  trustLevel: CouncilTrustLevel;
+  failureClass: CouncilFailureClass;
+  degradationKinds: CouncilDegradationKind[];
+  canContinueNominally: boolean;
+  decisionBasis: "debate" | "fallback" | "none";
+  visibilityMessage?: string;
+}
+
+export function buildPhaseOutcomeEnvelope(input: {
+  outcome: EnhancedCouncilOutcome | null;
+  synthesisFailReason?: string;
+  participantCount: number;
+  activeCount: number;
+  evidenceDensity?: number;
+  taggedClaims?: number;
+  unmetCriteriaCount?: number;
+  acceptedEscalation?: boolean;
+}): PhaseOutcomeEnvelope {
+  if (!input.outcome) {
+    return {
+      outcome: input.outcome,
+      trustLevel: "invalidated",
+      failureClass: "synthesis_failed",
+      degradationKinds: [],
+      canContinueNominally: false,
+      decisionBasis: "none",
+      visibilityMessage: input.synthesisFailReason
+        ? `Council could not produce a validated structured outcome: ${input.synthesisFailReason}`
+        : "Council could not produce a validated structured outcome.",
+    };
+  }
+
+  const degradationKinds: CouncilDegradationKind[] = [];
+  let failureClass: CouncilFailureClass = "none";
+
+  if (input.activeCount < input.participantCount) {
+    degradationKinds.push("partial_panel");
+    failureClass = "partial_panel";
+  }
+  if ((input.unmetCriteriaCount ?? 0) > 0 && input.acceptedEscalation) {
+    degradationKinds.push("accepted_open_criteria");
+    failureClass = failureClass === "none" ? "criteria_unmet" : failureClass;
+  }
+  if ((input.taggedClaims ?? 0) > 0 && (input.evidenceDensity ?? 0) <= 0) {
+    degradationKinds.push("evidence_gap");
+    failureClass = failureClass === "none" ? "ungrounded" : failureClass;
+  }
+
+  const trustLevel: CouncilTrustLevel = degradationKinds.length > 0 ? "degraded" : "high";
+  const notes: string[] = [];
+  if (degradationKinds.includes("partial_panel")) {
+    notes.push("one or more panelists failed, so the decision was synthesized from a partial panel");
+  }
+  if (degradationKinds.includes("accepted_open_criteria")) {
+    notes.push("the debate ended with accepted open success criteria");
+  }
+  if (degradationKinds.includes("evidence_gap")) {
+    notes.push("grounding stayed weak: tagged claims were not backed by confirmed evidence");
+  }
+
+  return {
+    outcome: input.outcome,
+    trustLevel,
+    failureClass,
+    degradationKinds,
+    canContinueNominally: trustLevel === "high",
+    decisionBasis: degradationKinds.length > 0 ? "fallback" : "debate",
+    visibilityMessage: notes.length > 0 ? `Decision quality degraded: ${notes.join("; ")}.` : undefined,
+  };
+}
+
+export function resolvePhaseOutcomeTransition(
+  envelope: PhaseOutcomeEnvelope,
+  requestedAction: PostDebateActionId | "retry_synthesis" | "refine" | "" | undefined,
+): CouncilTransitionAction {
+  if (envelope.trustLevel === "invalidated") return "hard_stop";
+  // `!requestedAction` already covers both "" and undefined — an explicit
+  // `=== ""` after it is a dead branch (TS2367).
+  if (!requestedAction || requestedAction === "save_exit" || requestedAction === "ask_followup") {
+    return "continue";
+  }
+  if (requestedAction === "retry_synthesis" || requestedAction === "refine") {
+    return envelope.trustLevel === "high" ? "continue" : "degrade";
+  }
+  return envelope.canContinueNominally ? "continue" : "degrade";
+}
+
 /**
  * Post-debate actions the leader may recommend. Bounded to handlers wired in
  * index.ts's post-debate switch — the model selects/orders/labels FROM this
@@ -265,7 +536,6 @@ export interface EnhancedCouncilOutcome {
  */
 export type PostDebateActionId =
   | "ask_followup"
-  | "generate_plan"
   | "implement"
   | "save_exit"
   /**
@@ -302,6 +572,12 @@ export interface CouncilConfig {
   leaderNeedsResearch?: boolean;
   /** When true, the working directory has no source code yet — research prompt prefers internet sources. */
   internetFirst?: boolean;
+  /**
+   * When true, the turn is an out-of-repo ("external") question: runDebate skips
+   * the research phase AND grounding-verify so no council sub-path reads the repo.
+   * Council still convenes + debates + synthesizes on model knowledge.
+   */
+  externalTopic?: boolean;
   /** When true, leader sub-tasks downshift to cheaper tier models on the same provider. */
   costAware?: boolean;
   /**
@@ -328,15 +604,20 @@ export interface CouncilConfig {
    */
   respondToQuestion?: QuestionResponder;
   /**
-   * convene_council path — when true, the mid-debate escalation askcard
-   * (runEscalationPrompt) is auto-accepted WITHOUT emitting a blocking
-   * council_question card. The convene tool runs the council autonomously
-   * mid-agent-turn: there is no interactive user answering the escalation, so a
-   * card would hang the tool call. Auto-accept = conclude with the best
-   * synthesis so far. No decision is hardcoded post-synthesis — the calling
-   * agent decides what to do with the returned conclusion.
+   * When true, the mid-debate escalation askcard (runEscalationPrompt) is
+   * auto-accepted WITHOUT emitting a blocking council_question card. Set by the
+   * agent-convened callers (`convene_council`, the `runDebate` builtin), which
+   * run the council autonomously mid-agent-turn: there is no interactive user
+   * answering the escalation, so a card would hang the tool call. Auto-accept =
+   * conclude with the best synthesis so far.
+   *
+   * Fed from `RunCouncilOptions.suppressPreDebateCards` — renamed from
+   * `convenePath` (2026-08-06, C2) because that name described the CALLER, not
+   * the condition, and the same flag was being reused for four unrelated
+   * suppressions. The condition is "no human is present to answer a blocking
+   * card before the debate concludes".
    */
-  convenePath?: boolean;
+  autoAcceptEscalation?: boolean;
   /**
    * C (mid-debate checkpoint) — directory to persist the per-round debate
    * checkpoint (`debate-checkpoint.json`), normally the run dir
@@ -455,6 +736,25 @@ export interface CouncilLLM {
     options?: { enableVerificationTools?: boolean },
     onUsage?: UsageCallback,
   ): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }>;
+  /**
+   * Session-scoped entitlement/auth blocklist (see model-blocklist.ts) — true
+   * when `modelId` just failed non-retryably (401/403 + SDK isRetryable:false)
+   * earlier in this session, so callers walking a candidate list should skip
+   * it rather than burn the same rejected call again. Optional so every
+   * existing literal `CouncilLLM` test mock (which never implements it) keeps
+   * compiling — `llm.isModelBlocked?.(id)` reads as `undefined` (falsy) there,
+   * i.e. "not blocked", which is the correct default for a mock with no
+   * blocklist wired up.
+   */
+  isModelBlocked?(modelId: string): boolean;
+  /**
+   * Consume the one-shot "tell the user about this block" flag for `modelId`.
+   * Returns the warning text the FIRST time it's called for a blocked model in
+   * this scope, and `undefined` on every call after that (or when the model
+   * isn't blocked) — so a run that retries the same model across many calls
+   * surfaces the warning once, not once per call.
+   */
+  takeModelBlockWarning?(modelId: string): string | undefined;
 }
 
 export type QuestionResponder = (questionId: string) => Promise<string>;

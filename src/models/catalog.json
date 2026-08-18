@@ -1,7 +1,7 @@
 {
-  "version": "2.15",
-  "updated_at": "2026-07-15",
-  "description": "Local fallback catalog: deepseek + zai + opencode-go + xai. routing.council multi-provider debate; routing.vision_proxy Z.ai/xai backend for text-only models (deepseek etc.). provider_policies.peak_hour from vendor docs. Pricing APPROXIMATE.",
+  "version": "2.18",
+  "updated_at": "2026-08-18",
+  "description": "Local fallback catalog: anthropic + deepseek + zai + opencode-go + xai + stepfun. routing.council multi-provider debate; routing.vision_proxy Z.ai/xai backend for text-only models (deepseek etc.). provider_policies.peak_hour from vendor docs. Anthropic rows verified against platform.claude.com/docs/en/about-claude/pricing and /models/overview on 2026-07-29. StepFun model contracts, pricing, and V0 limits verified against platform.stepfun.ai documentation on 2026-08-18. Other pricing APPROXIMATE.",
   "models": [
     {
       "id": "deepseek-v4-flash",
@@ -42,6 +42,183 @@
       "aliases": ["deepseek-pro-native"],
       "supports_vision": false,
       "roles": ["leader", "implement", "verify", "research"],
+      "native_web_research": false,
+      "web_research_kind": null
+    },
+    {
+      "id": "step-3.5-flash",
+      "name": "Step 3.5 Flash (StepFun)",
+      "provider": "stepfun",
+      "tier": "balanced",
+      "routing_tiers": ["fast"],
+      "context_window": 256000,
+      "max_output_tokens": 8192,
+      "input_price_per_million": 0.1,
+      "output_price_per_million": 0.3,
+      "cached_input_price_per_million": 0.02,
+      "rate_limits": { "concurrency": 5, "requests_per_minute": 10, "tokens_per_minute": 5000000 },
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": false,
+      "default_reasoning_effort": null,
+      "description": "StepFun reasoning model with documented tool calling and 256K context. Uses the OpenAI-compatible chat-completions API.",
+      "supports_vision": false,
+      "roles": ["leader", "implement", "verify", "research"],
+      "native_web_research": false,
+      "web_research_kind": null
+    },
+    {
+      "id": "step-3.5-flash-2603",
+      "name": "Step 3.5 Flash 2603 (StepFun)",
+      "provider": "stepfun",
+      "tier": "balanced",
+      "routing_tiers": ["fast"],
+      "context_window": 256000,
+      "max_output_tokens": 8192,
+      "input_price_per_million": 0.1,
+      "output_price_per_million": 0.3,
+      "cached_input_price_per_million": 0.02,
+      "rate_limits": { "concurrency": 5, "requests_per_minute": 10, "tokens_per_minute": 5000000 },
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": false,
+      "default_reasoning_effort": null,
+      "description": "Versioned StepFun reasoning model with documented tool calling and 256K context. Uses the OpenAI-compatible chat-completions API.",
+      "supports_vision": false,
+      "roles": ["leader", "implement", "verify", "research"],
+      "native_web_research": false,
+      "web_research_kind": null
+    },
+    {
+      "id": "step-3.7-flash",
+      "name": "Step 3.7 Flash (StepFun)",
+      "provider": "stepfun",
+      "tier": "premium",
+      "context_window": 256000,
+      "max_output_tokens": 0,
+      "input_price_per_million": 0.2,
+      "output_price_per_million": 1.15,
+      "cached_input_price_per_million": 0.04,
+      "rate_limits": { "concurrency": 5, "requests_per_minute": 10, "tokens_per_minute": 5000000 },
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": false,
+      "default_reasoning_effort": null,
+      "description": "StepFun's multimodal reasoning model with documented tool calling, 256K context, and image/video understanding. The documented maximum output-token limit is not published.",
+      "supports_vision": true,
+      "roles": ["leader", "implement", "verify", "research"],
+      "native_web_research": false,
+      "web_research_kind": null
+    },
+    {
+      "id": "stepaudio-2.5-chat",
+      "name": "StepAudio 2.5 Chat (StepFun)",
+      "provider": "stepfun",
+      "tier": "balanced",
+      "tier_routing": false,
+      "context_window": 0,
+      "max_output_tokens": 0,
+      "input_price_per_million": 1.5,
+      "output_price_per_million": 3.5,
+      "cached_input_price_per_million": 0.3,
+      "rate_limits": { "concurrency": 5, "requests_per_minute": 10, "tokens_per_minute": 5000000 },
+      "reasoning": false,
+      "description": "Audio-and-text chat model served through the chat-completions API. Excluded from text-model tier routing; select it explicitly for its specialized audio workflow.",
+      "supports_vision": false,
+      "native_web_research": false,
+      "web_research_kind": null
+    },
+    {
+      "id": "stepaudio-2.5-realtime",
+      "name": "StepAudio 2.5 Realtime (StepFun)",
+      "provider": "stepfun",
+      "tier": "balanced",
+      "tier_routing": false,
+      "context_window": 0,
+      "max_output_tokens": 0,
+      "input_price_per_million": 1.5,
+      "output_price_per_million": 10,
+      "cached_input_price_per_million": 0.3,
+      "rate_limits": { "concurrency": 5, "requests_per_minute": 10, "tokens_per_minute": 5000000 },
+      "reasoning": false,
+      "description": "Real-time audio-and-text model served through StepFun's WebSocket API. Excluded from text-model tier routing; select it explicitly for its specialized audio workflow.",
+      "supports_vision": false,
+      "native_web_research": false,
+      "web_research_kind": null
+    },
+    {
+      "id": "stepaudio-2.5-tts",
+      "name": "StepAudio 2.5 TTS (StepFun)",
+      "provider": "stepfun",
+      "tier": "fast",
+      "tier_routing": false,
+      "context_window": 0,
+      "max_output_tokens": 0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
+      "pricing_unit": "per_10000_characters",
+      "unit_price": 0.85,
+      "rate_limits": { "concurrency": 5, "requests_per_minute": 10, "tokens_per_minute": 5000000 },
+      "reasoning": false,
+      "description": "Text-to-speech model billed at USD 0.85 per 10,000 characters. Excluded from text-model tier routing; select it explicitly for its speech endpoint.",
+      "supports_vision": false,
+      "native_web_research": false,
+      "web_research_kind": null
+    },
+    {
+      "id": "stepaudio-2.5-asr",
+      "name": "StepAudio 2.5 ASR (StepFun)",
+      "provider": "stepfun",
+      "tier": "fast",
+      "tier_routing": false,
+      "context_window": 0,
+      "max_output_tokens": 0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
+      "pricing_unit": "per_hour",
+      "unit_price": 0.022,
+      "rate_limits": { "concurrency": 5, "requests_per_minute": 10, "tokens_per_minute": 5000000 },
+      "reasoning": false,
+      "description": "Batch automatic-speech-recognition model billed at USD 0.022 per hour. Excluded from text-model tier routing; select it explicitly for its transcription endpoint.",
+      "supports_vision": false,
+      "native_web_research": false,
+      "web_research_kind": null
+    },
+    {
+      "id": "stepaudio-2.5-asr-stream",
+      "name": "StepAudio 2.5 ASR Stream (StepFun)",
+      "provider": "stepfun",
+      "tier": "fast",
+      "tier_routing": false,
+      "context_window": 0,
+      "max_output_tokens": 0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
+      "pricing_unit": "per_hour",
+      "unit_price": 0.18,
+      "rate_limits": { "concurrency": 5, "requests_per_minute": 10, "tokens_per_minute": 5000000 },
+      "reasoning": false,
+      "description": "Streaming automatic-speech-recognition model billed at USD 0.18 per hour. Excluded from text-model tier routing; select it explicitly for its WebSocket transcription workflow.",
+      "supports_vision": false,
+      "native_web_research": false,
+      "web_research_kind": null
+    },
+    {
+      "id": "step-image-edit-2",
+      "name": "Step Image Edit 2 (StepFun)",
+      "provider": "stepfun",
+      "tier": "balanced",
+      "tier_routing": false,
+      "context_window": 0,
+      "max_output_tokens": 0,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
+      "pricing_unit": "per_image",
+      "unit_price": 0.003,
+      "rate_limits": { "concurrency": 5, "requests_per_minute": 10, "tokens_per_minute": 5000000 },
+      "reasoning": false,
+      "description": "Image-editing model billed at USD 0.003 per image. Excluded from text-model tier routing; select it explicitly for StepFun's image endpoint.",
+      "supports_vision": false,
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -156,7 +333,7 @@
       "max_output_tokens": 8192,
       "input_price_per_million": 0.3,
       "output_price_per_million": 0.9,
-      "reasoning": false,
+      "reasoning": true,
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
@@ -176,7 +353,7 @@
       "max_output_tokens": 8000,
       "input_price_per_million": 0,
       "output_price_per_million": 0,
-      "reasoning": false,
+      "reasoning": true,
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
@@ -197,7 +374,7 @@
       "max_output_tokens": 8192,
       "input_price_per_million": 0.2,
       "output_price_per_million": 1.1,
-      "reasoning": false,
+      "reasoning": true,
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
@@ -218,7 +395,7 @@
       "max_output_tokens": 16000,
       "input_price_per_million": 0.6,
       "output_price_per_million": 2.2,
-      "reasoning": false,
+      "reasoning": true,
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
@@ -238,7 +415,7 @@
       "max_output_tokens": 8192,
       "input_price_per_million": 0.1,
       "output_price_per_million": 0.3,
-      "reasoning": false,
+      "reasoning": true,
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
@@ -259,7 +436,7 @@
       "max_output_tokens": 8192,
       "input_price_per_million": 0.3,
       "output_price_per_million": 0.9,
-      "reasoning": false,
+      "reasoning": true,
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
@@ -388,7 +565,7 @@
       "default_reasoning_effort": "medium",
       "description": "Subscription version of GLM-5.2 MoE with 1M-token context window.",
       "aliases": ["glm-5.2-go"],
-      "supports_vision": true,
+      "supports_vision": false,
       "roles": ["leader", "implement", "verify"],
       "native_web_research": false,
       "web_research_kind": null
@@ -587,10 +764,95 @@
       "supports_vision": false,
       "native_web_research": false,
       "web_research_kind": null
+    },
+    {
+      "id": "claude-fable-5",
+      "name": "Claude Fable 5 (Anthropic)",
+      "provider": "anthropic",
+      "tier": "premium",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_million": 10,
+      "output_price_per_million": 50,
+      "cached_input_price_per_million": 1,
+      "reasoning": true,
+      "thinking_type": "adaptive",
+      "supports_effort": false,
+      "default_reasoning_effort": null,
+      "description": "Anthropic's most capable widely released model (GA 2026-06-09). Adaptive thinking always on — does NOT accept thinking.type=enabled or the effort parameter. Knowledge cutoff Jan 2026. Safeguards routing: some flagged queries are silently answered by Opus 5 instead (<5% of sessions). Costs exactly 2x Opus 5 on both meters — reserve for measured workloads.",
+      "aliases": ["fable-5", "fable", "claude-fable-5-latest"],
+      "supports_vision": true,
+      "roles": ["leader", "implement", "verify", "research"],
+      "native_web_research": true,
+      "web_research_kind": "web-search"
+    },
+    {
+      "id": "claude-opus-5",
+      "name": "Claude Opus 5 (Anthropic)",
+      "provider": "anthropic",
+      "tier": "premium",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_million": 5,
+      "output_price_per_million": 25,
+      "cached_input_price_per_million": 0.5,
+      "reasoning": true,
+      "thinking_type": "adaptive",
+      "supports_effort": true,
+      "default_reasoning_effort": "high",
+      "description": "Released 2026-07-24. Default premium route for the anthropic provider — complex agentic coding and enterprise work. Adaptive thinking; effort defaults to high on the Claude API and Claude Code. Knowledge cutoff May 2026 (newest of the family). Fast mode research preview available at 2x price ($10/$50) — see provider_policies.anthropic.fast_mode.",
+      "aliases": ["opus-5", "opus", "claude-opus-5-latest"],
+      "supports_vision": true,
+      "roles": ["leader", "implement", "verify", "research"],
+      "native_web_research": true,
+      "web_research_kind": "web-search"
+    },
+    {
+      "id": "claude-sonnet-5",
+      "name": "Claude Sonnet 5 (Anthropic)",
+      "provider": "anthropic",
+      "tier": "balanced",
+      "routing_tiers": ["fast"],
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_million": 2,
+      "output_price_per_million": 10,
+      "cached_input_price_per_million": 0.2,
+      "reasoning": true,
+      "thinking_type": "adaptive",
+      "supports_effort": true,
+      "default_reasoning_effort": "high",
+      "description": "Released 2026-06-30. Best speed/intelligence balance; primary balanced model and also routes as fast-tier for compaction/title. PRICING IS INTRODUCTORY: $2/$10 per MTok through 2026-08-31, then $3/$15 (cache hit $0.20 -> $0.30). Update this row on 2026-09-01. Knowledge cutoff Jan 2026.",
+      "aliases": ["sonnet-5", "sonnet", "claude-sonnet-5-latest"],
+      "supports_vision": true,
+      "roles": ["implement", "verify", "research"],
+      "native_web_research": true,
+      "web_research_kind": "web-search"
+    },
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "name": "Claude Haiku 4.5 (Anthropic)",
+      "provider": "anthropic",
+      "tier": "fast",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "input_price_per_million": 1,
+      "output_price_per_million": 5,
+      "cached_input_price_per_million": 0.1,
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": false,
+      "default_reasoning_effort": null,
+      "description": "Fastest Anthropic model with near-frontier intelligence. Different shape from the 5-series: 200k context (not 1M), 64k max output, extended thinking via thinking.type=enabled (not adaptive), no effort parameter, knowledge cutoff Feb 2025. Good for file ops, compaction, and background work.",
+      "aliases": ["claude-haiku-4-5", "haiku-4.5", "haiku"],
+      "supports_vision": true,
+      "roles": ["research", "verify"],
+      "native_web_research": true,
+      "web_research_kind": "web-search"
     }
   ],
   "routing": {
-    "switch_provider_order": ["deepseek", "zai", "opencode-go", "xai"],
+    "switch_provider_order": ["deepseek", "zai", "opencode-go", "xai", "anthropic"],
     "vision_proxy": {
       "default": {
         "provider": "zai",
@@ -612,6 +874,16 @@
         {
           "provider": "zai",
           "model_id": "glm-5.2"
+        },
+        {
+          "provider": "siliconflow",
+          "model_id": "Qwen/Qwen3-VL-32B-Instruct",
+          "api_base": "https://api.siliconflow.com/v1",
+          "api_key_env": "SILICONFLOW_API_KEY"
+        },
+        {
+          "provider": "anthropic",
+          "model_id": "claude-sonnet-5"
         }
       ]
     },
@@ -640,6 +912,68 @@
     }
   },
   "provider_policies": {
+    "anthropic": {
+      "api_base": "https://api.anthropic.com/v1",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "auth_modes": ["api_key", "subscription_oauth"],
+      "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "source_verified_at": "2026-07-29",
+      "policy_note": "No peak/off-peak pricing. Per-token rates are flat 24/7 on the Claude API. Subscription (Pro/Max) access through Claude Code uses rolling 5-hour + weekly session limits instead of per-token billing — model rows keep list prices for cost estimation only.",
+      "tier_defaults": {
+        "fast": "claude-haiku-4-5-20251001",
+        "balanced": "claude-sonnet-5",
+        "premium": "claude-opus-5"
+      },
+      "fallback_model_id": "claude-sonnet-5",
+      "switch_fallback_providers": ["deepseek", "zai", "opencode-go", "xai"],
+      "cache_multipliers": {
+        "note": "Multipliers relative to base input price. cached_input_price_per_million in the model rows already reflects cache_read.",
+        "cache_write_5m": 1.25,
+        "cache_write_1h": 2,
+        "cache_read": 0.1
+      },
+      "batch_discount": {
+        "note": "Batch API applies 50% off both input and output. Stacks with prompt caching. Not available with fast mode.",
+        "multiplier": 0.5
+      },
+      "fast_mode": {
+        "note": "Research preview. Up to ~2.5x output speed, first-party Claude API only. Not on Bedrock/Vertex/AWS marketplace, not with Batch API.",
+        "supported_model_ids": ["claude-opus-5"],
+        "input_price_per_million": 10,
+        "output_price_per_million": 50
+      },
+      "data_residency": {
+        "note": "inference_geo=\"us\" applies a 1.1x multiplier to every token category. Default global routing is standard price.",
+        "us_multiplier": 1.1
+      },
+      "server_tool_pricing": {
+        "web_search_per_1000_requests": 10,
+        "web_fetch": 0,
+        "code_execution_free_hours_per_month": 1550,
+        "code_execution_price_per_container_hour": 0.05
+      },
+      "scheduled_price_changes": [
+        {
+          "model_id": "claude-sonnet-5",
+          "effective_date": "2026-09-01",
+          "input_price_per_million": 3,
+          "output_price_per_million": 15,
+          "cached_input_price_per_million": 0.3,
+          "note": "Introductory $2/$10 pricing ends 2026-08-31."
+        }
+      ],
+      "tokenizer_note": "Claude 4.7 and later use a newer tokenizer producing roughly 30% more tokens for the same text. Budget accordingly when comparing $/MTok against non-Anthropic providers.",
+      "excluded_models": [
+        {
+          "id": "claude-mythos-5",
+          "reason": "Limited availability, invitation-only under Project Glasswing (https://anthropic.com/glasswing). Same specs and pricing as claude-fable-5. Not self-serve — omitted from the catalog."
+        },
+        {
+          "id": "claude-mythos-preview",
+          "reason": "Invitation-only preview under Project Glasswing. Not self-serve."
+        }
+      ]
+    },
     "zai": {
       "peak_hour": {
         "source_url": "https://docs.z.ai/devpack/overview",
@@ -651,7 +985,7 @@
         "off_peak_quota_multiplier": 2,
         "sensitive_model_ids": ["glm-5.2", "glm-5-turbo", "glm-5", "glm-5.1", "glm-5v-turbo"],
         "fallback_model_id": "glm-4.7",
-        "switch_fallback_providers": ["deepseek", "opencode-go", "xai"]
+        "switch_fallback_providers": ["deepseek", "opencode-go", "xai", "anthropic"]
       }
     },
     "deepseek": {
@@ -673,7 +1007,7 @@
         ],
         "sensitive_model_ids": ["deepseek-v4-pro"],
         "fallback_model_id": "deepseek-v4-flash",
-        "switch_fallback_providers": ["zai", "opencode-go", "xai"]
+        "switch_fallback_providers": ["zai", "opencode-go", "xai", "anthropic"]
       }
     }
   }

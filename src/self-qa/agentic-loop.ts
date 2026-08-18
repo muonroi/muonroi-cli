@@ -572,9 +572,9 @@ async function executeDecision(driver: Driver, d: AgenticDecision): Promise<void
       return;
     case "wait_for": {
       const timeout = d.timeoutMs ?? 5_000;
-      if (d.idle) return driver.wait_for({ idle: true, timeoutMs: timeout });
-      if (d.selector) return driver.wait_for({ selector: d.selector, timeoutMs: timeout });
-      if (d.event) return driver.wait_for({ event: d.event, timeoutMs: timeout });
+      if (d.idle) await driver.wait_for({ idle: true, timeoutMs: timeout });
+      else if (d.selector) await driver.wait_for({ selector: d.selector, timeoutMs: timeout });
+      else if (d.event) await driver.wait_for({ event: d.event, timeoutMs: timeout });
       return;
     }
     case "done":

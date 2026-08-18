@@ -35,7 +35,16 @@ export interface StanceRecallOptions {
   maxSeedChars?: number;
 }
 
-const DEFAULT_TIMEOUT_MS = 4000;
+// Must clear the server's recall pipeline wall-time, not just its internal bound.
+// client.ts documents the /api/recall pipeline at ~8s internal bound with a
+// *measured ~9.3s* on a warm VPS (embedding + 3-leg search + network push); the
+// client's own default is 15s for exactly this reason. The previous 4000ms here
+// guillotined virtually every remote recall before it returned — N stance recalls
+// that always ran to the cap and always came back empty (0 seeds + a fixed latency
+// tax + spurious ee_unavailable logs). 15s matches the client default so a
+// slow-but-valid stance recall actually lands. Prefetch (debate.ts) hides this
+// budget behind the research phase, so the ceiling is not paid on the critical path.
+const DEFAULT_TIMEOUT_MS = 15000;
 const DEFAULT_MAX_SEED_CHARS = 1200;
 
 /**

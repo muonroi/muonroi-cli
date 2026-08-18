@@ -39,6 +39,10 @@ export const LIFECYCLE_PRESET: ReadonlySet<EventKind> = new Set<EventKind>([
   "sprint-plan-committed",
   "route-decision",
   "steer-inject",
+  // A driving agent MUST see this to react to an in-TUI /resume under the
+  // harness (stop → start --session). Dropping it would silently swallow the
+  // only signal that a relaunch was suppressed.
+  "resume-request",
   "usage",
   // Ephemeral kinds carry a visualText snapshot for wake-at-milestone monitors
   // (event-tee.ts EPHEMERAL_KINDS). The default preset must not drop them, or a

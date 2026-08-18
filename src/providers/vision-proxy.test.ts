@@ -16,7 +16,46 @@ function restoreFetch(): void {
   globalThis.fetch = realFetch;
 }
 
-beforeEach(() => {
+/**
+ * Env-var-backed vision slots must be neutralized, or this whole file is
+ * environment-dependent.
+ *
+ * A catalog vision slot may carry `api_key_env` instead of a keychain entry (the
+ * SiliconFlow Qwen-VL slot is wired that way), and `resolveSlotTransport` reads
+ * `process.env[api_key_env]` DIRECTLY — a path `vi.spyOn(keychain,
+ * "loadKeyForProvider")` cannot reach. So on a developer machine that happens to
+ * export that variable, the "no vision keys at all" tests are asserting against a
+ * premise that is false: the chain really does have a usable slot, the plan is
+ * correctly `proxy`, and one test even issued a live fetch. Green in CI, red
+ * locally, and the product was never at fault.
+ *
+ * Names are derived from the loaded routing rather than hardcoded, so a new
+ * env-keyed slot in the catalog is covered without touching this file.
+ */
+const savedSlotEnv = new Map<string, string | undefined>();
+
+async function scrubEnvKeyedVisionSlots(): Promise<void> {
+  await registry.loadCatalog();
+  const routing = registry.getVisionProxyRouting();
+  const slots = [routing?.default, routing?.ocr, routing?.design, ...(routing?.fallback_chain ?? [])];
+  for (const slot of slots) {
+    const name = slot?.api_key_env;
+    if (!name || savedSlotEnv.has(name)) continue;
+    savedSlotEnv.set(name, process.env[name]);
+    delete process.env[name];
+  }
+}
+
+function restoreEnvKeyedVisionSlots(): void {
+  for (const [name, value] of savedSlotEnv) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+  savedSlotEnv.clear();
+}
+
+beforeEach(async () => {
+  await scrubEnvKeyedVisionSlots();
   vi.spyOn(keychain, "loadKeyForProvider").mockResolvedValue("sk-test-key-12345678901234567890");
   vi.spyOn(registry, "getModelInfo").mockImplementation((id: string) => {
     if (id === "deepseek-v4-flash") return { id, supportsVision: false } as any;
@@ -30,6 +69,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   restoreFetch();
+  restoreEnvKeyedVisionSlots();
 });
 
 describe("needsVisionProxy", () => {
@@ -72,8 +112,14 @@ describe("planImageHandlingForTextOnlyModel", () => {
   it("returns native_model when proxy providers lack keys but another vision model is configured", async () => {
     vi.spyOn(settings, "isProviderDisabled").mockReturnValue(false);
     vi.spyOn(settings, "isModelDisabled").mockReturnValue(false);
+    // Narrow the proxy chain to zai only, so a keyed vision model that is NOT a
+    // chain slot is the only way images can be served — the native_model branch.
+    vi.spyOn(registry, "getVisionProxyRouting").mockReturnValue({
+      default: { provider: "zai", model_id: "glm-4.6v-flash" },
+      fallback_chain: [],
+    });
     vi.spyOn(keychain, "loadKeyForProvider").mockImplementation(async (p) => {
-      if (p === "opencode-go") return "sk-opencode-key-123456789012345678";
+      if (p === "xai") return "sk-xai-key-1234567890123456789012";
       throw new Error("no key");
     });
     const plan = await planImageHandlingForTextOnlyModel({
@@ -82,9 +128,27 @@ describe("planImageHandlingForTextOnlyModel", () => {
     });
     expect(plan.strategy).toBe("native_model");
     if (plan.strategy === "native_model") {
-      expect(plan.fallback.provider).toBe("opencode-go");
-      expect(plan.fallback.modelId).toBe("opencode/glm-5.2");
+      expect(plan.fallback.provider).toBe("xai");
+      expect(plan.fallback.modelId).toBe("grok-4.5");
     }
+  });
+
+  it("does NOT route an image to opencode-go, which answers without seeing it", async () => {
+    // Verified live: the Console Go proxy returns HTTP 200 and "I cannot see the
+    // image" — it drops image parts. `supports_vision:false` in the catalog keeps
+    // it out of every vision path; the runtime blind-response guard in
+    // vision-backend.ts is the second line of defence.
+    vi.spyOn(settings, "isProviderDisabled").mockReturnValue(false);
+    vi.spyOn(settings, "isModelDisabled").mockReturnValue(false);
+    vi.spyOn(keychain, "loadKeyForProvider").mockImplementation(async (p) => {
+      if (p === "opencode-go") return "sk-opencode-key-123456789012345678";
+      throw new Error("no key");
+    });
+    const plan = await planImageHandlingForTextOnlyModel({
+      primaryModelId: "deepseek-v4-flash",
+      imageCount: 1,
+    });
+    expect(plan.strategy).toBe("unavailable");
   });
 
   it("returns unavailable when no vision keys at all", async () => {

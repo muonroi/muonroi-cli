@@ -383,6 +383,8 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   askSafetyOverride?: (info: SafetyOverrideAskInfo) => Promise<SafetyOverrideVerdict>;
   /** ask_user handler — invoked when the model calls the `ask_user` tool; resolves the human's answer. */
   askUser?: (info: AskUserAskInfo) => Promise<string>;
+  /** Feature B2 — enter_ideal handler; records a pending product-loop request on the orchestrator. */
+  enterIdeal?: (idea: string) => void;
   runCouncilV2(
     userMessage: string,
     opts: {
@@ -392,7 +394,10 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
       // Agent-driven post-council: suppress the hardcoded post-debate card so the
       // synthesis returns to the agent, which decides the follow-up. Threaded from
       // the auto-council + runDebate call sites in tool-engine.
-      convenePath?: boolean;
+      suppressPreDebateCards?: boolean;
+      suppressPostDebate?: boolean;
+      /** Gate A — thread the main turn's already-classified scopeKind so runCouncil skips a redundant self-classify round-trip. */
+      externalTopic?: boolean;
     },
   ): AsyncGenerator<StreamChunk, void, unknown>;
   processMessage(
@@ -1153,7 +1158,7 @@ export class MessageProcessor {
       } else {
         try {
           if (historyHasImages) {
-            const historyResult = await proxyVision(deps.messages, turnModelId, signal);
+            const historyResult = await proxyVision(deps.messages, turnModelId, signal, deps.session?.id);
             if (historyResult.proxied) {
               deps.setMessages(historyResult.messages);
               yield {
@@ -1163,7 +1168,12 @@ export class MessageProcessor {
             }
           }
           if (turnHasImages) {
-            const proxyResult = await proxyVision([userModelMessage, userEnrichedMessage], turnModelId, signal);
+            const proxyResult = await proxyVision(
+              [userModelMessage, userEnrichedMessage],
+              turnModelId,
+              signal,
+              deps.session?.id,
+            );
             if (proxyResult.proxied) {
               userModelMessage = proxyResult.messages[0];
               userEnrichedMessage = proxyResult.messages[1];
@@ -1327,7 +1337,7 @@ export class MessageProcessor {
       ),
       turnModelId,
     );
-    const runtime = resolveModelRuntime(turnModelId);
+    const runtime = resolveModelRuntime(turnModelId, { stage: "main", sessionId: deps.session?.id });
     const modelInfo = runtime.modelInfo;
 
     // SAMR: Step-Aware Model Routing — downgrade to fast model for tool-execution
@@ -1361,7 +1371,7 @@ export class MessageProcessor {
     const stepRouterDecision = decideStepRouting(turnModelId, deps.providerId, stepRouterCfg);
     const stepRouterPhase: "phase1" | "phase2" | "done" = stepRouterDecision.phase2ModelId ? "phase1" : "done";
     const phase2Runtime = stepRouterDecision.phase2ModelId
-      ? resolveModelRuntime(stepRouterDecision.phase2ModelId)
+      ? resolveModelRuntime(stepRouterDecision.phase2ModelId, { stage: "main", sessionId: deps.session?.id })
       : null;
     if (stepRouterDecision.phase2ModelId && _debugOn) {
       _debugSteps.push({
@@ -1450,6 +1460,22 @@ export class MessageProcessor {
     } finally {
       if (deps.getAbortController()?.signal === signal) {
         deps.setAbortController(null);
+      }
+      // Meter the C3 same-turn re-serve cost — the dedup deliberately re-bills
+      // full content on same-turn re-reads (avoiding a worse single-read
+      // fallback), and that cost was invisible. Emit cumulative per session so
+      // cost-leak analysis can attribute it and a future policy fix is
+      // falsifiable. Only when there is something to report.
+      const dstats = deps.crossTurnDedup?.getStats();
+      if (deps.session?.id && dstats && dstats.sameTurnReservedChars > 0) {
+        logInteraction(deps.session.id, "dedup", {
+          data: {
+            hits: dstats.hits,
+            sameTurnReserves: dstats.sameTurnReserves,
+            sameTurnReservedChars: dstats.sameTurnReservedChars,
+            approxTokens: Math.round(dstats.sameTurnReservedChars / 4),
+          },
+        });
       }
     }
   }

@@ -149,7 +149,11 @@ export class GrokOAuthProvider implements ProviderOAuth {
   // -------------------------------------------------------------------------
 
   async login(
-    opts: { onUserCode?: (code: string, url: string) => void; signal?: AbortSignal } = {},
+    opts: {
+      onUserCode?: (code: string, url: string) => void;
+      signal?: AbortSignal;
+      allowManualCodePaste?: boolean;
+    } = {},
   ): Promise<OAuthTokens> {
     const { codeVerifier, codeChallenge } = generatePKCE();
     const state = randomBytes(16).toString("base64url");
@@ -157,6 +161,7 @@ export class GrokOAuthProvider implements ProviderOAuth {
 
     let callbackServer: OAuthCallbackServer | undefined;
     let manualPasteRl: readline.Interface | undefined;
+    let stdinWasFlowing = false;
     let authCode: string;
     let receivedState = "";
 
@@ -209,14 +214,23 @@ export class GrokOAuthProvider implements ProviderOAuth {
             // Manual code-paste fallback (xAI's page sometimes shows a code
             // instead of redirecting to the loopback URI).
             //
-            // CLI only. `isRaw` means another consumer already owns stdin —
-            // inside the TUI that is OpenTUI's key handler. Attaching a readline
-            // there stole every keystroke, and on the normal HTTP-callback path
-            // it was never closed, so the TUI kept receiving nothing: Esc did
-            // not dismiss the provider dialog and only restarting the session
-            // recovered it. The console.log pair also printed into the TUI's
-            // alternate screen. Both are correct for `keys login`, wrong here.
-            if (process.stdin.isTTY && !process.stdin.isRaw) {
+            // CLI ONLY, and the caller must say so. Attaching a readline while
+            // the TUI owns stdin steals every keystroke: readline takes over
+            // the 'data' listener and its close() PAUSES process.stdin, so
+            // OpenTUI never receives another key and the TUI is dead until the
+            // process restarts. The console.log pair also prints into the TUI's
+            // alternate screen.
+            //
+            // This used to be gated on `!process.stdin.isRaw`, which looks like
+            // "nobody else owns stdin" but is not: under Bun 1.3.13 (the
+            // runtime this CLI ships on) `setRawMode(true)` does NOT set
+            // `isRaw` — measured isTTY=true, isRaw=false while OpenTUI held the
+            // terminal in raw mode — so the guard passed inside the TUI and the
+            // freeze came back. Ownership is a caller fact, not a runtime one.
+            if (opts.allowManualCodePaste && process.stdin.isTTY) {
+              // readline.close() pauses the input stream; restore whatever flow
+              // state the caller had so a paused stdin is never left behind.
+              stdinWasFlowing = !process.stdin.isPaused();
               manualPasteRl = readline.createInterface({ input: process.stdin });
               console.log('  If the xAI page shows a code ("Could not establish connection") instead of redirecting,');
               console.log("  copy the code and paste it here then press Enter:");
@@ -243,7 +257,12 @@ export class GrokOAuthProvider implements ProviderOAuth {
       callbackServer?.close();
       // Unconditional: the old code only closed this when the user actually
       // pasted a code, so the normal HTTP-callback path left stdin captured.
-      manualPasteRl?.close();
+      if (manualPasteRl) {
+        manualPasteRl.close();
+        // close() calls input.pause(). Leaving stdin paused is the same freeze
+        // by another name, so hand it back in the state we borrowed it in.
+        if (stdinWasFlowing) process.stdin.resume();
+      }
     }
 
     if (receivedState && receivedState !== state) {

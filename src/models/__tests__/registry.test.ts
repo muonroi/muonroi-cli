@@ -29,10 +29,13 @@ describe("MODELS catalog", () => {
   });
 
   describe("Part E — native web research", () => {
-    test("openai + xai + zai models are web-native; deepseek + opencode-go are not", () => {
+    // anthropic joined the web-native set with the Claude rows: every anthropic
+    // model carries native_web_research, backed by the server-side web_search
+    // tool that provider_policies.anthropic prices under server_tool_pricing.
+    test("anthropic + openai + xai + zai models are web-native; deepseek + opencode-go are not", () => {
+      const WEB_NATIVE_PROVIDERS = new Set(["anthropic", "openai", "xai", "zai"]);
       for (const m of MODELS) {
-        const expected = m.provider === "openai" || m.provider === "xai" || m.provider === "zai";
-        expect(modelHasNativeWebResearch(m.id)).toBe(expected);
+        expect(modelHasNativeWebResearch(m.id)).toBe(WEB_NATIVE_PROVIDERS.has(m.provider ?? ""));
       }
     });
 
@@ -56,7 +59,14 @@ describe("MODELS catalog", () => {
     for (const m of MODELS) {
       expect(m.id).toBeTruthy();
       expect(m.name).toBeTruthy();
-      expect(m.contextWindow).toBeGreaterThan(0);
+      // Explicit-only media endpoints do not publish a token context window.
+      // They use 0 as the catalog's documented N/A value and never participate
+      // in text-tier routing. Every auto-routable text model must retain a
+      // positive context window.
+      expect(m.contextWindow).toBeGreaterThanOrEqual(0);
+      if (m.tierRouting !== false) {
+        expect(m.contextWindow).toBeGreaterThan(0);
+      }
       expect(typeof m.inputPrice).toBe("number");
       expect(typeof m.outputPrice).toBe("number");
       expect(typeof m.reasoning).toBe("boolean");
@@ -174,6 +184,13 @@ describe("isReasoningModel", () => {
 });
 
 describe("tier_routing catalog flag", () => {
+  test("StepFun routes text models by tier and leaves specialized media models explicit-only", () => {
+    expect(getModelByTier("fast", "stepfun")?.id).toBe("step-3.5-flash");
+    expect(getModelByTier("premium", "stepfun")?.id).toBe("step-3.7-flash");
+    expect(getModelInfo("stepaudio-2.5-tts")?.tierRouting).toBe(false);
+    expect(getModelInfo("step-image-edit-2")?.tierRouting).toBe(false);
+  });
+
   test("glm-4.7-flash is still addressable but excluded from tier routing", () => {
     const flash = getModelInfo("glm-4.7-flash");
     expect(flash).toBeDefined();
@@ -204,7 +221,10 @@ describe("tier_routing catalog flag", () => {
 
 describe("provider_policies from catalog", () => {
   test("loads switch provider order from routing", () => {
-    expect(SWITCH_PROVIDER_ORDER).toEqual(["deepseek", "zai", "opencode-go", "xai"]);
+    // anthropic is last: it is the newest provider and must not displace the
+    // established switch order (see also the models[] ordering, which keeps
+    // getModelByTier's per-tier defaults on deepseek/openai).
+    expect(SWITCH_PROVIDER_ORDER).toEqual(["deepseek", "zai", "opencode-go", "xai", "anthropic"]);
   });
 
   test("loads zai peak-hour rule from vendor-sourced catalog metadata", () => {

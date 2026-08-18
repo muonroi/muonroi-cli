@@ -123,6 +123,12 @@ const ALLOWED_FIELDS: Partial<Record<EventKind, Record<string, FieldSpec>>> = {
     atStep: "pass",
     runId: "pass",
   },
+  "resume-request": {
+    // A session id (word/dash chars only, vetted by the tui.start allowlist) —
+    // safe to pass through so the driving agent can restart bound to it.
+    sessionId: "pass",
+    ts: "pass",
+  },
   toast: {
     level: "pass",
     text: 500, // cap to 500 chars, then scrub

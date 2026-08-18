@@ -505,14 +505,67 @@ export async function detectExistingPlanTargets(planSynthesis: string, cwd: stri
 }
 
 /**
+ * Deferral markers a sprint plan uses to flag a target file as intentionally OUT
+ * of the current sprint's scope (post-MVP / phase 2 / a later sprint). A plan is
+ * free to NAME a file in its folder structure yet explicitly defer building it
+ * this sprint — e.g. the sandbox plan named `module-hook.ts` in `folderStructure`
+ * but marked its API `[POST-MVP]` / `DEFERRED`. Matched case-insensitively.
+ */
+const DEFERRAL_MARKER_RE =
+  /(deferred|defer\b|post-?mvp|phase\s*2|later sprint|next sprint|out of scope|kh[ôo]ng v[àa]o sprint|not in sprint|not part of this)/i;
+
+/**
+ * Plan-named target paths the plan marks as DEFERRED / POST-MVP. A path counts as
+ * deferred when a deferral marker sits within `window` lines of the path token —
+ * the marker often lives on the sibling `"name"`/`"contract"` line of a JSON
+ * `internal_api` entry, not the `"location"` line that carries the path itself.
+ * `window` defaults to 1 (immediate neighbours only): a wider window bleeds a
+ * marker onto shared enumeration lines (e.g. a `folderStructure` string listing
+ * several files at once) and wrongly defers files named beside a deferred one.
+ *
+ * Best-effort and deliberately conservative: the completeness re-check is a soft
+ * nudge (a re-check miss never fails the sprint), so over-excluding a genuinely
+ * needed file just defers its detection to the verify gate — far cheaper than the
+ * failure mode this prevents, where the re-check spawns a plan-CONTRADICTING
+ * repair turn to create a file the plan asked NOT to build this sprint (observed
+ * live: run mrq8mesr0389 wedged after the repair turn for a deferred module-hook).
+ * Never throws.
+ */
+export function extractDeferredTargetPaths(planSynthesis: string, window = 1): string[] {
+  try {
+    const lines = planSynthesis.split(/\r?\n/);
+    const markerLine: boolean[] = lines.map((l) => DEFERRAL_MARKER_RE.test(l));
+    const deferred = new Set<string>();
+    for (let i = 0; i < lines.length; i++) {
+      const paths = extractPlanTargetPaths(lines[i]!);
+      if (paths.length === 0) continue;
+      const lo = Math.max(0, i - window);
+      const hi = Math.min(lines.length - 1, i + window);
+      let nearMarker = false;
+      for (let j = lo; j <= hi && !nearMarker; j++) nearMarker = markerLine[j]!;
+      if (nearMarker) for (const p of paths) deferred.add(p);
+    }
+    return [...deferred];
+  } catch (err) {
+    console.error(`[sprint-runner] extractDeferredTargetPaths failed: ${(err as Error).message}`);
+    return [];
+  }
+}
+
+/**
  * 4A: plan-named target file paths that STILL DO NOT EXIST after the impl turn —
  * i.e. action items the implementer left unaddressed. Drives the post-impl
  * completeness re-check (spend an extra turn ONLY when there is proven-incomplete
  * work, unlike an unconditional reviewer pass). Empty ⇒ every named target landed.
+ *
+ * Paths the plan explicitly DEFERRED (post-MVP / phase 2) are excluded — the
+ * re-check must not force-create files the plan asked NOT to build this sprint.
  */
 export async function computeMissingPlanTargets(planSynthesis: string, cwd: string, cap = 20): Promise<string[]> {
+  const deferred = new Set(extractDeferredTargetPaths(planSynthesis));
   const missing: string[] = [];
   for (const t of extractPlanTargetPaths(planSynthesis)) {
+    if (deferred.has(t)) continue;
     if (!existsSync(path.resolve(cwd, t))) missing.push(t);
     if (missing.length >= cap) break;
   }

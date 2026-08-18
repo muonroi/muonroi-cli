@@ -91,9 +91,16 @@ export function createAnthropicAdapter(config: ProviderConfig): Adapter {
   // When OAuth headers are present, hand auth off to extraHeaders. Anthropic SDK
   // requires an apiKey field for config validation, so we pass a placeholder
   // that the OAuth `Authorization` header overrides at request time.
+  //
+  // `config.baseURL` is threaded like every other adapter (see openai.ts /
+  // openai-compatible.ts). This one used to drop it, so a caller running
+  // anthropic through a third-party gateway silently hit api.anthropic.com and
+  // got "invalid x-api-key" — the gateway's key rejected by the real API. Left
+  // undefined the SDK still defaults to api.anthropic.com/v1, so callers that
+  // pass nothing are unaffected.
   const provider = config.oauthHeaders
-    ? createAnthropic({ apiKey: "oauth", headers: config.oauthHeaders })
-    : createAnthropic({ apiKey: config.apiKey });
+    ? createAnthropic({ apiKey: "oauth", baseURL: config.baseURL, headers: config.oauthHeaders })
+    : createAnthropic({ apiKey: config.apiKey, baseURL: config.baseURL });
 
   return {
     id: "anthropic",

@@ -63,6 +63,23 @@ export function isContextRailEnabled(): boolean {
 }
 
 /**
+ * Council surface (Concept 4 — "two-pane IDE / budgeted rail"). Default ON.
+ * When ON, the council transcript + a SECTIONED rail (meta / phases / NOW
+ * liveness / rounds) mount inside a `<CouncilSurface>` root that owns its own
+ * reflow: two-pane at ≥96 cols, a priority-ordered one-line `council-strip`
+ * banner below 96 cols (the 84–95 compact-rail band is a deferred follow-up —
+ * it currently renders as the strip). The surface unifies the four council
+ * consumers (auto-council, /council, /ideal, continue-as-council) behind one
+ * render path. When OFF the legacy ContextRail path (isContextRailEnabled +
+ * railVisible + width≥100) renders unchanged, so opting out is a clean
+ * fallback. Opt out: MUONROI_COUNCIL_SURFACE=0.
+ */
+export function isCouncilSurfaceEnabled(): boolean {
+  const raw = process.env.MUONROI_COUNCIL_SURFACE;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}
+
+/**
  * Debate/council TUI two-pane redesign — round-grouped transcript. Default ON
  * (baked). When ON, debate turns are grouped by round; only the running round
  * streams live while done rounds render an expanded summary (input, outcome,
@@ -82,6 +99,63 @@ export function isRoundGroupsEnabled(): boolean {
  */
 export function isTaskAwarePanelEnabled(): boolean {
   const raw = process.env.MUONROI_TASK_AWARE_PANEL;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}
+
+/**
+ * Feature A — conversation handoff into /ideal. Default ON. When ON,
+ * `orchestrator.runProductLoopV1` (subcommand "start") captures a recent-turns
+ * chat summary and passes it as `conversationContext` into `runProductLoop`, so
+ * the clarifier + council debate inherit what the user discussed before running
+ * `/ideal <vague reference>` instead of re-interviewing from scratch. Opt out:
+ * MUONROI_IDEAL_CONVO_HANDOFF=0.
+ */
+export function isIdealConversationHandoffEnabled(): boolean {
+  const raw = process.env.MUONROI_IDEAL_CONVO_HANDOFF;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}
+
+/**
+ * Feature B1 — enter /ideal via natural language. Default ON. When ON, the
+ * sub-session router (`classifySubSessionAction`) may return `ENTER_IDEAL` for an
+ * EXPLICIT request to enter ideal/product-loop/build mode, and the orchestrator
+ * dispatches `runProductLoopV1` for that turn. Opt out: MUONROI_IDEAL_NL_ENTRY=0.
+ */
+export function isIdealNlEntryEnabled(): boolean {
+  const raw = process.env.MUONROI_IDEAL_NL_ENTRY;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}
+
+/**
+ * Feature B2 — agent-callable `enter_ideal` tool. Default ON. When ON, the
+ * `enter_ideal` tool is registered so the agent can request entry into /ideal
+ * product-loop mode; the orchestrator dispatches the pending request after the
+ * current turn's tool phase completes. Opt out: MUONROI_IDEAL_TOOL_ENTRY=0.
+ */
+export function isIdealToolEntryEnabled(): boolean {
+  const raw = process.env.MUONROI_IDEAL_TOOL_ENTRY;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}
+
+/**
+ * EE connect card — the inline "connect the Experience Engine brain" nudge +
+ * `/ee setup` card. Default ON. When ON, an unconfigured EE (no serverBaseUrl,
+ * no reachable local brain, not snoozed) surfaces the connect card once per
+ * session. Opt out: MUONROI_EE_CONNECT_CARD=0.
+ */
+export function isEeConnectCardEnabled(): boolean {
+  const raw = process.env.MUONROI_EE_CONNECT_CARD;
+  return raw !== "0" && raw?.toLowerCase() !== "false";
+}
+
+/**
+ * LSP setup card — the inline first-run "which languages do you work in?"
+ * multi-select nudge + `/lsp setup` card. Default ON. When ON, a never-
+ * completed LSP setup (not snoozed, project languages not already covered)
+ * surfaces the card once per session. Opt out: MUONROI_LSP_SETUP_CARD=0.
+ */
+export function isLspSetupCardEnabled(): boolean {
+  const raw = process.env.MUONROI_LSP_SETUP_CARD;
   return raw !== "0" && raw?.toLowerCase() !== "false";
 }
 

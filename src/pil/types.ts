@@ -77,6 +77,13 @@ export interface PipelineContext {
    */
   ecosystemScope?: boolean | null;
   /**
+   * Model-decided repo relevance (widened scope): "external" means the turn is
+   * NOT about any codebase in this repo. Set by layer1's classifier; read by the
+   * discovery/layer5/council gates to suppress repo grounding. null/undefined →
+   * treated as relevant (fail-open).
+   */
+  scopeKind?: "ecosystem" | "local" | "external" | null;
+  /**
    * Model-decided reply language as a display name ("Vietnamese", "Japanese"),
    * or null for English. Agent-first replacement for the Vietnamese-only
    * diacritic regex — generalizes to any language. Set by layer1; consumed by

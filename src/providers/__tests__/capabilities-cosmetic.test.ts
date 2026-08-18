@@ -35,6 +35,9 @@ describe("ProviderCapabilities — G5 cosmetic methods", () => {
     it("opencode-go → https://opencode.ai", () => {
       expect(getProviderCapabilities("opencode-go").consoleSignupURL()).toBe("https://opencode.ai");
     });
+    it("stepfun uses the StepFun console", () => {
+      expect(getProviderCapabilities("stepfun").consoleSignupURL()).toBe("https://platform.stepfun.ai/");
+    });
     it("unknown provider id falls back to default anthropic console", () => {
       expect(getProviderCapabilities("does-not-exist").consoleSignupURL()).toBe(
         "https://console.anthropic.com/settings/keys",
@@ -97,9 +100,18 @@ describe("ProviderCapabilities — G5 cosmetic methods", () => {
   });
 
   describe("ALL_PROVIDER_IDS single source of truth", () => {
-    it("contains exactly 7 providers in canonical order", async () => {
+    it("contains exactly 8 providers in canonical order", async () => {
       const { ALL_PROVIDER_IDS } = await import("../types.js");
-      expect(ALL_PROVIDER_IDS).toEqual(["anthropic", "openai", "deepseek", "xai", "ollama", "zai", "opencode-go"]);
+      expect(ALL_PROVIDER_IDS).toEqual([
+        "anthropic",
+        "openai",
+        "deepseek",
+        "xai",
+        "ollama",
+        "zai",
+        "opencode-go",
+        "stepfun",
+      ]);
     });
     it("iterProviders returns the same canonical list", async () => {
       const { ALL_PROVIDER_IDS, iterProviders } = await import("../types.js");

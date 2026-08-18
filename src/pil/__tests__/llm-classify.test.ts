@@ -232,6 +232,31 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     expect(p?.replyLanguage).toBeNull();
   });
 
+  it("parses external scope and keeps language + ecosystemScope correct", async () => {
+    const ext = installMockModel({
+      fixture: { stream: textOnlyStream("analyze,concise,task,answer,heavy,external,vietnamese,clear") },
+    });
+    cleanup = ext.uninstall;
+    const extClassify = createLlmClassifier("deepseek-v4-flash");
+    const r = await extClassify("giải thích CAP theorem");
+    expect(r?.scopeKind).toBe("external");
+    // external is NOT the ecosystem — no docs nudge, and it must not be
+    // swallowed as the reply language.
+    expect(r?.ecosystemScope).toBe(false);
+    expect(r?.replyLanguage).toBe("Vietnamese");
+    ext.uninstall();
+
+    // local stays local; the overloaded `false` ecosystemScope bucket is covered.
+    const loc = installMockModel({
+      fixture: { stream: textOnlyStream("debug,concise,task,code,standard,local,english,clear") },
+    });
+    cleanup = loc.uninstall;
+    const locClassify = createLlmClassifier("deepseek-v4-flash");
+    const p = await locClassify("fix the crash");
+    expect(p?.scopeKind).toBe("local");
+    expect(p?.ecosystemScope).toBe(false);
+  });
+
   it("parses the fourth word as the output deliverable (Phase 2b)", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise,task,code,standard") } });
     cleanup = handle.uninstall;
@@ -404,6 +429,32 @@ describe("classifySubSessionAction", () => {
     cleanup = handle.uninstall;
     const result = await classifySubSessionAction("deepseek-v4-flash", "test");
     expect(result).toBeNull();
+  });
+
+  // Feature B1 — enter /ideal via natural language.
+  it("parses ENTER_IDEAL for an explicit request to enter ideal/build mode", async () => {
+    const handle = installMockModel({
+      fixture: {
+        stream: textOnlyStream(
+          "ENTER_IDEAL,0.96,User explicitly asked to enter ideal mode to build what was discussed.",
+        ),
+      },
+    });
+    cleanup = handle.uninstall;
+    const result = await classifySubSessionAction("deepseek-v4-flash", "ok đi vào ideal mode để làm những gì đã bàn");
+    expect(result?.action).toBe("ENTER_IDEAL");
+    expect(result?.confidence).toBe(0.96);
+  });
+
+  it("keeps a normal multi-step task as SPAWN_SUB_SESSION, not ENTER_IDEAL", async () => {
+    // The router must be conservative: a plain task request — even a big one —
+    // stays SPAWN_SUB_SESSION. Only an EXPLICIT "enter ideal mode" earns ENTER_IDEAL.
+    const handle = installMockModel({
+      fixture: { stream: textOnlyStream("SPAWN_SUB_SESSION,0.97,Refactor the storage layer across files") },
+    });
+    cleanup = handle.uninstall;
+    const result = await classifySubSessionAction("deepseek-v4-flash", "refactor the storage layer");
+    expect(result?.action).toBe("SPAWN_SUB_SESSION");
   });
 });
 

@@ -71,6 +71,14 @@ export interface ProductLoopOptions {
   /** P5: when true, skip cross-run workspace memory injection. */
   skipPriorContext?: boolean;
   /**
+   * Feature A — conversation handoff into /ideal. Optional recent-chat summary
+   * (from `orchestrator._buildRecentTurnsSummary`) captured when the user ran
+   * `/ideal <vague reference>` after discussing a topic. Threaded into the
+   * DriverContext so loop-driver can prepend it to its conversationContext.
+   * Does NOT overwrite `idea` — the idea stays the user's literal text.
+   */
+  conversationContext?: string;
+  /**
    * Mode C — explicit override. When "maintain", runProductLoop dispatches to
    * runMaintain (single-task PR flow). When "new", forces Mode A (greenfield)
    * even if cwd has a verify recipe. When undefined, auto-detect (verify
@@ -388,6 +396,7 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
     detectVerifyRecipe: opts.detectVerifyRecipe,
     skipPriorContext: opts.skipPriorContext,
     sufficiencyMissing: opts.sufficiencyMissing,
+    conversationContext: opts.conversationContext,
   };
 
   const roleAssignments = opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
@@ -804,6 +813,7 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
     detectVerifyRecipe: opts.detectVerifyRecipe,
     skipPriorContext: opts.skipPriorContext,
     sufficiencyMissing: opts.sufficiencyMissing,
+    conversationContext: opts.conversationContext,
   };
 
   // Phase 1: outer FSM (gather → research → scoping → approved | halted).

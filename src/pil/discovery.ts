@@ -296,7 +296,7 @@ export function createModelClarificationProposer(modelId: string): ModelClarific
     // process.stderr.write(`[discovery] createModelClarificationProposer CALLED!\n`);
     try {
       const { resolveModelRuntime } = await import("../providers/runtime.js");
-      const { generateText } = await import("ai");
+      const { generateTextStreamed } = await import("../providers/streamed-generate.js");
       const runtime = resolveModelRuntime(modelId);
       const contextStr = input.additionalContext
         ? `\nCurrent CLI enrichment / context (use this to decide what is already known):\n${input.additionalContext}`
@@ -345,7 +345,8 @@ JSON format:
   "defaultIndex": 0
 }]`;
 
-      const result = await generateText({
+      // Stream + collect (NOT generateText): codex/oauth 400s non-stream requests.
+      const result = await generateTextStreamed({
         model: runtime.model,
         prompt,
         maxOutputTokens: 600,

@@ -1,7 +1,7 @@
-import { generateText, type ModelMessage } from "ai";
+import type { ModelMessage } from "ai";
 import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
-import { getProviderCapabilities } from "../providers/capabilities.js";
-import { requireRuntimeProvider, resolveModelRuntime, resolveTemperatureParam } from "../providers/runtime.js";
+import { resolveModelRuntime, resolveTemperatureParam, shouldDropParam } from "../providers/runtime.js";
+import { generateTextStreamed } from "../providers/streamed-generate.js";
 import { logger } from "../utils/logger.js";
 import { COMPACT_PROPOSER_SYSTEM_PROMPT } from "./compaction-proposer-prompt.js";
 import { containsEncryptedReasoning } from "./reasoning";
@@ -37,17 +37,22 @@ export async function proposeCompaction(
 ): Promise<CompactionProposal | null> {
   try {
     const runtime = resolveModelRuntime(modelId);
-    const compactCaps = getProviderCapabilities(requireRuntimeProvider(runtime));
     const serialized = serializeConversation(messages);
 
-    const result = await generateText({
+    const result = await generateTextStreamed({
       model: runtime.model,
       system: COMPACT_PROPOSER_SYSTEM_PROMPT,
       prompt: `Current conversation messages:\n\n${serialized}\n\nDecide if compaction is needed and what to keep/drop/summarize. Return strict JSON.`,
       abortSignal: signal,
       maxRetries: 1,
       ...resolveTemperatureParam(runtime, 0.1),
-      ...(!compactCaps.acceptsParam("maxOutputTokens", runtime.modelInfo) ? {} : { maxOutputTokens: 2048 }),
+      // shouldDropParam — NOT capabilities.acceptsParam alone. The catalog can
+      // say the model accepts `maxOutputTokens` while the OAuth provider
+      // registry rejects it (`unsupportedParams`); ChatGPT Codex answers HTTP
+      // 400 `Unsupported parameter: max_output_tokens`. Session bce44da8134d:
+      // the proposer 400'd, the summary call below 400'd too, and the summary
+      // throw killed the whole turn before streamText ever ran.
+      ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 2048 }),
       ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     });
 
@@ -645,15 +650,17 @@ async function summarizeConversation(
   }
 
   const runtime = resolveModelRuntime(modelId);
-  const compactCaps = getProviderCapabilities(requireRuntimeProvider(runtime));
-  const result = await generateText({
+  const result = await generateTextStreamed({
     model: runtime.model,
     system: SUMMARIZATION_SYSTEM_PROMPT,
     prompt: promptParts.filter(Boolean).join("\n\n"),
     abortSignal: signal,
     maxRetries: 0,
     ...resolveTemperatureParam(runtime, 0.2),
-    ...(!compactCaps.acceptsParam("maxOutputTokens", runtime.modelInfo) ? {} : { maxOutputTokens: effectiveMax }),
+    // See proposeCompaction — the OAuth registry veto must be honoured here too.
+    // This call has NO caller-side catch (compactForContext awaits it directly),
+    // so a 400 here aborts the user's turn outright.
+    ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: effectiveMax }),
     ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
   });
 

@@ -406,6 +406,48 @@ export interface Layer1Options {
    * sentence. null/undefined ⇒ classifier sees the bare prompt (old behaviour).
    */
   recentTurns?: string | null;
+  /**
+   * Depth of the work already in flight (GSD `.planning/STATE.md` → Depth),
+   * supplied by the caller so this layer stays I/O-free. Read ONLY to resolve
+   * the depth of a continuation utterance — see `resolveContinuationDepth`.
+   * null/undefined ⇒ no active run known.
+   */
+  priorDepthTier?: DepthTier | null;
+}
+
+type DepthTier = "quick" | "standard" | "heavy";
+
+/**
+ * Depth for a continuation utterance ("tiếp tục", "ok", "continue", …).
+ *
+ * A continuation carries NO work description, so it must never ORIGINATE a
+ * depth — it inherits the depth of the task already in flight. Left to score
+ * the isolated phrase, the classifier drifts: session 3f998bfef7db scored
+ * "tiếp tục" as `standard` at 03:40 and the near-identical "tiếp tục nhé" as
+ * `heavy` at 03:51. That one flipped token both disabled the reasoning-model
+ * auto-council skip and armed the heavy gate (tool-engine.ts `shouldSkipForReasoning`
+ * / `heavyTier`), so a bare "carry on" convened a full multi-model debate whose
+ * pinned topic was the literal string "tiếp tục nhé" (decision-log
+ * ts=1785124295266: `"taken":true,"complexityTier":"heavy"`).
+ *
+ * The Pass-0 deterministic pin documented above (CONTINUATION_FULL_RE →
+ * short-circuit) was deleted along with the keyword cascade in the 2026-07-07
+ * no-regex rewrite; `isContinuationPhrase` survived but nothing consulted it
+ * during classification. This restores the guarantee at the DEPTH slot only:
+ * taskType/intentKind/style remain the model's call, so the turn keeps its
+ * toolset and still routes as the real follow-up work it is.
+ *
+ * With no prior depth known, fall back to `standard` rather than the model's
+ * guess — a contentless phrase is never evidence for heavy.
+ */
+function resolveContinuationDepth(
+  raw: string,
+  modelDepth: DepthTier | null,
+  prior: DepthTier | null,
+): DepthTier | null {
+  if (!isContinuationPhrase(raw)) return modelDepth;
+  if (prior) return prior;
+  return modelDepth === "heavy" ? "standard" : modelDepth;
 }
 
 // Explicit command/tool-execution signals (EN + VI). When any fires the turn
@@ -627,8 +669,12 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
         // telemetry trace — routing reads depthTier directly, not this.
         const outputStyle = llmRes.outputStyle;
         const domain = extractDomain("", ctx.raw);
+        // Continuation utterances inherit the in-flight depth instead of being
+        // re-scored in isolation (see resolveContinuationDepth). Resolve BEFORE
+        // deriving `complexity` so the trace and the routing slot never diverge.
+        const depthTier = resolveContinuationDepth(ctx.raw, llmRes.depthTier ?? null, opts.priorDepthTier ?? null);
         const complexity: "low" | "medium" | "high" =
-          llmRes.depthTier === "heavy" ? "high" : llmRes.depthTier === "quick" ? "low" : "medium";
+          depthTier === "heavy" ? "high" : depthTier === "quick" ? "low" : "medium";
         const complexityScore = 0;
         const intentTrace: IntentDetectionTrace = {
           pass1Reason: "llm-first",
@@ -713,11 +759,12 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
           // Agent-first work depth: the model decides the GSD tier in the same
           // classify call (no extra round-trip). layer4 prefers this over the
           // regex scorer. null → layer4 defaults to "standard".
-          modelDepthTier: llmRes.depthTier,
+          modelDepthTier: depthTier,
           // Agent-first scope + reply-language (same classify call). Replace the
           // ecosystem/diacritic regexes: layer4 reads these instead of scanning
           // the raw prompt.
           ecosystemScope: llmRes.ecosystemScope,
+          scopeKind: llmRes.scopeKind,
           replyLanguage: llmRes.replyLanguage,
           // G3 (b1): populated from the unified pil-context fetch above so
           // layer3 renders source="unified" instead of its legacy dense-only

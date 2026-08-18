@@ -34,15 +34,10 @@ const SPLIT = {
   rightT: "",
 };
 
-const USER_MSG_COLLAPSED_LINES = 5;
-// Long assistant blocks (model narration between tool batches) auto-collapse
-// to this many lines to stop the chat scroll wall and cut markdown re-render
-// cost. 8 fits comfortably on a short terminal and conveys the gist.
-const ASSISTANT_MSG_COLLAPSED_LINES = 8;
-// Chain-of-thought is never the answer — it is the model talking to itself.
-// Unlike the final assistant message (which must stay fully visible), reasoning
-// collapses even on the final entry: once the turn is answered, a wall of
-// "[Thought]" above the reply is pure noise. 3 lines keeps a gist visible.
+// Chain-of-thought is never the answer — it is the model talking to itself, so
+// it stays collapsed to a 3-line gist. This is the ONE prose surface that still
+// auto-collapses; assistant and user message bodies render in full (see
+// AssistantMessageContent for why the old body clamp was removed).
 const REASONING_COLLAPSED_LINES = 3;
 
 /**
@@ -51,29 +46,21 @@ const REASONING_COLLAPSED_LINES = 3;
  * The TUI has ONE global ctrl+e, so it must resolve to a single target. Every
  * component that prints "ctrl+e expand" must be represented here, otherwise the
  * affordance lies: it tells the user a key works while nothing is listening.
- * Mirrors the collapse conditions in AssistantMessageContent / UserMessageContent
- * / ReasoningContent / ToolGroupView — keep the two in sync.
+ * Mirrors the collapse conditions in ReasoningContent / ToolGroupView — keep the
+ * two in sync.
+ *
+ * Message BODIES are deliberately absent: prose no longer collapses, so it
+ * advertises no affordance and must not be a ctrl+e target. Leaving it in would
+ * make ctrl+e select a message that has nothing to toggle, swallowing the key
+ * before the real target (a tool group / reasoning block) below it.
  */
 export function findLastCollapsibleIndex(messages: ChatEntry[]): number {
-  let lastAssistantIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.type === "assistant") {
-      lastAssistantIdx = i;
-      break;
-    }
-  }
   const lineCount = (s: string | undefined) => (s ? s.split("\n").length : 0);
 
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (!m) continue;
-    if (m.type === "user" && lineCount(m.content) > USER_MSG_COLLAPSED_LINES) return i;
-    if (m.type === "assistant") {
-      if (lineCount(m.reasoning) > REASONING_COLLAPSED_LINES) return i;
-      // The final assistant message never auto-collapses its body (F7), so it
-      // offers no body affordance to toggle.
-      if (i !== lastAssistantIdx && lineCount(m.content) > ASSISTANT_MSG_COLLAPSED_LINES) return i;
-    }
+    if (m.type === "assistant" && lineCount(m.reasoning) > REASONING_COLLAPSED_LINES) return i;
     if (m.type === "tool_group" && m.toolGroup?.state === "done" && (m.toolGroup?.items.length ?? 0) > 0) return i;
   }
   return -1;
@@ -100,11 +87,12 @@ export function ReasoningContent({ content, t, expanded }: { content: string; t:
   );
 }
 
+// `expanded` / `isFinal` stay in the prop type for call-site compatibility but
+// are deliberately NOT destructured: prose no longer collapses, so nothing here
+// reads them.
 export function AssistantMessageContent({
   content,
   t,
-  expanded,
-  isFinal,
 }: {
   content: string;
   t: Theme;
@@ -116,79 +104,29 @@ export function AssistantMessageContent({
   content = stripStrayModelMacros(content);
   // Strip invisible/control Unicode characters that mess up terminal rendering.
   content = stripInvisibleChars(content);
-  const lines = content.split("\n");
-  const isLong = lines.length > ASSISTANT_MSG_COLLAPSED_LINES;
-  // Phase 5 F7 — the FINAL assistant message in a turn IS the answer the
-  // user is waiting for. Auto-collapsing it behind "ctrl+e expand (N more
-  // lines)" hides the actual response. Intermediate assistant blocks
-  // (narration between tool batches) keep the auto-collapse behavior so
-  // the chat doesn't become a scroll wall.
-  if (!isLong || isFinal) {
-    return <Markdown content={content} t={t} />;
-  }
-  if (expanded) {
-    return (
-      <>
-        <Markdown content={content} t={t} />
-        <box marginTop={1}>
-          <text fg={t.textDim}>
-            {"ctrl+e "}
-            <span style={{ fg: t.textMuted }}>{"collapse"}</span>
-          </text>
-        </box>
-      </>
-    );
-  }
-  const preview = lines.slice(0, ASSISTANT_MSG_COLLAPSED_LINES).join("\n");
-  const hidden = lines.length - ASSISTANT_MSG_COLLAPSED_LINES;
-  return (
-    <>
-      <Markdown content={preview} t={t} />
-      <box marginTop={1}>
-        <text fg={t.textDim}>
-          {"ctrl+e "}
-          <span style={{ fg: t.textMuted }}>{`expand (${hidden} more lines)`}</span>
-        </text>
-      </box>
-    </>
-  );
+  // PROSE IS NEVER AUTO-COLLAPSED.
+  //
+  // This used to clamp any assistant body over ASSISTANT_MSG_COLLAPSED_LINES
+  // unless it was the turn's FINAL message. The exemption was keyed on "last
+  // assistant message in the transcript", so the moment the NEXT turn produced
+  // a message, every previous answer silently folded back to 8 lines — the user
+  // watched already-read replies collapse behind them as they kept chatting,
+  // and Ctrl+E only ever un-folded ONE of them (findLastCollapsibleIndex
+  // returns a single index), so there was no way to get the history back.
+  //
+  // Chat history is the record of the conversation; it renders in full, the way
+  // every other coding CLI does. Collapsing is reserved for things that are
+  // genuinely previews of a larger artifact — reasoning traces and tool results
+  // (edit / write / create diffs) — not for what the agent or the user said.
+  return <Markdown content={content} t={t} />;
 }
 
-export function UserMessageContent({ content, t, expanded }: { content: string; t: Theme; expanded: boolean }) {
-  const lines = content.split("\n");
-  const isLong = lines.length > USER_MSG_COLLAPSED_LINES;
-
-  if (!isLong) {
-    return <text fg={t.text}>{content}</text>;
-  }
-
-  if (expanded) {
-    return (
-      <>
-        <text fg={t.text}>{content}</text>
-        <box marginTop={1}>
-          <text fg={t.textDim}>
-            {"ctrl+e "}
-            <span style={{ fg: t.textMuted }}>{"collapse"}</span>
-          </text>
-        </box>
-      </>
-    );
-  }
-
-  const preview = lines.slice(0, USER_MSG_COLLAPSED_LINES).join("\n");
-  const hiddenCount = lines.length - USER_MSG_COLLAPSED_LINES;
-  return (
-    <>
-      <text fg={t.text}>{preview}</text>
-      <box marginTop={1}>
-        <text fg={t.textDim}>
-          {"ctrl+e "}
-          <span style={{ fg: t.textMuted }}>{`expand (${hiddenCount} more lines)`}</span>
-        </text>
-      </box>
-    </>
-  );
+export function UserMessageContent({ content, t }: { content: string; t: Theme; expanded: boolean }) {
+  // Same rule as the assistant body above: what the USER typed is never folded.
+  // A long pasted prompt is context the reader needs while reading the reply to
+  // it, and it was the other half of the "everything collapses when I keep
+  // chatting" complaint.
+  return <text fg={t.text}>{content}</text>;
 }
 
 /** Per-index instructions for collapsing consecutive identical MCP fs calls. */

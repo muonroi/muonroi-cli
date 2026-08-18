@@ -85,6 +85,7 @@ describe("runPipeline()", () => {
         depthTier: "standard" as const,
         needsClarification: null,
         ecosystemScope: null,
+        scopeKind: null,
         replyLanguage: null,
       }),
     });
@@ -224,5 +225,31 @@ describe("runPipeline()", () => {
     expect(timingNames).toContain("layer4-gsd-structuring");
     expect(timingNames).toContain("layer5-context-enrichment");
     expect(timingNames).not.toContain("layer-personality-adaptation");
+  });
+
+  it("skips discovery for an external-scope turn", async () => {
+    let discoveryProbed = false;
+    const ctx = await runPipeline("explain the CAP theorem tradeoffs", {
+      llmFallback: async () => ({
+        taskType: "analyze" as const,
+        outputStyle: "concise" as const,
+        confidence: 0.9,
+        intentKind: "task" as const,
+        deliverableKind: "answer" as const,
+        depthTier: "heavy" as const,
+        needsClarification: null,
+        ecosystemScope: false,
+        scopeKind: "external" as const,
+        replyLanguage: null,
+      }),
+      clarificationProposer: async () => {
+        discoveryProbed = true;
+        return [];
+      },
+    });
+    expect(ctx.scopeKind).toBe("external");
+    // discovery must not have engaged the clarification proposer for an
+    // out-of-repo question.
+    expect(discoveryProbed).toBe(false);
   });
 });

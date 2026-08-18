@@ -1,5 +1,20 @@
 # Sprint 2: Native Council Workflow + Hierarchical State + EE Differentiation
 
+## IMPL-2 — Full continuation (Part B/C/D/E) — đã merge develop
+
+| Part | Commit / PR | Trạng thái |
+|---|---|---|
+| **B** — native 6/9 gsd-tools cmd + contract test (giữ dep+flag rollback; 3 cmd hủy-diệt còn subprocess) | cli `68fbb54a` · PR #89 | ✅ merged |
+| **E** — `native_web_research` audit 29 model (openai/xai/zai=true; deepseek+opencode-go=false vì gateway strip) + research routing + drift test | cli `31c7e6e1` · PR #89 | ✅ merged |
+| **D** — EE `/api/workflow-event` + collection `workflow_*` + stance param (experience-engine) | ee `6a1b47e` · PR #23 | ✅ merged develop |
+| **C** — client write-during-execution: sprint/debate/decision event (gate-on-outcome; drop-404; enqueue-fail) | cli `b734838b` · PR #89 | ✅ merged |
+
+**Còn deferred (đúng debate):** (1) **Fold cutover + xóa dep** — chặn tới khi native hóa nốt 2 cmd hủy-diệt (`phase complete`, `roadmap update-plan-progress`) qua soak; (2) **Hierarchy đầy đủ** (milestone/phase store) — MVP run-centric đã giải resume UX; hierarchy cần nền tảng, debate chốt làm sprint riêng; (3) **per-stance recall weighting** — cần refactor recall hot-path (3 collection unrolled → loop) trong EE.
+
+Test: 277 xanh (gsd+ee+models+flow) cli; EE workflow-event 3 + server-boot xanh. Typecheck+biome sạch 2 repo.
+
+---
+
 ## IMPL-1 — MVP đã implement (branch `feat/native-state-ee`, typecheck xanh, 45 test mới)
 
 > Ship theo scope REV-2/REV-3 (giữ `.muonroi-flow/`, hierarchy/EE/Part B–E DEFER).

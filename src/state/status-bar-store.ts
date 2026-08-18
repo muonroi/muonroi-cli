@@ -42,7 +42,12 @@ export interface StatusBarState {
   current_pct: number;
   degraded: boolean;
   routed_from: string | null;
-  ee_status: "ok" | "warn" | "down" | "unknown";
+  /**
+   * EE dot state. "off" = NOT CONFIGURED (no serverBaseUrl and the localhost
+   * fallback doesn't answer) — visually distinct from "down" (configured but
+   * unreachable) so "never connected" doesn't read as an outage.
+   */
+  ee_status: "ok" | "warn" | "down" | "off" | "unknown";
   ctx_tokens?: number;
   /** F5 — percent of model contextWindow filled by the latest call. */
   ctx_pct?: number;
@@ -124,28 +129,46 @@ export function wireStatusBar(): () => void {
     });
   });
 
-  // EE health polling (every 30s) — reads config.json for server URL
+  // EE health polling (every 30s) — reads config.json for server URL.
+  // Re-read on every poll (not once at wire time) so a mid-session connect via
+  // the EE connect card / `/ee config` flips the dot without a restart.
   let eeTimer: ReturnType<typeof setInterval> | null = null;
-  let eeBaseUrl = "http://127.0.0.1:8082";
-  let eeAuthToken = "";
-  try {
-    const fs = require("node:fs");
-    const os = require("node:os");
-    const path = require("node:path");
-    const cfgPath = path.join(os.homedir(), ".experience", "config.json");
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-    if (cfg.serverBaseUrl) eeBaseUrl = cfg.serverBaseUrl;
-    eeAuthToken = cfg.serverReadAuthToken || cfg.serverAuthToken || "";
-  } catch {
-    /* config unreadable — try localhost */
+
+  function readEEConnection(): { baseUrl: string; authToken: string; configured: boolean } {
+    let baseUrl = "http://127.0.0.1:8082";
+    let authToken = "";
+    let configured = false;
+    try {
+      const fs = require("node:fs");
+      const os = require("node:os");
+      const path = require("node:path");
+      const cfgPath = path.join(os.homedir(), ".experience", "config.json");
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+      if (cfg.serverBaseUrl) {
+        baseUrl = cfg.serverBaseUrl;
+        configured = true;
+      }
+      authToken = cfg.serverReadAuthToken || cfg.serverAuthToken || "";
+    } catch {
+      /* config unreadable — try localhost */
+    }
+    // Test/harness override mirrors getCachedServerBaseUrl(): counts as configured.
+    const envOverride = process.env.MUONROI_EE_BASE_URL;
+    if (envOverride) {
+      baseUrl = envOverride;
+      configured = true;
+    }
+    return { baseUrl, authToken, configured };
   }
 
   async function checkEEHealth() {
+    const { baseUrl: eeBaseUrl, authToken: eeAuthToken, configured } = readEEConnection();
     try {
       const circuit = getCircuitState();
-      // Circuit open → EE integration is effectively down in CLI
+      // Circuit open → EE integration is effectively down in CLI.
+      // Unconfigured + open circuit is still "off": there is nothing to be down.
       if (circuit === "open") {
-        statusBarStore.setState({ ee_status: "down" });
+        statusBarStore.setState({ ee_status: configured ? "down" : "off" });
         return;
       }
 
@@ -168,7 +191,9 @@ export function wireStatusBar(): () => void {
         statusBarStore.setState({ ee_status: "warn" });
       }
     } catch {
-      statusBarStore.setState({ ee_status: "down" });
+      // Unreachable: configured server → "down" (outage); no config and the
+      // localhost fallback silent → "off" (never connected — see EE connect card).
+      statusBarStore.setState({ ee_status: configured ? "down" : "off" });
     }
   }
   checkEEHealth();

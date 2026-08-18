@@ -5,19 +5,18 @@ import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotoc
 import type { ToolSet } from "ai";
 import type { McpServerConfig } from "../utils/settings.js";
 import { capMcpToolResult } from "./cap-tool-result.js";
-import { getMcpKey, type McpKeyId } from "./mcp-keychain.js";
+import {
+  MCP_KEY_REQUIREMENTS,
+  type MissingKeyServer,
+  noticeNeedsKeyOnce,
+  partitionEnabledServers,
+} from "./key-requirements.js";
+import { getMcpKey } from "./mcp-keychain.js";
 import { createOAuthProviderWithCallback } from "./oauth-provider.js";
 import { validateMcpServerConfig } from "./validate.js";
 
-// Map MCP server id → keychain id + env var name for env hydration at spawn.
-// When a server's env value is empty/missing, we look up the key from the
-// OS keychain (or its env-var fallback) and inject it into the spawned process.
-const MCP_ENV_HYDRATION: Record<string, { keyId: McpKeyId; envVar: string }> = {
-  tavily: { keyId: "tavily", envVar: "TAVILY_API_KEY" },
-};
-
 async function hydrateServerEnv(server: McpServerConfig): Promise<McpServerConfig> {
-  const hydration = MCP_ENV_HYDRATION[server.id];
+  const hydration = MCP_KEY_REQUIREMENTS[server.id];
   if (!hydration) return server;
   const existing = server.env?.[hydration.envVar];
   if (existing && existing.length > 0) return server;
@@ -118,6 +117,12 @@ function toTransport(server: McpServerConfig, authProvider?: OAuthClientProvider
 export interface McpToolBundle {
   tools: ToolSet;
   errors: string[];
+  /**
+   * Enabled servers skipped because they need an API key they do not have. NOT
+   * counted as errors (they are unconfigured, not broken) — surfaced once for
+   * the inline fix card + one-time notice. Empty when everything is configured.
+   */
+  needsKey: MissingKeyServer[];
   close(): Promise<void>;
 }
 
@@ -240,7 +245,11 @@ export async function buildMcpToolSet(servers: McpServerConfig[], opts?: McpBuil
     result?: ConnectedServer;
     error?: string;
   }
-  const enabled = servers.filter((s) => s.enabled);
+  // Partition OUT enabled-but-keyless servers before connecting: they are
+  // unconfigured (native fallbacks cover them), not per-turn failures. This is
+  // the fix for the "⚠️ tavily unavailable: TAVILY_API_KEY is missing" nag.
+  const { connectable: enabled, needsKey } = await partitionEnabledServers(servers);
+  noticeNeedsKeyOnce(needsKey);
   const slots: Slot[] = enabled.map((s) => ({ label: s.label, done: false }));
 
   const attempts = enabled.map((rawServer, i) => {
@@ -305,6 +314,7 @@ export async function buildMcpToolSet(servers: McpServerConfig[], opts?: McpBuil
   return {
     tools,
     errors,
+    needsKey,
     async close() {
       for (const fn of cleanups) fn();
       await Promise.all(clients.map((client) => client.close().catch(() => {})));

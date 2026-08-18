@@ -72,11 +72,19 @@ export function SlashInlineMenu({
               paddingLeft={1}
               paddingRight={1}
             >
-              <text fg={isSelected ? t.selected : t.text}>
-                {"/"}
-                {item.label}
-              </text>
-              <text fg={t.textMuted}>{item.description}</text>
+              {/* Label must NEVER shrink — a long description (e.g. /providers')
+                  would otherwise squeeze the command name to zero width in this
+                  space-between row, rendering just "/". flexShrink={0} pins the
+                  label; the description takes the remaining space and truncates. */}
+              <box flexShrink={0} flexDirection="row">
+                <text fg={isSelected ? t.selected : t.text}>
+                  {"/"}
+                  {item.label}
+                </text>
+              </box>
+              <box flexShrink={1} marginLeft={2} overflow="hidden">
+                <text fg={t.textMuted}>{item.description}</text>
+              </box>
             </box>
           </Semantic>
         );

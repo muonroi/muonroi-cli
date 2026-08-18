@@ -54,6 +54,11 @@ export interface CostForensicsSummary {
    */
   peakSingleCallFresh: number;
   events: CostForensicsRow[];
+  /**
+   * Characters the C3 cross-turn dedup deliberately RE-SERVED on same-turn
+   * re-reads (its policy trade-off) — previously invisible. ~4 chars/token.
+   */
+  redundantReservedChars: number;
   /** Anti-mù counters for this session (null when none recorded). */
   experience: SessionExperienceCounts | null;
 }
@@ -140,6 +145,24 @@ export function collectCostForensics(sessionId: string): CostForensicsSummary {
 
   const countMap = new Map(counts.map((r) => [r.event_type, r.c]));
 
+  // Latest cumulative same-turn re-serve cost (C3 dedup policy trade-off). The
+  // metric is cumulative per session, so the newest row holds the session total.
+  const dedupRow = db
+    .prepare(`
+    SELECT metadata_json FROM interaction_logs
+    WHERE session_id IN (${placeholders}) AND event_type = 'dedup'
+    ORDER BY id DESC LIMIT 1
+  `)
+    .get(...chain) as { metadata_json: string } | undefined;
+  let redundantReservedChars = 0;
+  if (dedupRow) {
+    try {
+      redundantReservedChars = Number(JSON.parse(dedupRow.metadata_json)?.sameTurnReservedChars) || 0;
+    } catch {
+      /* malformed row — ignore */
+    }
+  }
+
   const events: CostForensicsRow[] = rows.map((r) => ({
     id: r.id,
     source: r.source,
@@ -188,6 +211,7 @@ export function collectCostForensics(sessionId: string): CostForensicsSummary {
     peakSingleCallInput,
     peakSingleCallFresh,
     events,
+    redundantReservedChars,
     experience: selectSessionExperience(sessionId),
   };
 }
@@ -281,6 +305,16 @@ export function printCostForensics(summary: CostForensicsSummary, opts: { json?:
         `despite a cacheable ~${formatNum(cadence.warmPrefixTokens)}-tok prefix ` +
         `(~${formatNum(cadence.estReBilledTokens)} tok re-billed). ` +
         `Likely fast tool-loop latency — fewer/batched tool rounds recover this.`,
+    );
+  }
+  // C3 same-turn re-serve cost — the dedup deliberately re-bills full content on
+  // same-turn re-reads (avoiding a worse single-read fallback). Surfaced so the
+  // policy's cost is falsifiable rather than hidden inside the `message` bucket.
+  if (summary.redundantReservedChars > 0) {
+    w(
+      `Dedup re-serve:      ~${formatNum(Math.round(summary.redundantReservedChars / 4))} tok ` +
+        `(${formatNum(summary.redundantReservedChars)} chars) re-billed by the C3 same-turn re-read policy. ` +
+        `If high, batch reads / raise retention so identical same-turn reads stub instead of re-serve.`,
     );
   }
   // Anti-mù counters for this session (rec #1 persisted forensics).

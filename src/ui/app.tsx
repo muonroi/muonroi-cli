@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clearLastSurfacedMatches, getDefaultEEClient, getLastSurfacedMatches } from "../ee/intercept.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import { writeScaffoldCheckpoint } from "../flow/scaffold-checkpoint.js";
-import { isContextRailEnabled, isRoundGroupsEnabled } from "../gsd/flags.js";
+import { isContextRailEnabled, isCouncilSurfaceEnabled, isRoundGroupsEnabled } from "../gsd/flags.js";
 import { appendCrashLog, setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
@@ -37,6 +37,7 @@ import type {
   CouncilPhaseEvent,
   CouncilQuestionData,
   CouncilQuestionOption,
+  CouncilStanceRow,
   CouncilStatusData,
   Plan,
   PlanQuestion,
@@ -92,7 +93,9 @@ import {
 import { ProductStatusCard } from "./cards/product-status-card.js";
 import { BtwOverlay, type BtwState } from "./components/btw-overlay.js";
 import { makePairKey, usePairSideMap } from "./components/bubble-layout.js";
-import { ContextRail, type ContextRailRow } from "./components/context-rail.js";
+import { ContextRail, type ContextRailRow, type ContextRailStage } from "./components/context-rail.js";
+import { buildStageDividerTitle, buildStageRows, deriveSprintStage, pushActivity } from "./components/sprint-stage.js";
+import { SprintStatusStrip } from "./components/sprint-status-strip.js";
 import { AgentRailActivities } from "./components/agent-rail-activities.js";
 import { CompactProgressCard } from "./components/compact-progress-card.js";
 import { CopyFlashBanner } from "./components/copy-flash-banner.js";
@@ -108,8 +111,19 @@ import {
   initialCardState,
   reduceCardKey,
 } from "./components/council-question-card.js";
+import { CouncilBanner } from "./components/council-banner.js";
+import { CouncilRail } from "./components/council-rail.js";
+import { CouncilScoreboard, countOpenSplits } from "./components/council-scoreboard.js";
+import {
+  collectDissent,
+  CouncilStanceMatrix,
+  pickStanceQuote,
+  stanceVerdictLabel,
+} from "./components/council-stance-matrix.js";
 import { CouncilRailRounds } from "./components/council-rail-rounds.js";
-import { CouncilRoundGroup, CouncilRoundsOverview } from "./components/council-round-group.js";
+import { CouncilRoundGroup, CouncilRoundsOverview, CouncilRunLedger } from "./components/council-round-group.js";
+import { CouncilStrip } from "./components/council-strip.js";
+import { resolveCouncilLayout, resolveCouncilRailWidth } from "./components/council-surface.js";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
 import { CouncilSynthesisBanner } from "./components/council-synthesis-banner.js";
 import { HaltRecoveryCard } from "./components/halt-recovery-card.js";
@@ -122,6 +136,12 @@ import {
   initialInitNewFormState,
 } from "./components/init-new-form-card.js";
 import { JumpToLatestPill } from "./components/jump-to-latest-pill.js";
+import {
+  buildWatchlist,
+  CouncilWatchlist,
+  useWatchlistBaseline,
+  watchlistStateFrom,
+} from "./components/council-watchlist.js";
 import { computeMcpRunInfo, MessageView } from "./components/message-view.js";
 import {
   initialPointToExistingFormState,
@@ -151,6 +171,12 @@ import { Markdown } from "./markdown";
 import { buildMcpBrowseRows, McpBrowserModal, McpEditorModal } from "./mcp-modal";
 import { createEmptyMcpEditorDraft, type McpEditorDraft } from "./mcp-modal-types";
 import { ApiKeyModal } from "./modals/api-key-modal.js";
+import { McpNeedsKeyCard } from "./modals/mcp-needs-key-card.js";
+import { buildNeedsKeyActions } from "./needs-key-controller.js";
+import { EeConnectCard } from "./modals/ee-connect-card.js";
+import { buildEeConnectActions } from "./ee-connect-controller.js";
+import { LspSetupCard } from "./modals/lsp-setup-card.js";
+import { buildLspSetupLanguages } from "./lsp-setup-controller.js";
 import { ConnectModal, TelegramPairModal, TelegramTokenModal } from "./modals/connect-modal.js";
 import { ModelPickerModal } from "./modals/model-picker-modal.js";
 import { SandboxPickerModal } from "./modals/sandbox-picker-modal.js";
@@ -177,6 +203,7 @@ import "./slash/clear.js";
 import "./slash/pin.js";
 import "./slash/cost.js";
 import "./slash/ee.js";
+import "./slash/lsp.js";
 import "./slash/debug.js";
 import "./slash/council.js";
 import "./slash/ideal.js";
@@ -571,7 +598,7 @@ ${prompt}`;
 // the router picks them, but the user-facing picker hides them so the
 // user cannot enable a provider we are not actively maintaining UX for.
 // Hoisted to module-level so React useEffect deps stay stable across renders.
-const SPLASH_PROVIDERS: readonly ProviderId[] = ["deepseek", "zai", "opencode-go", "xai"];
+const SPLASH_PROVIDERS: readonly ProviderId[] = ["deepseek", "zai", "opencode-go", "xai", "stepfun"];
 
 import { useAppLogic } from "./use-app-logic.js";
 
@@ -604,6 +631,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     councilCardState,
     councilInfoCards,
     councilMeta,
+    councilConvene,
     councilRounds,
     selectedRound,
     setSelectedRound,
@@ -614,6 +642,11 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     councilProgress,
     councilStatuses,
     councilTodoExpanded,
+    councilSteerMode,
+    stanceMatrixOpen,
+    stanceCell,
+    expandedTurns,
+    toggleTurnExpanded,
     compactRun,
     defaultProvider,
     disabledModels,
@@ -651,6 +684,24 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     mcpLabelRef,
     mcpModalIndex,
     mcpRows,
+    needsKeyError,
+    needsKeyIndex,
+    needsKeyInputRef,
+    needsKeyMode,
+    needsKeyQueue,
+    submitNeedsKeyKey,
+    eeConnectError,
+    eeConnectIndex,
+    eeConnectInputRef,
+    eeConnectMode,
+    eeConnectVisible,
+    submitEeConnectToken,
+    lspSetupCursor,
+    lspSetupDetected,
+    lspSetupMode,
+    lspSetupSelected,
+    lspSetupStatuses,
+    lspSetupVisible,
     mcpSearchQuery,
     mcpUrlRef,
     messages,
@@ -728,6 +779,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     telegramTokenError,
     telegramTokenInputRef,
     typeahead,
+    runUpdateFromUi,
     updateInfo,
     updateOutput,
     walletDisplayInfo,
@@ -796,60 +848,51 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // hasn't hidden it (Ctrl+B), and the terminal is wide enough that a fixed
   // side panel doesn't starve the transcript. Below 100 cols it stays inline.
   const railActive = isContextRailEnabled() && railVisible && width >= 100;
+  // Design 2A — the nine static config rows collapse into one `▸ Run config`
+  // row at the bottom of the rail. Collapsed by default (that is the whole
+  // point: they never change after the run starts); click the row to unfold.
+  const [runConfigExpanded, setRunConfigExpanded] = useState(false);
+  // 2C — bumped to re-baseline the "While you were away" band, which is how it
+  // clears without also un-locking the transcript.
+  const [watchlistCleared, setWatchlistCleared] = useState(0);
   const railWidth = Math.min(40, Math.max(28, Math.floor(width * 0.28)));
-  const railRows: ContextRailRow[] = [
-    { label: "Session", value: sessionId ? sessionId.slice(0, 12) : "—" },
-    { label: "Mode", value: modeInfo?.label ?? "—" },
-    { label: "Model", value: model ?? "—" },
-  ];
-  // Council metadata rows (P3) — appended only when a debate has published them,
-  // so non-council sessions keep a lean rail.
-  if (councilMeta?.topic) {
-    const t = councilMeta.topic.trim();
-    railRows.push({ label: "Topic", value: t.length > 90 ? `${t.slice(0, 89)}…` : t });
-  }
-  // B2: the pinned OUTCOME — the exact criteria the debate is graded against,
-  // with live ✓ (met) / ○ (pending) per criterion. Pinned beside Topic so the
-  // user always sees WHAT "criteria met" refers to. `criteriaMet` is index-
-  // aligned to `successCriteria` (may be shorter/absent before the first eval).
-  if (councilMeta?.successCriteria?.length) {
-    const crits = councilMeta.successCriteria;
-    // Defense-in-depth: only trust criteriaMet when it is index-aligned to the
-    // current criteria (same length). A count mismatch means it is stale from a
-    // prior council (upsert-merge leak) — treat as all-not-met rather than paint
-    // wrong ✓ marks. index.ts also emits a count-matched all-false reset.
-    const rawMet = councilMeta.criteriaMet ?? [];
-    const met = rawMet.length === crits.length ? rawMet : [];
-    const metCount = met.filter(Boolean).length;
-    railRows.push({ label: "Outcome", value: `${metCount}/${crits.length} criteria met` });
-    crits.forEach((c, i) => {
-      const mark = met[i] ? "✓" : "○";
-      const text = c.trim();
-      railRows.push({ label: "", value: `  ${mark} ${text.length > 64 ? `${text.slice(0, 63)}…` : text}` });
-    });
-  }
-  if (councilMeta?.leader) railRows.push({ label: "Leader", value: councilMeta.leader });
-  if (councilMeta?.panel?.length) {
-    railRows.push({ label: "Panel", value: `${councilMeta.panel.length} (${councilMeta.panel.join(", ")})` });
-  }
-  // Round budget is a CEILING the leader may stop under once the panel converges
-  // — not a commitment to run that many. Label it as a budget so it doesn't read
-  // as "3 of 3 done" next to a Progress row that stopped early.
+
+  // ── Stage awareness (/ideal sprint loop) ──────────────────────────────────
+  // The rail keeps a small fixed IDENTITY block plus ONE stage block that swaps
+  // with the current sprint stage; the main panel gets a live status strip so
+  // it never goes silent during plan/research/implement.
+  const sprintStage = useMemo(() => deriveSprintStage(councilPhases), [councilPhases]);
+  // Sprint progress segment from the status-bar store (already tracked for the
+  // bottom bar) — subscribed here so the rail/strip can show "n/m · x/y".
+  const [sprintSeg, setSprintSeg] = useState(() => statusBarStore.getState().sprint);
+  useEffect(() => statusBarStore.subscribe((s) => setSprintSeg((prev) => (prev === s.sprint ? prev : s.sprint))), []);
+  // 1s ticking clock while a sprint stage is active, so elapsed displays tick
+  // continuously instead of freezing between chunks.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!sprintStage) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [sprintStage]);
+  // Rolling ring of the latest sub-agent activity details (implement stage) —
+  // fed by the same SubagentStatus events SubagentActivity renders, reset when
+  // the stage changes so sprint 2 doesn't inherit sprint 1's tail.
+  const [stageActivity, setStageActivity] = useState<readonly string[]>([]);
+  const stagePhaseId = sprintStage?.phaseId ?? null;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: stagePhaseId is the TRIGGER, not a value the body reads — the point is to clear the activity list on every phase change. Taking the rule's advice would run this once and never reset again.
+  useEffect(() => {
+    setStageActivity([]);
+  }, [stagePhaseId]);
+  const subagentDetail = activeSubagent?.detail ?? null;
+  useEffect(() => {
+    if (!stagePhaseId || !subagentDetail) return;
+    setStageActivity((prev) => pushActivity(prev, subagentDetail));
+  }, [stagePhaseId, subagentDetail]);
+
+  // Live council progress line (shared by the classic Progress row and the
+  // planning stage block).
   const roundBudget = typeof councilMeta?.roundBudget === "number" ? councilMeta.roundBudget : undefined;
-  if (roundBudget !== undefined) {
-    const upTo =
-      typeof councilMeta?.roundCeiling === "number" && councilMeta.roundCeiling > roundBudget
-        ? ` (up to ${councilMeta.roundCeiling})`
-        : "";
-    railRows.push({ label: "Round budget", value: `${roundBudget} max${upTo}` });
-  }
-  if (councilMeta?.researchMode !== undefined) {
-    railRows.push({ label: "Research", value: councilMeta.researchMode ? "on" : "off" });
-  }
-  if (councilMeta?.costAware) railRows.push({ label: "Cost-aware", value: "on" });
-  // Live debate progress — current round vs budget + its outcome/decision, so the
-  // rail reflects debate STATE. A `stop` before the budget is an EARLY convergence,
-  // not a truncation — say so explicitly to resolve the "3 planned but 1 ran" look.
+  let councilProgressLine: string | null = null;
   if (councilRounds.length > 0) {
     const last = councilRounds[councilRounds.length - 1];
     const parts = [roundBudget ? `Round ${last.round}/${roundBudget}` : `Round ${last.round}`];
@@ -864,7 +907,106 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         parts.push(last.leaderDecision);
       }
     }
-    railRows.push({ label: "Progress", value: parts.join(" · ") });
+    councilProgressLine = parts.join(" · ");
+  }
+
+  // Council surface layout resolved early so the fixed rail META can shed the
+  // per-criterion outcome rows into the scrollable DETAIL region (two-pane only)
+  // — that 5-row block is the main thing squeezing DETAIL. The one-line Outcome
+  // summary stays in META; the sticky banner also pins the outcome count.
+  const councilTwoPaneRail = isCouncilSurfaceEnabled() && resolveCouncilLayout(width) === "two-pane";
+  // Outcome criteria captured for reuse by the banner (counts) + DETAIL (list).
+  let outcomeCriteria: string[] = [];
+  let outcomeMet: boolean[] = [];
+  // Fixed identity block — rows that rarely change during a run.
+  const railRows: ContextRailRow[] = [
+    { label: "Session", value: sessionId ? sessionId.slice(0, 12) : "—" },
+    { label: "Mode", value: modeInfo?.label ?? "—" },
+    { label: "Model", value: model ?? "—" },
+  ];
+  if (councilMeta?.leader) railRows.push({ label: "Leader", value: councilMeta.leader });
+
+  // Stage block (active sprint stage) — replaces the full council row dump so
+  // the narrow rail stays readable ("gọn, mịn").
+  let railStage: ContextRailStage | null = null;
+  if (sprintStage) {
+    const metaCrits = councilMeta?.successCriteria ?? [];
+    const rawMet = councilMeta?.criteriaMet ?? [];
+    const met = rawMet.length === metaCrits.length ? rawMet : [];
+    railStage = {
+      title: buildStageDividerTitle(sprintStage, sprintSeg),
+      rows: buildStageRows({
+        info: sprintStage,
+        sprint: sprintSeg,
+        councilProgress: councilProgressLine,
+        topic: sprintStage.stage === "planning" ? (councilMeta?.topic ?? null) : null,
+        criteriaSummary:
+          sprintStage.stage === "planning" && metaCrits.length > 0
+            ? `${met.filter(Boolean).length}/${metaCrits.length} criteria met`
+            : null,
+        lastActivity: stageActivity[stageActivity.length - 1] ?? null,
+        now: nowTick,
+      }),
+    };
+  }
+
+  // Classic council metadata rows (P3) — only when NO sprint stage is active
+  // (pure /council debates keep the detailed view; during a sprint the stage
+  // block above carries the live signal and these rows are dropped, not
+  // truncated).
+  if (!sprintStage && councilMeta?.topic) {
+    const t = councilMeta.topic.trim();
+    railRows.push({ label: "Topic", value: t.length > 90 ? `${t.slice(0, 89)}…` : t });
+  }
+  // B2: the pinned OUTCOME — the exact criteria the debate is graded against,
+  // with live ✓ (met) / ○ (pending) per criterion. Pinned beside Topic so the
+  // user always sees WHAT "criteria met" refers to. `criteriaMet` is index-
+  // aligned to `successCriteria` (may be shorter/absent before the first eval).
+  if (!sprintStage && councilMeta?.successCriteria?.length) {
+    const crits = councilMeta.successCriteria;
+    // Defense-in-depth: only trust criteriaMet when it is index-aligned to the
+    // current criteria (same length). A count mismatch means it is stale from a
+    // prior council (upsert-merge leak) — treat as all-not-met rather than paint
+    // wrong ✓ marks. index.ts also emits a count-matched all-false reset.
+    const rawMet = councilMeta.criteriaMet ?? [];
+    const met = rawMet.length === crits.length ? rawMet : [];
+    const metCount = met.filter(Boolean).length;
+    outcomeCriteria = crits;
+    outcomeMet = met;
+    railRows.push({ label: "Outcome", value: `${metCount}/${crits.length} criteria met` });
+    // In the two-pane surface the per-criterion ✓/○ rows live in the scrollable
+    // DETAIL region (councilOutcomeNode) so they don't starve DETAIL; the legacy
+    // rail keeps them inline in META.
+    if (!councilTwoPaneRail)
+      crits.forEach((c, i) => {
+        const mark = met[i] ? "✓" : "○";
+        const text = c.trim();
+        railRows.push({ label: "", value: `  ${mark} ${text.length > 64 ? `${text.slice(0, 63)}…` : text}` });
+      });
+  }
+  if (!sprintStage && councilMeta?.panel?.length) {
+    railRows.push({ label: "Panel", value: `${councilMeta.panel.length} (${councilMeta.panel.join(", ")})` });
+  }
+  // Round budget is a CEILING the leader may stop under once the panel converges
+  // — not a commitment to run that many. Label it as a budget so it doesn't read
+  // as "3 of 3 done" next to a Progress row that stopped early.
+  if (!sprintStage && roundBudget !== undefined) {
+    const upTo =
+      typeof councilMeta?.roundCeiling === "number" && councilMeta.roundCeiling > roundBudget
+        ? ` (up to ${councilMeta.roundCeiling})`
+        : "";
+    railRows.push({ label: "Round budget", value: `${roundBudget} max${upTo}` });
+  }
+  if (!sprintStage && councilMeta?.researchMode !== undefined) {
+    railRows.push({ label: "Research", value: councilMeta.researchMode ? "on" : "off" });
+  }
+  if (!sprintStage && councilMeta?.costAware) railRows.push({ label: "Cost-aware", value: "on" });
+  // Live debate progress — current round vs budget + its outcome/decision, so the
+  // rail reflects debate STATE. A `stop` before the budget is an EARLY convergence,
+  // not a truncation — say so explicitly to resolve the "3 planned but 1 ran" look.
+  // During a sprint the planning stage block carries the same line instead.
+  if (!sprintStage && councilProgressLine) {
+    railRows.push({ label: "Progress", value: councilProgressLine });
   }
 
   // Council metadata cards (phase timeline, product-status, statuses, info cards
@@ -872,13 +1014,39 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // transcript when the rail is off, or hoisted into the rail when it is on — so
   // metadata stops pushing the live debate off screen. `cols` sizes the info
   // cards to whichever container holds them.
-  const renderCouncilMeta = (cols: number) => (
+  // `opts.hideRounds` — the rail hides the detailed per-round breakdown while a
+  // sprint stage other than planning is active (the stage block already carries
+  // the compact live signal; a full round list is planning-time detail).
+  // The council rail content, split into named sections so the Concept-4/1 mix
+  // rail (CouncilRail) can wrap each in its own titled `── SECTION ──` rule.
+  const councilPhasesNode = () =>
+    councilPhases.length > 0 ? (
+      <Semantic id="council-phases" role="listbox" name="Council Phases">
+        <CouncilPhaseTimeline phases={councilPhases} theme={t} expanded={councilTranscriptExpanded} />
+      </Semantic>
+    ) : null;
+  // Planned round count for the dimmed placeholders — the hard ceiling if the
+  // leader may extend, else the budget. Rounds beyond what has started render as
+  // "pending" so the full planned shape is visible up front.
+  const plannedRounds =
+    typeof councilMeta?.roundCeiling === "number"
+      ? councilMeta.roundCeiling
+      : typeof councilMeta?.roundBudget === "number"
+        ? councilMeta.roundBudget
+        : undefined;
+  const councilRoundsNode = (cols: number, opts?: { hideRounds?: boolean }) =>
+    !opts?.hideRounds && isRoundGroupsEnabled() && councilRounds.length > 0 ? (
+      <CouncilRailRounds
+        rounds={councilRounds}
+        selected={selectedRound}
+        onSelect={setSelectedRound}
+        width={cols}
+        theme={t}
+        plannedTotal={plannedRounds}
+      />
+    ) : null;
+  const councilDetailNode = (cols: number) => (
     <>
-      {councilPhases.length > 0 && (
-        <Semantic id="council-phases" role="listbox" name="Council Phases">
-          <CouncilPhaseTimeline phases={councilPhases} theme={t} expanded={councilTranscriptExpanded} />
-        </Semantic>
-      )}
       {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
       {councilStatuses.length > 0 && (
         <Semantic id="council-status" role="listbox" name="Council Status">
@@ -895,16 +1063,286 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
           <CouncilInfoCardView key={`info-card-${idx}-${card.title}`} card={card} terminalCols={cols} theme={t} />
         </Semantic>
       ))}
-      {isRoundGroupsEnabled() && councilRounds.length > 0 && (
-        <CouncilRailRounds
-          rounds={councilRounds}
-          selected={selectedRound}
-          onSelect={setSelectedRound}
-          width={cols}
-          theme={t}
-        />
-      )}
     </>
+  );
+  // Flat composition preserved for the legacy (non-surface) rail + inline paths.
+  const renderCouncilMeta = (cols: number, opts?: { hideRounds?: boolean }) => (
+    <>
+      {councilPhasesNode()}
+      {councilDetailNode(cols)}
+      {councilRoundsNode(cols, opts)}
+    </>
+  );
+
+  // ── Council surface (Concept 4, flag MUONROI_COUNCIL_SURFACE) ─────────────
+  // When enabled, the transcript + a SECTIONED rail (NOW liveness / meta /
+  // phases / rounds) mount as a self-reflowing surface: two panes at ≥96 cols,
+  // a one-line council-strip banner below. Honest data only — the NOW block and
+  // strip read the live council_status liveness that is already tracked; there
+  // is no per-role cost section because that data does not exist in state.
+  const councilSurfaceActive = isCouncilSurfaceEnabled();
+  const councilLayout = resolveCouncilLayout(width);
+  const councilTwoPane = councilSurfaceActive && councilLayout === "two-pane";
+  const councilStripMode = councilSurfaceActive && councilLayout === "strip";
+  const councilSurfaceRailWidth = resolveCouncilRailWidth(width);
+  // Latest live phase status (state start|tick) drives the liveness meter.
+  const liveCouncilStatus =
+    [...councilStatuses].reverse().find((s) => s.state === "start" || s.state === "tick") ?? null;
+  const councilRoundLabel = councilRounds.length > 0 ? `r${councilRounds[councilRounds.length - 1]!.round}` : null;
+  // A blocking clarification/preflight card is a human-wait, NOT a stall.
+  const councilWaiting = !!pendingCouncilQuestion || !!preflightCardState;
+  const activeCouncilPhaseLabel = councilPhases.find((p) => p.state === "active")?.label ?? null;
+  const councilSurfaceTitle = sprintStage ? `SPRINT · Council` : "Council";
+  // ── Sticky banner (top of main pane) + DETAIL outcome list (two-pane) ──────
+  // The banner replaces the stripped preamble noise with a phase-aware pin.
+  const outcomeMetCount = outcomeMet.filter(Boolean).length;
+  const councilLastRound = councilRounds.length > 0 ? councilRounds[councilRounds.length - 1]! : null;
+  const councilHasSynthesis = councilMessages.some((m) => m.kind === "synthesis");
+  // Honest synthesis-phase decision from the last round's leader verdict — not a
+  // fabricated post-debate action (the UI has no clean IMPLEMENT/CONTINUE signal).
+  const councilDecision = councilHasSynthesis
+    ? councilLastRound?.leaderDecision === "aborted"
+      ? "ended early"
+      : councilLastRound?.leaderDecision === "circuit-break"
+        ? "stopped"
+        : "converged"
+    : null;
+  const councilActive =
+    councilConvene !== null || councilRounds.length > 0 || outcomeCriteria.length > 0 || !!councilMeta?.topic;
+  const councilBannerNode =
+    councilTwoPane && councilActive ? (
+      <CouncilBanner
+        title={councilSurfaceTitle}
+        convene={councilConvene}
+        criteriaTotal={outcomeCriteria.length}
+        criteriaMet={outcomeMetCount}
+        roundCurrent={councilLastRound ? councilLastRound.round : null}
+        roundTotal={roundBudget}
+        phaseLabel={activeCouncilPhaseLabel}
+        status={liveCouncilStatus}
+        waiting={councilWaiting}
+        decision={councilDecision}
+        width={width - councilSurfaceRailWidth}
+        theme={t}
+      />
+    ) : null;
+  // Per-criterion ✓/○ list relocated from the fixed rail META into scrollable
+  // DETAIL (two-pane) so it no longer squeezes DETAIL to a sliver.
+  //
+  // Superseded by the scoreboard (design 2A), which renders the same criteria
+  // at the TOP of the rail and adds the stance sigils. Suppressed rather than
+  // deleted so the DETAIL list is still the fallback when the scoreboard has
+  // nothing to draw (no criteria and no ledger — e.g. a council that failed
+  // before its first turn).
+  const scoreboardOwnsCriteria = councilActive && outcomeCriteria.length > 0;
+  const councilOutcomeNode =
+    councilTwoPane && outcomeCriteria.length > 0 && !scoreboardOwnsCriteria ? (
+      <Semantic id="council-outcome" role="list" name="Outcome criteria">
+        <box flexDirection="column" flexShrink={0}>
+          {outcomeCriteria.map((c, i) => {
+            const text = c.trim();
+            return (
+              <text key={`crit-${i}-${text.slice(0, 12)}`} fg={outcomeMet[i] ? t.diffAddedFg : t.textMuted}>
+                {`${outcomeMet[i] ? "✓" : "○"} ${text.length > 48 ? `${text.slice(0, 47)}…` : text}`}
+              </text>
+            );
+          })}
+        </box>
+      </Semantic>
+    ) : null;
+  // ── Scoreboard rail body (design 2A) ──────────────────────────────────────
+  // Inverts the old rail's priority: the nine rows that never change after the
+  // run starts fold into ONE collapsed `▸ Run config`, and the live scoreboard
+  // (criteria + who is on which side, panel ledger, next decision) takes the
+  // top. Built here because every input already lives in this scope.
+  //
+  // Static-vs-live is decided by LABEL, not by push order, so a future row
+  // lands in the right half by naming rather than by position.
+  const RUN_CONFIG_LABELS = new Set([
+    "Session",
+    "Mode",
+    "Model",
+    "Leader",
+    "Topic",
+    "Panel",
+    "Round budget",
+    "Research",
+    "Cost-aware",
+  ]);
+  const runConfigRows = railRows.filter((r) => RUN_CONFIG_LABELS.has(r.label));
+  // Stance rows come from the leader's per-round grading. Before the first
+  // evaluation lands there are none — fall back to the pinned criteria with an
+  // EMPTY stance map so the rail still lists what the debate is graded against
+  // and every panelist reads as "has not spoken" (never as agreement).
+  const scoreboardStanceRows: CouncilStanceRow[] = councilMeta?.stanceRows?.length
+    ? councilMeta.stanceRows
+    : outcomeCriteria.map((c, i) => ({ criterion: c, met: !!outcomeMet[i], stances: {} }));
+  const councilLedger = councilMeta?.panelLedger ?? [];
+  // Roster for the sigil columns: prefer the roles that have actually spoken
+  // (ledger order == first-seen order == palette slot order), falling back to
+  // the announced panel before the first turn settles.
+  const scoreboardRoster =
+    councilLedger.length > 0
+      ? councilLedger.filter((e) => e.role !== "leader").map((e) => e.role)
+      : (councilMeta?.panel ?? []);
+  // Who has already spoken in the LIVE round — drives "Next decision".
+  const liveRoundNumber = councilLastRound?.state === "running" ? councilLastRound.round : null;
+  const liveRoundTurns =
+    liveRoundNumber === null ? [] : councilMessages.filter((m) => m.kind === "debate" && m.round === liveRoundNumber);
+  const spokenThisRound =
+    liveRoundNumber === null ? [] : Array.from(new Set(liveRoundTurns.map((m) => m.speaker.role)));
+  // 2A header — position against the plan + turns landed this round. Sourced
+  // from the round's own phase event, the only place carrying a start stamp.
+  const liveRoundStartedAt =
+    liveRoundNumber === null
+      ? null
+      : (councilPhases.find((p) => p.phaseId === `phase:round-${liveRoundNumber}`)?.startedAt ?? null);
+  const scoreboardProgress =
+    liveRoundNumber === null || !councilLastRound
+      ? null
+      : {
+          round: liveRoundNumber,
+          budget: councilMeta?.roundBudget ?? null,
+          ceiling: councilMeta?.roundCeiling ?? null,
+          emergent: councilLastRound.emergent,
+          startedAt: liveRoundStartedAt,
+          turnsDone: liveRoundTurns.length,
+          turnsExpected: councilLastRound.turnsExpected ?? null,
+        };
+  const runConfigSummary = [
+    sessionId ? sessionId.slice(0, 12) : null,
+    councilMeta?.leader ?? model ?? null,
+    councilLedger.length > 0 ? `$${councilLedger.reduce((sum, e) => sum + (e.usd || 0), 0).toFixed(2)}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  // Panelists who ended the run still opposing — the conclusion card's Dissent
+  // section. Derived from the SAME stance rows the rail and matrix render, so
+  // the verdict cannot claim a consensus the matrix contradicts.
+  const councilDissent = collectDissent(scoreboardStanceRows, scoreboardRoster);
+  // S4 — the selected cell and the passage behind it. Clamped HERE as well as in
+  // the reducer, because the roster can shrink between keypresses (a panelist
+  // dropped by the circuit breaker) and a stale column would read another
+  // panelist's stance under the wrong name.
+  const stanceSelection =
+    stanceMatrixOpen && scoreboardStanceRows.length > 0 && scoreboardRoster.length > 0
+      ? {
+          row: Math.max(0, Math.min(stanceCell.row, scoreboardStanceRows.length - 1)),
+          col: Math.max(0, Math.min(stanceCell.col, scoreboardRoster.length - 1)),
+        }
+      : null;
+  const stanceQuote = stanceSelection
+    ? pickStanceQuote({
+        criterion: scoreboardStanceRows[stanceSelection.row]?.criterion ?? "",
+        role: scoreboardRoster[stanceSelection.col] ?? "",
+        mark: scoreboardStanceRows[stanceSelection.row]?.stances[scoreboardRoster[stanceSelection.col] ?? ""] ?? null,
+        turns: councilMessages
+          .filter((m) => m.kind === "debate")
+          .map((m) => ({ role: m.speaker.role, text: m.text, round: m.round, model: m.speaker.model })),
+      })
+    : null;
+  // Roles holding an unresolved objection on ANY criterion — marks their turns
+  // `◐ contested` in the transcript, so the disagreement is visible where it was
+  // argued rather than only in the rail's aggregate.
+  const contestedRoles = new Set(councilDissent.map((d) => d.role));
+  // 2C — the "While you were away" band. Only armed while the transcript is
+  // scroll-locked away AND a council is live: outside those two, "what changed"
+  // is not a question the user has.
+  const watchlistArmed = councilActive && scrollLockedAway;
+  const watchlistNow = watchlistStateFrom(
+    scoreboardStanceRows,
+    scoreboardRoster,
+    councilLedger.reduce((sum, e) => sum + (e.usd || 0), 0),
+    councilMessages.filter((m) => m.kind === "debate").length,
+  );
+  const watchlistBaseline = useWatchlistBaseline(watchlistArmed, watchlistNow, watchlistCleared);
+  const watchlistEntries = watchlistBaseline
+    ? buildWatchlist(
+        watchlistBaseline.state,
+        watchlistNow,
+        Object.fromEntries(scoreboardStanceRows.map((r) => [r.criterion, r.split])),
+      )
+    : [];
+  const councilWatchlistNode =
+    watchlistEntries.length > 0 ? (
+      <CouncilWatchlist
+        entries={watchlistEntries}
+        since={watchlistBaseline?.at ?? null}
+        width={councilSurfaceRailWidth}
+        theme={t}
+        onDismiss={() => setWatchlistCleared((n) => n + 1)}
+      />
+    ) : null;
+  const councilScoreboardNode =
+    councilActive && (scoreboardStanceRows.length > 0 || councilLedger.length > 0 || scoreboardProgress) ? (
+      <CouncilScoreboard
+        width={councilSurfaceRailWidth}
+        theme={t}
+        stanceRows={scoreboardStanceRows}
+        roster={scoreboardRoster}
+        resolveStyle={resolveStyle}
+        ledger={councilLedger}
+        activeRole={liveCouncilStatus?.role ?? null}
+        spokenThisRound={spokenThisRound}
+        criteriaTotal={outcomeCriteria.length}
+        runConfigRows={runConfigRows}
+        runConfigSummary={runConfigSummary}
+        runConfigExpanded={runConfigExpanded}
+        onToggleRunConfig={() => setRunConfigExpanded((v) => !v)}
+        progress={scoreboardProgress}
+      />
+    ) : null;
+  const councilRailNode = (
+    <CouncilRail
+      width={councilSurfaceRailWidth}
+      theme={t}
+      scoreboardNode={councilScoreboardNode}
+      watchlistNode={councilWatchlistNode}
+      status={liveCouncilStatus}
+      roundLabel={councilRoundLabel}
+      waiting={councilWaiting}
+      metaRows={railRows}
+      stage={railStage}
+      phasesNode={councilPhasesNode()}
+      roundsNode={councilRoundsNode(councilSurfaceRailWidth, {
+        hideRounds: !!sprintStage && sprintStage.stage !== "planning",
+      })}
+      detailNode={
+        councilOutcomeNode ||
+        sessionTree.length > 0 ||
+        agentActivities.length > 0 ||
+        productStatus ||
+        councilStatuses.length > 0 ||
+        councilInfoCards.length > 0 ? (
+          <>
+            {councilOutcomeNode}
+            <SessionTreeCard nodes={sessionTree} />
+            <AgentRailActivities
+              activities={agentActivities}
+              selected={selectedActivity}
+              onSelect={setSelectedActivity}
+              width={councilSurfaceRailWidth}
+              t={t}
+            />
+            {councilDetailNode(councilSurfaceRailWidth)}
+          </>
+        ) : null
+      }
+    />
+  );
+  const councilStripNode = (
+    <CouncilStrip
+      status={liveCouncilStatus}
+      waiting={councilWaiting}
+      roundLabel={councilRoundLabel}
+      phaseLabel={activeCouncilPhaseLabel}
+      panel={councilMeta?.panel}
+      width={width}
+      theme={t}
+      criteriaMet={outcomeMetCount}
+      criteriaTotal={outcomeCriteria.length}
+      openSplits={countOpenSplits(scoreboardStanceRows, scoreboardRoster)}
+    />
   );
 
   return (
@@ -941,10 +1379,43 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               paddingLeft={2}
               paddingRight={2}
               gap={1}
-              flexDirection="row"
+              flexDirection={councilStripMode ? "column" : "row"}
             >
+              {/* Council surface marker (Concept 4): carries props.layout for the
+                  harness and reflows the transcript/rail below. Invisible node. */}
+              {councilSurfaceActive && (
+                <Semantic
+                  id="council-surface"
+                  role="region"
+                  name={councilSurfaceTitle}
+                  props={{ layout: councilLayout, width }}
+                />
+              )}
+              {/* <96 cols: the rail collapses to a one-line priority strip. */}
+              {councilStripMode && councilStripNode}
               {/* Main transcript column — splits with the context rail (P1). */}
               <box flexDirection="column" flexGrow={1} gap={1}>
+                {/* Sticky phase-aware council banner — pinned ABOVE the scroll
+                    region so the convene/outcome/round/decision pin stays visible
+                    while the debate transcript scrolls (replaces preamble noise). */}
+                {councilBannerNode}
+                {/* Ctrl+T — stance matrix (design S4). Pinned ABOVE the scroll
+                    region, like the banner, so it stays put while the debate
+                    streams underneath instead of scrolling away mid-read. */}
+                {stanceMatrixOpen && scoreboardStanceRows.length > 0 ? (
+                  <CouncilStanceMatrix
+                    rows={scoreboardStanceRows}
+                    roster={scoreboardRoster}
+                    resolveStyle={resolveStyle}
+                    theme={t}
+                    width={councilTwoPane ? width - councilSurfaceRailWidth : width}
+                    round={councilLastRound?.round ?? null}
+                    roundTotal={roundBudget ?? null}
+                    verdicts={scoreboardStanceRows.map((r) => stanceVerdictLabel(r, scoreboardRoster))}
+                    selected={stanceSelection}
+                    quote={stanceQuote}
+                  />
+                ) : null}
                 {/* Scrollable messages */}
                 <Semantic
                   id="log"
@@ -1115,6 +1586,11 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                               partnerLastText={partnerLastText}
                               partnerRole={cm.partner?.role}
                               theme={t}
+                              // Ctrl+O (expand everything) wins over the
+                              // per-turn set, so the global toggle still works.
+                              expanded={councilTranscriptExpanded || expandedTurns.has(idx)}
+                              onToggleExpand={() => toggleTurnExpanded(idx)}
+                              contested={contestedRoles.has(cm.speaker.role)}
                             />
                           </Semantic>
                         );
@@ -1165,6 +1641,10 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                                       record={rec}
                                       selected={isSelected}
                                       theme={t}
+                                      roster={scoreboardRoster}
+                                      resolveSigil={(role) => resolveStyle(role).sigil}
+                                      turnsDone={debateTurns.filter(({ cm }) => cm.round === rec.round).length}
+                                      criteriaTotal={outcomeCriteria.length}
                                     >
                                       {showTurns
                                         ? debateTurns.filter(({ cm }) => cm.round === rec.round).map(renderTurn)
@@ -1172,6 +1652,18 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                                     </CouncilRoundGroup>
                                   );
                                 })}
+                              {/* S6 — the after-N-rounds view: what each round
+                                  settled and how it ended. Only once more than
+                                  one round has landed; a single-round run is
+                                  already fully described by its own receipt. */}
+                              {selectedRound === null && councilRounds.filter((r) => r.state === "done").length > 1 ? (
+                                <CouncilRunLedger
+                                  rounds={councilRounds}
+                                  roster={scoreboardRoster}
+                                  theme={t}
+                                  resolveSigil={(role) => resolveStyle(role).sigil}
+                                />
+                              ) : null}
                             </>
                           ) : (
                             debateTurns.length > 0 && (
@@ -1205,7 +1697,13 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                               name={`${cm.kind}:${cm.speaker?.role ?? "?"}`}
                               value={cm.text}
                             >
-                              <CouncilSynthesisBanner key={idx} msg={cm} theme={t} />
+                              <CouncilSynthesisBanner
+                                key={idx}
+                                msg={cm}
+                                theme={t}
+                                dissent={councilDissent}
+                                resolveStyle={resolveStyle}
+                              />
                             </Semantic>
                           ))}
                         </>
@@ -1341,6 +1839,20 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     <JumpToLatestPill newSinceLock={newSinceLock} />
                   </box>
                 )}
+                {/* Live sprint status strip — pinned under the transcript so the
+                  main panel NEVER goes silent during plan/implement/verify. Ticks
+                  elapsed each second + echoes latest sub-agent activity even when
+                  the isolated implement stage absorbs its own stream. */}
+                {sprintStage && (
+                  <SprintStatusStrip
+                    t={t}
+                    info={sprintStage}
+                    sprint={sprintSeg}
+                    activity={stageActivity}
+                    now={nowTick}
+                    width={councilTwoPane ? width - councilSurfaceRailWidth : railActive ? width - railWidth : width}
+                  />
+                )}
                 {btwState && <BtwOverlay state={btwState} theme={t} />}
                 {/* TodoCard — fixed bottom so agent text cannot push it up */}
                 {taskListSnapshot && (
@@ -1370,6 +1882,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     t={t}
                     inputRef={inputRef}
                     isProcessing={isProcessing}
+                    councilLive={councilStatuses.length > 0}
+                    steerMode={councilSteerMode}
                     showModelPicker={showModelPicker}
                     showSandboxPicker={showSandboxPicker}
                     showWalletPicker={showWalletPicker}
@@ -1394,19 +1908,61 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   />
                 </box>
               </box>
-              {railActive && (
-                <ContextRail width={railWidth} rows={railRows}>
-                  <SessionTreeCard nodes={sessionTree} />
-                  <AgentRailActivities
-                    activities={agentActivities}
-                    selected={selectedActivity}
-                    onSelect={setSelectedActivity}
-                    width={railWidth}
-                    t={t}
-                  />
-                  {renderCouncilMeta(railWidth)}
-                </ContextRail>
-              )}
+              {/* Two-pane surface: the sectioned council rail (NOW block leads).
+                  Legacy ContextRail only when the surface flag is OFF. */}
+              {councilTwoPane
+                ? councilRailNode
+                : !councilSurfaceActive &&
+                  railActive && (
+                    <ContextRail
+                      width={railWidth}
+                      rows={railRows}
+                      stage={railStage}
+                      watchlistNode={
+                        councilWatchlistNode ? (
+                          <CouncilWatchlist
+                            entries={watchlistEntries}
+                            since={watchlistBaseline?.at ?? null}
+                            width={railWidth}
+                            theme={t}
+                            onDismiss={() => setWatchlistCleared((n) => n + 1)}
+                          />
+                        ) : null
+                      }
+                      scoreboardNode={
+                        councilScoreboardNode ? (
+                          <CouncilScoreboard
+                            width={railWidth}
+                            theme={t}
+                            stanceRows={scoreboardStanceRows}
+                            roster={scoreboardRoster}
+                            resolveStyle={resolveStyle}
+                            ledger={councilLedger}
+                            activeRole={liveCouncilStatus?.role ?? null}
+                            spokenThisRound={spokenThisRound}
+                            criteriaTotal={outcomeCriteria.length}
+                            runConfigRows={runConfigRows}
+                            runConfigSummary={runConfigSummary}
+                            runConfigExpanded={runConfigExpanded}
+                            onToggleRunConfig={() => setRunConfigExpanded((v) => !v)}
+                            progress={scoreboardProgress}
+                          />
+                        ) : null
+                      }
+                    >
+                      <SessionTreeCard nodes={sessionTree} />
+                      <AgentRailActivities
+                        activities={agentActivities}
+                        selected={selectedActivity}
+                        onSelect={setSelectedActivity}
+                        width={railWidth}
+                        t={t}
+                      />
+                      {renderCouncilMeta(railWidth, {
+                        hideRounds: !!sprintStage && sprintStage.stage !== "planning",
+                      })}
+                    </ContextRail>
+                  )}
             </box>
             <box paddingLeft={2} paddingRight={2} flexShrink={0}>
               <StatusBar />
@@ -1441,6 +1997,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   t={t}
                   inputRef={inputRef}
                   isProcessing={isProcessing}
+                  councilLive={councilStatuses.length > 0}
+                  steerMode={councilSteerMode}
                   showModelPicker={showModelPicker}
                   showSandboxPicker={showSandboxPicker}
                   showWalletPicker={showWalletPicker}
@@ -1467,13 +2025,20 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               <box flexGrow={1} minHeight={0} />
             </box>
             {updateInfo?.hasUpdate && (
-              <box paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0}>
+              <box
+                paddingLeft={2}
+                paddingRight={2}
+                flexDirection="row"
+                flexShrink={0}
+                onMouseDown={() => runUpdateFromUi()}
+              >
                 <text fg="#f59e0b">
                   {"┃ Update available: v"}
                   {startupConfig.version}
-                  {" → v"}
-                  {updateInfo.latestVersion}
-                  {" — run /update to install"}
+                  {" → "}
+                  {/* A source checkout has no next version — see latestLabel. */}
+                  {updateInfo.latestLabel ?? `v${updateInfo.latestVersion}`}
+                  {" — click or run /update to install"}
                 </text>
               </box>
             )}
@@ -1518,6 +2083,47 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             height={height}
             currentVersion={startupConfig.version}
             latestVersion={updateInfo.latestVersion}
+            latestLabel={updateInfo.latestLabel}
+          />
+        )}
+        {needsKeyQueue.length > 0 && needsKeyQueue[0] && (
+          <McpNeedsKeyCard
+            t={t}
+            width={width}
+            height={height}
+            server={needsKeyQueue[0]}
+            actions={buildNeedsKeyActions(needsKeyQueue[0])}
+            selectedIndex={needsKeyIndex}
+            mode={needsKeyMode}
+            inputRef={needsKeyInputRef}
+            error={needsKeyError}
+            onSubmitKey={submitNeedsKeyKey}
+          />
+        )}
+        {eeConnectVisible && needsKeyQueue.length === 0 && (
+          <EeConnectCard
+            t={t}
+            width={width}
+            height={height}
+            actions={buildEeConnectActions()}
+            selectedIndex={eeConnectIndex}
+            mode={eeConnectMode}
+            inputRef={eeConnectInputRef}
+            error={eeConnectError}
+            onSubmitToken={submitEeConnectToken}
+          />
+        )}
+        {lspSetupVisible && needsKeyQueue.length === 0 && !eeConnectVisible && (
+          <LspSetupCard
+            t={t}
+            width={width}
+            height={height}
+            languages={buildLspSetupLanguages()}
+            selectedIds={lspSetupSelected}
+            detectedIds={lspSetupDetected}
+            cursorIndex={lspSetupCursor}
+            mode={lspSetupMode}
+            statuses={lspSetupStatuses}
           />
         )}
         {showMcpModal && !showMcpEditor && (

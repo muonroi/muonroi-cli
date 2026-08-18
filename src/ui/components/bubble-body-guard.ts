@@ -52,3 +52,37 @@ export function capBubbleBody(text: string, terminalCols: number, maxChars = MAX
   }
   return body;
 }
+
+/**
+ * Default number of body lines a collapsed council turn shows. Enough for a
+ * full argument's opening (the design's mock runs 3–4), short enough that a
+ * five-speaker round still fits on one screen.
+ */
+export const DEFAULT_BUBBLE_BODY_LINES = 8;
+
+export interface ClampedBody {
+  /** The text to render. */
+  text: string;
+  /** Body lines hidden by the clamp. 0 → nothing was cut. */
+  hiddenLines: number;
+}
+
+/**
+ * Clamp a bubble body to `maxLines` and REPORT what was hidden.
+ *
+ * The reporting is the whole point. `capBubbleBody` above is a safety guard
+ * against a layout-freezing mega-body and cuts silently; that is correct for a
+ * 100KB blob but wrong for an ordinary long argument, where the reader has no
+ * way to know the turn continued. Returning `hiddenLines` lets the renderer
+ * offer an expand affordance instead of quietly dropping half a panelist's
+ * position.
+ *
+ * `maxLines <= 0` disables the clamp (the expanded state), returning the body
+ * unchanged with `hiddenLines: 0`.
+ */
+export function clampBubbleLines(text: string, maxLines = DEFAULT_BUBBLE_BODY_LINES): ClampedBody {
+  if (maxLines <= 0) return { text, hiddenLines: 0 };
+  const lines = text.split("\n");
+  if (lines.length <= maxLines) return { text, hiddenLines: 0 };
+  return { text: lines.slice(0, maxLines).join("\n"), hiddenLines: lines.length - maxLines };
+}

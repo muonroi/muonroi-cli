@@ -7,17 +7,25 @@
  */
 
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
+import { isIdealToolEntryEnabled } from "../gsd/flags.js";
 import { registerGsdWorkflowTools } from "../gsd/workflow-tools.js";
 import type { AskUserAskInfo, AskUserOption } from "../orchestrator/ask-user.js";
 import { requestProactiveCompact } from "../orchestrator/compact-request.js";
 import { requestCouncilConvene } from "../orchestrator/council-request.js";
 import { canonicalizeBashCommand } from "../orchestrator/tool-args-hash.js";
-import { analyzeImageFromSource, askVisionProxy, listCachedImages } from "../providers/mcp-vision-bridge.js";
+import {
+  analyzeImageFromSource,
+  askVisionProxy,
+  closeVisionSessionAndCache,
+  listCachedImages,
+  listOpenVisionSessions,
+} from "../providers/mcp-vision-bridge.js";
 import { needsVisionProxy } from "../providers/vision-proxy.js";
+import { mostRecentVisionSessionId } from "../providers/vision-session.js";
 import type { AgentMode, TaskRequest, ToolResult } from "../types/index.js";
 import { loadMcpServers } from "../utils/settings.js";
 import type { BashTool } from "./bash.js";
-import { type BashSliceMode, getBashRun, sliceBashOutput } from "./bash-output-cache.js";
+import { type BashSliceMode, bashOutputNotFoundMessage, getBashRun, sliceBashOutput } from "./bash-output-cache.js";
 import { editFile, readFile, readFiles, writeFile } from "./file.js";
 import { FileTracker } from "./file-tracker.js";
 import {
@@ -77,6 +85,14 @@ interface ToolRegistryOpts {
    * that can never be answered.
    */
   askUser?: (info: AskUserAskInfo) => Promise<string>;
+  /**
+   * Feature B2 — when provided, the `enter_ideal` tool is registered so the agent
+   * can request entry into /ideal product-loop mode after the user agreed to start
+   * building what was discussed. The callback records a pending request on the
+   * orchestrator; the top-level loop is dispatched AFTER the current turn's tool
+   * phase completes (the tool cannot stream the loop itself). Omitted → tool absent.
+   */
+  enterIdeal?: (idea: string) => void;
 }
 
 /**
@@ -277,7 +293,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // when THIS request genuinely warrants a cross-provider debate (conflicting
   // design tradeoffs, high-stakes decision). The request is queued here; the
   // tool-engine consumes it from the outer restart loop, runs runCouncilV2 with
-  // convenePath:true (which suppresses ALL hardcoded post-debate decision
+  // suppressPostDebate:true (which suppresses ALL hardcoded post-debate decision
   // surface — no card, no continuation), splices the synthesis into THIS tool's
   // tool_result, and restarts the step so the model reads the conclusion as the
   // result and continues. Registered only when the council is usable so the
@@ -320,7 +336,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     const askUser = opts.askUser;
     tools.ask_user = dynamicTool({
       description:
-        "Ask the human user a question and receive their answer AS THIS TOOL'S RESULT. Use when you need a decision, confirmation (e.g. 'proceed with implementation?'), or missing detail that only the user can provide — typically in an interactive discussion, or after a convene_council conclusion when you want a go/no-go before building. Supply the exact `question` and, optionally, `options` the user picks from (omit for a free-text answer). This BLOCKS until the user responds. Nothing is auto-decided: read their answer and continue from your own judgment. Do NOT use it to narrate or for rhetorical questions — only when you genuinely need input to proceed.",
+        "Ask the human user a question and receive their answer AS THIS TOOL'S RESULT. Use when you need a decision, confirmation (e.g. 'proceed with implementation?'), or missing detail that only the user can provide — typically in an interactive discussion, or after a convene_council conclusion when you want a go/no-go before building. ALSO use it when you have been EXPLORING (multiple searches/reads) without a clear next step emerging: one focused question to the user is cheaper than several more speculative tool calls, and the per-step `[step N mirror]` note will flag this as 'Convergence: LOW'. Supply the exact `question` and, optionally, `options` the user picks from (omit for a free-text answer). This BLOCKS until the user responds. Nothing is auto-decided: read their answer and continue from your own judgment. Do NOT use it to narrate or for rhetorical questions — only when you genuinely need input to proceed.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {
@@ -432,7 +448,16 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     // Phase 8 — safety-blocked commands queue, keyed by sessionId + toolCallId.
     // When the orchestrator intercepts a blocked result, the approval handler
     // stores the approved command here so bash.execute() can retry it.
-    execute: async (input: any, extra?: { toolCallId?: string; messages?: ReadonlyArray<unknown> }) => {
+    // `abortSignal` is part of the AI SDK's ToolCallOptions and streamText is
+    // called with one (src/orchestrator/stream-runner.ts). It was missing from
+    // this type, so every `bash.execute()` below dropped it and BashTool never
+    // registered its `onAbort` — the turn watchdog's abort could not kill a
+    // running child at all. Sessions 7ec700df5589 / d22397a9e47d: a `bun test` +
+    // `bun run typecheck` child outlived the CLI by 24h burning 16.5h of CPU.
+    execute: async (
+      input: any,
+      extra?: { toolCallId?: string; messages?: ReadonlyArray<unknown>; abortSignal?: AbortSignal },
+    ) => {
       // Corrective guard for malformed calls: a cheap model sometimes emits a
       // bash call with a missing / empty `command` (live: deepseek sent `{}`
       // repeatedly until the loop-guard fired). Passing undefined to
@@ -480,7 +505,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         if (_approvalEntry.kind === "once") {
           _approvedMap.delete(_approvalKey!);
         }
-        const result = await bash.execute(input.command, input.timeout ?? 30000);
+        const result = await bash.execute(input.command, input.timeout ?? 30000, extra?.abortSignal);
         return formatResult(result);
       }
 
@@ -572,7 +597,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       const repeatedIntent = canonical !== "" && canonical === entry.lastCanonical && entry.lastRunId !== null;
       const prevRunId = entry.lastRunId;
 
-      const result = await bash.execute(input.command, input.timeout ?? 30000);
+      const result = await bash.execute(input.command, input.timeout ?? 30000, extra?.abortSignal);
       const formatted = formatResult(result);
 
       // Record verification outcome so a later `git push` can be gated on it.
@@ -633,7 +658,8 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     execute: async (input: any) => {
       const record = getBashRun(input.run_id);
       if (!record) {
-        return truncateOutput(`ERROR: No cached bash run with id '${input.run_id}'. Cache holds up to 50 runs.`);
+        // Actionable recovery, not a dead end — see bashOutputNotFoundMessage.
+        return truncateOutput(bashOutputNotFoundMessage(input.run_id));
       }
       const slice = sliceBashOutput(record, {
         mode: input.mode as BashSliceMode,
@@ -1364,6 +1390,38 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     });
   }
 
+  // Feature B2 — agent-callable entry into /ideal product-loop mode. Registered
+  // only when the orchestrator wired an `enterIdeal` callback AND the flag is on.
+  // The tool records a pending request; the top-level loop is dispatched after the
+  // current turn's tool phase completes (a tool cannot stream the loop itself).
+  const enterIdeal = opts?.enterIdeal;
+  if (enterIdeal && isIdealToolEntryEnabled()) {
+    tools.enter_ideal = dynamicTool({
+      description:
+        "Enter /ideal product-loop mode to plan+build the given idea; inherits the current conversation as context. " +
+        "Use when the user has agreed to start building what was discussed. Records the request and hands off to the " +
+        "product loop after this turn — do not call other tools expecting to continue the current turn afterward.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          idea: {
+            type: "string",
+            description: "The consolidated goal to build, phrased as a concrete product/feature request.",
+          },
+        },
+        required: ["idea"],
+      }),
+      execute: async (input: any) => {
+        const idea = typeof input?.idea === "string" ? input.idea.trim() : "";
+        if (!idea) {
+          return "ERROR: enter_ideal requires a non-empty `idea` describing what to build.";
+        }
+        enterIdeal(idea);
+        return `Entering /ideal to build: ${idea}`;
+      },
+    });
+  }
+
   // Vision proxy tools — only for text-only models (DeepSeek, etc.)
   if (opts?.modelId && needsVisionProxy(opts.modelId)) {
     const cwd = bash.getCwd();
@@ -1392,7 +1450,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         required: ["image_source"],
       }),
       execute: async (input: any) => {
-        return analyzeImageFromSource(input.image_source, input.question, cwd);
+        return analyzeImageFromSource(input.image_source, input.question, cwd, undefined, opts?.sessionId);
       },
     });
 
@@ -1418,7 +1476,31 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         required: ["question"],
       }),
       execute: async (input: any) => {
-        return askVisionProxy(input.question, input.image_id_or_path, cwd);
+        return askVisionProxy(input.question, input.image_id_or_path, cwd, undefined, opts?.sessionId);
+      },
+    });
+
+    tools.vision_done = dynamicTool({
+      description:
+        "Release a vision sub-session when you no longer need to look at its image(s). " +
+        "While a session is open the image stays loaded and ask_vision_proxy answers follow-ups " +
+        "from what it already saw — cheap and consistent. Call this ONCE you have finished " +
+        "reasoning about the image (before your final answer, or when the user moves on), " +
+        "so the image bytes are freed. Omit vision_session_id to close the most recent session.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          vision_session_id: {
+            type: "string",
+            description:
+              "Session id from the <vision-observation> block (e.g. vs_1a2b3c4d). Defaults to the most recent.",
+          },
+        },
+      }),
+      execute: async (input: any) => {
+        const id = input?.vision_session_id ?? mostRecentVisionSessionId();
+        if (!id) return "No open vision session to close.";
+        return closeVisionSessionAndCache(id);
       },
     });
 
@@ -1435,9 +1517,21 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         if (cached.length === 0) {
           return "No cached images. Use analyze_image to analyze an image file, or take a screenshot with browser_take_screenshot.";
         }
-        return cached
-          .map((c) => `${c.id}: ${c.label} (${c.source}, ${c.age})${c.hasDescription ? " [analyzed]" : ""}`)
-          .join("\n");
+        const open = listOpenVisionSessions();
+        const openBlock =
+          open.length > 0
+            ? `\n\nOpen vision sessions (follow-ups are free — no re-read):\n${open
+                .map(
+                  (s) =>
+                    `${s.id}: ${s.imageCount} image(s) [${s.labels.join(", ")}], ${s.questionsAnswered} answered — close with vision_done`,
+                )
+                .join("\n")}`
+            : "";
+        return (
+          cached
+            .map((c) => `${c.id}: ${c.label} (${c.source}, ${c.age})${c.hasDescription ? " [analyzed]" : ""}`)
+            .join("\n") + openBlock
+        );
       },
     });
   }

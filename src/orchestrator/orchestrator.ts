@@ -12,7 +12,12 @@ import { getTenantId } from "../ee/tenant.js";
 import { emitTranscriptToDisk } from "../ee/transcript-emit.js";
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
 import { ensureFlowDir } from "../flow/scaffold.js";
-import { isContextRailEnabled } from "../gsd/flags.js";
+import {
+  isContextRailEnabled,
+  isIdealConversationHandoffEnabled,
+  isIdealNlEntryEnabled,
+  isIdealToolEntryEnabled,
+} from "../gsd/flags.js";
 import { executeEventHooks } from "../hooks/index";
 import type {
   NotificationHookInput,
@@ -27,8 +32,9 @@ import type {
 import { shutdownWorkspaceLspManager } from "../lsp/runtime";
 import { ensureDefaultMcpServers } from "../mcp/auto-setup.js";
 import { getModelInfo, normalizeModelId } from "../models/registry.js";
-import { getProviderCapabilities } from "../providers/capabilities.js";
-import { apiBaseFor } from "../providers/endpoints.js";
+import { IDEAL_LOOP_DEFAULTS } from "../product-loop/loop-defaults.js";
+import { getProviderCapabilities, minimalReasoningProviderOptions } from "../providers/capabilities.js";
+import { apiBaseFor, isProviderDefaultApiBase } from "../providers/endpoints.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {
   createProviderFactory,
@@ -37,6 +43,7 @@ import {
   requireRuntimeProvider,
   resolveModelRuntime,
   resolveTemperatureParam,
+  shouldDropParam,
 } from "../providers/runtime.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
 import { statusBarStore } from "../state/status-bar-store.js";
@@ -51,10 +58,12 @@ import {
   getSessionTotalTokens,
   loadSessionChainTranscriptState,
   logInteraction,
+  markLatestPendingMessageErrored,
   markMessageCompleted,
   persistApprovedPlan,
   recordUsageEvent,
   SessionStore,
+  sessionUsedGsdWorkflow,
 } from "../storage/index.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
@@ -82,6 +91,7 @@ import { logger } from "../utils/logger.js";
 import type { PermissionMode } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
+  getAutoCompactAbsoluteFloorTokens,
   getAutoCompactMinNewTokens,
   getAutoCompactThresholdPct,
   getCouncilRounds,
@@ -171,13 +181,16 @@ import { getReactiveDelegationThresholdChars, shouldReactivelyEscalate } from ".
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
 import { withStreamRetry } from "./retry-stream.js";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
+import { salvageSubSessionOutput } from "./salvage-sub-session-output.js";
 import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
 import { type ModelTaskKind, resolveModelForTask } from "./sub-agent-model-tier.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
+import { isToolActivityLive } from "./tool-activity.js";
 import { getToolLimitAutoRecoverCap } from "./tool-limit-auto-recover.js";
 import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
 import { firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
+import { hasTurnProgressSince } from "./turn-progress.js";
 
 // ---------------------------------------------------------------------------
 // Provider implementations
@@ -194,14 +207,12 @@ function createProvider(providerId: ProviderId, apiKey: string, baseURL?: string
  * True iff `url` equals the default apiBase of ANY registered provider.
  * Used to detect stale carryover of one provider's default URL into another
  * provider's factory after a /model switch (see setModel + setApiKey).
+ *
+ * Delegates to the endpoints module so the rule has one definition — it also
+ * gates the user-override precedence in `resolveFactoryBaseURL`, and the two
+ * drifting apart would silently re-break custom gateways.
  */
-function isAnyProviderApiBase(url: string | null | undefined): boolean {
-  if (!url) return false;
-  for (const id of ALL_PROVIDER_IDS) {
-    if (url === apiBaseFor(id)) return true;
-  }
-  return false;
-}
+const isAnyProviderApiBase = isProviderDefaultApiBase;
 
 const TITLE_SYSTEM_PROMPT = `You are a session-naming assistant. Given the first message a user sent to an AI coding assistant, produce a short session title.
 
@@ -244,17 +255,29 @@ async function genTitle(
   modelId: string,
 ): Promise<{ title: string; modelId: string; usage?: { totalTokens?: number } }> {
   try {
-    const { generateText } = await import("ai");
+    const { generateTextStreamed } = await import("../providers/streamed-generate.js");
     const runtime = resolveModelRuntime(modelId);
     const snippet = userMessage.length > 1500 ? `${userMessage.slice(0, 1500)}…` : userMessage;
 
-    const { text, usage } = await generateText({
+    // A title is a ≤60-char fixed shape — reasoning on it is pure waste. On
+    // glm-4.7 (z.ai's coding endpoint force-thinks) one title burned 1357 output
+    // tokens against this call's own `maxOutputTokens: 64`.
+    const titleProviderOptions = minimalReasoningProviderOptions(runtime);
+
+    // Stream + collect (NOT generateText): codex/oauth 400s non-stream requests.
+    const { text, usage } = await generateTextStreamed({
       model: runtime.model,
       system: TITLE_SYSTEM_PROMPT,
       prompt: `User's first message:\n\n${snippet}\n\nTitle:`,
       ...resolveTemperatureParam(runtime, 0.3),
-      ...(runtime.modelInfo?.supportsMaxOutputTokens === false ? {} : { maxOutputTokens: 64 }),
-      ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+      // `shouldDropParam` — NOT the raw catalog flag. It already mirrors
+      // `supportsMaxOutputTokens`, and additionally honours the OAuth registry's
+      // `unsupportedParams`, which the flag alone cannot see. Gating on the flag
+      // meant a title call still sent `maxOutputTokens` to a codex/OAuth endpoint
+      // that rejects it — a 400 swallowed by the catch below into a fallback
+      // title. Same bypass class as the council max_output_tokens 400.
+      ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 64 }),
+      ...(titleProviderOptions ? { providerOptions: titleProviderOptions } : {}),
     });
 
     const title = sanitizeTitle(text ?? "");
@@ -378,6 +401,14 @@ export class Agent {
    * this so we can answer "did this billed call carry store=true?" etc.
    */
   private _lastProviderOptionsShape: string | null = null;
+  /**
+   * Feature B2 — pending `enter_ideal` request. The `enter_ideal` tool cannot
+   * itself stream the top-level product loop (it runs inside the tool phase), so
+   * its handler records the consolidated idea here and returns a ToolResult. After
+   * the current turn's tool phase completes, processMessage checks this field and
+   * dispatches runProductLoopV1, streaming its chunks and clearing the flag.
+   */
+  private _pendingEnterIdeal: { idea: string } | null = null;
   /** External abort context from src/index.ts SIGINT handler (TUI-04). */
   private externalAbortContext: import("./abort.js").AbortContext | null = null;
   /** Pending calls log for Pitfall 9 staged-write tracking. */
@@ -610,11 +641,14 @@ export class Agent {
       // startup, the rebuilt strategy factory was created with that stale
       // baseURL, and requests landed at the wrong host which rejected the
       // model id.
-      // A user-supplied custom baseURL is preserved only when it does NOT
-      // match any known provider's apiBase (i.e. it's a real override, not
-      // a stale default).
-      const staleBaseURL = isAnyProviderApiBase(this.baseURL) && this.baseURL !== apiBaseFor(this.providerId);
-      if (staleBaseURL) this.baseURL = null;
+      // A custom (non-default) URL is dropped too: a base URL always belongs to
+      // ONE provider, so a third-party gateway configured for anthropic is not
+      // a valid endpoint for deepseek. Keeping it sent every post-switch request
+      // to the gateway with the new provider's key. The new provider's own URL
+      // is re-resolved when the factory is rebuilt — `resolveFactoryBaseURL`
+      // reads `providers.<id>.baseURL`, and each strategy falls back to its
+      // default apiBase — so clearing here loses nothing.
+      this.baseURL = null;
       // Provider changed — DEFER factory construction. The current this.apiKey
       // belongs to the PREVIOUS provider (or is the "oauth" OAuth sentinel) and
       // is invalid for the new one. Rebuilding here with it sent provider A's
@@ -1075,12 +1109,24 @@ export class Agent {
   getLastTodoSnapshot(): TaskListSnapshot | null {
     if (!this.session) return null;
 
+    // The GSD checklist is parsed out of `.planning/PLAN.md` — a file owned by
+    // the CWD, not by this conversation. Restoring it unconditionally pinned a
+    // stale plan onto any resumed session opened in a repo that had ever run
+    // GSD, including chats that never wrote a single todo. Only this session's
+    // own GSD tool calls make that plan its checklist.
     try {
-      const { getTaskListSnapshotFromGsd } = require("../gsd/phase-sync.js");
-      const gsdSnap = getTaskListSnapshotFromGsd(this.bash?.getCwd() ?? process.cwd());
-      if (gsdSnap) return gsdSnap;
+      if (sessionUsedGsdWorkflow(this.session.id)) {
+        const { getTaskListSnapshotFromGsd } = require("../gsd/phase-sync.js");
+        const gsdSnap = getTaskListSnapshotFromGsd(this.bash?.getCwd() ?? process.cwd());
+        if (gsdSnap) return gsdSnap;
+      }
     } catch (err) {
-      // fail-open to legacy todo_write args
+      // Fail-open to the legacy todo_write args below — but say why, otherwise
+      // a missing checklist looks like "the todos were lost".
+      logger.error("orchestrator", "GSD task-list restore failed; falling back to todo_write", {
+        sessionId: this.session.id,
+        message: (err as Error)?.message,
+      });
     }
 
     const argsJson = getLastTodoWriteArgs(this.session.id);
@@ -1419,7 +1465,10 @@ export class Agent {
                 system: childSystem,
                 messages: roundMessages,
                 temperature: childRuntime.modelInfo?.fixedTemperature ?? (request.agent === "explore" ? 0.2 : 0.5),
-                maxOutputTokens: !childCaps.acceptsParam("maxOutputTokens", childRuntime.modelInfo)
+                // shouldDropParam, not acceptsParam alone — the OAuth registry
+                // veto (`unsupportedParams`) is invisible to the catalog check
+                // and 400s on ChatGPT Codex. See compaction.ts.
+                maxOutputTokens: shouldDropParam(childRuntime, "maxOutputTokens")
                   ? undefined
                   : Math.min(this.maxTokens, 8_192),
                 reasoningEffort: childRuntime.providerOptions?.xai.reasoningEffort,
@@ -1862,9 +1911,17 @@ export class Agent {
       signal,
     );
 
-    // Record compaction call in cost-log — bypasses recordUsage because
-    // compaction returns usage separately and isn't routed through the
-    // status-bar / usage event pipeline (intentional: it's overhead, not user spend).
+    // Record compaction usage in usage_events under a dedicated `compaction`
+    // source. Previously this was cost-log-ONLY ("overhead, not user spend"),
+    // which made compaction cost INVISIBLE to `usage forensics` — you could not
+    // tell how much a bloated context (e.g. redundant reads) cost to compact.
+    // Measurement-first: overhead must be attributable, not hidden. It has its
+    // own source so it never inflates the `message` bucket.
+    this.recordUsage(
+      { inputTokens: compactUsage.promptTokens, outputTokens: compactUsage.completionTokens },
+      "compaction",
+      compactModelId,
+    );
     const compactProvider = detectProviderForModel(compactModelId);
     appendCostLog({
       ts: compactStartedAt,
@@ -2010,12 +2067,21 @@ export class Agent {
     if (!isAutoCompactAfterTurnEnabled()) return log(false, "feature-disabled");
     const tokens = estimateConversationTokens(system, this.messages);
     const thresholdPct = getAutoCompactThresholdPct();
-    const minMeaningfulTokens = Math.max(POST_TURN_MIN_TOKENS, Math.floor(contextWindow * thresholdPct));
+    // Window-relative floor, then bound it by an absolute-token cap so a
+    // large-window model (256K/1M) can't carry 80K+ of uncached tool-history
+    // below 40% of its window and never trip compaction. min() leaves small
+    // windows (128K → 51.2K < 80K floor) unchanged. absFloor=0 disables the cap.
+    const windowFloor = Math.floor(contextWindow * thresholdPct);
+    const absFloor = getAutoCompactAbsoluteFloorTokens();
+    const effectiveFloor = absFloor > 0 ? Math.min(windowFloor, absFloor) : windowFloor;
+    const minMeaningfulTokens = Math.max(POST_TURN_MIN_TOKENS, effectiveFloor);
     if (tokens < minMeaningfulTokens) {
       return log(false, `under-threshold (${tokens} < ${minMeaningfulTokens})`, {
         tokens,
         thresholdPct,
         minMeaningfulTokens,
+        windowFloor,
+        absFloor,
       });
     }
     const minNew = getAutoCompactMinNewTokens();
@@ -2025,7 +2091,13 @@ export class Agent {
         lastAfter: this._lastCompactionTokensAfter,
       });
     }
-    log(true, `over-threshold (${tokens} >= ${minMeaningfulTokens})`, { tokens, thresholdPct, minMeaningfulTokens });
+    log(true, `over-threshold (${tokens} >= ${minMeaningfulTokens})`, {
+      tokens,
+      thresholdPct,
+      minMeaningfulTokens,
+      windowFloor,
+      absFloor,
+    });
     await this.compactForContext(
       provider,
       system,
@@ -2065,14 +2137,34 @@ export class Agent {
       observer?: ProcessMessageObserver;
       userModelMessage?: ModelMessage;
       /**
-       * convene_council path — forwarded into runCouncil so the post-debate
-       * decision surface is suppressed and the synthesis is returned to the
-       * calling agent (no CLI-hardcoded post-council branch).
+       * Agent-convened run — forwarded into `RunCouncilOptions
+       * .suppressPreDebateCards`: no human is at the composer, so the launch
+       * card, the preflight approval and the mid-debate escalation card are all
+       * suppressed rather than left to hang the tool call.
        */
-      convenePath?: boolean;
+      suppressPreDebateCards?: boolean;
+      /**
+       * Forwarded into `RunCouncilOptions.suppressPostDebate`: the CLI must not
+       * hardcode what happens after the debate — the calling agent decides.
+       * Set only by `convene_council` and the `runDebate` builtin. Both the
+       * `/council` slash dispatch and auto-council leave it false so the
+       * post-debate surface (and the planner/plan-review/post-plan-card path
+       * behind it) actually runs (C2, 2026-08-06).
+       */
+      suppressPostDebate?: boolean;
+      /**
+       * Gate A — caller-threaded out-of-repo ("external") scope, forwarded into
+       * runCouncil's `RunCouncilOptions.externalTopic`. Set by the auto-council
+       * caller (tool-engine) from the main turn's already-classified
+       * `pilCtx.scopeKind` so runCouncil doesn't need a second self-classify
+       * round-trip. Undefined falls through to runCouncil's own self-classify.
+       */
+      externalTopic?: boolean;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
-    const { runCouncil, buildNeutralPostCouncilContinuation } = await import("../council/index.js");
+    const { runCouncil, buildNeutralPostCouncilContinuation, extractReadableSynthesis } = await import(
+      "../council/index.js"
+    );
     const { createCouncilLLM } = await import("../council/llm.js");
     const councilStats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
     const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, councilStats);
@@ -2119,6 +2211,17 @@ export class Agent {
     // "continue_session" (user chose to keep working with the debate result).
     let chosenAction: string | undefined;
 
+    // Clear the CouncilManager relay fields BEFORE the run, not after. Only
+    // tool-engine's auto-council branch cleared them (read-then-null at
+    // :851-861), so a `/council` slash run left `lastIntentKind` (and
+    // `lastPostDebateAction`) set for the rest of the process — and the next
+    // reader could not tell "this run locked nothing" from "the previous run
+    // locked evaluation". Clearing here (not in `finally`) is deliberate: the
+    // auto-council caller reads these AFTER draining this generator, so a
+    // finally-clear would wipe the values it is waiting for.
+    this.councilManager.setLastPostDebateAction(null);
+    this.councilManager.setLastIntentKind(null);
+
     try {
       const gen = runCouncil(
         topic,
@@ -2135,9 +2238,15 @@ export class Agent {
           cwd: this.bash.getCwd(),
           councilStats, // NEW — share orchestrator's stats object with runCouncil (Phase 14 CQ-01)
           signal,
-          // convene_council path — suppress ALL hardcoded post-debate decision
+          // Agent-convened run — no human to answer the launch card, the
+          // preflight approval or the mid-debate escalation card.
+          suppressPreDebateCards: options?.suppressPreDebateCards,
+          // Agent-convened run — suppress ALL hardcoded post-debate decision
           // surface; the agent decides what happens after the synthesis.
-          convenePath: options?.convenePath,
+          suppressPostDebate: options?.suppressPostDebate,
+          // Gate A — thread the caller's already-classified scope so runCouncil
+          // doesn't pay for a second self-classify round-trip.
+          externalTopic: options?.externalTopic,
           // When the Context Rail is active it carries leader/panel/cost as
           // ambient sidebar rows, so suppress the duplicate inline summary.
           suppressInlineMeta: isContextRailEnabled(),
@@ -2147,12 +2256,30 @@ export class Agent {
           // explore child runs the debate's research phase so its multi-step tool
           // clutter never accretes into the council thread/context. Threads the
           // council abort signal so Esc cancels the research child too.
-          runIsolatedTask: (request) => this.runTaskRequest(request, undefined, signal),
+          // Relay the research child's per-tool activity to the SubagentStatus
+          // surface so the transcript shows live "→ …" lines instead of going
+          // silent while the isolated research sub-agent works.
+          runIsolatedTask: (request) =>
+            this.runTaskRequest(
+              request,
+              (detail) => {
+                if (signal?.aborted) return;
+                this.emitSubagentStatus({ agent: request.agent, description: request.description, detail });
+              },
+              signal,
+            ).finally(() => this.emitSubagentStatus(null)),
           onPostDebateAction: (action) => {
             chosenAction = action;
             // Relay to the auto-council caller (tool-engine) so nested runs honor
             // the user's choice instead of always continuing.
             this.councilManager.setLastPostDebateAction(action);
+          },
+          onIntentLocked: (kind) => {
+            // Relay the launch-card lock across the same seam as
+            // onPostDebateAction, so the auto-council caller (tool-engine) can
+            // resolve the run's authoritative kind instead of falling back to
+            // the post-hoc synthesis regex.
+            this.councilManager.setLastIntentKind(kind);
           },
         },
       );
@@ -2178,15 +2305,20 @@ export class Agent {
       } while (!result.done);
 
       const synthesis = result.value;
+      // Keep lastSynthesis FULL (the raw JSON is needed for output-kind detection
+      // in the convene follow-up), but persist only the READABLE prose as the
+      // assistant turn so the conversation history isn't a raw evaluation blob.
       this.councilManager.setLastSynthesis(synthesis);
 
       if (options?.userModelMessage && synthesis) {
-        this.appendCompletedTurn(options.userModelMessage, [{ role: "assistant", content: synthesis }]);
+        this.appendCompletedTurn(options.userModelMessage, [
+          { role: "assistant", content: extractReadableSynthesis(synthesis) },
+        ]);
       }
 
       // Keep working in THIS session when the chosen action calls for it
-      // (continue_session → carry the conclusion; generate_plan/implement →
-      // execute action items). postDebateContinuation is the single source of
+      // (continue_session → carry the conclusion; implement → execute action
+      // items). postDebateContinuation is the single source of
       // truth shared with the auto-council caller (tool-engine). Re-entering
       // processMessage also writes real message rows, which is what makes the
       // session resumable (the /council slash path otherwise leaves no messages
@@ -2194,78 +2326,36 @@ export class Agent {
       // fires ONLY on the top-level slash path, never when nested inside
       // processMessage (auto-council) or drained by the runDebate tool — those
       // callers manage their own continuation.
-      // convenePath suppresses the hardcoded card (chosenAction stays undefined),
-      // so always hand the synthesis to a normal agent turn via the neutral
-      // continuation and let the agent decide. ownsController scopes this to the
-      // top-level /council slash path (auto-council nests with ownsController
-      // false and continues in tool-engine instead).
+      // The neutral continuation is the fallback for a run whose post-debate
+      // surface was SUPPRESSED (`suppressPostDebate` — convene_council /
+      // runDebate): with no card there is no chosenAction, so the synthesis is
+      // handed to a normal agent turn and the agent decides.
+      //
+      // C1/C2 (2026-08-06): when the post-debate surface DID run, `chosenAction`
+      // is the terminal action runCouncil resolved (`execute_plan` — the gated
+      // per-phase loop already ran inside runCouncil; `save_exit`; a refine /
+      // follow-up already re-synthesized in there). Re-entering here on top of
+      // that is the same double-implementation defect as C1, one layer up: the
+      // phase loop would finish and then a full ungated turn would run on the
+      // raw synthesis — including right after a verify HALT. So a resolved
+      // action means: nothing more to start here.
+      const councilResolvedNext = chosenAction !== undefined;
       const continuationPrompt =
-        ownsController && synthesis ? buildNeutralPostCouncilContinuation(synthesis) || null : null;
-      const isBuildContinuation = chosenAction === "implement" || chosenAction === "generate_plan";
-      if (continuationPrompt && isBuildContinuation && process.env.MUONROI_COUNCIL_ISOLATE_IMPL !== "0") {
-        // #1 — build the council decision in an ISOLATED sub-agent instead of
-        // re-entering the full processMessage turn. The flat turn inherited the
-        // entire multi-round debate history and could overflow the context window
-        // (the exact wedge 97bc9d12 fixed for the /ideal sprint-runner but that
-        // /council never got). runTaskRequest starts near-empty and returns a
-        // compact ToolResult. ANTI-MÙ: the child is NOT blind — it is seeded with
-        // (a) the approved synthesis-as-spec (already in continuationPrompt) and
-        // (b) councilManager.buildContext(), the same compaction-summary + Recent
-        // Conversation + [Council Decision]/[Council Memory] "Key Decisions"
-        // checkpoint the anti-mù layer surfaces — so it has the decision + its
-        // rationale without carrying the raw transcript. Opt out with
-        // MUONROI_COUNCIL_ISOLATE_IMPL=0 (falls back to the processMessage path).
-        yield { type: "content", content: "\n[Implementing the council decision in an isolated context…]\n" };
-        this.councilManager.setContinuation(true);
-        try {
-          let councilCheckpoint = "";
-          try {
-            councilCheckpoint = this.councilManager.buildContext();
-          } catch {
-            /* anti-mù bundle is best-effort — the synthesis alone still grounds the build */
-          }
-          const seededPrompt = councilCheckpoint
-            ? `${continuationPrompt}\n\n## Council context (decision + recent session — do NOT re-debate, just build)\n${councilCheckpoint}`
-            : continuationPrompt;
-          let result: import("../types/index.js").ToolResult;
-          try {
-            result = await this.runTaskRequest(
-              { agent: "general", description: "Council implementation", prompt: seededPrompt, modelId: this.modelId },
-              undefined,
-              signal,
-            );
-          } catch (err) {
-            // A throw (vs a returned {success:false}) must not escape and take the
-            // whole /council run down — surface it in-band like the processMessage
-            // path's TurnStallError handling and end the turn cleanly.
-            yield {
-              type: "error",
-              content: `Council implementation failed: ${err instanceof Error ? err.message : String(err)}`,
-            };
-            yield { type: "done" };
-            return;
-          }
-          if (result.success && result.output?.trim()) {
-            yield { type: "content", content: `\n${result.output.trim()}\n` };
-          } else if (result.error) {
-            yield { type: "error", content: `Council implementation failed: ${result.error}` };
-          }
-          // Persist a COMPACT record so the /council slash session stays resumable
-          // (the processMessage path wrote rows for this) WITHOUT re-inheriting the
-          // debate bloat the isolated child deliberately avoided.
-          try {
-            this.appendCompletedTurn(
-              { role: "user", content: "[Council implementation of the debate decision]" } as ModelMessage,
-              [{ role: "assistant", content: (result.output ?? result.error ?? "(no output)").trim() } as ModelMessage],
-            );
-          } catch {
-            /* non-critical persistence */
-          }
-          yield { type: "done" };
-        } finally {
-          this.councilManager.setContinuation(false);
-        }
-      } else if (continuationPrompt) {
+        ownsController && synthesis && !councilResolvedNext
+          ? buildNeutralPostCouncilContinuation(synthesis) || null
+          : null;
+      // REMOVED 2026-08-06 (C1/C2): the `chosenAction === "implement"` branch
+      // that re-built the council decision in an isolated `runTaskRequest`
+      // sub-agent (env `MUONROI_COUNCIL_ISOLATE_IMPL`). `implement` is no longer
+      // relayed at all — runCouncil resolves it to `execute_plan` / `save_exit`
+      // before firing `onPostDebateAction` — and any resolved action nulls
+      // `continuationPrompt` above, so the branch was provably unreachable.
+      // Implementation of a council conclusion now runs as the gated per-phase
+      // loop INSIDE runCouncil (src/council/plan-execution.ts), one turn per
+      // phase, each gated on that phase's own verify command. Keeping a second
+      // implementation entry point alive "just in case" is exactly how C1
+      // shipped, so it is deleted rather than left armed.
+      if (continuationPrompt) {
         yield { type: "content", content: "\n[Continuing with the debate conclusion…]\n" };
         this.councilManager.setContinuation(true);
         try {
@@ -2307,6 +2397,11 @@ export class Agent {
         yield { type: "done" };
       }
     } finally {
+      // A card abandoned mid-debate (turn aborted, or this generator unwound by
+      // the turn watchdog's it.return()) never resolves, so its
+      // beginInteractivePause() would leak and suppress the turn watchdog for the
+      // rest of the process. Runs on every exit path — normal, throw, unwind.
+      this.councilManager.releasePendingWaits();
       if (ownsController && this.abortController?.signal === signal) {
         this.abortController = null;
       }
@@ -2381,8 +2476,21 @@ export class Agent {
       const prev = self.permissionMode;
       if (self.permissionMode === "safe") self.permissionMode = "auto-edit";
       try {
-        return await this.runTaskRequest(request, undefined, this.abortController?.signal);
+        // Live activity bridge: the isolated implement stage absorbs its own
+        // stream (compact ToolResult only at the END), which left the main
+        // panel silent for the whole stage. Relay per-tool activity through
+        // the SubagentStatus channel the UI already renders (SubagentActivity
+        // line + /ideal sprint status strip).
+        return await this.runTaskRequest(
+          request,
+          (detail) => {
+            if (this.abortController?.signal.aborted) return;
+            self.emitSubagentStatus({ agent: request.agent, description: request.description, detail });
+          },
+          this.abortController?.signal,
+        );
       } finally {
+        self.emitSubagentStatus(null);
         self.permissionMode = prev;
       }
     };
@@ -2493,6 +2601,16 @@ export class Agent {
       }
     }
 
+    // Feature A — conversation handoff. When the user discussed a topic in chat
+    // and then ran `/ideal <vague reference>` (or entered ideal via NL/tool),
+    // capture a recent-turns summary and ride it on a separate channel into the
+    // loop so the clarifier + council debate inherit the discussion. The idea
+    // stays the user's literal text (payload.idea). Only meaningful for "start".
+    const conversationContext =
+      payload.subcommand === "start" && isIdealConversationHandoffEnabled()
+        ? (this._buildRecentTurnsSummary() ?? undefined)
+        : undefined;
+
     const gen = runProductLoop({
       subcommand: payload.subcommand,
       idea: payload.idea ?? "",
@@ -2516,6 +2634,7 @@ export class Agent {
       // Mode C — wire verify-recipe detector so runProductLoop auto-detect can probe cwd.
       detectVerifyRecipe: () => this.detectVerifyRecipe(),
       skipPriorContext: payload.flags.noPriorContext === true,
+      conversationContext,
       complexity,
       needsClarification,
       sufficiencyMissing,
@@ -3204,6 +3323,42 @@ export class Agent {
       routeAction = "SPAWN_SUB_SESSION";
     }
 
+    // Feature B1 — enter /ideal via natural language. When the router judged the
+    // user EXPLICITLY asked to enter ideal/product-loop/build mode to build what
+    // was discussed, dispatch the product loop for this turn and stream its chunks
+    // into the current output. The conversation context flows automatically via
+    // Feature A (runProductLoopV1 captures a recent-turns summary). Fail-open: on
+    // any dispatch error, fall through to the ordinary turn so the user is never
+    // stranded. Skipped when the flag is off (routes as a normal task instead).
+    if (routeAction === "ENTER_IDEAL") {
+      if (isIdealNlEntryEnabled()) {
+        logger.info("orchestrator", "ENTER_IDEAL route — dispatching product loop for this turn", {});
+        try {
+          yield {
+            type: "toast",
+            toastLevel: "info",
+            content: "Đang vào chế độ /ideal để xây dựng những gì đã thảo luận...",
+          };
+          yield* this.runProductLoopV1(
+            {
+              subcommand: "start",
+              idea: userMessage,
+              flags: { ...IDEAL_LOOP_DEFAULTS },
+            },
+            { observer },
+          );
+          return;
+        } catch (err) {
+          logger.error("orchestrator", "ENTER_IDEAL dispatch failed — falling back to normal turn", { error: err });
+          // Fall through to the ordinary turn below (routeAction stays ENTER_IDEAL
+          // but no branch consumes it beyond here, so it behaves like DIRECT_ANSWER).
+        }
+      } else {
+        // Flag off — treat as an ordinary multi-step task so the intent isn't lost.
+        routeAction = "SPAWN_SUB_SESSION";
+      }
+    }
+
     const shouldRotate = currentChars > threshold || routeAction === "ROTATE_SESSION";
 
     if (shouldRotate && this.session && this.sessionStore) {
@@ -3363,6 +3518,13 @@ export class Agent {
     }
 
     let processor = new MessageProcessor(this._buildMessageProcessorDeps());
+    // Boundary between "already in the sub-session transcript" and "produced by
+    // THIS turn". Captured after the fork/resume above swapped `this.messages`
+    // to the sub-session, and read by salvageSubSessionOutput in the finally
+    // block below so a turn that produces nothing cannot hand the parent the
+    // PREVIOUS turn's answer (session 708f0fc4ac8b). Declared out here because
+    // `finally` cannot see bindings scoped to the `try` block.
+    const preTurnMessageCount = this.messages.length;
     const autoCommitOn = isAutoCommitEnabled();
     const cwd = this.bash.getCwd();
     const dirtyBefore = autoCommitOn ? await snapshotDirtyPaths(cwd) : new Set<string>();
@@ -3398,7 +3560,17 @@ export class Agent {
               idleMs: turnIdleMs,
               totalMs: turnTotalMs,
               label: "assistant turn",
-              shouldSuppressFire: isInteractivePaused,
+              // Hold the turn open while a human is answering a blocking card
+              // OR while a tool call is still inside its own deadline. The idle
+              // timer only resets on yielded chunks, so a single long tool call
+              // is indistinguishable from a wedge without this — see
+              // tool-activity.ts (session 708f0fc4ac8b).
+              shouldSuppressFire: () => isInteractivePaused() || isToolActivityLive(),
+              // Re-arm (once per fresh signal) when a request was issued to the
+              // provider inside the window that just elapsed, so pre-stream setup,
+              // retry backoff and the model's time-to-first-byte stop sharing a
+              // single 120s budget. See turn-progress.ts.
+              hasProgressSince: (sinceMs) => hasTurnProgressSince(sinceMs),
             });
           } catch (stallErr) {
             // A hung turn is NOT a transient error — retrying it (below) would
@@ -3409,7 +3581,36 @@ export class Agent {
                 message: stallErr.message,
               });
               this.abortController?.abort(new DOMException(stallErr.message, "TimeoutError"));
-              yield { type: "toast", toastLevel: "warn", content: `Turn ended by watchdog: ${stallErr.message}` };
+              // A watchdog kill must leave the SAME three artifacts a thrown
+              // provider error leaves (tool-engine.ts error path) — otherwise it
+              // ends the turn more quietly than a crash and the whole failure is
+              // invisible: session 1096fc59144c lost two glm-4.7 turns with zero
+              // `error` rows, zero transcript entries and both user rows stuck at
+              // `status='pending'`, so the screen was simply blank and the DB
+              // could not distinguish it from a turn that never ran.
+              //   1. a durable `error` interaction_log row (forensics),
+              //   2. the write-ahead user row flipped off `pending`,
+              //   3. an `error` chunk, not a toast — the UI folds `error` content
+              //      into the transcript, while a toast auto-dismisses.
+              const stallMessage = `Turn ended by watchdog: ${stallErr.message}`;
+              if (this.session) {
+                try {
+                  logInteraction(this.session.id, "error", {
+                    eventSubtype: "watchdog",
+                    data: { message: stallMessage.slice(0, 200), kind: stallErr.kind },
+                  });
+                } catch (logErr) {
+                  logger.error("orchestrator", "watchdog error-log failed", { error: logErr });
+                }
+                try {
+                  // No-op when the inner path already salvaged + finalized the
+                  // row (the UPDATE is scoped to status='pending').
+                  markLatestPendingMessageErrored(this.session.id);
+                } catch (markErr) {
+                  logger.error("orchestrator", "watchdog pending-message mark failed", { error: markErr });
+                }
+              }
+              yield { type: "error", content: stallMessage, isAuthError: false };
               yield { type: "done" };
             } else {
               throw stallErr;
@@ -3450,7 +3651,7 @@ export class Agent {
     } finally {
       if (isSubSessionForked && parentSessionId && this.sessionStore) {
         try {
-          const finalMessages = salvageSubSessionOutput(this.messages);
+          const finalMessages = salvageSubSessionOutput(this.messages, preTurnMessageCount);
 
           // Restore parent session
           this.session = this.sessionStore.getRequiredSession(parentSessionId);
@@ -3481,6 +3682,36 @@ export class Agent {
         } catch (err) {
           logger.error("orchestrator", "Failed to absorb sub-session final summary", { error: err });
         }
+      }
+    }
+
+    // Feature B2 — post-turn dispatch of a pending `enter_ideal` request. The
+    // enter_ideal tool ran during this turn's tool phase and recorded the idea;
+    // now that the tool phase (and any sub-session absorb) is done, dispatch the
+    // product loop and stream its chunks into the same turn output. Cleared first
+    // so a dispatch failure or re-entrancy cannot loop. The conversation context
+    // flows automatically via Feature A inside runProductLoopV1.
+    const pendingEnterIdeal = this._pendingEnterIdeal;
+    this._pendingEnterIdeal = null;
+    if (pendingEnterIdeal && isIdealToolEntryEnabled()) {
+      logger.info("orchestrator", "enter_ideal tool — dispatching product loop after turn", {});
+      try {
+        yield {
+          type: "toast",
+          toastLevel: "info",
+          content: "Đang vào chế độ /ideal để xây dựng những gì đã thảo luận...",
+        };
+        yield* this.runProductLoopV1(
+          {
+            subcommand: "start",
+            idea: pendingEnterIdeal.idea,
+            flags: { ...IDEAL_LOOP_DEFAULTS },
+          },
+          { observer },
+        );
+      } catch (err) {
+        logger.error("orchestrator", "enter_ideal dispatch failed", { error: err });
+        yield { type: "toast", toastLevel: "warn", content: "Không thể vào /ideal — vui lòng chạy /ideal thủ công." };
       }
     }
   }
@@ -3681,11 +3912,12 @@ export class Agent {
           `${serializedParent}\n\n` +
           `Provide clear, actionable guidance to resolve the child's query.`;
 
-        const { generateText } = await import("ai");
+        const { generateTextStreamed } = await import("../providers/streamed-generate.js");
         const modelId = self.modelId;
         const runtime = resolveModelRuntime(modelId);
 
-        const result = await generateText({
+        // Stream + collect (NOT generateText): codex/oauth 400s non-stream requests.
+        const result = await generateTextStreamed({
           model: runtime.model,
           system: systemPrompt,
           prompt: `Child Sub-session is stuck. Question:\n${question}`,
@@ -3762,6 +3994,11 @@ export class Agent {
         } finally {
           endInteractivePause();
         }
+      },
+      enterIdeal: (idea: string) => {
+        // Feature B2 — record a pending product-loop request. processMessage
+        // dispatches runProductLoopV1 after the current turn's tool phase ends.
+        self._pendingEnterIdeal = { idea };
       },
       runCouncilV2: (msg, opts) => self.runCouncilV2(msg, opts),
       processMessage: (msg, obs, imgs) => self.processMessage(msg, obs, imgs),
@@ -4047,25 +4284,4 @@ function isTransientError(err: unknown): boolean {
     msg.includes("econnreset") ||
     msg.includes("econnrefused")
   );
-}
-
-function salvageSubSessionOutput(messages: ModelMessage[]): ModelMessage[] {
-  let lastAsstIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "assistant") {
-      lastAsstIdx = i;
-      break;
-    }
-  }
-
-  const finalMessages: ModelMessage[] = [];
-  if (lastAsstIdx >= 0) {
-    finalMessages.push(messages[lastAsstIdx]);
-    for (let i = lastAsstIdx + 1; i < messages.length; i++) {
-      if (messages[i].role === "tool") {
-        finalMessages.push(messages[i]);
-      }
-    }
-  }
-  return finalMessages;
 }

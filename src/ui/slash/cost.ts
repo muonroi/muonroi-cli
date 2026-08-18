@@ -11,10 +11,18 @@
 import { healthDetailed } from "../../ee/health.js";
 import { getDefaultEEClient } from "../../ee/intercept.js";
 import { statusBarStore } from "../../state/status-bar-store.js";
+import { handleCouncilCost } from "./council-cost.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 
-export const handleCostSlash: SlashHandler = async (_args, _ctx) => {
+export const handleCostSlash: SlashHandler = async (args, ctx) => {
+  // S10 — `/cost --council [sessionId]` swaps the status-bar dump for the
+  // per-phase / per-speaker council breakdown. Kept as a flag on /cost rather
+  // than a new command: it answers the same question, just scoped to a debate.
+  const councilIdx = args.indexOf("--council");
+  if (councilIdx >= 0) {
+    return handleCouncilCost(args[councilIdx + 1]?.trim() || ctx?.sessionId);
+  }
   const s = statusBarStore.getState();
   const lines = [
     `Provider: ${s.provider || "(none)"}`,

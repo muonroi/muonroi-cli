@@ -24,11 +24,21 @@ function makeBashStub(): BashTool {
 }
 
 function makeCouncilStub(extra: Partial<CouncilManager> = {}): CouncilManager {
+  // Mutable so setLastIntentKind (below) can be observed back via
+  // councilManager.lastIntentKind, mirroring the real CouncilManager's
+  // getter/setter pair without pulling in the real class.
+  let lastIntentKind: CouncilManager["lastIntentKind"] = null;
   return {
     isContinuation: false,
     lastSynthesis: null,
     setContinuation: () => {},
     setLastSynthesis: () => {},
+    get lastIntentKind() {
+      return lastIntentKind;
+    },
+    setLastIntentKind: (v: CouncilManager["lastIntentKind"]) => {
+      lastIntentKind = v;
+    },
     resolveNonDisabledFallback: async () => ({ modelId: "deepseek-v4-flash" }),
     createQuestionResponder: () => async () => "",
     ...extra,
@@ -193,7 +203,15 @@ describe("MessageProcessor — DI surface invariants", () => {
     expect(councilCalled).toBe(true);
   });
 
-  it("auto-council runs runCouncilV2 with convenePath:true (no hardcoded post-debate card)", async () => {
+  it("auto-council does NOT suppress the post-debate card (the user decides what happens next)", async () => {
+    // The auto-council path is convened by the CLI: the user never asked for a
+    // debate and no model called one, so there is no agent to hand the
+    // post-debate decision to. a72731e6 passed the (now-split) convenePath flag
+    // here, which did
+    // not delegate the choice — it replaced "ask the user" with "always
+    // implement", and work began the moment the council converged (user report
+    // 2026-07-27, session 3f998bfef7db seq 21-22). Only the model-callable
+    // paths (convene_council / the runDebate tool) may set the suppressions.
     let capturedOpts: Record<string, unknown> | undefined;
     const deps = makeDeps({
       councilManager: makeCouncilStub({
@@ -205,25 +223,67 @@ describe("MessageProcessor — DI surface invariants", () => {
         yield { type: "done" };
       },
     });
-    // Same style as the neighbouring "delegates to deps.runCouncilV2 when
-    // auto-council gate is taken" test: we cannot exercise the gate
-    // end-to-end without PIL machinery, so directly invoke deps.runCouncilV2
-    // with the same options tool-engine.ts's auto-council branch passes,
-    // and assert convenePath is threaded through.
     const processor = new MessageProcessor(deps);
     expect(processor).toBeInstanceOf(MessageProcessor);
-    // convenePath is declared on MessageProcessorDeps.runCouncilV2's opts type,
-    // so the same options tool-engine.ts's auto-council branch passes type-check
-    // directly here (no cast needed).
+    // Mirror the options tool-engine.ts's auto-council branch now passes.
     const iter = deps.runCouncilV2("topic", {
       skipClarification: true,
       userModelMessage: { role: "user", content: "topic" },
-      convenePath: true,
     });
     for await (const _ of iter) {
       /* drain */
     }
-    expect(capturedOpts?.convenePath).toBe(true);
+    expect(capturedOpts?.suppressPostDebate).toBeUndefined();
+    expect(capturedOpts?.suppressPreDebateCards).toBeUndefined();
+  });
+
+  it("nothing auto-runs after an auto-council unless the user picked an action", async () => {
+    const { postDebateContinuation } = await import("../../council/index.js");
+    const synthesis = ["```json", '{"type":"implementation_plan","conclusion":"build it"}', "```"].join("\n");
+
+    // Card dismissed / no pick → the turn ends at the composer.
+    expect(postDebateContinuation(undefined, synthesis)).toBeNull();
+    // C1 (2026-08-06): this line used to assert
+    // `postDebateContinuation("implement", synthesis)).toContain(synthesis)` —
+    // i.e. it PINNED the defect. runCouncil relayed "implement" before its own
+    // plan block ran, so this branch built the ~14K-char prose and tool-engine
+    // ran it through processMessage as a SECOND, ungated implementation turn on
+    // top of the gated per-phase loop (and after a halt, and after save_exit).
+    // The arm is deleted; runCouncil now resolves the implement pick to
+    // execute_plan / save_exit before relaying, and both stop here.
+    expect(postDebateContinuation("implement", synthesis)).toBeNull();
+    expect(postDebateContinuation("execute_plan", synthesis)).toBeNull();
+    expect(postDebateContinuation("save_exit", synthesis)).toBeNull();
+    // continue_session is untouched — the /ideal build flow depends on it.
+    expect(postDebateContinuation("continue_session", synthesis)).toContain(synthesis);
+  });
+
+  // tool-engine.ts's auto-council dispatch deliberately sets NEITHER suppression
+  // (see its comment near the shouldAutoCouncil branch), so the launch card
+  // DOES fire and lock spec.intentKind. tool-engine.ts:851-870 reads that lock
+  // off `councilManager.lastIntentKind` (relayed by orchestrator.ts's
+  // `onIntentLocked` the same way `chosenAction` is relayed via
+  // `onPostDebateAction`) and passes it as postDebateContinuation's third
+  // argument. This proves the exact call shape tool-engine.ts uses honors the
+  // lock over the synthesis-JSON regex (task-3; session 3a8378db4adf had no
+  // lock available and the regex alone mis-shaped the whole post-debate flow).
+  it("the auto-council path's locked intent kind (CouncilManager relay) overrides the synthesis regex", async () => {
+    const { postDebateContinuation } = await import("../../council/index.js");
+    const synthesis = ["```json", '{"type":"implementation_plan","conclusion":"build it"}', "```"].join("\n");
+
+    // Baseline — no lock available (e.g. a resumed pre-2026-08 spec): the
+    // regex alone decides, and an implementation-shaped synthesis carries the
+    // original task forward.
+    expect(postDebateContinuation("continue_session", synthesis)).toContain("Continue the original task");
+
+    // The user locked "decision" on the launch card before the debate ever
+    // started. Simulate CouncilManager relaying it exactly as tool-engine.ts
+    // reads it (`councilManager.lastIntentKind`) — the lock must win even
+    // though the synthesis JSON itself says "implementation_plan".
+    const councilManager = makeCouncilStub();
+    councilManager.setLastIntentKind("decision");
+    const lockedIntentKind = councilManager.lastIntentKind;
+    expect(postDebateContinuation("continue_session", synthesis, lockedIntentKind ?? undefined)).toBeNull();
   });
 
   it("respects observer callbacks via notifyObserver (smoke)", () => {

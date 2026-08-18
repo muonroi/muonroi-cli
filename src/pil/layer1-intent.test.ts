@@ -90,6 +90,7 @@ describe("intentKind guard — a tool/command request must never route as chitch
     depthTier: null,
     needsClarification: null,
     ecosystemScope: null,
+    scopeKind: null,
     replyLanguage: null,
   });
 
@@ -255,6 +256,7 @@ describe("social pleasantries vs task — model-first intentKind", () => {
         depthTier: "standard" as const,
         needsClarification: null,
         ecosystemScope: null,
+        scopeKind: null,
         replyLanguage: null,
       }),
     });
@@ -284,6 +286,7 @@ describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () =>
         depthTier: null,
         needsClarification: null,
         ecosystemScope: null,
+        scopeKind: null,
         replyLanguage: null,
       }),
     });
@@ -317,6 +320,7 @@ describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () =>
         depthTier: null,
         needsClarification: null,
         ecosystemScope: null,
+        scopeKind: null,
         replyLanguage: null,
       }),
     });
@@ -341,6 +345,7 @@ describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () =>
         depthTier: null,
         needsClarification: null,
         ecosystemScope: null,
+        scopeKind: null,
         replyLanguage: null,
       }),
     });
@@ -361,6 +366,7 @@ describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () =>
         depthTier: null,
         needsClarification: null,
         ecosystemScope: null,
+        scopeKind: null,
         replyLanguage: null,
       }),
     });
@@ -380,6 +386,7 @@ describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () =>
         depthTier: null,
         needsClarification: null,
         ecosystemScope: null,
+        scopeKind: null,
         replyLanguage: null,
       }),
     });
@@ -397,6 +404,7 @@ describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () =>
         depthTier: null,
         needsClarification: null,
         ecosystemScope: null,
+        scopeKind: null,
         replyLanguage: null,
       }),
     });

@@ -107,6 +107,8 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
     }));
     vi.doMock("../../utils/settings.js", () => ({
       loadMcpServers: vi.fn().mockReturnValue([]),
+      // Watchdog off: these tests assert call shape, not stall behaviour.
+      getProviderStallTimeoutMs: vi.fn().mockReturnValue(0),
     }));
     vi.doMock("../prompts.js", () => ({
       buildResearchSystemPrompt: vi.fn().mockReturnValue("research system prompt"),
@@ -157,6 +159,8 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
     }));
     vi.doMock("../../utils/settings.js", () => ({
       loadMcpServers: vi.fn().mockReturnValue([]),
+      // Watchdog off: these tests assert call shape, not stall behaviour.
+      getProviderStallTimeoutMs: vi.fn().mockReturnValue(0),
     }));
     vi.doMock("../prompts.js", () => ({
       buildResearchSystemPrompt: vi.fn().mockReturnValue("research system prompt"),
@@ -219,6 +223,8 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
     }));
     vi.doMock("../../utils/settings.js", () => ({
       loadMcpServers: vi.fn().mockReturnValue([]),
+      // Watchdog off: these tests assert call shape, not stall behaviour.
+      getProviderStallTimeoutMs: vi.fn().mockReturnValue(0),
     }));
     vi.doMock("../prompts.js", () => ({
       buildResearchSystemPrompt: vi.fn().mockReturnValue("research system prompt"),
@@ -265,6 +271,8 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
     }));
     vi.doMock("../../utils/settings.js", () => ({
       loadMcpServers: vi.fn().mockReturnValue([]),
+      // Watchdog off: these tests assert call shape, not stall behaviour.
+      getProviderStallTimeoutMs: vi.fn().mockReturnValue(0),
     }));
     vi.doMock("../prompts.js", () => ({
       buildResearchSystemPrompt: vi.fn().mockReturnValue("research system prompt"),
@@ -304,6 +312,8 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
     }));
     vi.doMock("../../utils/settings.js", () => ({
       loadMcpServers: vi.fn().mockReturnValue([]),
+      // Watchdog off: these tests assert call shape, not stall behaviour.
+      getProviderStallTimeoutMs: vi.fn().mockReturnValue(0),
     }));
     vi.doMock("../prompts.js", () => ({
       buildResearchSystemPrompt: vi.fn().mockReturnValue("research system prompt"),

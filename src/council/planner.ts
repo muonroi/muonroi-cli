@@ -12,9 +12,11 @@ import type {
   DebatePlan,
   DebateState,
   EnhancedCouncilOutcome,
+  IntentKind,
   PostDebateActionId,
   PreflightResponder,
 } from "./types.js";
+import { coerceIntentKind } from "./types.js";
 
 export async function* runPlanning(
   debateState: DebateState,
@@ -94,11 +96,22 @@ export async function* runPlanning(
     // and confidence locked at 0 — which is exactly the bug we're fixing.
     const trimmed = synthesisText.trim();
     const emptySynthesis = trimmed.length === 0;
-    const unparseable = !emptySynthesis && outcome === null;
-    if (emptySynthesis || unparseable) {
+    // A JSON object that opened and never closed means the completion was CUT
+    // OFF at the provider's output ceiling — a different failure from "the model
+    // ignored the format", and it needs the opposite retry: ask for LESS, not
+    // for the same thing again. Measured on the leak this fixes: Z.ai caps
+    // glm-5.2 completions at 4096 tokens regardless of the max_tokens we send
+    // (probe: requested 8192 → finishReason "length", 4096 out, 2501 of them
+    // reasoning), so a maximal structured answer cannot physically fit and both
+    // attempts truncated identically.
+    const truncated = !emptySynthesis && extractJsonObject(synthesisText).truncated;
+    const unparseable = !emptySynthesis && !truncated && outcome === null;
+    if (emptySynthesis || truncated || unparseable) {
       const initialReason = emptySynthesis
-        ? "synthesizer returned empty completion (likely provider timeout or token budget exhausted on the 8192-token slot)"
-        : "synthesizer output had no parseable JSON object (model produced markdown without the required JSON block)";
+        ? "synthesizer returned an empty completion — on a reasoning leader this usually means the whole output budget went to thinking tokens"
+        : truncated
+          ? "synthesizer output was cut off mid-JSON at the provider's output ceiling"
+          : "synthesizer output had no parseable JSON object (model produced markdown without the required JSON block)";
       yield {
         type: "content",
         content: `\n> Synthesis attempt 1 failed: ${initialReason}. Retrying once with a compact prompt…\n`,
@@ -113,8 +126,13 @@ export async function* runPlanning(
       const retrySystem =
         retry.system +
         `\n\n## Retry directive\n` +
-        `Your previous attempt produced no parseable JSON. Emit the JSON object FIRST, ` +
-        `then the literal line \`---READABLE---\`, then the markdown. Do not add any preamble before the JSON.`;
+        (truncated || emptySynthesis
+          ? `Your previous attempt did not FIT in the output budget. Emit the JSON object FIRST and keep it SMALL: ` +
+            `\`summary\` at most 400 characters, every list at most 3 entries of at most 200 characters each, ` +
+            `no nested prose. Completing the JSON object matters more than covering every point. ` +
+            `Skip the \`---READABLE---\` section entirely if you are running short.`
+          : `Your previous attempt produced no parseable JSON. Emit the JSON object FIRST, ` +
+            `then the literal line \`---READABLE---\`, then the markdown. Do not add any preamble before the JSON.`);
       const retryText = yield* tracedGenerate(llm, {
         phase: "synthesis",
         label: "Synthesizing action plan (retry, compact)",
@@ -130,8 +148,10 @@ export async function* runPlanning(
       if (!synthesisText.trim() || outcome === null) {
         synthesisFailReason =
           synthesisText.trim().length === 0
-            ? "Synthesizer returned empty completion on both attempts. Provider may be rate-limited or the model timed out twice — the debate exchanges above are still usable as raw notes."
-            : "Synthesizer produced text but no parseable JSON outcome on either attempt. Raw output is shown above; the structured sections could not be extracted.";
+            ? "Synthesizer returned empty completion on both attempts. Provider may be rate-limited, or the leader is a reasoning model spending its whole output budget on thinking tokens — the debate exchanges above are still usable as raw notes."
+            : extractJsonObject(synthesisText).truncated
+              ? "Synthesizer hit the provider's output ceiling on both attempts and the JSON was cut off mid-object. Raw output is shown above; try a leader model with a larger completion budget."
+              : "Synthesizer produced text but no parseable JSON outcome on either attempt. Raw output is shown above; the structured sections could not be extracted.";
       }
     }
 
@@ -277,14 +297,72 @@ function shapeFallback(synthesisText: string, debatePlan: DebatePlan): EnhancedC
   };
 }
 
+/**
+ * Pull the synthesis JSON object out of a leader completion.
+ *
+ * The old `/\{[\s\S]*\}/` greedy match had two failure modes that both fired in
+ * session e74e820c6417:
+ *
+ *   1. No `---READABLE---` separator (the model emitted a ```json fence and then
+ *      markdown) → the match ran from the first `{` to the LAST `}` anywhere in
+ *      the prose, producing invalid JSON.
+ *   2. The completion was CUT OFF at the provider's output ceiling mid-object →
+ *      no trailing `}` at all → no match, and the caller could not tell
+ *      "truncated" from "model ignored the format".
+ *
+ * This scanner strips code fences, then walks from the first `{` with a
+ * string/escape-aware depth counter and stops at the matching close. `truncated`
+ * is true when the object never closed — the signal the retry path needs to ask
+ * for a SHORTER answer rather than repeating the same oversized request.
+ */
+export function extractJsonObject(raw: string): { json: string | null; truncated: boolean } {
+  // Only consider the pre-separator half when the contract was honoured.
+  const beforeSeparator = raw.includes("---READABLE---") ? raw.split("---READABLE---")[0]! : raw;
+  // ```json … ``` (or a bare ``` fence) around the object.
+  const fenced = beforeSeparator.match(/```(?:json)?\s*([\s\S]*?)(?:```|$)/i);
+  const body = fenced ? fenced[1]! : beforeSeparator;
+  const start = body.indexOf("{");
+  if (start === -1) return { json: null, truncated: false };
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < body.length; i++) {
+    const ch = body[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      if (inString) escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return { json: body.slice(start, i + 1), truncated: false };
+    }
+  }
+  // Ran off the end with the object still open.
+  return { json: null, truncated: true };
+}
+
 function parseOutcome(synthesisText: string, debatePlan?: DebatePlan): EnhancedCouncilOutcome | null {
-  // Target only JSON before the ---READABLE--- separator to avoid matching curly braces in markdown
-  const jsonPart = synthesisText.includes("---READABLE---") ? synthesisText.split("---READABLE---")[0] : synthesisText;
-  const jsonMatch = jsonPart.match(/\{[\s\S]*\}/);
+  const { json: extracted } = extractJsonObject(synthesisText);
+  const jsonMatch = extracted ? [extracted] : null;
   if (jsonMatch) {
     try {
       const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
-      const type = typeof parsed.type === "string" ? parsed.type : (debatePlan?.outputShape.kind ?? "decision");
+      // Authoritative kind: trust the planner's already-coerced kind over the
+      // synthesizer's free-form "type" string (it can drift — bug 12d3022b was a
+      // leader LLM emitting implementation_plan for an analysis request). Fall
+      // back to coercing the synthesizer's type only when no plan kind exists.
+      const type: IntentKind = debatePlan?.outputShape.kind ?? coerceIntentKind(parsed.type);
       const summary = typeof parsed.summary === "string" ? parsed.summary : "";
       if (!summary) {
         throw new Error("No summary in parsed JSON");
@@ -301,7 +379,7 @@ function parseOutcome(synthesisText: string, debatePlan?: DebatePlan): EnhancedC
       // Model-first post-debate options. Keep only entries whose action is in
       // the wired vocabulary; drop malformed items so a hallucinated action id
       // can't reach the handler switch. Empty → index.ts uses its fallback set.
-      const VALID_ACTIONS = new Set(["ask_followup", "generate_plan", "implement", "save_exit", "continue_session"]);
+      const VALID_ACTIONS = new Set(["ask_followup", "implement", "save_exit", "continue_session"]);
       const nextActions = Array.isArray(parsed.nextActions)
         ? (parsed.nextActions as unknown[])
             .filter(
@@ -340,9 +418,31 @@ function parseOutcome(synthesisText: string, debatePlan?: DebatePlan): EnhancedC
   }
   // Log raw text for diagnostics
   console.error("[Council] parseOutcome failed — raw synthesis text:", synthesisText.slice(0, 500));
-  // Shape-based fallback
+  // Shape-based fallback — feed it the READABLE prose only. Handing it the raw
+  // completion let a truncated JSON blob through line-first summary extraction
+  // and persisted `summary: "\"type\": \"evaluation\","` with every section empty
+  // into session memory as the council's decision (session e74e820c6417).
   if (debatePlan?.outputShape) {
-    return shapeFallback(synthesisText, debatePlan);
+    const prose = synthesisText.includes("---READABLE---")
+      ? (synthesisText.split("---READABLE---")[1] ?? "")
+      : stripJsonPreamble(synthesisText);
+    return shapeFallback(prose.trim().length > 0 ? prose : synthesisText, debatePlan);
   }
   return null;
+}
+
+/**
+ * Drop a leading (possibly truncated / fenced) JSON object so the prose fallback
+ * summarises prose, not JSON syntax. Returns "" when the text is JSON all the
+ * way down — better an empty fallback the caller can reject than a summary that
+ * reads `"type": "evaluation",`.
+ */
+function stripJsonPreamble(text: string): string {
+  const withoutFence = text.replace(/```(?:json)?[\s\S]*?(?:```|$)/i, "");
+  const start = withoutFence.indexOf("{");
+  if (start === -1) return withoutFence;
+  const { json } = extractJsonObject(withoutFence);
+  if (!json) return withoutFence.slice(0, start);
+  const end = withoutFence.indexOf(json) + json.length;
+  return `${withoutFence.slice(0, start)}\n${withoutFence.slice(end)}`;
 }

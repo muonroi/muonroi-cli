@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SPRINT_EXECUTION_MARKER } from "../../pil/layer6-output.js";
+import { COUNCIL_PLAN_EXECUTION_MARKER, SPRINT_EXECUTION_MARKER } from "../../pil/layer6-output.js";
 import { taskTypeToMaxTokens } from "../../pil/task-tier-map.js";
 import { resolveTurnMaxOutputTokens } from "../tool-engine.js";
 
@@ -20,6 +20,17 @@ describe("resolveTurnMaxOutputTokens", () => {
 
   it("floors a sprint-execution turn recognised by the plan header marker", () => {
     const raw = "--- SPRINT PLAN TO IMPLEMENT ---\n\nphase 1 ...";
+    expect(resolveTurnMaxOutputTokens({ taskType: null, raw })).toBe(BUILD);
+  });
+
+  // I3 — the COUNCIL per-phase execution turn is the same kind of turn and was
+  // getting the starved cap: pipeline.ts recognised COUNCIL_PLAN_EXECUTION_MARKER
+  // and forced deliverableKind:"code", but left `taskType` alone, and this
+  // function only checked the SPRINT marker. A phase turn classified `analyze`
+  // therefore hit the exact 4_096 cap that wedged the /ideal impl turn.
+  it("floors a COUNCIL plan-execution phase turn to the build tier", () => {
+    const raw = `${COUNCIL_PLAN_EXECUTION_MARKER}\n\nExecute phase P0 — Sentinel — from the approved plan.`;
+    expect(resolveTurnMaxOutputTokens({ taskType: "analyze", raw })).toBe(BUILD);
     expect(resolveTurnMaxOutputTokens({ taskType: null, raw })).toBe(BUILD);
   });
 

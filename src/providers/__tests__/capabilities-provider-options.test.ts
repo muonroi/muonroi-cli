@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ModelInfo } from "../../types/index.js";
-import { getProviderCapabilities } from "../capabilities.js";
+import { getProviderCapabilities, mergeProviderOptions, minimalReasoningProviderOptions } from "../capabilities.js";
 
 /**
  * G3 — provider-specific `buildProviderOptions` coverage.
@@ -219,5 +219,115 @@ describe("ProviderCapabilities — G3 buildProviderOptions", () => {
       expect(caps.buildProviderOptions({ model })).toBeUndefined();
       expect(caps.buildProviderOptions({ model, sessionId: "x" })).toBeUndefined();
     });
+  });
+});
+
+/**
+ * `minimizeReasoning` — "spend NOTHING on reasoning for this call", set by the
+ * PIL classifier (a format-only, one-line-output call).
+ *
+ * Motivating measurement (2026-07-27, Z.ai coding endpoint): thinking is forced
+ * on server-side with no reasoning_effort knob, giving TTFT 10–11 s against the
+ * classifier's 8 s per-attempt ceiling → every z.ai classify aborted before the
+ * first byte and the whole PIL stack was skipped. `thinking: {type:"disabled"}`
+ * cuts TTFT to 1.2–2.1 s.
+ */
+describe("buildProviderOptions — minimizeReasoning", () => {
+  it("zai disables thinking entirely (it exposes no effort knob)", () => {
+    const opts = getProviderCapabilities("zai").buildProviderOptions({
+      model: baseModel({ id: "glm-4.7", provider: "zai", reasoning: true }),
+      minimizeReasoning: true,
+    });
+    expect(opts).toEqual({ zai: { thinking: { type: "disabled" } } });
+  });
+
+  it("zai leaves thinking untouched on a normal turn (no flag)", () => {
+    const opts = getProviderCapabilities("zai").buildProviderOptions({
+      model: baseModel({ id: "glm-4.7", provider: "zai", reasoning: true }),
+    });
+    expect(opts).toBeUndefined();
+  });
+
+  it("anthropic withholds its thinking budget rather than funding a throwaway call", () => {
+    const model = baseModel({ id: "claude-x", provider: "anthropic", thinkingType: "adaptive" });
+    const caps = getProviderCapabilities("anthropic");
+    // Normal turn: thinking enabled as before.
+    expect(caps.buildProviderOptions({ model })).toEqual({
+      anthropic: { thinking: { type: "enabled", budgetTokens: 10_000 } },
+    });
+    // Format-only call: no budget granted.
+    expect(caps.buildProviderOptions({ model, minimizeReasoning: true })).toBeUndefined();
+  });
+
+  it("still honors reasoningEffort for providers that expose it", () => {
+    const opts = getProviderCapabilities("xai").buildProviderOptions({
+      model: baseModel({ id: "grok-x", provider: "xai", supportsReasoningEffort: true }),
+      minimizeReasoning: true,
+      reasoningEffort: "low",
+    });
+    expect(opts).toEqual({ xai: { reasoningEffort: "low" } });
+  });
+});
+
+/**
+ * `minimalReasoningProviderOptions` — the shared wrapper every throwaway
+ * format-only call uses (PIL classify, session title). Session 1096fc59144c
+ * measured a glm-4.7 session TITLE costing 1357 output tokens against its own
+ * `maxOutputTokens: 64`, because the title call passed `runtime.providerOptions`
+ * straight through and z.ai's coding endpoint force-thinks.
+ */
+describe("minimalReasoningProviderOptions", () => {
+  it("turns off z.ai's forced thinking for a throwaway call", () => {
+    const opts = minimalReasoningProviderOptions({
+      modelInfo: baseModel({ id: "glm-4.7", provider: "zai", reasoning: true }),
+    });
+    expect(opts).toEqual({ zai: { thinking: { type: "disabled" } } });
+  });
+
+  it("asks for the cheapest exposed effort when the provider has a knob", () => {
+    const opts = minimalReasoningProviderOptions({
+      modelInfo: baseModel({ id: "grok-x", provider: "xai", supportsReasoningEffort: true }),
+    });
+    expect(opts).toEqual({ xai: { reasoningEffort: "low" } });
+  });
+
+  it("preserves factory-level defaults in the same namespace instead of replacing it", () => {
+    // The regression a top-level spread would cause: OAuth's `store:false` must
+    // survive the reasoning overlay.
+    const opts = minimalReasoningProviderOptions({
+      modelInfo: baseModel({ id: "glm-4.7", provider: "zai", reasoning: true }),
+      providerOptions: { zai: { store: false } },
+    });
+    expect(opts).toEqual({ zai: { store: false, thinking: { type: "disabled" } } });
+  });
+
+  it("is a pass-through when the provider has nothing to minimize", () => {
+    const providerOptions = { openai: { promptCacheKey: "abc" } };
+    expect(minimalReasoningProviderOptions({ modelInfo: baseModel({ provider: "openai" }), providerOptions })).toEqual(
+      providerOptions,
+    );
+  });
+
+  it("returns the untouched options when the model (or its provider) is unknown", () => {
+    const providerOptions = { openai: { promptCacheKey: "abc" } };
+    expect(minimalReasoningProviderOptions({ modelInfo: undefined, providerOptions })).toBe(providerOptions);
+  });
+});
+
+describe("mergeProviderOptions", () => {
+  it("merges per namespace rather than replacing it", () => {
+    expect(mergeProviderOptions({ zai: { store: false } }, { zai: { thinking: { type: "disabled" } } })).toEqual({
+      zai: { store: false, thinking: { type: "disabled" } },
+    });
+  });
+
+  it("returns the other side when either is undefined", () => {
+    expect(mergeProviderOptions(undefined, { a: { b: 1 } })).toEqual({ a: { b: 1 } });
+    expect(mergeProviderOptions({ a: { b: 1 } }, undefined)).toEqual({ a: { b: 1 } });
+    expect(mergeProviderOptions(undefined, undefined)).toBeUndefined();
+  });
+
+  it("lets the overlay win on a key both sides set", () => {
+    expect(mergeProviderOptions({ x: { effort: "high" } }, { x: { effort: "low" } })).toEqual({ x: { effort: "low" } });
   });
 });

@@ -90,7 +90,36 @@ export function getOrCreateManager(cwd: string): WorkspaceLspManager {
 
   const manager = createWorkspaceLspManager(key, getCurrentLspSettings());
   managers.set(key, manager);
+
+  // Background LSP warm-up: send a known project file to tsserver so it
+  // starts indexing BEFORE the agent's first real query. This reduces the
+  // visible first-query latency from ~2-4s to near-zero (the server is
+  // already running and has loaded the project). Non-blocking — failures
+  // are silently ignored since the first real query will spawn normally.
+  warmUpLsp(manager, key).catch(() => {});
+
   return manager;
+}
+
+/**
+ * Non-blocking warm-up: tell tsserver about common project files so it
+ * starts indexing immediately. The server typically loads tsconfig.json
+ * on its own after initialization, but a didOpen on a tracked source file
+ * triggers earlier project-loading for large workspaces.
+ */
+async function warmUpLsp(manager: WorkspaceLspManager, root: string): Promise<void> {
+  const candidates = [
+    path.join(root, "src", "index.ts"),
+    path.join(root, "src", "main.ts"),
+    path.join(root, "src", "cli.ts"),
+    path.join(root, "tsconfig.json"),
+  ];
+  for (const file of candidates) {
+    if (existsSync(file)) {
+      await manager.touchFile(file, false);
+      return; // one is enough to kick off tsserver; more just adds I/O
+    }
+  }
 }
 
 function resolveManagerKey(cwd: string): string {

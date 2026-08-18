@@ -190,6 +190,17 @@ export interface DriverContext {
    * for each missing category.
    */
   sufficiencyMissing?: readonly import("../pil/layer1-intent.js").SufficiencyMissing[];
+  /**
+   * Feature A — conversation handoff into /ideal. When the user discussed a
+   * topic in chat and then ran `/ideal <vague reference>` (or entered ideal via
+   * NL/tool), the orchestrator captures a recent-turns summary and threads it
+   * here. loop-driver PREPENDS it to its local conversationContext (under a
+   * "Prior conversation" heading) so the clarifier + council debate inherit the
+   * discussion instead of re-interviewing from scratch. Augments — never
+   * overwrites — the repo audit + discovery context. The `idea` stays the
+   * user's literal text; this rides a separate channel.
+   */
+  conversationContext?: string;
 }
 
 export interface DriverResult {

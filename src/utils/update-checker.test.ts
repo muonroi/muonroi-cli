@@ -2,7 +2,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const RELEASE_URL = "https://api.github.com/repos/muonroi/muonroi-cli/releases/latest";
 
+// These specs exercise the RELEASE path, so the install method has to be
+// pinned: the suite itself runs out of a git checkout, so the real detector
+// returns "dev-link" here and would route every case through the source-branch
+// check instead.
+const state = vi.hoisted(() => ({
+  method: "compiled" as import("./install-manager").InstallMethod,
+  upstream: null as { branch: string; behind: boolean } | null,
+}));
+
+vi.mock("./install-manager", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./install-manager")>();
+  return {
+    ...actual,
+    detectInstallMethod: () => state.method,
+    getRunningCheckoutRoot: () => "/repo",
+    checkUpstreamCommits: async () => state.upstream,
+  };
+});
+
 beforeEach(() => {
+  state.method = "compiled";
+  state.upstream = null;
   vi.stubGlobal("fetch", vi.fn());
 });
 
@@ -148,6 +169,45 @@ describe("checkForUpdate", () => {
     const result = await checkForUpdate("1.0.0");
 
     expect(result).toBeNull();
+  });
+});
+
+describe("checkForUpdate — linked source checkout", () => {
+  // A checkout updates by pulling its branch. Comparing against the newest
+  // RELEASE TAG answered a different question: it stayed silent while the
+  // checkout fell behind, and cried "update" whenever the checkout was ahead
+  // of the tag.
+  it("reports an update when the branch has upstream commits, without asking the release API", async () => {
+    state.method = "dev-link";
+    state.upstream = { branch: "develop", behind: true };
+    const mockFetch = vi.fn();
+    vi.stubGlobal("fetch", mockFetch);
+
+    const { checkForUpdate } = await importModule();
+    const result = await checkForUpdate("1.9.0");
+
+    expect(result?.hasUpdate).toBe(true);
+    expect(result?.latestLabel).toBe("new commits on develop");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("reports no update when the branch head is already checked out", async () => {
+    state.method = "dev-link";
+    state.upstream = { branch: "develop", behind: false };
+
+    const { checkForUpdate } = await importModule();
+    const result = await checkForUpdate("1.9.0");
+
+    expect(result?.hasUpdate).toBe(false);
+  });
+
+  it("stays silent when the upstream cannot be read", async () => {
+    state.method = "dev-link";
+    state.upstream = null;
+
+    const { checkForUpdate } = await importModule();
+
+    await expect(checkForUpdate("1.9.0")).resolves.toBeNull();
   });
 });
 

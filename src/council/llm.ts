@@ -1,12 +1,15 @@
 import * as fs from "node:fs";
 import type { LanguageModel, ToolSet } from "ai";
-import { generateText, stepCountIs, streamText } from "ai";
+import { stepCountIs, streamText } from "ai";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { emitMatches } from "../ee/render.js";
 import { getMcpKey } from "../mcp/mcp-keychain.js";
 import type { McpToolBundle } from "../mcp/runtime.js";
 import { buildMcpToolSet } from "../mcp/runtime.js";
 import { getModelInfo } from "../models/registry.js";
+import { isAuthenticationError, summarizeApiErrorForLog } from "../orchestrator/error-utils.js";
+import { createStallWatchdog, STALL_ERROR_MESSAGE } from "../orchestrator/stall-watchdog.js";
+import { combineAbortSignals } from "../orchestrator/tool-utils.js";
 import { getProviderCapabilities, resolveTemperature } from "../providers/capabilities.js";
 import { loadKeyForProvider, ProviderKeyMissingError } from "../providers/keychain.js";
 import {
@@ -19,7 +22,7 @@ import {
 import type { ProviderId } from "../providers/types.js";
 import { wireDebug } from "../providers/wire-debug.js";
 import { statusBarStore } from "../state/status-bar-store.js";
-import { recordUsageEvent } from "../storage/index.js";
+import { logInteraction, recordUsageEvent } from "../storage/index.js";
 import type { BashTool } from "../tools/bash.js";
 import { createBuiltinTools as createTools } from "../tools/registry.js";
 import type { AgentMode, CouncilStatusPhase, StreamChunk } from "../types/index.js";
@@ -27,8 +30,16 @@ import { appendCostLog } from "../usage/cost-log.js";
 import { projectCostUSD } from "../usage/estimator.js";
 import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
-import { loadMcpServers } from "../utils/settings.js";
+import { getProviderStallTimeoutMs, loadMcpServers } from "../utils/settings.js";
 import { withVisibleRetry } from "../utils/visible-retry.js";
+import {
+  blockModel,
+  consumeBlockNotification,
+  formatBlockedModelWarning,
+  getBlockedModel,
+  isModelBlocked as isModelBlockedInScope,
+  isNonRetryableAuthFailure,
+} from "./model-blocklist.js";
 import { buildResearchSystemPrompt } from "./prompts.js";
 import { stripThinkBlocks } from "./strip-think.js";
 import type { CouncilLLM, CouncilStats, ToolTraceEmitter, UsageCallback } from "./types.js";
@@ -451,6 +462,17 @@ async function collectStreamText(args: {
   toolCalls: Array<{ toolName: string; input?: unknown; result?: unknown }>;
 }> {
   const hasTools = !!args.tools && Object.keys(args.tools).length > 0;
+  // Time-to-next-chunk guard. The council had NO stall watchdog — every phase
+  // relied solely on its flat wall-clock deadline (COUNCIL_LLM_TIMEOUT_MS, and
+  // double that for research), so an upstream that accepts the connection and
+  // never sends a chunk burned the ENTIRE deadline before degrading. Measured
+  // live: a research call sat on a stalled gateway for 600.005s — ten minutes
+  // of a debate's wall clock spent on a dead socket. The orchestrator's
+  // streaming paths have had this guard since 2026-05-31 (stream-runner,
+  // tool-engine, message-processor); council was the one streaming surface
+  // that never got it. Re-armed on ANY chunk, so a slow-but-alive reasoning
+  // model is never cut short; disabled with MUONROI_PROVIDER_STALL_TIMEOUT_MS=0.
+  const stall = createStallWatchdog(getProviderStallTimeoutMs());
   const result = streamText({
     model: args.model,
     system: args.system,
@@ -460,7 +482,7 @@ async function collectStreamText(args: {
     ...(args.temperature === undefined ? {} : { temperature: args.temperature }),
     ...(args.providerOptions ? { providerOptions: args.providerOptions as never } : {}),
     ...(hasTools ? { tools: args.tools, stopWhen: args.stopWhen, prepareStep: args.prepareStep as never } : {}),
-    abortSignal: args.abortSignal,
+    abortSignal: combineAbortSignals(args.abortSignal, stall.signal),
   });
   let text = "";
   let reasoningText = "";
@@ -468,48 +490,66 @@ async function collectStreamText(args: {
   let finishReason: string | undefined;
   const toolCalls: Array<{ toolName: string; input?: unknown; result?: unknown }> = [];
   const byId = new Map<string, { toolName: string; input?: unknown; result?: unknown }>();
-  for await (const part of result.fullStream) {
-    switch (part.type) {
-      case "text-delta": {
-        const d = (part as { text?: string }).text ?? "";
-        text += d;
-        args.onDelta?.(d.length);
-        break;
+  try {
+    for await (const part of result.fullStream) {
+      // Re-arm on EVERY chunk (including reasoning-delta and step boundaries):
+      // the guard must catch a dead socket, not punish a slow-but-alive model.
+      stall.pet();
+      switch (part.type) {
+        case "text-delta": {
+          const d = (part as { text?: string }).text ?? "";
+          text += d;
+          args.onDelta?.(d.length);
+          break;
+        }
+        case "reasoning-delta": {
+          // Reasoning deltas count as liveness: a reasoning model streams these
+          // for minutes before its first text-delta, and that silent-on-text
+          // window is precisely what gets misread as a hang.
+          const d = (part as { text?: string }).text ?? "";
+          reasoningText += d;
+          args.onDelta?.(d.length);
+          break;
+        }
+        case "tool-call": {
+          const p = part as { toolCallId: string; toolName: string; input?: unknown };
+          const tc = { toolName: p.toolName, input: p.input };
+          byId.set(p.toolCallId, tc);
+          toolCalls.push(tc);
+          break;
+        }
+        case "tool-result": {
+          const p = part as { toolCallId: string; output?: unknown };
+          const tc = byId.get(p.toolCallId);
+          if (tc) tc.result = p.output;
+          break;
+        }
+        case "finish":
+          usage = (part as { totalUsage?: unknown; usage?: unknown }).totalUsage ?? (part as { usage?: unknown }).usage;
+          finishReason = (part as { finishReason?: string }).finishReason;
+          break;
+        case "error": {
+          const raw = (part as { error?: unknown }).error;
+          throw raw instanceof Error ? raw : new Error(String(raw));
+        }
+        default:
+          break;
       }
-      case "reasoning-delta": {
-        // Reasoning deltas count as liveness: a reasoning model streams these
-        // for minutes before its first text-delta, and that silent-on-text
-        // window is precisely what gets misread as a hang.
-        const d = (part as { text?: string }).text ?? "";
-        reasoningText += d;
-        args.onDelta?.(d.length);
-        break;
-      }
-      case "tool-call": {
-        const p = part as { toolCallId: string; toolName: string; input?: unknown };
-        const tc = { toolName: p.toolName, input: p.input };
-        byId.set(p.toolCallId, tc);
-        toolCalls.push(tc);
-        break;
-      }
-      case "tool-result": {
-        const p = part as { toolCallId: string; output?: unknown };
-        const tc = byId.get(p.toolCallId);
-        if (tc) tc.result = p.output;
-        break;
-      }
-      case "finish":
-        usage = (part as { totalUsage?: unknown; usage?: unknown }).totalUsage ?? (part as { usage?: unknown }).usage;
-        finishReason = (part as { finishReason?: string }).finishReason;
-        break;
-      case "error": {
-        const raw = (part as { error?: unknown }).error;
-        throw raw instanceof Error ? raw : new Error(String(raw));
-      }
-      default:
-        break;
     }
+  } catch (err) {
+    // A watchdog abort surfaces as an AbortError from the iterator (or, on some
+    // providers, as an `abort` part that ends the stream). Re-label it: without
+    // this the caller sees a bare "aborted" and cannot tell a provider stall
+    // from the user pressing Esc — the two want opposite handling.
+    if (stall.fired()) throw new Error(STALL_ERROR_MESSAGE);
+    throw err;
+  } finally {
+    stall.dispose();
   }
+  // Stream ended cleanly but the watchdog had already fired (abort delivered as
+  // a stream part rather than a throw) — surface it rather than returning a
+  // truncated answer as if it were complete.
+  if (stall.fired()) throw new Error(STALL_ERROR_MESSAGE);
   return { text, usage, finishReason, reasoningText: reasoningText || undefined, toolCalls };
 }
 
@@ -521,6 +561,76 @@ async function collectStreamText(args: {
  */
 export const __testCollectStreamText = collectStreamText;
 
+/**
+ * Persist a council provider-call failure into `interaction_logs`, ALONGSIDE
+ * the existing `logger.error` — before this, the council path's only writer
+ * for a provider failure was debug.log, so `usage forensics` and every
+ * DB-based analysis were structurally blind to this entire failure class
+ * (confirmed: `SELECT … WHERE event_type='error' AND metadata_json LIKE
+ * '%China%'` over the whole DB returns exactly one row, and only because that
+ * one happened to hit the MAIN orchestrator path instead). Reuses the exact
+ * `summarizeApiErrorForLog` envelope the main path already writes
+ * (tool-engine.ts) so status code / url host / response body / isRetryable
+ * land in the SAME shape next to main-path rows — `event_type='error'` is
+ * shared, `event_subtype` is prefixed `council_<kind>_` so the three call
+ * sites (generate/debate/research) stay distinguishable within that shared
+ * type.
+ *
+ * Best-effort: a DB failure here must never break a council run (No-Silent-
+ * Catch — the write failure is still logged, once, with context).
+ *
+ * Also drives Fix 2: when the failure classifies as non-retryable
+ * entitlement/auth (401/403 + SDK isRetryable:false), the model is recorded
+ * in the session-scoped blocklist (model-blocklist.ts) so later calls in the
+ * same session skip it instead of repeating the same rejected call.
+ */
+function recordCouncilProviderFailure(args: {
+  sessionId: string | undefined;
+  kind: "generate" | "debate" | "research";
+  modelId: string;
+  resolvedModelId: string | undefined;
+  providerId: string;
+  durationMs: number;
+  aborted: boolean;
+  err: unknown;
+}): void {
+  const { sessionId, kind, modelId, resolvedModelId, providerId, durationMs, aborted, err } = args;
+  const forensics = summarizeApiErrorForLog(err);
+  const message = err instanceof Error ? err.message : String(err);
+  try {
+    const authError = isAuthenticationError(err) || forensics?.statusCode === 401 || forensics?.statusCode === 403;
+    logInteraction(sessionId ?? "unknown", "error", {
+      eventSubtype: `council_${kind}_${authError ? "auth" : "api"}`,
+      model: modelId,
+      durationMs,
+      data: {
+        message: message.slice(0, 200),
+        resolvedModelId,
+        provider: providerId,
+        aborted,
+        ...(forensics ? { forensics } : {}),
+      },
+    });
+  } catch (logErr) {
+    console.error(
+      `[council/llm] interaction-log write for provider failure failed: ${logErr instanceof Error ? logErr.message : String(logErr)}`,
+      { modelId, kind },
+    );
+  }
+
+  if (isNonRetryableAuthFailure(forensics) && forensics) {
+    blockModel(sessionId, modelId, { statusCode: forensics.statusCode as number, reason: message.slice(0, 300) });
+  }
+}
+
+/**
+ * Test-only handle on the private failure recorder, so Fix 1 (DB write) and
+ * Fix 2 (blocklist) are directly assertable without driving a full streamText
+ * call through `generate`/`debate`/`research`. Not for production use.
+ * @internal
+ */
+export const __testRecordCouncilProviderFailure = recordCouncilProviderFailure;
+
 export function createCouncilLLM(
   bash: BashTool,
   mode: AgentMode,
@@ -528,6 +638,15 @@ export function createCouncilLLM(
   stats: CouncilStats,
 ): CouncilLLM {
   return {
+    isModelBlocked(modelId: string): boolean {
+      return isModelBlockedInScope(sessionId, modelId);
+    },
+    takeModelBlockWarning(modelId: string): string | undefined {
+      const info = getBlockedModel(sessionId, modelId);
+      if (!info) return undefined;
+      if (!consumeBlockNotification(sessionId, modelId)) return undefined;
+      return formatBlockedModelWarning(info);
+    },
     async generate(
       modelId: string,
       system: string,
@@ -544,7 +663,7 @@ export function createCouncilLLM(
       }
       const providerId = detectProviderForModel(modelId);
       await ensureCouncilFactory(providerId);
-      const runtime = resolveModelRuntime(modelId);
+      const runtime = resolveModelRuntime(modelId, { stage: "council", sessionId });
       const t0 = Date.now();
       // Combine the user-abort signal (when threaded from runCouncil) with the
       // per-call wall-clock deadline. Without the parent signal, an Esc/Ctrl-C
@@ -637,6 +756,30 @@ export function createCouncilLLM(
           textHead: "",
           error: err instanceof Error ? err.message : String(err),
         });
+        // Always-on (writeDebugRecord above is opt-in): a council call that dies
+        // must name its model + provider + elapsed in debug.log. The bare
+        // "The operation timed out." in crash.log for session 811336618ee0 could
+        // not be tied to a model, a phase, or even to the council at all.
+        logger.error("orchestrator", "[council.generate] call failed", {
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          provider: providerId,
+          durationMs: Date.now() - t0,
+          aborted: signal?.aborted === true,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // Fix 1 (DB-blind council failures) + Fix 2 (non-retryable entitlement
+        // blocklist) — see recordCouncilProviderFailure doc comment.
+        recordCouncilProviderFailure({
+          sessionId,
+          kind: "generate",
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          providerId,
+          durationMs: Date.now() - t0,
+          aborted: signal?.aborted === true,
+          err,
+        });
         throw err;
       }
     },
@@ -658,7 +801,7 @@ export function createCouncilLLM(
       }
       const providerId = detectProviderForModel(modelId);
       await ensureCouncilFactory(providerId);
-      const runtime = resolveModelRuntime(modelId);
+      const runtime = resolveModelRuntime(modelId, { stage: "council", sessionId });
 
       // Verification tools — re-introduced after the no-tools fix (session
       // a7a5690d2049). The original failure was stepCountIs(4) + full toolset
@@ -827,6 +970,24 @@ export function createCouncilLLM(
           textHead: "",
           error: errMsg,
         });
+        logger.error("orchestrator", "[council.debate] call failed — panelist turn degraded", {
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          provider: providerId,
+          durationMs: Date.now() - t0,
+          aborted: signal?.aborted === true,
+          error: errMsg,
+        });
+        recordCouncilProviderFailure({
+          sessionId,
+          kind: "debate",
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          providerId,
+          durationMs: Date.now() - t0,
+          aborted: signal?.aborted === true,
+          err,
+        });
         return { text: `[debate failed: ${errMsg}]`, toolCalls: [] };
       } finally {
         await mcpBundleForDebate?.close().catch(() => {});
@@ -850,7 +1011,7 @@ export function createCouncilLLM(
       }
       const providerId = detectProviderForModel(modelId);
       await ensureCouncilFactory(providerId);
-      const runtime = resolveModelRuntime(modelId);
+      const runtime = resolveModelRuntime(modelId, { stage: "council", sessionId });
 
       const builtinTools = createTools(bash, mode);
 
@@ -908,7 +1069,16 @@ export function createCouncilLLM(
           () =>
             withVisibleRetry(
               () =>
-                generateText({
+                // Stream + collect (NOT generateText) — the same migration
+                // generate() and debate() already made. research() was the last
+                // non-streaming council phase, and that had three consequences:
+                // it 400s outright on the codex/oauth endpoint ("Stream must be
+                // set to true"); it emits no delta, so the rail's liveness read
+                // is blind for the whole phase and a hang looks like thinking;
+                // and with no chunks there is nothing for a stall watchdog to
+                // observe, so only the flat 600s deadline could end a dead
+                // socket (measured: 600.005s burned on one call).
+                collectStreamText({
                   model: runtime.model,
                   system: systemPrompt,
                   prompt: userPrompt,
@@ -916,7 +1086,7 @@ export function createCouncilLLM(
                   stopWhen: stepCountIs(15),
                   prepareStep: ({ stepNumber, messages }) => {
                     if (stepNumber < 1) return {};
-                    const stripped = researchCaps.sanitizeHistory(messages) as typeof messages;
+                    const stripped = researchCaps.sanitizeHistory(messages as never) as typeof messages;
                     return stripped === messages ? {} : { messages: stripped };
                   },
                   ...maxOutSpread(runtime, 4096),
@@ -925,12 +1095,13 @@ export function createCouncilLLM(
                     const t = resolveTemperature(providerId, runtime.modelInfo, 0.3);
                     return t === undefined ? {} : { temperature: t };
                   })(),
-                  // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent
-                  // exponential backoff (2,4,8,16,32s). When SiliconFlow rate-limits
-                  // with 429, user now sees "[retry] rate-limited (429) — waiting Xs
-                  // before attempt N/6" instead of a 62s blank window that looks hung.
-                  maxRetries: 0,
-                  ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+                  onDelta: noteCouncilStreamDelta,
+                  // maxRetries:0 is baked into collectStreamText. Visible retry
+                  // (src/utils/visible-retry.ts) replaces the SDK's silent
+                  // exponential backoff (2,4,8,16,32s) so a SiliconFlow 429 reads
+                  // as "[retry] rate-limited (429) — waiting Xs before attempt
+                  // N/6" instead of a 62s blank window that looks hung.
+                  providerOptions: runtime.providerOptions as Record<string, unknown> | undefined,
                   abortSignal: timedSignal,
                 }),
               { label: "council.research" },
@@ -1022,6 +1193,28 @@ export function createCouncilLLM(
           textHead: "",
           error: errMsg,
         });
+        // Unlike generate/debate above, this catch previously had NO
+        // unconditional logger call (writeDebugRecord above is opt-in,
+        // MUONROI_COUNCIL_DEBUG_LOG-gated) — a research-phase provider failure
+        // was invisible outside that opt-in file. Add both per No-Silent-Catch.
+        logger.error("orchestrator", "[council.research] call failed — research phase degraded", {
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          provider: providerId,
+          durationMs: Date.now() - t0,
+          aborted: signal?.aborted === true,
+          error: errMsg,
+        });
+        recordCouncilProviderFailure({
+          sessionId,
+          kind: "research",
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          providerId,
+          durationMs: Date.now() - t0,
+          aborted: signal?.aborted === true,
+          err,
+        });
         return (
           `## Source Code Findings\n[Research failed: ${errMsg}]\n\n` +
           `## Internet Findings\n_Not performed._\n\n` +
@@ -1045,6 +1238,13 @@ interface TracedGenerateArgs {
   maxTokens?: number;
   /** Tick interval in ms. Default 1000. Set 0 to disable ticks. */
   tickIntervalMs?: number;
+  /**
+   * Per-call usage sink. `llm.generate` has always accepted one; nothing passed
+   * it here, so leader/synthesis spend never reached anything but the aggregate
+   * `usage_events` row. Threading it is what lets the rail's panel ledger show a
+   * real "leader" line instead of a fabricated zero.
+   */
+  onUsage?: UsageCallback;
 }
 
 /**
@@ -1084,7 +1284,7 @@ export async function* tracedGenerate(
 
   const generatePromise = (async () => {
     try {
-      resultText = await llm.generate(args.modelId, args.system, args.prompt, args.maxTokens);
+      resultText = await llm.generate(args.modelId, args.system, args.prompt, args.maxTokens, args.onUsage);
     } catch (err) {
       resultErr = err;
     } finally {
@@ -1165,11 +1365,24 @@ export async function* tracedGenerateWithFallback(
   const seen = new Set<string>();
   const models = args.models.filter((m) => m && !seen.has(m) && (seen.add(m), true));
   for (let i = 0; i < models.length; i++) {
+    const modelId = models[i];
+    // Fix 2 — skip a candidate that already failed non-retryably (401/403 +
+    // SDK isRetryable:false) earlier in this session instead of burning the
+    // same rejected call again. Surface the reason once per model (not once
+    // per call): `takeModelBlockWarning` returns text only the FIRST time
+    // it's asked about a given blocked model in this scope.
+    if (llm.isModelBlocked?.(modelId)) {
+      const warning = llm.takeModelBlockWarning?.(modelId);
+      if (warning) {
+        yield { type: "toast", toastLevel: "warn", content: warning };
+      }
+      continue;
+    }
     try {
       const raw = yield* tracedGenerate(llm, {
         ...args,
-        modelId: models[i],
-        label: i > 0 ? `${args.label} (fallback: ${models[i]})` : args.label,
+        modelId,
+        label: i > 0 ? `${args.label} (fallback: ${modelId})` : args.label,
       });
       if (raw?.trim()) return raw;
     } catch {

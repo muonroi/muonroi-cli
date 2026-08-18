@@ -1,11 +1,18 @@
 import type { CouncilMessage } from "../../types/index.js";
 import type { Theme } from "../theme.js";
 import { truncateCodeBlocks } from "./code-block-truncate.js";
-import { CouncilConclusionCard, parseConclusion } from "./council-conclusion-card.js";
+import { type ConclusionDissent, CouncilConclusionCard, parseConclusion } from "./council-conclusion-card.js";
 
 export interface CouncilSynthesisBannerProps {
   msg: CouncilMessage;
   theme: Theme;
+  /**
+   * Panelists still opposing at the end of the run — surfaced by the conclusion
+   * card's Dissent section. Threaded through rather than derived here so the
+   * banner stays a pure renderer.
+   */
+  dissent?: ConclusionDissent[];
+  resolveStyle?: (role: string) => { color: string; sigil: string };
 }
 
 export function buildSynthesisTitle(round: number | undefined): string {
@@ -18,13 +25,24 @@ export function buildSynthesisTitle(round: number | undefined): string {
  * verdict from the debate turns while staying in the same downward stream (no
  * centered/full-width banner that broke the chat flow).
  */
-export function CouncilSynthesisBanner({ msg, theme: t }: CouncilSynthesisBannerProps) {
+export function CouncilSynthesisBanner({ msg, theme: t, dissent, resolveStyle }: CouncilSynthesisBannerProps) {
   // When the synthesis is a structured evaluation/decision JSON, render it as a
   // scannable conclusion card instead of dumping raw JSON as freetext. Prose
   // syntheses (no parseable JSON object) fall through to the plain-text path.
   const conclusion = parseConclusion(msg.text);
   if (conclusion) {
-    return <CouncilConclusionCard conclusion={conclusion} round={msg.round} theme={t} />;
+    return (
+      <CouncilConclusionCard
+        conclusion={conclusion}
+        round={msg.round}
+        theme={t}
+        // Dissent belongs to the FINAL verdict. A per-round synthesis has not
+        // finished hearing the objection yet, so attaching it there would
+        // present a position as abandoned while it is still being argued.
+        dissent={msg.round === undefined ? dissent : []}
+        resolveStyle={resolveStyle}
+      />
+    );
   }
 
   // A `---READABLE---` marker means the synthesizer already produced a human

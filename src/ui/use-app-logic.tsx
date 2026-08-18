@@ -7,12 +7,15 @@ import { decodePasteBytes, type PasteEvent, parseKeypress } from "@opentui/core"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { COUNCIL_ANSWER_DISMISSED } from "../council/types.js";
 import { clearLastSurfacedMatches, getDefaultEEClient, getLastSurfacedMatches } from "../ee/intercept.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import { type CompactProgress, stageProgress } from "../flow/compaction/progress.js";
 import { writeScaffoldCheckpoint } from "../flow/scaffold-checkpoint.js";
 import { appendCrashLog, setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
+import type { MissingKeyServer } from "../mcp/key-requirements";
+import { subscribeNeedsKey } from "../mcp/needs-key-bus";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import type { AskUserAskInfo } from "../orchestrator/ask-user.js";
@@ -217,8 +220,10 @@ import type {
 
 export type { AppStartupConfig } from "./types.js";
 
-import { isScrollLockEnabled } from "../gsd/flags.js";
+import { isCouncilSurfaceEnabled, isScrollLockEnabled } from "../gsd/flags.js";
+import { stripCouncilNoise } from "./council-preamble.js";
 import {
+  getCatalogProviderIds,
   getEffectiveReasoningEffort,
   getModelByTier,
   getModelIds,
@@ -240,7 +245,37 @@ import {
   isCouncilStartPatch,
   mapCouncilCardKey,
 } from "./utils/format.js";
+// S5 — council steering channel. This file is @ts-nocheck, so a missing import
+// here fails at RUNTIME, not at build: keep it explicit and beside the others.
+import { getActiveCouncilRun, pushCouncilSteer, requestCouncilConverge } from "../state/council-steer.js";
 import { isEscapeKey } from "./utils/modal.js";
+import type { NeedsKeyCardMode } from "./modals/mcp-needs-key-card.js";
+import {
+  buildNeedsKeyActions,
+  defaultSubmitKeyDeps,
+  setMcpServerEnabled,
+  submitMcpServerKey,
+} from "./needs-key-controller.js";
+import { subscribeEeConnect } from "../ee/ee-connect-bus.js";
+import { snoozeEeConnect } from "../ee/ee-connect.js";
+import type { EeConnectCardMode } from "./modals/ee-connect-card.js";
+import {
+  buildEeConnectActions,
+  connectHostedEE,
+  connectLocalEE,
+  defaultEeConnectDeps,
+} from "./ee-connect-controller.js";
+import { subscribeLspSetup } from "../lsp/lsp-setup-bus.js";
+import { snoozeLspSetup } from "../lsp/lsp-setup-onboarding.js";
+import { detectProjectLanguages, type LspInstallStatus } from "../lsp/lsp-setup.js";
+import type { LspBuiltInServerId } from "../lsp/types.js";
+import type { LspSetupCardMode } from "./modals/lsp-setup-card.js";
+import {
+  buildLspSetupLanguages,
+  confirmLspSetup,
+  defaultLspSetupConfirmDeps,
+  toggleLspLanguage,
+} from "./lsp-setup-controller.js";
 import { sanitizeContent } from "./utils/text.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
@@ -527,6 +562,7 @@ const BUILTIN_TYPED_SLASH_COMMANDS = new Set([
   "/quit",
   "/exit",
   "/q",
+  "/update",
   "/review",
   "/verify",
   "/commit-push",
@@ -628,6 +664,22 @@ function shouldOpenApiKeyModalForKey(key: {
   if (key.name === "return" || key.name === "backspace") return true;
   return !!(key.sequence && key.sequence.length === 1);
 }
+
+/**
+ * Shape of the inter-card heartbeat entry ("⏳ <label>... elapsed Ns"). Module
+ * scope so both the tick and the teardown match on exactly the same pattern —
+ * they drifted apart before, which is how frozen copies survived a clear.
+ */
+const HEARTBEAT_RE = /^⏳ .*\.\.\. elapsed \d+s\s*$/;
+
+/**
+ * Hard ceiling on how long a heartbeat may tick. It exists to bound the damage
+ * of a MISSED clear, not to replace one: past this the run is either finished
+ * or genuinely wedged, and either way "elapsed 8113s" tells the user nothing
+ * true. Session 0e2ef2d2b869 ticked for 2h15m after its council had already
+ * completed, which read as a hang.
+ */
+const HEARTBEAT_MAX_MS = 10 * 60 * 1000;
 
 export function useAppLogic(props: AppLogicProps) {
   const { agent, startupConfig, initialMessage, onExit, onRelaunch } = props;
@@ -859,7 +911,16 @@ export function useAppLogic(props: AppLogicProps) {
       // selected in /models. Splash providers stay listed even with no key so
       // the user can still press `k` to add one.
       setConfiguredProviders(
-        resolvePickerProviders(SPLASH_PROVIDERS, configured, (p) => getModelsForProvider(p).length > 0),
+        resolvePickerProviders(
+          SPLASH_PROVIDERS,
+          configured,
+          (p) => getModelsForProvider(p).length > 0,
+          // Catalog-derived, so a provider that ships models is reachable in the
+          // picker BEFORE it has credentials. openai was invisible until signed
+          // in, and this picker is the only place to sign in — see
+          // resolvePickerProviders.
+          getCatalogProviderIds() as ProviderId[],
+        ),
       );
       setProvidersWithKey(new Set(configured));
     } catch (err) {
@@ -972,6 +1033,9 @@ export function useAppLogic(props: AppLogicProps) {
           setOAuthLogin({ provider, error: "OAuth is not available for this provider." });
           return;
         }
+        // No allowManualCodePaste here: OpenTUI owns stdin. A flow that reads
+        // it takes every keystroke from the TUI and its readline close() leaves
+        // stdin paused — the "TUI is dead after signing in" bug.
         const tokens = await cfg.provider.login({ signal: oauthAbortRef.current?.signal });
         if (oauthCancelRef.current) return;
         const { saveTokens } = await import("../providers/auth/token-store.js");
@@ -1138,12 +1202,76 @@ export function useAppLogic(props: AppLogicProps) {
   // Peek toggle (ctrl+e) for the todo panel while it auto-collapses during a
   // council debate. Default collapsed; expands back to the full panel on demand.
   const [councilTodoExpanded, setCouncilTodoExpanded] = useState(false);
+  // Ctrl+T — the stance matrix (design S4) overlaid on the transcript. Lives
+  // here rather than in app.tsx because handleKey owns every council binding.
+  const [stanceMatrixOpen, setStanceMatrixOpen] = useState(false);
+  // Ref mirror so the Ctrl+←/→ branch can tell whether the matrix owns that key
+  // without adding stanceMatrixOpen to handleKey's dep list.
+  const stanceMatrixOpenRef = useRef(false);
+  // S5 — steer mode. Ctrl+S arms it while a debate is live; the next submitted
+  // message goes to the council's steering inbox rather than the message queue.
+  // A MODE rather than a modal on purpose: the submit path already handles
+  // Return correctly, and a new card would have to fight the ~20 other Return
+  // handlers in this reducer for the key.
+  const [councilSteerMode, setCouncilSteerMode] = useState(false);
+  const councilSteerModeRef = useRef(false);
+  useEffect(() => {
+    councilSteerModeRef.current = councilSteerMode;
+  }, [councilSteerMode]);
+  // S4 — the cell under the cursor, as absolute (criterion row, roster column)
+  // indices. Ctrl+↑↓←→ moves it and the quote panel follows; the matrix scrolls
+  // its own column window to keep the selection visible.
+  const [stanceCell, setStanceCell] = useState<{ row: number; col: number }>({ row: 0, col: 0 });
+  useEffect(() => {
+    stanceMatrixOpenRef.current = stanceMatrixOpen;
+    // Reopening always starts at the first cell — a stale cursor from a prior
+    // debate would open the matrix scrolled past the panelists that matter.
+    if (!stanceMatrixOpen) setStanceCell({ row: 0, col: 0 });
+  }, [stanceMatrixOpen]);
+  // Per-turn expand state for council debate bubbles, keyed by the turn's index
+  // in `councilMessages` (the same index the Semantic id `council-msg-N` uses).
+  // Sits BESIDE councilTranscriptExpanded rather than replacing it: Ctrl+O still
+  // expands everything at once, this is the per-turn override.
+  const [expandedTurns, setExpandedTurns] = useState<ReadonlySet<number>>(() => new Set<number>());
+  const toggleTurnExpanded = useCallback((idx: number) => {
+    setExpandedTurns((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  }, []);
+  // Ref mirror so the Ctrl+↵ binding can find the newest turn without putting
+  // councilMessages on handleKey's dep list (same pattern as councilStatusesRef).
+  const councilMessagesRef = useRef<CouncilMessage[]>([]);
+  useEffect(() => {
+    councilMessagesRef.current = councilMessages;
+  }, [councilMessages]);
   // Non-null only while a /compact is in flight; drives CompactProgressCard.
   const [compactRun, setCompactRun] = useState<{ progress: CompactProgress; startedAt: number } | null>(null);
   const [councilInfoCards, setCouncilInfoCards] = useState<CouncilInfoCard[]>([]);
   // P3 — council metadata for the context rail (leader/panel/budget/research/
   // cost), upsert-merged from incremental council_meta patches.
   const [councilMeta, setCouncilMeta] = useState<CouncilMetaPatch>({});
+  // Stance-matrix dimensions, mirrored so the Ctrl+arrow branch can clamp the
+  // cursor without pulling councilMeta into handleKey's dep list. Clamping HERE
+  // rather than at render is what keeps the cursor reversible: an unclamped
+  // increment would need as many presses back as it took to overshoot.
+  const stanceDimsRef = useRef<{ rows: number; cols: number }>({ rows: 0, cols: 0 });
+  useEffect(() => {
+    const ledger = councilMeta.panelLedger ?? [];
+    stanceDimsRef.current = {
+      rows: councilMeta.stanceRows?.length || councilMeta.successCriteria?.length || 0,
+      cols: ledger.length > 0 ? ledger.filter((e) => e.role !== "leader").length : (councilMeta.panel?.length ?? 0),
+    };
+  }, [councilMeta]);
+  // The convene reason ("heavy · analyze") parsed out of the stripped
+  // `[Auto-council triggered: …]` line, promoted to the sticky banner header
+  // instead of being scrolled past in the transcript. Null for user-initiated
+  // /council. The preamble-window ref scopes `↳ …` echo stripping to the
+  // convene→first-debate-turn span (see council-preamble.ts).
+  const [councilConvene, setCouncilConvene] = useState<string | null>(null);
+  const inCouncilPreambleRef = useRef(false);
   // Tracks the current council's topic so a NEW council (topic change) can flush
   // the prior council's residue even when clearLiveTurnUi (turn-end) was skipped
   // — e.g. an Esc-interrupt before a fresh /council. applyCouncilMetaPatch is
@@ -1191,11 +1319,20 @@ export function useAppLogic(props: AppLogicProps) {
       // new one. selectedRound follows via the councilRounds effect above.
       setCouncilRounds([]);
       setCouncilMeta({ ...patch });
+      // Open the preamble-strip window at council start so the bare `↳ <answer>`
+      // clarification echoes are stripped even on the user-initiated /council path
+      // (which emits no `[Auto-council triggered]` trigger line). Closed on the
+      // first council_round. Distinctive noise lines strip regardless of window.
+      inCouncilPreambleRef.current = true;
       return;
     }
     setCouncilMeta((prev) => ({ ...prev, ...patch }));
   }, []);
   const applyCouncilRound = useCallback((rec: CouncilRoundRecord) => {
+    // First real debate round → close the preamble-strip window so later
+    // unrelated `↳ …` lines (e.g. EE rating reminders) survive. Shared by every
+    // council loop, so the close happens once here rather than at each call site.
+    inCouncilPreambleRef.current = false;
     setCouncilRounds((prev) => {
       const idx = prev.findIndex((r) => r.round === rec.round);
       if (idx < 0) return [...prev, rec];
@@ -1240,10 +1377,13 @@ export function useAppLogic(props: AppLogicProps) {
     // shape (`⏳ ... elapsed Ns`) and remove it wherever it landed in the tail —
     // the shape is distinctive enough not to hit real assistant content.
     setMessages((prev) => {
-      const HEARTBEAT_RE = /^⏳ .*\.\.\. elapsed \d+s\s*$/;
-      const idx = prev.findIndex((e) => e.type === "assistant" && HEARTBEAT_RE.test((e.content ?? "").trim()));
-      if (idx === -1) return prev;
-      return [...prev.slice(0, idx), ...prev.slice(idx + 1)];
+      // Strip EVERY heartbeat entry, not just the first. The tick below appends a
+      // NEW entry whenever the tail is no longer the heartbeat (an askcard answer
+      // or a fresh user message lands after it), so a stalled run can leave more
+      // than one frozen "⏳ … elapsed Ns" row in scrollback — that is exactly what
+      // session 0e2ef2d2b869 showed (8113s above the user message, 8132s below).
+      const next = prev.filter((e) => !(e.type === "assistant" && HEARTBEAT_RE.test((e.content ?? "").trim())));
+      return next.length === prev.length ? prev : next;
     });
   }, []);
 
@@ -1256,20 +1396,29 @@ export function useAppLogic(props: AppLogicProps) {
       // frequently sub-second, and an entry that flashes "elapsed 0s" for every
       // short gap is pure noise (this is exactly the "meaningless elapsed 0s" the
       // user reported). Only surface the ticking entry once a gap is long enough
-      // to warrant a "still working" reassurance — and never show "0s". The tail
-      // is stripped by clearInterCardHeartbeat() at the top of the next chunk
-      // iteration, so the heartbeat is always the last entry while active; that
-      // invariant lets us detect-or-create idempotently on each tick.
+      // to warrant a "still working" reassurance — and never show "0s".
       const MIN_VISIBLE_S = 3;
       const interval = setInterval(() => {
-        const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+        const elapsedMs = Date.now() - startedAt;
+        // Self-terminate rather than tick forever when nobody cleared us. The
+        // entry is removed too: a stale "still working" claim is worse than no
+        // claim, because it is indistinguishable from a live run.
+        if (elapsedMs >= HEARTBEAT_MAX_MS) {
+          clearInterCardHeartbeat();
+          return;
+        }
+        const elapsed = Math.floor(elapsedMs / 1000);
         if (elapsed < MIN_VISIBLE_S) return;
         const line = `${marker}${label}... elapsed ${elapsed}s\n`;
         setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          const hasHeartbeat = last?.type === "assistant" && !!last.content?.includes(marker);
-          if (!hasHeartbeat) return [...prev, buildAssistantEntry(line)];
-          return [...prev.slice(0, -1), { ...last, content: line }];
+          // Update the EXISTING heartbeat wherever it sits — do not assume it is
+          // the tail. The old code only matched `prev[len-1]`, so anything
+          // appended after it (an askcard answer echo, the next user message)
+          // made this branch append a SECOND heartbeat and freeze the first.
+          const idx = prev.findIndex((e) => e.type === "assistant" && HEARTBEAT_RE.test((e.content ?? "").trim()));
+          if (idx === -1) return [...prev, buildAssistantEntry(line)];
+          const hit = prev[idx];
+          return [...prev.slice(0, idx), { ...hit, content: line }, ...prev.slice(idx + 1)];
         });
       }, 1_000);
       interCardHeartbeatRef.current = { interval, marker };
@@ -1559,6 +1708,44 @@ export function useAppLogic(props: AppLogicProps) {
   const showConnectModalRef = useRef(false);
   const showTelegramTokenModalRef = useRef(false);
   const showTelegramPairModalRef = useRef(false);
+  // ---- MCP needs-key inline fix card (enabled server missing its API key) ----
+  // Queue of servers to fix, FIFO — one card at a time. Fed by the needs-key
+  // bus (tool-engine publishes McpToolBundle.needsKey once per server/session).
+  const [needsKeyQueue, setNeedsKeyQueue] = useState<MissingKeyServer[]>([]);
+  const [needsKeyMode, setNeedsKeyMode] = useState<NeedsKeyCardMode>("actions");
+  const [needsKeyIndex, setNeedsKeyIndex] = useState(0);
+  const [needsKeyError, setNeedsKeyError] = useState<string | null>(null);
+  const needsKeyInputRef = useRef<TextareaRenderable>(null);
+  const needsKeyQueueRef = useRef<MissingKeyServer[]>([]);
+  const needsKeyModeRef = useRef<NeedsKeyCardMode>("actions");
+  const needsKeyIndexRef = useRef(0);
+  // ---- EE connect card (unconfigured Experience Engine brain) ----
+  // Parallel to the needs-key card but on its own bus/controller — EE
+  // onboarding and MCP key-repair must not couple. Fed by ee-connect-bus
+  // (boot-time nudge in index.ts, or `/ee setup`).
+  const [eeConnectVisible, setEeConnectVisible] = useState(false);
+  const [eeConnectMode, setEeConnectMode] = useState<EeConnectCardMode>("actions");
+  const [eeConnectIndex, setEeConnectIndex] = useState(0);
+  const [eeConnectError, setEeConnectError] = useState<string | null>(null);
+  const eeConnectInputRef = useRef<TextareaRenderable>(null);
+  const eeConnectVisibleRef = useRef(false);
+  const eeConnectModeRef = useRef<EeConnectCardMode>("actions");
+  const eeConnectIndexRef = useRef(0);
+  // ---- LSP setup card (first-run language-server onboarding) ----
+  // Parallel to the EE connect card but on its own bus/controller — LSP
+  // onboarding and EE onboarding must not couple. MULTI-select: Space toggles
+  // the language under the cursor, Enter installs the picked set. Fed by
+  // lsp-setup-bus (boot-time nudge in index.ts, or `/lsp setup`).
+  const [lspSetupVisible, setLspSetupVisible] = useState(false);
+  const [lspSetupMode, setLspSetupMode] = useState<LspSetupCardMode>("pick");
+  const [lspSetupCursor, setLspSetupCursor] = useState(0);
+  const [lspSetupSelected, setLspSetupSelected] = useState<ReadonlySet<string>>(new Set());
+  const [lspSetupDetected, setLspSetupDetected] = useState<ReadonlySet<string>>(new Set());
+  const [lspSetupStatuses, setLspSetupStatuses] = useState<LspInstallStatus[]>([]);
+  const lspSetupVisibleRef = useRef(false);
+  const lspSetupModeRef = useRef<LspSetupCardMode>("pick");
+  const lspSetupCursorRef = useRef(0);
+  const lspSetupSelectedRef = useRef<ReadonlySet<string>>(new Set());
   const {
     showMcpModal,
     setShowMcpModal,
@@ -1590,6 +1777,278 @@ export function useAppLogic(props: AppLogicProps) {
   const mcpArgsRef = useRef<TextareaRenderable>(null);
   const mcpCwdRef = useRef<TextareaRenderable>(null);
   const mcpEnvRef = useRef<TextareaRenderable>(null);
+
+  // ---- MCP needs-key card wiring (state declared above with the modal refs) ----
+  useEffect(() => {
+    needsKeyQueueRef.current = needsKeyQueue;
+  }, [needsKeyQueue]);
+  useEffect(() => {
+    needsKeyModeRef.current = needsKeyMode;
+  }, [needsKeyMode]);
+  useEffect(() => {
+    needsKeyIndexRef.current = needsKeyIndex;
+  }, [needsKeyIndex]);
+
+  // Receive enabled-but-keyless servers from the turn pipeline (needs-key bus).
+  // The bus already dedupes per server per session; the queue-level dedupe here
+  // only guards against a server being re-announced while still queued.
+  useEffect(
+    () =>
+      subscribeNeedsKey((fresh) => {
+        setNeedsKeyQueue((queue) => {
+          const queued = new Set(queue.map((s) => s.id));
+          const added = fresh.filter((s) => !queued.has(s.id));
+          return added.length > 0 ? [...queue, ...added] : queue;
+        });
+      }),
+    [],
+  );
+
+  /** Close the current card (snooze / use-builtin / after success) and advance the queue. */
+  const advanceNeedsKeyQueue = useCallback(() => {
+    needsKeyInputRef.current?.clear();
+    setNeedsKeyMode("actions");
+    setNeedsKeyIndex(0);
+    setNeedsKeyError(null);
+    setNeedsKeyQueue((queue) => queue.slice(1));
+  }, []);
+
+  /** "Paste API key" submit: validate → store → re-enable → reconnect the pool. */
+  const submitNeedsKeyKey = useCallback(() => {
+    if (needsKeyModeRef.current === "validating") return; // re-entry guard (textarea onSubmit + global Enter)
+    const server = needsKeyQueueRef.current[0];
+    if (!server) return;
+    const rawKey = needsKeyInputRef.current?.plainText ?? "";
+    setNeedsKeyMode("validating");
+    setNeedsKeyError(null);
+    void (async () => {
+      const result = await submitMcpServerKey(server, rawKey, defaultSubmitKeyDeps());
+      if (result.ok) {
+        setMcpServers(loadMcpServers());
+        if (result.unverified) {
+          // Saved despite an inconclusive online probe (offline / rate-limited) —
+          // tell the user it IS stored so they don't think setup failed, but flag
+          // that it wasn't verified. It will be exercised on first real use.
+          pushToast("warn", `${server.label} key saved (couldn't verify online — will be used as-is).`);
+        } else {
+          pushToast("info", `${server.label} key stored — reconnecting.`);
+        }
+        advanceNeedsKeyQueue();
+      } else {
+        setNeedsKeyError(result.error);
+        setNeedsKeyMode("input");
+      }
+    })();
+  }, [advanceNeedsKeyQueue, pushToast, setMcpServers]);
+
+  /** Activate the currently-selected card action. */
+  const activateNeedsKeyAction = useCallback(() => {
+    const server = needsKeyQueueRef.current[0];
+    if (!server) return;
+    const actions = buildNeedsKeyActions(server);
+    const action = actions[Math.min(needsKeyIndexRef.current, actions.length - 1)];
+    if (!action) return;
+    switch (action.id) {
+      case "paste-key":
+        needsKeyInputRef.current?.clear();
+        setNeedsKeyError(null);
+        setNeedsKeyMode("input");
+        return;
+      case "disable":
+        setMcpServerEnabled(server.id, false);
+        setMcpServers(loadMcpServers());
+        pushToast("info", `${server.label} disabled — re-enable any time via /mcp.`);
+        advanceNeedsKeyQueue();
+        return;
+      case "use-builtin":
+      case "snooze":
+        advanceNeedsKeyQueue();
+        return;
+    }
+  }, [advanceNeedsKeyQueue, pushToast, setMcpServers]);
+
+  // ---- EE connect card wiring (state declared above with the modal refs) ----
+  useEffect(() => {
+    eeConnectVisibleRef.current = eeConnectVisible;
+  }, [eeConnectVisible]);
+  useEffect(() => {
+    eeConnectModeRef.current = eeConnectMode;
+  }, [eeConnectMode]);
+  useEffect(() => {
+    eeConnectIndexRef.current = eeConnectIndex;
+  }, [eeConnectIndex]);
+
+  // Receive the "offer to connect the brain" signal (boot nudge or /ee setup).
+  // The bus dedupes per session and buffers pre-mount publishes.
+  useEffect(
+    () =>
+      subscribeEeConnect(() => {
+        setEeConnectMode("actions");
+        setEeConnectIndex(0);
+        setEeConnectError(null);
+        setEeConnectVisible(true);
+      }),
+    [],
+  );
+
+  /** Close the connect card. `snooze` = the user declined (esc / Not now). */
+  const dismissEeConnectCard = useCallback((snooze: boolean) => {
+    eeConnectInputRef.current?.clear();
+    setEeConnectMode("actions");
+    setEeConnectIndex(0);
+    setEeConnectError(null);
+    setEeConnectVisible(false);
+    if (snooze) {
+      try {
+        snoozeEeConnect();
+      } catch {
+        // Settings write failure must not break dismissal.
+      }
+    }
+  }, []);
+
+  /** "Connect hosted" submit: probe with token → write config → reload cache. */
+  const submitEeConnectToken = useCallback(() => {
+    if (eeConnectModeRef.current === "validating") return; // re-entry guard (textarea onSubmit + global Enter)
+    const rawToken = eeConnectInputRef.current?.plainText ?? "";
+    setEeConnectMode("validating");
+    setEeConnectError(null);
+    void (async () => {
+      const result = await connectHostedEE(rawToken, defaultEeConnectDeps());
+      if (result.ok) {
+        statusBarStore.setState({ ee_status: "ok" });
+        pushToast("info", "Experience Engine connected — recall is live for this session.");
+        dismissEeConnectCard(false);
+      } else {
+        setEeConnectError(result.error);
+        setEeConnectMode("input");
+      }
+    })();
+  }, [dismissEeConnectCard, pushToast]);
+
+  /** Activate the currently-selected connect-card action. */
+  const activateEeConnectAction = useCallback(() => {
+    const actions = buildEeConnectActions();
+    const action = actions[Math.min(eeConnectIndexRef.current, actions.length - 1)];
+    if (!action) return;
+    switch (action.id) {
+      case "hosted":
+        eeConnectInputRef.current?.clear();
+        setEeConnectError(null);
+        setEeConnectMode("input");
+        return;
+      case "local":
+        setEeConnectMode("validating");
+        setEeConnectError(null);
+        void (async () => {
+          const result = await connectLocalEE(defaultEeConnectDeps());
+          if (result.ok) {
+            statusBarStore.setState({ ee_status: "ok" });
+            pushToast("info", "Local Experience Engine connected — recall is live for this session.");
+            dismissEeConnectCard(false);
+          } else {
+            // Short hint ("start the local brain, or use hosted") back on the action list.
+            setEeConnectError(result.error);
+            setEeConnectMode("actions");
+          }
+        })();
+        return;
+      case "how":
+        setEeConnectError(null);
+        setEeConnectMode("how");
+        return;
+      case "not-now":
+        dismissEeConnectCard(true);
+        return;
+    }
+  }, [dismissEeConnectCard, pushToast]);
+
+  // ---- LSP setup card wiring (state declared above with the modal refs) ----
+  useEffect(() => {
+    lspSetupVisibleRef.current = lspSetupVisible;
+  }, [lspSetupVisible]);
+  useEffect(() => {
+    lspSetupModeRef.current = lspSetupMode;
+  }, [lspSetupMode]);
+  useEffect(() => {
+    lspSetupCursorRef.current = lspSetupCursor;
+  }, [lspSetupCursor]);
+  useEffect(() => {
+    lspSetupSelectedRef.current = lspSetupSelected;
+  }, [lspSetupSelected]);
+
+  // Receive the "offer LSP language setup" signal (boot nudge or /lsp setup).
+  // The bus dedupes per session and buffers pre-mount publishes. Detected
+  // project languages are pre-selected as a nicety — the scan runs async and
+  // merges in only while the card is still in pick mode.
+  useEffect(
+    () =>
+      subscribeLspSetup(() => {
+        // Write the refs synchronously too (not just via the mirror effects):
+        // an immediate keypress after the card opens must see a fresh cursor(0)
+        // / mode / selection, not the deferred-committed values from a prior
+        // open of the same session.
+        lspSetupModeRef.current = "pick";
+        lspSetupCursorRef.current = 0;
+        lspSetupSelectedRef.current = new Set();
+        setLspSetupMode("pick");
+        setLspSetupCursor(0);
+        setLspSetupSelected(new Set());
+        setLspSetupDetected(new Set());
+        setLspSetupStatuses([]);
+        setLspSetupVisible(true);
+        void detectProjectLanguages(process.cwd())
+          .then((ids) => {
+            if (ids.length === 0 || lspSetupModeRef.current !== "pick") return;
+            setLspSetupDetected(new Set(ids));
+            setLspSetupSelected((prev) => {
+              const next = new Set(prev);
+              for (const id of ids) next.add(id);
+              lspSetupSelectedRef.current = next;
+              return next;
+            });
+          })
+          .catch(() => {});
+      }),
+    [],
+  );
+
+  /** Close the setup card. `snooze` = the user declined (esc / not now). */
+  const dismissLspSetupCard = useCallback((snooze: boolean) => {
+    lspSetupModeRef.current = "pick";
+    lspSetupCursorRef.current = 0;
+    lspSetupSelectedRef.current = new Set();
+    setLspSetupMode("pick");
+    setLspSetupCursor(0);
+    setLspSetupSelected(new Set());
+    setLspSetupStatuses([]);
+    setLspSetupVisible(false);
+    if (snooze) {
+      try {
+        snoozeLspSetup();
+      } catch {
+        // Settings write failure must not break dismissal.
+      }
+    }
+  }, []);
+
+  /** Enter on the picker: install the picked set, then show per-language results. */
+  const confirmLspSetupSelection = useCallback(() => {
+    if (lspSetupModeRef.current !== "pick") return; // re-entry guard
+    const ids = [...lspSetupSelectedRef.current] as LspBuiltInServerId[];
+    lspSetupModeRef.current = "installing"; // arm the guard synchronously (double-Enter safe)
+    setLspSetupMode("installing");
+    void (async () => {
+      const statuses = await confirmLspSetup(ids, defaultLspSetupConfirmDeps());
+      if (statuses.length === 0) {
+        pushToast("info", "LSP setup saved — no languages selected. Re-run any time via /lsp setup.");
+        dismissLspSetupCard(false);
+        return;
+      }
+      setLspSetupStatuses(statuses);
+      setLspSetupMode("result");
+    })();
+  }, [dismissLspSetupCard, pushToast]);
   const {
     showAgentsModal,
     setShowAgentsModal,
@@ -1746,10 +2205,17 @@ export function useAppLogic(props: AppLogicProps) {
       SLASH_MENU_ITEMS_ARROW_ORDER;
   const slashInputIsMatched = useMemo(() => {
     if (!showSlashMenu) return false;
-    const typed = slashSearchQuery.toLowerCase();
-    if (!typed) return false;
-    return filteredSlashItems.some((item) => item.id.toLowerCase() === typed || item.label.toLowerCase() === typed);
-  }, [showSlashMenu, filteredSlashItems, slashSearchQuery]);
+    // Match the LEADING command token, not the whole query, so the composer
+    // stays highlighted once the user types arguments after the command
+    // (e.g. "/council thảo luận …" → first token "council" still matches).
+    // Match against the full SLASH_MENU_ITEMS set (not filteredSlashItems,
+    // which narrows to nothing once the query includes the free-text args).
+    const firstToken = slashSearchQuery.trim().split(/\s+/, 1)[0]?.toLowerCase() ?? "";
+    if (!firstToken) return false;
+    return SLASH_MENU_ITEMS.some(
+      (item) => item.id.toLowerCase() === firstToken || item.label.toLowerCase() === firstToken,
+    );
+  }, [showSlashMenu, slashSearchQuery]);
   const mcpRows = buildMcpBrowseRows(mcpServers, POPULAR_MCP_CATALOG, mcpSearchQuery);
   const mcpEditorFields = mcpEditorDraft.transport === "stdio" ? MCP_STDIO_FIELDS : MCP_REMOTE_FIELDS;
   const agentRows = useMemo(
@@ -2325,6 +2791,40 @@ export function useAppLogic(props: AppLogicProps) {
     setScheduleModalIndex((idx) => Math.max(0, Math.min(idx, Math.max(0, scheduleRows.length - 1))));
   }, [scheduleRows.length]);
 
+  /**
+   * Tear down the LIVE council block (ephemeral debate transcript, info cards,
+   * meta, rounds, phases, placeholders).
+   *
+   * These arrays are append-only and render as a block BELOW the
+   * timestamp-sorted messages list, so while they stay populated every newer
+   * message renders ABOVE them and reads as "swallowed". Two callers:
+   *   - clearLiveTurnUi, at every turn boundary (begin/finalize);
+   *   - the `council_collapse` chunk, when a debate hands off to a post-debate
+   *     continuation that runs INSIDE the same turn. No turn boundary happens
+   *     there, which is why the implementation phase used to stay invisible
+   *     until the whole turn ended (user report 2026-07-27).
+   * Synthesis is persisted independently as the [Council Decision] system
+   * message, so collapsing loses nothing.
+   */
+  const collapseCouncilUi = useCallback(() => {
+    setCouncilMessages([]);
+    setCouncilInfoCards([]);
+    setCouncilMeta({});
+    setCouncilConvene(null);
+    inCouncilPreambleRef.current = false;
+    setCouncilRounds([]);
+    setSelectedRound(null);
+    setCouncilPlaceholders(new Map());
+    // The auto-council path drives councilPhases through the MAIN stream loop,
+    // which — unlike the nested /council and /ideal loops — never reset it on
+    // turn end. On a hung/watchdog-aborted council turn the running phase never
+    // emits its `state:"done"` event, so <CouncilPhaseTimeline> stays frozen at
+    // "Council working… elapsed Ns" forever and the session LOOKS hung even after
+    // the turn actually finalized (live: reasoning-model hang c1d461439618).
+    setCouncilPhases([]);
+    councilTopicRef.current = undefined;
+  }, []);
+
   const clearLiveTurnUi = useCallback(() => {
     setStreamContent("");
     setReasoningActive(false);
@@ -2338,29 +2838,9 @@ export function useAppLogic(props: AppLogicProps) {
     setLiveTurnSourceLabel(null);
     contentAccRef.current = "";
     // Collapse the ephemeral council transcript to the persisted [Council
-    // Decision] message on every turn end. These three arrays are append-only
-    // and rendered as a block BELOW the timestamp-sorted messages list, so
-    // leaving them populated makes a later message render ABOVE the stale
-    // council block (looks "swallowed"). Synthesis is persisted independently,
-    // so clearing here loses nothing. Covers auto-council + slash paths.
-    setCouncilMessages([]);
-    setCouncilInfoCards([]);
-    setCouncilMeta({});
-    setCouncilRounds([]);
-    setSelectedRound(null);
-    setCouncilPlaceholders(new Map());
-    // The auto-council path drives councilPhases through the MAIN stream loop,
-    // which — unlike the nested /council and /ideal loops — never reset it on
-    // turn end. On a hung/watchdog-aborted council turn the running phase never
-    // emits its `state:"done"` event, so <CouncilPhaseTimeline> stays frozen at
-    // "Council working… elapsed Ns" forever and the session LOOKS hung even after
-    // the turn actually finalized (live: reasoning-model hang c1d461439618).
-    // Clearing here (called at both beginLiveTurn and finalizeActiveTurn) tears
-    // the timeline down on every turn boundary. The completed phases were already
-    // rendered live; the persisted [Council Decision] message is the durable record.
-    setCouncilPhases([]);
-    councilTopicRef.current = undefined;
-  }, []);
+    // Decision] message on every turn end. Covers auto-council + slash paths.
+    collapseCouncilUi();
+  }, [collapseCouncilUi]);
 
   const finishTurnProcessing = useCallback(() => {
     const nextQueued = queuedMessagesRef.current.shift();
@@ -2483,6 +2963,24 @@ export function useAppLogic(props: AppLogicProps) {
     },
     [closeCurrentToolGroup, flushContent],
   );
+
+  // Two-pane council surface: strip the streamed preamble noise (convene line,
+  // dividers, budget, experience-loaded, ↳ echoes) from a content delta so it
+  // never reaches the transcript — it is redundant with the sticky banner + rail.
+  // Shared by the MAIN stream loop AND the detached /council + /ideal loops, each
+  // of which appends council content through its own setMessages updater. The
+  // convene reason is promoted to the banner header; the preamble window (opened
+  // on the trigger, closed on the first council_round) scopes the bare-↳ echo
+  // stripping. Returns the delta unchanged when the surface is off (headless is
+  // never here) or nothing matched; returns "" when a delta became whitespace-
+  // only after stripping so callers can skip the empty append.
+  const maybeStripCouncilContent = useCallback((raw: string): string => {
+    if (!isCouncilSurfaceEnabled() || !raw) return raw;
+    const stripped = stripCouncilNoise(raw, inCouncilPreambleRef.current);
+    if (stripped.sawTrigger) inCouncilPreambleRef.current = true;
+    if (stripped.convene) setCouncilConvene(stripped.convene);
+    return stripped.text !== raw && stripped.text.trim().length === 0 ? "" : stripped.text;
+  }, []);
 
   const applyTelegramAssistantPreview = useCallback(
     (fullContent: string) => {
@@ -3001,6 +3499,21 @@ export function useAppLogic(props: AppLogicProps) {
   // position and copy any terminal-level word selection (like Claude Code / Codex CLI).
   const lastClickRef = useRef<{ time: number; x: number; y: number }>({ time: 0, x: 0, y: 0 });
 
+  // When a modal popup with a text input is open (MCP needs-key card, EE connect
+  // card, or the API-key modal), that input must OWN focus: a mouse click
+  // anywhere — or a bracketed paste that the composer intercepts — must route to
+  // it, never fall through to the composer behind the modal. Reads refs (not
+  // state) so it is stale-closure safe inside the mouse/paste callbacks. Returns
+  // the active modal's input renderable, or null when the composer is the
+  // legitimate focus target. (`apiKeyPrompt` is a non-textarea credential prompt
+  // whose paste is already special-cased in handlePaste and is focus-independent.)
+  const getActiveModalInput = useCallback((): TextareaRenderable | null => {
+    if (needsKeyQueueRef.current.length > 0 && needsKeyModeRef.current === "input") return needsKeyInputRef.current;
+    if (eeConnectVisibleRef.current && eeConnectModeRef.current === "input") return eeConnectInputRef.current;
+    if (showApiKeyModalRef.current) return apiKeyInputRef.current;
+    return null;
+  }, []);
+
   const handleRootMouseUp = useCallback(
     (event?: { button?: number; type?: string; x?: number; y?: number }) => {
       // Right-click semantics:
@@ -3011,8 +3524,12 @@ export function useAppLogic(props: AppLogicProps) {
       if (isRightClick) {
         const copied = copyTuiSelectionToHost();
         if (!copied) {
-          const ta = inputRef.current;
-          const text = readTextFromHostClipboard();
+          // Route a right-click paste into the open modal input (secret →
+          // sanitize to strip newlines) rather than the composer behind it.
+          const modalInput = getActiveModalInput();
+          const ta = modalInput ?? inputRef.current;
+          const raw = readTextFromHostClipboard();
+          const text = modalInput ? sanitizeSecretInput(raw) : raw;
           if (ta && text) {
             const current = ta.plainText || "";
             const insertAt = typeof ta.cursorOffset === "number" ? ta.cursorOffset : current.length;
@@ -3025,7 +3542,7 @@ export function useAppLogic(props: AppLogicProps) {
             }
           }
         }
-        inputRef.current?.focus();
+        (getActiveModalInput() ?? inputRef.current)?.focus();
         return;
       }
 
@@ -3046,14 +3563,40 @@ export function useAppLogic(props: AppLogicProps) {
       } else {
         copyTuiSelectionToHost();
       }
-      inputRef.current?.focus();
+      // Never steal focus back to the composer while a modal input is open —
+      // re-assert the modal input so typing/paste stay inside it.
+      (getActiveModalInput() ?? inputRef.current)?.focus();
     },
-    [copyTuiSelectionToHost],
+    [copyTuiSelectionToHost, getActiveModalInput],
   );
 
   const handleRootMouseDown = useCallback(() => {
-    setTimeout(() => inputRef.current?.focus(), 0);
-  }, []);
+    setTimeout(() => (getActiveModalInput() ?? inputRef.current)?.focus(), 0);
+  }, [getActiveModalInput]);
+
+  // Single entry point for running a self-update, shared by the /update command,
+  // the startup UpdateModal's Enter, and a click on the "Update available"
+  // banner. Guarded against a double-trigger while one is already running.
+  const isUpdatingRef = useRef(false);
+  const runUpdateFromUi = useCallback(() => {
+    if (isUpdatingRef.current) return;
+    isUpdatingRef.current = true;
+    setIsUpdating(true);
+    setUpdateOutput(null);
+    setShowUpdateModal(false);
+    // Echo into the log too — the home-screen updateOutput banner only renders
+    // on the splash screen, so an update from an active chat needs a log entry.
+    // Not "checking" — on a linked source build this pulls, installs and
+    // rebuilds, which takes a while and the old wording made it look hung.
+    setMessages((prev) => [...prev, buildAssistantEntry("🔄 Updating — this can take a minute if a rebuild runs…")]);
+    runUpdate(startupConfig.version).then((result) => {
+      isUpdatingRef.current = false;
+      setIsUpdating(false);
+      const text = result.success ? result.output : `Update failed: ${result.output}`;
+      setUpdateOutput(text);
+      setMessages((prev) => [...prev, buildAssistantEntry(text)]);
+    });
+  }, [startupConfig.version]);
 
   useEffect(() => {
     if (copyFlashId === 0) return;
@@ -3272,6 +3815,16 @@ export function useAppLogic(props: AppLogicProps) {
 
   const interruptActiveRun = useCallback(
     (key?: KeyEvent) => {
+      // S5 — steer mode owns Escape: backing out of a steering instruction must
+      // not abort the debate you were about to steer. Guarded HERE as well as in
+      // the key reducer because this runs from a separate `_internalKeyInput`
+      // subscriber whose ordering against the reducer is not guaranteed.
+      if (councilSteerModeRef.current) {
+        setCouncilSteerMode(false);
+        key?.preventDefault();
+        key?.stopPropagation();
+        return true;
+      }
       if (btwStateRef.current) {
         btwAbortRef.current?.abort();
         btwAbortRef.current = null;
@@ -3491,12 +4044,19 @@ export function useAppLogic(props: AppLogicProps) {
             }
           });
           for await (const chunk of agent.processMessage(text.trim(), undefined, images)) {
+            // A council spliced into a NORMAL agent turn (convene_council /
+            // auto-council route through tool-engine's runCouncilV2, not through
+            // the /council or /ideal slash loops) delivers its chunks here. This
+            // was the one chunk loop that never tore down the "Waiting for next
+            // phase" heartbeat started by the askcard-answer handler, so it
+            // ticked past the end of the run — 2h15m in session 0e2ef2d2b869.
+            clearInterCardHeartbeat();
             if (isStale()) {
               break;
             }
 
             switch (chunk.type) {
-              case "content":
+              case "content": {
                 // Reasoning streak ended (model started speaking). Stamp the
                 // elapsed time so the pill can replace the live "Thinking…"
                 // indicator.
@@ -3506,7 +4066,13 @@ export function useAppLogic(props: AppLogicProps) {
                   setReasoningActive(false);
                   setStreamReasoning(reasoningAccRef.current);
                 }
-                applyLocalAssistantDelta(chunk.content || "");
+                applyLocalAssistantDelta(maybeStripCouncilContent(chunk.content || ""));
+                break;
+              }
+              case "council_collapse":
+                // See collapseCouncilUi — the post-debate continuation runs in
+                // this same turn, so nothing else tears the block down in time.
+                collapseCouncilUi();
                 break;
               case "toast":
                 // Ephemeral notice — flash it, do NOT append to the persisted
@@ -3829,6 +4395,9 @@ export function useAppLogic(props: AppLogicProps) {
           // forever-active. Failed items keep the group expanded via state.
           closeCurrentToolGroup();
           setActiveEeYield(null);
+          // The turn is over — nothing can arrive to clear a heartbeat that the
+          // last askcard answer armed. Mirrors the /council loop's finally.
+          clearInterCardHeartbeat();
         }
         const wasInterrupted = interruptedRunIdRef.current === runId;
         if (isStale()) {
@@ -4162,6 +4731,14 @@ export function useAppLogic(props: AppLogicProps) {
         handleExit();
         return true;
       }
+      // /update existed only as a slash-MENU entry and as the update modal's
+      // Enter key. Typing it fell through to dispatchSlash, which has no
+      // "update" handler, returns null, and the caller returns on null — so the
+      // command did nothing at all, silently.
+      if (c === "/update") {
+        runUpdateFromUi();
+        return true;
+      }
       if (c === "/review") {
         processMessage(REVIEW_PROMPT);
         return true;
@@ -4251,9 +4828,23 @@ export function useAppLogic(props: AppLogicProps) {
       }
       // Plan 06: fallback to slash registry (dispatchSlash) for custom commands like /route
       if (c.startsWith("/")) {
-        const parts = c.slice(1).split(/\s+/);
-        const name = parts[0] ?? "";
-        const args = parts.slice(1);
+        // Parse the ARGUMENTS off the raw input, not off `c`. `c` is
+        // lowercased so `/Council` matches `/council` — but deriving args from
+        // it lowercased every argument of every slash command too. Measured
+        // live (session 770cc78e13cc): a `/council` brief citing
+        // `/mnt/data/Personal/Core/shipd-challenges/...` reached the council as
+        // `/mnt/data/personal/core/...`, which does not exist on a
+        // case-sensitive filesystem — the debate ran with ZERO tool calls
+        // because every read of the reference implementation missed. It also
+        // flattened `RetryCallState` → `retrycallstate`. Only the command NAME
+        // needs case folding.
+        const rawBody = cmd.trim().slice(1);
+        const split = rawBody.match(/^(\S+)(?:[^\S\n]*([\s\S]*))?$/);
+        const name = (split?.[1] ?? "").toLowerCase();
+        // `argsText` keeps the remainder verbatim (line breaks included);
+        // `args` stays whitespace-split for handlers that match on tokens.
+        const argsText = (split?.[2] ?? "").trim();
+        const args = argsText.length > 0 ? argsText.split(/\s+/) : [];
         dispatchSlash(name, args, {
           cwd: agent.getCwd(),
           tenantId: "local",
@@ -4262,9 +4853,16 @@ export function useAppLogic(props: AppLogicProps) {
           lastPrompt: messages[messages.length - 1]?.content,
           sessionId: agent.getSessionId() ?? undefined,
           getLiveEntries: () => messages,
+          argsText,
         })
           .then(async (result) => {
-            if (result === null) return;
+            if (result === null) {
+              // No handler for this name. Returning quietly made a mistyped (or
+              // never-wired) command indistinguishable from a working one that
+              // prints nothing — which is exactly how /update looked dead.
+              pushToast("error", `Unknown command: /${name}`);
+              return;
+            }
 
             if (result.startsWith("__COMPACT__")) {
               const match = result.match(/Instructions:\s*(.+)/);
@@ -4403,9 +5001,11 @@ export function useAppLogic(props: AppLogicProps) {
                     : "Product loop starting… (initializing council + discovery — first phase usually appears within 30s)\n",
                 ),
               ]);
-              // Fresh product-loop run — clear any persisted phase/status so old
-              // runs don't bleed into the new one (phaseIds collide across runs).
-              setCouncilPhases([]);
+              // Fresh product-loop run — clear any persisted council UI (phases,
+              // statuses, AND leftover debate arrays from a prior /council or
+              // /ideal turn) so old runs don't bleed into the new one (phaseIds
+              // collide across runs; a stale debate block would pin to the log).
+              clearLiveTurnUi();
               setCouncilStatuses([]);
               councilDoneAtRef.current.clear();
               // Liveness heartbeat — between "Product loop starting…" and the
@@ -4455,16 +5055,15 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   const _chunkType = chunk.type;
                   if (chunk.type === "content") {
-                    setMessages((prev) => {
-                      const last = prev[prev.length - 1];
-                      if (last?.type === "assistant") {
-                        return [
-                          ...prev.slice(0, -1),
-                          { ...last, content: (last.content ?? "") + (chunk.content ?? "") },
-                        ];
-                      }
-                      return [...prev, buildAssistantEntry(chunk.content ?? "")];
-                    });
+                    const cText = maybeStripCouncilContent(chunk.content ?? "");
+                    if (cText)
+                      setMessages((prev) => {
+                        const last = prev[prev.length - 1];
+                        if (last?.type === "assistant") {
+                          return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + cText }];
+                        }
+                        return [...prev, buildAssistantEntry(cText)];
+                      });
                   }
                   if (chunk.type === "council_question" && chunk.councilQuestion) {
                     const cq2 = chunk.councilQuestion;
@@ -4560,6 +5159,12 @@ export function useAppLogic(props: AppLogicProps) {
                     } catch {
                       /* best-effort */
                     }
+                  }
+                  if (chunk.type === "council_collapse") {
+                    // Debate handed off to a continuation running INSIDE this
+                    // turn — collapse the live block now so what follows is not
+                    // rendered underneath it. See collapseCouncilUi.
+                    collapseCouncilUi();
                   }
                   if (chunk.type === "council_phase" && chunk.councilPhase) {
                     const cp2 = chunk.councilPhase;
@@ -4687,7 +5292,15 @@ export function useAppLogic(props: AppLogicProps) {
                 });
               } finally {
                 if (!firstChunkSeen) clearHeartbeat();
-                setCouncilPhases([]);
+                // Tear down ALL council ephemeral UI (debate turns, rounds, info
+                // cards, meta, phases, topic) — not just phases/statuses. The
+                // debate arrays are append-only and render as a block BELOW the
+                // messages list in the sticky-bottom log; leaving them populated
+                // pins the stale debate to the viewport bottom, so a message sent
+                // after /ideal renders above it and scrolls off screen (looks
+                // "swallowed"). clearLiveTurnUi is the canonical teardown the
+                // normal turn path already uses.
+                clearLiveTurnUi();
                 setCouncilStatuses([]);
                 councilDoneAtRef.current.clear();
                 setProductStatus(null);
@@ -4722,7 +5335,18 @@ export function useAppLogic(props: AppLogicProps) {
               isProcessingRef.current = true;
               setIsProcessing(true);
               try {
-                const gen = agent.runCouncilV2(topic, { convenePath: true });
+                // C2 (2026-08-06) — a human just typed this command, so NEITHER
+                // suppression applies: the S1 launch card asks what the run is
+                // for, and the post-debate surface (which holds the only two
+                // consumers of that intent lock — resolveRunKind and the
+                // planner/plan-review/post-plan-card path) must actually run.
+                // The old `convenePath: true, allowLaunchCard: true` showed the
+                // intent card and then skipped everything downstream of it, so
+                // picking "Implement — plan it, review it, then build" produced
+                // no planner, no PLAN.md, no review and no phase loop.
+                // Passing NO options is deliberate, not an omission — it is the
+                // same shape auto-council uses (src/orchestrator/tool-engine.ts).
+                const gen = agent.runCouncilV2(topic);
                 for await (const chunk of gen) {
                   // Council emitted a chunk — clear the "Waiting for next phase"
                   // inter-card heartbeat started after the last askcard answer.
@@ -4732,13 +5356,15 @@ export function useAppLogic(props: AppLogicProps) {
                   // clearInterCardHeartbeat is idempotent.
                   clearInterCardHeartbeat();
                   if (chunk.type === "content") {
-                    setMessages((prev) => {
-                      const last = prev[prev.length - 1];
-                      if (last?.type === "assistant") {
-                        return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + chunk.content }];
-                      }
-                      return [...prev, buildAssistantEntry(chunk.content ?? "")];
-                    });
+                    const cText = maybeStripCouncilContent(chunk.content ?? "");
+                    if (cText)
+                      setMessages((prev) => {
+                        const last = prev[prev.length - 1];
+                        if (last?.type === "assistant") {
+                          return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + cText }];
+                        }
+                        return [...prev, buildAssistantEntry(cText)];
+                      });
                   }
                   if (chunk.type === "council_question" && chunk.councilQuestion) {
                     const cq3 = chunk.councilQuestion;
@@ -4845,6 +5471,12 @@ export function useAppLogic(props: AppLogicProps) {
                       /* best-effort */
                     }
                   }
+                  if (chunk.type === "council_collapse") {
+                    // Debate handed off to a continuation running INSIDE this
+                    // turn — collapse the live block now so what follows is not
+                    // rendered underneath it. See collapseCouncilUi.
+                    collapseCouncilUi();
+                  }
                   if (chunk.type === "council_phase" && chunk.councilPhase) {
                     const cp3 = chunk.councilPhase;
                     setCouncilPhases((prev) => upsertPhase(prev, cp3));
@@ -4907,9 +5539,12 @@ export function useAppLogic(props: AppLogicProps) {
               } finally {
                 // Clear council ephemeral UI so the assistant message (containing
                 // synthesis output + stats) becomes the bottommost visible content.
-                // Without this, the persisted timeline hides the final result and
-                // makes the council look stuck.
-                setCouncilPhases([]);
+                // Without this, the persisted timeline AND the append-only debate
+                // block (turns/rounds/info cards) hide the final result and pin a
+                // stale debate to the sticky-bottom log, swallowing later messages.
+                // clearLiveTurnUi tears down every council ephemeral array, not
+                // just phases — matching the normal turn path's teardown.
+                clearLiveTurnUi();
                 setCouncilStatuses([]);
                 councilDoneAtRef.current.clear();
                 // Stop any orphaned inter-card heartbeat so a finished/cancelled
@@ -4954,7 +5589,9 @@ export function useAppLogic(props: AppLogicProps) {
       openWalletPicker,
       openScheduleModal,
       processMessage,
+      pushToast,
       resetToNewSession,
+      runUpdateFromUi,
       subAgents,
       model,
       messages.length,
@@ -5027,18 +5664,7 @@ export function useAppLogic(props: AppLogicProps) {
           }
           break;
         case "update":
-          setIsUpdating(true);
-          setUpdateOutput(null);
-          // Always echo into the message log — the home-screen `updateOutput`
-          // banner only renders on the splash screen, so an /update run inside an
-          // active chat would otherwise produce no visible output at all.
-          setMessages((prev) => [...prev, buildAssistantEntry("🔄 Checking for updates...")]);
-          runUpdate(startupConfig.version).then((result) => {
-            setIsUpdating(false);
-            const text = result.success ? result.output : `Update failed: ${result.output}`;
-            setUpdateOutput(text);
-            setMessages((prev) => [...prev, buildAssistantEntry(text)]);
-          });
+          runUpdateFromUi();
           break;
         case "clear":
           agent.clearHistory();
@@ -5068,7 +5694,24 @@ export function useAppLogic(props: AppLogicProps) {
           break;
         }
         default: {
-          // Dispatch to slash registry for registered commands (compact, cost, ee, route, plan, execute, discuss, expand, optimize, debug, council)
+          // `council` is routed through handleCommand — the SAME path a typed
+          // `/council` takes — instead of being handled again below. Two
+          // `__COUNCIL__` handlers used to exist in this file with DIFFERENT
+          // behaviour: the typed one drives `agent.runCouncilV2` (launch card,
+          // intent lock, debate UI wiring, post-debate/post-plan cards), while
+          // the one in this branch called the legacy `agent.runCouncilRound`
+          // generator (orchestrator.ts:~2690), which never reaches `runCouncil`
+          // at all — so picking "council" from the menu silently ran a different,
+          // gate-less council. It also parsed the topic wrong: the sentinel is
+          // `__COUNCIL__\n<rounds>\n<topic>` (src/ui/slash/council.ts:48) and
+          // that branch stripped only the first line, leaking the rounds line
+          // into the topic. Reachable in practice: with no args the handler falls
+          // back to `ctx.lastPrompt`, so it does return the sentinel.
+          if (item.id === "council") {
+            handleCommand("/council");
+            break;
+          }
+          // Dispatch to slash registry for registered commands (compact, cost, ee, route, plan, execute, discuss, expand, optimize, debug)
           dispatchSlash(item.id, [], {
             cwd: agent.getCwd(),
             tenantId: "local",
@@ -5180,31 +5823,10 @@ export function useAppLogic(props: AppLogicProps) {
                 ]);
                 return;
               }
-              if (result.startsWith("__COUNCIL__")) {
-                const topic = result.replace(/^__COUNCIL__\n/, "");
-                // No "Council convening..." placeholder — see the branch above:
-                // the content handler creates a fresh assistant entry on demand,
-                // so seeding one only produced 0s-noise + prepended the real reply.
-                setMessages((prev) => [...prev, buildUserEntry(`/council ${topic}`)]);
-                try {
-                  const gen = agent.runCouncilRound(topic);
-                  for await (const chunk of gen) {
-                    if (chunk.type === "content") {
-                      setMessages((prev) => {
-                        const last = prev[prev.length - 1];
-                        if (last?.type === "assistant") {
-                          return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + chunk.content }];
-                        }
-                        return [...prev, buildAssistantEntry(chunk.content ?? "")];
-                      });
-                    }
-                    if (chunk.type === "done") break;
-                  }
-                } catch (e: unknown) {
-                  setMessages((prev) => [...prev, buildAssistantEntry(`Council error: ${e}`)]);
-                }
-                return;
-              }
+              // No `__COUNCIL__` branch here — `council` is intercepted above and
+              // routed through handleCommand so both entry points share ONE
+              // implementation. See that comment for what the removed branch did
+              // differently (legacy runCouncilRound, wrong topic parse).
               setMessages((prev) => [...prev, buildAssistantEntry(result)]);
             })
             .catch((err: unknown) => {
@@ -5225,6 +5847,16 @@ export function useAppLogic(props: AppLogicProps) {
     [
       agent,
       handleExit,
+      // `council` from the slash menu delegates to the typed-slash handler so
+      // both entry points share one implementation — it must not close over a
+      // stale one.
+      handleCommand,
+      // useCallback-stable, so listing it costs no extra re-creation — it only
+      // stops the callback from closing over a stale one. This file is
+      // @ts-nocheck, so the lint rule is the only thing watching for that drift.
+      // (`maybeStripCouncilContent` left the list with the duplicate
+      // `__COUNCIL__` branch that used to consume it.)
+      runUpdateFromUi,
       model,
       messages,
       openMcpModal,
@@ -5232,7 +5864,6 @@ export function useAppLogic(props: AppLogicProps) {
       openWalletPicker,
       processMessage,
       resetToNewSession,
-      startupConfig.version,
       setShowSlashMenuSync,
       setModelPickerIndex,
       setModelSearchQuery,
@@ -5247,6 +5878,9 @@ export function useAppLogic(props: AppLogicProps) {
     showConnectModal ||
     showTelegramTokenModal ||
     showTelegramPairModal ||
+    needsKeyQueue.length > 0 ||
+    eeConnectVisible ||
+    lspSetupVisible ||
     showMcpModal ||
     showSandboxPicker ||
     showSessionPicker ||
@@ -5386,6 +6020,72 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
 
+      // Ctrl+T — stance matrix (design S4): where each panelist stands on each
+      // success criterion. Scoped to an ACTIVE council the same way Ctrl+E is,
+      // so the key stays available to the terminal outside a debate. Does NOT
+      // `return` when no council is running, or it would swallow the key.
+      if (key.name === "t" && key.ctrl && !key.meta && councilStatusesRef.current.length > 0) {
+        setStanceMatrixOpen((v) => !v);
+        return;
+      }
+
+      // Esc cancels steer mode BEFORE the interrupt handlers below see the key —
+      // otherwise backing out of a steer would abort the whole council, which is
+      // the opposite of what the user asked for.
+      // The interrupt listener is a SEPARATE `_internalKeyInput` subscriber, so
+      // returning here is not enough to stop it — it only skips keys marked
+      // defaultPrevented (see its comment at the onInternalKey handler).
+      if (isEscapeKey(key) && councilSteerModeRef.current) {
+        setCouncilSteerMode(false);
+        key.preventDefault?.();
+        return;
+      }
+
+      // Ctrl+S — arm steer mode (design S5). Gated on a debate that is actually
+      // listening: `getActiveCouncilRun()` is registered by the debate loop, so
+      // this can never arm a mode whose input would go nowhere. Does NOT return
+      // when no debate is live, leaving Ctrl+S free for the terminal.
+      if (key.name === "s" && key.ctrl && !key.meta && getActiveCouncilRun()) {
+        setCouncilSteerMode((v) => !v);
+        return;
+      }
+
+      // Ctrl+F — force convergence (design S5 option 2 / S4 footer). Takes effect
+      // at the NEXT round boundary: the round in flight finishes and is graded,
+      // so nothing already paid for is thrown away.
+      if (key.name === "f" && key.ctrl && !key.meta && getActiveCouncilRun()) {
+        if (requestCouncilConverge(getActiveCouncilRun())) {
+          setMessages((prev) => [
+            ...prev,
+            buildAssistantEntry(
+              "→ Convergence requested. The council finishes the round in flight, grades it, then goes straight to synthesis.",
+            ),
+          ]);
+          setTimeout(scrollToBottom, 10);
+        }
+        return;
+      }
+
+      // Ctrl+↵ — expand the newest council debate turn (design S3). The mouse
+      // route is onMouseDown on the affordance row; this is its keyboard twin.
+      // Targets the LAST turn because that is the one being read when a long
+      // body gets clipped mid-argument. Scoped to a council with turns, and does
+      // NOT return otherwise so a plain Ctrl+↵ still reaches the composer.
+      if (key.name === "return" && key.ctrl && !key.meta) {
+        const msgs = councilMessagesRef.current;
+        let last = -1;
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i]?.kind !== "synthesis") {
+            last = i;
+            break;
+          }
+        }
+        if (last >= 0) {
+          toggleTurnExpanded(last);
+          return;
+        }
+      }
+
       // Ctrl+B — toggle the right context rail (MUONROI_CONTEXT_RAIL). No-op
       // visually when the rail flag is off or the terminal is too narrow; the
       // toggle only flips intent, app.tsx gates actual rendering on width.
@@ -5398,6 +6098,38 @@ export function useAppLogic(props: AppLogicProps) {
       // back to the global view). Composer-aware: only when the prompt is empty,
       // so Ctrl+arrows still do word-nav while composing. No-op when no rounds
       // exist. Mirrors the rail's clickable round list (council-rail-rounds).
+      // While the stance matrix is open it OWNS Ctrl+←/→ (design S4: "columns
+      // scroll with ctrl+←/→, same binding as round scoping"). Checked before
+      // the round-scoping branch below, since only one of them can have the key.
+      // The matrix clamps the offset to its own visible-column count, so an
+      // over-page here is a no-op rather than a blank matrix.
+      if (
+        key.ctrl &&
+        !key.meta &&
+        stanceMatrixOpenRef.current &&
+        (key.name === "left" || key.name === "right" || key.name === "up" || key.name === "down")
+      ) {
+        const composerEmpty = !(inputRef.current?.plainText ?? "").trim();
+        if (composerEmpty) {
+          const { rows, cols } = stanceDimsRef.current;
+          const horizontal = key.name === "left" || key.name === "right";
+          const step = key.name === "right" || key.name === "down" ? 1 : -1;
+          setStanceCell((cur) => {
+            const limit = (horizontal ? cols : rows) - 1;
+            if (limit < 0) return cur;
+            const next = Math.max(0, Math.min(limit, (horizontal ? cur.col : cur.row) + step));
+            return horizontal
+              ? { row: Math.min(cur.row, Math.max(0, rows - 1)), col: next }
+              : { row: next, col: Math.min(cur.col, Math.max(0, cols - 1)) };
+          });
+          // No paging call here on purpose: the matrix scrolls its own column
+          // window to keep the selection visible (windowStart), which only moves
+          // when the cursor leaves the window. Stepping an offset in lockstep
+          // would slide the whole matrix under the user on every press.
+          return;
+        }
+      }
+
       if (key.ctrl && !key.meta && (key.name === "left" || key.name === "right")) {
         const rounds = councilRoundsRef.current;
         if (rounds.length > 0) {
@@ -6080,7 +6812,11 @@ export function useAppLogic(props: AppLogicProps) {
             setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
             clearInterCardHeartbeat();
-            agent.respondToCouncilQuestion(qid, "", pendingQuestion.question);
+            // Send the DISMISSED sentinel, not "". The post-debate switch now
+            // reads an empty submit as "take the recommended option" (that is the
+            // fix for the answer silently vanishing); an Esc must stay a no-op,
+            // and both used to be indistinguishable at the council side.
+            agent.respondToCouncilQuestion(qid, COUNCIL_ANSWER_DISMISSED, pendingQuestion.question);
             // Task 2.4 — emit askcard-cancel harness event (agent-mode only).
             try {
               agentRuntime?.emitEvent({
@@ -6230,17 +6966,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         if (key.name === "return") {
-          setIsUpdating(true);
-          setShowUpdateModal(false);
-          // Echo into the message log too — same reason as the /update command:
-          // the updateOutput banner only renders on the home/splash screen.
-          setMessages((prev) => [...prev, buildAssistantEntry("🔄 Checking for updates...")]);
-          runUpdate(startupConfig.version).then((result) => {
-            setIsUpdating(false);
-            const text = result.success ? result.output : `Update failed: ${result.output}`;
-            setUpdateOutput(text);
-            setMessages((prev) => [...prev, buildAssistantEntry(text)]);
-          });
+          runUpdateFromUi();
           return;
         }
         return;
@@ -6435,6 +7161,131 @@ export function useAppLogic(props: AppLogicProps) {
         if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
           setAgentsSearchQuery((query) => query + key.sequence);
           setAgentsModalIndex(0);
+          return;
+        }
+        return;
+      }
+      if (needsKeyQueueRef.current.length > 0) {
+        const server = needsKeyQueueRef.current[0];
+        const mode = needsKeyModeRef.current;
+        if (mode === "validating") return; // swallow input while the key probe runs
+        if (mode === "input") {
+          if (isEscapeKey(key)) {
+            setNeedsKeyMode("actions");
+            setNeedsKeyError(null);
+            return;
+          }
+          if (key.name === "return") {
+            submitNeedsKeyKey(); // internally re-entry-guarded vs the textarea's own onSubmit
+          }
+          return; // typing goes to the focused textarea
+        }
+        if (isEscapeKey(key)) {
+          advanceNeedsKeyQueue(); // snooze for this session
+          return;
+        }
+        if (key.name === "up") {
+          setNeedsKeyIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (key.name === "down") {
+          const max = server ? buildNeedsKeyActions(server).length - 1 : 0;
+          setNeedsKeyIndex((i) => Math.min(max, i + 1));
+          return;
+        }
+        if (key.name === "return") {
+          activateNeedsKeyAction();
+          return;
+        }
+        return;
+      }
+      if (eeConnectVisibleRef.current) {
+        const mode = eeConnectModeRef.current;
+        if (mode === "validating") return; // swallow input while the probe runs
+        if (mode === "input") {
+          if (isEscapeKey(key)) {
+            setEeConnectMode("actions");
+            setEeConnectError(null);
+            return;
+          }
+          if (key.name === "return") {
+            submitEeConnectToken(); // internally re-entry-guarded vs the textarea's own onSubmit
+          }
+          return; // typing goes to the focused textarea
+        }
+        if (mode === "how") {
+          if (isEscapeKey(key) || key.name === "return") {
+            setEeConnectMode("actions");
+          }
+          return;
+        }
+        if (isEscapeKey(key)) {
+          dismissEeConnectCard(true); // snooze — re-offered in a few sessions
+          return;
+        }
+        if (key.name === "up") {
+          setEeConnectIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (key.name === "down") {
+          const max = buildEeConnectActions().length - 1;
+          setEeConnectIndex((i) => Math.min(max, i + 1));
+          return;
+        }
+        if (key.name === "return") {
+          activateEeConnectAction();
+          return;
+        }
+        return;
+      }
+      if (lspSetupVisibleRef.current) {
+        // Multi-select card: this branch must consume EVERY key (including
+        // Space) so nothing falls through to the composer behind the modal.
+        const mode = lspSetupModeRef.current;
+        if (mode === "installing") return; // swallow input while installs run
+        if (mode === "result") {
+          if (isEscapeKey(key) || key.name === "return") {
+            dismissLspSetupCard(false); // setup already recorded — no snooze
+          }
+          return;
+        }
+        if (isEscapeKey(key)) {
+          dismissLspSetupCard(true); // snooze — re-offered in a few sessions
+          return;
+        }
+        // Cursor moves write the ref SYNCHRONOUSLY (not just via the deferred
+        // useEffect that mirrors state → ref). A fast Down+Space burst — a
+        // real user, and the E2E driver — otherwise reads a stale cursor in the
+        // Space branch below and toggles the wrong row, because React commits
+        // the mirror effect only after this synchronous key handler returns.
+        if (key.name === "up") {
+          const next = Math.max(0, lspSetupCursorRef.current - 1);
+          lspSetupCursorRef.current = next;
+          setLspSetupCursor(next);
+          return;
+        }
+        if (key.name === "down") {
+          const max = buildLspSetupLanguages().length - 1;
+          const next = Math.min(max, lspSetupCursorRef.current + 1);
+          lspSetupCursorRef.current = next;
+          setLspSetupCursor(next);
+          return;
+        }
+        if (key.name === "space" || key.sequence === " ") {
+          const lang = buildLspSetupLanguages()[lspSetupCursorRef.current];
+          if (lang) {
+            setLspSetupSelected((prev) => {
+              const next = toggleLspLanguage(prev, lang.id);
+              // Keep the ref in lock-step so an immediate Enter (confirm reads
+              // lspSetupSelectedRef) installs exactly the visible selection.
+              lspSetupSelectedRef.current = next;
+              return next;
+            });
+          }
+          return;
+        }
+        if (key.name === "return") {
+          confirmLspSetupSelection();
           return;
         }
         return;
@@ -7193,6 +8044,14 @@ export function useAppLogic(props: AppLogicProps) {
       showScheduleDetails,
       submitTelegramPair,
       submitTelegramToken,
+      submitNeedsKeyKey,
+      activateNeedsKeyAction,
+      advanceNeedsKeyQueue,
+      submitEeConnectToken,
+      activateEeConnectAction,
+      dismissEeConnectCard,
+      confirmLspSetupSelection,
+      dismissLspSetupCard,
       submitMcpEditor,
       submitSubagentEditor,
       planQuestions,
@@ -7267,6 +8126,18 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
 
+      // A modal card input (MCP needs-key / EE connect / API-key modal) owns
+      // paste while open. The composer's onPaste still fires here if a prior
+      // mouse click left the composer focused, so route the sanitized secret to
+      // the modal input by ref (focus-independent) instead of the chat box.
+      const modalInput = getActiveModalInput();
+      if (modalInput) {
+        event.preventDefault();
+        const pasted = sanitizeSecretInput(decodePasteBytes(event.bytes));
+        if (pasted) modalInput.insertText(pasted);
+        return;
+      }
+
       const text = decodePasteBytes(event.bytes);
       const trimmed = text.trim();
       const imageExts = /\.(png|jpe?g|gif|webp|svg|bmp|ico|tiff?)$/i;
@@ -7286,7 +8157,7 @@ export function useAppLogic(props: AppLogicProps) {
       replacePasteBlocks([...pasteBlocksRef.current, block]);
       inputRef.current?.insertText(getPasteBlockToken(block));
     },
-    [apiKeyPrompt, replacePasteBlocks],
+    [apiKeyPrompt, replacePasteBlocks, getActiveModalInput],
   );
 
   const handleSubmit = useCallback(() => {
@@ -7388,6 +8259,27 @@ export function useAppLogic(props: AppLogicProps) {
       setMessages((prev) => [...prev, buildUserEntry(message.trim())]);
       return;
     }
+    // S5 — steer mode (ctrl+s). While a debate is live, what the user types goes
+    // to the leader's NEXT round directive instead of the message queue. Checked
+    // before handleCommand so a steering instruction that happens to start with
+    // "/" is not eaten as a slash command.
+    if (councilSteerModeRef.current) {
+      const target = getActiveCouncilRun();
+      const queued = pushCouncilSteer(target, message.trim());
+      setCouncilSteerMode(false);
+      setMessages((prev) => [
+        ...prev,
+        buildAssistantEntry(
+          queued
+            ? `→ Steering queued for the council: "${message.trim()}"\n   It applies at the next round boundary — the turn in flight is never cut short.`
+            : // Say WHY nothing happened. A steer that silently evaporates is the
+              // worst outcome: the user believes the debate changed direction.
+              "Steering not queued — no debate is currently accepting instructions.",
+        ),
+      ]);
+      setTimeout(scrollToBottom, 10);
+      return;
+    }
     if (handleCommand(message)) {
       setShowSlashMenuSync(false);
       setSlashSearchQuery("");
@@ -7476,12 +8368,18 @@ export function useAppLogic(props: AppLogicProps) {
     councilCardState,
     councilInfoCards,
     councilMeta,
+    councilConvene,
     councilRounds,
     selectedRound,
     setSelectedRound,
     councilMessages,
     councilTranscriptExpanded,
     councilTodoExpanded,
+    councilSteerMode,
+    stanceMatrixOpen,
+    stanceCell,
+    expandedTurns,
+    toggleTurnExpanded,
     compactRun,
     councilPhases,
     councilPlaceholders,
@@ -7503,6 +8401,7 @@ export function useAppLogic(props: AppLogicProps) {
     handleRootMouseDown,
     handleRootMouseUp,
     handleSubmit,
+    runUpdateFromUi,
     hasMessages,
     height,
     initNewForm,
@@ -7523,6 +8422,24 @@ export function useAppLogic(props: AppLogicProps) {
     mcpLabelRef,
     mcpModalIndex,
     mcpRows,
+    needsKeyError,
+    needsKeyIndex,
+    needsKeyInputRef,
+    needsKeyMode,
+    needsKeyQueue,
+    submitNeedsKeyKey,
+    eeConnectError,
+    eeConnectIndex,
+    eeConnectInputRef,
+    eeConnectMode,
+    eeConnectVisible,
+    submitEeConnectToken,
+    lspSetupCursor,
+    lspSetupDetected,
+    lspSetupMode,
+    lspSetupSelected,
+    lspSetupStatuses,
+    lspSetupVisible,
     mcpSearchQuery,
     mcpUrlRef,
     messages,

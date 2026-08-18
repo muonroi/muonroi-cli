@@ -207,9 +207,14 @@ def test_real_catalog_provider_policies_peak_hour():
     assert ds.peak_hour.windows[1].start_hour == 14
     assert ds.peak_hour.windows[1].end_hour == 18
     assert cat.routing is not None
-    assert cat.routing.switch_provider_order == ["deepseek", "zai", "opencode-go", "xai"]
+    assert cat.routing.switch_provider_order == ["deepseek", "zai", "opencode-go", "xai", "anthropic"]
     assert cat.routing.council is not None
     assert cat.routing.council.prefer_multi_provider is True
+    # Three participants, one per allowed role. The catalog schema's role enum is
+    # exactly {implement, verify, research} (src/models/catalog-client.ts), so a
+    # fourth "leader" slot is not representable — it made loadCatalog() reject the
+    # whole document, leaving MODELS empty. anthropic is reachable through
+    # models[] + provider_policies, not through a council participant slot.
     assert len(cat.routing.council.participants or []) == 3
     roles = {p.role for p in (cat.routing.council.participants or [])}
     assert roles == {"implement", "verify", "research"}
@@ -238,7 +243,10 @@ def test_list_models_includes_provider_policies(client: TestClient, monkeypatch,
                 "input_price_per_million": 0.1,
                 "output_price_per_million": 0.2,
                 "reasoning": False,
+                "fixed_temperature": 1,
                 "description": "fast one",
+                "native_web_research": True,
+                "web_research_kind": "web-search",
             },
         ],
         "routing": {"switch_provider_order": ["acme", "globex"]},
@@ -265,6 +273,9 @@ def test_list_models_includes_provider_policies(client: TestClient, monkeypatch,
     body = r.json()
     assert body["routing"]["switch_provider_order"] == ["acme", "globex"]
     assert body["provider_policies"]["acme"]["peak_hour"]["start_hour"] == 14
+    assert body["models"][0]["fixed_temperature"] == 1
+    assert body["models"][0]["native_web_research"] is True
+    assert body["models"][0]["web_research_kind"] == "web-search"
 
 
 def test_real_catalog_zai_flash_excluded_from_tier_routing(monkeypatch):
@@ -284,3 +295,34 @@ def test_real_catalog_zai_flash_excluded_from_tier_routing(monkeypatch):
     assert g51.tier_routing is False
     v5 = next(m for m in cat.models if m.id == "glm-5v-turbo")
     assert v5.tier_routing is False
+
+
+def test_real_catalog_serves_every_stepfun_model_with_billing_and_limits(monkeypatch):
+    real = Path(__file__).resolve().parents[2] / "src" / "models" / "catalog.json"
+    monkeypatch.setenv("CATALOG_JSON_PATH", str(real))
+    catalog_main.load_catalog.cache_clear()
+    c = TestClient(catalog_main.app)
+
+    response = c.get("/api/v1/models", params={"provider": "stepfun"})
+
+    assert response.status_code == 200
+    models = response.json()["models"]
+    assert [model["id"] for model in models] == [
+        "step-3.5-flash",
+        "step-3.5-flash-2603",
+        "step-3.7-flash",
+        "stepaudio-2.5-chat",
+        "stepaudio-2.5-realtime",
+        "stepaudio-2.5-tts",
+        "stepaudio-2.5-asr",
+        "stepaudio-2.5-asr-stream",
+        "step-image-edit-2",
+    ]
+    tts = next(model for model in models if model["id"] == "stepaudio-2.5-tts")
+    assert tts["pricing_unit"] == "per_10000_characters"
+    assert tts["unit_price"] == 0.85
+    assert tts["rate_limits"] == {
+        "concurrency": 5,
+        "requests_per_minute": 10,
+        "tokens_per_minute": 5000000,
+    }

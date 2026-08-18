@@ -1,9 +1,17 @@
 /**
  * phase-a1-a3-sprint-runner.test.ts — Phase A unit tests (A1 + A3).
  *
- * A1: generate_plan no longer exits sprint-runner.
- *     After council selects generate_plan, runSprint continues with
- *     implementation → verification → judgment, emitting all 4 sprint_stage events.
+ * A1: the sprint plan lock no longer exits sprint-runner.
+ *     After council locks the sprint plan (originally reached via the
+ *     `generate_plan` action id; that id was a dead alias to `implement` and
+ *     was removed 2026-08-04 — see
+ *     docs/superpowers/specs/2026-08-04-council-intent-plan-gate-design.md —
+ *     the sprintPlanningMode auto-lock branch it named is unaffected and still
+ *     runs), runSprint continues with implementation → verification →
+ *     judgment, emitting all 4 sprint_stage events. `runCouncil` is fully
+ *     mocked below, so these tests exercise ONLY sprint-runner's own
+ *     black-box contract with whatever `runCouncil` returns — they are
+ *     agnostic to the internal action id council used to get there.
  *
  * A3: sprint-runner emits phaseDone for implementation even when
  *     processMessageFn throws (try/finally guard).
@@ -144,17 +152,17 @@ afterEach(() => {
   delete (globalThis as Record<string, unknown>).__muonroiAgentRuntime;
 });
 
-// ── A1: generate_plan stays within sprint-runner ───────────────────────────
+// ── A1: the sprint plan lock stays within sprint-runner ─────────────────────
 
-describe("A1: generate_plan no longer exits sprint-runner", () => {
-  it("after council returns synthesisText from generate_plan, sprint-runner emits all 4 phase events", async () => {
+describe("A1: the sprint plan lock no longer exits sprint-runner", () => {
+  it("after council returns synthesisText from the sprint plan lock, sprint-runner emits all 4 phase events", async () => {
     const processMessageFn = vi.fn(async function* () {
       yield { type: "content", content: "implementing..." };
     });
 
     (runCouncil as ReturnType<typeof vi.fn>).mockImplementation(async function* () {
       yield { type: "content", content: "council planning..." };
-      // Simulate council returning synthesisText from generate_plan
+      // Simulate council returning synthesisText from the sprint plan lock
       return "Sprint plan locked (3 steps):\n- [high] Setup auth\n- [high] Build API\n- [medium] Tests";
     });
 

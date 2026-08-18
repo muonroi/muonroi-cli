@@ -31,3 +31,25 @@ describe("BashTool + bash-output-cache integration", () => {
     expect(cached?.exitCode).toBe(0);
   }, 20_000);
 });
+
+describe("bashOutputNotFoundMessage — actionable recovery (session 5349b59e16bf)", () => {
+  it("redirects to the bash tool and says no runs cached when the cache is empty", async () => {
+    const { clearBashOutputCache: clear, bashOutputNotFoundMessage } = await import("./bash-output-cache.js");
+    clear();
+    const msg = bashOutputNotFoundMessage("bash-0");
+    expect(msg).toContain("No bash runs are cached yet.");
+    expect(msg).toContain("call the `bash` tool directly");
+    expect(msg).not.toContain("Cache holds up to 50 runs."); // old dead-end wording gone
+  });
+
+  it("lists the valid cached run_ids so the model can self-correct", async () => {
+    const { clearBashOutputCache: clear, recordBashRun, bashOutputNotFoundMessage } = await import(
+      "./bash-output-cache.js"
+    );
+    clear();
+    recordBashRun({ id: "bash-1", command: "git log", stdout: "x", stderr: "", exitCode: 0, durationMs: 1 });
+    recordBashRun({ id: "bash-2", command: "wc -l", stdout: "y", stderr: "", exitCode: 0, durationMs: 1 });
+    const msg = bashOutputNotFoundMessage("bash-0");
+    expect(msg).toContain("Valid cached run_ids: bash-1, bash-2.");
+  });
+});

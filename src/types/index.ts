@@ -258,10 +258,23 @@ export interface StructuredResponse {
 }
 
 export type CouncilQuestionPhase =
+  /**
+   * Design S1 — the launch configurator, shown once the panel is resolved and
+   * before the first token is spent. Reuses the askcard shell rather than
+   * adding a card component, so the keyboard wiring is the one already proven.
+   */
+  | "council-setup"
   | "clarify"
   | "preflight"
   | "plan-confirm"
   | "post-debate"
+  /**
+   * D3/Task 8 — shown after "implement" is chosen on the post-debate card, once
+   * the planner has drafted `.planning/PLAN.md` and the debate panel has
+   * reviewed it (buildPostPlanCard). Distinct from "plan-confirm", which is the
+   * older council_preflight review of the flat pre-debate ActionPlan.
+   */
+  | "post-plan"
   | "pil-interview"
   | "pil-acceptance"
   | "tool-loop-cap"
@@ -291,6 +304,20 @@ export interface CouncilQuestionData {
   phase?: CouncilQuestionPhase;
   options?: CouncilQuestionOption[];
   defaultIndex?: number;
+  /**
+   * 1-based position of this question within the round's askable set, and how
+   * many will be asked in total — rendered as a "2 / 3" counter beside the
+   * phase chip. Clarify asks up to `getMaxInterviewQuestions()` questions and a
+   * user answering the first one currently cannot tell whether they are one
+   * question from the debate or four.
+   *
+   * `questionTotal` counts only questions that will actually be PUT to the
+   * user: seed questions auto-filled from project discovery are skipped
+   * silently, so counting them would promise interactions that never arrive.
+   * Both absent → the counter is suppressed.
+   */
+  questionIndex?: number;
+  questionTotal?: number;
 }
 
 export type CouncilStatusPhase =
@@ -442,6 +469,15 @@ export interface CouncilRoundRecord {
   participants: string[];
   /** Number of debate pairs exchanged this round. */
   pairCount: number;
+  /**
+   * How many debate turns this round will produce if every pair completes —
+   * emitted by the round loop, which is the only place that knows it (each pair
+   * speaks twice, and disabled pairs are already filtered out). The UI needs a
+   * denominator for "3 of 5 turns" and cannot derive one: `participants.length`
+   * happens to match only for some panel sizes, and guessing it would put a
+   * wrong progress bar in front of a user deciding whether to wait.
+   */
+  turnsExpected?: number;
   /** True when this round is beyond the leader's original planned budget. */
   emergent: boolean;
   /** Leader-evaluated criteria met / total (absent until the round is done). */
@@ -461,6 +497,21 @@ export interface CouncilRoundRecord {
    * conduct the round. Present only when the conductor is on + criteria pinned.
    */
   directive?: string;
+  /**
+   * This round's per-criterion stance snapshot — the data behind the round
+   * receipt's "Locked this round" / "Still open" blocks. Same rows the rail and
+   * Ctrl+T matrix render, frozen at the moment this round was graded so a later
+   * round cannot rewrite what this one actually settled.
+   */
+  stanceRows?: CouncilStanceRow[];
+  /**
+   * The PREVIOUS round's aligned met-set, index-aligned to the pinned criteria.
+   * Exists solely for the consensus delta (`0/4 → 2/4 · +2`): without it the
+   * receipt can show the running total but not this round's contribution, and a
+   * round that moved nothing looks identical to one that moved everything.
+   * Absent on round 1 (nothing was met going in).
+   */
+  prevCriteriaMet?: boolean[];
 }
 
 /**
@@ -470,6 +521,53 @@ export interface CouncilRoundRecord {
  * (locals invisible to the entrypoint). The UI upsert-merges each patch into a
  * single `councilMeta` object, so any subset of fields may be present.
  */
+/**
+ * One panelist's position on a criterion, mirrored from the council layer's
+ * `StanceMark` so UI components never import council internals.
+ *
+ *   "+" supports · "-" opposes · "~" conditional · null has not spoken
+ */
+export type CouncilStanceMark = "+" | "-" | "~" | null;
+
+/**
+ * One row of the stance matrix — a success criterion plus where each panelist
+ * stands on it. Emitted per round on `council_meta` after the leader's
+ * evaluation, so the rail and the Ctrl+T matrix answer "what is actually
+ * blocking convergence" without an extra model call.
+ *
+ * Invariant: `stances` carries an entry for EVERY current panelist. A panelist
+ * who has not argued the criterion maps to `null` — the renderer prints `·`.
+ * A row the leader failed to grade arrives with every value `null` rather than
+ * being dropped, so an un-gradeable criterion can never render as agreement.
+ */
+export interface CouncilStanceRow {
+  criterion: string;
+  met: boolean;
+  /** Per-role stance, keyed by the participant role label. */
+  stances: Record<string, CouncilStanceMark>;
+  /** One-line reason the panel is split (contested rows only). */
+  split?: string;
+}
+
+/**
+ * Per-speaker run ledger entry backing the rail's panel block: how many turns a
+ * panelist has taken and what those turns cost.
+ *
+ * `usd` is REAL spend accumulated from each debate call's usage callback priced
+ * through the model catalog — not an estimate. It is 0 until that panelist's
+ * first turn settles, and stays 0 for a model with no catalog pricing (rather
+ * than inventing a number).
+ */
+export interface CouncilPanelLedgerEntry {
+  role: string;
+  /** Model that spoke for this role, when known. */
+  model?: string;
+  /** Completed turns this run. */
+  turns: number;
+  /** Accumulated real spend in USD. */
+  usd: number;
+}
+
 export interface CouncilMetaPatch {
   /** The debate topic / question under discussion (shown at the top of the rail). */
   topic?: string;
@@ -498,6 +596,19 @@ export interface CouncilMetaPatch {
    * ✓/○ against the pinned criteria. Length matches `successCriteria`.
    */
   criteriaMet?: boolean[];
+  /**
+   * Per-criterion stance rows from the latest leader evaluation — the data
+   * behind the rail's inline "who is on which side" sigils and the Ctrl+T
+   * stance matrix. Index-aligned to `successCriteria`. Replaced wholesale each
+   * round (not merged per-row), so a criterion the panel flipped on shows the
+   * CURRENT split rather than a union of every round's positions.
+   */
+  stanceRows?: CouncilStanceRow[];
+  /**
+   * Per-speaker turns + real spend. Replaced wholesale on each patch — the
+   * emitter owns the running totals, so the UI never has to accumulate.
+   */
+  panelLedger?: CouncilPanelLedgerEntry[];
 }
 
 export interface CouncilMessage {
@@ -540,6 +651,17 @@ export interface StreamChunk {
     | "council_info_card"
     | "council_meta"
     | "council_round"
+    /**
+     * The debate is over and the SAME turn continues into other work.
+     *
+     * The live council arrays (messages / info cards / rounds / phases) render
+     * as an append-only block BELOW the timestamp-sorted transcript, and are
+     * torn down only at a turn boundary. A post-debate continuation runs INSIDE
+     * the turn, so without this signal every message it produces is appended
+     * above a still-mounted council block and reads as swallowed — the user sees
+     * nothing until the turn finally ends (user report 2026-07-27).
+     */
+    | "council_collapse"
     | "done"
     | "error"
     | "reasoning"
@@ -651,7 +773,7 @@ export interface ModelInfo {
 export type AgentMode = "agent" | "plan" | "ask";
 export type SessionStatus = "active" | "completed" | "archived" | "abandoned";
 export type SessionKind = "conversation" | "rotation" | "subagent";
-export type UsageSource = "message" | "title" | "task" | "delegation" | "council" | "other";
+export type UsageSource = "message" | "title" | "task" | "delegation" | "council" | "compaction" | "vision" | "other";
 
 export interface WorkspaceInfo {
   id: string;

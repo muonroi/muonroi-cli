@@ -419,6 +419,10 @@ export async function runKeysLogin(provider: string): Promise<void> {
   console.log("A browser window will open. Complete the sign-in to continue.");
 
   const tokens = await cfg.provider.login({
+    // Plain CLI: nothing else is reading stdin, so the flow may prompt for a
+    // manually-pasted code. The TUI caller must NOT set this — see
+    // ProviderOAuth.login in ../providers/auth/types.ts.
+    allowManualCodePaste: true,
     onUserCode(codeOrUrl, url) {
       // OAuth providers may call onUserCode with either:
       //   - (authorizeUrl) — browser-redirect / loopback callback flow

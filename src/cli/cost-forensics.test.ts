@@ -69,6 +69,7 @@ function summary(events: CostForensicsRow[]): CostForensicsSummary {
     peakSingleCallInput: Math.max(0, ...events.map((e) => e.inputTokens)),
     peakSingleCallFresh: Math.max(0, ...events.map((e) => Math.max(0, e.inputTokens - e.cacheReadTokens))),
     events,
+    redundantReservedChars: 0,
     experience: null,
   };
 }

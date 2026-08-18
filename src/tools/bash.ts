@@ -1,4 +1,4 @@
-import { type ChildProcess, exec, spawn } from "child_process";
+import { type ChildProcess, spawn } from "child_process";
 import { createReadStream, createWriteStream, existsSync } from "fs";
 import { mkdtemp, rm, stat, unlink } from "fs/promises";
 import os from "os";
@@ -13,6 +13,70 @@ import { nextBashRunId, recordBashRun, stripAnsi } from "./bash-output-cache.js"
 
 const MAX_TAIL_BYTES = 8_192;
 const MAX_BACKGROUND_PROCESSES = 8;
+
+/**
+ * Grace between "we killed the tree" and giving up on the `close` event.
+ *
+ * `close` only fires once every inherited stdio handle is closed, so a
+ * grandchild that outlives the shell keeps the promise pending forever. After a
+ * tree kill the handles normally close within milliseconds; if they do not, we
+ * settle anyway rather than wedge the turn. See the timeout/abort paths below.
+ */
+const POST_KILL_SETTLE_MS = 2_000;
+
+/**
+ * Kill a process and everything it spawned.
+ *
+ * `child.kill()` signals ONLY the direct child. That is not enough here:
+ * `bash -lc "<cmd>"` re-execs itself (observed live: bash.exe 21272 → bash.exe
+ * 5024 → bun.exe 7464), so signalling the top shell leaves the real workload
+ * running AND holding the stdio handles. Session 7ec700df5589's
+ * `bun test src/providers --runInBand; bun run typecheck` survived that way for
+ * over 24 hours and burned 59,244s of CPU until it was reaped by hand with
+ * `taskkill /F /T`. `src/orchestrator/delegations.ts` already used this pattern;
+ * the foreground bash path did not.
+ */
+function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  const pid = child.pid;
+  if (typeof pid !== "number") return;
+
+  if (process.platform === "win32") {
+    try {
+      // /T = tree, /F = force. The only reliable tree kill on Windows — there is
+      // no process-group signalling to fall back on.
+      spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { windowsHide: true, stdio: "ignore" }).unref();
+      return;
+    } catch (err) {
+      console.error(
+        `[bash] taskkill tree-kill failed for pid ${pid}, falling back to child.kill: ${(err as Error)?.message}`,
+      );
+    }
+  } else {
+    // POSIX: the child is spawned `detached`, making it its own process-group
+    // leader, so a NEGATIVE pid signals the whole group — shell, its re-exec, and
+    // every grandchild. `child.kill()` alone reaches only the direct child, which
+    // CI caught on ubuntu/macos: the grandchild kept ticking (43 -> 63 writes)
+    // after the "tree kill" while the Windows job passed.
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch (err) {
+      // ESRCH: the group is already gone. Anything else (e.g. the child never
+      // became a group leader) falls through to the single-process kill below.
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "ESRCH") return;
+      console.error(
+        `[bash] process-group kill failed for pgid ${pid} (${code ?? "?"}), falling back to child.kill: ${(err as Error)?.message}`,
+      );
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch (err) {
+    // Already exited — the caller's settle path still runs, so this is benign.
+    console.error(`[bash] kill(${signal}) failed for pid ${pid}: ${(err as Error)?.message}`);
+  }
+}
 
 export interface BackgroundProcess {
   id: number;
@@ -144,85 +208,203 @@ export class BashTool {
 
       const runId = nextBashRunId();
       const startedAt = Date.now();
+      // Route through spawn + spawnInvocation (NOT exec's `{shell}` option): exec
+      // appends its OWN flag, producing `wsl.exe -c <cmd>` (invalid — wsl has no
+      // -c) and `pwsh -c` without -NoProfile. spawnInvocation gives the correct
+      // argv per shell kind (`wsl bash -lc`, pwsh `-NoProfile -Command`, `bash
+      // -lc`, cmd `/d /s /c`) — the same path the background runner already uses.
+      const { binary, args } = this.spawnInvocation(prepared.command);
+      const MAX_BUFFER = 10 * 1024 * 1024;
       return await new Promise<ToolResult>((resolve) => {
         let settled = false;
         let aborted = false;
+        let timedOut = false;
+        let maxBufferHit = false;
         let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+        let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+        let settleTimer: ReturnType<typeof setTimeout> | undefined;
+        const outChunks: string[] = [];
+        const errChunks: string[] = [];
+        let bufferedLen = 0;
 
         const finish = (result: ToolResult) => {
           if (settled) return;
           settled = true;
           if (forceKillTimer) clearTimeout(forceKillTimer);
+          if (timeoutTimer) clearTimeout(timeoutTimer);
+          if (settleTimer) clearTimeout(settleTimer);
           abortSignal?.removeEventListener("abort", onAbort);
           resolve(result);
         };
 
-        const child = exec(
-          prepared.command,
-          {
-            cwd: this.cwd,
-            timeout,
-            maxBuffer: 10 * 1024 * 1024,
-            env: { ...process.env, FORCE_COLOR: "0" },
-            ...(this.resolvedShell.binary ? { shell: this.resolvedShell.binary } : {}),
-          },
-          (err, stdoutRaw, stderrRaw) => {
-            if (aborted || abortSignal?.aborted) {
-              finish({ success: false, error: "[Cancelled]" });
-              return;
-            }
+        /**
+         * Settle a killed command WITHOUT waiting for `close`.
+         *
+         * The `close` handler is the happy path and stays authoritative — it wins
+         * whenever it fires, because `finish` is one-shot. This is the backstop
+         * for the case that actually broke production: a surviving grandchild
+         * holds the inherited stdio open, `close` never fires, and the tool would
+         * otherwise stay pending forever (session 7ec700df5589 — 24h+).
+         */
+        const finishAfterKill = (annotation: string) => {
+          if (settled) return;
+          const stdout = stripAnsi(outChunks.join(""));
+          const stderr = stripAnsi(errChunks.join(""));
+          recordBashRun({
+            id: runId,
+            command,
+            stdout,
+            stderr,
+            exitCode: 128,
+            durationMs: Date.now() - startedAt,
+          });
+          const output = (stdout + (stderr ? `\nSTDERR: ${stderr}` : "")).trim();
+          finish({
+            success: false,
+            error: output ? `${output}\n${annotation}` : `${annotation} (no output)`,
+            bashRunId: runId,
+            bashTotalChars: stdout.length + stderr.length,
+          });
+        };
 
-            const stdout = stripAnsi(stdoutRaw);
-            const stderr = stripAnsi(stderrRaw);
-            const exitCode = err && typeof err.code === "number" ? err.code : err ? 1 : 0;
-            recordBashRun({
-              id: runId,
-              command,
-              stdout,
-              stderr,
-              exitCode,
-              durationMs: Date.now() - startedAt,
-            });
-            const totalChars = stdout.length + stderr.length;
-            const output = stdout + (stderr ? `\nSTDERR: ${stderr}` : "");
-            if (err) {
-              if (output.trim()) {
-                finish({ success: false, error: output.trim(), bashRunId: runId, bashTotalChars: totalChars });
-                return;
-              }
+        const child = spawn(binary, args, {
+          cwd: this.cwd,
+          env: { ...process.env, FORCE_COLOR: "0" },
+          windowsHide: true,
+          // POSIX only: make the child its own process-group leader so
+          // killProcessTree can signal the whole group via a negative pid.
+          // Windows has no process groups here — it uses `taskkill /T` instead,
+          // and `detached` there would spawn a separate console.
+          detached: process.platform !== "win32",
+        });
+
+        // spawn failure (shell binary missing / not executable) → surface, don't hang.
+        child.on("error", (spawnErr: Error) => {
+          finish({
+            success: false,
+            error: `Command failed to start: ${spawnErr.message}`,
+            bashRunId: runId,
+            bashTotalChars: 0,
+          });
+        });
+
+        const capture = (chunks: string[], data: Buffer) => {
+          if (maxBufferHit) return;
+          const s = data.toString("utf8");
+          bufferedLen += s.length;
+          chunks.push(s);
+          if (bufferedLen > MAX_BUFFER) {
+            maxBufferHit = true;
+            killProcessTree(child, "SIGKILL");
+            // Same `close`-never-fires hazard as the timeout/abort paths.
+            settleTimer = setTimeout(
+              () => finishAfterKill(`[output exceeded ${MAX_BUFFER} bytes; process killed]`),
+              POST_KILL_SETTLE_MS,
+            );
+          }
+        };
+        child.stdout?.on("data", (d: Buffer) => capture(outChunks, d));
+        child.stderr?.on("data", (d: Buffer) => capture(errChunks, d));
+
+        if (timeout && timeout > 0) {
+          timeoutTimer = setTimeout(() => {
+            timedOut = true;
+            killProcessTree(child, "SIGTERM");
+            forceKillTimer = setTimeout(() => {
+              killProcessTree(child, "SIGKILL");
+              // Do NOT depend on `close` to settle: if anything in the tree
+              // survived holding our stdio, it never fires.
+              settleTimer = setTimeout(
+                () => finishAfterKill(`[command timed out after ${timeout}ms and was killed]`),
+                POST_KILL_SETTLE_MS,
+              );
+            }, 1_000);
+          }, timeout);
+        }
+
+        child.on("close", (code, sig) => {
+          if (aborted || abortSignal?.aborted) {
+            finish({ success: false, error: "[Cancelled]" });
+            return;
+          }
+          const stdout = stripAnsi(outChunks.join(""));
+          const stderr = stripAnsi(errChunks.join(""));
+          const signal = sig ?? undefined;
+          const exitCode = typeof code === "number" ? code : signal ? 128 : 1;
+          const failed = maxBufferHit || timedOut || signal != null || (typeof code === "number" && code !== 0);
+          recordBashRun({
+            id: runId,
+            command,
+            stdout,
+            stderr,
+            exitCode,
+            durationMs: Date.now() - startedAt,
+          });
+          const totalChars = stdout.length + stderr.length;
+          let output = stdout + (stderr ? `\nSTDERR: ${stderr}` : "");
+          if (maxBufferHit) output += `\n[output exceeded ${MAX_BUFFER} bytes — truncated and process killed]`;
+          if (failed) {
+            // Exit 141 = 128 + SIGPIPE: the pipe reader (`| head`, `| grep -q`)
+            // closed after getting what it needed. With real stdout present this
+            // is the requested answer, not a failure — a build/test that fails on
+            // its own merits never dies of SIGPIPE. Reachable via pipefail or a
+            // direct SIGPIPE death, which safety-conscious models trigger with
+            // `set -o pipefail; … | head`. Do NOT flip a genuine crash: require
+            // stdout, no timeout, no maxBuffer kill.
+            if (!timedOut && !maxBufferHit && (exitCode === 141 || signal === "SIGPIPE") && stdout.trim()) {
               finish({
-                success: false,
-                error: `Command failed: ${err.message}`,
+                success: true,
+                output: `${output.trim()}\n[exit 141 (SIGPIPE): output truncated by a pipe reader such as | head — benign]`,
                 bashRunId: runId,
                 bashTotalChars: totalChars,
               });
               return;
             }
-
+            // Every other non-zero stays a failure, but the model finally sees
+            // WHY: it can then read `[exit code 1]` on a `grep`/`diff`/`test`
+            // probe as a normal boolean answer, not a broken command, while a
+            // failing build/test (exit 1/2 + output) still reads as ✗.
+            const annotation = maxBufferHit
+              ? `[output exceeded ${MAX_BUFFER} bytes; process killed]`
+              : timedOut
+                ? `[command timed out after ${timeout}ms and was killed${signal ? ` (${signal})` : ""}]`
+                : signal
+                  ? `[terminated by signal ${signal}]`
+                  : `[exit code ${exitCode}]`;
+            if (output.trim()) {
+              finish({
+                success: false,
+                error: `${output.trim()}\n${annotation}`,
+                bashRunId: runId,
+                bashTotalChars: totalChars,
+              });
+              return;
+            }
             finish({
-              success: true,
-              output: output.trim() || "Command executed successfully (no output)",
+              success: false,
+              error: `${annotation} (no output)`,
               bashRunId: runId,
               bashTotalChars: totalChars,
             });
-          },
-        );
-
-        const onAbort = () => {
-          aborted = true;
-          try {
-            child.kill("SIGTERM");
-          } catch {
-            finish({ success: false, error: "[Cancelled]" });
             return;
           }
 
+          finish({
+            success: true,
+            output: output.trim() || "Command executed successfully (no output)",
+            bashRunId: runId,
+            bashTotalChars: totalChars,
+          });
+        });
+
+        const onAbort = () => {
+          aborted = true;
+          killProcessTree(child, "SIGTERM");
           forceKillTimer = setTimeout(() => {
-            try {
-              child.kill("SIGKILL");
-            } catch {
-              /* already exited */
-            }
+            killProcessTree(child, "SIGKILL");
+            // Same backstop as the timeout path — an abort must not be able to
+            // leave the turn waiting on a `close` that will never arrive.
+            settleTimer = setTimeout(() => finishAfterKill("[Cancelled]"), POST_KILL_SETTLE_MS);
           }, 1_000);
         };
 
@@ -433,7 +615,18 @@ export class BashTool {
   }
 
   getToolDescription(): string {
-    return "Execute a bash command. Use for find, ls, git, build tools, package managers, running tests, and any other shell command. For content search, prefer the dedicated grep tool. Set background=true for long-running processes like dev servers, watchers, or anything that should keep running while you continue working. For file read/write/edit, prefer the dedicated file tools instead.";
+    const base =
+      "Execute a bash command. Use for find, ls, git, build tools, package managers, running tests, and any other shell command. For content search, prefer the dedicated grep tool. Set background=true for long-running processes like dev servers, watchers, or anything that should keep running while you continue working. For file read/write/edit, prefer the dedicated file tools instead.";
+    // On a non-POSIX host the model must NOT emit ls/grep/head/find — they don't
+    // exist (cmd) or take different flags (PowerShell). Declare the dialect so it
+    // uses native syntax instead of failing every command.
+    const s = this.resolvedShell;
+    if (!s.isPosix) {
+      return s.kind === "cmd"
+        ? `${base} IMPORTANT: this host runs Windows cmd.exe, NOT a POSIX shell. Use cmd syntax (dir, type, findstr, where, del) — POSIX tools like ls/grep/head/find/cat are unavailable.`
+        : `${base} IMPORTANT: this host runs PowerShell, NOT a POSIX shell. Use PowerShell cmdlets (Get-ChildItem, Select-String, Select-Object -First N, Get-Content) — POSIX tools like ls -la/grep/head/find behave differently or fail.`;
+    }
+    return base;
   }
 
   getResolvedShell(): ResolvedShell {

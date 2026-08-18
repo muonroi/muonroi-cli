@@ -25,7 +25,8 @@ export type DecisionKind =
   | "post-turn-compact"
   | "router-tier"
   | "permission-override"
-  | "yolo-override";
+  | "yolo-override"
+  | "scope-gate";
 
 export interface DecisionLogEntry {
   ts: number;

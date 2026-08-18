@@ -15,7 +15,7 @@
 import { appendFileSync } from "node:fs";
 import { streamText } from "ai";
 import { getModelInfo, SWITCH_PROVIDER_ORDER } from "../models/registry.js";
-import { getProviderCapabilities } from "../providers/capabilities.js";
+import { getProviderCapabilities, mergeProviderOptions } from "../providers/capabilities.js";
 import { getConfiguredProviders, loadKeyForProvider, ProviderKeyMissingError } from "../providers/keychain.js";
 import type { ProviderFactory } from "../providers/runtime.js";
 import { createProviderFactoryAsync, resolveModelRuntime } from "../providers/runtime.js";
@@ -96,6 +96,15 @@ export interface LlmClassifyResult {
    * Layer 4 treats it as not-ecosystem (no docs nudge).
    */
   ecosystemScope: boolean | null;
+  /**
+   * Model-decided repo relevance (widened `scope`): "ecosystem" (Muonroi
+   * PLATFORM/docs), "local" (this repo's own code), or "external" (NOT about any
+   * codebase in this repo — a general/conceptual/out-of-repo question). null when
+   * the model omitted/garbled the word. Drives the external-scope gate: only a
+   * confident "external" suppresses repo grounding. `ecosystemScope` above stays
+   * derived from the same word (=== "ecosystem").
+   */
+  scopeKind: "ecosystem" | "local" | "external" | null;
   /**
    * The language the user wrote in, as a capitalized display name (e.g.
    * "Vietnamese", "Japanese"), or null when the user wrote in English / the
@@ -279,26 +288,6 @@ async function pickCrossProviderClassifyModels(
   return out;
 }
 
-/**
- * Per-namespace shallow merge of providerOptions. The base already carries
- * factory-level defaults folded into the provider namespace (e.g. OAuth
- * `store:false`); the overlay only overrides specific keys (reasoningEffort)
- * within the same namespace, so defaults survive.
- */
-function mergeProviderOptions(
-  base: Record<string, unknown> | undefined,
-  overlay: Record<string, unknown> | undefined,
-): Record<string, unknown> | undefined {
-  if (!overlay) return base;
-  if (!base) return overlay;
-  const out: Record<string, unknown> = { ...base };
-  for (const [ns, val] of Object.entries(overlay)) {
-    const baseNs = (base[ns] as Record<string, unknown> | undefined) ?? {};
-    out[ns] = { ...baseNs, ...(val as Record<string, unknown>) };
-  }
-  return out;
-}
-
 const VALID_TASK_TYPES = new Set<TaskType>([
   "refactor",
   "debug",
@@ -338,6 +327,7 @@ const KNOWN_CLASSIFY_WORDS = new Set<string>([
   "heavy",
   "ecosystem",
   "local",
+  "external",
   "clear",
   "underspecified",
 ]);
@@ -363,9 +353,10 @@ const SYSTEM_PROMPT =
   "clarity ∈ { clear | underspecified } — whether the request gives enough to proceed WITHOUT guessing:\n" +
   "- underspecified — missing information the agent would need: an unstated target/scope ('add auth' — which flow?), a vague 'make it better' with no direction, competing interpretations, or an unresolved design choice. Such a task should be clarified with the user before code.\n" +
   "- clear — well-specified enough to plan and execute directly, even if large. A fully-spelled-out migration is 'clear'. When unsure, choose 'clear' (do NOT over-ask on ordinary work).\n" +
-  "scope ∈ { ecosystem | local }:\n" +
+  "scope ∈ { ecosystem | local | external }:\n" +
   "- ecosystem — the turn is about the Muonroi PLATFORM as a whole: the building-block / .NET packages, open-core boundary, the rule engine / decision tables, NuGet packages, or platform setup/install. These are documented in an authoritative docs source.\n" +
-  "- local — EVERYTHING else, including questions about this CLI's own internals (even when they mention the word 'muonroi'). When unsure, choose local.\n" +
+  "- local — a question about THIS project's own code/repo (this CLI's internals, its files, its behaviour), even when it mentions the word 'muonroi'.\n" +
+  "- external — the turn is NOT about any codebase in this repository: a general/conceptual question, an external-world analysis, a strategy/design debate about something outside this project's code. When unsure between local and external, choose local (the safe grounding default).\n" +
   "lang — the language the user's message is written in, as ONE lowercase English word: english, vietnamese, japanese, french, etc. Use 'english' for English or when unsure.\n\n" +
   "Rules (read carefully — Phase 4 4P-2 disambiguation):\n" +
   "- debug — fix a bug, CI/build/test failure, error, exception, crash, or any 'why is X broken' question.\n" +
@@ -407,7 +398,9 @@ const SYSTEM_PROMPT =
   "- 'làm cho CLI tốt hơn' → generate,concise,task,code,heavy,local,vietnamese,underspecified (vague 'make it better', no target)\n" +
   "- 'how does the building-block rule engine work' → analyze,concise,task,answer,standard,ecosystem,english,clear\n" +
   "- 'hệ sinh thái muonroi gồm những gì' → analyze,balanced,task,answer,standard,ecosystem,vietnamese,clear\n" +
-  "- 'plan the migration to hooks' → plan,balanced,task,report,heavy,local,english,clear\n\n" +
+  "- 'plan the migration to hooks' → plan,balanced,task,report,heavy,local,english,clear\n" +
+  "- 'giải thích CAP theorem' → analyze,concise,task,answer,standard,external,vietnamese,clear\n" +
+  "- 'design a council debate about pricing strategy for a SaaS product' → plan,balanced,task,report,heavy,external,english,clear\n\n" +
   "Prompts may be Vietnamese, English, or mixed. Reply with exactly eight words separated by commas. No other text.";
 
 // Appended to SYSTEM_PROMPT on the self-repair retry (see createLlmClassifier).
@@ -445,8 +438,11 @@ function parseResponse(raw: string): LlmClassifyResult | null {
   const depthWord = parts.find((p) => VALID_DEPTHS.has(p as DepthTier));
   const depthTier: DepthTier | null = (depthWord as DepthTier | undefined) ?? null;
   // Sixth word is the scope. "ecosystem" → platform/docs-authoritative turn;
-  // anything else (incl. absent) → not ecosystem. Position-independent.
-  const scopeWord = parts.find((p) => p === "ecosystem" || p === "local");
+  // "local" → this repo's own code; "external" → not about any repo codebase.
+  // Anything else (incl. absent) → null. Position-independent.
+  const scopeWord = parts.find((p) => p === "ecosystem" || p === "local" || p === "external");
+  const scopeKind: "ecosystem" | "local" | "external" | null =
+    scopeWord === "ecosystem" || scopeWord === "local" || scopeWord === "external" ? scopeWord : null;
   const ecosystemScope: boolean | null = scopeWord ? scopeWord === "ecosystem" : null;
   // Eighth word is the clarity signal. "underspecified" → the request is missing
   // information the agent needs → earn a clarify/council pass. Anything else
@@ -471,6 +467,7 @@ function parseResponse(raw: string): LlmClassifyResult | null {
     depthTier,
     needsClarification,
     ecosystemScope,
+    scopeKind,
     replyLanguage,
   };
 }
@@ -549,14 +546,30 @@ export function createLlmClassifier(modelId: string, classifyOpts?: CreateClassi
       const dropMaxTokens = runtime.unsupportedParams?.includes("maxOutputTokens") === true;
       const maxOut = isReasoning ? REASONING_MAX_OUTPUT_TOKENS : NONREASONING_MAX_OUTPUT_TOKENS;
 
-      // Minimize reasoning cost: force the lowest effort the provider exposes.
+      // Minimize reasoning cost: force the lowest effort the provider exposes,
+      // and — for providers that force thinking on server-side with no effort
+      // knob — ask for it OFF entirely via `minimizeReasoning`. Classify output
+      // is a fixed one-line shape; CoT buys nothing and is pure latency.
+      //
+      // The old gate required `supportsReasoningEffort`, so a provider with no
+      // effort knob got no minimization at all. Live: z.ai's coding endpoint
+      // force-thinks with TTFT 10–11 s against this attempt's 8 s ceiling, so
+      // EVERY z.ai classify aborted before the first byte and the whole PIL
+      // stack was skipped on every turn (see ZaiProviderCapabilities).
+      // Deliberately NOT gated on `isReasoning`: that comes from the catalog's
+      // `reasoning` flag, and the z.ai models were all catalogued as
+      // `reasoning:false` while the coding endpoint force-thinks — so gating on
+      // it would make this fix depend on the very flag that was wrong. Asking
+      // for minimal reasoning is always right for a format-only call; providers
+      // with nothing to say return undefined and the merge is a no-op.
       let providerOptions = runtime.providerOptions;
-      if (isReasoning && runtime.modelInfo?.supportsReasoningEffort && runtime.modelInfo.provider) {
-        const lowEffort = getProviderCapabilities(runtime.modelInfo.provider).buildProviderOptions({
+      if (runtime.modelInfo?.provider) {
+        const cheapest = getProviderCapabilities(runtime.modelInfo.provider).buildProviderOptions({
           model: runtime.modelInfo,
-          reasoningEffort: "low",
+          minimizeReasoning: true,
+          ...(runtime.modelInfo.supportsReasoningEffort ? { reasoningEffort: "low" as const } : {}),
         });
-        providerOptions = mergeProviderOptions(runtime.providerOptions, lowEffort);
+        providerOptions = mergeProviderOptions(runtime.providerOptions, cheapest);
       }
 
       const controller = new AbortController();
@@ -748,7 +761,7 @@ export function createLlmClassifier(modelId: string, classifyOpts?: CreateClassi
   };
 }
 
-export type SubSessionAction = "DIRECT_ANSWER" | "ROTATE_SESSION" | "SPAWN_SUB_SESSION";
+export type SubSessionAction = "DIRECT_ANSWER" | "ROTATE_SESSION" | "SPAWN_SUB_SESSION" | "ENTER_IDEAL";
 
 export interface SubSessionRouteResult {
   action: SubSessionAction;
@@ -761,7 +774,8 @@ const ROUTER_SYSTEM_PROMPT =
   "Analyze the user's prompt and select one of the following ACTIONS:\n" +
   '- "DIRECT_ANSWER": The prompt is informational, a quick question, a code review, an explanation, greeting, or thanks. No file creation/modification, test execution, or multi-turn tool runs are needed.\n' +
   '- "ROTATE_SESSION": The user is starting a completely new topic or task unrelated to the active discussion (e.g. "let\'s switch to writing a python script", "forget the previous bug, show me how to..."). OR, if the session size (metadata) exceeds the rotation threshold and the active task is completed or the prompt starts a new focus, choose ROTATE_SESSION to prune/summarize the context.\n' +
-  '- "SPAWN_SUB_SESSION": The user wants to execute a multi-step task (e.g. "write tests for X and debug it", "refactor the storage layer", "implement feature Y", "fix all compile errors"). This requires running multiple tools (file edits, bash commands, searches).\n\n' +
+  '- "SPAWN_SUB_SESSION": The user wants to execute a multi-step task (e.g. "write tests for X and debug it", "refactor the storage layer", "implement feature Y", "fix all compile errors"). This requires running multiple tools (file edits, bash commands, searches).\n' +
+  '- "ENTER_IDEAL": The user EXPLICITLY asks to enter the product-loop / "ideal" / build mode to plan+build what was just discussed (e.g. "ok đi vào ideal mode để làm những gì đã bàn", "go into ideal mode", "let\'s start building what we discussed now", "start the /ideal build"). Choose this ONLY for an explicit request to switch INTO ideal/product-loop/build mode; a normal task request (even a big one) is still SPAWN_SUB_SESSION, and a question is still DIRECT_ANSWER.\n\n' +
   "Response format: Reply with exactly one comma-separated line containing:\n" +
   "<ACTION>,<CONFIDENCE>,<REASON>\n\n" +
   "Examples:\n" +
@@ -769,6 +783,7 @@ const ROUTER_SYSTEM_PROMPT =
   '- "ROTATE_SESSION,0.90,Complete shift to a different project/language."\n' +
   '- "ROTATE_SESSION,0.95,Session size exceeds threshold and current request starts a new task."\n' +
   '- "SPAWN_SUB_SESSION,0.98,Requires writing a test suite and fixing multiple files to get it green."\n' +
+  '- "ENTER_IDEAL,0.96,User explicitly asked to enter ideal mode to build what was discussed."\n' +
   "No other text, only the comma-separated line.";
 
 export async function classifySubSessionAction(
@@ -816,13 +831,20 @@ export async function classifySubSessionAction(
     const dropMaxTokens = runtime.unsupportedParams?.includes("maxOutputTokens") === true;
     const maxOut = isReasoning ? REASONING_MAX_OUTPUT_TOKENS : NONREASONING_MAX_OUTPUT_TOKENS;
 
+    // Same minimization as the main classifier (see the comment there): this is
+    // also a fixed-shape throwaway call, so reasoning is pure latency. Two fixes
+    // over the previous version: it no longer gates on the catalog `reasoning`
+    // flag (z.ai's was wrong), and it passes `runtime.modelInfo` — it used to
+    // pass `runtime.model` (the language model), so every field
+    // buildProviderOptions reads was undefined and the override never applied.
     let providerOptions = runtime.providerOptions;
-    if (isReasoning && runtime.modelInfo?.supportsReasoningEffort && runtime.modelInfo.provider) {
-      const lowEffort = getProviderCapabilities(runtime.modelInfo.provider).buildProviderOptions({
-        model: runtime.model,
-        reasoningEffort: "low",
+    if (runtime.modelInfo?.provider) {
+      const cheapest = getProviderCapabilities(runtime.modelInfo.provider).buildProviderOptions({
+        model: runtime.modelInfo,
+        minimizeReasoning: true,
+        ...(runtime.modelInfo.supportsReasoningEffort ? { reasoningEffort: "low" as const } : {}),
       });
-      providerOptions = mergeProviderOptions(runtime.providerOptions, lowEffort);
+      providerOptions = mergeProviderOptions(runtime.providerOptions, cheapest);
     }
 
     let promptWithContext = prompt.slice(0, 1000);
@@ -867,7 +889,12 @@ export async function classifySubSessionAction(
     const confidence = Number(parts[1].trim()) || 0.8;
     const reason = parts.slice(2).join(",").trim() || "No reason given";
 
-    if (action === "DIRECT_ANSWER" || action === "ROTATE_SESSION" || action === "SPAWN_SUB_SESSION") {
+    if (
+      action === "DIRECT_ANSWER" ||
+      action === "ROTATE_SESSION" ||
+      action === "SPAWN_SUB_SESSION" ||
+      action === "ENTER_IDEAL"
+    ) {
       return { action, confidence, reason };
     }
     return null;

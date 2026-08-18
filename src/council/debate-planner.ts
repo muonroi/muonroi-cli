@@ -9,7 +9,16 @@ import { logger } from "../utils/logger.js";
 import { type CouncilExperienceMode, getProviderStallTimeoutMs } from "../utils/settings.js";
 import { tracedGenerate } from "./llm.js";
 import { buildDebatePlanPrompt } from "./prompts.js";
-import type { ClarifiedSpec, CouncilLLM, DebatePlan, DebateStance, OutputSection, OutputShape } from "./types.js";
+import type {
+  ClarifiedSpec,
+  CouncilLLM,
+  DebatePlan,
+  DebateStance,
+  IntentKind,
+  OutputSection,
+  OutputShape,
+} from "./types.js";
+import { coerceIntentKind } from "./types.js";
 
 const FALLBACK_PLAN: DebatePlan = {
   intentSummary: "(planner unavailable — using generic stances)",
@@ -126,8 +135,8 @@ function isAnalysisTaskType(taskType?: string): boolean {
  * PIL is the authoritative intent classifier. When it says the request is
  * analysis/evaluation, the leader LLM must not be allowed to silently reshape the
  * debate into an `implementation_plan` — that shape makes the post-debate AskCard
- * default to "generate_plan" (build a plan) via pickPostDebateRecommendation,
- * which is the wrong next step for a request that only wanted an assessment.
+ * default to "implement" (build it) via pickPostDebateRecommendation, which is
+ * the wrong next step for a request that only wanted an assessment.
  *
  * The prompt already asks the leader to honor the intent (soft), but LLMs drift;
  * this coerces a drifted shape back to "evaluation" so the synthesis stays the
@@ -336,7 +345,10 @@ function sanitizeShape(raw: unknown): OutputShape | null {
     ? obj.guardrails.filter((g): g is string => typeof g === "string" && g.trim().length > 0).map((g) => g.trim())
     : [];
   return {
-    kind: typeof obj.kind === "string" && obj.kind.trim() ? obj.kind.trim() : "decision",
+    // Type-level drift guard (bugs bab91d29/5c18d1d5/12d3022b): the leader LLM may
+    // emit any string here; coerceIntentKind bounds it to IntentKind so a drifted
+    // value can never reach the post-debate continuation switch as a raw string.
+    kind: coerceIntentKind(obj.kind) as IntentKind,
     sections,
     guardrails,
   };

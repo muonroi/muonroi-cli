@@ -19,14 +19,17 @@ export {
   loadSessionChainTranscriptState,
   loadTranscript,
   loadTranscriptState,
+  markLatestPendingMessageErrored,
   markMessageCompleted,
   markMessageErrored,
   markToolCallErrored,
   persistApprovedPlan,
   persistMessageWriteAhead,
   persistToolCallWriteAhead,
+  persistToolResultWriteAhead,
   revertLatestCompaction,
   type SessionChainNode,
+  sessionUsedGsdWorkflow,
 } from "./transcript";
 export { buildEffectiveTranscript, type LoadedTranscriptState, type PersistedCompaction } from "./transcript-view";
 export { logUIInteraction, type UIInteractionSubtype } from "./ui-interaction-log.js";

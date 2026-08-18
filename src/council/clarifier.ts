@@ -2,6 +2,7 @@ import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
 import { getMcpKey } from "../mcp/mcp-keychain.js";
 import { getWebResearchModel } from "../models/registry.js";
 import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
+import { logger } from "../utils/logger.js";
 import { getCouncilLanguage } from "../utils/settings.js";
 import { pickCouncilTaskModel } from "./leader.js";
 import { tracedAsync, tracedGenerate, tracedGenerateWithFallback } from "./llm.js";
@@ -293,7 +294,10 @@ async function hasTavilyKey(): Promise<boolean> {
   try {
     const k = ((await getMcpKey("tavily")) || process.env.TAVILY_API_KEY || "").trim();
     return k.length >= 10;
-  } catch {
+  } catch (err) {
+    logger.error("mcp", `clarifier: hasTavilyKey check failed: ${(err as Error)?.message}`, {
+      stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+    });
     return (process.env.TAVILY_API_KEY ?? "").trim().length >= 10;
   }
 }
@@ -556,6 +560,12 @@ export async function* runClarification(
       detail: `${questions.length} question${questions.length === 1 ? "" : "s"}`,
     });
 
+    // How many of this round's questions will actually be PUT to the user —
+    // prefilled seeds are answered from project discovery and never rendered,
+    // so counting them would promise a card that never appears.
+    const askableTotal = questions.filter((q) => !(q.id && prefillAnswers?.has(q.id))).length;
+    let askedSoFar = 0;
+
     for (const q of questions) {
       // Skip seed questions whose dimension was proven by project discovery.
       // The auto-filled answer is recorded as a normal Q&A so synthesizeSpec
@@ -597,6 +607,8 @@ export async function* runClarification(
           options,
           isRequired: q.isRequired,
           defaultIndex,
+          questionIndex: ++askedSoFar,
+          questionTotal: askableTotal,
         },
       };
 
@@ -688,8 +700,14 @@ export function buildSpecFromTopic(topic: string, conversationContext: string): 
  *
  * We LLM-extract criteria/constraints/scope from the topic when QA is empty.
  * Falls back to the original buildSpecFromTopic if the LLM call fails.
+ *
+ * Exported (Amendment A2, 2026-08-07) so the auto-council path in
+ * council/index.ts — which sets `skipClarification: true` and never calls
+ * `synthesizeSpec` at all — can call this directly to get a real spec for the
+ * S1 launch card, instead of leaving `spec` at `buildSpecFromTopic`'s
+ * degenerate default (`successCriteria = ["Address the topic: …"]`).
  */
-async function* inferSpecFromTopicOnly(
+export async function* inferSpecFromTopicOnly(
   topic: string,
   conversationContext: string,
   leaderModelId: string,
@@ -753,8 +771,24 @@ async function* inferSpecFromTopicOnly(
         rawQA: [],
       };
     }
-  } catch {
-    // Fall through to original buildSpecFromTopic shape
+  } catch (err) {
+    // No-Silent-Catch: this is the LLM call the auto-council path (index.ts)
+    // relies on for a real spec on the S1 launch card. Log with context, then
+    // fall through to the degenerate buildSpecFromTopic shape below — a failed
+    // inference must never block or abort the run. logger.error, not
+    // console.error: a bare console.error is silently dropped whenever the
+    // TUI owns the terminal (isTuiActive(), src/utils/logger.ts) — the exact
+    // defect commit 62129f5f migrated orchestrator/*.ts away from, and this
+    // file already has the same-shape precedent at hasTavilyKey above. There
+    // is no "council" LogNamespace (see the union in utils/logger.ts); every
+    // other council-module logger.error call uses "orchestrator" for the same
+    // reason — matched here, not "mcp" (that precedent above is specific to
+    // the MCP-key lookup it wraps).
+    logger.error("orchestrator", "[council/clarifier] inferSpecFromTopicOnly failed", {
+      topic: topic.slice(0, 80),
+      error: (err as Error)?.message,
+      stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+    });
   }
   return buildSpecFromTopic(topic, conversationContext);
 }

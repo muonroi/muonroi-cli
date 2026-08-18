@@ -528,6 +528,30 @@ async function startInteractive(
   // shell never reclaims the foreground mid-restart (which corrupted the
   // terminal and dropped the user back to a broken prompt).
   const onRelaunch = (sessionId: string) => {
+    // Under the harness (agent-mode), a relaunch spawns a NEW process that
+    // cannot inherit the fd3/4 (POSIX) / named-pipe (Windows) harness transport,
+    // so it strands the MCP driver — every subsequent tui.* call returns
+    // no_driver, and the driving client sees the server go dead. Suppress the
+    // relaunch: keep THIS process + driver alive and emit a resume-request event
+    // (plus a toast) so the driving agent resumes via tui.stop →
+    // tui.start({ args: ["--session=<id>"] }). No-op teardown, no process.exit.
+    const agentRt = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent?: (e: unknown) => void }
+      | undefined;
+    if (agentRt) {
+      try {
+        agentRt.emitEvent?.({ t: "event", kind: "resume-request", sessionId, ts: Date.now() });
+        agentRt.emitEvent?.({
+          t: "event",
+          kind: "toast",
+          level: "info",
+          text: `Resume under harness: driver held. Use tui.stop then tui.start --session=${sessionId}`,
+        });
+      } catch {
+        /* best-effort — never let a telemetry failure strand the resume */
+      }
+      return;
+    }
     void agent.cleanup().finally(() => {
       restoreTerminalForHandoff();
       // Let the terminal process the restore sequences before the child takes
@@ -1012,6 +1036,23 @@ program
 
     changeDirectoryOrExit(options.directory);
 
+    // Load the env-store (~/.muonroi-cli/.env) into process.env and migrate any
+    // legacy keychain/settings keys BEFORE any key resolution. Best-effort.
+    //
+    // This MUST precede loadCatalog(): the remote catalog is authenticated with
+    // MUONROI_CATALOG_API_KEY, which lives in the env-store. Loading the store
+    // afterwards meant the fetch always went out keyless, took a 401, and fell
+    // back to the bundled static catalog — the remote catalog could not be
+    // reached no matter how the key was configured.
+    try {
+      const { loadEnvFileIntoProcess } = await import("./providers/env-store.js");
+      loadEnvFileIntoProcess();
+      const { migrateLegacyKeysToEnv } = await import("./providers/keychain.js");
+      await migrateLegacyKeysToEnv();
+    } catch (err) {
+      console.error(`[muonroi-cli] env-store init failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     // Boot model registry BEFORE any key resolution path runs —
     // detectProviderForModel consults the catalog's alias map to route model
     // ids to the correct provider. With an empty registry it falls back to a
@@ -1021,17 +1062,6 @@ program
     await loadCatalog().catch(() => {
       catalogLoadFailed = true;
     });
-
-    // Load the env-store (~/.muonroi-cli/.env) into process.env and migrate any
-    // legacy keychain/settings keys BEFORE any key resolution. Best-effort.
-    try {
-      const { loadEnvFileIntoProcess } = await import("./providers/env-store.js");
-      loadEnvFileIntoProcess();
-      const { migrateLegacyKeysToEnv } = await import("./providers/keychain.js");
-      await migrateLegacyKeysToEnv();
-    } catch (err) {
-      console.error(`[muonroi-cli] env-store init failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
 
     if (options.backgroundTaskFile) {
       await runBackgroundDelegation(options.backgroundTaskFile, options);
@@ -1076,10 +1106,35 @@ program
           const wrote = await firstRunEESetup();
           if (wrote) await loadEEAuthToken().catch(() => {});
           saveUserSettings({ eeSetupPrompted: true });
+          // Skipping is a SNOOZE, not a permanent opt-out: the in-TUI connect
+          // card re-offers after a few sessions (see src/ee/ee-connect.ts).
+          const { recordEeConnected, snoozeEeConnect } = await import("./ee/ee-connect.js");
+          if (wrote) recordEeConnected();
+          else snoozeEeConnect();
+        } else {
+          // Already prompted once (or config existed before): if EE is still
+          // unconfigured, no local brain answers, and the snooze has run out,
+          // surface the inline connect card. Fire-and-forget — publishes on the
+          // ee-connect bus (buffered until the TUI mounts), never blocks boot.
+          const { maybeOfferEeConnect } = await import("./ee/ee-connect.js");
+          void maybeOfferEeConnect().catch(() => {});
         }
       } catch (err) {
         if (process.env.MUONROI_DEBUG)
           console.error(`[muonroi-cli] EE first-run setup skipped: ${(err as Error)?.message}`);
+      }
+
+      // First-run LSP language onboarding: offer the multi-select language
+      // picker when it was never completed, isn't snoozed, and the project's
+      // detected languages aren't already covered by installed servers. Same
+      // fire-and-forget bus pattern as the EE connect nudge above — publishes
+      // on the lsp-setup bus (buffered until the TUI mounts), never blocks boot.
+      try {
+        const { maybeOfferLspSetup } = await import("./lsp/lsp-setup-onboarding.js");
+        void maybeOfferLspSetup().catch(() => {});
+      } catch (err) {
+        if (process.env.MUONROI_DEBUG)
+          console.error(`[muonroi-cli] LSP first-run setup skipped: ${(err as Error)?.message}`);
       }
     }
 
@@ -1533,7 +1588,16 @@ program
   .action(async () => {
     const { runHarnessDriver } = await import("@muonroi/agent-harness-core/mcp-server");
     const { opentuiSpawn } = await import("./mcp/opentui-spawn.js");
-    await runHarnessDriver(opentuiSpawn);
+    // Anchor entry + repo root to THIS file, not the launch cwd. A cwd-derived
+    // entry silently breaks (child dies → every tui.* call returns no_driver)
+    // whenever the MCP server is launched from outside the muonroi-cli repo
+    // (e.g. a project-scoped .mcp.json with no `cwd`, or Claude started in a
+    // sibling project). import.meta.url is this compiled src/index.ts.
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, resolve } = await import("node:path");
+    const entry = fileURLToPath(import.meta.url);
+    const repoRoot = resolve(dirname(entry), ".."); // src/index.ts → repo root
+    await runHarnessDriver(opentuiSpawn, { entry, repoRoot });
   });
 
 program

@@ -65,12 +65,22 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "review", label: "review", description: "Review recent changes", hidden: true },
   { id: "verify", label: "verify", description: "Run local verification", hidden: true },
   { id: "update", label: "update", description: "Update muonroi-cli to the latest version", hidden: true },
-  { id: "cost", label: "cost", description: "Show session cost breakdown", hidden: true },
+  {
+    id: "cost",
+    label: "cost",
+    description: "Session cost breakdown — /cost --council [id] splits a debate by phase & speaker",
+    hidden: true,
+  },
   {
     id: "ee",
     label: "ee",
     description: "Experience Engine — connect a brain (/ee config <url> [token]), stats, search",
     hidden: true,
+  },
+  {
+    id: "lsp",
+    label: "lsp",
+    description: "Language servers — /lsp setup picks & installs LSPs for your languages",
   },
   { id: "route", label: "route", description: "Show current model routing info", hidden: true },
   { id: "plan", label: "plan", description: "Show active GSD plan", hidden: true },

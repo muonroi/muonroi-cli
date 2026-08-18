@@ -9,7 +9,7 @@
 import { getDefaultEEClient } from "../ee/intercept.js";
 import type { RouteOutcome } from "../ee/types.js";
 import { getModelInfo, getModelsForProvider } from "../models/registry.js";
-import { taskTypeToRole } from "../pil/task-tier-map.js";
+import { type EETier, taskTypeToRole, taskTypeToTier } from "../pil/task-tier-map.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import { ALL_PROVIDER_IDS } from "../providers/types.js";
@@ -82,9 +82,28 @@ interface CachedRoute {
 
 const routeCache = new Map<string, CachedRoute>();
 
-function routeCacheKey(pil?: DecideOpts["pil"]): string | null {
+/**
+ * Cache key for a routing decision.
+ *
+ * MUST include the active default model + provider. They are inputs to every
+ * branch below (`resolveTierModel`/`getRoutedModelByTier` take `defaultProvider`,
+ * and the fallthrough returns `opts.defaultModel`), so a key without them
+ * replays a decision computed for a DIFFERENT active model.
+ *
+ * Session 3f998bfef7db: the user hit a provider-side 400 on gpt-5.4 and switched
+ * provider to escape it. interaction_logs then shows
+ *   id 286 @03:39:53 routing/default   default=gpt-5.4           → gpt-5.4
+ *   id 293 @03:40:23 routing/promoted  default=deepseek-v4-flash → gpt-5.4
+ *   id 392 @03:51:34 routing/promoted  default=deepseek-v4-flash → gpt-5.4
+ * all three carrying the byte-identical reason "pil:debug(0.75)" — a replayed
+ * decision, not three independent ones. The switch was silently undone and the
+ * user was sent straight back to the provider they had just abandoned.
+ * (`clearRouteCache` exists but has no production caller, so nothing else
+ * invalidated it.)
+ */
+function routeCacheKey(pil?: DecideOpts["pil"], defaultModel?: string, defaultProvider?: string): string | null {
   if (!pil?.domain && !pil?.taskType) return null;
-  return `${pil.domain ?? ""}|${pil.taskType ?? ""}|${pil.gsdPhase ?? ""}`;
+  return `${pil.domain ?? ""}|${pil.taskType ?? ""}|${pil.gsdPhase ?? ""}|${defaultModel ?? ""}|${defaultProvider ?? ""}`;
 }
 
 function getCachedRoute(key: string): RouteDecision | null {
@@ -187,6 +206,28 @@ function resolveTierModel(
     }
   }
   return undefined;
+}
+
+const TIER_ORDER: ReadonlyArray<EETier> = ["fast", "balanced", "premium"];
+
+/**
+ * Keep a PIL-derived tier from silently DROPPING below the tier of the model the
+ * user actually chose.
+ *
+ * The user's model pick is an explicit instruction; quietly serving them a
+ * cheaper tier because this turn looked like "documentation" undoes it the same
+ * way the stale route cache did (see routeCacheKey). Raising the tier for
+ * demanding work is still allowed — `applyPromotionCap` inside capCheck bounds
+ * that direction via the `routingPromoteMax` setting. There is no symmetric
+ * "demote max" setting, so the floor is the user's own model.
+ */
+function clampTierToDefault(tier: EETier, defaultModel: string): EETier {
+  const defaultTier = getModelInfo(defaultModel)?.tier as EETier | undefined;
+  if (!defaultTier) return tier;
+  const want = TIER_ORDER.indexOf(tier);
+  const floor = TIER_ORDER.indexOf(defaultTier);
+  if (want < 0 || floor < 0) return tier;
+  return want >= floor ? tier : defaultTier;
 }
 
 function applyPeakHourRoute(dec: RouteDecision): RouteDecision {
@@ -447,7 +488,7 @@ export function shouldUseRoleModel(
 }
 
 export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDecision> {
-  const cacheKey = routeCacheKey(opts.pil);
+  const cacheKey = routeCacheKey(opts.pil, opts.defaultModel, opts.defaultProvider);
   if (cacheKey) {
     const cached = getCachedRoute(cacheKey);
     if (cached) {
@@ -495,7 +536,16 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   // Step 0: PIL context override — trust local classifier when confidence is high
   // Short/ambiguous messages ("fix it", "tiếp tục") can't be classified by text alone;
   // PIL has conversation context that brain LLM doesn't.
-  const pilTier = opts.pil?.taskType as "fast" | "balanced" | "premium" | undefined;
+  //
+  // taskType is NOT a tier. It used to be cast straight to the tier union
+  // (`opts.pil.taskType as "fast" | "balanced" | "premium"`), a cast that can
+  // never hold: `matchesTier` compares against `debug`/`analyze`/`plan`/… and
+  // never matches, so `getModelByTier` returned undefined and this entire branch
+  // silently fell through to `opts.defaultModel` — a no-op that only populated
+  // the route cache. `taskTypeToTier` is the canonical map (src/pil/task-tier-map.ts),
+  // already used for the role lookup in Step -1 above.
+  const pilTaskType = opts.pil?.taskType ?? null;
+  const pilTier = pilTaskType ? clampTierToDefault(taskTypeToTier(pilTaskType), opts.defaultModel) : undefined;
   const pilConf = opts.pil?.confidence ?? 0;
   if (pilTier && pilConf >= 0.6) {
     // Use effective (non-disabled) provider when default is disabled
@@ -514,15 +564,20 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
     }
     const pilModel = tierModel?.id ?? opts.defaultModel;
     const peak = adjustPeakHourModel(pilModel);
+    // Keep BOTH the taskType and the tier it mapped to. Forensics on
+    // interaction_logs.reason must tell "classified debug" apart from "routed at
+    // balanced"; the old `pil:debug(0.75)` conflated them, which is why three
+    // replayed cache hits were indistinguishable from three fresh decisions.
+    const pilReasonBase = `pil:${pilTaskType}→${pilTier}(${pilConf.toFixed(2)})`;
     const d: RouteDecision = {
       tier: "hot",
       model: peak.modelId,
       provider: tierModel?.provider ?? peak.provider,
       reason: peak.adjusted
-        ? `${effective ? `pil:${pilTier}(${pilConf.toFixed(2)})-rerouted(disabled-default)` : `pil:${pilTier}(${pilConf.toFixed(2)})`}|${peak.reason}`
+        ? `${effective ? `${pilReasonBase}-rerouted(disabled-default)` : pilReasonBase}|${peak.reason}`
         : effective
-          ? `pil:${pilTier}(${pilConf.toFixed(2)})-rerouted(disabled-default)`
-          : `pil:${pilTier}(${pilConf.toFixed(2)})`,
+          ? `${pilReasonBase}-rerouted(disabled-default)`
+          : pilReasonBase,
       confidence: pilConf,
       source: "pil",
     };

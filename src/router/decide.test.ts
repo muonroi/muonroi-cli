@@ -248,6 +248,98 @@ describe("provider constraint with PROVIDER_INHERIT", () => {
   });
 });
 
+describe("route cache is scoped to the active model/provider", () => {
+  // Session 3f998bfef7db (2026-07-27): the user hit a provider-side 400 on
+  // gpt-5.4 and switched provider to escape it. interaction_logs then recorded
+  //   id 286 @03:39:53 routing/default   default=gpt-5.4          → gpt-5.4
+  //   id 293 @03:40:23 routing/promoted  default=deepseek-v4-flash → gpt-5.4
+  //   id 392 @03:51:34 routing/promoted  default=deepseek-v4-flash → gpt-5.4
+  // all three with the byte-identical reason "pil:debug(0.75)" — the signature
+  // of a REPLAYED decision. routeCacheKey hashed only domain|taskType|gsdPhase,
+  // so a decision computed under the old default was served after the switch and
+  // sent the user straight back to the provider they had just abandoned.
+  const pil = { domain: null, taskType: "debug", confidence: 0.75, gsdPhase: null } as DecideOpts["pil"];
+
+  beforeEach(() => {
+    globalThis.disabledProvidersList = [];
+  });
+
+  it("does not serve a decision cached under a different default model", async () => {
+    const first = await decide("tiếp tục", { ...BASE_OPTS, defaultModel: "glm-4.7", defaultProvider: "zai", pil });
+    const afterSwitch = await decide("tiếp tục nhé", {
+      ...BASE_OPTS,
+      defaultModel: "deepseek-v4-flash",
+      defaultProvider: "deepseek",
+      pil,
+    });
+
+    expect(first.model).not.toBe("deepseek-v4-flash");
+    expect(afterSwitch.model).not.toBe(first.model);
+  });
+
+  it("still caches when the model and provider are unchanged", async () => {
+    const opts = { ...BASE_OPTS, defaultModel: "glm-4.7", defaultProvider: "zai", pil };
+    const a = await decide("tiếp tục", opts);
+    const b = await decide("tiếp tục nhé", opts);
+
+    expect(b).toEqual(a);
+  });
+});
+
+describe("PIL step-0 uses the real taskType→tier map", () => {
+  // `pilTier` was `opts.pil.taskType as "fast" | "balanced" | "premium"` — a cast
+  // that can never hold: taskType values are debug/analyze/plan/…, so
+  // matchesTier() never matched, getModelByTier returned undefined, and the whole
+  // "PIL context override" branch fell through to opts.defaultModel. It only ever
+  // populated the route cache. taskTypeToTier (src/pil/task-tier-map.ts) is the
+  // canonical map — decide() already uses taskTypeToRole from the same module.
+  const pilFor = (taskType: string) =>
+    ({ domain: null, taskType, confidence: 0.75, gsdPhase: null }) as DecideOpts["pil"];
+
+  beforeEach(() => {
+    globalThis.disabledProvidersList = [];
+  });
+
+  it("names the RESOLVED tier in the reason, not the raw taskType", async () => {
+    const d = await decide("fix the failing test", {
+      ...BASE_OPTS,
+      defaultModel: "glm-4.7",
+      defaultProvider: "zai",
+      pil: pilFor("debug"),
+    });
+
+    expect(d.reason).toContain("balanced");
+    expect(d.reason).not.toMatch(/pil:debug\(/);
+  });
+
+  it("promotes a premium-tier task above the user's balanced default", async () => {
+    (globalThis as { routingPromoteMax?: string }).routingPromoteMax = "premium";
+
+    const d = await decide("design the billing ledger schema", {
+      ...BASE_OPTS,
+      defaultModel: "glm-4.7",
+      defaultProvider: "zai",
+      pil: pilFor("plan"),
+    });
+
+    expect(d.model).toBe("glm-5.2");
+  });
+
+  it("never silently DOWNGRADES below the tier the user's chosen model sits at", async () => {
+    // documentation maps to "fast"; the user deliberately picked a balanced
+    // model. Undoing that pick is the same class of defect as the route-cache
+    // replay above — PIL may raise the tier, never quietly lower it.
+    const d = await decide("viết docs cho module này", {
+      ...BASE_OPTS,
+      defaultModel: "glm-4.7",
+      defaultProvider: "zai",
+      pil: pilFor("documentation"),
+    });
+
+    expect(d.model).toBe("glm-4.7");
+  });
+});
+
 describe("routerStore", () => {
   it("exposes subscribe/getState/setState and emits on changes", () => {
     const changes: any[] = [];

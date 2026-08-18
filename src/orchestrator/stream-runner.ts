@@ -49,7 +49,6 @@ import { getVisionGuidanceForTextOnly } from "../providers/mcp-vision-bridge.js"
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
   buildTurnProviderOptions,
-  factoryForModel,
   type ResolvedModelRuntime,
   requireRuntimeProvider,
   resolveModelRuntime,
@@ -60,9 +59,11 @@ import type { ProviderId } from "../providers/types.js";
 import { needsVisionProxy } from "../providers/vision-proxy.js";
 import { wireDebug } from "../providers/wire-debug.js";
 import { statusBarStore } from "../state/status-bar-store.js";
+import { logInteraction } from "../storage/interaction-log.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import type { AgentMode, TaskRequest, ToolResult, VerifyRecipe } from "../types/index";
+import { logger } from "../utils/logger.js";
 import { openUrl } from "../utils/open-url.js";
 import {
   getCurrentShellSettings,
@@ -78,6 +79,7 @@ import {
 import { resolveShell } from "../utils/shell.js";
 import { prepareVerifySandbox } from "../verify/entrypoint";
 import { asNumber } from "./batch-utils";
+import { buildConvergenceMirror } from "./convergence-mirror.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
 import {
@@ -105,6 +107,8 @@ import { recordCompaction, recordElision } from "./session-experience.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { applyAnthropicPromptCaching, compactSubAgentMessages } from "./subagent-compactor.js";
+import { buildSubAgentStepData, isSubAgentStepMeterEnabled } from "./subagent-step-meter.js";
+import { foldMidConversationSystemMessages } from "./system-message-fold.js";
 import { combineAbortSignals, firstLine, formatSubagentActivity } from "./tool-utils";
 
 /**
@@ -391,18 +395,18 @@ export class StreamRunner {
     if (childModelId !== topModelId) {
       statusBarStore.setState({ routed_from: topModelId, model: childModelId });
     }
-    // The vision branch must build its model from the CHILD model's own factory.
-    // It previously called the PARENT session's factory directly, so a sub-agent
-    // routed to another provider had its id POSTed to the parent's endpoint.
-    const childRuntime = isVision
-      ? (() => {
-          const childFactory = factoryForModel(childModelId);
-          return {
-            ...resolveModelRuntime(childModelId),
-            model: childFactory.responses?.(childModelId) ?? childFactory(childModelId),
-          };
-        })()
-      : resolveModelRuntime(childModelId);
+    // Bước 2 / H1: sub-agents (vision included) resolve through the factory like
+    // every other call. The old vision branch spread the resolved runtime then
+    // REPLACED `model` with a freshly-built `factoryForModel(...)` handle — the
+    // one path that bypassed the metered gate (an unwrapped, unmetered model).
+    // `resolveModelRuntime` already derives the factory from the CHILD model's
+    // own provider (the original cross-wire bug the override guarded against is
+    // fixed there) AND picks responses-vs-chat via the provider strategy, so the
+    // override is now pure bypass. Drop it; stamp the stage for attribution (H8).
+    const childRuntime = resolveModelRuntime(childModelId, {
+      stage: isVision ? "vision" : "subagent",
+      sessionId: this.deps.getSessionId(),
+    });
     const taskCaps = getProviderCapabilities(requireRuntimeProvider(childRuntime));
     if (isComputer && !taskCaps.supportsClientTools(childRuntime.modelInfo)) {
       return {
@@ -650,6 +654,16 @@ export class StreamRunner {
         },
       },
     );
+    // Per-step cache instrumentation: the aggregate `task` usage event only
+    // reports one cache-hit % for the whole sub-agent run, so an 8% aggregate
+    // can't be attributed to a step (is the growing prefix uncacheable, or does
+    // one late step dominate?). Record each step's input vs cache_read so the
+    // cache curve across the tool loop is falsifiable — the measure-first rule
+    // before any mid-loop-compaction / cache-key change. Opt out with
+    // MUONROI_SUBAGENT_STEP_METER=0 (default on, fail-open, one tiny row/step).
+    let subStepIndex = 0;
+    const stepMeterEnabled = isSubAgentStepMeterEnabled();
+
     const result = streamText({
       model: childRuntime.model,
       system: childSystem,
@@ -760,17 +774,90 @@ export class StreamRunner {
           }
           return compacted;
         })();
+        // Convergence mirror — sub-agent path. Same primitive as the top-level
+        // tool loop (tool-engine.ts prepareStep): reflect this delegation's own
+        // tool-call history so the sub-agent can spot circling without
+        // converging. Agent-first — observes + suggests, never blocks.
+        const _subMirrorNote = buildConvergenceMirror(messages, { stepNumber });
+        const finalMessagesWithMirror = _subMirrorNote
+          ? attachReminderToMessages(finalMessages, _subMirrorNote)
+          : finalMessages;
 
         if (childRuntime.modelId.startsWith("claude")) {
-          return { messages: applyAnthropicPromptCaching(finalMessages, childRuntime.modelId) };
+          return {
+            messages: applyAnthropicPromptCaching(
+              foldMidConversationSystemMessages(finalMessagesWithMirror),
+              childRuntime.modelId,
+            ),
+          };
         }
 
-        if (compacted === stripped && stripped === messages) return undefined;
-        return { messages: finalMessages };
+        if (compacted === stripped && stripped === messages && !_subMirrorNote) return undefined;
+        return { messages: finalMessagesWithMirror };
       },
       ...resolveTemperatureParam(childRuntime, isExplore ? 0.2 : 0.5),
       ...(childDropMaxOutput ? {} : { maxOutputTokens: Math.min(this.deps.getMaxTokens(), 8_192) }),
       ...(childProviderOptions ? { providerOptions: childProviderOptions } : {}),
+      onStepFinish: ({ usage, toolCalls, toolResults }) => {
+        const idx = subStepIndex++;
+        if (!stepMeterEnabled) return;
+        const sid = this.deps.getSessionId();
+        if (!sid) return; // nowhere to attribute
+        try {
+          const data = buildSubAgentStepData(usage, { stepIndex: idx, callId: subCallId });
+          logInteraction(sid, "subagent_step", {
+            eventSubtype: prepared.agentKey,
+            model: childRuntime.modelId,
+            inputTokens: data.inputTokens,
+            outputTokens: data.outputTokens,
+            data: { ...data },
+          });
+          // WHAT the sub-agent actually did — previously invisible. Sub-agent
+          // steps wrote a token meter and nothing else, so the delegation that
+          // dominates a session's cost (72% of input tokens in session
+          // 811336618ee0) left no record of which files it read or which
+          // searches it ran. Same event types as the top-level tool loop, so
+          // existing forensics queries pick these up unchanged; `subAgent` +
+          // `callId` distinguish them from parent-turn rows.
+          for (const tc of toolCalls ?? []) {
+            const call = tc as { toolCallId?: string; toolName?: string; input?: unknown };
+            logInteraction(sid, "tool_call", {
+              eventSubtype: call.toolName ?? "unknown",
+              data: {
+                toolCallId: call.toolCallId,
+                argsPreview: JSON.stringify(call.input ?? {}).slice(0, 200),
+                subAgent: prepared.agentKey,
+                callId: subCallId,
+                stepIndex: idx,
+              },
+            });
+          }
+          for (const tr of toolResults ?? []) {
+            const res = tr as { toolCallId?: string; toolName?: string; output?: unknown };
+            const rendered = typeof res.output === "string" ? res.output : JSON.stringify(res.output ?? null);
+            logInteraction(sid, "tool_result", {
+              eventSubtype: res.toolName ?? "unknown",
+              data: {
+                toolCallId: res.toolCallId,
+                outputChars: rendered.length,
+                outputPreview: rendered.slice(0, 200),
+                subAgent: prepared.agentKey,
+                callId: subCallId,
+                stepIndex: idx,
+              },
+            });
+          }
+        } catch (err) {
+          // Fail-open — instrumentation must never break a sub-agent step — but
+          // never silent: a logging path that dies quietly is how this blind spot
+          // would come back after being fixed.
+          logger.error("orchestrator", "[subagent-step] interaction logging failed", {
+            agent: prepared.agentKey,
+            stepIndex: idx,
+            error: (err as Error)?.message,
+          });
+        }
+      },
       onFinish: ({ totalUsage, finishReason }) => {
         const tu = totalUsage as Record<string, unknown>;
         const details = tu.inputTokenDetails as Record<string, unknown> | undefined;

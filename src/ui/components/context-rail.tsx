@@ -8,11 +8,38 @@ export interface ContextRailRow {
   value: string;
 }
 
+/**
+ * Stage-aware block rendered below the fixed identity rows, separated by a
+ * "── SPRINT 1/4 · impl ──" divider. Content swaps with the current sprint
+ * stage (planning / implementation / verification), keeping the rail compact:
+ * rows irrelevant to the active stage are dropped, not truncated.
+ */
+export interface ContextRailStage {
+  /** Divider title, e.g. "SPRINT 1/4 · impl". */
+  title: string;
+  rows: ContextRailRow[];
+}
+
 export interface ContextRailProps {
   /** Fixed column width of the rail (app.tsx decides based on terminal size). */
   width: number;
   /** Metadata rows (session id, mode, leader, panel, budget, …). */
   rows: ContextRailRow[];
+  /** Optional stage block (active /ideal sprint stage). */
+  stage?: ContextRailStage | null;
+  /**
+   * Design 2A — the council scoreboard body. When supplied it REPLACES the flat
+   * metadata rows: the static ones are folded into the scoreboard's own
+   * collapsed `▸ Run config` section, so rendering both would duplicate them.
+   * `rows` is still mirrored into the harness `props` regardless.
+   */
+  scoreboardNode?: ReactNode;
+  /**
+   * Design 2C — the "While you were away" diff band, above everything else while
+   * the transcript is scroll-locked away. Independent of `scoreboardNode`, so a
+   * council whose scoreboard has no data yet still reports what changed.
+   */
+  watchlistNode?: ReactNode;
   /**
    * Rich content rendered below the metadata rows — info cards (Clarified Spec,
    * Discussion Brief, Debate Plan), phase timeline, product-status. Wired by
@@ -28,7 +55,18 @@ export interface ContextRailProps {
  * re-scopes to a selected round (that hides the overview and recreates the
  * "empty rounds" problem). app.tsx gates visibility on width ≥ 100 and Ctrl+B.
  */
-export function ContextRail({ width, rows, children }: ContextRailProps) {
+export function ContextRail({ width, rows, stage, children, scoreboardNode, watchlistNode }: ContextRailProps) {
+  // Harness props cover identity + stage rows combined so existing assertions
+  // on labels/values keep seeing every visible row.
+  const allRows = stage ? [...rows, ...stage.rows] : rows;
+  // Fit the divider to the rail's inner width (border+padding eat 3 cols).
+  const inner = Math.max(10, width - 3);
+  const dividerBase = stage ? `── ${stage.title} ` : "";
+  const divider = stage
+    ? dividerBase.length >= inner
+      ? dividerBase.slice(0, inner)
+      : dividerBase.padEnd(inner, "─")
+    : "";
   return (
     <Semantic
       id="context-rail"
@@ -37,9 +75,10 @@ export function ContextRail({ width, rows, children }: ContextRailProps) {
       // labels/values exposed for harness assertions (rail rows are plain <text>,
       // not semantic nodes, so they don't otherwise show in the snapshot tree).
       props={{
-        rowCount: rows.length,
-        labels: rows.map((r) => r.label).join(","),
-        values: rows.map((r) => r.value).join(" | "),
+        rowCount: allRows.length,
+        labels: allRows.map((r) => r.label).join(","),
+        values: allRows.map((r) => r.value).join(" | "),
+        stageTitle: stage?.title ?? "",
       }}
     >
       <box
@@ -55,7 +94,13 @@ export function ContextRail({ width, rows, children }: ContextRailProps) {
         <text fg={dark.textMuted} attributes={1}>
           Context
         </text>
-        {rows.length > 0 && (
+        {watchlistNode}
+        {scoreboardNode ? (
+          <box flexDirection="column" flexShrink={0}>
+            {scoreboardNode}
+          </box>
+        ) : null}
+        {!scoreboardNode && rows.length > 0 && (
           <box flexDirection="column" flexShrink={0}>
             {rows.map((r, idx) => (
               // Index key: list-style rows (e.g. per-criterion outcome lines) may
@@ -68,6 +113,21 @@ export function ContextRail({ width, rows, children }: ContextRailProps) {
               // so "Topic: rest…" rendered as "Topicrest…" and "Progress: Round…"
               // lost its space. A single text flow keeps the "Label: " prefix.
               <box key={idx} flexDirection="column">
+                <text>
+                  {r.label ? <span style={{ fg: dark.textMuted }}>{`${r.label}: `}</span> : null}
+                  {r.value}
+                </text>
+              </box>
+            ))}
+          </box>
+        )}
+        {stage && (
+          <box flexDirection="column" flexShrink={0}>
+            <text fg={dark.councilLeaderBorder}>{divider}</text>
+            {stage.rows.map((r, idx) => (
+              // Same single-<text> rule as above: keep any "Label: " prefix in
+              // one text flow so wrapping can't trim the separator.
+              <box key={`stage-${idx}`} flexDirection="column">
                 <text>
                   {r.label ? <span style={{ fg: dark.textMuted }}>{`${r.label}: `}</span> : null}
                   {r.value}

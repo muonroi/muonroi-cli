@@ -3,10 +3,12 @@ import type { CouncilQuestionData, CouncilQuestionOption, CouncilQuestionPhase }
 import type { Theme } from "../theme.js";
 
 const PHASE_LABEL: Record<CouncilQuestionPhase, string> = {
+  "council-setup": "Council setup",
   clarify: "Quick question",
   preflight: "Pre-flight check",
   "plan-confirm": "Plan review",
   "post-debate": "Debate wrap-up",
+  "post-plan": "Reviewed plan",
   "pil-interview": "Understanding your idea",
   "pil-acceptance": "Confirm the goal",
   "tool-loop-cap": "Tool-loop checkpoint",
@@ -49,6 +51,7 @@ export function CouncilQuestionCard({ question, theme: t, state, freetextInputWi
   const recommendedIdx = hasRecommendation ? clampIndex(question.defaultIndex!, options.length) : -1;
   const freetext = state.freetext;
   const labelText = PHASE_LABEL[question.phase ?? "clarify"];
+  const counter = formatQuestionCounter(question);
 
   return (
     <Semantic id="askcard" role="dialog" name={question.question} isModal>
@@ -62,8 +65,12 @@ export function CouncilQuestionCard({ question, theme: t, state, freetextInputWi
         borderStyle="single"
         borderColor={t.borderActive}
       >
-        <box paddingBottom={1}>
+        <box paddingBottom={1} flexDirection="row">
           <text bg={t.accent} fg={t.background}>{` □ ${labelText} `}</text>
+          {/* "2 / 3" — how far through the round's questions this card is.
+              Suppressed unless BOTH numbers are present and sane, so an older
+              emitter can never render "2 / 0" or a bare "2 /". */}
+          {counter ? <text fg={t.textDim}>{`  ${counter}`}</text> : null}
         </box>
         <box paddingBottom={1}>
           <text fg={t.text} attributes={1}>
@@ -125,6 +132,20 @@ export function CouncilQuestionCard({ question, theme: t, state, freetextInputWi
       </box>
     </Semantic>
   );
+}
+
+/**
+ * "n / m" progress counter for the phase chip, or "" when it would be nonsense.
+ *
+ * Returns "" for a missing/zero total, an index outside 1..total, or a
+ * single-question round (a "1 / 1" counter is noise, not information).
+ */
+export function formatQuestionCounter(q: Pick<CouncilQuestionData, "questionIndex" | "questionTotal">): string {
+  const { questionIndex: i, questionTotal: total } = q;
+  if (typeof i !== "number" || typeof total !== "number") return "";
+  if (!Number.isFinite(i) || !Number.isFinite(total)) return "";
+  if (total <= 1 || i < 1 || i > total) return "";
+  return `${i} / ${total}`;
 }
 
 export function clampIndex(i: number, len: number): number {

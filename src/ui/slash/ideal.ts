@@ -29,6 +29,7 @@
 import * as path from "node:path";
 import { Command, InvalidArgumentError } from "commander";
 import { getActivePointer, listMilestones, listPhases, migrateLegacyRuns } from "../../flow/hierarchy.js";
+import { IDEAL_LOOP_DEFAULTS } from "../../product-loop/loop-defaults.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 
@@ -73,11 +74,9 @@ export interface IdealParseResult {
   warnings: string[];
 }
 
-const DEFAULTS: IdealFlags = {
-  maxCost: 50,
-  maxSprints: 8,
-  doneThreshold: 0.9,
-};
+// Budget defaults shared with the programmatic entry points (orchestrator
+// ENTER_IDEAL route + enter_ideal tool) so the three paths cannot drift.
+const DEFAULTS: IdealFlags = { ...IDEAL_LOOP_DEFAULTS };
 
 const HELP_TEXT = [
   "/ideal — Product Ideal Loop",

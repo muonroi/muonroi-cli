@@ -60,6 +60,35 @@ export const DEFAULT_PATTERN_THRESHOLD = 3;
 // step type is generic over toolset and we don't want to fight types here.
 interface MinimalStep {
   toolCalls?: ReadonlyArray<{ toolName?: string; input?: unknown; args?: unknown }>;
+  toolResults?: ReadonlyArray<{ toolName?: string; output?: unknown; result?: unknown }>;
+}
+
+/** Best-effort text of a tool result across SDK output shapes. */
+function toolResultText(r: { output?: unknown; result?: unknown }): string {
+  const o = r.output ?? r.result;
+  if (typeof o === "string") return o;
+  if (o && typeof o === "object") {
+    const v = (o as { value?: unknown }).value;
+    if (typeof v === "string") return v;
+  }
+  return "";
+}
+
+/**
+ * True when the step ran tools and EVERY result is an in-house `ERROR:` payload.
+ * This catches the "varying-args failure loop" that the args-hash detector below
+ * misses: a model that repeatedly calls one tool with a different (wrong)
+ * argument each time — e.g. bash_output_get with a guessed run_id — produces a
+ * distinct args hash every step, so it never trips the dup detector, yet every
+ * result is the same class of error. Session 5349b59e16bf burned ~800k input
+ * tokens this way (12× bash_output_get, all "No cached bash run"). Keys on our
+ * uppercase `ERROR:` convention only, so a failing test/build (not ERROR-prefixed)
+ * is NOT treated as a loop.
+ */
+function stepAllErrors(step: MinimalStep | undefined): boolean {
+  const rs = step?.toolResults;
+  if (!rs?.length) return false;
+  return rs.every((r) => /^\s*ERROR\b/i.test(toolResultText(r)));
 }
 
 /**
@@ -77,6 +106,17 @@ interface MinimalStep {
  */
 function hashStep(step: MinimalStep | undefined): { hash: string; toolName: string } | null {
   if (!step?.toolCalls?.length) return null;
+  // All-error step → collapse to a per-tool error signature so repeated failures
+  // with DIFFERENT (guessed) args still converge to one hash and trip the dup
+  // detector. Productive steps (any non-ERROR result) fall through to the
+  // args-hash path below and are never flagged by this.
+  if (stepAllErrors(step)) {
+    const toolName =
+      step.toolCalls.find((tc) => tc?.toolName)?.toolName ??
+      step.toolResults?.find((r) => r?.toolName)?.toolName ??
+      "unknown";
+    return { hash: `err:${toolName}`, toolName };
+  }
   const parts: string[] = [];
   for (const tc of step.toolCalls) {
     if (!tc?.toolName) continue;

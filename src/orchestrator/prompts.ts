@@ -235,7 +235,13 @@ function buildEnvironmentBlock(): string {
 
 const ENVIRONMENT = buildEnvironmentBlock();
 
-const MODE_PROMPTS: Record<AgentMode, string> = {
+/**
+ * Exported for the Explore-prompt invariant test: the read-only rule for
+ * read-only sub-agents lives in `ask`'s BEHAVIOR block, and `stripToolsSection`
+ * deletes TOOLS for every non-anthropic provider — so WHERE the rule sits is
+ * itself load-bearing and needs a direct assertion.
+ */
+export const MODE_PROMPTS: Record<AgentMode, string> = {
   agent: `You are muonroi-cli in Agent mode — a powerful AI coding agent. You execute tasks directly using tools.
 
 ${ENVIRONMENT}
@@ -346,6 +352,7 @@ TOKEN BUDGET:
 WORKFLOW RULES:
 - RESEARCH FIRST: Always prioritize research before proposing edits. DeepSeek and other models have knowledge cutoffs; do not assume you know the exact codebase structure or latest external libraries. Use 'grep', 'lsp', and 'read_file' to search the local codebase. Use MCP tools (like web search or documentation readers) to research external knowledge, APIs, or libraries. Use 'delegate' for deep background research. Read before you write.
 - CLARIFY GRAY AREAS: If the user's request is ambiguous or leaves critical design decisions unspecified, STOP and ask the user for clarification before writing code. Do not hallucinate requirements.
+- EXPLORE STALL: If you've made several exploratory tool calls (grep/read_file) in this turn without a clear next action emerging — especially when the per-step \`[step N mirror]\` note reports "Convergence: LOW" — pause and call \`ask_user\` with one focused question rather than continuing to speculate. One good question beats five more guesses.
 - PRIORITIZE RECENT CONTEXT OVER HISTORY: When receiving short, ambiguous, or general continuation prompts from the user (such as "implement nhé", "tiếp tục", "go ahead", "tiếp tục nhé"), ALWAYS prioritize the most recently discussed design decisions, proposals, or topics from the immediate preceding turn(s). Do not regress or default back to earlier, older, or already completed tasks/topics that dominated the earlier parts of the session.
 - BATCH ALL TOOL CALLS — HARD RULE: You MUST combine every independent tool call (read_file, grep, bash, etc.) you know you need into ONE parallel batch in your FIRST tool turn. Do NOT spread them across sequential rounds. Each extra LLM round re-sends the full ~17K system prompt + accumulated context, costing $0.003-$0.006 and inflating input 3-5x for NO new signal. If your first batch cannot cover all the reads/exploration needed, use delegate (explore) instead — do NOT scatter reads across 3+ rounds.
 - MAX 2 LLM ROUND TRIPS per user message: round 1 = batch all reads/exploration; round 2 = follow-up only if a result from round 1 genuinely requires a NEW read you could not have anticipated. If you need round 3, you violated the batching rule — stop and use delegate (explore) instead.
@@ -619,7 +626,9 @@ export function buildSystemPromptParts(
     ? `\n\n[Flow State Resume]\nThe following is context from your previous work session. Use it to continue seamlessly:\n${resumeDigest}\n`
     : "";
 
-  const dynamicSuffix = `${planSection}${resumeSection}\n\nCurrent working directory: ${cwd}`;
+  const currentDateTime = new Date();
+  const dateTimeSection = `- Current date/time (UTC): ${currentDateTime.toISOString()}\n- Current working directory: ${cwd}`;
+  const dynamicSuffix = `${planSection}${resumeSection}\n\n${dateTimeSection}`;
 
   return { staticPrefix, dynamicSuffix };
 }
@@ -688,7 +697,8 @@ export function buildSubagentPrompt(
 
   const rules = isExplore
     ? [
-        "Do not create, modify, or delete files.",
+        // Read-only is enforced by MODE_PROMPTS["ask"] ("NEVER create, modify, or
+        // delete files") appended via buildSystemPrompt below — no local duplicate.
         "Prefer `read_file` and search commands over broad shell exploration.",
         // RETURN CONTRACT — the parent only ingests your FINAL message (capped at
         // ~32K, head+tail), never your tool output. Make that message a tight

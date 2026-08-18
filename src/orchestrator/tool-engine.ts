@@ -50,7 +50,7 @@
 //   - O1 (providerOptions shape forensics)  — extractProviderOptionsShape
 //   - reasoning-strip (provider quirk)       — turnCaps.sanitizeHistory
 
-import { generateText, type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
+import { type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
 import { getEffectiveCouncilRoleCount } from "../council/leader.js";
 import { recordArtifact } from "../ee/artifact-cache.js";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
@@ -74,6 +74,7 @@ import type {
   UserPromptSubmitHookInput,
 } from "../hooks/types";
 import { acquireMcpTools } from "../mcp/client-pool";
+import { publishNeedsKey } from "../mcp/needs-key-bus";
 import { dropRedundantFsMcpTools, filterMcpServersByMessage } from "../mcp/smart-filter";
 import { getModelInfo, isReasoningModel } from "../models/registry.js";
 import {
@@ -93,7 +94,7 @@ import {
   runPipeline,
   shouldHaltOnResponseTool,
 } from "../pil/index.js";
-import { isMetaAnalysisPrompt, isSprintPlanExecution } from "../pil/layer6-output.js";
+import { isMetaAnalysisPrompt, isPlanExecution } from "../pil/layer6-output.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
 import { mentionsEcosystemScope } from "../playbook/directives.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
@@ -104,6 +105,7 @@ import {
   listCachedImages,
   scrubImagePayloadsInMessages,
 } from "../providers/mcp-vision-bridge.js";
+import { InputCeilingExceededError } from "../providers/model-gate";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
   buildTurnProviderOptions,
@@ -114,6 +116,7 @@ import {
   resolveTemperatureParam,
   shouldDropParam,
 } from "../providers/runtime.js";
+import { generateTextStreamed } from "../providers/streamed-generate.js";
 import type { ProviderId } from "../providers/types.js";
 import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
 import { wireDebug } from "../providers/wire-debug.js";
@@ -129,6 +132,7 @@ import {
   markToolCallErrored,
   persistMessageWriteAhead,
   persistToolCallWriteAhead,
+  persistToolResultWriteAhead,
   type SessionStore,
 } from "../storage/index.js";
 import { persistSessionExperience } from "../storage/session-experience-store.js";
@@ -167,8 +171,10 @@ import type { AskUserAskInfo } from "./ask-user.js";
 import { foldDynamicTailIntoUserMessage, splitFrontAndDynamicTail } from "./cache-prefix.js";
 import { consumeProactiveCompact } from "./compact-request.js";
 import { relaxCompactionSettings } from "./compaction";
+import { buildConvergenceMirror } from "./convergence-mirror.js";
 import type { CouncilManager } from "./council-manager.js";
 import { consumeCouncilConvene, hasPendingCouncilConvene, peekCouncilConveneToolCallId } from "./council-request.js";
+import { resolveCouncilTopic } from "./council-topic.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
 import { humanizeApiError, isAuthenticationError, isContextLimitError, summarizeApiErrorForLog } from "./error-utils";
@@ -239,7 +245,9 @@ import {
   cumulativeMessageChars,
   initCompactionHysteresisState,
 } from "./subagent-compactor.js";
-import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
+import { foldMidConversationSystemMessages } from "./system-message-fold.js";
+import { detectTextEmittedToolCall, parseLeakedToolCalls } from "./text-tool-call-detector.js";
+import { beginToolActivity, endToolActivity } from "./tool-activity.js";
 import { getToolLimitAutoRecoverCap, shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 import {
@@ -252,22 +260,28 @@ import {
  * Resolve the per-turn `maxOutputTokens` budget.
  *
  * Normally the budget is derived from the PIL-classified `taskType`
- * (`taskTypeToMaxTokens`). But a sprint IMPLEMENTATION turn — the /ideal
- * loop's handoff into the host orchestrator via `processMessageFn`, marked
- * with `SPRINT_EXECUTION_MARKER` — is a KNOWN code-writing task that must not
+ * (`taskTypeToMaxTokens`). But a PLAN-EXECUTION turn — a handoff into the host
+ * orchestrator via `processMessageFn` carrying an already-reviewed plan, marked
+ * with `SPRINT_EXECUTION_MARKER` (/ideal) or `COUNCIL_PLAN_EXECUTION_MARKER`
+ * (the council's per-phase loop) — is a KNOWN code-writing task that must not
  * be starved by a noisy classify. Observed live (2026-07-10, gsd-core
  * migration): the impl prompt was classified `analyze`/default → capped at
  * 4_096 output → the model spent the whole budget narrating its plan, hit
  * `finishReason:"length"` mid-word, produced ZERO code, and the turn wedged.
  *
- * Fix: for a sprint-execution turn, floor the budget at the build/generate
- * tier (12_288) regardless of the classified type. Scoped to the marker only
+ * Fix: for a plan-execution turn, floor the budget at the build/generate
+ * tier (12_288) regardless of the classified type. Scoped to the markers only
  * (NOT the broad `isImplementationIntent`) so ordinary refactor/debug turns
  * keep their intentionally tighter L6 budgets.
+ *
+ * I3: this used to call `isSprintPlanExecution` directly, so when the council
+ * marker was added it landed in pipeline.ts alone — `pipeline.ts` forces
+ * `deliverableKind:"code"` but leaves `taskType` alone, so a council phase turn
+ * classified `analyze` got exactly the 4,096-token cap described above.
  */
 export function resolveTurnMaxOutputTokens(pilCtx: { taskType: string | null; raw?: string }): number {
   const base = taskTypeToMaxTokens(pilCtx.taskType);
-  if (isSprintPlanExecution(pilCtx.raw ?? "")) {
+  if (isPlanExecution(pilCtx.raw ?? "")) {
     return Math.max(base, taskTypeToMaxTokens("build"));
   }
   return base;
@@ -308,6 +322,7 @@ import {
   toToolCall,
   toToolResult,
 } from "./tool-utils";
+import { pingTurnProgress } from "./turn-progress.js";
 import type { TurnRunnerDepsBase } from "./turn-runner-deps.js";
 
 /**
@@ -422,9 +437,21 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   askSafetyOverride?: (info: SafetyOverrideAskInfo) => Promise<SafetyOverrideVerdict>;
   /** ask_user handler — invoked when the model calls the `ask_user` tool; resolves the human's answer. */
   askUser?: (info: AskUserAskInfo) => Promise<string>;
+  /** Feature B2 — enter_ideal handler; records a pending product-loop request on the orchestrator. */
+  enterIdeal?: (idea: string) => void;
   runCouncilV2(
     userMessage: string,
-    opts: { skipClarification: boolean; observer?: ProcessMessageObserver; userModelMessage: ModelMessage },
+    opts: {
+      skipClarification: boolean;
+      observer?: ProcessMessageObserver;
+      userModelMessage: ModelMessage;
+      /** Agent-convened run: no human to answer the launch / preflight / escalation cards. */
+      suppressPreDebateCards?: boolean;
+      /** Agent-convened run: the CLI must not hardcode what happens after the debate. */
+      suppressPostDebate?: boolean;
+      /** Gate A — thread the main turn's already-classified scopeKind so runCouncil skips a redundant self-classify round-trip. */
+      externalTopic?: boolean;
+    },
   ): AsyncGenerator<StreamChunk, void, unknown>;
   processMessage(
     userMessage: string,
@@ -803,6 +830,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       ? `complexity=heavy${pilCtx.taskType ? ` task=${pilCtx.taskType}` : ""}`
       : `${pilCtx.taskType} task detected with ${(pilCtx.confidence * 100).toFixed(0)}% confidence`;
     yield { type: "content", content: `\n[Auto-council triggered: ${reason}]\n` };
+    // Reset the three relay fields BEFORE draining, mirroring the runDebate
+    // builtin (~:1077). A generator that throws before the post-debate block
+    // runs — or an analysis run that never reaches it at all — would otherwise
+    // leave the PREVIOUS council's synthesis / action / intent kind in place,
+    // and the continuation below would act on them as if they belonged to this
+    // debate. The reads at :851-858 clear them again after use; this closes the
+    // window before the run, which only runDebate was doing.
+    deps.councilManager.setLastSynthesis(null);
+    deps.councilManager.setLastPostDebateAction(null);
+    deps.councilManager.setLastIntentKind(null);
     // Pre-debate interview: unless disabled, run the model-designed clarification
     // askcards BEFORE the debate so a broadly-scoped "debate mode" request is
     // chốt-ed first (each card's options carry a recommended default + per-option
@@ -811,28 +848,61 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     // prompt is already specific. Skip only when the user turned it off. The
     // clarifier reuses PIL gray-areas as seed questions (no hardcoded questions),
     // and its models come from pickCouncilTaskModel (no hardcoded model/provider).
-    yield* deps.runCouncilV2(userMessage, {
+    // A continuation utterance names no subject — pinning it verbatim gives every
+    // debate round a contentless topic ("Topic for discussion: tiếp tục nhé",
+    // session 3f998bfef7db). Resolve to the work actually in flight.
+    yield* deps.runCouncilV2(resolveCouncilTopic(userMessage, deps.messages as Array<{ role?: string }>), {
       skipClarification: !isAutoCouncilClarifyEnabled(),
       observer,
       userModelMessage,
-      // Suppress the CLI-hardcoded post-debate option card. The follow-up is
-      // decided by the agent's own intent via the neutral continuation below,
-      // not a fixed CLI menu. (Pre-debate clarification is orthogonal and still
-      // runs per skipClarification.)
-      convenePath: true,
+      // Deliberately NOT convenePath. This council was convened by the CLI —
+      // the user never asked for it and no model called it — so there is no
+      // agent to hand the post-debate decision to. Suppressing the card here
+      // (a72731e6) did not delegate the choice, it hardcoded a different one:
+      // the synthesis was fed straight into an implementing turn and work began
+      // without the user ever being asked (user report 2026-07-27, session
+      // 3f998bfef7db seq 21-22). The model-callable paths (convene_council and
+      // the runDebate tool) keep convenePath — there the synthesis really IS a
+      // tool result the model reasons about.
+      // Gate A — thread the main turn's already-classified scope so runCouncil
+      // skips a redundant self-classify round-trip inside its own runPipeline.
+      externalTopic: pilCtx.scopeKind === "external",
     });
     const synthesis = deps.councilManager.lastSynthesis;
     const chosenAction = deps.councilManager.lastPostDebateAction;
+    // This auto-council dispatch is deliberately NOT convenePath (see the
+    // comment above), so the launch card DOES fire and lock spec.intentKind —
+    // relay it the same way chosenAction is relayed, so postDebateContinuation
+    // resolves the run's authoritative kind instead of falling back to the
+    // post-hoc synthesis regex.
+    const lockedIntentKind = deps.councilManager.lastIntentKind;
     deps.councilManager.setLastSynthesis(null);
     deps.councilManager.setLastPostDebateAction(null);
-    // convenePath suppressed the hardcoded card, so there is no chosenAction to
-    // branch on. Hand the synthesis to a normal agent turn with a non-binding
-    // nudge and let the agent decide the next step (respond / ask_user /
-    // implement). Re-entry is guarded by setContinuation(true) below so
-    // shouldAutoCouncil (which checks !isContinuation) can't re-fire into a loop.
-    const { buildNeutralPostCouncilContinuation } = await import("../council/index.js");
-    const continuationPrompt = synthesis ? buildNeutralPostCouncilContinuation(synthesis) || null : null;
+    deps.councilManager.setLastIntentKind(null);
+    // Honour the user's post-debate choice. `postDebateContinuation` returns
+    // null when no action was picked (card dismissed) and for an
+    // analysis/evaluation/decision debate whose deliverable IS the conclusion —
+    // so nothing runs unless the user asked for it.
+    //
+    // C1: an IMPLEMENT pick never reaches here as "implement". runCouncil owns
+    // that path (plan → review → post-plan card → gated per-phase loop) and
+    // relays the TERMINAL outcome instead — `execute_plan` (the phases already
+    // ran, gated) or `save_exit` (nothing ran). Both return null below, so this
+    // block can no longer start a second, ungated implementation turn on the raw
+    // synthesis after the phase loop already finished. Only `continue_session`
+    // still re-enters, and only for an implementation-shaped debate (/ideal).
+    // Shared with the /council slash path (orchestrator.runCouncilV2).
+    const { postDebateContinuation } = await import("../council/index.js");
+    const continuationPrompt = synthesis
+      ? postDebateContinuation(chosenAction ?? undefined, synthesis, lockedIntentKind ?? undefined)
+      : null;
     if (continuationPrompt) {
+      // Collapse the live debate block BEFORE the continuation streams. It is
+      // rendered below the transcript and is otherwise only torn down at a turn
+      // boundary — which this continuation does not cross, so everything it
+      // produces would render above a still-mounted council block and look
+      // swallowed until the turn ended.
+      yield { type: "council_collapse" };
       yield { type: "content", content: "\n[Auto-continuing with council recommendations...]\n" };
       deps.councilManager.setContinuation(true);
       try {
@@ -1019,6 +1089,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // call a council that can't convene.
           councilConfigured: configuredRoleCount >= autoCouncilMinRoles,
           askUser: deps.askUser,
+          enterIdeal: deps.enterIdeal,
           runDebate: async (topic: string) => {
             // Reset before draining so a generator that throws BEFORE setting
             // synthesis (orchestrator.setLastSynthesis) cannot return a STALE
@@ -1027,10 +1098,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             const gen = deps.runCouncilV2(topic, {
               skipClarification: true,
               userModelMessage: { role: "user", content: `/council ${topic}` },
-              // Model-callable debate: the synthesis is returned to the model as
-              // the tool result and the model decides the follow-up — so suppress
-              // the CLI-hardcoded post-debate card, same as convene_council.
-              convenePath: true,
+              // Model-callable debate: no human is at the composer mid-tool-call
+              // (suppressPreDebateCards) and the synthesis is returned to the
+              // model as the tool result so the model decides the follow-up
+              // (suppressPostDebate) — same as convene_council. Both stay on:
+              // this call site's behaviour is unchanged by the C2 flag split.
+              suppressPreDebateCards: true,
+              suppressPostDebate: true,
             });
             // Capture a tail of content chunks so an empty-synthesis failure
             // (provider unreachable / sub-phase fail-open / abort — all of which
@@ -1142,6 +1216,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           }
           if (mcpBundle) {
             closeMcp = mcpBundle.close;
+            // Surface enabled-but-keyless servers to the TUI's inline fix card.
+            // The bus dedupes per server per session, so re-publishing every
+            // turn is a no-op after the first announcement.
+            if (Array.isArray(mcpBundle.needsKey) && mcpBundle.needsKey.length > 0) {
+              publishNeedsKey(mcpBundle.needsKey);
+            }
             // Drop filesystem-MCP read/write/edit tools that duplicate the
             // first-class builtin file tools. Without this, models re-read the
             // SAME file via both `read_file` and `mcp_filesystem__read_text_file`
@@ -1272,6 +1352,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // why this is not a stack: with parallel tool calls, last-writer-
             // wins is the honest summary; the CPU profile is the real evidence.
             setLoopBreadcrumb(`tool:${name}`);
+            // Tell the top-level turn watchdog this turn is WORKING, not hung,
+            // for as long as this call stays inside its own declared deadline.
+            // Without it a single long tool call (session 708f0fc4ac8b ran
+            // `bun test` with timeout=120000 against a 120s turn-idle window)
+            // trips the idle timer and a healthy turn is killed as hung.
+            const activityId = beginToolActivity((input as { timeout?: number } | undefined)?.timeout);
             try {
               if (!guarded) return await originalExecute(input, context);
               const gate = evaluateMutationGate(deps.bash.getCwd(), {
@@ -1280,10 +1366,22 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 directAnswer: gsdDirectAnswer,
               });
               if (gate.blocked) {
-                return { success: false, output: gate.reason, error: gate.reason };
+                // Return the SAME shape the wrapped tool returns — a string. The
+                // guarded tools (write_file/edit_file/bash/…) all resolve to a
+                // string via formatResult, and the AI SDK feeds `execute`'s return
+                // value straight back as the tool-result the model reads. Returning
+                // a `{success,output,error}` object here made that value serialize
+                // to EMPTY: the gate still prevented the write (verified: target
+                // file absent), but the model was told nothing, so it could not act
+                // on "call gsd_status → gsd_discuss → gsd_plan → gsd_plan_review"
+                // and just saw a blank result. Measured in gsd-hard-gate: round 2's
+                // tool-result value was "\n\n[step 1 mirror] …" — only the
+                // convergence-mirror note appended to an empty string.
+                return gate.reason;
               }
               return await writeMutex.run(() => originalExecute(input, context));
             } finally {
+              endToolActivity(activityId);
               setLoopBreadcrumb(`after-tool:${name}`);
             }
           };
@@ -1550,8 +1648,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // for future provider-specific quirks). Reasoning round-trips
         // natively via @ai-sdk/openai-compatible — see
         // src/providers/__tests__/reasoning-roundtrip.test.ts.
+        // Fold BEFORE caching so the cache breakpoint lands on the final user
+        // message rather than on a trailing system note. See
+        // system-message-fold.ts: a system message after user/assistant turns
+        // is unrepresentable for Anthropic and the API rejects the request.
         const _topMessagesForCall = applyAnthropicPromptCaching(
-          turnCaps.sanitizeHistory(_messagesForCall) as typeof deps.messages,
+          foldMidConversationSystemMessages(
+            turnCaps.sanitizeHistory(_messagesForCall) as typeof deps.messages,
+          ) as typeof deps.messages,
           runtime.modelId,
         );
         // Closure-mutable cap for the tool-loop askcard rescue.
@@ -1644,7 +1748,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   },
                 ];
 
-                const { text: decisionText } = await generateText({
+                // Stream + collect (NOT generateText): codex/oauth 400s non-stream requests.
+                const { text: decisionText } = await generateTextStreamed({
                   model: runtime.model,
                   system: systemPrompt,
                   messages: modelMessages,
@@ -1812,6 +1917,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               hasBash: _toolNamesAtCall.includes("bash"),
               toolNames: _toolNamesAtCall.slice(0, 25),
               toolChoice: _finalToolChoice ?? "undefined",
+              // How long the turn spent getting HERE. Nothing between the
+              // write-ahead and this point was timed, so when session
+              // 1096fc59144c showed 97s of wall clock with zero LLM calls logged
+              // in the gap, the cause was simply unattributable — MCP acquire and
+              // the GSD assessor were both ruled out afterwards by elimination,
+              // not by measurement. On attempt 1 this is the pre-stream setup
+              // cost; on a retry it is cumulative (setup + earlier attempts +
+              // backoff), which is exactly the number the turn watchdog races.
+              msSinceTurnStart: Date.now() - turnStartMs,
               hasResponseTools: _hasResponseTools,
               supportsClientTools: turnCaps.supportsClientTools(runtime.modelInfo),
               priorTurnHadTools: (_topMessagesForCall as Array<{ role?: string }>).some((m) => m?.role === "tool"),
@@ -1820,6 +1934,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         } catch {
           /* telemetry only */
         }
+        // Forward progress for the TOP-LEVEL turn watchdog (not the stall guard
+        // below): a request is going out to the provider right now. Without this
+        // the turn's single idle budget covers pre-stream setup + every retry
+        // backoff + time-to-first-byte at once, so a provider that is merely slow
+        // to first byte is killed as "hung" — z.ai/glm-4.7 TTFT is 10.6-11.4s and
+        // two 5xx retries burned 80s of the 120s before the third attempt even
+        // started (session 1096fc59144c). One ping buys one more idle window; a
+        // setup phase that issues no request at all still fires. See
+        // turn-progress.ts.
+        pingTurnProgress();
         // Silent-hang guard: abort the stream (and surface a toast in the
         // catch below) if the provider sends no chunk for too long. Re-armed
         // on every chunk via stall.pet(), so it never kills an actively
@@ -1950,12 +2074,24 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
 
               if (baseRes.messages) {
                 baseRes.messages = applyAnthropicPromptCaching(
-                  baseRes.messages,
+                  foldMidConversationSystemMessages(baseRes.messages),
                   runtime.modelId,
                 ) as typeof stepMessages;
               }
+              // Convergence mirror — a "you are here" note reflecting the
+              // turn's own tool-call history so the model can spot when it is
+              // circling the same concept without converging (session
+              // d0fbdd730b08 burned 2M tokens on 5 angles of one bug). Agent-
+              // first: this only OBSERVES + suggests ask_user/ee_query; it
+              // never blocks. Computed once per step from the raw stepMessages.
+              if (_mirrorNote && baseRes.messages) {
+                baseRes.messages = attachReminderToMessages(baseRes.messages, _mirrorNote) as typeof stepMessages;
+              }
               return baseRes;
             };
+            // Compute the mirror once per prepareStep call. Empty on early steps
+            // or when there's no overlap signal — see buildConvergenceMirror.
+            const _mirrorNote = buildConvergenceMirror(stepMessages, { stepNumber: sn });
             const stripped = turnCaps.sanitizeHistory(stepMessages) as typeof stepMessages;
 
             // Agent-controlled veto (PRESERVE) or lighter selective keep (KEEP_TOOL_IDS) for this turn's B4 compaction.
@@ -2630,6 +2766,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   turnModelId,
                   signal,
                   part.toolCallId,
+                  deps.session?.id,
                 );
                 if (bridgeResult.proxied) {
                   tr = {
@@ -2834,6 +2971,19 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               } catch {
                 /* fail-open */
               }
+              // Durably record the finished call NOW, not at turn end. If the
+              // turn is aborted later (idle watchdog on a wedged tool), the
+              // end-of-turn appendMessages never runs and every result already
+              // produced would be lost — session 7ec700df5589 ended with 9
+              // tool_calls stuck 'pending' and 0 tool_results despite 8 recorded
+              // successes. appendMessages stays authoritative and overwrites this.
+              if (deps.sessionStore && deps.session) {
+                persistToolResultWriteAhead(deps.session.id, part.toolCallId, {
+                  success: tr.success,
+                  output: tr.output,
+                  error: tr.error,
+                });
+              }
               yield { type: "tool_result", toolCall: tc, toolResult: tr };
               // Reset tool-repetition counter on any non-error result. A
               // successful call between two failures of the same shape is
@@ -2847,8 +2997,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // doesn't parse (malformed args) so the UI is never poisoned.
               if (tr.success && (tc.function.name === "todo_write" || tc.function.name.startsWith("gsd_"))) {
                 try {
+                  // A gsd_* call means the workflow plan IS the checklist. A
+                  // todo_write does not: preferring the CWD's `.planning/PLAN.md`
+                  // there replaced the model's own todos with whatever plan the
+                  // repo happens to carry.
                   const { getTaskListSnapshotFromGsd } = require("../gsd/phase-sync.js");
-                  const snap = getTaskListSnapshotFromGsd(deps.bash.getCwd());
+                  const snap = tc.function.name.startsWith("gsd_")
+                    ? getTaskListSnapshotFromGsd(deps.bash.getCwd())
+                    : null;
                   if (snap) {
                     yield { type: "task_list_update", taskListSnapshot: snap };
                   } else if (tc.function.name === "todo_write") {
@@ -2856,6 +3012,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                     if (snapLegacy) yield { type: "task_list_update", taskListSnapshot: snapLegacy };
                   }
                 } catch (err) {
+                  logger.error("orchestrator", "task-list snapshot failed; falling back to todo_write args", {
+                    tool: tc.function.name,
+                    message: (err as Error)?.message,
+                  });
                   if (tc.function.name === "todo_write") {
                     const snapLegacy = snapshotFromTodoWriteArgs(tc.function.arguments);
                     if (snapLegacy) yield { type: "task_list_update", taskListSnapshot: snapLegacy };
@@ -3223,6 +3383,21 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               } catch (logErr) {
                 console.error(`[message-processor] interaction-log error failed: ${(logErr as Error)?.message}`);
               }
+              // Flip the write-ahead user row off `pending`, the same way the
+              // THROWN-error path does (see the `markMessageErrored` call in this
+              // function's outer catch). Without it an error delivered as a stream
+              // PART left the row `pending` forever — indistinguishable in
+              // forensics from "stream still in flight" (session 1096fc59144c).
+              // Safe to do here rather than at end-of-turn: `appendMessages`
+              // upserts `status='completed'`, so if a later step still salvages
+              // text for this turn the row is corrected on the way out.
+              if (deps.session && userWriteAheadSeq != null && !assistantText.trim()) {
+                try {
+                  markMessageErrored(deps.session.id, userWriteAheadSeq);
+                } catch (markErr) {
+                  console.error(`[message-processor] mark-errored failed: ${(markErr as Error)?.message}`);
+                }
+              }
               yield {
                 type: "error",
                 content: friendly,
@@ -3475,8 +3650,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Consume it here in the OUTER loop after every stream drain — NOT solely
         // via dynamicStopWhen, because a phase-1 SAMR step ends on stepCountIs(1)
         // and never evaluates the stop hook (design-debate BUG 2). Runs the
-        // council autonomously (convenePath suppresses ALL post-debate decision
-        // surface — no card, no continuation), splices the synthesis into the
+        // council autonomously (suppressPreDebateCards + suppressPostDebate: no
+        // blocking card before the debate, no decision surface after it — no
+        // card, no continuation), splices the synthesis into the
         // convene tool_result, grafts into deps.messages, and restarts the step
         // so the model reads the conclusion as the tool result and continues.
         if (hasPendingCouncilConvene()) {
@@ -3549,10 +3725,18 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // rendered). We continue the SAME turn ourselves via the splice +
               // `continue` restart, so the council's `done` must not propagate.
               for await (const chunk of deps.runCouncilV2(userMessage, {
-                convenePath: true,
+                // convene_council: the model called this mid-turn with no human
+                // waiting at the composer, and the synthesis is spliced back as
+                // the tool result for the model to reason about. Both
+                // suppressions stay on — behaviour unchanged by the C2 split.
+                suppressPreDebateCards: true,
+                suppressPostDebate: true,
                 skipClarification: true,
                 observer,
                 userModelMessage,
+                // Gate A — thread the main turn's already-classified scope so
+                // runCouncil skips a redundant self-classify round-trip.
+                externalTopic: pilCtx.scopeKind === "external",
               })) {
                 if ((chunk as { type?: string }).type === "done") continue;
                 yield chunk;
@@ -3651,7 +3835,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               const _ans =
                 typeof _d.response === "string" ? _d.response : JSON.stringify(_pendingStructuredResponse.data);
               deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: _ans } as ModelMessage]);
-            } catch {}
+            } catch (err) {
+              // Best-effort persistence of the structured-response assistant row — a
+              // failure here must not lose the answer the user already saw, but it
+              // MUST be surfaced (No-Silent-Catch) so a broken DB/session write does
+              // not rot silently. TUI "flashed then vanished" debug trail lives here.
+              console.warn(
+                `[tool-engine] appendCompletedTurn(structured-response) failed: ${(err as Error)?.message ?? err}`,
+              );
+            }
           }
           if (_responseToolEmitCount > 1 && deps.session) {
             try {
@@ -3672,7 +3864,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               const _ans =
                 typeof _d.response === "string" ? _d.response : JSON.stringify(_pendingStructuredResponse.data);
               deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: _ans } as ModelMessage]);
-            } catch {}
+            } catch (err) {
+              // Same best-effort persist on abort — surface the failure rather than
+              // swallow it (No-Silent-Catch), mirroring the non-abort path above.
+              console.warn(
+                `[tool-engine] appendCompletedTurn(structured-response, aborted) failed: ${(err as Error)?.message ?? err}`,
+              );
+            }
           }
           deps.discardAbortedTurn(userModelMessage);
           yield { type: "done" };
@@ -3845,7 +4043,18 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             streamOk = true;
           }
         } catch (responseError: unknown) {
-          if (!attemptedOverflowRecovery && !assistantText.trim() && modelInfo && isContextLimitError(responseError)) {
+          // H4: recover from an input-overflow error via compact-and-retry-once.
+          // The `!assistantText.trim()` guard applies only to provider
+          // context-limit errors (which fire before any text streams). The gate's
+          // typed InputCeilingExceededError trips at a LATE step, AFTER text has
+          // already streamed, so it must recover regardless of assistantText.
+          const isCeilingError = responseError instanceof InputCeilingExceededError;
+          if (
+            !attemptedOverflowRecovery &&
+            modelInfo &&
+            isContextLimitError(responseError) &&
+            (isCeilingError || !assistantText.trim())
+          ) {
             attemptedOverflowRecovery = true;
             continue;
           }
@@ -4028,7 +4237,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // Recover the model's INTENT from the leaked markup (DeepSeek-native
           // DSML carries the tool + args) so the corrective restates the exact
           // call — far more effective than a generic "use the tool" nudge.
-          const _parsedCalls = parseDsmlToolCalls(assistantText);
+          const _parsedCalls = parseLeakedToolCalls(assistantText);
           const _intent =
             _parsedCalls.length > 0
               ? ` You appear to have intended: ${_parsedCalls
@@ -4077,7 +4286,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Re-steer exhausted: inject DSML intent as a user message so the
         // model re-issues the same calls via the real tool interface.
         if (_textToolCall.detected) {
-          const _parsedDsml = assistantText ? parseDsmlToolCalls(assistantText) : [];
+          const _parsedDsml = assistantText ? parseLeakedToolCalls(assistantText) : [];
           if (_parsedDsml.length > 0 && textToolReSteerCount < MAX_TEXT_TOOL_RESTEER) {
             textToolReSteerCount++;
             const _intentStr = _parsedDsml
@@ -4095,7 +4304,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             await closeMcp?.().catch(() => {});
             continue;
           }
-          // No parseable DSML — surface the dead-end warning.
+          // No parseable leaked call — surface the dead-end warning.
           yield {
             type: "content",
             content:

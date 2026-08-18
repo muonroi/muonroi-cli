@@ -82,4 +82,22 @@ describe("feedbackEE durability", () => {
     expect(r.queued).toBeUndefined();
     expect(enqueueMock).not.toHaveBeenCalled();
   });
+
+  it("sends the caller cwd so the server can scope-narrow noise/ignored verdicts", async () => {
+    // Without cwd the server's deriveCallerMeta returns an all-null callerContext,
+    // and hittrack.recordFeedback's narrowing guard never fires — a wrong_repo /
+    // wrong_language verdict would then FULL-supersede the entry instead of
+    // excluding just this project/lang. The cwd is what makes narrowing possible.
+    let sentBody: Record<string, unknown> | null = null;
+    globalThis.fetch = vi.fn(async (_url: unknown, init: unknown) => {
+      sentBody = JSON.parse((init as { body: string }).body);
+      return new Response(JSON.stringify({ resolvedId: "abc123-full", verdict: "IRRELEVANT" }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await feedbackEE("abc123", "experience-behavioral", "noise", "wrong_repo");
+    expect(sentBody).not.toBeNull();
+    expect(sentBody!.cwd).toBe(process.cwd());
+    expect(sentBody!.verdict).toBe("IRRELEVANT");
+    expect(sentBody!.reason).toBe("wrong_repo");
+  });
 });

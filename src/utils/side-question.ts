@@ -1,5 +1,5 @@
-import { generateText } from "ai";
-import { resolveModelRuntime } from "../providers/runtime.js";
+import { resolveModelRuntime, shouldDropParam } from "../providers/runtime.js";
+import { generateTextStreamed } from "../providers/streamed-generate.js";
 
 export interface SideQuestionResult {
   response: string;
@@ -21,10 +21,14 @@ export async function runSideQuestion(
     ? `${SIDE_QUESTION_SYSTEM}\n\n<conversation_context>\n${conversationContext}\n</conversation_context>`
     : SIDE_QUESTION_SYSTEM;
 
-  const { text, usage } = await generateText({
+  // Stream + collect (NOT generateText): codex/oauth 400s non-stream requests.
+  const { text, usage } = await generateTextStreamed({
     model: runtime.model,
     abortSignal: signal,
-    ...(runtime.modelInfo?.supportsMaxOutputTokens === false ? {} : { maxOutputTokens: 2048 }),
+    // `shouldDropParam`, not the raw catalog flag: it mirrors
+    // `supportsMaxOutputTokens` AND honours the OAuth registry's
+    // `unsupportedParams`, which the flag alone cannot see.
+    ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 2048 }),
     ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     system,
     prompt: question,

@@ -519,14 +519,85 @@ function NextActionList({ actions, theme: t }: { actions: NextAction[]; theme: T
   );
 }
 
+/** One panelist who ended the run still opposing — see {@link DissentSection}. */
+export interface ConclusionDissent {
+  role: string;
+  criterion: string;
+  split?: string;
+}
+
+/** The design caps Dissent at 3 lines so it informs without burying the verdict. */
+export const MAX_DISSENT_LINES = 3;
+
+/**
+ * Dissent — the one section added to the conclusion card.
+ *
+ * A converged verdict erases the losing position, and the council's whole value
+ * is that someone argued the other side. These rows come from the final stance
+ * snapshot (panelists still marked `-`), colored with that speaker's palette
+ * slot so the objection is attributable to the voice that raised it.
+ *
+ * Rendered BEFORE Next Actions: the reader should carry the unresolved
+ * objection into the actions, not discover it after deciding.
+ */
+export function DissentSection({
+  dissent,
+  theme: t,
+  resolveStyle,
+}: {
+  dissent: ConclusionDissent[];
+  theme: Theme;
+  resolveStyle?: (role: string) => { color: string; sigil: string };
+}) {
+  if (dissent.length === 0) return null;
+  const shown = dissent.slice(0, MAX_DISSENT_LINES);
+  const hidden = dissent.length - shown.length;
+  return (
+    <box flexDirection="column" marginTop={1}>
+      <box flexDirection="row">
+        <text fg={t.textMuted} attributes={1}>
+          Dissent
+        </text>
+        <text fg={t.textDim}>{" — carried forward, not resolved"}</text>
+      </box>
+      {shown.map((d, i) => {
+        const style = resolveStyle?.(d.role);
+        return (
+          <text key={`dissent-${i}`}>
+            <span style={{ fg: style?.color ?? t.textMuted }}>{`  ${style ? `${style.sigil} ` : ""}${d.role}`}</span>
+            <span style={{ fg: t.text }}>{` holds ${d.criterion} unresolved`}</span>
+            {d.split ? <span style={{ fg: t.textMuted }}>{` — ${d.split}`}</span> : null}
+          </text>
+        );
+      })}
+      {hidden > 0 ? (
+        <text fg={t.textDim}>{`  +${hidden} more dissenting position${hidden === 1 ? "" : "s"}`}</text>
+      ) : null}
+    </box>
+  );
+}
+
 export interface CouncilConclusionCardProps {
   conclusion: ParsedConclusion;
   /** Round number for a per-round synthesis; undefined = final synthesis. */
   round?: number;
   theme: Theme;
+  /**
+   * Panelists still opposing at the end of the run. Empty/omitted → the section
+   * is suppressed entirely (a genuinely unanimous panel must not get an empty
+   * "Dissent" heading, which would read as withheld information).
+   */
+  dissent?: ConclusionDissent[];
+  resolveStyle?: (role: string) => { color: string; sigil: string };
 }
 
-export function CouncilConclusionCard({ conclusion, round, theme: t }: CouncilConclusionCardProps) {
+export function CouncilConclusionCard({
+  conclusion,
+  round,
+  theme: t,
+  dissent = [],
+  resolveStyle,
+}: CouncilConclusionCardProps) {
   const title = round === undefined ? "Final Conclusion" : `Round ${round} Conclusion`;
   return (
     <box
@@ -559,6 +630,7 @@ export function CouncilConclusionCard({ conclusion, round, theme: t }: CouncilCo
       <BulletSection title="Risks" items={conclusion.risks} color={t.diffRemovedFg} theme={t} />
       <BulletSection title="Trade-offs" items={conclusion.tradeoffs} color={t.mdItalic} theme={t} />
       <PriorityFixList fixes={conclusion.priorityFixes} theme={t} />
+      <DissentSection dissent={dissent} theme={t} resolveStyle={resolveStyle} />
       <NextActionList actions={conclusion.nextActions} theme={t} />
       {conclusion.coverage.length > 0 && (
         <box flexDirection="column" marginTop={1}>

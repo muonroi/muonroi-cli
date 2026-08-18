@@ -199,7 +199,10 @@ describe("wrapper happy-path: driver protocol contract", () => {
         runId: "r1",
       },
     });
-    await expect(p).resolves.toBeUndefined();
+    // An EVENT wait resolves WITH the matching event (WaitForResult =
+    // `{ event?: LiveEvent } | void`), so a caller no longer needs a separate
+    // last_event round-trip. Only selector/idle waits resolve to void.
+    await expect(p).resolves.toMatchObject({ event: { kind: "route-decision", path: "hot-path" } });
   });
 
   it("wait_for(event) with custom match function", async () => {
@@ -218,7 +221,8 @@ describe("wrapper happy-path: driver protocol contract", () => {
       kind: "event",
       event: { ...councilEvent, phaseKind: "synthesis" },
     });
-    await expect(p).resolves.toBeUndefined();
+    // Resolves with the event that actually satisfied `match` — the third one.
+    await expect(p).resolves.toMatchObject({ event: { kind: "council-step", phaseKind: "synthesis" } });
   });
 
   it("wait_for(all) resolves when all conditions are met", async () => {

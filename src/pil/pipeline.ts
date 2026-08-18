@@ -28,7 +28,7 @@ import { layer2Personality } from "./layer2-personality.js";
 import { layer3EeInjection, surfaceCompactionArtifacts } from "./layer3-ee-injection.js";
 import { layer4Gsd } from "./layer4-gsd.js";
 import { layer5Context } from "./layer5-context.js";
-import { isMetaAnalysisPrompt, isSprintPlanExecution, layer6Output } from "./layer6-output.js";
+import { isMetaAnalysisPrompt, isPlanExecution, layer6Output } from "./layer6-output.js";
 import { getRepoStructureHints } from "./repo-structure-hints.js";
 import { PipelineContextSchema } from "./schema.js";
 import { injectSessionExperience, isSelfExperiencePrompt } from "./session-experience-injection.js";
@@ -111,8 +111,25 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
       llmFallback: options?.llmFallback,
       profileStyleBaseline,
       recentTurns: options?.recentTurnsSummary,
+      priorDepthTier: options?.priorDepthTier,
     }),
   );
+
+  if (ctx.scopeKind === "external") {
+    const { appendDecisionLog } = await import("../usage/decision-log.js");
+    appendDecisionLog({
+      ts: Date.now(),
+      sessionId: ctx.sessionId ?? null,
+      kind: "scope-gate",
+      taken: false, // grounding suppressed → the expensive repo-read path is NOT taken
+      reason: "external-scope: repo grounding suppressed (discovery/layer5/council research)",
+      meta: {
+        scopeKind: ctx.scopeKind,
+        taskType: ctx.taskType ?? null,
+        confidence: ctx.confidence,
+      },
+    }).catch((err) => console.error(`[pipeline] scope-gate decision-log write failed: ${(err as Error)?.message}`));
+  }
 
   // Layer 1.5: deterministic complexity-size classification. Pure heuristic,
   // no LLM call, no network. Consumed by 4B (step ceiling matrix) and 4A
@@ -147,8 +164,12 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
   // Sprint-plan execution: the orchestrator deliberately pipes a locked plan
   // through processMessageFn. It MUST keep write tools and MUST be treated as
   // a code deliverable regardless of how the classifier tags the long plan text.
-  const sprintPlanExecution = isSprintPlanExecution(ctx.raw);
-  if (sprintPlanExecution) {
+  // The council's own per-phase execution envelope (plan-execution.ts) hits the
+  // same branch via COUNCIL_PLAN_EXECUTION_MARKER — see its module doc. Both
+  // sources go through the shared `isPlanExecution` predicate (layer6-output.ts)
+  // that tool-engine's output-budget floor and layer4's GSD directive also use.
+  const planExecution = isPlanExecution(ctx.raw);
+  if (planExecution) {
     ctx = {
       ...ctx,
       directAnswer: false,
@@ -166,8 +187,9 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
     ctx = { ...ctx, directAnswer: true };
   }
 
-  // Phase 1 discovery: L1.5–L1.8 (interactive, no hard timeout)
-  if (isDiscoveryEnabled() && ctx.intentKind !== "chitchat") {
+  // Phase 1 discovery: L1.5–L1.8 (interactive, no hard timeout).
+  // External-scope turns (not about this repo) skip the repo scan entirely.
+  if (isDiscoveryEnabled() && ctx.intentKind !== "chitchat" && ctx.scopeKind !== "external") {
     const { runDiscovery } = await import("./discovery.js");
     const discoveryStart = Date.now();
     try {
@@ -333,6 +355,12 @@ export interface PipelineOptions {
    * context that was already established in prior turns.
    */
   recentTurnsSummary?: string | null;
+  /**
+   * Depth of the run already in flight (GSD STATE.md → Depth), supplied by the
+   * orchestrator. Forwarded to layer1 so a continuation utterance inherits the
+   * in-flight depth instead of being re-scored in isolation.
+   */
+  priorDepthTier?: "quick" | "standard" | "heavy" | null;
 }
 
 export async function runPipeline(raw: string, options?: PipelineOptions): Promise<PipelineContext> {

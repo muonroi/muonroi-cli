@@ -1,4 +1,4 @@
-import { exec, spawn } from "child_process";
+import { spawn } from "child_process";
 import { createHash } from "crypto";
 import fs from "fs";
 import os from "os";
@@ -153,34 +153,10 @@ export function getScriptInstallContext(homeDir = os.homedir()): ScriptInstallCo
   return null;
 }
 
-export function fetchLatestGitTag(gitDir: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    exec(`git -C "${gitDir}" ls-remote --tags origin`, (error, stdout) => {
-      if (error) {
-        resolve(null);
-        return;
-      }
-      const lines = stdout.split(/\r?\n/);
-      let maxVersion: string | null = null;
-
-      for (const line of lines) {
-        const match = line.match(/refs\/tags\/(v?[0-9]+\.[0-9]+\.[0-9]+[^\s]*)$/);
-        if (!match) continue;
-        let tag = match[1];
-        if (tag.endsWith("^{}")) {
-          tag = tag.slice(0, -3);
-        }
-        const version = normalizeReleaseVersion(tag);
-        if (!version) continue;
-
-        if (!maxVersion || semverGt(version, maxVersion)) {
-          maxVersion = version;
-        }
-      }
-      resolve(maxVersion);
-    });
-  });
-}
+// fetchLatestGitTag lived here to answer "is a newer release tagged?" for a
+// linked checkout. That was never the right question for a source install (the
+// branch moves ahead of the tag), and nothing reads it now that dev-link pulls
+// its branch — see checkUpstreamCommits.
 
 export async function fetchLatestReleaseVersion(): Promise<string | null> {
   const release = await fetchReleaseJson(`${RELEASES_API}/latest`);
@@ -294,7 +270,68 @@ export function detectInstallMethod(homeDir = os.homedir()): InstallMethod {
   return "unknown";
 }
 
-/** Package-manager command that updates muonroi-cli for the given method, or null. */
+/**
+ * Git checkout this build is running out of, or null when it is not running
+ * from a checkout (packaged install / compiled binary).
+ */
+export function getRunningCheckoutRoot(): string | null {
+  const modPath = runningModulePath();
+  if (!modPath || modPath.includes("/node_modules/")) return null;
+  return findGitRoot(path.dirname(modPath));
+}
+
+/**
+ * Where a linked source build lives, or null when nothing is linked.
+ *
+ * `bun link` replaces `~/.bun/install/global/node_modules/muonroi-cli` with a
+ * SYMLINK to the checkout, and `~/.bun/bin` sits ahead of the npm global bin on
+ * PATH. So once a checkout is linked, a later `npm i -g muonroi-cli` or
+ * `bun add -g muonroi-cli` installs fine and is then never executed — the link
+ * keeps winning, silently. Measured on this machine: the bun global entry is a
+ * symlink to the checkout while an npm global `muonroi-cli` also exists, and
+ * `which -a muonroi-cli` lists the bun shim first.
+ *
+ * Nothing in the CLI can reorder PATH, so the only honest fix is to SAY which
+ * build is running and how to give the link back.
+ */
+export function getLinkedSourceRoot(homeDir = os.homedir()): string | null {
+  const linkPath = path.join(homeDir, ".bun", "install", "global", "node_modules", "muonroi-cli");
+  try {
+    if (!fs.lstatSync(linkPath).isSymbolicLink()) return null;
+    return fs.realpathSync(linkPath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    // ENOENT just means nothing is linked — the common case, not a problem.
+    if (code !== "ENOENT") {
+      console.error(`[install-manager] could not inspect the bun link at ${linkPath}: ${(err as Error)?.message}`);
+    }
+    return null;
+  }
+}
+
+/**
+ * Argv form of the package-manager update for a method, or null.
+ *
+ * Kept as argv (not a shell string) because the CLI RUNS this now instead of
+ * printing it — the published package is the product, so `/update` on an
+ * installed copy has to update the installed copy. On Windows npm is a `.cmd`
+ * shim, which a shell-less spawn cannot execute by its bare name.
+ */
+export function getUpdateStepForMethod(
+  method: InstallMethod,
+  platform: NodeJS.Platform = process.platform,
+): { cmd: string; args: string[] } | null {
+  switch (method) {
+    case "bun-global":
+      return { cmd: "bun", args: ["add", "-g", "muonroi-cli@latest"] };
+    case "npm-global":
+      return { cmd: platform === "win32" ? "npm.cmd" : "npm", args: ["install", "-g", "muonroi-cli@latest"] };
+    default:
+      return null;
+  }
+}
+
+/** Human-readable form of the same command, for error fallbacks and docs. */
 export function getUpdateCommandForMethod(method: InstallMethod): string | null {
   switch (method) {
     case "bun-global":
@@ -314,17 +351,36 @@ export function getUpdateCommandForMethod(method: InstallMethod): string | null 
  * files of the live process is unreliable, so we hand the user an exact command
  * to run from a fresh terminal.
  */
-export async function runManagedUpdate(currentVersion: string): Promise<ScriptUpdateRunResult> {
-  const method = detectInstallMethod();
-
+export async function runManagedUpdate(
+  currentVersion: string,
+  run: CommandRunner = spawnStep,
+  // Injected so each install path can be exercised: a spy on the exported
+  // detector does not reach this call, because the module calls its own local
+  // binding, and the suite always runs from a checkout (→ always "dev-link").
+  method: InstallMethod = detectInstallMethod(),
+): Promise<ScriptUpdateRunResult> {
   if (method === "script") return runScriptManagedUpdate(currentVersion);
 
   const root = findGitRoot(path.dirname(runningModulePath()));
+
+  // A linked checkout is updated, not described. Handled before the release /
+  // registry lookups below because none of them describe a source checkout: its
+  // update is the commits on its branch, and the newest tag is a different
+  // question that the old dev-link output printed as if it were the answer.
+  if (method === "dev-link") {
+    if (!root) {
+      return {
+        success: false,
+        output: `Running a linked build, but no git checkout was found above ${runningModulePath()} — cannot update automatically.`,
+      };
+    }
+    const result = await runDevLinkUpdate(root, run);
+    return { success: result.success, output: `${result.output}${linkShadowNotice(root)}` };
+  }
+
   let latestVersion: string | null = null;
 
-  if (method === "dev-link" && root) {
-    latestVersion = await fetchLatestGitTag(root);
-  } else if (method === "bun-global" || method === "npm-global") {
+  if (method === "bun-global" || method === "npm-global") {
     latestVersion = await fetchLatestNpmVersion("muonroi-cli");
   } else {
     latestVersion = await fetchLatestReleaseVersion();
@@ -351,14 +407,32 @@ export async function runManagedUpdate(currentVersion: string): Promise<ScriptUp
     statusHeader = `### ⚠️ Update Status\n* **Current Version:** \`v${normalizedCurrent}\`\n* **Status:** Unable to check the latest version from GitHub or NPM.\n\n`;
   }
 
-  const cmd = getUpdateCommandForMethod(method);
-  if (cmd) {
-    const instruction = hasUpdate
-      ? `To update, run this in a fresh terminal:\n\`\`\`bash\n${cmd}\n\`\`\`\nThen restart \`muonroi-cli\`.`
-      : `If you want to reinstall, run this in a fresh terminal:\n\`\`\`bash\n${cmd}\n\`\`\``;
+  const step = getUpdateStepForMethod(method);
+  if (step) {
+    if (!hasUpdate) {
+      const cmd = getUpdateCommandForMethod(method);
+      return {
+        success: true,
+        output: `${statusHeader}Nothing to install. To force a reinstall:\n\`\`\`bash\n${cmd}\n\`\`\``,
+      };
+    }
+    // The published package is the product, so `/update` runs the package
+    // manager here rather than handing back a command to paste. It still falls
+    // back to the command if the install cannot replace the running files —
+    // that is a real failure mode on Windows, not a reason to never try.
+    const result = await run({ ...step, cwd: os.tmpdir() });
+    if (result.code === 0) {
+      return {
+        success: true,
+        output: `${statusHeader}Installed **v${latestVersion}**. Restart \`muonroi-cli\` to load it.${linkShadowNotice()}`,
+      };
+    }
+    const cmd = getUpdateCommandForMethod(method);
     return {
-      success: true,
-      output: `${statusHeader}${instruction}`,
+      success: false,
+      output: `${statusHeader}The update could not be installed automatically:\n\n\`\`\`\n${
+        result.output || "(no output)"
+      }\n\`\`\`\n\nRun it yourself from a terminal where muonroi-cli is not running:\n\`\`\`bash\n${cmd}\n\`\`\`${linkShadowNotice()}`,
     };
   }
 
@@ -374,21 +448,141 @@ export async function runManagedUpdate(currentVersion: string): Promise<ScriptUp
     };
   }
 
-  if (method === "dev-link") {
-    const target = root ?? "the muonroi-cli checkout";
-    const instruction = hasUpdate
-      ? `To update, pull the latest changes and rebuild:\n\`\`\`bash\ngit -C "${target}" pull && bun install && bun run build\n\`\`\`\nThen restart \`muonroi-cli\`. (If you also use the compiled muonroi-cli-dev binary, rebuild that separately.)`
-      : `To rebuild your local installation:\n\`\`\`bash\ngit -C "${target}" pull && bun install && bun run build\n\`\`\`\nThen restart \`muonroi-cli\`.`;
-    return {
-      success: true,
-      output: `${statusHeader}${instruction}`,
-    };
-  }
-
   const fallback = notScriptManaged("update");
   return {
     success: fallback.success,
     output: `${statusHeader}${fallback.output}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// dev-link (linked source checkout) update — actually performs the update
+// ---------------------------------------------------------------------------
+
+export interface CommandStep {
+  cmd: string;
+  args: string[];
+  cwd: string;
+}
+
+export interface CommandOutcome {
+  code: number;
+  output: string;
+}
+
+export type CommandRunner = (step: CommandStep) => Promise<CommandOutcome>;
+
+const DEV_LINK_STEP_TIMEOUT_MS = 10 * 60_000;
+
+/** Default runner: spawn with no shell, merge stdout+stderr, bounded by a timeout. */
+function spawnStep(step: CommandStep): Promise<CommandOutcome> {
+  return new Promise((resolve) => {
+    const child = spawn(step.cmd, step.args, { cwd: step.cwd, shell: false, windowsHide: true });
+    let out = "";
+    const append = (chunk: Buffer | string): void => {
+      out += chunk.toString();
+      // Bound the buffer: `bun install` on a cold cache prints thousands of
+      // lines and the whole thing ends up in a chat bubble.
+      if (out.length > 8000) out = `${out.slice(-8000)}`;
+    };
+    child.stdout?.on("data", append);
+    child.stderr?.on("data", append);
+    const timer = setTimeout(() => {
+      child.kill();
+      out += `\n[timed out after ${Math.round(DEV_LINK_STEP_TIMEOUT_MS / 1000)}s]`;
+    }, DEV_LINK_STEP_TIMEOUT_MS);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({ code: -1, output: `${out}\n${err.message}` });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? -1, output: out.trim() });
+    });
+  });
+}
+
+/**
+ * Are there commits on the tracked upstream branch that this checkout lacks?
+ *
+ * For a source checkout, "is there an update" is NOT "is there a newer release
+ * tag" — tags lag the branch, so the release check both misses real updates and
+ * reports one when the checkout is already ahead of the tag. Asking the remote
+ * for the branch head and testing whether this repo already has that object
+ * answers the real question, and unlike `git fetch` it writes nothing.
+ */
+export async function checkUpstreamCommits(
+  root: string,
+  run: CommandRunner = spawnStep,
+): Promise<{ branch: string; behind: boolean } | null> {
+  const branch = await run({ cmd: "git", args: ["rev-parse", "--abbrev-ref", "HEAD"], cwd: root });
+  if (branch.code !== 0) return null;
+  const name = branch.output.trim();
+  if (!name || name === "HEAD") return null; // detached — no upstream to compare against
+
+  const remote = await run({ cmd: "git", args: ["ls-remote", "origin", `refs/heads/${name}`], cwd: root });
+  if (remote.code !== 0) return null;
+  const sha = remote.output.trim().split(/\s+/)[0];
+  if (!/^[0-9a-f]{7,40}$/i.test(sha ?? "")) return null;
+
+  const known = await run({ cmd: "git", args: ["cat-file", "-e", `${sha}^{commit}`], cwd: root });
+  return { branch: name, behind: known.code !== 0 };
+}
+
+/**
+ * Update a linked source checkout for real: pull, install, rebuild.
+ *
+ * The old behaviour printed these three commands and told the user to run them
+ * — for the one install method where the CLI has everything it needs to just do
+ * the work. Refuses on a dirty tree instead of pulling over uncommitted work.
+ */
+export async function runDevLinkUpdate(root: string, run: CommandRunner = spawnStep): Promise<ScriptUpdateRunResult> {
+  const dirty = await run({ cmd: "git", args: ["status", "--porcelain"], cwd: root });
+  if (dirty.code !== 0) {
+    return {
+      success: false,
+      output: `Cannot update: \`git status\` failed in ${root}.\n\n\`\`\`\n${dirty.output}\n\`\`\``,
+    };
+  }
+  if (dirty.output.trim()) {
+    const files = dirty.output.trim().split(/\r?\n/);
+    const shown = files.slice(0, 10).join("\n");
+    return {
+      success: false,
+      output:
+        `### ⚠️ Uncommitted changes in \`${root}\`\n` +
+        `Pulling would move the branch under your work, so the update stopped before touching anything.\n\n` +
+        `\`\`\`\n${shown}${files.length > 10 ? `\n… ${files.length - 10} more` : ""}\n\`\`\`\n\n` +
+        `Commit or stash them, then run \`/update\` again.`,
+    };
+  }
+
+  const steps: CommandStep[] = [
+    { cmd: "git", args: ["pull", "--ff-only"], cwd: root },
+    { cmd: "bun", args: ["install"], cwd: root },
+    { cmd: "bun", args: ["run", "build"], cwd: root },
+  ];
+
+  const log: string[] = [];
+  for (const step of steps) {
+    const label = `${step.cmd} ${step.args.join(" ")}`;
+    const result = await run(step);
+    if (result.code !== 0) {
+      return {
+        success: false,
+        output:
+          `### ❌ Update failed at \`${label}\`\n\n\`\`\`\n${result.output || "(no output)"}\n\`\`\`\n\n` +
+          `The checkout at \`${root}\` is unchanged past this step.`,
+      };
+    }
+    log.push(`✔ ${label}`);
+  }
+
+  return {
+    success: true,
+    output:
+      `### ✅ Updated the linked source build\n\`${root}\`\n\n${log.join("\n")}\n\n` +
+      `Restart \`muonroi-cli\` to load the rebuilt \`dist/\`.`,
   };
 }
 
@@ -503,6 +697,26 @@ export async function runScriptManagedUninstall(options: ScriptUninstallOptions 
   } catch (error) {
     return { success: false, output: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/**
+ * Trailing note for a dev-link update: name the build that is actually running
+ * and how to hand PATH back to a published install. Empty when this checkout is
+ * not the linked one (then nothing is being shadowed by it).
+ */
+function linkShadowNotice(root?: string): string {
+  const linked = getLinkedSourceRoot();
+  if (!linked) return "";
+  if (root && path.resolve(linked).toLowerCase() !== path.resolve(root).toLowerCase()) return "";
+  const lead = root
+    ? `**This is the linked build** (\`bun link\` → \`${linked}\`), and it takes priority over`
+    : `**A linked source build exists** (\`bun link\` → \`${linked}\`) and takes priority over`;
+  return (
+    `\n\n---\n${lead} any \`npm i -g muonroi-cli\` / \`bun add -g muonroi-cli\` install on this machine — ` +
+    "the installed package stays on disk but never runs, so an update to it changes nothing you can see. " +
+    "To hand the command back to the published package, remove the link:\n" +
+    "```bash\nbun unlink muonroi-cli\n```"
+  );
 }
 
 function notScriptManaged(action: string): ScriptUpdateRunResult {

@@ -4,13 +4,39 @@
  */
 import type { CatalogVisionProxyRouting, CatalogVisionProxySlot } from "../models/catalog-client.js";
 import { getModelInfo, getVisionProxyRouting, MODELS, SWITCH_PROVIDER_ORDER } from "../models/registry.js";
+import { recordUsageEvent } from "../storage/usage.js";
 import { apiBaseFor } from "./endpoints.js";
 import { loadKeyForProvider } from "./keychain.js";
 import type { ProviderId } from "./types.js";
 
+/**
+ * Bước 2 / H2: the vision backend is a hand-rolled `fetch` — it does NOT resolve
+ * through `resolveModelRuntime`, so the metered gate never sees it. To close the
+ * bypass we capture the provider's own `usage` from the response and record it
+ * under the `vision` usage source, making these calls visible to
+ * `usage forensics` (previously the tokens were discarded entirely). Threaded
+ * from callers that hold a session; a call with no session simply skips the row.
+ */
+export interface VisionCallMeta {
+  sessionId?: string;
+}
+
+interface VisionUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
 export type VisionTaskKind = "default" | "ocr" | "design";
 
 const REQUEST_TIMEOUT_MS = 90_000;
+
+/**
+ * Required `anthropic-version` header for the Messages API. Anthropic rejects a
+ * request without it, so the OpenAI-compatible header set this module uses for
+ * every other backend is not enough for an anthropic vision slot.
+ */
+const ANTHROPIC_VERSION = "2023-06-01";
 
 const DEFAULT_VISION_PROXY: CatalogVisionProxyRouting = {
   default: { provider: "zai", model_id: "glm-4.6v-flash" },
@@ -43,22 +69,114 @@ export function resolveVisionChain(kind: VisionTaskKind): CatalogVisionProxySlot
   return chain;
 }
 
-async function slotHasAvailableKey(slot: CatalogVisionProxySlot): Promise<boolean> {
+/**
+ * Resolve a slot's credentials + endpoint.
+ *
+ * A slot may name a backend that is NOT in the `ProviderId` union (SiliconFlow's
+ * Qwen-VL is wired this way — the vision path is a hand-rolled fetch, so a
+ * vision-only fallback needs no adapter, keychain entry, or settings screen).
+ * Those slots carry `api_key_env` + `api_base` in the catalog; everything else
+ * keeps going through the keychain and the provider endpoint table.
+ */
+async function resolveSlotTransport(slot: CatalogVisionProxySlot): Promise<{ apiKey: string; base: string } | null> {
+  if (slot.api_key_env) {
+    const key = process.env[slot.api_key_env]?.trim();
+    if (!key) return null;
+    return { apiKey: key, base: slot.api_base ?? apiBaseFor(slot.provider as ProviderId) };
+  }
   try {
-    await loadKeyForProvider(slot.provider as ProviderId);
-    return true;
+    const apiKey = await loadKeyForProvider(slot.provider as ProviderId);
+    return { apiKey, base: slot.api_base ?? apiBaseFor(slot.provider as ProviderId) };
   } catch {
-    return false;
+    return null;
   }
 }
 
-/** Vision-proxy chain filtered to providers that currently have API keys. */
-export async function resolveAvailableVisionChain(kind: VisionTaskKind = "default"): Promise<CatalogVisionProxySlot[]> {
-  const available: CatalogVisionProxySlot[] = [];
-  for (const slot of resolveVisionChain(kind)) {
-    if (await slotHasAvailableKey(slot)) available.push(slot);
+async function slotHasAvailableKey(slot: CatalogVisionProxySlot): Promise<boolean> {
+  return (await resolveSlotTransport(slot)) !== null;
+}
+
+// ── Per-slot circuit breaker ────────────────────────────────────────────────
+//
+// Two failures are worth remembering rather than re-paying every single call:
+//
+//   • HTTP 429 from a pay-as-you-go vision model on a subscription key
+//     (`glm-4.6v-flash` returns `code 1305` for every request on a GLM Coding
+//     Plan key — permanent for that key, despite the "temporarily overloaded"
+//     wording).
+//   • HTTP 400 `code 1210 messages.content.type is invalid, allowed values:
+//     ['text']` — the Z.ai *coding* endpoint does not accept image parts AT ALL,
+//     so that slot can never serve vision no matter how many times we ask.
+//
+// Both were live on this machine, and together they made every image fail while
+// the chain dutifully re-tried both dead slots on each request. A tripped slot
+// is skipped until the cooldown expires (image-shape rejections get a long one:
+// nothing about them is transient).
+const slotBreaker = new Map<string, { until: number; reason: string }>();
+const BREAKER_MS_TRANSIENT = 5 * 60_000;
+const BREAKER_MS_SHAPE_REJECT = 60 * 60_000;
+
+function slotKey(slot: CatalogVisionProxySlot): string {
+  return `${slot.provider}/${slot.model_id}`;
+}
+
+/** True when the backend told us it cannot accept image content at all. */
+function isImageShapeRejection(reason: string): boolean {
+  return /content\.type is invalid|allowed values.*'text'|does not support (image|vision)|unsupported.*image/i.test(
+    reason,
+  );
+}
+
+function tripSlot(slot: CatalogVisionProxySlot, reason: string, opts?: { durable?: boolean }): void {
+  if (opts?.durable) {
+    // Caller already proved the slot cannot serve images (e.g. it answered
+    // without seeing one) — no HTTP status will ever say so.
+    slotBreaker.set(slotKey(slot), { until: Date.now() + BREAKER_MS_SHAPE_REJECT, reason });
+    return;
   }
-  return available;
+  // Only failures that will REPEAT are worth remembering. 5xx and network
+  // faults stay eligible on the very next call — trip them and a blip demotes a
+  // healthy primary for minutes.
+  if (isImageShapeRejection(reason)) {
+    // The endpoint does not accept image parts at all. Nothing transient here.
+    slotBreaker.set(slotKey(slot), { until: Date.now() + BREAKER_MS_SHAPE_REJECT, reason });
+    return;
+  }
+  // 429 on a vision slot is usually entitlement, not load (a pay-as-you-go model
+  // called with a subscription key answers 429 forever); 401/403 is a bad key.
+  // Neither self-heals within a turn.
+  if (/HTTP (429|401|403)/.test(reason)) {
+    slotBreaker.set(slotKey(slot), { until: Date.now() + BREAKER_MS_TRANSIENT, reason });
+  }
+}
+
+function slotTrippedReason(slot: CatalogVisionProxySlot): string | null {
+  const entry = slotBreaker.get(slotKey(slot));
+  if (!entry) return null;
+  if (Date.now() >= entry.until) {
+    slotBreaker.delete(slotKey(slot));
+    return null;
+  }
+  return entry.reason;
+}
+
+/** Test seam — drops all breaker state. */
+export function __resetVisionSlotBreaker(): void {
+  slotBreaker.clear();
+}
+
+/**
+ * Vision-proxy chain filtered to slots that currently have credentials AND are
+ * not circuit-broken. Falls back to the key-only filter when the breaker would
+ * empty the chain — a stale breaker must never turn "degraded" into "no vision".
+ */
+export async function resolveAvailableVisionChain(kind: VisionTaskKind = "default"): Promise<CatalogVisionProxySlot[]> {
+  const keyed: CatalogVisionProxySlot[] = [];
+  for (const slot of resolveVisionChain(kind)) {
+    if (await slotHasAvailableKey(slot)) keyed.push(slot);
+  }
+  const healthy = keyed.filter((slot) => slotTrippedReason(slot) === null);
+  return healthy.length > 0 ? healthy : keyed;
 }
 
 export async function isVisionBackendAvailable(kind: VisionTaskKind = "default"): Promise<boolean> {
@@ -132,10 +250,29 @@ export async function findNativeVisionFallback(opts?: {
   return null;
 }
 
+/**
+ * Human setup hint derived from the catalog chain — never a hardcoded provider
+ * list, which drifts the moment a slot is added (the old copy still said
+ * "configure ZAI_API_KEY or XAI_API_KEY" after SiliconFlow was wired in).
+ */
+export function describeVisionSetup(kind: VisionTaskKind = "default"): string {
+  const envs = [
+    ...new Set(
+      resolveVisionChain(kind).map(
+        (slot) => slot.api_key_env ?? `${slot.provider.toUpperCase().replace(/-/g, "_")}_API_KEY`,
+      ),
+    ),
+  ];
+  return `configure one of: ${envs.join(", ")}`;
+}
+
 export async function collectVisionUnavailableReasons(kind: VisionTaskKind = "default"): Promise<string[]> {
   const reasons: string[] = [];
   for (const slot of resolveVisionChain(kind)) {
-    if (await slotHasAvailableKey(slot)) {
+    const tripped = slotTrippedReason(slot);
+    if (tripped) {
+      reasons.push(`${slot.model_id}@${slot.provider}: temporarily skipped after ${tripped}`);
+    } else if (await slotHasAvailableKey(slot)) {
       reasons.push(`${slot.model_id}@${slot.provider}: API key present but backend unreachable`);
     } else {
       reasons.push(`${slot.model_id}@${slot.provider}: no API key`);
@@ -154,29 +291,55 @@ export async function callVisionBackend(
   content: Array<Record<string, unknown>>,
   signal?: AbortSignal,
   responseFormat?: { type: "json_object" },
+  meta?: VisionCallMeta,
 ): Promise<VisionCallResult> {
   const failureReasons: string[] = [];
 
   if (chain.length === 0) {
-    return { ok: false, reason: "no vision backend available — configure ZAI_API_KEY or XAI_API_KEY" };
+    return { ok: false, reason: `no vision backend available — ${describeVisionSetup()}` };
   }
 
   for (const slot of chain) {
     const provider = slot.provider as ProviderId;
-    let apiKey: string;
-    try {
-      apiKey = await loadKeyForProvider(provider);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      failureReasons.push(`${slot.model_id}@${provider}: no API key (${msg})`);
+    const transport = await resolveSlotTransport(slot);
+    if (!transport) {
+      failureReasons.push(`${slot.model_id}@${provider}: no API key`);
       continue;
     }
+    const { apiKey, base } = transport;
 
-    const base = apiBaseFor(provider);
-    const result = await callVisionModelAt(base, slot.model_id, content, apiKey, signal, responseFormat);
+    const result = await callVisionModelAt(base, wireModelId(slot), content, apiKey, signal, responseFormat, provider);
+    if (result.ok && isBlindResponse(result.text)) {
+      // A 200 whose body says "I cannot see the image" is a FAILURE, not an
+      // observation. The OpenCode Go proxy does exactly this: it accepts the
+      // request, silently drops the image parts, and answers in prose. Treated as
+      // success, that sentence is injected into the primary as its own direct
+      // sight — the model then reasons about a picture nobody looked at, which is
+      // strictly worse than a clean "vision unavailable".
+      const reason = `backend answered without seeing the image (image parts dropped): ${result.text.slice(0, 120)}`;
+      tripSlot(slot, "answers without seeing the image", { durable: true });
+      failureReasons.push(`${slot.model_id}@${provider}: ${reason}`);
+      console.warn(`[vision-backend] ${slot.model_id}@${provider} ${reason}, trying next...`);
+      continue;
+    }
     if (result.ok) {
+      // H2: record the provider's own usage under the `vision` source so this
+      // otherwise-invisible paid call shows up in `usage forensics`. Fail-open.
+      if (meta?.sessionId && result.usage) {
+        try {
+          recordUsageEvent(meta.sessionId, "vision", slot.model_id, {
+            inputTokens: result.usage.inputTokens,
+            outputTokens: result.usage.outputTokens,
+            totalTokens: result.usage.totalTokens,
+          });
+        } catch {
+          /* usage recording is best-effort — never break the vision call */
+        }
+      }
+      slotBreaker.delete(slotKey(slot));
       return { ok: true, text: result.text, model: slot.model_id, provider };
     }
+    tripSlot(slot, result.reason);
     failureReasons.push(`${slot.model_id}@${provider}: ${result.reason}`);
     console.warn(`[vision-backend] ${slot.model_id}@${provider} failed (${result.reason}), trying next...`);
   }
@@ -184,7 +347,72 @@ export async function callVisionBackend(
   return { ok: false, reason: failureReasons.join(" | ") || "no vision backend configured" };
 }
 
-type VisionHttpResult = { ok: true; text: string } | { ok: false; reason: string };
+/**
+ * Model id as the WIRE expects it. Catalog ids for the OpenCode Go proxy carry
+ * an `opencode/` namespace that the endpoint itself rejects
+ * (`Model opencode/glm-5.2 is not supported`). The adapter path already strips
+ * it (`openai-compatible.ts`); this hand-rolled fetch did not, so every
+ * opencode-go vision slot 401'd on the model name before the image was even
+ * considered.
+ */
+function wireModelId(slot: CatalogVisionProxySlot): string {
+  return slot.model_id.startsWith("opencode/") ? slot.model_id.slice("opencode/".length) : slot.model_id;
+}
+
+/**
+ * True when the backend replied that it cannot see an image — while we were
+ * holding one. Deliberately narrow: only first-person "I can't see/view the
+ * image" shapes, so a legitimate observation about a blurry or cropped region
+ * ("the text at the bottom is not legible") is NOT swallowed.
+ */
+function isBlindResponse(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (t.length > 400) return false; // a real observation, whatever it also says
+  // The OBJECT must be the image itself. "I cannot see the axis labels clearly"
+  // is a legitimate observation about a low-resolution region and must survive.
+  const cannotSeeTheImage =
+    /\bi (cannot|can't|can not|am unable to|do not have the ability to|don't have the ability to)\s+(see|view|access|read|analyse|analyze|process)\s+(the |this |that |any |an |your )?(image|picture|screenshot|photo|attachment)\b/;
+  const noImageAtAll = /\b(no image (was )?(provided|attached|received|included)|there (is|was) no image)\b/;
+  return cannotSeeTheImage.test(t) || noImageAtAll.test(t);
+}
+
+type VisionHttpResult = { ok: true; text: string; usage?: VisionUsage } | { ok: false; reason: string };
+
+/**
+ * Translate this module's OpenAI-shaped content parts into Anthropic Messages
+ * blocks.
+ *
+ * Anthropic is NOT OpenAI-compatible: images are
+ * `{type:"image", source:{type:"base64", media_type, data}}`, not
+ * `{type:"image_url", image_url:{url:"data:…"}}`. Without this the anthropic
+ * vision slot was dead config — it POSTed an OpenAI body with a Bearer header to
+ * `/chat/completions` and could only ever 404.
+ *
+ * Returns null when a part cannot be represented (e.g. a remote http(s) image
+ * URL — Anthropic's base64 source needs the bytes, and this module always has
+ * data URIs), so the caller can fail the slot instead of silently dropping the
+ * image and getting a confident answer about a picture nobody looked at.
+ */
+export function toAnthropicContentBlocks(
+  content: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> | null {
+  const blocks: Array<Record<string, unknown>> = [];
+  for (const part of content) {
+    if (part.type === "text") {
+      blocks.push({ type: "text", text: String(part.text ?? "") });
+      continue;
+    }
+    if (part.type === "image_url") {
+      const url = String((part.image_url as { url?: string } | undefined)?.url ?? "");
+      const m = /^data:([^;,]+);base64,(.+)$/s.exec(url);
+      if (!m) return null; // not a data URI → cannot build a base64 source
+      blocks.push({ type: "image", source: { type: "base64", media_type: m[1], data: m[2] } });
+      continue;
+    }
+    return null; // unknown part kind — do not silently drop it
+  }
+  return blocks;
+}
 
 async function callVisionModelAt(
   baseURL: string,
@@ -193,6 +421,7 @@ async function callVisionModelAt(
   apiKey: string,
   signal?: AbortSignal,
   responseFormat?: { type: "json_object" },
+  provider?: string,
 ): Promise<VisionHttpResult> {
   const controller = new AbortController();
   let timedOut = false;
@@ -204,22 +433,53 @@ async function callVisionModelAt(
     signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
-  const url = `${baseURL.replace(/\/$/, "")}/chat/completions`;
+  const isAnthropic = provider === "anthropic";
+  const root = baseURL.replace(/\/$/, "");
+  let url: string;
+  let headers: Record<string, string>;
+  let body: string;
+
+  if (isAnthropic) {
+    const blocks = toAnthropicContentBlocks(content);
+    if (!blocks) {
+      clearTimeout(timeout);
+      return { ok: false, reason: "content parts cannot be expressed as Anthropic image blocks" };
+    }
+    url = `${root}/messages`;
+    headers = {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": ANTHROPIC_VERSION,
+    };
+    // `response_format` has no Anthropic equivalent; the JSON contract is already
+    // stated in the prompt by wrapAnalyzerInstructions ("Output ONLY valid JSON").
+    body = JSON.stringify({
+      model,
+      max_tokens: 3072,
+      temperature: 0.1,
+      messages: [{ role: "user", content: blocks }],
+    });
+  } else {
+    url = `${root}/chat/completions`;
+    headers = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    };
+    body = JSON.stringify({
+      model,
+      messages: [{ role: "user", content }],
+      max_tokens: 3072,
+      temperature: 0.1,
+      ...(responseFormat ? { response_format: responseFormat } : {}),
+    });
+  }
+
   let res: Response;
   try {
     res = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: "user", content }],
-        max_tokens: 3072,
-        temperature: 0.1,
-        ...(responseFormat ? { response_format: responseFormat } : {}),
-      }),
+      headers,
+      body,
       signal: controller.signal,
     });
   } catch (err) {
@@ -237,10 +497,49 @@ async function callVisionModelAt(
 
   const data = (await res.json().catch(() => null)) as {
     choices?: Array<{ message?: { content?: string } }>;
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+      input_tokens?: number;
+      output_tokens?: number;
+    };
+    // Anthropic Messages shape.
+    content?: Array<{ type?: string; text?: string }>;
   } | null;
+
+  if (isAnthropic) {
+    // Anthropic returns a content BLOCK array, not choices[].message.content. A
+    // response can lead with a thinking block, so take the text blocks.
+    const text = (data?.content ?? [])
+      .filter((b) => b?.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .join("")
+      .trim();
+    if (!text) return { ok: false, reason: "empty response body" };
+    const au = data?.usage;
+    const usage: VisionUsage | undefined = au
+      ? {
+          inputTokens: au.input_tokens ?? 0,
+          outputTokens: au.output_tokens ?? 0,
+          totalTokens: (au.input_tokens ?? 0) + (au.output_tokens ?? 0),
+        }
+      : undefined;
+    return { ok: true, text, usage };
+  }
+
   const text = data?.choices?.[0]?.message?.content;
   if (!text) return { ok: false, reason: "empty response body" };
-  return { ok: true, text };
+  // OpenAI-compatible usage block (H2). Absent on some backends → omit.
+  const u = data?.usage;
+  const usage: VisionUsage | undefined = u
+    ? {
+        inputTokens: u.prompt_tokens ?? 0,
+        outputTokens: u.completion_tokens ?? 0,
+        totalTokens: u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0),
+      }
+    : undefined;
+  return { ok: true, text, usage };
 }
 
 /** Ask the vision model to write as direct sight for the primary (text-only) agent. */
@@ -265,13 +564,23 @@ export function wrapAnalyzerInstructions(userPrompt: string, kind: VisionTaskKin
  */
 export function formatNativeVisionObservation(
   observation: string,
-  opts: { imageCount: number; cachedIds?: string[] },
+  opts: { imageCount: number; cachedIds?: string[]; visionSessionId?: string },
 ): string {
   const subject = opts.imageCount > 1 ? `these ${opts.imageCount} images` : "this image";
   const cacheHint =
     opts.cachedIds && opts.cachedIds.length > 0
       ? `- Cached as ${opts.cachedIds.join(", ")} — use ask_vision_proxy with a specific question to inspect a detail`
       : "";
+  // The image stays OPEN in a dedicated sub-session until the agent says done —
+  // follow-ups are answered from what it already saw, so asking twice is cheap
+  // and asking nothing costs a held-open session. Both facts belong in the
+  // envelope, or the model will neither ask nor release.
+  const sessionHint = opts.visionSessionId
+    ? [
+        `- The image is OPEN in vision session ${opts.visionSessionId}; ask_vision_proxy answers follow-ups from what it already saw (no re-read, no re-upload)`,
+        `- Call vision_done with vision_session_id="${opts.visionSessionId}" once you no longer need to look at it`,
+      ].join("\n")
+    : "";
 
   return [
     "<vision-observation>",
@@ -284,6 +593,7 @@ export function formatNativeVisionObservation(
     "- analyze_image on the file path to re-inspect or compare a fresh screenshot",
     "- ask the user to share another image or clarify what to focus on",
     cacheHint,
+    sessionHint,
     "</vision-observation>",
   ]
     .filter((line) => line !== "")
@@ -299,7 +609,7 @@ export function formatNativeVisionUnavailable(imageCount: number, reasons: strin
     '<vision-observation status="unavailable">',
     `${types} could not be analyzed (${detail}).`,
     "Do NOT guess what the image contains.",
-    "Setup: configure ZAI_API_KEY or XAI_API_KEY for vision proxy, or switch to a vision-capable default model.",
+    `Setup: ${describeVisionSetup()} for the vision proxy, or switch to a vision-capable default model.`,
     "- Retry with analyze_image and the file path once a vision key is configured",
     "- Use ask_vision_proxy if a cached image exists",
     "- Ask the user to re-share the screenshot or describe what you need to see",

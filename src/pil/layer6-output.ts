@@ -324,8 +324,46 @@ export function isSprintPlanExecution(raw: string): boolean {
   return raw.includes(SPRINT_EXECUTION_MARKER) || raw.includes("--- SPRINT PLAN TO IMPLEMENT ---");
 }
 
+/**
+ * Council plan execution (design 2026-08-04). Kept DISTINCT from
+ * SPRINT_EXECUTION_MARKER so council and /ideal stay separable in telemetry,
+ * while both hit the same pipeline branch.
+ */
+export const COUNCIL_PLAN_EXECUTION_MARKER = "[COUNCIL-PLAN-EXECUTION: locked]";
+
+export function isCouncilPlanExecution(raw: string): boolean {
+  return raw.includes(COUNCIL_PLAN_EXECUTION_MARKER);
+}
+
+/**
+ * I3 — "this turn is executing an already-reviewed plan", from EITHER source.
+ *
+ * The markers stay DISTINCT so `/ideal` sprints and council phase turns remain
+ * separable in telemetry; what must not be duplicated is the PREDICATE. Three
+ * sites key on "is this a plan-execution turn?" and every one of them was a
+ * separate `isSprintPlanExecution` call, so adding the council marker to
+ * pipeline.ts alone silently left the other two applying sprint-only behaviour:
+ *
+ *  1. `pipeline.ts` — forces `directAnswer:false, deliverableKind:"code"`.
+ *  2. `tool-engine.resolveTurnMaxOutputTokens` — floors the output budget at the
+ *     build tier. Without it a phase turn classified `analyze` is capped at
+ *     4,096 output tokens; measured (2026-07-10, gsd-core migration) that meant
+ *     the model narrated its plan, hit `finishReason:"length"` mid-word,
+ *     produced ZERO code, and the turn wedged.
+ *  3. `layer4-gsd.ts` — emits the "the plan is already reviewed, do NOT call
+ *     gsd_discuss/gsd_plan/gsd_plan_review" directive. Without it a council
+ *     phase turn at heavy tier is told to re-plan a plan four panelists just
+ *     cross-reviewed, and mutation tools are BLOCKED until it does.
+ *
+ * Separable markers, shared predicate. Any new plan-execution source adds one
+ * clause HERE and all three sites follow.
+ */
+export function isPlanExecution(raw: string): boolean {
+  return isSprintPlanExecution(raw) || isCouncilPlanExecution(raw);
+}
+
 const IMPLEMENTATION_INTENT_RE =
-  /\b(implement|edit|wire(?:\s+up)?|rewrite|rename|scaffold|refactor)\b|\bimprove(?:ment)?\b|\bmake\s+(the\s+)?(change|edit|modification)s?\b|\bapply\s+(the\s+)?(fix|change|patch|edit|diff)\b|(?:^|\s)(triển\s*khai|trien\s*khai|chỉnh\s*sửa|chinh\s*sua|viết\s*lại|viet\s*lai|đổi\s*tên|doi\s*ten|cải\s*thiện|cai\s*thien)\b|\[SPRINT-PLAN-EXECUTION:\s*locked\]/i;
+  /\b(implement|edit|wire(?:\s+up)?|rewrite|rename|scaffold|refactor)\b|\bimprove(?:ment)?\b|\bmake\s+(the\s+)?(change|edit|modification)s?\b|\bapply\s+(the\s+)?(fix|change|patch|edit|diff)\b|(?:^|\s)(triển\s*khai|trien\s*khai|chỉnh\s*sửa|chinh\s*sua|viết\s*lại|viet\s*lai|đổi\s*tên|doi\s*ten|cải\s*thiện|cai\s*thien)\b|\[SPRINT-PLAN-EXECUTION:\s*locked\]|\[COUNCIL-PLAN-EXECUTION:\s*locked\]/i;
 
 export function isImplementationIntent(raw: string): boolean {
   return !!raw && IMPLEMENTATION_INTENT_RE.test(raw);

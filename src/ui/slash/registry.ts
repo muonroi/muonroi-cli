@@ -20,6 +20,17 @@ export interface SlashContext {
    * as a ModelMessage. Optional so non-TUI callers (tests, MCP) can omit it.
    */
   getLiveEntries?: () => import("../../types/index.js").ChatEntry[];
+  /**
+   * Everything after the command name, VERBATIM — original casing, original
+   * line breaks. `args` is whitespace-split, so a handler that rebuilds free
+   * text with `args.join(" ")` silently flattens a pasted multi-line brief
+   * into one line. Prefer this whenever the argument is prose the user wrote
+   * rather than a token the handler matches on.
+   *
+   * Optional: non-TUI callers (tests, MCP) may omit it, so free-text handlers
+   * must keep their `args.join(" ")` fallback.
+   */
+  argsText?: string;
 }
 
 export type SlashHandler = (args: string[], ctx: SlashContext) => Promise<string> | string;

@@ -18,12 +18,33 @@ export interface VisibleRetryOpts {
   onRetry?: (attempt: number, totalAttempts: number, delayMs: number, error: Error) => void;
 }
 
-function isRetryableError(err: unknown): boolean {
-  const e = err as { statusCode?: number; status?: number; name?: string; message?: string };
-  const code = e?.statusCode ?? e?.status;
-  if (code === 429 || code === 408 || (code !== undefined && code >= 500 && code < 600)) return true;
-  const msg = (e?.message ?? "").toLowerCase();
-  return msg.includes("rate limit") || msg.includes("too many requests") || msg.includes("timeout");
+import { classifyStreamError } from "../orchestrator/retry-classifier.js";
+
+/**
+ * Whether a thrown/returned error should trigger a visible retry.
+ *
+ * Delegates to the single source of truth ({@link classifyStreamError}) shared
+ * with the main-chat stream path. Two parallel classifiers used to exist —
+ * `visible-retry.ts:isRetryableError` for council calls and
+ * `retry-classifier.ts:classifyStreamError` for the orchestrator stream — and
+ * they drifted apart at least once with real user-visible consequences:
+ *
+ *   bab91d29 — council's `isRetryableError` did NOT match
+ *   "The socket connection was closed unexpectedly", so session e74e820c6417
+ *   burned 6 one-shot attempts inside a 3s fault window and the debate died
+ *   with `Not enough successful openings`. The same socket-drop pattern WAS
+ *   retried on the main-chat path.
+ *
+ * Unifying here means every future transient-class (1210 one-shot degrade,
+ * network regex additions, cause-recursion edge cases) lands in ONE place.
+ *
+ * Note: classifyStreamError's 1210 branch also flips the thinking-degrade latch
+ * (`markProviderThinkingDegrade`) on first sighting — that side effect MUST
+ * fire here too, otherwise the retry would rebuild the same rejected body and
+ * 1210 again. Going through the function (not copying its regex) is load-bearing.
+ */
+export function isRetryableError(err: unknown): boolean {
+  return classifyStreamError(err).transient;
 }
 
 /**

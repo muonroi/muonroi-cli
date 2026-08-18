@@ -35,7 +35,11 @@ interface WorkspaceLspManagerOptions {
 }
 
 export interface WorkspaceLspManager {
-  touchFile(filePath: string, waitForDiagnostics?: boolean): Promise<LspDiagnosticFile[]>;
+  touchFile(
+    filePath: string,
+    waitForDiagnostics?: boolean,
+    diagnosticsTimeoutMs?: number,
+  ): Promise<LspDiagnosticFile[]>;
   syncFile(
     filePath: string,
     content: string,
@@ -134,10 +138,14 @@ export function createWorkspaceLspManager(
     return resolved.filter((value): value is ManagedClient => value !== null);
   }
 
-  async function touchFile(filePath: string, waitForDiagnostics = true): Promise<LspDiagnosticFile[]> {
+  async function touchFile(
+    filePath: string,
+    waitForDiagnostics = true,
+    diagnosticsTimeoutMs?: number,
+  ): Promise<LspDiagnosticFile[]> {
     try {
       const content = await readFile(filePath, "utf8");
-      return await syncFile(filePath, content, false, waitForDiagnostics);
+      return await syncFile(filePath, content, false, waitForDiagnostics, diagnosticsTimeoutMs);
     } catch (err) {
       if (err instanceof Error && (err as any).code === "ENOENT") {
         return [];
@@ -200,7 +208,29 @@ export function createWorkspaceLspManager(
       };
     }
 
-    const lspDiagnostics = input.operation === "workspaceSymbol" ? [] : await touchFile(normalizedPath, true);
+    // Skip or shorten diagnostics wait based on the operation type.
+    // documentSymbol/hover/goToDefinition answer immediately after didOpen — no need to wait.
+    // findReferences/goToImplementation/call-hierarchy benefit from a quick look but 1.5s is overkill.
+    const NO_DIAG_OPS = new Set(["documentSymbol", "hover", "goToDefinition", "workspaceSymbol"]);
+    const QUICK_DIAG_OPS = new Set([
+      "findReferences",
+      "goToImplementation",
+      "prepareCallHierarchy",
+      "incomingCalls",
+      "outgoingCalls",
+    ]);
+    const QUICK_DIAG_TIMEOUT_MS = 300;
+
+    let lspDiagnostics: LspDiagnosticFile[] = [];
+    if (NO_DIAG_OPS.has(input.operation)) {
+      // Send didOpen so the server knows the file, but skip waiting for diagnostics.
+      await touchFile(normalizedPath, false);
+    } else if (QUICK_DIAG_OPS.has(input.operation)) {
+      // Quick diagnostics check — if the server hasn't finished, we get stale but continue.
+      lspDiagnostics = await touchFile(normalizedPath, true, QUICK_DIAG_TIMEOUT_MS);
+    } else {
+      lspDiagnostics = await touchFile(normalizedPath, true);
+    }
     const params = createOperationParams(input, normalizedPath);
     const timeoutMs = settings.requestTimeoutMs;
     const results = (

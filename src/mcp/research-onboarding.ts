@@ -23,21 +23,46 @@ export interface MigrationResult {
   tavilyEnabled: boolean;
 }
 
-const TAVILY_VALIDATE_URL = "https://api.tavily.com/search";
+// Overridable so a self-hosted Tavily proxy can be probed, and so tests can
+// point it at a dead endpoint to exercise the "unverified" (unreachable) path.
+function tavilyValidateUrl(): string {
+  return process.env.MUONROI_TAVILY_VALIDATE_URL || "https://api.tavily.com/search";
+}
 const MAX_RETRY = 3;
 const MIN_KEY_LEN = 16;
 
-export async function validateTavilyKey(key: string): Promise<boolean> {
+/**
+ * Outcome of an online key probe:
+ *  - `ok`           — the API accepted the key (HTTP 2xx).
+ *  - `unauthorized` — the API rejected the key itself (HTTP 401/403). Retry/reject.
+ *  - `unverified`   — we could NOT determine validity: offline, DNS failure,
+ *                     timeout, rate-limit (429) or a server-side 5xx. The key is
+ *                     plausibly fine; the probe just didn't reach a verdict.
+ *
+ * The distinction matters: the old boolean collapsed `unverified` into "invalid",
+ * so a network hiccup at setup time SILENTLY discarded a perfectly valid key —
+ * the user pasted a key, saw it "not saved", and got re-prompted next launch
+ * (reported for Tavily). `unverified` must NOT throw the key away.
+ */
+export type TavilyKeyCheck = "ok" | "unauthorized" | "unverified";
+
+export async function validateTavilyKey(key: string): Promise<TavilyKeyCheck> {
   try {
-    const res = await fetch(TAVILY_VALIDATE_URL, {
+    const res = await fetch(tavilyValidateUrl(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ api_key: key, query: "ping", max_results: 1 }),
       signal: AbortSignal.timeout(5000),
     });
-    return res.ok;
+    if (res.ok) return "ok";
+    // Only an explicit auth rejection means the key is bad. Everything else
+    // (429 rate-limit, 5xx, unexpected status) is inconclusive — never a reason
+    // to drop the key the user just pasted.
+    if (res.status === 401 || res.status === 403) return "unauthorized";
+    return "unverified";
   } catch {
-    return false;
+    // Offline / DNS / timeout / abort — cannot verify, so do not reject.
+    return "unverified";
   }
 }
 
@@ -71,9 +96,15 @@ async function promptForKeyWithRetry(io: {
       io.log(`Key looks too short (< ${MIN_KEY_LEN} chars).\n`);
       continue;
     }
-    const ok = await validateTavilyKey(key);
-    if (ok) return key;
-    io.log("Validation failed (HTTP 401 or network error).\n");
+    const verdict = await validateTavilyKey(key);
+    if (verdict === "ok") return key;
+    if (verdict === "unverified") {
+      // Could not reach Tavily to verify (offline / rate-limited). Keep the key
+      // rather than forcing the user to re-enter it later — it is probably fine.
+      io.log("Couldn't verify the key online (offline or rate-limited) — saving it anyway.\n");
+      return key;
+    }
+    io.log("Key was rejected (HTTP 401/403). Check the key and try again.\n");
   }
   return null;
 }

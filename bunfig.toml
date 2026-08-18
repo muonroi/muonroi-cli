@@ -1,3 +1,11 @@
+# Bun uploads anonymous crash reports to bun.report by default on Windows and
+# macOS: on a native fault it spawns `powershell -NoProfile -ExecutionPolicy
+# Bypass -Command "try{Invoke-RestMethod -Uri 'https://bun.report/<ver>/<trace>/ack'
+# |out-null}catch{}"`. That extra child inherits our bash tool's stdio pipes, so a
+# crash during a `bash` tool call keeps the pipes open and the tool never settles.
+# Equivalent to DO_NOT_TRACK=1, but scoped to this repo instead of the machine.
+telemetry = false
+
 [test]
 preload = ["./src/__test-stubs__/vitest-setup.ts"]
 pathIgnorePatterns = [

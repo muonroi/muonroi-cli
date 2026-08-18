@@ -208,6 +208,7 @@ export function ModalsLayer(props: ModalsLayerProps) {
           height={height}
           currentVersion={startupConfig.version}
           latestVersion={updateInfo.latestVersion}
+          latestLabel={updateInfo.latestLabel}
         />
       )}
       {showMcpModal && !showMcpEditor && (

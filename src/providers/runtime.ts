@@ -1,10 +1,23 @@
 import { createHash } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
 import type { ModelInfo } from "../types/index.js";
-import { getReasoningEffortForModel } from "../utils/settings.js";
+import { getReasoningEffortForModel, loadUserSettings } from "../utils/settings.js";
 import { getProviderCapabilities } from "./capabilities.js";
+import { isProviderDefaultApiBase } from "./endpoints.js";
+import { ceilingForCall, type GateStage, wrapModelWithGate } from "./model-gate.js";
 import { getProviderStrategy } from "./strategies/registry.js";
 import type { ProviderId } from "./types.js";
+
+/**
+ * Bước 2 — attribution carrier for the metered gate (H8). A resolve site passes
+ * its pipeline stage + session so every doStream/doGenerate through the returned
+ * model is metered under the right stage. Omitting it is honest, not fatal: the
+ * meter records `unattributed` rather than guessing `main`.
+ */
+export interface ResolveRuntimeOpts {
+  stage?: GateStage;
+  sessionId?: string;
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ProviderFactory = ((modelId: string) => any) & {
@@ -67,6 +80,27 @@ export function registeredProviderIds(): ProviderId[] {
 }
 
 /**
+ * Resolve the base URL a factory should actually be built with, folding in a
+ * user-set `providers.<id>.baseURL` (a third-party gateway / proxy).
+ *
+ * This lives at the factory choke point on purpose. Before, the override was
+ * honored only inside the OAuth branch of `createProviderFactoryAsync`, so a
+ * provider without OAuth (anthropic) silently fell back to its default apiBase
+ * — and council sub-calls, which call `createProviderFactory(id, {apiKey})`
+ * with no baseURL at all, bypassed it on every provider. Resolving here means
+ * every path (orchestrator, council, warm-up) lands on the same URL.
+ *
+ * Precedence: an explicit caller override (`--base-url`, or the OAuth backend
+ * URL) wins, because a value that is not any provider's default apiBase is a
+ * deliberate per-run choice. A caller value that IS a default is derived state
+ * and yields to the user's setting.
+ */
+function resolveFactoryBaseURL(id: ProviderId, callerBaseURL?: string): string | undefined {
+  if (callerBaseURL && !isProviderDefaultApiBase(callerBaseURL)) return callerBaseURL;
+  return loadUserSettings()?.providers?.[id]?.baseURL ?? callerBaseURL;
+}
+
+/**
  * Phase 12.2-G4: thin dispatcher delegating to the provider strategy registry.
  * Each provider's SDK wiring + `factory.responses` + `defaultProviderOptions`
  * baseline lives in `src/providers/strategies/<provider>.strategy.ts`.
@@ -76,7 +110,7 @@ export function createProviderFactory(
   opts: { apiKey?: string; baseURL?: string; headers?: Record<string, string> },
 ): ProviderFactoryResult {
   const strategy = getProviderStrategy(id);
-  const factory = strategy.createFactory(opts);
+  const factory = strategy.createFactory({ ...opts, baseURL: resolveFactoryBaseURL(id, opts.baseURL) });
   factory.providerId = id;
   providerFactoryRegistry.set(id, factory);
   return { id, factory };
@@ -178,7 +212,7 @@ export function factoryForModel(modelId: string): ProviderFactory {
   return factory;
 }
 
-export function resolveModelRuntime(modelId: string): ResolvedModelRuntime {
+export function resolveModelRuntime(modelId: string, opts?: ResolveRuntimeOpts): ResolvedModelRuntime {
   // Resolve aliases (e.g. "deepseek-v4-flash") to the provider-native id
   // (e.g. "deepseek-v4-flash") BEFORE invoking the factory.
   // Without this, DeepSeek / xAI reject the request because
@@ -248,6 +282,18 @@ export function resolveModelRuntime(modelId: string): ResolvedModelRuntime {
       },
     };
   }
+
+  // Bước 2 — the metered gate. Wrap the resolved model so every doStream/
+  // doGenerate call passes through ONE instrumented point (design §2). Returns a
+  // new object (never mutates), meter-only for now (no ceiling enforcement).
+  // Universal: a new call site cannot get a model without this factory. Sites
+  // that have not migrated a stage are metered as `unattributed` (H8).
+  resolved.model = wrapModelWithGate(resolved.model, {
+    stage: opts?.stage ?? "unattributed",
+    modelId: resolved.modelId,
+    sessionId: opts?.sessionId,
+    ceiling: ceilingForCall(resolved.modelInfo),
+  });
 
   return resolved;
 }

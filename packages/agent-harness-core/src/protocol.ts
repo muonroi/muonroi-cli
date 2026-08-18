@@ -30,6 +30,12 @@ export type KnownRole =
   | "toast"
   | "tooltip"
   | "region"
+  // ARIA landmark / live-region / grouping roles (council surface sections)
+  | "status"
+  | "complementary"
+  | "group"
+  | "banner"
+  | "article"
   // IDE / editor surfaces (added for the desktop frontend; harmless in the TUI)
   | "editor"
   | "diff"
@@ -353,6 +359,20 @@ export type LiveEvent =
       /** The prepareStep step number at which injection occurred (>= 1). */
       atStep: number;
       runId: string;
+    }
+  // Emitted when /resume is invoked while the TUI runs under the harness
+  // (agent-mode). A relaunch would spawn a NEW process that cannot inherit the
+  // fd3/4 (POSIX) or named-pipe (Windows) harness transport, stranding the
+  // driver (every subsequent tui.* call returns no_driver). So under agent-mode
+  // the relaunch is SUPPRESSED and this event is emitted instead: the current
+  // process + driver stay alive, and the driving agent should resume by calling
+  // tui.stop then tui.start({ args: ["--session=<sessionId>"] }).
+  | {
+      t: "event";
+      kind: "resume-request";
+      /** The session id the user selected to resume. */
+      sessionId: string;
+      ts: number;
     }
   | { t: "idle" };
 

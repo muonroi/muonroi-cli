@@ -8,12 +8,15 @@ export function UpdateModal({
   height,
   currentVersion,
   latestVersion,
+  latestLabel,
 }: {
   t: Theme;
   width: number;
   height: number;
   currentVersion: string;
   latestVersion: string;
+  /** Pre-formatted target; a source checkout has no version to print. */
+  latestLabel?: string;
 }) {
   const overlayBg = "#000000cc" as string;
   const panelWidth = Math.min(60, width - 6);
@@ -54,10 +57,7 @@ export function UpdateModal({
                 {currentVersion}
               </span>
               {" → "}
-              <span style={{ fg: "#22c55e" }}>
-                {"v"}
-                {latestVersion}
-              </span>
+              <span style={{ fg: "#22c55e" }}>{latestLabel ?? `v${latestVersion}`}</span>
             </text>
           </box>
           <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>

@@ -91,6 +91,8 @@ export function PromptBox({
   contextStats,
   placeholder,
   queuedCount,
+  councilLive = false,
+  steerMode = false,
   queuedMessages,
   typeahead,
   slashItems,
@@ -117,6 +119,17 @@ export function PromptBox({
   contextStats?: ContextStats | null;
   placeholder?: string;
   queuedCount?: number;
+  /**
+   * True while a council debate is streaming. Swaps the processing hint row to
+   * the council bindings (see the render below). Distinct from "the agent is
+   * busy" — a plain tool loop has no council keys.
+   */
+  councilLive?: boolean;
+  /**
+   * S5 — Ctrl+S armed: the next submit steers the council instead of queueing a
+   * message. Purely presentational here; the submit path owns the routing.
+   */
+  steerMode?: boolean;
   queuedMessages?: string[];
   typeahead?: TypeaheadState;
   slashItems?: SlashMenuItem[];
@@ -206,9 +219,23 @@ export function PromptBox({
                 ref={inputRef}
                 focused={composerFocused}
                 placeholder={
-                  isProcessing ? "Queue a follow-up... (esc to interrupt)" : placeholder || "Message muonroi-cli..."
+                  // S5 — steer mode replaces the placeholder outright. The
+                  // consequence of Enter changes (the text goes to the leader,
+                  // not the queue), so the prompt has to say so before it is
+                  // pressed, not after.
+                  steerMode
+                    ? "Steer the council — enter applies it at the next round · esc cancel"
+                    : isProcessing
+                      ? "Queue a follow-up... (esc to interrupt)"
+                      : placeholder || "Message muonroi-cli..."
                 }
-                textColor={slashInputIsMatched ? "#3b82f6" : t.text}
+                // Set BOTH textColor and focusedTextColor: the OpenTUI textarea
+                // renders typed text with focusedTextColor while it holds focus
+                // (which the composer effectively always does), and textColor
+                // only when blurred — so highlighting the recognized command
+                // requires the focused variant, not textColor alone.
+                textColor={slashInputIsMatched ? t.composerCommand : t.text}
+                focusedTextColor={slashInputIsMatched ? t.composerCommand : t.text}
                 backgroundColor={t.backgroundElement}
                 placeholderColor={t.textMuted}
                 minHeight={1}
@@ -242,9 +269,34 @@ export function PromptBox({
                 {"enter "}
                 <span style={{ fg: t.textMuted }}>{"queue"}</span>
               </text>
+              {/* Council keys, shown only while a debate is actually live —
+                  they are inert otherwise, and a hint for an inert key is worse
+                  than no hint. Only bindings that EXIST are advertised here —
+                  ctrl+k (skip the turn in flight) is deliberately absent, it is
+                  not wired. */}
+              {councilLive ? (
+                <text fg={t.text}>
+                  {"ctrl+t "}
+                  <span style={{ fg: t.textMuted }}>{"stance"}</span>
+                </text>
+              ) : null}
+              {councilLive ? (
+                <text fg={t.text}>
+                  {"ctrl+s "}
+                  <span style={{ fg: t.textMuted }}>{"steer"}</span>
+                </text>
+              ) : null}
+              {councilLive ? (
+                <text fg={t.text}>
+                  {"ctrl+f "}
+                  <span style={{ fg: t.textMuted }}>{"converge"}</span>
+                </text>
+              ) : null}
               <text fg={t.text}>
                 {"esc "}
-                <span style={{ fg: t.textMuted }}>{(queuedCount ?? 0) > 0 ? "clear queue" : "interrupt"}</span>
+                <span style={{ fg: t.textMuted }}>
+                  {(queuedCount ?? 0) > 0 ? "clear queue" : councilLive ? "interrupt council" : "interrupt"}
+                </span>
               </text>
             </box>
           ) : showSlashMenu ? (

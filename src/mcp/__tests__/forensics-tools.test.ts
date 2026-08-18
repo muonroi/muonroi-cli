@@ -33,6 +33,7 @@ const fakeSummary = (id: string): CostForensicsSummary =>
     peakSingleCallInput: 100,
     peakSingleCallFresh: 100,
     events: [],
+    redundantReservedChars: 0,
     experience: null,
   }) as CostForensicsSummary;
 

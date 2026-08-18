@@ -46,3 +46,57 @@ describe("isPilGateEnrichEnabled", () => {
     expect(isPilGateEnrichEnabled()).toBe(false);
   });
 });
+
+describe("isEeConnectCardEnabled", () => {
+  const prev = process.env.MUONROI_EE_CONNECT_CARD;
+
+  afterEach(() => {
+    if (prev === undefined) delete process.env.MUONROI_EE_CONNECT_CARD;
+    else process.env.MUONROI_EE_CONNECT_CARD = prev;
+  });
+
+  it("defaults to enabled when env unset", async () => {
+    delete process.env.MUONROI_EE_CONNECT_CARD;
+    const { isEeConnectCardEnabled } = await import("../flags.js");
+    expect(isEeConnectCardEnabled()).toBe(true);
+  });
+
+  it("opts out when MUONROI_EE_CONNECT_CARD=0", async () => {
+    process.env.MUONROI_EE_CONNECT_CARD = "0";
+    const { isEeConnectCardEnabled } = await import("../flags.js");
+    expect(isEeConnectCardEnabled()).toBe(false);
+  });
+
+  it("opts out when MUONROI_EE_CONNECT_CARD=false", async () => {
+    process.env.MUONROI_EE_CONNECT_CARD = "false";
+    const { isEeConnectCardEnabled } = await import("../flags.js");
+    expect(isEeConnectCardEnabled()).toBe(false);
+  });
+});
+
+describe("isLspSetupCardEnabled", () => {
+  const prev = process.env.MUONROI_LSP_SETUP_CARD;
+
+  afterEach(() => {
+    if (prev === undefined) delete process.env.MUONROI_LSP_SETUP_CARD;
+    else process.env.MUONROI_LSP_SETUP_CARD = prev;
+  });
+
+  it("defaults to enabled when env unset", async () => {
+    delete process.env.MUONROI_LSP_SETUP_CARD;
+    const { isLspSetupCardEnabled } = await import("../flags.js");
+    expect(isLspSetupCardEnabled()).toBe(true);
+  });
+
+  it("opts out when MUONROI_LSP_SETUP_CARD=0", async () => {
+    process.env.MUONROI_LSP_SETUP_CARD = "0";
+    const { isLspSetupCardEnabled } = await import("../flags.js");
+    expect(isLspSetupCardEnabled()).toBe(false);
+  });
+
+  it("opts out when MUONROI_LSP_SETUP_CARD=false", async () => {
+    process.env.MUONROI_LSP_SETUP_CARD = "false";
+    const { isLspSetupCardEnabled } = await import("../flags.js");
+    expect(isLspSetupCardEnabled()).toBe(false);
+  });
+});

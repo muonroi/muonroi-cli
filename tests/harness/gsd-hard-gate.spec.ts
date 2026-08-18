@@ -32,7 +32,7 @@
  */
 
 import type { ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Driver } from "@muonroi/agent-harness-core/driver";
@@ -118,10 +118,13 @@ async function spawnGateHarness(
   // is off) up to heavy, writes it to STATE.md AND pilCtx.modelDepthTier, and the
   // mutation gate (heavy-only) reads heavy from STATE.md. Seeding STATE Depth alone is
   // NOT enough — syncWorkflowContext rewrites Depth every turn from the classifier.
-  // The assessor's leader call is createCouncilLLM.generate → mock.complete({prompt}),
-  // which matches against `responses` (NOT the doStream/doGenerate `model` fixture).
-  // Match the assessor prompt's unique header and return a heavy ComplexityVerdict so
-  // the assessor deterministically UPGRADES standard → heavy through the real pipeline.
+  // The assessor's leader call is createCouncilLLM.generate, which short-circuits
+  // to `mock.complete({ prompt })` when --mock-llm is installed (src/council/llm.ts),
+  // so it matches the `responses` fixture on the PROMPT — NOT the doStream/doGenerate
+  // `model` fixture. `buildAssessorPrompt` opens with "You are the complexity
+  // assessor …", and mock-llm's matcher is `prompt.includes(match)` with
+  // non-wildcard entries tried first, so this entry wins over the `*` fallback.
+  // `extractComplexityVerdict` accepts a bare {...}, so raw JSON is enough.
   const responses =
     opts.forceDepth === "heavy"
       ? [
@@ -214,12 +217,46 @@ async function exitAndWaitForDump(handle: GateHarness, timeoutMs = 20_000): Prom
   }
 }
 
-function isAgentCall(c: { options?: { prompt?: unknown } } | null | undefined): boolean {
+function systemTextOf(c: { options?: { prompt?: unknown } } | null | undefined): string {
   const p = c?.options?.prompt;
-  if (!Array.isArray(p) || p.length === 0) return false;
+  if (!Array.isArray(p) || p.length === 0) return "";
   const sys = p[0] as { content?: unknown };
-  const sysText = typeof sys?.content === "string" ? sys.content : JSON.stringify(sys?.content ?? "");
-  return sysText.includes("muonroi-cli in Agent mode");
+  return typeof sys?.content === "string" ? sys.content : JSON.stringify(sys?.content ?? "");
+}
+
+function isAgentCall(c: { options?: { prompt?: unknown } } | null | undefined): boolean {
+  return systemTextOf(c).includes("muonroi-cli in Agent mode");
+}
+
+/**
+ * `expected 1 to be >= 2` says nothing about WHY. Every call the mock served is
+ * recorded, so name them: which ones were agent rounds and what the others
+ * actually were. Without this the only way to tell "the loop stopped early" from
+ * "isAgentCall stopped matching" is to re-run with MUONROI_DEBUG_MOCK_MODEL=1.
+ */
+/**
+ * The gate reads Depth from `.planning/STATE.md` (and the assessor writes
+ * `.planning/ASSESSMENT.md`). When a gate assertion fails, the depth that was
+ * ACTUALLY in effect is the first thing to look at — the assessor degrades to
+ * priorDepth silently, and its console.error is swallowed by the TUI.
+ */
+function describePlanningState(cwd: string): string {
+  const read = (name: string): string => {
+    const f = join(cwd, ".planning", name);
+    if (!existsSync(f)) return `  ${name}: (absent)`;
+    return `  ${name}: ${readFileSync(f, "utf8").replace(/\s+/g, " ").slice(0, 200)}`;
+  };
+  return [read("STATE.md"), read("ASSESSMENT.md"), read("PLAN-VERIFY.md")].join("\n");
+}
+
+function describeCalls(calls: Array<{ options?: { prompt?: unknown } }>): string {
+  if (calls.length === 0) return "(no calls recorded at all)";
+  return calls
+    .map((c, i) => {
+      const sys = systemTextOf(c).replace(/\s+/g, " ").slice(0, 70);
+      return `  [${i}] ${isAgentCall(c) ? "AGENT" : "other"} :: ${sys || "(no system message)"}`;
+    })
+    .join("\n");
 }
 
 describe("GSD hard mutation gate — E2E via real TUI tool-execute wrapper", { retry: 0 }, () => {
@@ -270,11 +307,23 @@ describe("GSD hard mutation gate — E2E via real TUI tool-execute wrapper", { r
 
     await exitAndWaitForDump(handle, 20_000);
 
-    const agentCalls = loadDumpedRecordings(handle.dumpPath).filter(isAgentCall);
-    expect(agentCalls.length).toBeGreaterThanOrEqual(2);
+    const allCalls = loadDumpedRecordings(handle.dumpPath);
+    const agentCalls = allCalls.filter(isAgentCall);
+    expect(
+      agentCalls.length,
+      `recorded calls:
+${describeCalls(allCalls)}`,
+    ).toBeGreaterThanOrEqual(2);
 
     const afterToolCall = JSON.stringify(agentCalls[1]?.options?.prompt ?? {});
-    expect(afterToolCall).toContain("BLOCKED");
+    expect(
+      afterToolCall,
+      `planning state:
+${describePlanningState(workDir!)}
+  target written: ${existsSync(targetFile)}
+  agent rounds: ${agentCalls.length}
+  round2 tail: ${afterToolCall.slice(-700)}`,
+    ).toContain("BLOCKED");
     expect(afterToolCall).toContain("gsd_plan_review");
 
     // Second, independent signal: the gate must have prevented the write.
@@ -310,8 +359,13 @@ describe("GSD hard mutation gate — E2E via real TUI tool-execute wrapper", { r
 
     await exitAndWaitForDump(handle, 20_000);
 
-    const agentCalls = loadDumpedRecordings(handle.dumpPath).filter(isAgentCall);
-    expect(agentCalls.length).toBeGreaterThanOrEqual(2);
+    const allCalls = loadDumpedRecordings(handle.dumpPath);
+    const agentCalls = allCalls.filter(isAgentCall);
+    expect(
+      agentCalls.length,
+      `recorded calls:
+${describeCalls(allCalls)}`,
+    ).toBeGreaterThanOrEqual(2);
 
     const afterToolCall = JSON.stringify(agentCalls[1]?.options?.prompt ?? {});
     expect(afterToolCall).not.toContain("BLOCKED: this task was assessed as non-trivial");
@@ -355,8 +409,13 @@ describe("GSD hard mutation gate — E2E via real TUI tool-execute wrapper", { r
 
     await exitAndWaitForDump(handle, 20_000);
 
-    const agentCalls = loadDumpedRecordings(handle.dumpPath).filter(isAgentCall);
-    expect(agentCalls.length).toBeGreaterThanOrEqual(2);
+    const allCalls = loadDumpedRecordings(handle.dumpPath);
+    const agentCalls = allCalls.filter(isAgentCall);
+    expect(
+      agentCalls.length,
+      `recorded calls:
+${describeCalls(allCalls)}`,
+    ).toBeGreaterThanOrEqual(2);
 
     const afterToolCall = JSON.stringify(agentCalls[1]?.options?.prompt ?? {});
     expect(afterToolCall).not.toContain("BLOCKED: this task was assessed as non-trivial");

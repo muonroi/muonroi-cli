@@ -19,6 +19,7 @@ Catalog model entries currently ship for:
 | `xai` | Grok models via OpenAI-compatible API + OAuth subscription | Yes |
 | `zai` | GLM family (coding + vision) via the Z.ai coding endpoint | Yes |
 | `opencode-go` | OpenCode Go aggregator | Yes |
+| `stepfun` | Native OpenAI-compatible API; Step 3.5 Flash agent/coding model | Yes |
 | `openai` | Static fallback pricing only (not tier-routed by default) | Yes |
 
 ## Removed providers (kept in code, dropped from catalog)
