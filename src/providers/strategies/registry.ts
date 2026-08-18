@@ -12,6 +12,7 @@ import { DeepSeekStrategy } from "./deepseek.strategy.js";
 import { OllamaStrategy } from "./ollama.strategy.js";
 import { OpenAIStrategy } from "./openai.strategy.js";
 import { OpenCodeGoStrategy } from "./opencode-go.strategy.js";
+import { StepFunStrategy } from "./stepfun.strategy.js";
 import { XAIStrategy } from "./xai.strategy.js";
 import { ZaiStrategy } from "./zai.strategy.js";
 
@@ -23,6 +24,7 @@ const STRATEGIES: Record<ProviderId, ProviderStrategy> = {
   ollama: new OllamaStrategy(),
   zai: new ZaiStrategy(),
   "opencode-go": new OpenCodeGoStrategy(),
+  stepfun: new StepFunStrategy(),
 };
 
 /**

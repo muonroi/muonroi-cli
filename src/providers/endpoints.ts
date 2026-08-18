@@ -51,6 +51,10 @@ export const PROVIDER_ENDPOINTS: Record<ProviderId, ProviderEndpoints> = {
     apiBase: "https://opencode.ai/zen/go/v1",
     consoleUrl: "https://opencode.ai",
   },
+  stepfun: {
+    apiBase: "https://api.stepfun.ai/v1",
+    consoleUrl: "https://platform.stepfun.ai/",
+  },
 };
 
 /** Fast lookup: provider id → API base URL. */
@@ -84,9 +88,10 @@ export function isProviderDefaultApiBase(url: string | null | undefined): boolea
  * Default base URLs for OpenAI-compatible providers only. Used by adapters
  * that share the OpenAI SDK shape (deepseek, xai).
  */
-export const OPENAI_COMPATIBLE_BASE_URLS: Record<"deepseek" | "xai" | "zai" | "opencode-go", string> = {
+export const OPENAI_COMPATIBLE_BASE_URLS: Record<"deepseek" | "xai" | "zai" | "opencode-go" | "stepfun", string> = {
   deepseek: PROVIDER_ENDPOINTS.deepseek.apiBase,
   xai: PROVIDER_ENDPOINTS.xai.apiBase,
   zai: PROVIDER_ENDPOINTS.zai.apiBase,
   "opencode-go": PROVIDER_ENDPOINTS["opencode-go"].apiBase,
+  stepfun: PROVIDER_ENDPOINTS.stepfun.apiBase,
 };

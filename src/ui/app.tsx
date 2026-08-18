@@ -598,7 +598,7 @@ ${prompt}`;
 // the router picks them, but the user-facing picker hides them so the
 // user cannot enable a provider we are not actively maintaining UX for.
 // Hoisted to module-level so React useEffect deps stay stable across renders.
-const SPLASH_PROVIDERS: readonly ProviderId[] = ["deepseek", "zai", "opencode-go", "xai"];
+const SPLASH_PROVIDERS: readonly ProviderId[] = ["deepseek", "zai", "opencode-go", "xai", "stepfun"];
 
 import { useAppLogic } from "./use-app-logic.js";
 

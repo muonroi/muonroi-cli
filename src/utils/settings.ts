@@ -340,6 +340,7 @@ export interface UserSettings {
     ollama?: { baseURL?: string };
     zai?: ProviderKeyConfig;
     "opencode-go"?: ProviderKeyConfig;
+    stepfun?: ProviderKeyConfig;
   };
   /** Providers the user has explicitly disabled in the model picker (still configured but hidden). */
   disabledProviders?: ProviderId[];
@@ -726,6 +727,15 @@ export function getProviderConfigs(
     configs["opencode-go"] = {
       apiKey: opencodeGoKey,
       baseURL: p["opencode-go"]?.baseURL ?? apiBaseFor("opencode-go"),
+    };
+  }
+
+  // StepFun (OpenAI-compatible)
+  const stepfunKey = process.env.STEPFUN_API_KEY ?? p.stepfun?.apiKey;
+  if (stepfunKey) {
+    configs.stepfun = {
+      apiKey: stepfunKey,
+      baseURL: p.stepfun?.baseURL ?? apiBaseFor("stepfun"),
     };
   }
 

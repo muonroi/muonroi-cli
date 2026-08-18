@@ -65,7 +65,7 @@ export type ProviderStream = AsyncGenerator<StreamChunk, void, unknown>;
  * Supported provider identifiers.
  * 'deepseek' shares the OpenAI-compatible adapter with a custom baseURL.
  */
-export type ProviderId = "anthropic" | "openai" | "deepseek" | "xai" | "ollama" | "zai" | "opencode-go";
+export type ProviderId = "anthropic" | "openai" | "deepseek" | "xai" | "ollama" | "zai" | "opencode-go" | "stepfun";
 
 /**
  * Single source of truth for the canonical ordering of all provider IDs.
@@ -82,6 +82,7 @@ export const ALL_PROVIDER_IDS = [
   "ollama",
   "zai",
   "opencode-go",
+  "stepfun",
 ] as const satisfies readonly ProviderId[];
 
 /** Convenience iterator over the canonical provider list. */

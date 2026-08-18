@@ -28,6 +28,7 @@ export const ENV_BY_PROVIDER: Record<ProviderId, string> = {
   ollama: "OLLAMA_API_KEY",
   zai: "ZAI_API_KEY",
   "opencode-go": "OPENCODE_GO_API_KEY",
+  stepfun: "STEPFUN_API_KEY",
 };
 
 /**

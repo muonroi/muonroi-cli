@@ -85,6 +85,8 @@ const ADAPTER_FACTORIES: Record<ProviderId, AdapterFactory> = {
   zai: (config) =>
     createOpenAICompatibleAdapter({ ...config, id: "zai", baseURL: config.baseURL ?? apiBaseFor("zai") }),
   "opencode-go": (config) => createOpenAICompatibleAdapter({ ...config, id: "opencode-go" }),
+  stepfun: (config) =>
+    createOpenAICompatibleAdapter({ ...config, id: "stepfun", baseURL: config.baseURL ?? apiBaseFor("stepfun") }),
 };
 
 /**

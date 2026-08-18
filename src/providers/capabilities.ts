@@ -368,6 +368,13 @@ class OpenCodeGoProviderCapabilities extends ReliableProviderCapabilities {
   }
 }
 
+/** StepFun uses the standard OpenAI-compatible Chat Completions contract. */
+class StepFunProviderCapabilities extends ReliableProviderCapabilities {
+  override consoleSignupURL(): string {
+    return consoleUrlFor("stepfun");
+  }
+}
+
 const CAPABILITIES: Record<ProviderId, ProviderCapabilities> = {
   anthropic: new AnthropicProviderCapabilities(),
   openai: new OpenAIProviderCapabilities(),
@@ -376,6 +383,7 @@ const CAPABILITIES: Record<ProviderId, ProviderCapabilities> = {
   ollama: new OllamaProviderCapabilities(),
   zai: new ZaiProviderCapabilities(),
   "opencode-go": new OpenCodeGoProviderCapabilities(),
+  stepfun: new StepFunProviderCapabilities(),
 };
 
 /**
