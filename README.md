@@ -6,7 +6,7 @@
   <p align="center">
     <a href="https://github.com/muonroi/muonroi-cli/actions/workflows/ci-matrix.yml"><img alt="CI" src="https://github.com/muonroi/muonroi-cli/actions/workflows/ci-matrix.yml/badge.svg"></a>
     <a href="https://www.npmjs.com/package/muonroi-cli"><img alt="npm" src="https://img.shields.io/npm/v/muonroi-cli.svg"></a>
-    <img alt="Providers" src="https://img.shields.io/badge/providers-7%20supported-blue">
+    <img alt="Providers" src="https://img.shields.io/badge/providers-8%20supported-blue">
     <img alt="License" src="https://img.shields.io/badge/license-MIT-yellow">
     <img alt="Runtime" src="https://img.shields.io/badge/runtime-Bun%201.3%2B-orange">
   </p>
@@ -60,7 +60,7 @@ The installers download a `bun --compile` binary from GitHub Releases — single
 ### First run
 
 On first launch the CLI shows a wizard that:
-1. Lists supported providers (currently **DeepSeek** and **SiliconFlow**).
+1. Lists the eight supported providers: **Anthropic**, **OpenAI**, **DeepSeek**, **xAI (Grok)**, **Ollama**, **Z.ai**, **OpenCode Go**, and **StepFun**.
 2. Offers four ways to add credentials: paste an API key, import an encrypted bundle (`keys export`/`keys import`), sync from Bitwarden, or skip and add later via `/providers` inside the TUI.
 
 After setup, role routing auto-balances across enabled providers:
@@ -71,7 +71,7 @@ After setup, role routing auto-balances across enabled providers:
   "defaultProvider": "deepseek",
   "providers": {
     "deepseek":    { "enabled": true },
-    "siliconflow": { "enabled": true }
+    "stepfun":     { "enabled": true }
   },
   "roleModels": {
     "leader":    "deepseek-v4-pro",
@@ -81,6 +81,21 @@ After setup, role routing auto-balances across enabled providers:
   }
 }
 ```
+
+### Supported providers
+
+| Provider | Settings ID | Authentication |
+|---|---|---|
+| Anthropic | `anthropic` | API key |
+| OpenAI | `openai` | API key or ChatGPT OAuth |
+| DeepSeek | `deepseek` | API key |
+| xAI (Grok) | `xai` | API key or xAI OAuth |
+| Ollama | `ollama` | Local endpoint; no API key required |
+| Z.ai | `zai` | API key |
+| OpenCode Go | `opencode-go` | API key |
+| StepFun | `stepfun` | API key |
+
+Use `/providers` in the TUI to configure credentials and select an available model. Provider and model availability follows the built-in catalog and your configured credentials.
 
 ### Moving keys between devices
 
