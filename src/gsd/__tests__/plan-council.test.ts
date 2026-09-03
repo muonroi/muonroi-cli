@@ -1,7 +1,22 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+
+// Host-hermeticity: `resolvePlanCouncilLeader` early-returns the *session* model
+// whenever the session provider is disabled, and `isProviderDisabled` reads the
+// developer's real ~/.muonroi-cli/user-settings.json (there is no settings-path
+// env seam). So on any machine where the user has turned deepseek off — a normal
+// thing to do — the standard-depth leader stayed `deepseek-v4-flash` and this
+// file failed, while passing on hosts that leave it on. The beforeAll below
+// already forces the *key* axis of reachability; this forces the *disabled*
+// axis, which it missed. Production behaviour is deliberately untouched: not
+// promoting into a provider the user disabled is correct.
+vi.mock("../../utils/settings.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../utils/settings.js")>();
+  return { ...actual, isProviderDisabled: vi.fn().mockReturnValue(false) };
+});
+
 import { loadCatalog } from "../../models/registry.js";
 import { ensurePlanningWorkspace } from "../config-bridge.js";
 import { planningArtifact } from "../paths.js";

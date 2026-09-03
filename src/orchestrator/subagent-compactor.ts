@@ -623,6 +623,27 @@ function stripAssistantReasoning(msg: ModelMessage): ModelMessage {
   return { ...msg, content: filtered } as unknown as ModelMessage;
 }
 
+/** Marker text shared by the elided-args object and the legacy string form. */
+const ELIDED_ARGS_PREFIX = "[earlier call args elided";
+
+/**
+ * A3 cache-stability / idempotency: never re-wrap an already-elided marker.
+ * The marker is itself ~95 chars, so without this guard a second pass re-wrapped
+ * it ("…— 200 chars…" → "…— 95 chars…"), changing the bytes and churning the
+ * cached prefix every call. Once elided, leave it terminal.
+ *
+ * Both shapes are recognised: the current object form, and the legacy bare
+ * string still present in histories persisted before the wire-validity fix.
+ */
+function isElidedToolCallInput(input: unknown): boolean {
+  if (typeof input === "string") return input.startsWith(ELIDED_ARGS_PREFIX);
+  if (input && typeof input === "object") {
+    const note = (input as Record<string, unknown>).__elided_note;
+    return typeof note === "string" && note.startsWith(ELIDED_ARGS_PREFIX);
+  }
+  return false;
+}
+
 function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
   if (!Array.isArray(msg.content)) return msg;
   const parts = msg.content as ReadonlyArray<Record<string, unknown>>;
@@ -634,20 +655,37 @@ function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
     // The marker is itself ~95 chars, so without this guard a second pass
     // re-wrapped it ("…— 200 chars…" → "…— 95 chars…"), changing the bytes and
     // churning the cached prefix every call. Once elided, leave it terminal.
-    if (typeof input === "string" && input.startsWith("[earlier call args elided")) return part;
+    if (isElidedToolCallInput(input)) return part;
     const sz = typeof input === "string" ? input.length : JSON.stringify(input ?? "").length;
     if (sz < 80) return part; // tiny calls aren't worth touching
     mutated = true;
-    // F3b — use a STRING marker, not the legacy `{_elided:true,original_chars:N}`
-    // object. The LLM previously hallucinated the elided object shape as its
-    // NEXT tool input (session 101870b4d9bb: read_file called with
+    // The marker must satisfy TWO constraints that pull in opposite directions.
+    //
+    // F3b — it must not read as a plausible tool schema. The original elision
+    // was `{_elided:true,original_chars:N}`, and the LLM hallucinated that shape
+    // as its NEXT tool input (session 101870b4d9bb: read_file called with
     // `{_elided:true,original_chars:75}` → "path must be string, got undefined").
-    // A plain string in `input` is impossible to confuse with a valid tool
-    // schema (every tool expects an object), so the model is forced to
-    // synthesize fresh args from the user's actual intent.
+    //
+    // Wire validity — it must still be an OBJECT. `input` is serialized into
+    // OpenAI `tool_calls[].function.arguments`, which the spec defines as a JSON
+    // string that parses to an object. F3b's fix (a bare string) parses to a
+    // JSON *string*, which is malformed there: StepFun renders history through a
+    // Jinja chat template that does `arguments | fromjson` and then iterates the
+    // result, so a non-object 400s the whole request —
+    // `{"stage":"prefill","error":{"message":"No filter named 'fromjson' found."}}`
+    // (measured 2026-09-03 against step-3.7-flash; proved both directions:
+    // wrapping this value in an object turned the failing request 200, and
+    // injecting a bare string into a passing request turned it 400).
+    //
+    // An object with ONE obviously-non-schema key whose value is the same full
+    // English sentence keeps F3b's property (no tool declares `__elided_note`,
+    // and the sentence is not copyable as an argument value) while restoring a
+    // well-formed object on the wire.
     return {
       ...part,
-      input: `[earlier call args elided by sub-agent compactor — ${sz} chars; consult the matching tool_result for what came back]`,
+      input: {
+        __elided_note: `[earlier call args elided by sub-agent compactor — ${sz} chars; consult the matching tool_result for what came back]`,
+      },
     } as Record<string, unknown>;
   });
   if (!mutated) return msg;
