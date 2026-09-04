@@ -768,6 +768,14 @@ export interface ModelInfo {
   roles?: string[];
   /** Part E — model has native online web research (its own web_search/browsing). */
   nativeWebResearch?: boolean;
+  /**
+   * P0-5b — model emits its NATIVE tool-call markup as plain-text content when a
+   * request carries no tool schemas. Arms the provider-boundary output guard
+   * (`src/providers/tool-markup-guard.ts`) via
+   * `ProviderCapabilities.emitsNativeToolCallMarkup`. Absent → the provider's
+   * capability class decides (StepFun defaults on; everyone else off).
+   */
+  emitsNativeToolCallMarkup?: boolean;
 }
 
 export type AgentMode = "agent" | "plan" | "ask";

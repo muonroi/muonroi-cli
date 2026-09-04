@@ -6,6 +6,7 @@ import { getProviderCapabilities } from "./capabilities.js";
 import { isProviderDefaultApiBase } from "./endpoints.js";
 import { ceilingForCall, type GateStage, wrapModelWithGate } from "./model-gate.js";
 import { getProviderStrategy } from "./strategies/registry.js";
+import { wrapModelWithToolMarkupGuard } from "./tool-markup-guard.js";
 import type { ProviderId } from "./types.js";
 
 /**
@@ -293,6 +294,22 @@ export function resolveModelRuntime(modelId: string, opts?: ResolveRuntimeOpts):
     modelId: resolved.modelId,
     sessionId: opts?.sessionId,
     ceiling: ceilingForCall(resolved.modelInfo),
+  });
+
+  // P0-5b — provider-boundary output guard. StepFun emits its native
+  // `<tool_call>` markup as plain-text content on any request with no tool
+  // schemas (measured 2026-09-04, SELF-IMPROVEMENT-PLAN §4.1), which reaches the
+  // user as the final answer on `forcedFinalize`, stall-rescue and the chitchat
+  // continuation. Armed by the capability layer (never by a provider-id compare
+  // here) and a no-op for every model without the quirk. Applied AFTER the
+  // metered gate so it still guards when `MUONROI_GATE=0` disables metering.
+  const _markupProvider = resolved.modelInfo?.provider ?? providerId;
+  resolved.model = wrapModelWithToolMarkupGuard(resolved.model, {
+    enabled: _markupProvider
+      ? getProviderCapabilities(_markupProvider).emitsNativeToolCallMarkup(resolved.modelInfo)
+      : false,
+    modelId: resolved.modelId,
+    sessionId: opts?.sessionId,
   });
 
   return resolved;

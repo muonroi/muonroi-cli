@@ -139,6 +139,17 @@ export interface ProviderCapabilities {
    * non-Anthropic tokenizers handle tool routing the same way.
    */
   systemPromptStyle(): "anthropic" | "openai" | "generic";
+  /**
+   * True when this model is known to emit its NATIVE tool-call markup as plain
+   * text `content` on a request that carries no tool schemas (P0-5b). Measured
+   * on StepFun 2026-09-04 — see `src/providers/tool-markup-guard.ts` and
+   * SELF-IMPROVEMENT-PLAN §4.1. Gates the provider-boundary output guard, so no
+   * call site ever compares a provider id itself (Zero Hardcode Rule).
+   *
+   * Default reads the catalog flag `ModelInfo.emitsNativeToolCallMarkup`, so a
+   * newly-observed model on any provider opts in from `catalog.json` alone.
+   */
+  emitsNativeToolCallMarkup(model: ModelInfo | undefined): boolean;
 }
 
 /**
@@ -178,6 +189,9 @@ class ReliableProviderCapabilities implements ProviderCapabilities {
   }
   systemPromptStyle(): "anthropic" | "openai" | "generic" {
     return "generic";
+  }
+  emitsNativeToolCallMarkup(model: ModelInfo | undefined): boolean {
+    return model?.emitsNativeToolCallMarkup === true;
   }
 }
 
@@ -368,10 +382,27 @@ class OpenCodeGoProviderCapabilities extends ReliableProviderCapabilities {
   }
 }
 
-/** StepFun uses the standard OpenAI-compatible Chat Completions contract. */
+/**
+ * StepFun uses the standard OpenAI-compatible Chat Completions contract, with
+ * one measured quirk: whenever a request carries no tool schemas but the message
+ * history still contains prior tool usage, `step-3.7-flash` / `step-3.5-flash`
+ * emit their native `<tool_call>…</tool_call>` markup as plain-text content,
+ * with `finish_reason: "stop"` and `tool_calls: false` (measured 2026-09-04,
+ * 5 of 6 request shapes including the forced-finalize shape — see
+ * SELF-IMPROVEMENT-PLAN §4.1). `tool_choice` and prompt instructions were both
+ * measured inert, so the only working mitigation is the output guard in
+ * `src/providers/tool-markup-guard.ts`, armed by the flag below.
+ *
+ * Provider-wide by default because every StepFun model measured so far leaks;
+ * `catalog.json` can set `emits_native_tool_call_markup: false` per model to
+ * disarm it once StepFun ships a fix, without touching this file.
+ */
 class StepFunProviderCapabilities extends ReliableProviderCapabilities {
   override consoleSignupURL(): string {
     return consoleUrlFor("stepfun");
+  }
+  override emitsNativeToolCallMarkup(model: ModelInfo | undefined): boolean {
+    return model?.emitsNativeToolCallMarkup !== false;
   }
 }
 

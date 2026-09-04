@@ -160,6 +160,12 @@ export interface CatalogModel {
    * | null. Advisory only — `native_web_research` is the gate.
    */
   web_research_kind?: string | null;
+  /**
+   * P0-5b — model emits its native `<tool_call>` markup as plain text when the
+   * request carries no tool schemas. Arms the provider-boundary output guard.
+   * Absent → the provider's capability class decides (StepFun defaults on).
+   */
+  emits_native_tool_call_markup?: boolean;
 }
 
 export interface CatalogRateLimits {
@@ -203,6 +209,7 @@ const CatalogModelSchema = z
     roles: z.array(z.string()).optional(),
     native_web_research: z.boolean().optional(),
     web_research_kind: z.string().nullable().optional(),
+    emits_native_tool_call_markup: z.boolean().optional(),
   })
   .loose();
 
@@ -465,5 +472,6 @@ export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
     routingTiers: m.routing_tiers as ModelInfo["routingTiers"],
     roles: m.roles,
     nativeWebResearch: m.native_web_research ?? false,
+    emitsNativeToolCallMarkup: m.emits_native_tool_call_markup,
   };
 }
