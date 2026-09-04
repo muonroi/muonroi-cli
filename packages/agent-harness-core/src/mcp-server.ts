@@ -504,13 +504,112 @@ export function registerActionTools(server: McpServer, getDriver: () => Driver |
   );
 }
 
+/**
+ * Outcome of a `tui.stop` — reported so a caller can distinguish a real kill
+ * from a no-op. Before this existed, `tui.stop` returned the string "ok"
+ * unconditionally while never calling `kill()`, so every started TUI survived
+ * the stop and an unattended loop leaked one process per sprint.
+ */
+export interface HarnessStopOutcome {
+  /** false only when the child was still live and kill() could not reach it. */
+  ok: boolean;
+  /** pid of the child we attempted to kill (undefined when nothing was running). */
+  pid?: number;
+  /** true when kill() was invoked and the signal was accepted. */
+  killed: boolean;
+  /** `no_child` | `already_exited` — why no signal was delivered. */
+  reason?: string;
+  /** kill() failure message, when one was raised. */
+  error?: string;
+}
+
 export type AsyncToolDeps = {
-  onStop: () => void;
+  /**
+   * Tear down the current child. Returning an outcome is optional (a `void`
+   * return is treated as plain success) so existing embedders keep compiling:
+   * `| undefined` would reject them, since a void-returning function is not
+   * assignable to one returning undefined.
+   */
+  // biome-ignore lint/suspicious/noConfusingVoidType: deliberate — keeps existing `onStop: () => {}` embedders assignable while the real server reports a HarnessStopOutcome.
+  onStop: () => HarnessStopOutcome | void;
   /** Returns the spawned TUI child PID (undefined when no driver). */
   getPid: () => number | undefined;
   /** Milliseconds since the child process was spawned (undefined when no driver). */
   getStartedAt: () => number | undefined;
 };
+
+/** Grace period between the polite kill and the forced one. */
+export const HARNESS_KILL_GRACE_MS = 2_000;
+
+/**
+ * Kill a harness child, tolerating the already-exited case.
+ *
+ * Exported for unit testing: the stop path is otherwise only reachable through
+ * a real spawn, which is exactly what made the "stop does not stop" bug ship.
+ *
+ * Escalation: `kill()` (SIGTERM on POSIX) first; if `exited` has not settled
+ * after HARNESS_KILL_GRACE_MS the child is SIGKILLed. The timer is unref'd so
+ * it never keeps the MCP server process alive.
+ */
+export function killHarnessChild(
+  proc: HarnessSpawnResult["proc"] | null | undefined,
+  exited?: Promise<number> | null,
+  graceMs: number = HARNESS_KILL_GRACE_MS,
+): HarnessStopOutcome {
+  if (!proc) return { ok: true, killed: false, reason: "no_child" };
+  const pid = proc.pid;
+  try {
+    const accepted = proc.kill();
+    if (accepted === false) {
+      // Node returns false when the signal could not be delivered — almost
+      // always because the child is already gone. Not an error for us (no
+      // orphan is left), but it must be visible, not swallowed.
+      console.error(
+        `[agent-harness-core/mcp-server] kill(pid=${String(pid)}) returned false — child already exited or signal undeliverable`,
+      );
+      return { ok: true, killed: false, pid, reason: "already_exited" };
+    }
+  } catch (err) {
+    // POSIX raises ESRCH and Windows "process not found" once the child has
+    // exited. Treat as success (nothing orphaned) but log per the No Silent
+    // Catch Rule — module, operation, message.
+    const message = (err as Error)?.message ?? String(err);
+    console.error(`[agent-harness-core/mcp-server] kill(pid=${String(pid)}) threw: ${message}`);
+    return { ok: true, killed: false, pid, reason: "already_exited", error: message };
+  }
+
+  if (exited && graceMs > 0) {
+    let settled = false;
+    exited.then(
+      () => {
+        settled = true;
+      },
+      (err: unknown) => {
+        settled = true;
+        console.error(
+          `[agent-harness-core/mcp-server] exited promise rejected for pid=${String(pid)}: ${(err as Error)?.message ?? String(err)}`,
+        );
+      },
+    );
+    const timer = setTimeout(() => {
+      if (settled) return;
+      try {
+        proc.kill("SIGKILL");
+        console.error(
+          `[agent-harness-core/mcp-server] child pid=${String(pid)} did not exit within ${graceMs}ms — sent SIGKILL`,
+        );
+      } catch (err) {
+        console.error(
+          `[agent-harness-core/mcp-server] SIGKILL(pid=${String(pid)}) failed: ${(err as Error)?.message ?? String(err)}`,
+        );
+      }
+    }, graceMs);
+    // Never hold the event loop open on account of the escalation timer.
+    (timer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  return { ok: true, killed: true, pid };
+}
 
 export function registerAsyncTools(server: McpServer, getDriver: () => Driver | null, deps: AsyncToolDeps): void {
   const noDriver = () => ({
@@ -660,8 +759,15 @@ export function registerAsyncTools(server: McpServer, getDriver: () => Driver | 
       inputSchema: {},
     },
     async () => {
-      deps.onStop();
-      return { content: [{ type: "text" as const, text: "ok" }] };
+      const outcome = deps.onStop();
+      // `void` (or a successful outcome) keeps the historical "ok" payload so
+      // existing agent scripts keep parsing. A genuine kill failure is the only
+      // case that changes shape — silence there is what P0-3 was about.
+      if (!outcome || outcome.ok) return { content: [{ type: "text" as const, text: "ok" }] };
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ error: "stop_failed", ...outcome }) }],
+        isError: true,
+      };
     },
   );
 
@@ -870,17 +976,29 @@ export function createMcpHarnessServer({
   let currentDriver: Driver | null = null;
   let currentPid: number | undefined;
   let currentStartedAt: number | undefined;
+  // The child handle itself — NOT just its pid. Without this, onStop had no way
+  // to reach kill() and every "stopped" TUI survived as an orphan (P0-3).
+  let currentProc: HarnessSpawnResult["proc"] | null = null;
+  let currentExited: Promise<number> | null = null;
   let stopBridge: (() => void) | null = null;
   /** Bridge caps detected at the most recent tui.start (all-false if client caps unknown). */
   let currentBridgeCaps: BridgeCapabilities = { logging: false, resources: false, sampling: false };
-  const onStop = () => {
+  const onStop = (): HarnessStopOutcome => {
     if (stopBridge) {
       stopBridge();
       stopBridge = null;
     }
+    const proc = currentProc;
+    const exited = currentExited;
     currentDriver = null;
     currentPid = undefined;
     currentStartedAt = undefined;
+    currentProc = null;
+    currentExited = null;
+    // Kill AFTER clearing state, so the server can never be stranded in a
+    // "started" state it cannot stop out of. killHarnessChild never throws —
+    // it converts the already-exited case into an outcome.
+    return killHarnessChild(proc, exited);
   };
 
   // Register the subscribable event-feed resource so clients that advertised
@@ -1034,18 +1152,32 @@ export function createMcpHarnessServer({
       // onLine already delivers complete newline-stripped lines — no extra
       // splitting required.
       const unsub = onLine(makeLineHandler(driver, eventTee));
-      spawnResult.exited.then(() => {
+      const clearIfCurrent = () => {
         unsub();
-        if (currentPid === proc.pid) {
+        // Identity, not pid: a pid can be undefined (or, in principle, reused),
+        // and this handler must only clear the child it belongs to.
+        if (currentProc === proc) {
           currentDriver = null;
           currentPid = undefined;
           currentStartedAt = undefined;
+          currentProc = null;
+          currentExited = null;
         }
+      };
+      spawnResult.exited.then(clearIfCurrent, (err: unknown) => {
+        // A rejected exit promise must still release the transport, and must
+        // never surface as an unhandled rejection that kills the MCP server.
+        console.error(
+          `[agent-harness-core/mcp-server] child exit promise rejected (pid=${String(proc.pid)}): ${(err as Error)?.message ?? String(err)}`,
+        );
+        clearIfCurrent();
       });
 
       currentDriver = driver;
       currentPid = proc.pid;
       currentStartedAt = Date.now();
+      currentProc = proc;
+      currentExited = spawnResult.exited;
 
       // Start the opt-in push bridge. Feature-detect client caps; when the
       // client advertised logging/resources/sampling, forward events via those

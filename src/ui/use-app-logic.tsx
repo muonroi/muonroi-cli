@@ -5042,6 +5042,18 @@ export function useAppLogic(props: AppLogicProps) {
                   return [...prev.slice(0, -1), { ...last, content: base.endsWith("\n") ? base : `${base}\n` }];
                 });
               };
+              // Mark the turn as processing for the lifetime of the product loop.
+              // Same shape (and same bug) as /council above: `/ideal` is dispatched
+              // via a DETACHED `dispatchSlash(...).then(...)` promise, so the submit
+              // handler has already returned — and already reset isProcessing — by
+              // the time this callback runs. Without re-arming the ref here,
+              // `interruptActiveRun` bails on `!isProcessingRef.current`
+              // (use-app-logic.tsx:3847) and Esc never reaches `agent.abort()`,
+              // leaving a multi-minute (or wedged) /ideal run uncancellable. Set the
+              // ref (read synchronously by the Esc handler) AND the state (drives the
+              // "esc to interrupt" affordance).
+              isProcessingRef.current = true;
+              setIsProcessing(true);
               try {
                 const gen = (agent as any).runProductLoopV1(payload);
                 for await (const chunk of gen) {
@@ -5304,6 +5316,11 @@ export function useAppLogic(props: AppLogicProps) {
                 setCouncilStatuses([]);
                 councilDoneAtRef.current.clear();
                 setProductStatus(null);
+                // Release the processing flag re-armed before the run so the
+                // composer returns to idle and a subsequent turn isn't blocked.
+                // Mirrors the /council finally below.
+                isProcessingRef.current = false;
+                setIsProcessing(false);
               }
               return;
             }
