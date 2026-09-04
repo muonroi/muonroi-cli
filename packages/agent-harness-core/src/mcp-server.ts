@@ -26,8 +26,10 @@ import {
   EVENTS_RESOURCE_URI,
   NotificationBridge,
 } from "./notification-bridge.js";
-import type { LiveEvent, LiveFrame, VisualFrame } from "./protocol.js";
-import { PROTOCOL_VERSION } from "./protocol.js";
+import { PREDICATE_GRAMMAR } from "./predicate.js";
+import type { LiveEvent, LiveFrame, UINode, VisualFrame } from "./protocol.js";
+import { KNOWN_ROLES, LIVE_EVENT_KINDS, PROTOCOL_VERSION } from "./protocol.js";
+import { SELECTOR_GRAMMAR } from "./selector.js";
 
 // ---------------------------------------------------------------------------
 // Spawn injection contract
@@ -242,26 +244,101 @@ export function validateMockLlmPath(value: string): boolean {
   return real === root || real.startsWith(root + sep);
 }
 
-const FEATURES = [
-  "capabilities",
-  "snapshot",
-  "press",
-  "type",
-  "wait_for",
-  "query",
-  "expect",
-  "render_text",
-  "render_visual",
-  "snapshot_visual",
-  "cell",
-  "visual_quality",
-  "wait_for_event",
-  "event_log",
-] as const;
+// ---------------------------------------------------------------------------
+// Capabilities
+// ---------------------------------------------------------------------------
 
-export function buildCapabilitiesPayload(): {
+/** Prefix every harness tool is registered under. */
+const TOOL_NAMESPACE = "tui.";
+
+/**
+ * Capability strings that are NOT tools, and so cannot come from the registrar.
+ * `event_log` is the JSONL sink (see `eventLogPath`), not a callable.
+ */
+const NON_TOOL_FEATURES = ["event_log"] as const;
+
+/**
+ * Every tool name passed to `server.registerTool`, recorded as it is registered.
+ *
+ * The predecessor of this set was a hand-maintained `FEATURES` array that had
+ * drifted to 14 entries against 21 registered tools — `tui.last_event`, the one
+ * tool that answers "is this run waiting on a human or hung", was among the
+ * seven a capabilities-only agent could not discover. Deriving the advertised
+ * list from the registrar makes that class of drift unrepresentable.
+ */
+const REGISTERED_TOOL_NAMES = new Set<string>();
+
+/** The tool names registered in this process, sorted. */
+export function getRegisteredToolNames(): readonly string[] {
+  return [...REGISTERED_TOOL_NAMES].sort();
+}
+
+/**
+ * Wrap `server.registerTool` so every registration is recorded in
+ * {@link REGISTERED_TOOL_NAMES} before it is forwarded to the SDK. Must be
+ * applied before the first `registerTool` call on that server.
+ *
+ * The SDK keeps its tool table in a private field (`McpServer._registeredTools`),
+ * so intercepting the registrar is the only way to read the real tool set
+ * without depending on SDK internals.
+ */
+function recordToolRegistrations(server: McpServer): void {
+  type Registrar = (...args: unknown[]) => unknown;
+  const holder = server as unknown as { registerTool: Registrar };
+  const original = holder.registerTool.bind(server) as Registrar;
+  holder.registerTool = (...args: unknown[]) => {
+    const name = args[0];
+    if (typeof name === "string") REGISTERED_TOOL_NAMES.add(name);
+    return original(...args);
+  };
+}
+
+/** One semantic node, flattened out of the live frame for the capabilities handshake. */
+export interface CapabilitiesSemanticNode {
+  id: string;
+  role: string;
+  name?: string;
+  focus?: true;
+  isModal?: true;
+}
+
+/** Upper bound on nodes echoed into the payload, so capabilities stays a handshake. */
+const SEMANTICS_NODE_CAP = 300;
+
+export interface HarnessCapabilities {
   protocol: string;
+  /**
+   * Short (namespace-stripped) tool names plus non-tool capability strings.
+   * Retained for callers that predate `tools`; derived, not hand-maintained.
+   */
   features: readonly string[];
+  /** Fully-qualified names of every registered tool — what you actually call. */
+  tools: readonly string[];
+  /** `"registrar"` when derived from real registrations; `"none"` when no server
+   *  has been constructed in this process, so an empty list is never mistaken
+   *  for "this build has no tools". */
+  toolsSource: "registrar" | "none";
+  /** Every `LiveEvent.kind` accepted by `tui.last_event` / `tui.wait_for`. */
+  eventKinds: readonly string[];
+  /** The closed role vocabulary a semantic node may carry. */
+  roles: readonly string[];
+  /** Roles outside `roles` are admitted only under this prefix. */
+  customRolePrefix: "x-";
+  /** The selector grammar accepted by query/query_all/count/expect/focus/wait_for. */
+  selector: typeof SELECTOR_GRAMMAR;
+  /** The predicate grammar accepted by tui.expect. */
+  predicate: typeof PREDICATE_GRAMMAR;
+  /** Semantic ids/roles present in the CURRENT frame. Never a static inventory —
+   *  ids are per-render, so this reports what exists right now, or says why not. */
+  semantics: {
+    source: "live-frame" | "no-driver" | "no-frame";
+    frameSeq: number | null;
+    focus: string | null;
+    modals: readonly string[];
+    nodeCount: number;
+    truncated: boolean;
+    nodes: readonly CapabilitiesSemanticNode[];
+  };
   /** Where LiveEvents are teed as JSONL, or null when the sink is disabled. */
   eventLogPath: string | null;
   /** Streaming event + heartbeat tool is available (single-call delivery). */
@@ -271,10 +348,68 @@ export function buildCapabilitiesPayload(): {
   /** Server MAY use sampling/createMessage when the client advertises sampling
    *  AND the caller passes pushMode:true at tui.start. Runtime-detected per session. */
   supportsSampling: "client-dependent";
-} {
+}
+
+/** Flatten a frame's node forest, capped, into the handshake shape. */
+function flattenSemanticNodes(nodes: readonly UINode[]): { out: CapabilitiesSemanticNode[]; total: number } {
+  const out: CapabilitiesSemanticNode[] = [];
+  let total = 0;
+  const visit = (n: UINode): void => {
+    total++;
+    if (out.length < SEMANTICS_NODE_CAP) {
+      const row: CapabilitiesSemanticNode = { id: n.id, role: n.role };
+      if (n.name !== undefined) row.name = n.name;
+      if (n.focus) row.focus = true;
+      if (n.isModal) row.isModal = true;
+      out.push(row);
+    }
+    for (const c of n.children ?? []) visit(c);
+  };
+  for (const n of nodes) visit(n);
+  return { out, total };
+}
+
+/**
+ * Build the `tui.capabilities` payload.
+ *
+ * Everything an agent needs to construct a working selector is derived from the
+ * code that consumes it — the tool list from the registrar, the event kinds and
+ * role vocabulary from `protocol.ts`, the selector grammar from `selector.ts`.
+ * Nothing here is a second copy that can silently fall out of date.
+ *
+ * @param opts.frame  the current LiveFrame (or null) — supplies live semantic ids.
+ * @param opts.tools  override the derived tool list; tests only.
+ */
+export function buildCapabilitiesPayload(
+  opts: { frame?: LiveFrame | null; hasDriver?: boolean; tools?: readonly string[] } = {},
+): HarnessCapabilities {
+  const tools = opts.tools ?? getRegisteredToolNames();
+  const shortNames = tools.map((t) => (t.startsWith(TOOL_NAMESPACE) ? t.slice(TOOL_NAMESPACE.length) : t));
+  const features = [...new Set([...shortNames, ...NON_TOOL_FEATURES])].sort();
+
+  const frame = opts.frame ?? null;
+  const hasDriver = opts.hasDriver ?? frame !== null;
+  const { out: nodes, total } = frame ? flattenSemanticNodes(frame.nodes) : { out: [], total: 0 };
+
   return {
     protocol: PROTOCOL_VERSION,
-    features: FEATURES,
+    features,
+    tools,
+    toolsSource: tools.length > 0 ? "registrar" : "none",
+    eventKinds: LIVE_EVENT_KINDS,
+    roles: KNOWN_ROLES,
+    customRolePrefix: "x-",
+    selector: SELECTOR_GRAMMAR,
+    predicate: PREDICATE_GRAMMAR,
+    semantics: {
+      source: frame ? "live-frame" : hasDriver ? "no-frame" : "no-driver",
+      frameSeq: frame ? frame.seq : null,
+      focus: frame?.focus ?? null,
+      modals: frame?.modals ?? [],
+      nodeCount: total,
+      truncated: total > nodes.length,
+      nodes,
+    },
     // A default-on sink nobody can locate is still opt-in. Reporting the
     // resolved path here is what makes it discoverable without the caller
     // reproducing the env/tmpdir/pid rule.
@@ -716,33 +851,14 @@ export function registerAsyncTools(server: McpServer, getDriver: () => Driver | 
         "(null if none) — including the complete askcard question text, which tui.query truncates. " +
         "Use this instead of polling a database or log file: modal pauses write no DB row, so a " +
         "poller cannot tell 'waiting for a human' from 'hung'. Pair with tui.wait_for to block.",
-      // Full protocol event set (minus the idle sentinel) so an external agent can
-      // observe lifecycle events — council/sprint/route/askcard, not just toasts.
-      // The Driver accepts any kind; this enum is the MCP-boundary validation.
+      // Derived from LIVE_EVENT_KINDS — the protocol's own runtime projection of
+      // the LiveEvent union, kept exhaustive by a compile-time assertion in
+      // protocol.ts. The hand-copied enum this replaces claimed to be the "full
+      // protocol event set" while omitting `resume-request`, so that one call was
+      // rejected at the MCP boundary. The Driver accepts any kind; this enum is
+      // the MCP-boundary validation.
       inputSchema: {
-        kind: z.enum([
-          "toast",
-          "stream.delta",
-          "llm-token",
-          "llm-done",
-          "council-step",
-          "council-speaker",
-          "council-turn-length",
-          "askcard-open",
-          "askcard-answered",
-          "askcard-cancel",
-          "sprint-stage",
-          "sprint-halt",
-          "sprint-plan-committed",
-          "route-decision",
-          "steer-inject",
-          "usage",
-          "grounding-flag",
-          "ee-timeout",
-          "ee-error",
-          "stream-retry",
-          "disconnect",
-        ]),
+        kind: z.enum(LIVE_EVENT_KINDS),
       },
     },
     async ({ kind }) => {
@@ -973,6 +1089,8 @@ export function createMcpHarnessServer({
 }): McpServer {
   configureHarnessRoots({ repoRoot, entry });
   const server = new McpServer({ name: "muonroi-harness-driver", version: "0.1.0" });
+  // Before ANY registerTool call, so tui.capabilities advertises the real set.
+  recordToolRegistrations(server);
   let currentDriver: Driver | null = null;
   let currentPid: number | undefined;
   let currentStartedAt: number | undefined;
@@ -1035,14 +1153,25 @@ export function createMcpHarnessServer({
   server.registerTool(
     "tui.capabilities",
     {
-      description: "Report the harness protocol version and supported feature list.",
+      description:
+        "Report everything needed to drive this TUI with no repo knowledge: protocol version, " +
+        "the full registered tool list, every LiveEvent kind, the semantic role vocabulary, the " +
+        "selector grammar, and the semantic ids present in the CURRENT frame.",
       inputSchema: {},
     },
     async () => ({
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify(buildCapabilitiesPayload()),
+          text: JSON.stringify(
+            // Semantic ids are per-render, so they are read off the live frame
+            // rather than published as a static inventory that would be wrong
+            // the moment the UI changes.
+            buildCapabilitiesPayload({
+              frame: currentDriver?.snapshot() ?? null,
+              hasDriver: currentDriver !== null,
+            }),
+          ),
         },
       ],
     }),

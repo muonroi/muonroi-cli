@@ -4,43 +4,52 @@ export const PROTOCOL_VERSION = "0.4.0" as const;
  * Known accessibility-style roles for semantic blocks. Closed vocabulary —
  * `Role` (below) additionally admits namespaced `x-*` custom roles so new UI
  * surfaces can be introduced without a protocol version bump (additive-only).
+ *
+ * Declared as a runtime array and the {@link KnownRole} type derived FROM it,
+ * not the other way round: `tui.capabilities` has to hand a driving agent the
+ * role vocabulary, and a type-only union is invisible at runtime. Deriving in
+ * this direction makes a role that exists in the type but not in the advertised
+ * vocabulary unrepresentable.
  */
-export type KnownRole =
-  | "dialog"
-  | "textbox"
-  | "listbox"
-  | "listitem"
-  | "button"
-  | "checkbox"
-  | "radio"
-  | "radiogroup"
-  | "tab"
-  | "tablist"
-  | "tree"
-  | "treeitem"
-  | "table"
-  | "row"
-  | "cell"
-  | "progressbar"
-  | "spinner"
-  | "log"
-  | "statusbar"
-  | "menu"
-  | "menuitem"
-  | "toast"
-  | "tooltip"
-  | "region"
+export const KNOWN_ROLES = [
+  "dialog",
+  "textbox",
+  "listbox",
+  "listitem",
+  "button",
+  "checkbox",
+  "radio",
+  "radiogroup",
+  "tab",
+  "tablist",
+  "tree",
+  "treeitem",
+  "table",
+  "row",
+  "cell",
+  "progressbar",
+  "spinner",
+  "log",
+  "statusbar",
+  "menu",
+  "menuitem",
+  "toast",
+  "tooltip",
+  "region",
   // ARIA landmark / live-region / grouping roles (council surface sections)
-  | "status"
-  | "complementary"
-  | "group"
-  | "banner"
-  | "article"
+  "status",
+  "complementary",
+  "group",
+  "banner",
+  "article",
   // IDE / editor surfaces (added for the desktop frontend; harmless in the TUI)
-  | "editor"
-  | "diff"
-  | "gutter"
-  | "panel";
+  "editor",
+  "diff",
+  "gutter",
+  "panel",
+] as const;
+
+export type KnownRole = (typeof KNOWN_ROLES)[number];
 
 /**
  * A semantic role. Either a well-known {@link KnownRole} or a namespaced
@@ -375,6 +384,54 @@ export type LiveEvent =
       ts: number;
     }
   | { t: "idle" };
+
+/** The `kind` discriminant of every non-sentinel {@link LiveEvent} member. */
+export type LiveEventKind = Extract<LiveEvent, { t: "event" }>["kind"];
+
+/**
+ * Runtime list of every {@link LiveEvent} kind, excluding the `{t:"idle"}`
+ * sentinel (which carries no `kind`).
+ *
+ * The `LiveEvent` union is type-only, so nothing downstream — the
+ * `tui.last_event` MCP enum, the `tui.capabilities` payload — could enumerate it
+ * at runtime; both maintained hand-written copies instead, and the MCP enum
+ * drifted to 21 of 22 (`resume-request` was missing, so that call was rejected
+ * at the boundary). This array is that runtime projection, and the two
+ * assertions below make it exhaustive at COMPILE time in both directions: a new
+ * union member that is not listed here, or an entry here that no union member
+ * declares, fails `tsc`. Zero runtime cost.
+ */
+export const LIVE_EVENT_KINDS = [
+  "stream.delta",
+  "toast",
+  "llm-token",
+  "llm-done",
+  "council-step",
+  "council-speaker",
+  "council-turn-length",
+  "askcard-open",
+  "askcard-answered",
+  "askcard-cancel",
+  "sprint-stage",
+  "sprint-halt",
+  "sprint-plan-committed",
+  "route-decision",
+  "usage",
+  "ee-timeout",
+  "ee-error",
+  "disconnect",
+  "stream-retry",
+  "grounding-flag",
+  "steer-inject",
+  "resume-request",
+] as const;
+
+/** Fails to compile unless `T` is `never`. */
+type AssertNever<T extends never> = T;
+/** A LiveEvent kind exists that LIVE_EVENT_KINDS does not list. */
+export type _LiveEventKindsMissing = AssertNever<Exclude<LiveEventKind, (typeof LIVE_EVENT_KINDS)[number]>>;
+/** LIVE_EVENT_KINDS lists a kind no LiveEvent member declares. */
+export type _LiveEventKindsExtra = AssertNever<Exclude<(typeof LIVE_EVENT_KINDS)[number], LiveEventKind>>;
 
 export type StatePatch = { id: string } & Partial<Omit<UINode, "children" | "id">>;
 
