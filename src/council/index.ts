@@ -862,6 +862,26 @@ export async function* runCouncil(
   // LLM budget. Cancellation latency is bounded by one in-flight sub-call.
   const userAborted = (): boolean => options?.signal?.aborted === true;
 
+  /**
+   * The TURN terminator, emitted only when this council IS a turn.
+   *
+   * `{type:"done"}` is what the TUI's `for await` over a run treats as "the turn
+   * ended" (`use-app-logic.tsx`: `if (chunk.type === "done") break;`). Under
+   * `sprintPlanningMode` this council is a SUB-STEP of `/ideal`'s sprint runner,
+   * not a turn — so a `done` leaking out of here breaks the enclosing `/ideal`
+   * for-await and tears the whole product-loop run down with no halt card, no
+   * error and no terminal event (the P0-1 "wedge": measured 2026-09-04, sprint 1
+   * Planning bailed at the `participants.length < 2` guard below and the run
+   * simply stopped, `sprint.planCouncil.after` never reached).
+   *
+   * The terminal `done` at the end of the run was already gated on this flag;
+   * the eight EARLY-BAIL sites were not. Route every one of them through here so
+   * a future bail cannot reintroduce the leak.
+   */
+  const terminalDone = function* (): Generator<StreamChunk, void, unknown> {
+    if (!options?.sprintPlanningMode) yield { type: "done" };
+  };
+
   // ── Resolve models ──────────────────────────────────────────────────────────
   const leaderResolution = await resolveLeaderModelDetailed(sessionModelId);
   const leaderModelId = leaderResolution.modelId;
@@ -885,7 +905,7 @@ export async function* runCouncil(
       type: "content",
       content: "\nNo reachable provider. Check API keys in user-settings.json or environment.\n",
     };
-    yield { type: "done" };
+    yield* terminalDone();
     return null;
   }
 
@@ -941,7 +961,7 @@ export async function* runCouncil(
 
   if (userAborted()) {
     yield { type: "content", content: "\n> Council cancelled by user.\n" };
-    yield { type: "done" };
+    yield* terminalDone();
     return null;
   }
 
@@ -1131,7 +1151,7 @@ export async function* runCouncil(
 
   if (userAborted()) {
     yield { type: "content", content: "\n> Council cancelled by user.\n" };
-    yield { type: "done" };
+    yield* terminalDone();
     return null;
   }
 
@@ -1197,7 +1217,7 @@ export async function* runCouncil(
 
   if (userAborted()) {
     yield { type: "content", content: "\n> Council cancelled by user.\n" };
-    yield { type: "done" };
+    yield* terminalDone();
     return null;
   }
 
@@ -1263,7 +1283,7 @@ export async function* runCouncil(
 
   if (userAborted()) {
     yield { type: "content", content: "\n> Council cancelled by user.\n" };
-    yield { type: "done" };
+    yield* terminalDone();
     return null;
   }
 
@@ -1389,7 +1409,7 @@ export async function* runCouncil(
             ? "\n> Council not started — refine the topic and run `/council` again. Nothing was spent.\n"
             : "\n> Council cancelled before the debate started. Nothing was spent.\n",
       };
-      yield { type: "done" };
+      yield* terminalDone();
       return null;
     }
     // Only lock spec.intentKind (and confirm it) once the run is actually
@@ -1502,7 +1522,7 @@ export async function* runCouncil(
 
   if (userAborted()) {
     yield { type: "content", content: "\n> Council cancelled by user — skipping synthesis.\n" };
-    yield { type: "done" };
+    yield* terminalDone();
     return null;
   }
 
@@ -1532,7 +1552,7 @@ export async function* runCouncil(
       eventSubtype: "aborted_no_openings",
       data: { topic, failures: reasons },
     });
-    yield { type: "done" };
+    yield* terminalDone();
     return null;
   }
 

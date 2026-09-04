@@ -848,15 +848,54 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       },
     );
 
+    let planBailed = false;
     while (true) {
       const step = await planGen.next();
       if (step.done) {
+        // `runCouncil` returns `null` from every early-bail path (no reachable
+        // provider, user abort, no openings, cancelled intent card). Distinguish
+        // that from a real (possibly empty-ish) synthesis so the bail becomes an
+        // accountable sprint failure below instead of an empty plan the impl
+        // stage silently builds against.
+        planBailed = step.value == null;
         planSynthesis = step.value ?? "";
         break;
       }
-      yield step.value as StreamChunk;
+      const chunk = step.value as StreamChunk;
+      // Structural guarantee at the seam: this council is a SUB-STEP, so a
+      // `{type:"done"}` from it is NOT this turn's terminator. The TUI ends its
+      // `/ideal` for-await on the first `done` it sees (use-app-logic.tsx), so
+      // forwarding one here tore the entire product-loop run down mid-sprint
+      // with no halt card, no error and no terminal event — the P0-1 wedge.
+      // `runCouncil` now suppresses these under `sprintPlanningMode`; this guard
+      // keeps the invariant enforced at the boundary that actually owns it.
+      if (chunk?.type === "done") continue;
+      yield chunk;
     }
-    idealTrace("sprint.planCouncil.after", { runId: ctx.runId, sprintN, planSynthesisLen: planSynthesis.length });
+    idealTrace("sprint.planCouncil.after", {
+      runId: ctx.runId,
+      sprintN,
+      planSynthesisLen: planSynthesis.length,
+      planBailed,
+    });
+    if (planBailed || planSynthesis.trim().length === 0) {
+      // A sprint with no plan cannot implement anything. Fail loudly: the caller
+      // (product-loop/index.ts `catch` around runSprint) turns a throw into a
+      // persisted `sprint_halt`, a manifest verdict and the TUI recovery card —
+      // a terminal state the driver can see. Previously this fell through with
+      // `planSynthesis === ""` and the run continued (or, with the leaked `done`,
+      // vanished) with no verdict at all.
+      const reason = `Sprint ${sprintN} planning council produced no plan (council bailed before synthesis — check provider reachability and API keys for the planning model)`;
+      console.error(`[sprint-runner] ${reason} (run ${ctx.runId})`);
+      yield phaseError({
+        phaseId: planPhaseId,
+        kind: "sprint_stage",
+        label: `Sprint ${sprintN} — Planning`,
+        startedAt: planStartedAt,
+        errorMessage: reason,
+      });
+      throw new Error(reason);
+    }
     // Persist so a resumed/retried sprint reuses this exact plan (and target folder).
     await persistSprintPlan(planPath, planSynthesis);
   }

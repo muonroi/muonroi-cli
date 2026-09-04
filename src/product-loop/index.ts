@@ -17,6 +17,7 @@ import { defaultResolveChannelId, maybeAutoFire } from "../reporter/auto-fire.js
 import { clearWorkspaceFocus, setWorkspaceFocus } from "../state/active-run.js";
 import { logInteraction, logUIInteraction } from "../storage/index.js";
 import type { ModelInfo, StreamChunk, VerifyRecipe } from "../types/index.js";
+import { isProviderDisabled } from "../utils/settings.js";
 import { markIterationCrashed, readIterations, readManifest, writeManifest } from "./artifact-io.js";
 import { buildBacklog } from "./backlog-builder.js";
 import { readBacklog, writeBacklog } from "./backlog-store.js";
@@ -2071,7 +2072,7 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
  * #4 when score < 0.85) keeps early sprints unblocked, and the user-approval
  * gate (Cond #5) still runs so the loop can ship via /ship.
  */
-async function resolveRoleAssignments(
+export async function resolveRoleAssignments(
   sessionModelId: string,
 ): Promise<Map<RoleSlot, { modelId: string; provider: string; tier?: string }>> {
   const out = new Map<RoleSlot, { modelId: string; provider: string; tier?: string }>();
@@ -2081,6 +2082,19 @@ async function resolveRoleAssignments(
   const order: readonly ProviderId[] = ALL_PROVIDER_IDS.filter((p) => p !== "xai");
   const inventory: ModelInfo[] = [];
   for (const p of order) {
+    // Honour the user's disabled-provider list. This scan was the ONLY model
+    // selector in the codebase that read key presence without also consulting
+    // `isProviderDisabled` (compare council/leader.ts resolveParticipants:322/337/343
+    // and buildCouncilCandidatePool:388), so a stale key for a provider the user
+    // had switched OFF still won a role slot. Downstream that is fatal, not
+    // cosmetic: sprint-runner passes `roleAssignments.get("Architect").modelId`
+    // into `runCouncil` as its session model, and `resolveParticipants` returns
+    // `[]` for a DISABLED provider — so sprint 1 Planning bailed with "No
+    // reachable provider" on every run. Measured 2026-09-04: with
+    // disabledProviders ["xai","zai","opencode-go","deepseek"] and a stale
+    // opencode-go key present, Architect resolved to `opencode/glm-5.1` and
+    // resolveParticipants returned 0 participants.
+    if (isProviderDisabled(p)) continue;
     try {
       await loadKeyForProvider(p);
     } catch {

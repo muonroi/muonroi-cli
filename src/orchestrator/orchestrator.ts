@@ -2646,8 +2646,22 @@ export class Agent {
       sessionId: this.session?.id,
     } as Parameters<typeof runProductLoop>[0]);
 
-    for await (const chunk of gen) {
-      yield chunk;
+    try {
+      for await (const chunk of gen) {
+        yield chunk;
+      }
+    } finally {
+      // Same invariant runCouncilV2 already enforces (:2404). `/ideal` uses the
+      // SAME `createQuestionResponder` / `createPreflightResponder` closures, and
+      // those bracket every open card with `beginInteractivePause()`. A card
+      // abandoned mid-run — the user hits Esc, the UI breaks out of its
+      // `for await` (which unwinds this generator via `gen.return()`), or the
+      // run throws while a card is open — never resolves, so its pause would
+      // leak. `pauseDepth` is process-global, so ONE leak permanently disarms
+      // `shouldSuppressFire` for the top-level turn watchdog (:3568) and the
+      // provider stall watchdog (tool-engine.ts:1977) for every LATER chat turn
+      // in the process. Runs on every exit path — normal, throw, unwind.
+      this.councilManager.releasePendingWaits();
     }
   }
 
