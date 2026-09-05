@@ -2,7 +2,7 @@
 /**
  * scripts/agent-drivability-score.ts — the Agent-Drivability referee (P1-1).
  *
- * Scores axes A1..A6 of the scorecard in
+ * Scores axes A1..A7 of the scorecard in
  * `docs/agent-first/SELF-IMPROVEMENT-PLAN.md` §1.1 from artifacts, and emits
  * JSON (`--json`) plus a readable summary.
  *
@@ -26,7 +26,7 @@
  *
  * 2. **Every axis ships a negative control** (§2.6). {@link NEGATIVE_CONTROLS}
  *    holds, per axis, a deliberately-broken mutation of {@link HEALTHY_FIXTURE}
- *    that the scorer is REQUIRED to fail on. `--self-test` runs all six and
+ *    that the scorer is REQUIRED to fail on. `--self-test` runs all seven and
  *    exits non-zero if any known-bad input still scores a pass. An axis whose
  *    score cannot detect a known-bad change is not measuring anything, and this
  *    is the only thing standing between an agent-written referee and a rubber
@@ -54,6 +54,7 @@
  * | A4   | NOT mechanical — "flows that REQUIRE render_text" is not observable; no referee can tell "needed the scrape" from "used the scrape" | bounded POSITIVE proxy: fraction of corpus decision points whose decision field is reachable through a structured tool (never a scrape tool) |
  * | A5   | mechanical | `check-harness-skips.ts --strict` exit code + scalars, with the `retry: 2` caveat recorded |
  * | A6   | mechanical | `capabilities.tools` must equal `tools/list` EXACTLY, and every field any corpus step references must appear in the payload |
+ * | A7   | mechanical | 7 spawned headless invocations; per row, `(exit === 0)` must equal `(ground truth === answered)`, where the ground truth is fixed by the mock fixture BEFORE the run. A false alarm (a run that worked and exited non-zero) is subtracted at 2x, so the naive "any error => exit 1" fix ranks BELOW the defect it replaces |
  *
  * A1 and A4 are therefore scored, but their `axisAsStated.mechanical` is
  * `false` and their `humanMustJudge` is never null: **whether the corpus
@@ -85,6 +86,22 @@
  *   bun scripts/agent-drivability-score.ts --replay <path>      # upgrade A1/A4 to replayed
  *   bun scripts/agent-drivability-score.ts --escape-log <path>  # + A3 Escape sub-metric
  *   bun scripts/agent-drivability-score.ts --self-test          # prove the negative controls fire
+ *   bun scripts/agent-drivability-score.ts --a7                 # + A7 (spawns 7 headless runs, ~5-7 min)
+ *   bun scripts/agent-drivability-score.ts --a7-matrix <path>   # + A7 from a previously collected matrix
+ *
+ * Reproducing the A7 baseline from a clean checkout, in ONE command — no
+ * network, no API key, no cost (every row is driven by a generated mock-LLM
+ * fixture, and the fixtures are written by this file into a temp dir so there
+ * is no committed artifact a sprint could edit):
+ *
+ *   bun scripts/agent-drivability-score.ts --a7 --a7-out docs/agent-first/a7-baseline.json --json
+ *
+ * A7 SCOPE NOTE (deliberate, not an oversight): every other axis is about an
+ * agent driving the TUI over MCP. A7 is about an agent driving the CLI as a
+ * child process — a different, arguably more common drive surface. That is the
+ * reason A7 escapes §2.2: A1/A2/A4/A6 are referee-owned because the harness
+ * protocol IS their instrument, whereas A7's contract (`exitCode` + stdout) is
+ * owned by `src/` and merely observed from outside here.
  *
  * Exit codes: 0 = ran (see `meetsTarget` per axis for the verdict);
  *             1 = `--gate` was passed and a baselined axis is `false`;
@@ -93,8 +110,9 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -109,7 +127,7 @@ const MODULE = "agent-drivability-score";
 // Types
 // ===========================================================================
 
-export type AxisId = "A1" | "A2" | "A3" | "A4" | "A5" | "A6";
+export type AxisId = "A1" | "A2" | "A3" | "A4" | "A5" | "A6" | "A7";
 export type Confidence = "high" | "medium" | "low" | "none";
 
 /** How a step's field is reached and named. Mirrors nothing in `src/` on purpose. */
@@ -209,6 +227,69 @@ export interface ReplayResult {
   model?: string;
 }
 
+// --- A7 artifacts -----------------------------------------------------------
+
+/** Which generated mock-LLM fixture a matrix row drives. `null` = no model call. */
+export type A7FixtureId = "ok" | "fail" | "mixed" | "nomodel";
+
+/**
+ * "answered" = the invocation DID the job it was asked to do (a turn produced an
+ * answer; the boot probe completed its boot), so exit 0 is the correct report.
+ * "not-answered" = it did not, so a non-zero exit is the correct report.
+ *
+ * The value is a fact about the FIXTURE — what stream parts the model emits —
+ * decided before the process runs. It is never inferred from the output, which
+ * is the whole point: the output is what is on trial.
+ */
+export type A7GroundTruth = "answered" | "not-answered";
+
+export interface A7RowSpec {
+  id: string;
+  label: string;
+  /** Fixture dir this row drives; `null` for rows that make no model call. */
+  fixture: A7FixtureId | null;
+  /** argv after `bun run src/index.ts`. `{{fixture}}` / `{{cwd}}` are substituted. */
+  argv: readonly string[];
+  groundTruth: A7GroundTruth;
+  /** WHY the ground truth is what it is — always a statement about the fixture. */
+  basis: string;
+  /**
+   * Text the fixture makes the process emit when it does its job. Used ONLY as a
+   * consistency cross-check, never as the score. `null` when the fixture emits no
+   * text at all — see {@link scoreA7} for why that direction cannot be probed.
+   */
+  answerSentinel: string | null;
+}
+
+export interface A7RowResult {
+  id: string;
+  groundTruth: A7GroundTruth;
+  /** null when the row could not be executed at all. */
+  exitCode: number | null;
+  stdoutBytes: number;
+  /**
+   * DIAGNOSTIC ONLY — never scored. See {@link scoreA7}: an implementation that
+   * quietens stderr moves no row, because no row reads it.
+   */
+  stderrBytes: number;
+  /** Sentinel found on stdout; `null` when the row declares no sentinel. */
+  answerOnStdout: boolean | null;
+  /** `(exitCode === 0) === (groundTruth === "answered")`. The score. */
+  exitCorrect: boolean;
+  /** The sentinel cross-check agreed with the declared ground truth. */
+  consistent: boolean;
+  /** false when the row could not be executed (spawn failure / timeout). */
+  ran: boolean;
+  error?: string;
+}
+
+export interface A7MatrixResult {
+  collectedAt: string;
+  /** How the matrix was produced, so a committed baseline is reproducible. */
+  collectedBy: string;
+  rows: A7RowResult[];
+}
+
 export interface ScoreInputs {
   corpus: CorpusParseResult;
   capabilities: CapabilitiesLike | null;
@@ -220,6 +301,8 @@ export interface ScoreInputs {
   lifecycle: LifecycleResult | null;
   escape: EscapeProbe | null;
   replay: ReplayResult | null;
+  /** Non-interactive outcome matrix for A7. */
+  a7: A7MatrixResult | null;
   /** Silence budget for A2's "no turn goes quiet" invariant. */
   maxSilenceMs: number;
 }
@@ -315,6 +398,15 @@ export const PRE_PHASE0_BASELINE: Record<
     meetsTarget: false,
     source:
       "§1.1 — 14 advertised FEATURES strings vs 21 registered tools; 0 selector/role/event-kind/semantic-id information",
+  },
+  A7: {
+    score: null,
+    unit: "fraction of matrix rows whose exit code matches the run's outcome",
+    meetsTarget: null,
+    source:
+      "§1.1 — not baselined: the axis did not exist before Phase 0. A7 was added 2026-09-05, AFTER Phase 0 shipped, " +
+      "so it has no pre-Phase-0 row and Phase 0 can claim no credit on it. Its own committed baseline (5/7 = 0.714, " +
+      "measured 2026-09-05 against 683a7b99 with `--a7`) is the pre-Phase-2 line a sprint is judged against.",
   },
 };
 
@@ -609,15 +701,34 @@ export function scoreA1(inputs: ScoreInputs): AxisResult {
  * BOTH terminal-ish on purpose — §1.1 is explicit that "exactly one terminal
  * event" is falsified by normal operation and that an implementer told to
  * satisfy it will suppress events.
+ *
+ * `run-finished` is the terminal event of an `/ideal` run and the SUCCESS
+ * counterpart to `sprint-halt`: before it existed a run that finished FINE
+ * emitted nothing at all, so "approved" and "hung" were the same observation to
+ * a driver (§6.0 open item 3 / §1 failure-class instance 5). Listing it here
+ * WIDENS what can close a turn, which is the one direction that can hand the
+ * axis free credit — so it is admitted under the extra `outcome` requirement in
+ * {@link isSubstantiveTerminal}, exactly as `toast` is admitted only with a
+ * `level`. A `run-finished` that does not say HOW the run ended closes nothing.
  */
 export const TERMINAL_KINDS: readonly string[] = [
   "llm-done",
   "sprint-halt",
+  "run-finished",
   "askcard-open",
   "askcard-answered",
   "askcard-cancel",
   "toast",
 ];
+
+/**
+ * The `outcome` values `run-finished` is defined to carry. Duplicated as string
+ * literals ON PURPOSE: the referee imports nothing from `src/` or `packages/`,
+ * so a sprint that changes the product cannot change the yardstick it is being
+ * measured against. An outcome outside this list fails CLOSED (the event does
+ * not count as closure), so drift can only ever make A2 harder to pass.
+ */
+const RUN_FINISHED_OUTCOMES: ReadonlySet<string> = new Set(["approved", "halted", "error", "threw", "abandoned"]);
 
 /** Kinds that open a turn. A turn also opens at the first event in the log. */
 export const TURN_OPENING_KINDS: readonly string[] = ["route-decision", "sprint-stage", "council-step"];
@@ -641,6 +752,19 @@ export function isSubstantiveTerminal(line: TeedLine): boolean {
   // A toast that does not say what KIND of thing happened cannot discharge
   // "the turn announced its outcome" — it is decoration, not accountability.
   if (line.kind === "toast" && !("level" in ev)) return false;
+  // Same rule, applied to the kind this axis just started crediting. The
+  // zero-payload check above is NOT sufficient for `run-finished`: a wrapper
+  // stub that emits `{t, kind, ts, runId}` unconditionally carries two
+  // non-empty fields and would sail through it while saying nothing about how
+  // the run ended. `outcome` is the ONE field that discharges "the turn
+  // announced its outcome", so it — not mere non-emptiness — is what admits a
+  // `run-finished`. An unrecognised value fails closed (see
+  // RUN_FINISHED_OUTCOMES): "finished, outcome unknown" is a wedge wearing a
+  // terminal event's hat.
+  if (line.kind === "run-finished") {
+    const outcome = (ev as Record<string, unknown>).outcome;
+    if (typeof outcome !== "string" || !RUN_FINISHED_OUTCOMES.has(outcome)) return false;
+  }
   return true;
 }
 
@@ -1139,6 +1263,422 @@ export function scoreA6(inputs: ScoreInputs): AxisResult {
 }
 
 // ===========================================================================
+// A7 — Non-interactive outcome fidelity
+//
+// The surface: an agent that drives muonroi-cli as a PLAIN SUBPROCESS
+// (`muonroi-cli -p "…" --format json|text`) rather than over the MCP harness.
+// Its contract is `process.exitCode` plus stdout — the two things a caller
+// actually checks. A1/A2/A4/A6 are referee-owned because the harness protocol
+// IS their instrument; A7 owns none of its contract, it only observes it from
+// outside, so a change that moves A7 is confined to `src/` (§2.2).
+//
+// ---------------------------------------------------------------------------
+// WHY stderr IS NOT SCORED — the "just quieten the dump" gaming path
+// ---------------------------------------------------------------------------
+// Driving the CLI at a real provider 401 produces a correct, actionable final
+// line on stderr buried under ~160KB of serialized AI_APICallError (the whole
+// request body). That is hostile to a non-interactive caller and worth fixing,
+// but if A7 scored OUTPUT VOLUME then deleting the dump would "pass" the axis
+// while the exit code kept lying — the defect untouched, the number green.
+// So: `stderrBytes` is recorded as diagnostic metadata and is read by nothing.
+// Every row's verdict is a function of `exitCode` and a stdout sentinel only.
+// Suppressing, reformatting or deleting stderr moves ZERO rows.
+//
+// ---------------------------------------------------------------------------
+// WHY "any error seen => exit 1" IS THE WRONG FIX, and how the axis knows
+// ---------------------------------------------------------------------------
+// Internal sub-calls fail routinely INSIDE successful runs. Measured on this
+// matrix's own R2 row (an `answered` run that exits 0 with "PONG" on stdout),
+// verbatim from its stderr:
+//     [gsd] complexity assessor call failed, keeping priorDepth: …
+//     [WARN] [ORCHESTRATOR] Failed to extract JSON from proposer output …
+// and R5 is the same shape ON STDOUT: an answer AND a `type:"error"` record,
+// with the error record emitted LAST. So the naive rules "an error chunk was
+// seen => exit 1" and "the last record was an error => exit 1" both flip R5 to
+// a wrong exit. That is what the A7 negative control models.
+//
+// ---------------------------------------------------------------------------
+// WHY THE SCORE IS NOT A PLAIN FRACTION — the false-alarm penalty
+// ---------------------------------------------------------------------------
+// A plain `correct / rows` RANKS THE OVER-EAGER FIX ABOVE THE DEFECT: it gets
+// R3 and R4 right and only breaks R5, so 6/7 = 0.857 beats today's 5/7 = 0.714.
+// Measured, not argued — that is what this scorer printed before the penalty
+// below existed. A sprint loop reading `score` as progress would take the trade
+// and ship a CLI that exits non-zero on ordinary successful runs.
+//
+// It is the wrong trade, and the two error directions are genuinely not equal:
+//
+//   * a MISS (a `not-answered` row exiting 0) hides a failure, but the caller
+//     can still recover it — in json mode the `type:"error"` record is right
+//     there on stdout (measured on R3).
+//   * a FALSE ALARM (an `answered` row exiting non-zero) fires on runs that
+//     WORKED, and there is no recovery: the caller must ignore the exit code
+//     entirely, which destroys the contract the axis exists to create. It is
+//     also the common case, not the corner — every ordinary run carries benign
+//     internal failures (see R2's stderr above).
+//
+// So a false alarm is subtracted at twice what it would otherwise be credited:
+//
+//     score = max(0, (correct - 2 * falseAlarms) / rowsRun)
+//
+// The coefficient must exceed 1 for "fix two misses by creating one false
+// alarm" to be net negative; 2 is the smallest integer that does it. This is a
+// STATED VALUE JUDGEMENT rather than a measurement — an unweighted fraction is
+// not neutral, it silently asserts the opposite judgement. The raw count is
+// still reported as `detail.unweightedCorrectRate` so nobody has to trust the
+// weighting to read the data. `meetsTarget` is unaffected: it needs every row
+// right, which means zero of both.
+// ===========================================================================
+
+/**
+ * The A7 matrix. Seven invocations with a ground truth fixed by the fixture.
+ *
+ * The mock fixtures are GENERATED BY THIS FILE into a fresh temp dir at
+ * measurement time (see {@link A7_FIXTURES}) rather than read from the repo, so
+ * there is no committed artifact a sprint could edit to make its own change
+ * score well — the same property §2.2 demands of everything else in here.
+ */
+export const A7_ROWS: readonly A7RowSpec[] = [
+  {
+    id: "R1",
+    label: "ok fixture, --format json",
+    fixture: "ok",
+    argv: ["-p", "Reply PONG", "--format", "json", "--mock-llm", "{{fixture}}", "-d", "{{cwd}}", "-k", "FAKE"],
+    groundTruth: "answered",
+    basis: "fixture stream is text-delta 'PONG' then finish/stop — the turn produces an answer",
+    answerSentinel: "PONG",
+  },
+  {
+    id: "R2",
+    label: "ok fixture, --format text",
+    fixture: "ok",
+    argv: ["-p", "Reply PONG", "--format", "text", "--mock-llm", "{{fixture}}", "-d", "{{cwd}}", "-k", "FAKE"],
+    groundTruth: "answered",
+    basis: "same fixture as R1 through the text emitter — the turn produces an answer",
+    answerSentinel: "PONG",
+  },
+  {
+    id: "R3",
+    label: "mid-stream provider error, --format json",
+    fixture: "fail",
+    argv: ["-p", "Reply PONG", "--format", "json", "--mock-llm", "{{fixture}}", "-d", "{{cwd}}", "-k", "FAKE"],
+    groundTruth: "not-answered",
+    basis: "fixture stream carries NO text part at all: an error part then finish/error — nothing to answer with",
+    answerSentinel: null,
+  },
+  {
+    id: "R4",
+    label: "mid-stream provider error, --format text",
+    fixture: "fail",
+    argv: ["-p", "Reply PONG", "--format", "text", "--mock-llm", "{{fixture}}", "-d", "{{cwd}}", "-k", "FAKE"],
+    groundTruth: "not-answered",
+    basis: "same fixture as R3 through the text emitter — nothing to answer with",
+    answerSentinel: null,
+  },
+  {
+    id: "R5",
+    label: "ANTI-GAMING: an answer AND an error in the same turn, --format json",
+    fixture: "mixed",
+    argv: ["-p", "Reply PONG", "--format", "json", "--mock-llm", "{{fixture}}", "-d", "{{cwd}}", "-k", "FAKE"],
+    groundTruth: "answered",
+    basis:
+      "fixture emits a text part ('PARTIAL ANSWER OK') AND an error part, finishing on stop. The user got an answer, " +
+      "so exit 0 is correct even though an error was reported — this row is what makes 'any error => exit 1' fail.",
+    answerSentinel: "PARTIAL ANSWER OK",
+  },
+  {
+    id: "R6",
+    label: "structurally different failure: the mock refuses to install",
+    fixture: "nomodel",
+    argv: ["-p", "Reply PONG", "--format", "json", "--mock-llm", "{{fixture}}", "-d", "{{cwd}}", "-k", "FAKE"],
+    groundTruth: "not-answered",
+    basis:
+      "the fixture dir declares no {model:…} block, so the run aborts before any turn. A SECOND, structurally " +
+      "different failure mechanism, so a special-case on the mid-stream path alone cannot cover the matrix.",
+    answerSentinel: null,
+  },
+  {
+    id: "R7",
+    label: "ANTI-GAMING: a run that must stay 0 (--smoke-boot-only)",
+    fixture: null,
+    argv: ["--smoke-boot-only"],
+    groundTruth: "answered",
+    basis:
+      "the boot probe's job is to load config+usage and exit; it does. Present so that a blanket non-zero exit, or " +
+      "refusing to run at all, scores WORSE rather than better.",
+    answerSentinel: "smoke-boot-only",
+  },
+];
+
+/**
+ * Mock-LLM fixture bodies, written to a temp dir by {@link collectA7Matrix}.
+ * Shapes mirror `textOnlyStream`/`errorStream` in the product's own mock model;
+ * they are transcribed here rather than imported, because the referee must not
+ * share a module with the thing it measures.
+ */
+export const A7_FIXTURES: Record<A7FixtureId, string> = (() => {
+  const usage = {
+    inputTokens: { total: 10, noCache: 10, cacheRead: null, cacheWrite: null },
+    outputTokens: { total: 4, text: 4, reasoning: null },
+  };
+  const model = (modelId: string, stream: unknown[]): string =>
+    `${JSON.stringify({ model: { provider: "mock", modelId, stream: [stream] } }, null, 2)}\n`;
+  return {
+    ok: model("mock-a7-ok", [
+      { type: "stream-start", warnings: [] },
+      { type: "text-delta", textDelta: "PONG" },
+      { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+    ]),
+    fail: model("mock-a7-fail", [
+      { type: "stream-start", warnings: [] },
+      { type: "error", error: "simulated provider failure" },
+      { type: "finish", finishReason: { unified: "error", raw: "error" }, usage },
+    ]),
+    mixed: model("mock-a7-mixed", [
+      { type: "stream-start", warnings: [] },
+      { type: "text-delta", textDelta: "PARTIAL ANSWER OK" },
+      { type: "error", error: "non-fatal internal sub-call failure" },
+      { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+    ]),
+    nomodel: `${JSON.stringify({ responses: [{ match: "*", text: "no model block here" }] })}\n`,
+  };
+})();
+
+export function scoreA7(inputs: ScoreInputs): AxisResult {
+  const humanMustJudge =
+    "Whether these seven rows are the outcomes a real subprocess driver hits. Like A1/A4's corpus the matrix is a " +
+    "human-authored denominator and is therefore gameable BY OMISSION — no code here can tell a complete matrix from " +
+    "a convenient one. Read A7_ROWS and decide. Note also what the axis deliberately does NOT score: stderr. A run " +
+    "may exit correctly and still bury its only actionable line under a 160KB error dump; that is a real defect and " +
+    "A7 will report 1.0 anyway.";
+
+  const base: AxisResult = {
+    axis: "A7",
+    name: "Non-interactive outcome fidelity",
+    mechanical: true,
+    axisAsStated: {
+      mechanical: true,
+      why:
+        "'exit 0 iff the run produced an answer' is decidable from a spawned process: the exit code is a machine " +
+        "fact and the ground truth is fixed by the fixture before the process starts. Nothing here needs a human " +
+        "in the loop to produce the number — though a human still has to judge whether the row set is complete.",
+    },
+    measured: false,
+    measuredBy: "none",
+    score: null,
+    unit: "fraction of matrix rows whose exit code matches the run's outcome, less 2x per false alarm",
+    target: "1.0 over the fixed matrix, with R5 (answered-with-an-error) pinned at exit 0",
+    meetsTarget: null,
+    confidence: "none",
+    humanMustJudge,
+    detail: {},
+    notes: [],
+  };
+
+  const matrix = inputs.a7;
+  if (!matrix) {
+    base.notes.push(
+      "no A7 matrix supplied (--a7 to run it now, or --a7-matrix <path> for a collected one). A7 is unmeasured, " +
+        "NOT passing. A missing artifact is not a score of 0.",
+    );
+    return base;
+  }
+
+  const rows = matrix.rows ?? [];
+  const ran = rows.filter((r) => r.ran);
+  const notRun = rows.filter((r) => !r.ran);
+  if (ran.length === 0) {
+    base.measured = true;
+    base.measuredBy = `A7 matrix (${matrix.collectedBy}) — no row executed`;
+    base.notes.push(
+      `every row failed to execute (${notRun.map((r) => `${r.id}: ${r.error ?? "unknown"}`).join("; ")}). ` +
+        "That is a broken measurement, not a finding about the CLI.",
+    );
+    base.detail = { rows, collectedAt: matrix.collectedAt };
+    return base;
+  }
+
+  const wrong = ran.filter((r) => !r.exitCorrect);
+  const inconsistent = ran.filter((r) => !r.consistent);
+  const uniformExit = new Set(ran.map((r) => r.exitCode)).size === 1;
+  // A run that WORKED but reported failure. Penalised at 2x — see the block
+  // comment above: without it the over-eager fix outranks the defect.
+  const falseAlarms = wrong.filter((r) => r.groundTruth === "answered");
+  const misses = wrong.filter((r) => r.groundTruth === "not-answered");
+  const correct = ran.length - wrong.length;
+
+  base.measured = true;
+  base.measuredBy = `A7 matrix: ${ran.length} spawned invocation(s), exit code compared to fixture ground truth (${matrix.collectedBy})`;
+  base.score = Math.max(0, (correct - 2 * falseAlarms.length) / ran.length);
+  base.confidence = notRun.length > 0 ? "medium" : ran.length >= A7_ROWS.length ? "high" : "medium";
+  base.detail = {
+    collectedAt: matrix.collectedAt,
+    collectedBy: matrix.collectedBy,
+    rowsDeclared: A7_ROWS.length,
+    rowsRan: ran.length,
+    rowsNotRun: notRun.map((r) => ({ id: r.id, error: r.error ?? null })),
+    correct,
+    /** The raw count, unpenalised — so the weighting never hides the data. */
+    unweightedCorrectRate: correct / ran.length,
+    falseAlarms: falseAlarms.map((r) => r.id),
+    misses: misses.map((r) => r.id),
+    falseAlarmPenaltyPerRow: 2,
+    wrongRows: wrong.map((r) => ({
+      id: r.id,
+      groundTruth: r.groundTruth,
+      expectedExitZero: r.groundTruth === "answered",
+      exitCode: r.exitCode,
+      stdoutBytes: r.stdoutBytes,
+    })),
+    inconsistentRows: inconsistent.map((r) => ({ id: r.id, groundTruth: r.groundTruth, answerOnStdout: r.answerOnStdout })),
+    // Recorded so a reader can see the stderr situation; read by NOTHING here.
+    stderrBytesPerRow: Object.fromEntries(rows.map((r) => [r.id, r.stderrBytes])),
+    rows,
+  };
+
+  // A demonstrated wrong row is decisive: it is a run that reported the wrong
+  // outcome, whatever else did or did not execute.
+  if (wrong.length > 0 || inconsistent.length > 0) base.meetsTarget = false;
+  else if (notRun.length > 0) base.meetsTarget = null;
+  else base.meetsTarget = true;
+
+  for (const r of misses) {
+    base.notes.push(
+      `MISS: ${r.id} is ${r.groundTruth} but exited ${String(r.exitCode)} — a caller checking $? is told the run succeeded.`,
+    );
+  }
+  for (const r of falseAlarms) {
+    base.notes.push(
+      `FALSE ALARM: ${r.id} produced its answer and still exited ${String(r.exitCode)}. This is penalised at 2x: a ` +
+        "non-zero exit on a run that WORKED forces every caller to ignore the exit code, which is worse than the " +
+        "defect it was traded for. Decide from whether an answer was produced, not from whether an error occurred.",
+    );
+  }
+  for (const r of inconsistent) {
+    base.notes.push(
+      `${r.id}: the declared ground truth (${r.groundTruth}) disagrees with what reached stdout. The matrix's own ` +
+        "premise is no longer true, so its score cannot be trusted — fix the row before reading the number.",
+    );
+  }
+  if (notRun.length > 0) {
+    base.notes.push(
+      `${notRun.length} row(s) did not execute (${notRun.map((r) => r.id).join(", ")}); they are evidence about ` +
+        "nothing and are excluded from the denominator. meetsTarget cannot be true on a partial matrix.",
+    );
+  }
+  if (uniformExit && ran.length > 1) {
+    base.notes.push(
+      `every executed row exited ${String(ran[0]?.exitCode)} — the exit code carries no information about the ` +
+        "outcome at all. That is the signature of the pre-Phase-2 defect, not of a passing axis.",
+    );
+  }
+  const collided = ran.filter((r) => r.exitCode === 78 && r.id !== "R6");
+  if (collided.length > 0) {
+    base.notes.push(
+      `${collided.map((r) => r.id).join(", ")} exited 78, which src/index.ts already uses for "mock model not ` +
+        'installed" (EX_CONFIG). Reusing it makes a failed TURN indistinguishable from a failed CONFIG. Not scored — ' +
+        "the axis only asks zero/non-zero — but a reviewer should reject it.",
+    );
+  }
+  base.notes.push(
+    "stderr is NOT scored (see the block comment above scoreA7): quietening or deleting the error dump moves no row.",
+  );
+  return base;
+}
+
+/**
+ * Run the A7 matrix for real: generate the fixtures, spawn the CLI once per row,
+ * read `$?` and stdout. Offline and deterministic — every row is driven by a
+ * mock-LLM fixture, so no network, no API key, no cost, no flake.
+ *
+ * Cost: each row pays a full `bun run src/index.ts` cold start (measured ~50s
+ * per row on Windows), so the whole matrix is ~5-7 minutes. Rows run
+ * SEQUENTIALLY on purpose: they share the on-disk session DB, and a parallel
+ * run would trade a reproducible number for a faster one.
+ */
+export async function collectA7Matrix(opts?: {
+  timeoutMsPerRow?: number;
+  rows?: readonly A7RowSpec[];
+}): Promise<A7MatrixResult> {
+  const rowSpecs = opts?.rows ?? A7_ROWS;
+  const timeoutMs = opts?.timeoutMsPerRow ?? 300_000;
+  const out: A7MatrixResult = {
+    collectedAt: new Date().toISOString(),
+    collectedBy: `collectA7Matrix (${rowSpecs.length} rows, timeout ${timeoutMs}ms/row)`,
+    rows: [],
+  };
+
+  let root: string | null = null;
+  try {
+    root = mkdtempSync(join(tmpdir(), "muonroi-a7-"));
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    console.error(`[${MODULE}] A7: could not create a temp dir: ${message}`);
+    out.rows = rowSpecs.map((s) => ({
+      id: s.id,
+      groundTruth: s.groundTruth,
+      exitCode: null,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+      answerOnStdout: null,
+      exitCorrect: false,
+      consistent: true,
+      ran: false,
+      error: `temp dir creation failed: ${message}`,
+    }));
+    return out;
+  }
+
+  const childCwd = join(root, "cwd");
+  try {
+    mkdirSync(childCwd, { recursive: true });
+    for (const [id, body] of Object.entries(A7_FIXTURES)) {
+      const dir = join(root, id);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "fixture.json"), body, "utf-8");
+    }
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    console.error(`[${MODULE}] A7: fixture materialisation failed under ${root}: ${message}`);
+  }
+
+  const entry = resolve(REPO_ROOT, "src/index.ts");
+  for (const spec of rowSpecs) {
+    const argv = spec.argv.map((a) =>
+      a === "{{fixture}}" ? join(root, spec.fixture ?? "ok") : a === "{{cwd}}" ? childCwd : a,
+    );
+    const res = await runCommand("bun", ["run", entry, ...argv], REPO_ROOT, timeoutMs);
+    const answered = spec.groundTruth === "answered";
+    const sentinelFound = spec.answerSentinel === null ? null : res.stdout.includes(spec.answerSentinel);
+    const ran = res.error === undefined && res.code !== null;
+    out.rows.push({
+      id: spec.id,
+      groundTruth: spec.groundTruth,
+      exitCode: res.code,
+      stdoutBytes: Buffer.byteLength(res.stdout, "utf-8"),
+      stderrBytes: Buffer.byteLength(res.stderr, "utf-8"),
+      answerOnStdout: sentinelFound,
+      exitCorrect: ran ? (res.code === 0) === answered : false,
+      // The sentinel can only FALSIFY an "answered" ground truth. A
+      // "not-answered" fixture emits no text at all, so there is nothing whose
+      // absence could be checked — that direction rests on the fixture body,
+      // which this file writes itself, not on the output.
+      consistent: sentinelFound === null ? true : sentinelFound === answered,
+      ran,
+      ...(res.error ? { error: res.error } : {}),
+    });
+    if (res.error) console.error(`[${MODULE}] A7 row ${spec.id} did not execute: ${res.error}`);
+  }
+
+  try {
+    rmSync(root, { recursive: true, force: true });
+  } catch (err) {
+    console.error(`[${MODULE}] A7: temp dir cleanup failed (${root}): ${(err as Error)?.message ?? String(err)}`);
+  }
+  return out;
+}
+
+// ===========================================================================
 // Assembly
 // ===========================================================================
 
@@ -1150,6 +1690,7 @@ export function scoreAll(inputs: ScoreInputs): Scorecard {
     A4: scoreA4(inputs),
     A5: scoreA5(inputs),
     A6: scoreA6(inputs),
+    A7: scoreA7(inputs),
   };
   const ids = Object.keys(axes) as AxisId[];
   const postPhase0 = {} as Scorecard["attribution"]["postPhase0"];
@@ -1626,7 +2167,36 @@ export function healthyInputs(): ScoreInputs {
         "H1.2": { discriminating: true, decision: true },
       },
     },
+    a7: healthyA7Matrix(),
     maxSilenceMs: 120_000,
+  };
+}
+
+/**
+ * A fixed A7 matrix in which every row reports the truth: the state the axis
+ * exists to reach. Exit codes are the ones the row's ground truth requires — 0
+ * for `answered`, non-zero for `not-answered` — with R6 keeping the 78 the CLI
+ * already returns for "mock model not installed".
+ */
+export function healthyA7Matrix(): A7MatrixResult {
+  const exits: Record<string, number> = { R1: 0, R2: 0, R3: 1, R4: 1, R5: 0, R6: 78, R7: 0 };
+  return {
+    collectedAt: "2026-09-05T00:00:00.000Z",
+    collectedBy: "<healthy-fixture>",
+    rows: A7_ROWS.map((s) => {
+      const answered = s.groundTruth === "answered";
+      return {
+        id: s.id,
+        groundTruth: s.groundTruth,
+        exitCode: exits[s.id] ?? (answered ? 0 : 1),
+        stdoutBytes: answered ? 64 : 0,
+        stderrBytes: 800,
+        answerOnStdout: s.answerSentinel === null ? null : answered,
+        exitCorrect: ((exits[s.id] ?? (answered ? 0 : 1)) === 0) === answered,
+        consistent: true,
+        ran: true,
+      };
+    }),
   };
 }
 
@@ -1671,10 +2241,12 @@ export const NEGATIVE_CONTROLS: NegativeControl[] = [
   },
   {
     axis: "A2",
-    name: "a turn ends with no terminal event, and a synthetic stub tries to cover another",
+    name: "a turn ends with no terminal event, and two synthetic stubs try to cover the others",
     models:
-      "the wedge itself (a turn that stops emitting and never announces an outcome) PLUS §2.6's named attack: an " +
-      "unconditional content-free terminal event emitted from a wrapper to turn the spec green.",
+      "the wedge itself (a turn that stops emitting and never announces an outcome) PLUS §2.6's named attack in both " +
+      "of its shapes: an unconditional content-free terminal event emitted from a wrapper to turn the spec green, " +
+      "and — since `run-finished` was admitted as a terminal kind — the SAME wrapper attack dressed in routing " +
+      "fields (`ts`, `runId`) that are non-empty but say nothing about how the run ended.",
     mutate: (h) => {
       const c = structuredClone(h);
       c.eventLog = [
@@ -1684,6 +2256,14 @@ export const NEGATIVE_CONTROLS: NegativeControl[] = [
         { ts: 900_000, kind: "route-decision", event: { t: "event", kind: "route-decision", path: "hot-path" } },
         // turn 2 "terminates" on a payload-free stub
         { ts: 900_100, kind: "llm-done", event: { t: "event", kind: "llm-done" } },
+        { ts: 900_200, kind: "route-decision", event: { t: "event", kind: "route-decision", path: "hot-path" } },
+        // turn 3 "terminates" on a run-finished that carries routing noise and
+        // no `outcome` — the widening this kind could have introduced.
+        {
+          ts: 900_300,
+          kind: "run-finished",
+          event: { t: "event", kind: "run-finished", ts: 900_300, runId: "r1" },
+        },
       ];
       return c;
     },
@@ -1751,6 +2331,37 @@ export const NEGATIVE_CONTROLS: NegativeControl[] = [
       return c;
     },
   },
+  {
+    axis: "A7",
+    name: "the over-eager fix: 'an error was seen anywhere => exit 1'",
+    models:
+      "the gaming path a cheap model reaches for first, and the one that must SCORE LOWER rather than higher. It " +
+      "gets R3/R4 right for the wrong reason and breaks R5, the row where the user DID get an answer and an error " +
+      "was also reported. Measured justification: R2 — an answered run — carries two benign internal failures on " +
+      "its own stderr ('[gsd] complexity assessor call failed…', 'Failed to extract JSON from proposer output'), " +
+      "and R5's `type:\"error\"` record is the LAST line of its stdout, so both 'any error' and 'last record was an " +
+      "error' flip a correct run red.\n\n" +
+      "Note WHY this control needed a scoring change and not just a fixture: on a plain fraction it scores 6/7 = " +
+      "0.857 and RANKS ABOVE today's 5/7 defect, because it is right on more rows. The 2x false-alarm penalty is " +
+      "what makes the trade net negative; without it the axis would have rewarded the very answer it exists to " +
+      "reject, while still reporting meetsTarget:false.\n\n" +
+      "The OTHER direction — today's defect, every turn row exiting 0 — needs no fixture here: `--a7` measures it " +
+      "live against the real CLI and reports meetsTarget:false at 5/7. A live measurement outranks a mutation.",
+    mutate: (h) => {
+      const c = structuredClone(h);
+      if (!c.a7) return c;
+      // Rows whose run emitted an error at any point now exit 1 — including R5,
+      // which answered the user.
+      const erroring = new Set(["R3", "R4", "R5"]);
+      c.a7.collectedBy = "<negative-control: any-error-implies-exit-1>";
+      for (const row of c.a7.rows) {
+        if (!erroring.has(row.id)) continue;
+        row.exitCode = 1;
+        row.exitCorrect = row.groundTruth === "not-answered";
+      }
+      return c;
+    },
+  },
 ];
 
 export interface SelfTestRow {
@@ -1803,6 +2414,10 @@ interface Args {
   graceMs: number;
   mockLlmDir: string;
   childCwd: string;
+  a7: boolean;
+  a7Matrix: string | null;
+  a7Out: string | null;
+  a7TimeoutMs: number;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -1820,6 +2435,10 @@ function parseArgs(argv: string[]): Args {
     graceMs: 1500,
     mockLlmDir: resolve(REPO_ROOT, "tests/harness/fixtures/llm"),
     childCwd: REPO_ROOT,
+    a7: false,
+    a7Matrix: null,
+    a7Out: null,
+    a7TimeoutMs: 300_000,
   };
   const abs = (p: string) => (isAbsolute(p) ? p : resolve(process.cwd(), p));
   for (let i = 0; i < argv.length; i++) {
@@ -1864,6 +2483,18 @@ function parseArgs(argv: string[]): Args {
         break;
       case "--child-cwd":
         a.childCwd = abs(argv[++i] ?? a.childCwd);
+        break;
+      case "--a7":
+        a.a7 = true;
+        break;
+      case "--a7-matrix":
+        a.a7Matrix = abs(argv[++i] ?? "");
+        break;
+      case "--a7-out":
+        a.a7Out = abs(argv[++i] ?? "");
+        break;
+      case "--a7-timeout-ms":
+        a.a7TimeoutMs = Math.max(1000, Number(argv[++i] ?? 0) || 300_000);
         break;
       default:
         throw new Error(`unknown argument: ${String(arg)}`);
@@ -1939,6 +2570,23 @@ async function main(): Promise<number> {
   const escapeProbe = args.escapeLog ? readJsonFile<EscapeProbe>(args.escapeLog, "escape probe") : null;
   const replay = args.replay ? readJsonFile<ReplayResult>(args.replay, "replay transcript") : null;
 
+  let a7: A7MatrixResult | null = args.a7Matrix ? readJsonFile<A7MatrixResult>(args.a7Matrix, "A7 matrix") : null;
+  if (args.a7) {
+    if (a7) console.error(`[${MODULE}] --a7 overrides the matrix supplied by --a7-matrix`);
+    console.error(
+      `[${MODULE}] A7: running ${A7_ROWS.length} headless invocations sequentially — expect several minutes.`,
+    );
+    a7 = await collectA7Matrix({ timeoutMsPerRow: args.a7TimeoutMs });
+  }
+  if (args.a7Out && a7) {
+    try {
+      writeFileSync(args.a7Out, `${JSON.stringify(a7, null, 2)}\n`, "utf-8");
+      console.error(`[${MODULE}] A7 matrix written to ${args.a7Out}`);
+    } catch (err) {
+      console.error(`[${MODULE}] A7 matrix write failed (${args.a7Out}): ${(err as Error)?.message ?? String(err)}`);
+    }
+  }
+
   const inputs: ScoreInputs = {
     corpus,
     capabilities,
@@ -1950,6 +2598,7 @@ async function main(): Promise<number> {
     lifecycle,
     escape: escapeProbe,
     replay,
+    a7,
     maxSilenceMs: args.maxSilenceMs,
   };
 
