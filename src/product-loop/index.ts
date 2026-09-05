@@ -722,6 +722,38 @@ async function* runMaintain(opts: ProductLoopOptions): AsyncGenerator<StreamChun
   return { runId, stage: "approved", success: true, reason: "pr_ready", sprintsRun: 1, shipped: true };
 }
 
+/**
+ * Announce a non-approved loop-driver outcome before returning it.
+ *
+ * `runLoopDriver` signals every non-approved terminal state by RETURNING a
+ * `DriverResult` — it does not throw — so the `catch` arms at both call sites
+ * never see one. Before this helper existed both sites did a bare
+ * `return { ...driverResult }`, yielding nothing: the orchestrator's `for await`
+ * ended normally, the TUI got no error chunk, no toast and no terminal event,
+ * and the run was indistinguishable from a hang.
+ *
+ * Measured on run `mtmrm9c667d4` (2026-09-04): scoping's `JSON.parse` threw on a
+ * synthesis completion truncated at the provider's 4096-token output ceiling,
+ * the driver returned `failed_to_synthesize_spec`, and the session emitted zero
+ * further chunks, events or LLM calls for 32 minutes while the UI still showed
+ * `loop:scoping` active. Every bail reason now routes through here.
+ */
+function* announceDriverBail(result: DriverResult | undefined, runId: string): Generator<StreamChunk> {
+  const detail = result?.detail ?? result?.reason ?? "unknown reason";
+  if (!result || result.stage === "error") {
+    yield {
+      type: "error",
+      error: true,
+      content: `/ideal run ${runId} stopped before sprints: ${detail}`,
+    } as unknown as StreamChunk;
+    return;
+  }
+  yield {
+    type: "content",
+    content: `\n> /ideal run ${runId} stopped before sprints: ${detail}\n`,
+  } as StreamChunk;
+}
+
 /** start: createRun → loop-driver (gather/research/scoping) → sprint loop → done|halted. */
 async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   const { idea, flowDir, llm, flags, respondToQuestion, respondToPreflight } = opts;
@@ -854,6 +886,7 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
   }
 
   if (!driverResult?.success || driverResult.stage !== "approved") {
+    yield* announceDriverBail(driverResult, runId);
     return { ...driverResult!, runId };
   }
 
@@ -2021,6 +2054,7 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
       return { runId: resolvedRunId, stage: "error", success: false, reason: msg };
     }
     if (!driverResult?.success || driverResult.stage !== "approved") {
+      yield* announceDriverBail(driverResult, resolvedRunId);
       return { ...driverResult!, runId: resolvedRunId };
     }
     // Build the sprint plan now that the spec exists (idempotent — skips when

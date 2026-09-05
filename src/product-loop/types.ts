@@ -208,6 +208,14 @@ export interface DriverResult {
   stage: Stage;
   success: boolean;
   reason?: string;
+  /**
+   * Human-readable expansion of `reason`, for the terminal chunk the caller
+   * yields before returning. `reason` stays a stable machine code (callers and
+   * forensics match on it); `detail` carries the sentence a user can act on
+   * (e.g. which provider ceiling truncated the synthesis). Optional — bails
+   * without one fall back to `reason`.
+   */
+  detail?: string;
 }
 
 export interface DoneGateContext {
