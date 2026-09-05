@@ -22,6 +22,14 @@ describe("askcard E2E", () => {
     const ctx = await spawnHarness({
       extraArgs: ["-k", MOCK_PROVIDER_KEY, "-m", "deepseek-v4-flash"],
       env: { SILICONFLOW_API_KEY: MOCK_PROVIDER_KEY },
+      // Dedicated fixture dir. The shared tests/harness/fixtures/llm dir cannot
+      // drive this flow: its council.json is a positional SEQUENCE whose entries
+      // are consumed by every council call in order, so the clarifier receives
+      // whichever entry happens to be next (today: filler with no JSON array) and
+      // asks nothing. llm-askcard/askcard.json answers the clarifier with one
+      // real question on every call, so the askcard is reached deterministically
+      // in the first second regardless of how many calls precede it.
+      fixturesDir: join(__dirname, "fixtures/llm-askcard"),
       cwd: greenfield,
     });
     proc = ctx.proc;
@@ -48,10 +56,20 @@ describe("askcard E2E", () => {
   });
 
   it("council question modal appears and is observable", async () => {
-    // Force the council/loop path; the gather phase emits a council_question
-    // chunk → app.tsx renders CouncilQuestionCard wrapped in
-    // <Semantic id="askcard" role="dialog" isModal>. Drive via the askcard-open
-    // event (fires ~0.4s in greenfield) for a deterministic wait.
+    // Force the council/loop path. gather delegates to runClarification, which
+    // asks the leader for clarification questions; the fixture returns one, so a
+    // council_question chunk is emitted and use-app-logic renders
+    // CouncilQuestionCard inside <Semantic id="askcard" role="dialog" isModal>
+    // and fires askcard-open. The run then BLOCKS on respondToQuestion, which is
+    // what keeps the card up for the navigation test below.
+    //
+    // Until a9a509c6 this spec passed on something else entirely: the clarifier
+    // asked nothing, scoping synthesis parsed no ProductSpec, and the old
+    // `productSpec = {} as ProductSpec` fallback marched on to runPreflight —
+    // whose approve card then still rendered under id=askcard. a9a509c6 removed
+    // that silent degradation (correctly) and the card had nowhere to come from;
+    // the preflight card is also id=askcard-preflight now. Assert the clarify
+    // card the spec always claimed to be testing instead.
     driver.type("/ideal build a counter --max-sprints 1 --force-council");
     await driver.wait_for({ idle: true, timeoutMs: 5_000 });
     driver.press("Enter");

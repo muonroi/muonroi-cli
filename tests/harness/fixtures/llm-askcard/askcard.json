@@ -1,0 +1,31 @@
+{
+  "___note": "Dedicated fixture for tests/harness/askcard.spec.ts. It must NOT live in the shared tests/harness/fixtures/llm dir: createMockLlm (packages/agent-harness-core/src/mock-llm.ts) tries every SEQUENCE fixture in a directory before any responses fixture, so council.json's positional sequence would win and this wildcard would never be reached.",
+  "___why_two_blocks": "The TUI has two independent mock hooks. `model` feeds globalThis.__muonroiMockModel (src/providers/runtime.ts) — the AI-SDK path used by the agent turn and by PIL's model-first classifier. `responses` feeds globalThis.__muonroiMockLlm (src/council/llm.ts getMockLlm) — the path EVERY council generate/debate/research call short-circuits through. The council askcard this spec drives comes from the second hook; without the first, the classify call would reach a real provider.",
+  "___how_the_card_appears": "/ideal --force-council → loop-driver gather → runClarification (src/council/clarifier.ts:490-540) asks the leader for clarification questions and parses the reply with /\\[[\\s\\S]*\\]/ + JSON.parse. Returning this array gives it one real question, so it yields a `council_question` chunk; use-app-logic.tsx:4162-4198 renders CouncilQuestionCard (<Semantic id=\"askcard\" role=\"dialog\">) and emits the askcard-open LiveEvent, then the run BLOCKS on respondToQuestion. That block is what keeps the card on screen for the navigation test.",
+  "model": {
+    "provider": "mock",
+    "modelId": "mock-askcard",
+    "stream": [
+      [
+        { "type": "stream-start", "warnings": [] },
+        { "type": "text-start", "id": "turn" },
+        { "type": "text-delta", "id": "turn", "delta": "Acknowledged." },
+        { "type": "text-end", "id": "turn" },
+        {
+          "type": "finish",
+          "finishReason": { "unified": "stop", "raw": null },
+          "usage": {
+            "inputTokens": { "total": 10, "noCache": 10, "cacheRead": null, "cacheWrite": null },
+            "outputTokens": { "total": 10, "text": 10, "reasoning": null }
+          }
+        }
+      ]
+    ]
+  },
+  "responses": [
+    {
+      "match": "*",
+      "text": "[{\"question\":\"Which counter behaviour should the discussion assume?\",\"why\":\"The two readings lead to different debates, and neither is implied by the request.\",\"options\":[{\"label\":\"Increment only\",\"description\":\"A single up button; nothing else is in scope.\",\"recommended\":true},{\"label\":\"Increment, decrement and reset\",\"description\":\"Full controls, which pulls state handling into the debate.\"}],\"isRequired\":true}]"
+    }
+  ]
+}

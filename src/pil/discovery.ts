@@ -120,6 +120,9 @@ export async function runDiscovery(
     cards = await proposeModelCards(clarificationProposer, raw, l1, projectContext, recentTurnsSummary);
     // process.stderr.write(`[discovery] proposeModelCards returned ${cards?.length} cards\n`);
   } catch (err) {
+    console.error(`[Agent:discovery] proposeModelCards threw — skipping the interview: ${(err as Error)?.message}`, {
+      rawPreview: raw.slice(0, 120),
+    });
     return baseResult();
   }
 
@@ -362,6 +365,18 @@ JSON format:
         const parsed = JSON.parse(txt);
         items = Array.isArray(parsed) ? parsed : [];
       } catch (parseErr) {
+        // Was a bare `return []`. That silence is what hid a real breakage for
+        // seven weeks: after 5fbebf23 moved this call from generateText to
+        // generateTextStreamed, the harness fixture's cards were no longer on
+        // the path the proposer read, so `result.text` was an unrelated line,
+        // JSON.parse threw here, and the interview simply never opened — with
+        // nothing on stdout, in the event stream, or in the DB to say so.
+        console.error(
+          `[Agent:discovery] model clarification proposer returned unparseable JSON — no interview: ${
+            (parseErr as Error)?.message
+          }`,
+          { textPreview: result.text.slice(0, 200) },
+        );
         return [];
       }
 
@@ -369,6 +384,10 @@ JSON format:
         .filter((it: any) => it && typeof it.question === "string" && it.question.trim())
         .slice(0, 3) as ModelCard[];
     } catch (err) {
+      console.error(
+        `[Agent:discovery] model clarification proposer call failed — no interview: ${(err as Error)?.message}`,
+        { modelId, rawPreview: input.raw.slice(0, 120) },
+      );
       return [];
     }
   };
