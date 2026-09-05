@@ -1351,6 +1351,94 @@ export async function* tracedGenerate(
 }
 
 /**
+ * One candidate's failure inside a council model-fallback chain.
+ *
+ * `reason` separates the three ways a chain advances, which a bare `catch {}`
+ * had collapsed into "something happened, we moved on":
+ *  - "error"            — the call threw; `statusCode` / `errorMessage` say why
+ *  - "empty-completion" — the call SUCCEEDED and was billed but returned no
+ *                         usable text (e.g. the whole output budget spent inside
+ *                         <think>, stripped to "")
+ *  - "blocked"          — skipped; the model was blocklisted earlier this session
+ */
+export interface CouncilCandidateFailure {
+  fromModel: string;
+  /** Next candidate to be tried, or null when the chain is exhausted. */
+  toModel: string | null;
+  reason: "error" | "empty-completion" | "blocked";
+  /** 1-based index of this candidate. */
+  attempt: number;
+  totalCandidates: number;
+  provider?: string;
+  errorName?: string;
+  errorMessage?: string;
+  statusCode?: number;
+  /** Truncated provider response body, for the log only — never the wire. */
+  responseBodyTrunc?: string;
+  /** True on the single terminal record emitted when every candidate failed. */
+  exhausted?: boolean;
+}
+
+/**
+ * Provider id for a model, or undefined when it cannot be derived.
+ *
+ * Deliberately returns `undefined` rather than defaulting to a provider string:
+ * per the Zero Hardcode Rule a provider must come from `detectProviderForModel`
+ * or not be claimed at all — a wrong-but-plausible provider on a failure record
+ * is worse than an absent one, because it misdirects the next investigation.
+ */
+function safeDetectProvider(modelId: string): string | undefined {
+  try {
+    return detectProviderForModel(modelId);
+  } catch (err) {
+    logger.error("orchestrator", "[council.generateWithFallback] provider detection failed", {
+      modelId,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
+}
+
+/**
+ * Emit the `model-fallback` LiveEvent for one candidate failure.
+ *
+ * Uses the SAME `globalThis.__muonroiAgentRuntime.emitEvent` channel the
+ * orchestrator already uses for `stream-retry` / `toast` (tool-engine.ts:980-997)
+ * — no parallel channel, and no dependency from council code onto the UI layer.
+ * Telemetry must never break a council run, so the emit is guarded; per the
+ * No-Silent-Catch rule the guard still logs.
+ */
+function emitModelFallbackEvent(failure: CouncilCandidateFailure, label?: string): void {
+  try {
+    const runtime = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    if (!runtime?.emitEvent) return;
+    runtime.emitEvent({
+      t: "event",
+      kind: "model-fallback",
+      fromModel: failure.fromModel,
+      toModel: failure.toModel,
+      reason: failure.reason,
+      attempt: failure.attempt,
+      totalCandidates: failure.totalCandidates,
+      ...(failure.exhausted ? { exhausted: true } : {}),
+      ...(label ? { label } : {}),
+      ...(failure.provider ? { provider: failure.provider } : {}),
+      ...(typeof failure.statusCode === "number" ? { statusCode: failure.statusCode } : {}),
+      ...(failure.errorName ? { errorName: failure.errorName } : {}),
+      ...(failure.errorMessage ? { errorMessage: failure.errorMessage } : {}),
+      ts: Date.now(),
+    });
+  } catch (emitErr) {
+    logger.error("orchestrator", "[council.generateWithFallback] model-fallback telemetry failed", {
+      modelId: failure.fromModel,
+      message: emitErr instanceof Error ? emitErr.message : String(emitErr),
+    });
+  }
+}
+
+/**
  * Run {@link tracedGenerate} across a list of models, returning the first
  * non-empty completion. A model that throws (e.g. a flaky proxy returning
  * "Upstream request failed") or yields only whitespace advances to the next
@@ -1360,10 +1448,53 @@ export async function* tracedGenerate(
  */
 export async function* tracedGenerateWithFallback(
   llm: CouncilLLM,
-  args: Omit<TracedGenerateArgs, "modelId"> & { models: string[] },
+  args: Omit<TracedGenerateArgs, "modelId"> & {
+    models: string[];
+    /**
+     * Called once per candidate that fails, and once more with `toModel: null`
+     * when the chain is exhausted. This is how the reason SURVIVES to the caller:
+     * the generator's `null` return says only "no text", so a terminal
+     * `run-finished` / `sprint-halt` reason built from it could say nothing better
+     * than "check provider reachability and API keys" — which reads identically
+     * for a 429 (rate/credit limit → back off) and a 401 (bad key → stop), two
+     * failures that call for opposite responses.
+     */
+    onCandidateFailure?: (failure: CouncilCandidateFailure) => void;
+  },
 ): AsyncGenerator<StreamChunk, string | null, unknown> {
   const seen = new Set<string>();
   const models = args.models.filter((m) => m && !seen.has(m) && (seen.add(m), true));
+  const failures: CouncilCandidateFailure[] = [];
+
+  /** Log + record + emit one structured switch. Never throws. */
+  const noteFailure = (failure: CouncilCandidateFailure): void => {
+    failures.push(failure);
+    // No-Silent-Catch: name the module, the operation, the model, the reason,
+    // and — for an API error — the HTTP status and truncated response body.
+    logger.error("orchestrator", "[council.generateWithFallback] candidate did not produce a completion", {
+      label: args.label,
+      modelId: failure.fromModel,
+      provider: failure.provider,
+      reason: failure.reason,
+      attempt: failure.attempt,
+      totalCandidates: failure.totalCandidates,
+      nextModel: failure.toModel,
+      statusCode: failure.statusCode,
+      errorName: failure.errorName,
+      message: failure.errorMessage,
+      responseBody: failure.responseBodyTrunc,
+    });
+    try {
+      args.onCandidateFailure?.(failure);
+    } catch (cbErr) {
+      logger.error("orchestrator", "[council.generateWithFallback] onCandidateFailure callback threw", {
+        modelId: failure.fromModel,
+        message: cbErr instanceof Error ? cbErr.message : String(cbErr),
+      });
+    }
+    emitModelFallbackEvent(failure, args.label);
+  };
+
   for (let i = 0; i < models.length; i++) {
     const modelId = models[i];
     // Fix 2 — skip a candidate that already failed non-retryably (401/403 +
@@ -1376,6 +1507,14 @@ export async function* tracedGenerateWithFallback(
       if (warning) {
         yield { type: "toast", toastLevel: "warn", content: warning };
       }
+      noteFailure({
+        fromModel: modelId,
+        toModel: models[i + 1] ?? null,
+        reason: "blocked",
+        attempt: i + 1,
+        totalCandidates: models.length,
+        provider: safeDetectProvider(modelId),
+      });
       continue;
     }
     try {
@@ -1385,11 +1524,80 @@ export async function* tracedGenerateWithFallback(
         label: i > 0 ? `${args.label} (fallback: ${modelId})` : args.label,
       });
       if (raw?.trim()) return raw;
-    } catch {
-      /* try the next candidate */
+      // The call SUCCEEDED and was billed, but produced nothing usable. This is
+      // not a hypothetical: a reasoning model given a small maxTokens budget can
+      // spend the entire budget inside <think>, so `stripThinkBlocks` returns "".
+      // Before this branch was instrumented it advanced to the next model in
+      // total silence — no throw, no log, no event — which is how a StepFun-only
+      // run ended up executing on two other vendors with no record of why.
+      noteFailure({
+        fromModel: modelId,
+        toModel: models[i + 1] ?? null,
+        reason: "empty-completion",
+        attempt: i + 1,
+        totalCandidates: models.length,
+        provider: safeDetectProvider(modelId),
+      });
+    } catch (err) {
+      // NOT a bare catch. The provider-side detail (status + body) is the whole
+      // difference between "429 — out of credit, stop asking" and "401 — bad key":
+      // identical-looking failures that call for opposite responses.
+      const forensics = summarizeApiErrorForLog(err);
+      noteFailure({
+        fromModel: modelId,
+        toModel: models[i + 1] ?? null,
+        reason: "error",
+        attempt: i + 1,
+        totalCandidates: models.length,
+        provider: safeDetectProvider(modelId),
+        errorName: err instanceof Error ? err.name : typeof err,
+        errorMessage: err instanceof Error ? err.message : String(err),
+        statusCode: typeof forensics?.statusCode === "number" ? forensics.statusCode : undefined,
+        responseBodyTrunc:
+          typeof forensics?.responseBodyTrunc === "string" ? forensics.responseBodyTrunc : undefined,
+      });
     }
   }
+
+  // Chain exhausted. Emit one terminal record so the caller — and the terminal
+  // run-finished / sprint-halt reason built from it — can name the ACTUAL cause
+  // instead of a generic "check provider reachability and API keys".
+  if (models.length > 0) {
+    const last = failures[failures.length - 1];
+    noteFailure({
+      fromModel: last?.fromModel ?? models[models.length - 1],
+      toModel: null,
+      reason: last?.reason ?? "error",
+      attempt: models.length,
+      totalCandidates: models.length,
+      exhausted: true,
+      provider: last?.provider,
+      errorName: last?.errorName,
+      errorMessage: last?.errorMessage ?? summarizeCandidateFailures(failures),
+      statusCode: last?.statusCode,
+    });
+  }
   return null;
+}
+
+/**
+ * One-line human summary of an exhausted fallback chain, e.g.
+ * `step-3.5-flash: empty completion; glm-5.2: HTTP 429 Insufficient balance…`.
+ *
+ * This is the string a terminal reason should carry instead of the generic
+ * "council bailed before synthesis — check provider reachability and API keys",
+ * which was the only thing available while the reasons were being swallowed.
+ */
+export function summarizeCandidateFailures(failures: readonly CouncilCandidateFailure[]): string {
+  const parts = failures
+    .filter((f) => !f.exhausted)
+    .map((f) => {
+      if (f.reason === "empty-completion") return `${f.fromModel}: empty completion`;
+      if (f.reason === "blocked") return `${f.fromModel}: skipped (blocked earlier this session)`;
+      const status = typeof f.statusCode === "number" ? `HTTP ${f.statusCode} ` : "";
+      return `${f.fromModel}: ${status}${(f.errorMessage ?? "unknown error").slice(0, 160)}`;
+    });
+  return parts.length > 0 ? parts.join("; ") : "no candidates were attempted";
 }
 
 interface TracedAsyncArgs {

@@ -79,7 +79,9 @@ describe("harness-driver capabilities", () => {
     // 22 → 23 when run-finished was added. This count is a drift alarm for the
     // hand-maintained enumerations around LIVE_EVENT_KINDS — bump it when a kind
     // is ADDED; never lower it to make a removal pass (plan §2.5).
-    expect(eventKinds.length).toBe(23);
+    // 23 → 24 when model-fallback was added (council provider switch observability).
+    expect(eventKinds).toContain("model-fallback");
+    expect(eventKinds.length).toBe(24);
   });
 
   it("advertises the role vocabulary and the custom-role prefix", () => {

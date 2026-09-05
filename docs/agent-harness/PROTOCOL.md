@@ -88,6 +88,10 @@ type LiveEvent =
   | { t: "event"; kind: "run-finished"; runId: string; subcommand: string;
       outcome: "approved" | "halted" | "error" | "threw" | "abandoned";
       success: boolean; reason: string; sprintsRun: number; shipped: boolean; ts: number }
+  | { t: "event"; kind: "model-fallback"; fromModel: string; toModel: string | null;
+      reason: "error" | "empty-completion" | "blocked"; attempt: number; totalCandidates: number;
+      exhausted?: boolean; label?: string; provider?: string; statusCode?: number;
+      errorName?: string; errorMessage?: string; ts: number }
   | { t: "idle" };
 ```
 
@@ -98,6 +102,7 @@ type LiveEvent =
 - `resume-request`: The user invoked in-TUI `/resume` while the TUI runs under the harness (agent-mode). A relaunch would spawn a new process that cannot inherit the fd 3/4 (POSIX) / named-pipe (Windows) transport, stranding the driver (`no_driver`). So the relaunch is **suppressed** — the current process + driver stay alive — and this event carries the selected `sessionId`. The driving agent resumes by restarting the harnessed child bound to it: `tui.stop` → `tui.start({ args: ["--session=<sessionId>"] })`.
 - `sprint-halt`: A `/ideal` sprint stopped at a gate. `reason` is the CB gate code that fired (e.g. `no_recipe`).
 - `run-finished`: **The terminal event of a `/ideal` run, success included.** Emitted exactly once per run from the single choke point every subcommand returns through (`runProductLoop`), in a `finally`, so it also covers the two exits that produce no result: an exception escaping (`outcome:"threw"`) and the consumer tearing the generator down (`outcome:"abandoned"`). `outcome` names the exit — `approved` | `halted` | `error` | `threw` | `abandoned` — and `reason` carries the stable machine code (or the exception message when `threw`). `runId` is `""` only when the id was genuinely never observed; it is never back-filled with a guess. Before this kind existed, a FAILING run announced itself but a SUCCESSFUL one emitted nothing, so a driver could not tell "finished fine" from "hung" (`docs/agent-first/SELF-IMPROVEMENT-PLAN.md` §6.0 open item 3).
+- `model-fallback`: **A council model-fallback chain switched to a DIFFERENT model, or ran out of candidates.** This is how a driver detects that the model policy it was told to run under was violated, without regexing a display label — previously the only trace of a switch was the string `"<label> (fallback: <modelId>)"` on a `council-speaker` event, and the reason was destroyed by a bare `catch {}`. Distinct from `stream-retry` on purpose: that kind means the SAME model is retried after a transient error with a backoff and carries no model identity, whereas here the model is substituted, there is no backoff, and the trigger is frequently not an error at all (`reason:"empty-completion"` — the call succeeded and was billed but returned nothing usable after think-block stripping, e.g. a reasoning model that spent its whole output budget inside `<think>`). `statusCode` is what separates a 429 (out of credit / rate limited → back off) from a 401 (bad key → stop), two failures that call for opposite responses. Filter the terminal record with `exhausted === true`, **not** `toModel === null` — the last candidate's own record also has a null `toModel` because there was no next model.
 - `idle`: The UI has reached a stable state with no pending renders or timers. Consumers may use this to detect when the TUI is ready for the next interaction.
 
 ## 3. Schema: Design Mode

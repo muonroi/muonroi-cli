@@ -48,6 +48,8 @@ const LOG_KINDS = new Set([
   "askcard-cancel",
   "toast",
   "disconnect",
+  // A silent provider switch is exactly the kind of thing a host log must show.
+  "model-fallback",
 ]);
 
 export type BridgeCapabilities = {

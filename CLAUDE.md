@@ -475,8 +475,8 @@ var on the **MCP server process** to a path to choose your own, or to `0` /
 `off` / `false` / `no` to disable. `tui.capabilities` reports the resolved path
 as `eventLogPath` — read it rather than recomputing the rule.
 
-Ephemeral kinds (`toast`, `disconnect`, `stream-retry`, `ee-timeout`,
-`ee-error`, `grounding-flag`) additionally carry a `visualText` snapshot
+Ephemeral kinds (`toast`, `disconnect`, `stream-retry`, `model-fallback`,
+`ee-timeout`, `ee-error`, `grounding-flag`) additionally carry a `visualText` snapshot
 captured at emit time, so flash events aren't lost before an agent wakes.
 Wiring: `event-tee.ts` + `makeLineHandler` in `mcp-server.ts`.
 

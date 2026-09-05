@@ -382,6 +382,57 @@ export type LiveEvent =
       errorMessage: string;
       nextDelayMs: number;
     }
+  // A council model-fallback chain advanced to a DIFFERENT model, or ran out of
+  // candidates. Distinct from `stream-retry` on purpose: that kind means the SAME
+  // model is retried after a transient error with a backoff, and carries no model
+  // identity. Here the model itself is substituted, there is no backoff, and the
+  // trigger is frequently NOT an error at all (`empty-completion` — a reasoning
+  // model that spends its whole output budget inside <think> and returns nothing).
+  // Folding the two together would make "attempt 2 of 3" ambiguous between "same
+  // model, second try" and "second different model", silently corrupting any
+  // retry metric built on stream-retry.
+  //
+  // Before this existed, the ONLY trace of a provider switch was the human-readable
+  // label string `"<label> (fallback: <modelId>)"` on a council-speaker event — a
+  // driving agent had to regex a display label to learn the model policy had been
+  // violated, and the reason was destroyed by a bare `catch {}`.
+  | {
+      t: "event";
+      kind: "model-fallback";
+      /** The model that just failed or returned nothing. */
+      fromModel: string;
+      /** The next candidate to be tried, or null when the chain is exhausted. */
+      toModel: string | null;
+      /**
+       * Why the chain advanced:
+       *  - "error"            — the call threw (see statusCode / errorMessage)
+       *  - "empty-completion" — the call SUCCEEDED and was billed, but produced
+       *                         no usable text after think-block stripping
+       *  - "blocked"          — candidate skipped; already blocklisted this session
+       */
+      reason: "error" | "empty-completion" | "blocked";
+      /** 1-based index of the candidate that just failed. */
+      attempt: number;
+      /** Total candidates in the deduped chain. */
+      totalCandidates: number;
+      /**
+       * True on the single terminal record emitted when EVERY candidate failed.
+       * The last candidate's own record also carries `toModel: null` (there was
+       * no next model), so this flag — not a null check — is what a driver
+       * filters on to detect an exhausted chain without double-counting.
+       */
+      exhausted?: boolean;
+      /** Phase label, e.g. "Inferring spec from topic". */
+      label?: string;
+      /** Provider id backing `fromModel`, when resolvable. */
+      provider?: string;
+      /** HTTP status when the failure was an API error (429 vs 401 want opposite responses). */
+      statusCode?: number;
+      errorName?: string;
+      /** Provider-side message. Capped + scrubbed by event-redact. */
+      errorMessage?: string;
+      ts: number;
+    }
   // Summary-phase grounding check — emitted at turn finalize when the model's
   // final synthesis asserts counts / file:line refs that do NOT appear in this
   // turn's tool outputs (possible hallucination). Soft-flag only; the turn is
@@ -457,6 +508,7 @@ export const LIVE_EVENT_KINDS = [
   "ee-error",
   "disconnect",
   "stream-retry",
+  "model-fallback",
   "grounding-flag",
   "steer-inject",
   "resume-request",

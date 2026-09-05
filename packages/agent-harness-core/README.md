@@ -66,6 +66,7 @@ serialized as JSONL on the sidechannel (fd 3 / named pipe) and ingested by
 | `llm-done` | `correlationId`, `totalChars`, `finishReason` | low | yes |
 | `toast` | `level` ("info"\|"warn"\|"error"), `text`, `ttlMs?` | low | yes |
 | `stream.delta` | `target`, `text` | medium | yes |
+| `model-fallback` | `fromModel`, `toModel` (null when exhausted), `reason` ("error"\|"empty-completion"\|"blocked"), `attempt`, `totalCandidates`, `exhausted?`, `label?`, `provider?`, `statusCode?`, `errorName?`, `errorMessage?`, `ts` — **a council fallback chain switched model**; the structured signal that a model policy was violated. Not `stream-retry`: that is the SAME model retried with a backoff and carries no model identity. Filter the terminal record on `exhausted === true`, not `toModel === null` | low | yes |
 
 ### correlationId
 

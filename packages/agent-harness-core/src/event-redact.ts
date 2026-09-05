@@ -241,6 +241,28 @@ const ALLOWED_FIELDS: Record<EventKind, Record<string, FieldSpec>> = {
     errorMessage: 500,
     nextDelayMs: "pass",
   },
+  // Emit site: src/council/llm.ts (tracedGenerateWithFallback). Shape: protocol.ts.
+  //
+  // Every free-text field here is CAPPED, never "pass". `errorMessage` is the
+  // provider's own message, which on an `AI_APICallError` can embed the serialized
+  // upstream response body (the 160KB-dump shape that reached stderr once) — the
+  // cap is what bounds it; scrubKeys alone would not. Model ids and the phase label
+  // are model/catalog-derived rather than user text, but they are still capped so
+  // no field on this kind is an unbounded channel.
+  "model-fallback": {
+    fromModel: 120,
+    toModel: 120,
+    reason: "pass",
+    attempt: "pass",
+    totalCandidates: "pass",
+    exhausted: "pass",
+    label: 200,
+    provider: 60,
+    statusCode: "pass",
+    errorName: 120,
+    errorMessage: 500,
+    ts: "pass",
+  },
   // Emit site: src/orchestrator/tool-engine.ts:4006-4012. Shape: protocol.ts:389-397.
   // `claims` is a string ARRAY of model-authored text (e.g. ["67 tests",
   // "app.tsx:836"]) — the most free-form payload of the six. Per-element cap +
