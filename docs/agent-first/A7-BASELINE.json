@@ -1,0 +1,83 @@
+{
+  "collectedAt": "2026-09-05T10:37:52.311Z",
+  "collectedBy": "collectA7Matrix (7 rows, timeout 300000ms/row)",
+  "rows": [
+    {
+      "id": "R1",
+      "groundTruth": "answered",
+      "exitCode": 0,
+      "stdoutBytes": 362,
+      "stderrBytes": 729,
+      "answerOnStdout": true,
+      "exitCorrect": true,
+      "consistent": true,
+      "ran": true
+    },
+    {
+      "id": "R2",
+      "groundTruth": "answered",
+      "exitCode": 0,
+      "stdoutBytes": 5,
+      "stderrBytes": 786,
+      "answerOnStdout": true,
+      "exitCorrect": true,
+      "consistent": true,
+      "ran": true
+    },
+    {
+      "id": "R3",
+      "groundTruth": "not-answered",
+      "exitCode": 0,
+      "stdoutBytes": 374,
+      "stderrBytes": 739,
+      "answerOnStdout": null,
+      "exitCorrect": false,
+      "consistent": true,
+      "ran": true
+    },
+    {
+      "id": "R4",
+      "groundTruth": "not-answered",
+      "exitCode": 0,
+      "stdoutBytes": 0,
+      "stderrBytes": 832,
+      "answerOnStdout": null,
+      "exitCorrect": false,
+      "consistent": true,
+      "ran": true
+    },
+    {
+      "id": "R5",
+      "groundTruth": "answered",
+      "exitCode": 0,
+      "stdoutBytes": 493,
+      "stderrBytes": 638,
+      "answerOnStdout": true,
+      "exitCorrect": true,
+      "consistent": true,
+      "ran": true
+    },
+    {
+      "id": "R6",
+      "groundTruth": "not-answered",
+      "exitCode": 78,
+      "stdoutBytes": 0,
+      "stderrBytes": 550,
+      "answerOnStdout": null,
+      "exitCorrect": true,
+      "consistent": true,
+      "ran": true
+    },
+    {
+      "id": "R7",
+      "groundTruth": "answered",
+      "exitCode": 0,
+      "stdoutBytes": 68,
+      "stderrBytes": 0,
+      "answerOnStdout": true,
+      "exitCorrect": true,
+      "consistent": true,
+      "ran": true
+    }
+  ]
+}
