@@ -174,6 +174,33 @@ describe("A2 — terminal-state coverage", () => {
     expect(res.meetsTarget).toBe(false);
   });
 
+  it("does NOT count an announced human wait as silence, but still counts an unannounced one", () => {
+    const announced: TeedLine[] = [
+      { ts: 0, kind: "route-decision", event: { t: "event", kind: "route-decision", path: "hot-path" } },
+      {
+        ts: 100,
+        kind: "askcard-open",
+        event: { t: "event", kind: "askcard-open", question: "which?", optionCount: 2 },
+      },
+      { ts: 900_000, kind: "askcard-answered", event: { t: "event", kind: "askcard-answered", answerText: "a" } },
+      { ts: 900_100, kind: "llm-done", event: { t: "event", kind: "llm-done", finishReason: "stop" } },
+    ];
+    const ok = scoreA2({ ...healthyInputs(), eventLog: announced, maxSilenceMs: 120_000 });
+    expect(ok.detail.silenceViolations).toBe(0);
+    expect(ok.meetsTarget).toBe(true);
+    expect(segmentTurns(announced)[0]?.explainedGapMs).toBeGreaterThan(120_000);
+
+    // Same shape, but the long quiet stretch is NOT preceded by askcard-open.
+    const unannounced: TeedLine[] = [
+      { ts: 0, kind: "route-decision", event: { t: "event", kind: "route-decision", path: "hot-path" } },
+      { ts: 100, kind: "usage", event: { t: "event", kind: "usage", source: "title", inputTokens: 1 } },
+      { ts: 900_000, kind: "llm-done", event: { t: "event", kind: "llm-done", finishReason: "stop" } },
+    ];
+    const bad = scoreA2({ ...healthyInputs(), eventLog: unannounced, maxSilenceMs: 120_000 });
+    expect(bad.detail.silenceViolations).toBe(1);
+    expect(bad.meetsTarget).toBe(false);
+  });
+
   it("treats an empty event log as a failure, never as a pass", () => {
     const res = scoreA2({ ...healthyInputs(), eventLog: [] });
     expect(res.meetsTarget).toBe(false);

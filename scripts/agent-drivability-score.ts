@@ -650,7 +650,10 @@ export interface TurnWindow {
   openedBy: string;
   terminal: string | null;
   substantive: boolean;
+  /** Longest UNEXPLAINED quiet stretch inside the turn. Scores the invariant. */
   maxGapMs: number;
+  /** Longest quiet stretch that `askcard-open` already accounted for. Reported, never scored. */
+  explainedGapMs: number;
   eventCount: number;
 }
 
@@ -661,12 +664,24 @@ export function segmentTurns(lines: TeedLine[]): TurnWindow[] {
     if (!current) return;
     const evs = current.events;
     const terminalLine = evs.find((e) => isSubstantiveTerminal(e)) ?? evs.find((e) => TERMINAL_KINDS.includes(e.kind));
+    // Silence is only a defect when the driver cannot NAME the state it is in.
+    // The interval that opens with `askcard-open` is an announced human wait —
+    // the driver has the question, the option count and the default index — so
+    // counting it as a silence violation would score correct behaviour as a
+    // wedge, and an implementer told to fix it would start emitting keep-alive
+    // noise. Every other gap counts.
     let maxGap = 0;
+    let explainedGap = 0;
     for (let i = 1; i < evs.length; i++) {
       const gap = (evs[i]?.ts ?? 0) - (evs[i - 1]?.ts ?? 0);
+      if (evs[i - 1]?.kind === "askcard-open") {
+        if (gap > explainedGap) explainedGap = gap;
+        continue;
+      }
       if (gap > maxGap) maxGap = gap;
     }
     turns.push({
+      explainedGapMs: explainedGap,
       startTs: current.startTs,
       endTs: evs[evs.length - 1]?.ts ?? current.startTs,
       openedBy: current.openedBy,
