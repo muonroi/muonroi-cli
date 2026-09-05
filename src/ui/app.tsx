@@ -622,6 +622,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     apiKeyPrompt,
     blockPrompt,
     btwState,
+    modalKeyboardOwner,
     oauthLogin,
     oauthProviders,
     configuredProviders,
@@ -1794,11 +1795,24 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         selectedIndex={haltSelectedIndex}
                         terminalCols={width}
                         theme={t}
+                        focused={modalKeyboardOwner === "ideal-halt-card"}
                       />
                     )}
-                    {initNewForm && <InitNewFormCard state={initNewForm} terminalCols={width} theme={t} />}
+                    {initNewForm && (
+                      <InitNewFormCard
+                        state={initNewForm}
+                        terminalCols={width}
+                        theme={t}
+                        focused={modalKeyboardOwner === "init-new-form"}
+                      />
+                    )}
                     {pointToExistingForm && (
-                      <PointToExistingFormCard state={pointToExistingForm} terminalCols={width} theme={t} />
+                      <PointToExistingFormCard
+                        state={pointToExistingForm}
+                        terminalCols={width}
+                        theme={t}
+                        focused={modalKeyboardOwner === "point-to-existing-form"}
+                      />
                     )}
                     {councilProgress && (
                       <Semantic id="continue-as-council-progress" role="log" name="Council brainstorm">
@@ -1823,13 +1837,20 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       anchors to the pending question (moved here from above
                       streamContent/councilProgress — see fix/tui-askcard-anchor). */}
                     {pendingCouncilQuestion && councilCardState && (
-                      <CouncilQuestionCard question={pendingCouncilQuestion} theme={t} state={councilCardState} />
+                      <CouncilQuestionCard
+                        question={pendingCouncilQuestion}
+                        theme={t}
+                        state={councilCardState}
+                        focused={modalKeyboardOwner === "askcard"}
+                      />
                     )}
                     {pendingCouncilPreflight && preflightCardState && (
                       <CouncilQuestionCard
                         question={buildPreflightQuestion(pendingCouncilPreflight)}
                         theme={t}
                         state={preflightCardState}
+                        focused={modalKeyboardOwner === "askcard-preflight"}
+                        semanticId="askcard-preflight"
                       />
                     )}
                   </scrollbox>
@@ -1891,6 +1912,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     showPlanQuestions={showPlanPanel}
                     showApiKeyModal={showApiKeyModal}
                     blockPrompt={blockPrompt}
+                    modalOwnsKeyboard={modalKeyboardOwner !== null}
                     onSubmit={handleSubmit}
                     onPaste={handlePaste}
                     pasteBlocks={pasteBlocks}
@@ -2006,6 +2028,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   showPlanQuestions={showPlanPanel}
                   showApiKeyModal={showApiKeyModal}
                   blockPrompt={blockPrompt}
+                  modalOwnsKeyboard={modalKeyboardOwner !== null}
                   onSubmit={handleSubmit}
                   onPaste={handlePaste}
                   pasteBlocks={pasteBlocks}

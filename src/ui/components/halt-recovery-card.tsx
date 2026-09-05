@@ -18,6 +18,13 @@ export interface HaltRecoveryCardProps {
   selectedIndex: number;
   terminalCols: number;
   theme: Theme;
+  /**
+   * True when this card is the modal that owns the keyboard (see
+   * src/ui/modal-focus.ts). Mirrored to the Semantic node's `focus` flag so a
+   * harness driver can read `tui.query "focus"` and learn which of several
+   * stacked cards its keypresses will reach.
+   */
+  focused?: boolean;
 }
 
 const MAX_CARD_COLS = 100;
@@ -30,7 +37,7 @@ const REASON_LABELS: Record<HaltChunk["reason"], string> = {
   sprint_failed: "Sprint failed",
 };
 
-export function HaltRecoveryCard({ halt, selectedIndex, terminalCols, theme }: HaltRecoveryCardProps) {
+export function HaltRecoveryCard({ halt, selectedIndex, terminalCols, theme, focused }: HaltRecoveryCardProps) {
   const fallback = terminalCols < FALLBACK_THRESHOLD;
   const width = fallback ? terminalCols : Math.min(terminalCols - 2, MAX_CARD_COLS);
   // A — a sprint break titles with the failing sprint number ("Sprint 3 failed").
@@ -40,7 +47,7 @@ export function HaltRecoveryCard({ halt, selectedIndex, terminalCols, theme }: H
       : `Halted — ${REASON_LABELS[halt.reason] ?? halt.reason}`;
 
   return (
-    <Semantic id="ideal-halt-card" role="dialog" name="Recovery options" isModal>
+    <Semantic id="ideal-halt-card" role="dialog" name="Recovery options" focus={focused || undefined} isModal>
       <box flexDirection="column" marginBottom={1}>
         <box
           width={width}

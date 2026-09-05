@@ -618,20 +618,33 @@ export function registerActionTools(server: McpServer, getDriver: () => Driver |
   server.registerTool(
     "tui.focus",
     {
-      description: "Move focus to the node matched by selector (must match exactly one).",
-      inputSchema: { selector: z.string().max(500) },
+      description:
+        "Move focus to the node matched by selector (must match exactly one) and VERIFY it moved. " +
+        "Returns an error when the selector matches 0 or >1 nodes, or when no frame reports the node " +
+        "focused within timeoutMs — most TUI surfaces do not accept programmatic focus, drive those " +
+        "with tui.press / tui.press_sequence instead.",
+      inputSchema: { selector: z.string().max(500), timeoutMs: z.number().int().min(0).max(10_000).optional() },
     },
-    async ({ selector }) => {
+    async ({ selector, timeoutMs }) => {
       const d = getDriver();
       if (!d) return noDriver();
       try {
-        d.focus(selector);
-        return { content: [{ type: "text" as const, text: "ok" }] };
-      } catch (e) {
+        const outcome = await d.focus_verified(selector, timeoutMs);
+        if (outcome.ok) {
+          return { content: [{ type: "text" as const, text: JSON.stringify(outcome) }] };
+        }
+        // Not an exception — a truthful negative result. It MUST be isError so a
+        // driver cannot mistake "focus did not move" for "focus moved": that
+        // false `ok` is what left a live /ideal run unreachable (2026-09-05).
         return {
-          content: [
-            { type: "text" as const, text: JSON.stringify({ error: "focus_failed", message: (e as Error).message }) },
-          ],
+          content: [{ type: "text" as const, text: JSON.stringify({ error: outcome.reason, ...outcome }) }],
+          isError: true,
+        };
+      } catch (e) {
+        const message = (e as Error)?.message ?? String(e);
+        console.error(`[harness/mcp-server] tui.focus failed for selector ${JSON.stringify(selector)}: ${message}`);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ error: "focus_failed", message }) }],
           isError: true,
         };
       }

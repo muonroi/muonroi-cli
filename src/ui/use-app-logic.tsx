@@ -164,6 +164,14 @@ import { useTypeahead } from "./hooks/useTypeahead.js";
 import { Markdown } from "./markdown";
 import { buildMcpBrowseRows, McpBrowserModal, McpEditorModal } from "./mcp-modal";
 import { createEmptyMcpEditorDraft, type McpEditorDraft } from "./mcp-modal-types";
+import {
+  collectOpenModalSurfaces,
+  createModalOpenOrder,
+  type ModalSurfaceId,
+  modalOwnsKeyboard,
+  reconcileModalOpenOrder,
+  resolveModalKeyboardOwner,
+} from "./modal-focus.js";
 import { ApiKeyModal } from "./modals/api-key-modal.js";
 import { ConnectModal, TelegramPairModal, TelegramTokenModal } from "./modals/connect-modal.js";
 import { ModelPickerModal } from "./modals/model-picker-modal.js";
@@ -5916,6 +5924,25 @@ export function useAppLogic(props: AppLogicProps) {
     initNewForm !== null ||
     pointToExistingForm !== null;
 
+  // --- Modal keyboard ownership ------------------------------------------
+  // Exactly one open modal owns the keyboard: the most recently opened one.
+  // The SAME resolution feeds (a) the `handleKey` branch guards below and
+  // (b) the `focused` prop each card renders, so the `focus` flag published in
+  // the semantic tree can never disagree with where the keys actually go.
+  // See src/ui/modal-focus.ts for the measurement this fixes.
+  const modalOpenOrderRef = useRef(createModalOpenOrder());
+  const modalKeyboardOwner = useMemo<ModalSurfaceId | null>(() => {
+    const open = collectOpenModalSurfaces({
+      haltCard: activeHaltCard !== null,
+      initNewForm: initNewForm !== null,
+      pointToExistingForm: pointToExistingForm !== null,
+      askcard: pendingCouncilQuestion !== null,
+      preflight: pendingCouncilPreflight !== null,
+    });
+    reconcileModalOpenOrder(modalOpenOrderRef.current, open);
+    return resolveModalKeyboardOwner(modalOpenOrderRef.current, open);
+  }, [activeHaltCard, initNewForm, pointToExistingForm, pendingCouncilQuestion, pendingCouncilPreflight]);
+
   const showPlanPanel = !!activePlan?.questions?.length;
   const planQuestions = activePlan?.questions ?? [];
   const isSinglePlan = planQuestions.length === 1 && planQuestions[0]?.type !== "multiselect";
@@ -6193,8 +6220,27 @@ export function useAppLogic(props: AppLogicProps) {
         }
       }
 
-      // Point-to-existing form intercepts all input while open.
-      if (pointToExistingForm) {
+      // --- Modal keyboard ownership (see src/ui/modal-focus.ts) -----------
+      // Resolved synchronously here, not read off `modalKeyboardOwner`: a
+      // harness key burst can land before React commits the render that
+      // recomputed the memo, and the askcard branch below already reads
+      // `pendingCouncilQuestionRef` for exactly that reason. Reconcile is
+      // idempotent, so running it from both places is safe. The two can differ
+      // for at most one render (ref nulled, state not yet committed); routing
+      // always follows THIS resolution, and the published `focus` catches up on
+      // the commit that removes the card anyway.
+      const openModalSurfacesNow = collectOpenModalSurfaces({
+        haltCard: activeHaltCard !== null,
+        initNewForm: initNewForm !== null,
+        pointToExistingForm: pointToExistingForm !== null,
+        askcard: pendingCouncilQuestionRef.current !== null,
+        preflight: pendingCouncilPreflight !== null,
+      });
+      reconcileModalOpenOrder(modalOpenOrderRef.current, openModalSurfacesNow);
+      const modalOwnerNow = resolveModalKeyboardOwner(modalOpenOrderRef.current, openModalSurfacesNow);
+
+      // Point-to-existing form intercepts all input while it owns the keyboard.
+      if (pointToExistingForm && modalOwnsKeyboard(modalOwnerNow, "point-to-existing-form")) {
         if (pointToExistingForm.step === "input") {
           if (isEscapeKey(key)) {
             setPointToExistingForm(null);
@@ -6302,7 +6348,7 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
       // Init-new form intercepts all input while open.
-      if (initNewForm) {
+      if (initNewForm && modalOwnsKeyboard(modalOwnerNow, "init-new-form")) {
         if (initNewForm.step === "name") {
           if (isEscapeKey(key)) {
             setInitNewForm(null);
@@ -6525,7 +6571,7 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
       // Halt recovery card intercepts all input until dismissed.
-      if (activeHaltCard) {
+      if (activeHaltCard && modalOwnsKeyboard(modalOwnerNow, "ideal-halt-card")) {
         if (isEscapeKey(key)) {
           setActiveHaltCard(null);
           setHaltSelectedIndex(0);
@@ -6623,7 +6669,7 @@ export function useAppLogic(props: AppLogicProps) {
       // setPendingCouncilQuestionSync so the handler sees the new question
       // immediately. (Mirror of councilCardStateRef pattern.)
       const pendingQuestion = pendingCouncilQuestionRef.current;
-      if (pendingQuestion && councilCardStateRef.current) {
+      if (pendingQuestion && councilCardStateRef.current && modalOwnsKeyboard(modalOwnerNow, "askcard")) {
         const cardKey = mapCouncilCardKey(key);
         if (cardKey) {
           // Mark the key consumed BEFORE mutating card state: the renderer's
@@ -7641,7 +7687,11 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (pendingCouncilPreflight && preflightCardStateRef.current) {
+      if (
+        pendingCouncilPreflight &&
+        preflightCardStateRef.current &&
+        modalOwnsKeyboard(modalOwnerNow, "askcard-preflight")
+      ) {
         const cardKey = mapCouncilCardKey(key);
         if (cardKey) {
           const synthetic = buildPreflightQuestion(pendingCouncilPreflight);
@@ -8376,6 +8426,7 @@ export function useAppLogic(props: AppLogicProps) {
     apiKeyPrompt,
     blockPrompt,
     btwState,
+    modalKeyboardOwner,
     oauthLogin,
     oauthProviders,
     configuredProviders,

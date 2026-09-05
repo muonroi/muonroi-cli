@@ -320,7 +320,10 @@ driver.expect("id=foo", { field: "value", op: "eq", rhs: "bar" })  // boolean
 driver.press("Enter")                   // single key
 driver.press_sequence(["Down", "Down", "Enter"])
 driver.type("hello")                    // literal text
-driver.focus("id=composer")             // dispatches __focus__:<id>; throws on ambiguous
+driver.focus("id=composer")             // dispatches __focus__:<id>; throws on ambiguous (does NOT verify)
+await driver.focus_verified("id=x")     // dispatches AND verifies; {ok:false, reason:"not_focusable"|"no_match"|"ambiguous"}
+                                        // `tui.focus` uses this and returns isError when focus did not actually move.
+                                        // Most surfaces reject programmatic focus — drive them with press()/press_sequence().
 await driver.wait_for({ idle: true, timeoutMs: 5000 })
 await driver.wait_for({ selector: "role=toast", timeoutMs: 3000 })
 await driver.wait_for({ all: [{ selector: "id=log" }, { idle: true }], timeoutMs: 5000 })
