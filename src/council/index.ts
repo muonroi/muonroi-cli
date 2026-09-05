@@ -71,17 +71,26 @@ import {
 } from "./types.js";
 
 /**
- * Wrap a CouncilLLM so every `generate` call inherits the council-wide abort
+ * Wrap a CouncilLLM so every model call inherits the council-wide abort
  * signal. The whole generate-based call path (clarifier, research-need eval,
  * leader round-eval, opening statements, round summary, spec/plan synthesis,
  * and the debate-planner retry) calls `llm.generate(...)` with NO signal arg —
  * none of those sites thread one. Injecting it here in ONE place makes them all
- * cancellable without touching each signature. `debate`/`research` already get
- * `config.signal` explicitly, so they pass through unchanged.
+ * cancellable without touching each signature.
  *
- * An explicit per-call signal (none exist today, but the param is there) wins
- * over the injected one. Returns the original llm untouched when no signal is
- * configured (e.g. the sprint-planner path, which has no user-abort signal).
+ * `debate`/`research` are wrapped for the SAME reason, for a different caller.
+ * Inside `runCouncil` they already receive `config.signal` explicitly, so the
+ * `sig ?? signal` precedence below makes the wrap a no-op there. But `/ideal`
+ * reaches `runDebate` through `loop-driver.ts:761` with a config that carries
+ * NO `signal` field at all (and `debate.ts:692` reads `config.signal`), and it
+ * reaches the sprint-planning `runCouncil` (`sprint-runner.ts:821`) with no
+ * `options.signal` either — so on the product-loop path every debate/research
+ * call was uncancellable for exactly the same reason generate was. Wrapping all
+ * three here is what lets `Agent.abort()` reach a pending `/ideal` council
+ * without threading a signal through ten product-loop modules.
+ *
+ * An explicit per-call signal wins over the injected one. Returns the original
+ * llm untouched when no signal is configured.
  */
 export function withCouncilSignal(llm: CouncilLLM, signal: AbortSignal | undefined): CouncilLLM {
   if (!signal) return llm;
@@ -89,6 +98,10 @@ export function withCouncilSignal(llm: CouncilLLM, signal: AbortSignal | undefin
     ...llm,
     generate: (modelId, system, prompt, maxTokens, onUsage, sig) =>
       llm.generate(modelId, system, prompt, maxTokens, onUsage, sig ?? signal),
+    debate: (modelId, system, prompt, sig, persistTrace, options, onUsage) =>
+      llm.debate(modelId, system, prompt, sig ?? signal, persistTrace, options, onUsage),
+    research: (modelId, topic, conversationContext, sig, persistTrace, options, onUsage) =>
+      llm.research(modelId, topic, conversationContext, sig ?? signal, persistTrace, options, onUsage),
   };
 }
 

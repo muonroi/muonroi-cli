@@ -2437,14 +2437,44 @@ export class Agent {
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const { runProductLoop } = await import("../product-loop/index.js");
     const { createCouncilLLM } = await import("../council/llm.js");
+    const { withCouncilSignal } = await import("../council/index.js");
     const nodePath = await import("node:path");
+
+    // P0-4 remainder — make Esc reach a PENDING council on the `/ideal` path.
+    // Re-arming `isProcessingRef` (use-app-logic.tsx) got the keypress as far as
+    // `agent.abort()`, but abort() is `this.abortController?.abort()` (:882) and
+    // the `/ideal` SLASH path never created one: unlike the auto-council path,
+    // it does NOT run inside processMessage (which sets it at :4262) — the TUI
+    // calls `agent.runProductLoopV1(payload)` directly. So `abort()` hit a null
+    // controller and was a total no-op, and the two `runIsolatedTask` sites
+    // below that already read `this.abortController?.signal` got `undefined`.
+    // Identical defect and identical fix to `runCouncilV2` (:2183-2187); only
+    // tear down a controller we own.
+    const ownsController = !this.abortController;
+    if (ownsController) {
+      this.abortController = new AbortController();
+    }
+    const signal = this.abortController?.signal;
 
     const productStats = {
       calls: 0,
       startMs: Date.now(),
       phases: [] as Array<{ name: string; durationMs: number }>,
     };
-    const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, productStats);
+    // Second half of the same defect: even WITH a controller, no product-loop
+    // call site passes a signal — `llm.generate(...)` (loop-driver, sprint-
+    // planner, done-gate, gather, backlog-builder, criteria-seed, cross-run-
+    // memory, assumption-ledger), `runDebate(spec, config, ctx.llm)` with no
+    // `config.signal` (loop-driver.ts:761 vs debate.ts:692) and the sprint-
+    // planning `runCouncil` with no `options.signal` (sprint-runner.ts:821).
+    // `withCouncilSignal` is the council's existing one-place injector for
+    // exactly this; reuse it rather than threading a signal through ten
+    // product-loop modules. `runCouncil` re-wraps with its own (undefined)
+    // signal downstream, which is a no-op passthrough that keeps ours.
+    const llm = withCouncilSignal(
+      createCouncilLLM(this.bash, this.mode, this.session?.id, productStats),
+      signal,
+    );
     // Autonomous-execution permission for the product loop. /ideal's consent
     // boundary is the preflight plan-approval askcard; once the PO approves the
     // plan, the sprint IMPLEMENT turn must apply its own file-op mutations without
@@ -2649,8 +2679,24 @@ export class Agent {
     try {
       for await (const chunk of gen) {
         yield chunk;
+        // Hard-stop guard, same shape as runCouncil's `userAborted()` phase
+        // check (council/index.ts). Aborting the in-flight model call is not by
+        // itself enough to end the turn: every product-loop phase wraps its work
+        // in fail-open try/catch (e.g. the debate retry at loop-driver.ts:1119),
+        // so a swallowed AbortError would let the loop march into the NEXT phase
+        // and keep spending. Breaking here unwinds `gen` via its `return()`, so
+        // the TUI's own `for await` ends and the turn is actually cancelled.
+        // Latency is bounded by one in-flight sub-call.
+        if (signal?.aborted) break;
       }
     } finally {
+      // Release the controller we created above so the next turn starts clean.
+      // Guarded on ownsController + identity so an abort during a nested run
+      // cannot null out a controller that belongs to an enclosing processMessage
+      // turn. Mirrors runCouncilV2 (:2405-2407).
+      if (ownsController && this.abortController?.signal === signal) {
+        this.abortController = null;
+      }
       // Same invariant runCouncilV2 already enforces (:2404). `/ideal` uses the
       // SAME `createQuestionResponder` / `createPreflightResponder` closures, and
       // those bracket every open card with `beginInteractivePause()`. A card
