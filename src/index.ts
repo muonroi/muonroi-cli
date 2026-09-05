@@ -1663,7 +1663,7 @@ program
         process.exit(report.verdict === "fail" ? 1 : 0);
       }
 
-      const { runSelfVerify } = await import("./self-qa/index.js");
+      const { runSelfVerify, selfVerifyExitCode } = await import("./self-qa/index.js");
       const report = await runSelfVerify({
         baseRef: opts.since,
         maxScenarios: Number.parseInt(opts.max, 10) || 8,
@@ -1676,14 +1676,14 @@ program
       } else {
         const s = report.summary;
         console.log(
-          `\n[self-verify] ${s.passed}/${s.total} passed | ${s.failed} failed | ${s.inconclusive} inconclusive | ${report.durationMs}ms`,
+          `\n[self-verify] ${s.passed}/${s.total} passed | ${s.failed} failed | ${s.inconclusive} inconclusive | ${report.skipped.length} skipped | ${report.durationMs}ms`,
         );
         if (report.emittedSpecs.length > 0) {
           console.log(`[self-verify] Emitted ${report.emittedSpecs.length} regression spec(s):`);
           for (const path of report.emittedSpecs) console.log(`  ${path}`);
         }
       }
-      process.exit(report.summary.failed > 0 ? 1 : 0);
+      process.exit(selfVerifyExitCode(report.summary));
     },
   );
 

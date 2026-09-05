@@ -81,6 +81,15 @@ if (result.status === 0) {
   exitWith(0);
 }
 
-log(`self-verify FAILED (exit ${result.status}) — blocking push`);
+// Exit codes are the contract in `selfVerifyExitCode` (src/self-qa/index.ts):
+// 1 = an expectation failed, 3 = nothing failed but nothing was established.
+// Both block. Reporting them differently matters because the fix differs: a
+// regression is in your change, an inconclusive is usually in the harness.
+if (result.status === 3) {
+  log("self-verify INCONCLUSIVE — no scenario failed, but at least one verified NOTHING");
+  log("this is not a pass: the gate could not establish that your change works");
+} else {
+  log(`self-verify FAILED (exit ${result.status}) — blocking push`);
+}
 log("override with: git push --no-verify");
 exitWith(1);

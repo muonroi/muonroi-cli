@@ -1,5 +1,6 @@
 import type { LiveEvent, LiveFrame } from "@muonroi/agent-harness-core/protocol";
 import { describe, expect, it } from "vitest";
+import { SELF_VERIFY_EXIT, selfVerifyExitCode } from "../index.js";
 import { judge, summariseResults } from "../judge.js";
 import type { Scenario, ScenarioRun } from "../types.js";
 
@@ -26,6 +27,11 @@ const makeRun = (
   endedAt: 2_000,
   timedOut: false,
   crashed: false,
+  // Models a normal run: the TUI reached idle at least once. `idleReached` now
+  // requires an OBSERVED idle sentinel rather than inferring one from "did not
+  // crash", so this must be explicit.
+  idleObserved: 1,
+  syncTimeouts: [],
   ...extra,
 });
 
@@ -115,6 +121,54 @@ describe("judge", () => {
     expect(judge(makeRun(scn, [], frame)).verdict).toBe("pass");
   });
 
+  it("selectorPresent fails when the id is absent but other nodes exist", () => {
+    // Guard for the truthiness bug: `matchSelector` returns UINode[], and `[]`
+    // is truthy, so the old walk pushed EVERY node and this passed vacuously.
+    const scn = baseScenario({
+      expectations: [{ kind: "selectorPresent", selector: "id=not-rendered" }],
+    });
+    const frame: LiveFrame = {
+      mode: "live",
+      version: "0.4.0",
+      seq: 1,
+      ts: 0,
+      nodes: [{ id: "composer", role: "textbox" }, { id: "status", role: "statusbar" }],
+    };
+    const r = judge(makeRun(scn, [], frame));
+    expect(r.verdict).toBe("fail");
+    expect(r.checks[0]?.reason).toContain("matched 0 nodes");
+  });
+
+  it("selectorPresent counts only real matches, not the whole tree", () => {
+    const scn = baseScenario({ expectations: [{ kind: "selectorPresent", selector: "id=subagents-modal" }] });
+    const frame: LiveFrame = {
+      mode: "live",
+      version: "0.4.0",
+      seq: 1,
+      ts: 0,
+      nodes: [
+        { id: "composer", role: "textbox" },
+        { id: "status", role: "statusbar" },
+        { id: "subagents-modal", role: "dialog", children: [{ id: "subagents-list", role: "listbox" }] },
+      ],
+    };
+    const r = judge(makeRun(scn, [], frame));
+    expect(r.verdict).toBe("pass");
+    expect(r.checks[0]?.reason).toContain("matched 1 node(s)");
+  });
+
+  it("selectorAbsent passes when the id is genuinely absent from a populated frame", () => {
+    const scn = baseScenario({ expectations: [{ kind: "selectorAbsent", selector: "id=subagents-modal" }] });
+    const frame: LiveFrame = {
+      mode: "live",
+      version: "0.4.0",
+      seq: 1,
+      ts: 0,
+      nodes: [{ id: "composer", role: "textbox" }],
+    };
+    expect(judge(makeRun(scn, [], frame)).verdict).toBe("pass");
+  });
+
   it("selectorPresent fails when frame is null", () => {
     const scn = baseScenario({
       expectations: [{ kind: "selectorPresent", selector: "id=composer" }],
@@ -140,6 +194,32 @@ describe("judge", () => {
     expect(judge(run).verdict).toBe("fail");
   });
 
+  it("idleReached fails when no idle sentinel was observed", () => {
+    // The old check was a tautology: it compared wall-clock duration to the
+    // budget, so a zero-step run with an empty frame "reached idle".
+    const scn = baseScenario({ expectations: [{ kind: "idleReached" }], budgetMs: 10_000 });
+    const run = makeRun(scn, [], null, { startedAt: 0, endedAt: 0, idleObserved: 0 });
+    const r = judge(run);
+    expect(r.verdict).toBe("fail");
+    expect(r.checks[0]?.reason).toContain("No idle sentinel observed");
+  });
+
+  it("still evaluates expectations when the run timed out", () => {
+    // Regression guard for the gate hole: a timeout used to return before the
+    // expectation loop, so selectorPresent silently ceased to exist.
+    const scn = baseScenario({ expectations: [{ kind: "selectorPresent", selector: "id=missing-modal" }] });
+    const r = judge(makeRun(scn, [], null, { timedOut: true }));
+    expect(r.checks.some((c) => c.expectation.kind === "selectorPresent" && !c.passed)).toBe(true);
+    // A definite negative outranks "could not establish".
+    expect(r.verdict).toBe("fail");
+  });
+
+  it("an expired sync step alone yields inconclusive, not pass", () => {
+    const scn = baseScenario({ expectations: [{ kind: "noErrorToast" }] });
+    const r = judge(makeRun(scn, [], null, { syncTimeouts: ["wait_for id=x (5000ms): timeout"] }));
+    expect(r.verdict).toBe("inconclusive");
+  });
+
   it("summariseResults reports correct counts", () => {
     const s = summariseResults([
       { verdict: "pass", scenarioId: "a", checks: [], durationMs: 0 },
@@ -148,5 +228,39 @@ describe("judge", () => {
       { verdict: "inconclusive", scenarioId: "d", checks: [], durationMs: 0 },
     ]);
     expect(s).toEqual({ total: 4, passed: 2, failed: 1, inconclusive: 1, passRate: 0.5 });
+  });
+});
+
+describe("selfVerifyExitCode — the gate contract", () => {
+  const s = (over: Partial<{ total: number; passed: number; failed: number; inconclusive: number }> = {}) => ({
+    total: 1,
+    passed: 1,
+    failed: 0,
+    inconclusive: 0,
+    ...over,
+  });
+
+  it("exits 0 only when every scenario that ran passed", () => {
+    expect(selfVerifyExitCode(s({ total: 3, passed: 3 }))).toBe(SELF_VERIFY_EXIT.OK);
+  });
+
+  it("exits 1 when an expectation failed", () => {
+    expect(selfVerifyExitCode(s({ total: 3, passed: 2, failed: 1 }))).toBe(SELF_VERIFY_EXIT.FAILED);
+  });
+
+  it("does NOT report success when a scenario verified nothing", () => {
+    // The measured hole: 1 passed / 0 failed / 5 inconclusive exited 0.
+    expect(selfVerifyExitCode({ total: 6, passed: 1, failed: 0, inconclusive: 5 })).not.toBe(SELF_VERIFY_EXIT.OK);
+    expect(selfVerifyExitCode({ total: 6, passed: 1, failed: 0, inconclusive: 5 })).toBe(
+      SELF_VERIFY_EXIT.INCONCLUSIVE,
+    );
+  });
+
+  it("a definite failure outranks an inconclusive", () => {
+    expect(selfVerifyExitCode({ total: 6, passed: 1, failed: 1, inconclusive: 4 })).toBe(SELF_VERIFY_EXIT.FAILED);
+  });
+
+  it("planning nothing is not a failure to verify", () => {
+    expect(selfVerifyExitCode({ total: 0, passed: 0, failed: 0, inconclusive: 0 })).toBe(SELF_VERIFY_EXIT.OK);
   });
 });

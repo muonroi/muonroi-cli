@@ -52,6 +52,20 @@ export type Scenario = {
   expectations: Expectation[];
   /** Estimated wall-clock budget for the full scenario. */
   budgetMs: number;
+  /**
+   * False when the planner knows no way to bring this surface on screen (no
+   * registered opener, and the surface is not top-level). Such a scenario is
+   * still PLANNED — so callers can see the surface was noticed — but it is not
+   * RUN, because driving it would block on a `wait_for` that can never resolve
+   * and produce a permanent `inconclusive`.
+   *
+   * "I do not know how to reach this" is reported as `skipped`, which is
+   * honest, and is deliberately kept distinct from "I drove it and the harness
+   * broke" (`inconclusive`). Defaults to true when omitted.
+   */
+  reachable?: boolean;
+  /** Human-readable reason, set whenever `reachable === false`. */
+  unreachableReason?: string;
 };
 
 export type ScenarioRun = {
@@ -66,6 +80,20 @@ export type ScenarioRun = {
   crashed: boolean;
   /** Captured stderr or stack from any caught error. */
   errorTrace?: string;
+  /**
+   * Number of `{t:"idle"}` sentinels observed on the sidechannel during this
+   * scenario's window. `idleReached` is judged against this: without it the
+   * check was a tautology that a zero-step run satisfied (it only compared
+   * wall-clock duration to the budget, so `durationMs: 0` "reached idle").
+   */
+  idleObserved: number;
+  /**
+   * Human-readable descriptions of `wait_for` steps that expired. A step is a
+   * SYNCHRONISATION primitive, not an assertion: its expiry must not abort the
+   * scenario, because doing so skipped the scenario's real `expectations`
+   * entirely and silently discarded the only assertions it had.
+   */
+  syncTimeouts: string[];
 };
 
 export type CheckResult = {

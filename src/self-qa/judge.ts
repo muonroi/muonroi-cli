@@ -7,9 +7,19 @@
  * Rule-based — NO LLM call. Reproducible and cheap.
  *
  * Verdict policy:
- *   - All checks passed              → "pass"
- *   - One or more checks failed      → "fail"
- *   - Run crashed / timed out        → "inconclusive"  (don't claim pass/fail)
+ *   - A check failed                 → "fail"          (we know the answer: no)
+ *   - Child crashed                  → "inconclusive"  (nothing was established)
+ *   - A `wait_for` step expired but
+ *     every expectation still passed → "inconclusive"  (suspicious, unproven)
+ *   - Everything passed cleanly      → "pass"
+ *
+ * The expectation loop now runs in EVERY case, including crash and timeout.
+ * Previously a timeout returned early with a single synthetic `idleReached`
+ * check, so the scenario's own `selectorPresent` / `noErrorToast` assertions
+ * were never evaluated — they did not fail, they silently ceased to exist.
+ * That is the failure class this module is supposed to catch, so it must not
+ * commit it: a run that could not be driven still reports WHAT would have
+ * failed, and the `inconclusive` verdict records that it was not proven.
  */
 
 import type { LiveEvent, LiveFrame, UINode } from "@muonroi/agent-harness-core/protocol";
@@ -18,49 +28,45 @@ import type { CheckResult, Expectation, JudgeResult, ScenarioRun } from "./types
 
 export function judge(run: ScenarioRun): JudgeResult {
   const durationMs = run.endedAt - run.startedAt;
-
+  // Harness-level context first, so a reader sees WHY before WHAT. These are
+  // NOT assertions about the product, so they are excluded from `anyFailed` —
+  // a dead child means "unproven", not "the feature is broken".
+  const harnessChecks: CheckResult[] = [];
   if (run.crashed) {
-    return {
-      verdict: "inconclusive",
-      scenarioId: run.scenario.id,
-      durationMs,
-      checks: [
-        {
-          expectation: { kind: "idleReached" },
-          passed: false,
-          reason: `Child process crashed before scenario completed: ${run.errorTrace ?? "unknown"}`,
-        },
-      ],
-    };
+    harnessChecks.push({
+      expectation: { kind: "idleReached" },
+      passed: false,
+      reason: `Child process crashed before scenario completed: ${run.errorTrace ?? "unknown"}`,
+    });
+  } else if (run.timedOut) {
+    harnessChecks.push({
+      expectation: { kind: "idleReached" },
+      passed: false,
+      reason: `Scenario exceeded budget of ${run.scenario.budgetMs}ms`,
+    });
+  }
+  for (const t of run.syncTimeouts) {
+    harnessChecks.push({ expectation: { kind: "idleReached" }, passed: false, reason: `Sync step expired: ${t}` });
   }
 
-  if (run.timedOut) {
-    return {
-      verdict: "inconclusive",
-      scenarioId: run.scenario.id,
-      durationMs,
-      checks: [
-        {
-          expectation: { kind: "idleReached" },
-          passed: false,
-          reason: `Scenario exceeded budget of ${run.scenario.budgetMs}ms`,
-        },
-      ],
-    };
-  }
+  // ALWAYS evaluate the scenario's own expectations — even after a crash or a
+  // timeout. A dropped assertion reads as success; a failed one reads as
+  // failure. Only the latter is honest.
+  const expectationChecks: CheckResult[] = run.scenario.expectations.map((exp) => evaluate(exp, run));
+  const checks: CheckResult[] = [...harnessChecks, ...expectationChecks];
 
-  const checks: CheckResult[] = [];
-  for (const exp of run.scenario.expectations) {
-    checks.push(evaluate(exp, run));
-  }
+  const anyFailed = expectationChecks.some((c) => !c.passed);
+  const unproven = run.crashed || run.timedOut || run.syncTimeouts.length > 0;
 
-  const allPassed = checks.every((c) => c.passed);
-  return {
-    verdict: allPassed ? "pass" : "fail",
-    scenarioId: run.scenario.id,
-    durationMs,
-    checks,
-  };
+  // A definite negative outranks "could not establish": if an expectation
+  // actually failed we know the answer, and reporting it as inconclusive would
+  // understate a real regression.
+  let verdict: JudgeResult["verdict"];
+  if (anyFailed) verdict = "fail";
+  else if (unproven) verdict = "inconclusive";
+  else verdict = "pass";
+
+  return { verdict, scenarioId: run.scenario.id, durationMs, checks };
 }
 
 function evaluate(exp: Expectation, run: ScenarioRun): CheckResult {
@@ -179,9 +185,6 @@ function checkIdleReached(exp: Expectation, run: ScenarioRun): CheckResult {
   if (exp.kind !== "idleReached") throw new Error("invariant");
   const duration = run.endedAt - run.startedAt;
   const budget = exp.withinMs ?? run.scenario.budgetMs;
-  // Idle is signalled by the harness via `{ t: "idle" }` — driver._ingest
-  // converts it to a non-event sentinel. We can also infer idle when the
-  // scenario completed without timeout/crash.
   if (run.timedOut || run.crashed) {
     return {
       expectation: exp,
@@ -189,11 +192,23 @@ function checkIdleReached(exp: Expectation, run: ScenarioRun): CheckResult {
       reason: "Run did not finish cleanly — idle not reached",
     };
   }
+  // Idle is signalled by the harness via `{ t: "idle" }` on the sidechannel and
+  // counted by the orchestrator. Requiring an OBSERVED sentinel is the whole
+  // check: inferring idle from "did not crash and finished inside the budget"
+  // made this a tautology that a scenario with zero steps satisfied — a run
+  // with `durationMs: 0` and an empty frame was reported as having reached idle.
+  if (run.idleObserved <= 0) {
+    return {
+      expectation: exp,
+      passed: false,
+      reason: `No idle sentinel observed during the scenario (duration ${duration}ms)`,
+    };
+  }
   if (duration <= budget) {
     return {
       expectation: exp,
       passed: true,
-      reason: `Idle reached in ${duration}ms (budget ${budget}ms)`,
+      reason: `Idle reached in ${duration}ms after ${run.idleObserved} idle sentinel(s) (budget ${budget}ms)`,
     };
   }
   return {
@@ -212,15 +227,32 @@ function payloadMatches(event: LiveEvent, expected: Record<string, unknown>): bo
   return true;
 }
 
+/**
+ * Collect every node in the frame matching `selector`.
+ *
+ * `matchSelector(root, sel)` returns a UINode[] of matching DESCENDANTS
+ * (`packages/agent-harness-core/src/selector.ts:247`), and it already walks the
+ * subtree itself (`walk` visits the root first, :242-245).
+ *
+ * The previous implementation was `if (matchSelector(n, selector)) out.push(n)`
+ * — but `[]` is TRUTHY in JavaScript, so the condition never discriminated and
+ * every node in the tree was pushed. That made `selectorPresent` pass whenever
+ * the frame held any node at all, and `selectorAbsent` fail for the same
+ * reason: two assertions that could not observe what they claimed to. Measured
+ * 2026-09-05: `selectorPresent 'id=subagents-modal'` reported "matched 4
+ * node(s)" against a 4-node frame, and `id=subagent-editor` "matched 5" against
+ * a 5-node frame — always the total node count, never the real match count.
+ */
 function findBySelector(frame: LiveFrame, selector: string): UINode[] {
   const out: UINode[] = [];
-  const visit = (nodes: UINode[]): void => {
-    for (const n of nodes) {
-      if (matchSelector(n, selector)) out.push(n);
-      if (n.children) visit(n.children);
+  const seen = new Set<UINode>();
+  for (const root of frame.nodes) {
+    for (const hit of matchSelector(root, selector)) {
+      if (seen.has(hit)) continue;
+      seen.add(hit);
+      out.push(hit);
     }
-  };
-  visit(frame.nodes);
+  }
   return out;
 }
 
