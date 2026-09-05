@@ -84,6 +84,10 @@ type LiveEvent =
   | { t: "event"; kind: "toast"; level: "info" | "warn" | "error"; text: string; ttlMs?: number }
   | { t: "event"; kind: "steer-inject"; count: number; atStep: number; runId: string }
   | { t: "event"; kind: "resume-request"; sessionId: string; ts: number }
+  | { t: "event"; kind: "sprint-halt"; sprintN: number; reason: string; runId: string }
+  | { t: "event"; kind: "run-finished"; runId: string; subcommand: string;
+      outcome: "approved" | "halted" | "error" | "threw" | "abandoned";
+      success: boolean; reason: string; sprintsRun: number; shipped: boolean; ts: number }
   | { t: "idle" };
 ```
 
@@ -92,6 +96,8 @@ type LiveEvent =
 - `toast`: A transient notification appeared. `level` indicates severity. `ttlMs` is the time-to-live in milliseconds; omit for indefinite.
 - `steer-inject`: A queued mid-turn message was injected into the running turn at a prepareStep boundary (live-queue steering). `count` is the number of messages injected; `atStep` is the `prepareStep` step number (≥ 1); `runId` is the active turn run ID.
 - `resume-request`: The user invoked in-TUI `/resume` while the TUI runs under the harness (agent-mode). A relaunch would spawn a new process that cannot inherit the fd 3/4 (POSIX) / named-pipe (Windows) transport, stranding the driver (`no_driver`). So the relaunch is **suppressed** — the current process + driver stay alive — and this event carries the selected `sessionId`. The driving agent resumes by restarting the harnessed child bound to it: `tui.stop` → `tui.start({ args: ["--session=<sessionId>"] })`.
+- `sprint-halt`: A `/ideal` sprint stopped at a gate. `reason` is the CB gate code that fired (e.g. `no_recipe`).
+- `run-finished`: **The terminal event of a `/ideal` run, success included.** Emitted exactly once per run from the single choke point every subcommand returns through (`runProductLoop`), in a `finally`, so it also covers the two exits that produce no result: an exception escaping (`outcome:"threw"`) and the consumer tearing the generator down (`outcome:"abandoned"`). `outcome` names the exit — `approved` | `halted` | `error` | `threw` | `abandoned` — and `reason` carries the stable machine code (or the exception message when `threw`). `runId` is `""` only when the id was genuinely never observed; it is never back-filled with a guess. Before this kind existed, a FAILING run announced itself but a SUCCESSFUL one emitted nothing, so a driver could not tell "finished fine" from "hung" (`docs/agent-first/SELF-IMPROVEMENT-PLAN.md` §6.0 open item 3).
 - `idle`: The UI has reached a stable state with no pending renders or timers. Consumers may use this to detect when the TUI is ready for the next interaction.
 
 ## 3. Schema: Design Mode

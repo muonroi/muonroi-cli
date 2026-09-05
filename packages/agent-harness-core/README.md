@@ -61,6 +61,7 @@ serialized as JSONL on the sidechannel (fd 3 / named pipe) and ingested by
 | `askcard-cancel` | `questionId` | low | yes |
 | `sprint-stage` | `sprintIndex`, `stage` ("planning"\|"implementation"\|"verification"\|"judgment"), `runId` | low | yes |
 | `sprint-halt` | `sprintN`, `reason`, `runId` | low | yes |
+| `run-finished` | `runId`, `subcommand`, `outcome` ("approved"\|"halted"\|"error"\|"threw"\|"abandoned"), `success`, `reason`, `sprintsRun`, `shipped`, `ts` — **the terminal event of a `/ideal` run, success included**; wait on it instead of guessing from `idle` | low | yes |
 | `llm-token` | `correlationId`, `delta`, `tokenIndex` | **HIGH** (80-120/sec) | **no** — opt-in only |
 | `llm-done` | `correlationId`, `totalChars`, `finishReason` | low | yes |
 | `toast` | `level` ("info"\|"warn"\|"error"), `text`, `ttlMs?` | low | yes |

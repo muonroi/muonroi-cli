@@ -73,7 +73,13 @@ describe("harness-driver capabilities", () => {
     expect(eventKinds).toEqual(LIVE_EVENT_KINDS);
     expect(eventKinds).toContain("resume-request");
     expect(eventKinds).toContain("askcard-open");
-    expect(eventKinds.length).toBe(22);
+    // The terminal event of a /ideal run. Pinned by name, not just by count:
+    // a driver that cannot name it is back to "approved and hung look alike".
+    expect(eventKinds).toContain("run-finished");
+    // 22 → 23 when run-finished was added. This count is a drift alarm for the
+    // hand-maintained enumerations around LIVE_EVENT_KINDS — bump it when a kind
+    // is ADDED; never lower it to make a removal pass (plan §2.5).
+    expect(eventKinds.length).toBe(23);
   });
 
   it("advertises the role vocabulary and the custom-role prefix", () => {

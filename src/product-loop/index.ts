@@ -140,7 +140,121 @@ export async function* runProductLoop(
   opts: ProductLoopOptions,
 ): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   const sub = opts.subcommand ?? "start";
+  // Filled in by whichever path calls createRun, so the terminal event can name
+  // the run even on the two exits that never produce a result.
+  const runIdSink: RunIdSink = { runId: opts.runId ?? "" };
+  let announced = false;
 
+  try {
+    const result = yield* dispatchProductLoop(opts, sub, runIdSink);
+    announced = true;
+    emitRunFinished({
+      runId: result.runId || runIdSink.runId,
+      subcommand: sub,
+      outcome: outcomeFromResult(result),
+      success: !!result.success,
+      reason: result.reason ?? "",
+      sprintsRun: result.sprintsRun ?? 0,
+      shipped: !!result.shipped,
+    });
+    return result;
+  } catch (err) {
+    announced = true;
+    emitRunFinished({
+      runId: runIdSink.runId,
+      subcommand: sub,
+      outcome: "threw",
+      success: false,
+      reason: (err as Error)?.message ?? "unknown error",
+      sprintsRun: 0,
+      shipped: false,
+    });
+    throw err;
+  } finally {
+    // Reached un-announced ONLY when the consumer stopped pulling — a
+    // `gen.return()` from Escape/abort, or a `for await` that broke out. That is
+    // failure-class instance 2's exact shape ("the TUI tore the generator down
+    // silently"), so it gets a named outcome instead of silence. Nothing is
+    // yielded or awaited here: a `yield` inside this `finally` would be
+    // swallowed by a consumer that has already stopped iterating.
+    if (!announced) {
+      emitRunFinished({
+        runId: runIdSink.runId,
+        subcommand: sub,
+        outcome: "abandoned",
+        success: false,
+        reason: "consumer stopped iterating before the run returned",
+        sprintsRun: 0,
+        shipped: false,
+      });
+    }
+  }
+}
+
+/**
+ * Mutable holder for the run id, so `runProductLoop`'s terminal event can name
+ * the run on exits that never produce a `ProductLoopResult` (an exception
+ * escaping, or the consumer tearing the generator down). `runId: ""` means the
+ * id was genuinely never observed — it is never back-filled with a guess.
+ */
+type RunIdSink = { runId: string };
+
+/** How a `/ideal` run ended, as carried by the `run-finished` harness event. */
+type RunFinishedOutcome = "approved" | "halted" | "error" | "threw" | "abandoned";
+
+function outcomeFromResult(result: ProductLoopResult): RunFinishedOutcome {
+  if (result.stage === "approved") return "approved";
+  if (result.stage === "halted") return "halted";
+  if (result.stage === "error") return "error";
+  // A non-terminal stage escaping as a returned result is a bug elsewhere, but
+  // the driver must still be told the run ended. Report it by the success flag
+  // rather than inventing a stage it did not report.
+  return result.success ? "approved" : "error";
+}
+
+/**
+ * Emit the `run-finished` terminal event (agent-mode only; a no-op otherwise).
+ *
+ * `docs/agent-first/SELF-IMPROVEMENT-PLAN.md` §6.0 open item 3: after Phase 0 a
+ * FAILING `/ideal` run announces itself (`sprint-halt reason=…`,
+ * `announceDriverBail`), but a run that finished FINE emitted nothing at all —
+ * so an agent watching the event stream could not tell "approved" from "hung".
+ * This is the success counterpart, emitted once per run from the single choke
+ * point every subcommand returns through, carrying the outcome so the driver
+ * can name it from the event alone. It is not keep-alive chatter: one event, at
+ * one boundary, only when a run ends.
+ */
+function emitRunFinished(payload: {
+  runId: string;
+  subcommand: string;
+  outcome: RunFinishedOutcome;
+  success: boolean;
+  reason: string;
+  sprintsRun: number;
+  shipped: boolean;
+}): void {
+  try {
+    const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    _ar?.emitEvent({ t: "event", kind: "run-finished", ...payload, ts: Date.now() });
+  } catch (err) {
+    // Never let the announcement break the run it is announcing — but never
+    // swallow it either (repo No Silent Catch Rule): a lost terminal event is
+    // exactly the blindness this emit exists to remove, so it must be greppable.
+    console.error(
+      `[ideal] run-finished emit failed (outcome=${payload.outcome}, runId=${payload.runId || "<unobserved>"}): ${
+        (err as Error)?.message
+      }`,
+    );
+  }
+}
+
+async function* dispatchProductLoop(
+  opts: ProductLoopOptions,
+  sub: NonNullable<ProductLoopOptions["subcommand"]>,
+  runIdSink: RunIdSink,
+): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   switch (sub) {
     case "status":
       return yield* runStatus(opts);
@@ -160,7 +274,7 @@ export async function* runProductLoop(
       //   4. Auto-detect: verify recipe present in cwd → Mode C
       //   5. Otherwise               → Mode A
       if (opts.mode === "maintain") {
-        return yield* runMaintain(opts);
+        return yield* runMaintain(opts, runIdSink);
       }
       // `--force-council` must bypass the recipe auto-detect. Without this,
       // ANY recipe-bearing repo (package.json/*.csproj/…) routes to runMaintain
@@ -181,7 +295,7 @@ export async function* runProductLoop(
         try {
           const recipe = await opts.detectVerifyRecipe();
           if (recipe) {
-            return yield* runMaintain(opts);
+            return yield* runMaintain(opts, runIdSink);
           }
         } catch {
           // Detection failure is non-fatal — fall through to Mode A.
@@ -208,7 +322,7 @@ export async function* runProductLoop(
           ...opts,
           flags: { ...opts.flags, forceCouncil: true },
         };
-        return yield* runStart(forcedOpts);
+        return yield* runStart(forcedOpts, runIdSink);
       }
       // Existing repo + complexity≠high + well-specified → hot-path. The leader
       // can grep the source instead of interviewing the user. Two things still
@@ -224,12 +338,12 @@ export async function* runProductLoop(
         !(opts.needsClarification && opts.complexity !== "low") &&
         !opts.flags.forceCouncil
       ) {
-        return yield* runHotPath(opts);
+        return yield* runHotPath(opts, runIdSink);
       }
       if (opts.complexity === "low" && !opts.flags.forceCouncil) {
-        return yield* runHotPath(opts);
+        return yield* runHotPath(opts, runIdSink);
       }
-      return yield* runStart(opts);
+      return yield* runStart(opts, runIdSink);
     }
   }
 }
@@ -266,7 +380,10 @@ async function detectExistingRepoBypass(opts: ProductLoopOptions): Promise<boole
  * Skips Council debate + scoping. Goes straight from idea → single sprint → ship.
  * extractRunToEE still fires so cross-run memory continues to build.
  */
-async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+async function* runHotPath(
+  opts: ProductLoopOptions,
+  runIdSink?: RunIdSink,
+): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   const { idea, flowDir, flags } = opts;
   if (!idea?.trim()) {
     yield { type: "content", content: "error: /ideal start requires an idea" } as StreamChunk;
@@ -275,6 +392,9 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
 
   const runState = await createRun(flowDir);
   const runId = runState.id;
+  // Publish the id immediately so a throw / teardown after this point still
+  // produces a `run-finished` that names the run (see RunIdSink).
+  if (runIdSink) runIdSink.runId = runId;
 
   await writeManifest(flowDir, runId, {
     idea,
@@ -556,7 +676,10 @@ export function buildDefaultAcceptanceCriteria(idea: string): string[] {
  * follow-up), gathers codebase intel, runs the 5-stage task cycle,
  * builds a PR, optionally invokes `gh pr create`.
  */
-async function* runMaintain(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+async function* runMaintain(
+  opts: ProductLoopOptions,
+  runIdSink?: RunIdSink,
+): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   const { idea, flowDir, llm, flags, cwd, processMessageFn, detectVerifyRecipe, respondToPreflight, sessionModelId } =
     opts;
   if (!idea?.trim()) {
@@ -578,6 +701,9 @@ async function* runMaintain(opts: ProductLoopOptions): AsyncGenerator<StreamChun
 
   const runState = await createRun(flowDir);
   const runId = runState.id;
+  // Publish the id immediately so a throw / teardown after this point still
+  // produces a `run-finished` that names the run (see RunIdSink).
+  if (runIdSink) runIdSink.runId = runId;
 
   await writeManifest(flowDir, runId, {
     idea,
@@ -755,7 +881,10 @@ function* announceDriverBail(result: DriverResult | undefined, runId: string): G
 }
 
 /** start: createRun → loop-driver (gather/research/scoping) → sprint loop → done|halted. */
-async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+async function* runStart(
+  opts: ProductLoopOptions,
+  runIdSink?: RunIdSink,
+): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   const { idea, flowDir, llm, flags, respondToQuestion, respondToPreflight } = opts;
   if (!idea?.trim()) {
     yield { type: "content", content: "error: /ideal start requires an idea" } as StreamChunk;
@@ -764,6 +893,9 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
 
   const runState = await createRun(flowDir);
   const runId = runState.id;
+  // Publish the id immediately so a throw / teardown after this point still
+  // produces a `run-finished` that names the run (see RunIdSink).
+  if (runIdSink) runIdSink.runId = runId;
 
   await writeManifest(flowDir, runId, {
     idea,

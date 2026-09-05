@@ -268,6 +268,41 @@ export type LiveEvent =
       reason: string;
       runId: string;
     }
+  // The terminal event of a `/ideal` run — the SUCCESS counterpart to
+  // `sprint-halt`. A failing run has announced itself since Phase 0
+  // (`sprint-halt reason=…`, `announceDriverBail`), but a run that finished
+  // FINE emitted nothing at all, so "approved" and "hung" were the same
+  // observation to a driver watching the event stream. Emitted from the single
+  // choke point every `/ideal` subcommand returns through
+  // (`runProductLoop` in src/product-loop/index.ts), in a `finally`, so it also
+  // covers the two exits that never produce a result: an exception escaping the
+  // generator, and the consumer tearing the generator down mid-run.
+  | {
+      t: "event";
+      kind: "run-finished";
+      /** The `/ideal` run id. `""` when the run died before `createRun`. */
+      runId: string;
+      /** Which `/ideal` subcommand ended (start | status | resume | abort | ship | review). */
+      subcommand: string;
+      /**
+       * How the run ENDED, named so a driver can act without parsing prose:
+       *  - `approved`  — reached the approved stage (the success case)
+       *  - `halted`    — stopped at a gate or by user action; `reason` says which
+       *  - `error`     — returned a failure result; `reason` says which
+       *  - `threw`     — an exception escaped the run; `reason` is its message
+       *  - `abandoned` — the consumer tore the generator down before it returned
+       */
+      outcome: "approved" | "halted" | "error" | "threw" | "abandoned";
+      /** Mirrors `ProductLoopResult.success`; always false for `threw` / `abandoned`. */
+      success: boolean;
+      /** Stable machine code (e.g. "shipped", "not_found", "budget exhausted"). */
+      reason: string;
+      /** Sprints actually executed; 0 when none ran or the count is unknown. */
+      sprintsRun: number;
+      /** Whether the run reached the shipped state. */
+      shipped: boolean;
+      ts: number;
+    }
   | {
       t: "event";
       kind: "sprint-plan-committed";
@@ -414,6 +449,7 @@ export const LIVE_EVENT_KINDS = [
   "askcard-cancel",
   "sprint-stage",
   "sprint-halt",
+  "run-finished",
   "sprint-plan-committed",
   "route-decision",
   "usage",

@@ -447,7 +447,8 @@ watcher you might be tempted to write. Reach for them FIRST:
 | What stage is it in? | `tui.last_event {kind: "sprint-stage"}` |
 | Did it fail? | `tui.last_event {kind: "sprint-halt"}` / `{kind: "toast"}` |
 | Block until X happens | `tui.wait_for {event\|selector\|idle, timeoutMs}` |
-| Has the run ended? | `tui.wait_for {idle: true}` |
+| Did it END, and how? | `tui.wait_for {event: "run-finished"}` → `tui.last_event {kind: "run-finished"}` (`outcome` names the exit) |
+| Is the UI quiet? | `tui.wait_for {idle: true}` — idle means the TUI settled, NOT that the run succeeded |
 
 `tui.last_event` reads the driver's event ring and returns the FULL payload —
 the entire askcard question, not the truncated `name` that `tui.query` exposes.
@@ -500,7 +501,17 @@ ephemeral flashes need the embedded snapshot.
 
 See authoritative schema in `docs/agent-harness/PROTOCOL.md` and https://docs.muonroi.com (covers 18+ kinds + `usage`, idle sentinel etc).
 
-Commonly used: `route-decision`, `council-step` / `council-speaker`, `askcard-*`, `sprint-stage` / `sprint-halt` / `sprint-plan-committed`, `toast`, `ee-timeout` / `ee-error`, `steer-inject`, `llm-done`. `llm-token` is opt-in only (very high volume).
+Commonly used: `route-decision`, `council-step` / `council-speaker`, `askcard-*`, `sprint-stage` / `sprint-halt` / `sprint-plan-committed`, `run-finished`, `toast`, `ee-timeout` / `ee-error`, `steer-inject`, `llm-done`. `llm-token` is opt-in only (very high volume).
+
+**`run-finished` is the terminal event of a `/ideal` run — wait on it rather than
+guessing.** A failing run announces itself (`sprint-halt reason=…`); before this
+kind existed a run that finished FINE emitted nothing, so "approved" and "hung"
+were the same observation. It fires exactly once per run, from the choke point
+every subcommand returns through, and names the exit in `outcome`:
+`approved` | `halted` | `error` | `threw` | `abandoned` (the consumer stopped
+iterating), alongside `runId`, `subcommand`, `success`, `reason`, `sprintsRun`,
+`shipped`. Block on it with `tui.wait_for {event: "run-finished"}`; read the
+outcome with `tui.last_event {kind: "run-finished"}`.
 
 ## Selector grammar quick reference
 

@@ -34,6 +34,11 @@ export const LIFECYCLE_PRESET: ReadonlySet<EventKind> = new Set<EventKind>([
   "askcard-cancel",
   "sprint-stage",
   "sprint-halt",
+  // The terminal event of a /ideal run (success included). Dropping it from the
+  // default preset would re-create the exact blindness it exists to remove:
+  // a driver on the default env would see the failure path announce itself and
+  // the success path stay silent.
+  "run-finished",
   // Emitted at product-loop/index.ts on plan commit; a wake-at-milestone monitor
   // must see it. Was previously dropped by this preset despite being emitted.
   "sprint-plan-committed",
