@@ -9,10 +9,24 @@
 > codebase, and the P0-5 provider measurement (§4.1 — **it leaked**). Baselines measured, not
 > estimated. Every code reference below was re-read at revision time; §11 records where the review
 > brief itself was wrong.
+>
+> Revised again **2026-09-05** to record Phase 0's measured results (§6.0) and to repair a polluted
+> baseline. Phase −1 says commit the scorecard *before* Phase 0 touches anything; that did not
+> happen, and Phase 0 has already moved A1, A2, A3, A5 and A6. Every axis therefore carries **two
+> committed rows** — pre-Phase-0 and post-Phase-0 — each with an explicit attribution line (§1.1.1).
+> **No line of code in this repository has been written by StepFun or by `/ideal`.** Every Phase 0
+> commit is a Claude subagent under the §6 exception. The experiment this document exists to run
+> (Phase 2..N) has not started.
 
 ---
 
 ## 0. The premise is blocked. Read this first.
+
+> **Status after Phase 0 (2026-09-05): still blocked, but no longer silent.** Two of the three wedge
+> instances are fixed and **2 of 3 runs now reach an announced terminal state** — the 3/3 exit
+> criterion is not met, `Escape` still cannot cancel a stuck turn, and a *successful* run still
+> announces nothing (§6.0). Everything below is the **pre-Phase-0** record and is kept verbatim,
+> with post-Phase-0 deltas marked inline. Do not read it as the current state.
 
 **`/ideal` cannot currently run unattended. It wedges, reproducibly (2/2).** Measured 2026-09-03,
 both runs on `step-3.7-flash`:
@@ -25,9 +39,23 @@ both runs on `step-3.7-flash`:
 - `MUONROI_LOOP_PROFILE=1` armed and never fired — correct behaviour, it only triggers on a
   *blocked* loop, and this loop is not blocked. **It is the wrong instrument for this class.**
 
-Those four discriminators — last-call status, established connections, CPU delta, does the UI still
-take a keystroke — are the instruments. They localise the failure to **a promise that never
-settles after a successful model response**, which no loop profiler can see.
+~~Those four discriminators — last-call status, established connections, CPU delta, does the UI
+still take a keystroke — are the instruments. They localise the failure to a promise that never
+settles after a successful model response.~~
+
+**Corrected 2026-09-05 — the four discriminators are not a diagnosis.** "Last call 200 + 0
+established connections + flat CPU + live UI" was used three times in Phase 0 to conclude "a promise
+never settled." It was wrong every time. Those four signals establish only **"nothing is running"**;
+they cannot distinguish **hung** from **already finished**, and they name no mechanism. Both
+mechanisms Phase 0 actually found came from artifacts, not from the signals:
+
+- the sprint-planning bail, from `interaction_logs` (a `council_error` with `output_tokens = 4096`,
+  exactly the ceiling), and
+- the scoping-synthesis stall, from the `.muonroi-flow` artifacts (`phaseStart` ×4,
+  `phaseDone`/`phaseError` ×0).
+
+Keep the four signals as a *cheap triage* — they are still the fastest way to rule out "it is
+spinning" or "the network is in flight" — but never present them as localising a mechanism.
 
 **`Escape` produced no toast and no `sprint-halt` during the wedge — but this is NOT evidence about
 the unsettled promise.** `interruptActiveRun` bails at `src/ui/use-app-logic.tsx:3847`
@@ -39,6 +67,10 @@ never reaches `agent.abort()` — the multi-minute council was uncancellable." `
 shape (`use-app-logic.tsx:5046-5047`) and never re-arms. **This is an independent, already-solved-
 elsewhere UI bug (A3/P0-4), not wedge evidence.**
 
+**Post-Phase-0 (2026-09-05):** the guard is fixed and structurally tested, **but Escape still does
+not abort a live stuck `/ideal` turn** — the abort does not reach the pending council. P0-4 is
+**partial**; do not read it as met (§6.0).
+
 Second blocker: **`tui_stop` returns `ok` without killing the child.** All 8 TUIs started in one
 session survived it. `tui.stop` unconditionally returns the string `"ok"`
 (`packages/agent-harness-core/src/mcp-server.ts:662-664`) and `onStop` (`:876-884`) only calls
@@ -47,6 +79,13 @@ session survived it. `tui.stop` unconditionally returns the string `"ok"`
 (`const { proc, sendLine, onLine } = spawnResult`) and never stored in module scope — only the pid
 is. `HarnessSpawnResult.proc` exposes `kill()` (`:44`). An unattended loop that starts a TUI per
 sprint leaks a process per sprint.
+
+**Post-Phase-0 (2026-09-05): fixed and independently verified — 10/10 start/stop cycles, 0
+survivors**, each pid dead immediately after `tui.stop`. The child handle is now held in module
+scope (`mcp-server.ts:1112` `currentProc`, assigned at `:1321`, cleared at `:1127`/`:1305`) and
+`onStop` escalates `kill()` → `SIGKILL` (`:698-745`) and reports `killed` / failure reason instead
+of the bare `"ok"`. The pre-fix 8/8-survived baseline above was operator-measured too, so both rows
+of A3 are measurements rather than one measurement and one recollection.
 
 A self-improvement loop that hangs silently at sprint 1 does not improve anything; it burns
 quota and produces a transcript that reads like progress. **Phase 0 exists to fix this, and it is
@@ -90,6 +129,14 @@ while their neighbours were guarded**. Four guards in the same files already doc
 **Revised effort estimate: P0-1 is days, not weeks** — the pattern to copy is in the same file three
 times. P0-3 and P0-4 are ~5 lines each (§6).
 
+**Post-Phase-0 (2026-09-05):** sites 1 and 5 are addressed — the sprint-planning bail (`df7ec627`)
+and the scoping-synthesis silent `return` (`a9a509c6`). **Site 3 is still live**, and it is now
+known to be reachable from ordinary UI flow as well: answering the halt-recovery card with
+`init_new` abandons a pending council askcard without cancelling it (§9, latent bug 2), leaving
+exactly the never-settling promise this list predicted, with both watchdogs suppressed by
+`holdWatchdogOpen()`. The estimate held: P0-1 took days, and its remaining 1/3 is a run, not a
+rewrite.
+
 ---
 
 ## 1. What "improvement" means here
@@ -103,6 +150,28 @@ against the north star, in three properties an agent-driven CLI must have:
 | **Steerable** | Can the driver change that state? | a flow that needs `render_text` to proceed |
 | **Accountable** | Does every outcome announce itself? | a turn that ends without success *or* failure |
 
+#### The failure class: *reported success for something that did not happen*
+
+Named here because Phase 0 found it **five times, in five unrelated subsystems**. It is not a fourth
+property — it is the concrete way Accountable fails in this codebase, and future work should look
+for this shape **first**:
+
+| # | Instance | The lie |
+|---|---|---|
+| 1 | `tui.stop` | returned `"ok"` without killing the child (8/8 orphans) |
+| 2 | `/ideal` sprint-planning bail | yielded `{type:"done"}` — the turn terminator — and the TUI tore the generator down silently |
+| 3 | scoping-synthesis parse | `return`ed without yielding, leaving `loop:scoping` at `state:"active"` forever (`phaseStart` ×4, `phaseDone`/`phaseError` ×0) |
+| 4 | `tui.focus` | returned the bare string `"ok"` without moving focus — for **any** selector, in **any** state, since it was written |
+| 5 | a **successful** `/ideal` run | emits no terminal event at all, so success and hang are the same observation. **Still open** (§6.0) |
+
+All five are the same defect: a success token emitted by the layer that was supposed to *do* the
+thing, on a path where the thing did not happen. None was detectable from the return value; every
+one needed an artifact — a pid, an event log, a frame — to expose. **The rule this yields: a success
+signal must be produced by observing the effect, never by reaching the end of the function.**
+`Driver.focus_verified` (`packages/agent-harness-core/src/driver.ts:351`) is the shape to copy: it
+dispatches *and then verifies against a subsequent frame*, returning a typed `FocusOutcome` carrying
+a reason (`no_match` / `ambiguous` / `not_focusable`) when the move did not happen.
+
 **A change is an improvement if and only if it moves an axis that has a committed baseline (§1.1),
 breaks none of the others, and passes every gate in §5.** The "iff" binds only to baselined axes —
 an axis with no baseline cannot adjudicate anything, and a sprint aimed at one is a discard by
@@ -115,7 +184,11 @@ self-improvement loop optimises its own narration.
 Every axis needs a measurement command **and a named data source**. Where neither exists, the row
 says so instead of carrying an invented target.
 
-| # | Axis | Metric | Measurement | Baseline (2026-09-04) | Target |
+**The table below is the *pre-Phase-0* row.** It is kept verbatim as measured on 2026-09-03/04;
+§1.1.1 carries the post-Phase-0 row and the attribution for each move. Do not overwrite this table
+with post-Phase-0 numbers — the two-row form is the whole point (§6, Phase −1).
+
+| # | Axis | Metric | Measurement | Pre-Phase-0 baseline (2026-09-03/04) | Target |
 |---|---|---|---|---|---|
 | **A1** | Named-state coverage | fraction of scenario steps where a **named discriminating field** appears in `tui.query` / `tui.last_event` output within N s, letting the driver tell *waiting* / *working* / *hung* apart | `agent-drivability-score.ts` replays `GRADUATION-SCENARIOS.md` over MCP | **not baselined** — corpus does not exist yet (P1-3) | 100% of a fixed corpus |
 | **A2** | Terminal-state coverage | every turn emits **at least one** terminal event (result node, `sprint-halt`, `toast(error)`, `askcard-open`, `askcard-answered`) within N s of last stream activity, **and** no turn exceeds N s with no event of any kind | harness spec + negative control (§2.6) | not enforced | invariant enforced by a spec that fails on the negative control |
@@ -148,6 +221,41 @@ says so instead of carrying an invented target.
   pass criterion produced by this session. It is the template the other rewrites follow.
 - **A1, A2, A4 and A6 are referee-change axes** (§2.2). Improving them means changing the
   measurement instrument. They are human-reviewed sprints, not `/ideal`-driven ones.
+
+### 1.1.1 Two committed rows per axis — pre-Phase-0 vs post-Phase-0
+
+Phase −1 (commit the baseline before anything is touched) **was executed late**: Phase 0 had already
+moved A1, A2, A3, A5 and A6 by the time the scorecard was written down. Left as a single row, Phase 2
+would inherit gains a human made and the scorecard would credit `/ideal` for them — exactly the
+self-deception §2 exists to prevent. The honest substitute is **two committed rows with an explicit
+attribution column**. Every post-Phase-0 value below was measured by the operator in a clean process
+(§2.4), not taken from an implementing agent's report; where an agent's number differed, the operator
+number is the one recorded.
+
+**Attribution for every move in this table: Claude subagents in Phase 0. Not `/ideal`, and not
+StepFun.**
+
+| Axis | Pre-Phase-0 (measured 2026-09-03/04) | Post-Phase-0 (measured 2026-09-04/05) | Moved by |
+|---|---|---|---|
+| **A1** blind states | **≥ 1** (the `/ideal` wedge); by the end of Phase 0, **3 distinct instances** had been found, all the same shape (§1's failure class) | 2 fixed (sprint-planning bail, scoping-synthesis parse); 1 new one found (stacked modals → A4) | Phase 0 subagent |
+| **A2** terminal-state coverage | not enforced; **3 independent runs ended with no terminal event of any kind** | `sprint-halt` now carries a reason; `announceDriverBail` covers every non-approved driver outcome. **A successful run still emits no terminal event — gap open** | Phase 0 subagent |
+| **A3** lifecycle | `tui_stop` left **8/8** TUIs alive (1 orphan per stop); `Escape` did not abort | **0 orphans across 10 start/stop cycles**; Escape guard fixed, but **abort still does not propagate to a stuck council — gap open** | Phase 0 subagent |
+| **A4** scrape-free | unmeasured | **1 hard dead end found and fixed**: two stacked modals → `tui.query "focus"` → `null`, `tui.press` silently dropped, `tui.focus` `"ok"` without moving focus. Root cause was larger than the report (§6.0) | Phase 0 subagent |
+| **A5** harness determinism | **67 spec files**; 4 `.skip` + 4 `.todo` = 8 counted; **1 unallowlisted** (`tests/harness/gsd-pil-gate.spec.ts:389`); `lint:harness-skips:strict` **exit 1**; 11 `describe.skipIf` exempt, **4 of them disabling E2E in CI** | **7** counted hits, **0 unallowlisted**, `:strict` **exit 0**; the `.todo` was **implemented, not allowlisted** (allowlist byte-identical); `it.skipIf` now visible; the CI-disabled sites were reported unprompted | Phase 0 subagent |
+| **A6** self-description | 21 tools registered but **14 advertised** in `FEATURES`; **21 of 22** event kinds in the `tui.last_event` enum (`resume-request` missing → that call rejected at the MCP boundary); no selector grammar, no roles, no predicate grammar | `tools` derived from the registrar — **21/21 exact match with `tools/list`**; **22** event kinds; **33** roles; full selector + predicate grammar; `semantics` read from the live frame with `no-driver` / `no-frame` / `live-frame` honesty | Phase 0 subagent |
+| `/ideal` end-to-end | **wedged 2/2 runs**, both silent | **2/3 runs reached an announced terminal state**; the 3/3 criterion is **not met** | Phase 0 subagent |
+
+Two notes the table cannot carry:
+
+- **A1's target of `0` remains unreachable as a measurement.** You can demonstrate `≥ n` blind
+  states; you can never demonstrate `= 0`. The counts above are "instances found", not a level. The
+  bounded proxy in §1.1 is what should actually be scored once the corpus exists.
+- **A5's post-row is green for the right reason.** The `.todo` was implemented rather than
+  allowlisted, and `scripts/.harness-skips-allow.json` is byte-identical to its pre-Phase-0 content —
+  so §2.5 (no green-by-deletion) and §2.7 (no green-by-dilution) both hold. The later focus work
+  (`46bff1f3`) deliberately appended its new cases *below* the allowlisted `it.todo` in
+  `tests/harness/modal-focus.spec.ts:62` to avoid shifting the `path:line` pin — the §2.7 hazard
+  behaving exactly as predicted.
 
 ### 1.2 The graduation test — the north star, made falsifiable
 
@@ -328,7 +436,8 @@ proximate cause.
 
 | Budget | Value | Source / status |
 |---|---|---|
-| Tokens per sprint | **to be set from the first three sprints' measured data** | `interaction_logs WHERE event_type='call_accounting'` (see CLAUDE.md → "The metered gate"); `usage_events` for billed totals. No target is stated here because none has been measured — inventing one would violate §1. |
+| Tokens per sprint | **still to be set from the first three sprints' measured data** | `interaction_logs WHERE event_type='call_accounting'` (see CLAUDE.md → "The metered gate"); `usage_events` for billed totals. No token target is stated here because none has been measured — inventing one would violate §1. The **call/dollar** figures now have a measurement; see the row below. |
+| Cost per `/ideal` run | **~45-62 StepFun calls, ~$0.06-0.10** | Measured, not estimated: derived from the Phase 0 engagement total of **410 StepFun calls / $0.6617** across all `step-*` models (`usage_events`) — `step-3.5-flash` council 218 calls / $0.2368; `step-3.7-flash` council 58 / $0.1510; `step-3.7-flash` message 49 / $0.1188; `step-3.7-flash` task 8 / $0.0987; `step-3.5-flash-2603` council 69 / $0.0415; remainder $0.0148. That total covers the StepFun evaluation **and** all Phase 0 verification, so it bounds a sprint from above as well. |
 | Wall clock per sprint | **90 min, provisional** | A *chosen bound*, not a measurement. Justification: documented sprint planning alone runs ~12 min, and impl/verify carry their own multi-minute watchdogs. Revise after three sprints of data and record the revision here. |
 | Max sprints per axis | **3** | After 3 discards on one axis, stop and escalate to a human decision. |
 | 429 / quota exhaustion | **discard the sprint, log the axis, do not retry inside the same worktree** | see §8's third ending |
@@ -429,6 +538,9 @@ Raw transcripts: cases a–b and c–f, captured by the operator on 2026-09-04.
    tool call. That guard is **P0-5b**, and it is a hard precondition for every later phase: without
    it, any StepFun-driven sprint can produce a "successful" turn whose visible answer is markup —
    which is precisely the transcript-that-reads-like-progress failure §8 exists to prevent.
+   **P0-5b shipped 2026-09-04** and was verified independently: a live leak is detected, this
+   document's own prose quoting the markup is **not** flagged, the 5-case false-positive matrix is
+   clean, and the negative control (guard present but unwired) turns one test red (§6.0).
 
 **File this upstream.** It is the strongest StepFun bug report this project has produced: it breaks
 every agent framework that has a final-answer-without-tools turn, not only muonroi-cli. Case (e)
@@ -539,6 +651,14 @@ must show up as Phase 0's credit, not as the loop's.
 At this point A1 and A4 have no baseline (no corpus yet). Record them as **not baselined** rather
 than as a number.
 
+**What actually happened: Phase −1 was executed late.** The scorecard was not committed before
+Phase 0 ran; by the time it was written down, Phase 0 had already moved A1, A2, A3, A5 and A6. The
+pre-Phase-0 values were still *measured* (2026-09-03/04) rather than reconstructed, so the honest
+substitute is the **two-row form in §1.1.1** — pre and post, with an attribution column naming
+Phase 0 subagents for every move. That is a weaker guarantee than a committed baseline (nothing
+independently timestamps the pre-row), and this paragraph exists so the weakness is on the record
+rather than smoothed over. **For every future phase, commit the baseline first.**
+
 ### Phase 0 — Unblock (human-driven; `/ideal` cannot do this)
 
 Ordered by "cheapest test that can kill the whole plan" first.
@@ -546,7 +666,7 @@ Ordered by "cheapest test that can kill the whole plan" first.
 | ID | Work | Effort | Exit criterion |
 |---|---|---|---|
 | **P0-5** | ✅ **DONE 2026-09-04.** Measured whether `step-3.7-flash` leaks native markup on a chitchat continuation with an empty tool set and prior tool history, including through `forcedFinalize`. | 6 API calls, no code | **Result: LEAKS, deterministically, in 5 of 6 cases including the forced-finalize shape; `tool_choice` irrelevant; prompt mitigation disproven** (§4.1). Model policy survives only via P0-5b |
-| **P0-5b** | 🔴 **BLOCKING — new work created by P0-5.** Provider-level output guard for StepFun: detect the well-formed `<tool_call>…</tool_call>` block in `content` and either strip it or parse it back into a tool call. Must sit at the provider boundary, not in a prompt and not behind `tool_choice` — both are disproven. Cover `forcedFinalize` (`scope-ceiling.ts:222`), stall-rescue and the chitchat continuation. | small-to-medium, one seam | all six P0-5 cases replayed through the CLI produce prose or a parsed tool call, never markup; a regression spec pins case (b), the forced-finalize shape |
+| **P0-5b** | ✅ **DONE 2026-09-04** (was 🔴 BLOCKING — new work created by P0-5). Provider-level output guard for StepFun: detect the well-formed `<tool_call>…</tool_call>` block in `content` and either strip it or parse it back into a tool call. Must sit at the provider boundary, not in a prompt and not behind `tool_choice` — both are disproven. Cover `forcedFinalize` (`scope-ceiling.ts:222`), stall-rescue and the chitchat continuation. | small-to-medium, one seam | all six P0-5 cases replayed through the CLI produce prose or a parsed tool call, never markup; a regression spec pins case (b), the forced-finalize shape |
 | **P0-3** | `tui_stop` kills the child: store the `proc` handle in module scope and call `kill()` in `onStop` | ~5 lines (`mcp-server.ts:876-884`, `:1021`, `:44`) | 0 orphans across 10 start/stop cycles |
 | **P0-4** | `Escape` aborts a stuck `/ideal` turn within 5 s, or emits a `toast` explaining why it cannot | ~5 lines — mirror the `/council` fix at `use-app-logic.tsx:5335-5336` | Esc during a live `/ideal` turn produces an abort or a toast |
 | **P0-6** | Make `tui.capabilities` sufficient: add selector grammar, role vocabulary, the full event-kind list and the semantic-id inventory; advertise all 21 tools in `FEATURES`; add `resume-request` to the `tui.last_event` kind enum (`mcp-server.ts:625-645`) so that call stops being rejected at the MCP boundary | small, mechanical | A6's static criterion is satisfiable at all |
@@ -554,11 +674,94 @@ Ordered by "cheapest test that can kill the whole plan" first.
 | **P0-2** | Every terminal state emits an event (A2 invariant), **with a negative control** (§2.6), so a wedge is observable even before it is fixed | medium | spec green, negative control red |
 | **P0-1** | `/ideal` completes a full run without wedging, 3/3 consecutive. Work the unguarded await sites in the §0.1 order | **days, not weeks** — the guard pattern already exists three times in the same file | 3/3 clean runs |
 | **P0-8** | *(conditional on P0-5)* If low-effort reasoning is needed: flip `supports_effort` for `step-3.5-flash` and add a StepFun capability override that emits the provider option (§4) | small | a StepFun call demonstrably carries the effort parameter |
+| **P0-9** | ✅ **DONE 2026-09-05, `46bff1f3`.** *(new work, found while measuring A4)* Give the topmost modal unambiguous keyboard ownership and publish a `focus` flag for it; make `tui.focus` honest. Discovered because two stacked modals left the driver with **no** focus owner at all | medium | `tui.query "focus"` resolves to exactly one node with a modal open; `tui.focus` reports failure instead of `"ok"` when focus did not move |
 
 **Nothing downstream starts until P0-1 through P0-4, P0-5b and P0-7 pass.** P0-5 is done and its
-verdict (§4.1) makes **P0-5b the gate on everything else**: until the output guard ships, a StepFun
+verdict (§4.1) made **P0-5b the gate on everything else**: until the output guard ships, a StepFun
 turn can return markup as its final answer, so no sprint transcript on this stack can be trusted —
-and a plan whose evidence channel is untrustworthy measures nothing (§8).
+and a plan whose evidence channel is untrustworthy measures nothing (§8). **P0-5b has since
+shipped**; the remaining blockers are P0-1 (2/3) and P0-4 (partial) — see §6.0.
+
+### 6.0 Phase 0 — results (recorded 2026-09-05)
+
+Every "Operator verification" cell below was produced outside the implementing agent's session, in a
+clean process (§2.4). Nothing here is an agent's self-report.
+
+| Item | Status | Operator verification |
+|---|---|---|
+| **P0-5** leak measurement | ✅ done | leaks 5/6 cases including the `forcedFinalize` shape (§4.1) |
+| **P0-5b** provider markup guard | ✅ done | live leak → detected; the repo's own plan text quoting the markup → **not** flagged; 5/5 false-positive matrix; negative control (guard present but unwired) → 1 test red |
+| **P0-3** `tui_stop` kills child | ✅ done | **10/10 cycles, 0 survivors**, each pid dead immediately after stop. The pre-fix 8/8-survived baseline was operator-measured too |
+| **P0-6** `tui.capabilities` sufficiency | ✅ done | verified against a live `mcp-driver`: 21/21 tools matching `tools/list`, 22 event kinds, 33 roles, selector + predicate grammar, frame-derived `semantics` |
+| **P0-7** skip gate honest | ✅ done | `:strict` exit 1 → **0**; allowlist byte-identical (no green-by-dilution) |
+| **P0-9** stacked-modal / focus | ✅ done (`46bff1f3`) | see the deep dive below |
+| **P0-2** A2 invariant | ⚠️ largely done via the scoping fix | `sprint-halt reason=no_recipe` announced live. **A *successful* run still emits no terminal event — that gap is open** |
+| **P0-1** `/ideal` wedge | ⚠️ **2/3** | sprint-planning bail gone (`sprint-plan-committed` observed live); the **third clean run is outstanding** |
+| **P0-4** `Escape` aborts | ⚠️ **partial** | guard fixed and structurally tested, **but a live stuck `/ideal` turn did not abort** — abort does not reach the pending council. **Do not record as met** |
+| **P0-8** low-effort reasoning | not started | conditional; not needed yet |
+
+#### Still NOT met — four open items, stated so they cannot be read as done
+
+1. **P0-1's third clean run.** 2/3 is not 3/3, and the exit criterion is 3/3 consecutive.
+2. **P0-4's abort propagation.** Escape now reaches the abort path but the abort does not reach a
+   pending council; a stuck `/ideal` turn is still uncancellable from the keyboard.
+3. **A2's success case.** Failures announce themselves now; **successes do not.** A driver still
+   cannot distinguish "finished fine" from "hung" on the happy path — instance 5 of §1's failure
+   class, and the one that most directly blocks unattended operation.
+4. **The residual two-focus-node risk.** P0-9 resolved ownership for the modals it covers, but the
+   picker/connect modal layer has not been swept for the same hazard. Any surface that publishes a
+   `focus` flag without suppressing the composer's mirror will produce **two** focus nodes, and
+   `driver.query("focus")` **throws** `ambiguous` on >1 match — a worse dead end than `null`.
+
+#### P0-9 deep dive — the focus finding was larger than the report
+
+The reported symptom was "two stacked modals and the driver cannot act." What the fix found:
+
+- **No modal card ever set a `focus` flag.** The tree had **zero focus owners by construction**.
+  This reproduces with the init-new form open *alone*; the modal collision merely exposed it.
+- **`tui.focus` never worked at all.** `__focus__:<id>` is documented in-code as a deliberate no-op
+  (`packages/agent-harness-opentui/src/input-bridge.tsx:157`) and dropped on arrival (`:211`). It
+  could not move focus for any selector in any state, and always returned the bare string `"ok"`.
+  `Driver.focus_verified` (`driver.ts:351`) now dispatches **and verifies**, and `tui.focus` returns
+  `isError` with a reason when focus did not move.
+- **A hazard avoided.** Naively publishing focus on the askcard yields **two** focus nodes — an
+  askcard does not set `blockPrompt`, so the composer keeps its flag — and `driver.query("focus")`
+  throws `ambiguous` on >1 match. Solved with a `modalOwnsKeyboard` prop that suppresses only the
+  *semantic mirror* (`src/ui/components/prompt-box.tsx:229-231`), never the real focus.
+- **Strategy: LIFO — the topmost modal owns the keyboard** (`src/ui/modal-focus.ts`), with the
+  resolver driving **both** the `handleKey` guards and the rendered `focused` prop, so the published
+  flag cannot disagree with where keys actually go.
+- **Correction to the record.** The second modal was **not** opened by the halt path.
+  `setInitNewForm` has exactly one non-self call site — the halt-recovery card's Enter handler for
+  option `init_new` (`src/ui/use-app-logic.tsx:6595-6604`). **The operator's own keypress opened it.**
+  The two underlying defects are real and independent of each other; the plan must not claim the
+  system stacked the modals by itself.
+- **Real bug found in passing, still open.** That same transition calls `interruptActiveRun()`
+  (`use-app-logic.tsx:6600`) but **never cancels the pending council askcard**, leaving its responder
+  promise dangling — the same family as §0.1 item 3 (`createQuestionResponder`: a promise with no
+  reject and no timeout, with `holdWatchdogOpen()` suppressing both watchdogs meanwhile).
+
+#### Two lessons for the next investigator
+
+- **Exhaust cheap deterministic probes before spending a live run.** The most expensive root cause of
+  the phase — the sprint-planning wedge, two live runs, ~2 hours, ~$0.13 — was `resolveRoleAssignments`
+  being the only model selector in the repo that read key-presence **without** also consulting
+  `isProviderDisabled`. One direct function call would have shown it. A live `/ideal` run is the
+  *last* instrument to reach for, not the first.
+- **The four discriminators do not localise a mechanism** (§0). They tell you nothing is running.
+  Both mechanisms found this phase came from `interaction_logs` and `.muonroi-flow` artifacts.
+
+#### Attribution — what must NOT be recorded as progress
+
+**No line of code in this repository has been written by StepFun or by `/ideal`.** All Phase 0
+commits are Claude subagents fixing Phase 0 prerequisites — the approved exception stated at the top
+of Phase 0, because `/ideal` cannot repair the thing that prevents it running. Concretely:
+
+- Phase 0 improved the CLI's **drivability**; it is not evidence that the CLI can improve itself.
+- The scorecard movement in §1.1.1 belongs to Phase 0 subagents. If any later summary attributes it
+  to the loop, that summary is wrong.
+- **The experiment this document exists to run (Phase 2..N) has not started.** Not "in progress",
+  not "partially complete" — not started.
 
 ### Phase 1 — Build the referee
 
@@ -582,8 +785,8 @@ axes cannot be adjudicated cleanly.
 
 | Axis | Available to `/ideal`? | Why |
 |---|---|---|
-| A3 | ❌ | fully delivered by P0-3 + P0-4 |
-| A2 | ❌ | fully delivered by P0-2 |
+| A3 | ❌ | delivered by P0-3 + P0-4 — **except the P0-4 abort-propagation remainder** (§6.0), which is a ~5-line human fix in the same shape as the `/council` precedent, not a sprint |
+| A2 | ❌ | delivered by P0-2 for the failure paths — **except the successful-run terminal event** (§6.0), which is likewise Phase 0 remainder work, not a sprint |
 | A1, A4, A6 | ❌ as `/ideal` sprints | **referee-change sprints** (§2.2) — improving them means changing the measurement instrument, so they are human-reviewed |
 | A5 | — | a constraint on every sprint, never a target of its own |
 
@@ -641,6 +844,12 @@ The failure mode to avoid is none of those: sprints that run, produce commits, m
 axis, and generate a transcript that reads like progress. §2 exists to make that impossible to
 mistake for success.
 
+**A fourth way to get this wrong appeared before sprint 1 and is now guarded against: counting
+Phase 0 as the loop's output.** Phase 0 produced real, verified movement on five axes and eight
+commits — all of it human-directed subagent work (§6.0). A document that stops recording attribution
+would read, six weeks later, exactly like a successful self-improvement run. That is why §1.1.1 is
+two rows and why every one of them names who moved it.
+
 ---
 
 ## 9. Machinery that already exists — cite it, do not rebuild it
@@ -669,22 +878,29 @@ Also reusable:
 **Green light:** `bunx tsc --noEmit` passes cleanly on `develop` right now, so §5.1 starts from a
 real zero.
 
-**Latent bug found in passing, unrelated to this plan but worth a ticket:**
-`src/cli/reporter-cmd.ts:37-39` — `resolveFlowDir()` hardcodes
-`path.join(process.cwd(), ".planning")`, bypassing `planningRoot()` and the `.muonroi-flow` fold. It
-will misbehave in exactly the worktree/alternate-root setups §3 depends on.
+**Latent bugs found in passing, unrelated to this plan but worth a ticket:**
+
+1. `src/cli/reporter-cmd.ts:37-39` — `resolveFlowDir()` hardcodes
+   `path.join(process.cwd(), ".planning")`, bypassing `planningRoot()` and the `.muonroi-flow` fold.
+   It will misbehave in exactly the worktree/alternate-root setups §3 depends on.
+2. **(found by P0-9, 2026-09-05, still open)** `src/ui/use-app-logic.tsx:6595-6604` — answering the
+   halt-recovery card with `init_new` calls `interruptActiveRun()` but **never cancels a pending
+   council askcard**, leaving its responder promise dangling. Same family as §0.1 item 3, and it
+   holds `holdWatchdogOpen()` open, so both watchdogs stay suppressed for the rest of the process.
 
 ---
 
 ## 10. Preconditions this plan depends on — one table
 
-Every row is a verified defect that silently neutralises part of the plan. None may be assumed fixed.
+Every row is a verified defect that silently neutralises part of the plan. Rows marked **✅ fixed**
+were resolved and independently verified in Phase 0 (§6.0) — the defect statement is kept so the
+pre-Phase-0 row of §1.1.1 stays legible. **No unmarked row may be assumed fixed.**
 
 | # | Defect | Effect if left | Owner |
 |---|---|---|---|
 | 1 | `lint:semantic` / `lint:harness-skips` exit 0 unconditionally | gate §5.4 cannot fail | §5.4 (use `:strict`) |
-| 2 | `lint:harness-skips:strict` exits 1 today (1 unallowlisted hit) | gate fails before sprint 1 | P0-7 |
-| 3 | `describe.skipIf` invisible to the linter; 4 real E2E disabled in CI | "green harness" overstates coverage | §2.7 / P0-7 |
+| 2 | `lint:harness-skips:strict` exits 1 today (1 unallowlisted hit) | gate fails before sprint 1 | P0-7 — **✅ fixed** (exit 0, allowlist byte-identical) |
+| 3 | `describe.skipIf` invisible to the linter; 4 real E2E disabled in CI | "green harness" overstates coverage | §2.7 / P0-7 — **✅ partly fixed**: `it.skipIf` is now visible and the CI-disabled sites were reported; whether to keep the `describe.skipIf` exemption is still a policy decision |
 | 4 | Skip ratio denominator is spec **files**, inflated by the self-verify emitter | loop buys its own skip headroom | §2.7 |
 | 5 | `vitest.harness.config.ts` `retry: 2` on every spec | A5 cannot distinguish fixed from lucky | §5.3 |
 | 6 | Tier-3 self-verify has a bare `catch`, `HEAD~1` base, contradictory defaults | gate §5.7 fails open and is evadable | §5.7 |
@@ -692,11 +908,16 @@ Every row is a verified defect that silently neutralises part of the plan. None 
 | 8 | `.planning/` is 29 **tracked** files | branch-point state dirtied per sprint; merge conflicts | §3.1 |
 | 9 | `~/.muonroi-cli/` state + usage ledger shared across worktrees | cross-sprint interference; racy `reserve()` | §3.2 |
 | 10 | GSD mutation gate fails open on `depth: null` | plan-review requirement inert for sprints | §3.4 |
-| 11 | `buildCapabilitiesPayload()` carries no selector/role/event/id information | graduation test unpassable as written | P0-6 |
-| 12 | `tui.last_event` enum omits `resume-request` | that call rejected at the MCP boundary | P0-6 |
+| 11 | `buildCapabilitiesPayload()` carries no selector/role/event/id information | graduation test unpassable as written | P0-6 — **✅ fixed**: 21/21 tools derived from the registrar, 22 event kinds, 33 roles, selector + predicate grammar, frame-derived `semantics` |
+| 12 | `tui.last_event` enum omits `resume-request` | that call rejected at the MCP boundary | P0-6 — **✅ fixed** (22 kinds) |
 | 13 | `supports_effort: false` + no StepFun capability override | `reasoning_effort: "low"` is not settable | P0-8 |
 | 14 | StepFun 10 RPM / 5 concurrent vs parallel council fan-out | 429s mid-debate, read as wedges | §3.3 |
-| 15 | 🔴 **StepFun emits native `<tool_call>` markup as the final answer whenever the tool set is empty** — measured, 5/6 cases, incl. forced-finalize; `tool_choice` and prompting both disproven (§4.1) | a "successful" sprint turn can be 101 chars of markup; every transcript on this stack is untrustworthy until guarded | **P0-5b — blocks all downstream phases** |
+| 15 | 🔴 **StepFun emits native `<tool_call>` markup as the final answer whenever the tool set is empty** — measured, 5/6 cases, incl. forced-finalize; `tool_choice` and prompting both disproven (§4.1) | a "successful" sprint turn can be 101 chars of markup; every transcript on this stack is untrustworthy until guarded | **P0-5b — ✅ fixed**: provider-boundary guard, 5/5 false-positive matrix, negative control red |
+| 16 | `/ideal` does not complete 3/3 clean runs (2/3 as of 2026-09-05) | unattended operation is not established; a sprint can still stall silently | **P0-1 — open** |
+| 17 | `Escape` reaches the abort path but the abort does not reach a pending council | a stuck `/ideal` turn is still uncancellable from the keyboard | **P0-4 — open** |
+| 18 | a **successful** `/ideal` run emits no terminal event | success and hang are the same observation for a driver; A2 is met for failures only | **P0-2 — open** |
+| 19 | the picker/connect modal layer has not been swept for the two-focus-node hazard | a surface that publishes `focus` without suppressing the composer mirror makes `driver.query("focus")` throw `ambiguous` — worse than `null` | **P0-9 follow-up — open** |
+| 20 | halt-recovery `init_new` never cancels a pending council askcard | dangling responder promise; `holdWatchdogOpen()` suppresses both watchdogs for the rest of the process | §9, latent bug 2 — open |
 
 ---
 
