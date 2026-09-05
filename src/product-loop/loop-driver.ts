@@ -8,7 +8,8 @@ import {
 } from "../council/debate-checkpoint.js";
 import { resolveDebateSummary } from "../council/debate-summary.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
-import { phaseStart } from "../council/phase-events.js";
+import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
+import { extractJsonObject } from "../council/planner.js";
 import { runPreflight } from "../council/preflight.js";
 import { makeStanceRecall } from "../council/stance-recall.js";
 import type { ClarifiedSpec, CouncilLLM, CouncilParticipant, DebateState } from "../council/types.js";
@@ -75,6 +76,46 @@ function logLoopEvent(
     console.error(
       `[loop-driver] logLoopEvent failed for subtype "${subtype}": ${err instanceof Error ? err.message : String(err)}`,
     );
+  }
+}
+
+/**
+ * Parse the scoping-synthesis completion into a ProductSpec.
+ *
+ * Uses the SAME string/escape-aware scanner the council synthesizer already
+ * relies on (`extractJsonObject`, src/council/planner.ts) instead of a greedy
+ * `/\{[\s\S]*\}/` match. Two things the regex could not do:
+ *
+ *  - It cannot tell "the model ignored the format" from "the completion was CUT
+ *    OFF at the provider's output ceiling" — opposite failures needing opposite
+ *    retries (ask for LESS vs ask again).
+ *  - On a truncated object it still matches first-`{`..last-`}` and hands
+ *    JSON.parse a fragment, which throws.
+ *
+ * Measured on run `mtmrm9c667d4` (interaction_logs 2026-09-04T09:55:29.507Z):
+ * `step-3.5-flash` returned exactly 4096 output tokens — its ceiling — and the
+ * object was cut mid-string, so `JSON.parse` threw `Unterminated string` and
+ * the whole /ideal run ended there.
+ */
+function parseProductSpec(raw: string): { spec: ProductSpec | null; truncated: boolean; error: string | null } {
+  const { json, truncated } = extractJsonObject(raw);
+  if (!json) {
+    return {
+      spec: null,
+      truncated,
+      error: truncated
+        ? "JSON object was cut off before it closed (provider output ceiling)"
+        : "completion contained no JSON object",
+    };
+  }
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { spec: null, truncated, error: "parsed JSON was not an object" };
+    }
+    return { spec: parsed as ProductSpec, truncated: false, error: null };
+  } catch (err) {
+    return { spec: null, truncated, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -1046,19 +1087,79 @@ interface ProductSpec {
           });
           throw err;
         }
-        try {
-          const match = rawSpec.match(/\{[\s\S]*\}/);
-          productSpec = match ? JSON.parse(match[0]) : ({} as ProductSpec);
-          productSpec!.createdAt = new Date();
-        } catch (err) {
+        let parsedSpec = parseProductSpec(rawSpec);
+        if (!parsedSpec.spec) {
+          // Attempt 1 did not parse. Mirror the recovery the council
+          // synthesizer already proved out (src/council/planner.ts:96-155):
+          // announce it, then retry ONCE asking for a SMALLER object. Repeating
+          // the same oversized request cannot fix a completion that was cut off
+          // at the provider's output ceiling — it truncates identically.
           logLoopEvent(ctx, "council_error", {
             phase: "scoping",
             stage: "synthesis-parse",
-            error: err instanceof Error ? err.message : String(err),
+            attempt: 1,
+            truncated: parsedSpec.truncated,
+            error: parsedSpec.error ?? "unparseable",
+            rawSpecExcerpt: rawSpec.slice(0, 800),
+            severity: "warn",
+          });
+          yield {
+            type: "content",
+            content: `\n> Spec synthesis attempt 1 did not parse (${
+              parsedSpec.truncated ? "output cut off at the provider's ceiling" : "no parseable JSON object"
+            }). Retrying once with a compact prompt…\n`,
+          } as StreamChunk;
+          const retrySystem =
+            "You are a Product Owner synthesizing a technical specification.\n\n" +
+            "## Retry directive\n" +
+            "Your previous attempt did not parse. Emit ONLY the JSON object — no preamble, no code fence, " +
+            "no commentary after it — and keep it SMALL: every string at most 200 characters, `mvp` and " +
+            "`phase2` at most 3 entries each. Completing the JSON object matters more than covering every point.";
+          try {
+            const retryRaw = await ctx.llm.generate(leaderModelId, retrySystem, synthesisPrompt);
+            rawSpec = retryRaw;
+            parsedSpec = parseProductSpec(retryRaw);
+          } catch (err) {
+            // Retry itself failed (provider error/abort). Keep attempt 1's
+            // parse verdict and fall through to the announced bail below.
+            logLoopEvent(ctx, "council_error", {
+              phase: "scoping",
+              stage: "synthesis-retry-llm",
+              error: err instanceof Error ? err.message : String(err),
+              elapsedMs: Date.now() - scopingPhaseStartMs,
+            });
+          }
+        }
+
+        if (!parsedSpec.spec) {
+          const detail = `Spec synthesis produced no parseable ProductSpec after 2 attempts (${
+            parsedSpec.error ?? "unparseable"
+          }).`;
+          logLoopEvent(ctx, "council_error", {
+            phase: "scoping",
+            stage: "synthesis-parse",
+            attempt: 2,
+            truncated: parsedSpec.truncated,
+            error: parsedSpec.error ?? "unparseable",
             rawSpecExcerpt: rawSpec.slice(0, 800),
           });
-          return { runId: ctx.runId, stage: "error", success: false, reason: "failed_to_synthesize_spec" };
+          // Close `loop:scoping`. Without this the phase stays `state:"active"`
+          // for the rest of the process and the run's last observable signal is
+          // "synthesis in progress" — indistinguishable from a hang to anything
+          // driving the TUI. That is exactly what run mtmrm9c667d4 looked like:
+          // a council_error row in the DB and nothing at all on the wire.
+          yield phaseError({
+            phaseId: "loop:scoping",
+            kind: "synthesis",
+            label: "Scoping & Synthesis",
+            startedAt: scopingPhaseStartMs,
+            errorMessage: detail,
+          });
+          return { runId: ctx.runId, stage: "error", success: false, reason: "failed_to_synthesize_spec", detail };
         }
+
+        productSpec = parsedSpec.spec;
+        productSpec.createdAt = new Date();
 
         // Write ProductSpec to roadmap.md (human-readable surface).
         const roadmapMap = (await readArtifact(runDir, "roadmap.md")) ?? { preamble: "", sections: new Map() };
@@ -1140,6 +1241,16 @@ interface ProductSpec {
           }
           yield value as StreamChunk;
         }
+
+        // Symmetry with the bail above: `loop:scoping` must reach a terminal
+        // state on EVERY exit, approved or rejected, or the phase list keeps
+        // showing an active synthesis after the run has moved on.
+        yield phaseDone({
+          phaseId: "loop:scoping",
+          kind: "synthesis",
+          label: "Scoping & Synthesis",
+          startedAt: scopingPhaseStartMs,
+        });
 
         const scopingWarn = await recordPhaseEnd({
           flowDir: ctx.flowDir,
