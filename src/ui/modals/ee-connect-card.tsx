@@ -27,6 +27,7 @@ export function EeConnectCard({
   inputRef,
   error,
   onSubmitToken,
+  focused,
 }: {
   t: Theme;
   width: number;
@@ -37,6 +38,12 @@ export function EeConnectCard({
   inputRef: React.RefObject<TextareaRenderable | null>;
   error: string | null;
   onSubmitToken: () => void;
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   */
+  focused?: boolean;
 }) {
   const overlayBg = "#000000cc" as string;
   const panelWidth = Math.min(78, width - 6);
@@ -57,7 +64,15 @@ export function EeConnectCard({
   const selectedHint = actions[selectedIndex]?.hint ?? "";
 
   return (
-    <Semantic id="ee-connect-card" role="dialog" name="Connect the Experience Engine brain" isModal>
+    <Semantic
+      id="ee-connect-card"
+      role="dialog"
+      name="Connect the Experience Engine brain"
+      // Focus lands on the token field in input mode (below) and on the card
+      // itself otherwise, so the card always publishes exactly one owner.
+      focus={(focused && mode !== "input") || undefined}
+      isModal
+    >
       <box
         position="absolute"
         left={0}
@@ -106,7 +121,7 @@ export function EeConnectCard({
                   id="ee-connect-input"
                   role="textbox"
                   name="EE auth token"
-                  focus={mode === "input" || undefined}
+                  focus={(focused && mode === "input") || undefined}
                 >
                   <textarea
                     ref={inputRef}

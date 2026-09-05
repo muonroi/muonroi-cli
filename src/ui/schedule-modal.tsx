@@ -32,6 +32,7 @@ export function ScheduleBrowserModal({
   selectedIndex,
   searchQuery,
   rows,
+  focused,
 }: {
   t: Theme;
   width: number;
@@ -39,6 +40,12 @@ export function ScheduleBrowserModal({
   selectedIndex: number;
   searchQuery: string;
   rows: ScheduleBrowseRow[];
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   */
+  focused?: boolean;
 }) {
   const listRef = useRef<ScrollBoxRenderable>(null);
 
@@ -55,7 +62,7 @@ export function ScheduleBrowserModal({
   const overlayBg = "#000000cc" as string;
 
   return (
-    <Semantic id="schedule-modal" role="dialog" name="Schedules" isModal>
+    <Semantic id="schedule-modal" role="dialog" name="Schedules" focus={focused || undefined} isModal>
       <box
         position="absolute"
         left={0}

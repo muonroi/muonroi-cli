@@ -14,12 +14,19 @@ export function SessionPickerModal({
   focusIndex,
   width,
   height,
+  focused,
 }: {
   t: Theme;
   sessions: ResumeEntry[];
   focusIndex: number;
   width: number;
   height: number;
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   */
+  focused?: boolean;
 }) {
   const panelWidth = Math.min(80, width - 6);
   const rowCount = Math.max(sessions.length, 1);
@@ -31,7 +38,7 @@ export function SessionPickerModal({
   const overlayBg = "#000000cc" as string;
 
   return (
-    <Semantic id="session-picker" role="dialog" name="Resume session" isModal>
+    <Semantic id="session-picker" role="dialog" name="Resume session" focus={focused || undefined} isModal>
       <box
         position="absolute"
         left={0}

@@ -72,7 +72,14 @@ describe("MCP needs-key inline card E2E", () => {
   afterAll(() => {
     proc?.kill();
     cleanup?.();
-    if (home) rmSync(home, { recursive: true, force: true });
+    if (!home) return;
+    try {
+      rmSync(home, { recursive: true, force: true });
+    } catch (err) {
+      // Windows keeps the killed child's cwd handle open for a moment, so this
+      // EPERMs and failed the FILE even with every test green. Logged, not thrown.
+      console.error(`[harness-cleanup] temp home removal failed: ${(err as Error)?.message ?? err}`, { home });
+    }
   });
 
   it("shows the inline fix card for the enabled-but-keyless Tavily server", async () => {

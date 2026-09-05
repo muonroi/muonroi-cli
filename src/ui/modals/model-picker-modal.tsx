@@ -55,6 +55,7 @@ export function ModelPickerModal({
   apiKeyPrompt,
   oauthProviders,
   oauthLogin,
+  focused,
 }: {
   t: Theme;
   currentModel?: string;
@@ -75,6 +76,15 @@ export function ModelPickerModal({
   /** Providers that support OAuth subscription login (openai, xai). */
   oauthProviders?: ReadonlySet<ProviderId>;
   oauthLogin?: OAuthLoginState | null;
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   *
+   * Routed to whichever sub-modal actually takes keys: use-app-logic.tsx:7583
+   * checks `oauthLogin` first, then `apiKeyPrompt`, then the picker body.
+   */
+  focused?: boolean;
 }) {
   const disabledSet = new Set(disabledProviders);
   const keyedSet = providersWithKey ?? new Set<ProviderId>();
@@ -90,7 +100,14 @@ export function ModelPickerModal({
 
   // Sub-modal: API key prompt overlay (rendered on top of the picker).
   const subModal = apiKeyPrompt ? (
-    <Semantic id="provider-key-prompt" role="dialog" isModal name={`Set ${apiKeyPrompt.provider} key`}>
+    <Semantic
+      id="provider-key-prompt"
+      role="dialog"
+      isModal
+      name={`Set ${apiKeyPrompt.provider} key`}
+      // The `provider-key-input` field below carries the flag for this
+      // sub-modal — see the comment there.
+    >
       <box
         position="absolute"
         left={0}
@@ -122,7 +139,13 @@ export function ModelPickerModal({
             id="provider-key-input"
             role="textbox"
             name={`${apiKeyPrompt.provider} API key`}
-            focus
+            // Was a hard-coded `focus` (always true). That was accidentally
+            // correct while no other node in the tree published the flag, and
+            // became a two-focus-node bug the moment the dialogs started
+            // mirroring ownership — `driver.query("focus")` THROWS on >1 match
+            // (driver.ts:449). The field is where typing goes, so it keeps the
+            // flag and the `provider-key-prompt` root does not publish one.
+            focus={(focused && !oauthLogin) || undefined}
             value={apiKeyPrompt.value}
           >
             <box
@@ -162,7 +185,13 @@ export function ModelPickerModal({
 
   // Sub-modal: OAuth subscription login (browser-based) for openai / xai.
   const oauthModal = oauthLogin ? (
-    <Semantic id="provider-oauth-login" role="dialog" isModal name={`Sign in to ${oauthLogin.provider}`}>
+    <Semantic
+      id="provider-oauth-login"
+      role="dialog"
+      isModal
+      name={`Sign in to ${oauthLogin.provider}`}
+      focus={focused || undefined}
+    >
       <box
         position="absolute"
         left={0}
@@ -206,7 +235,13 @@ export function ModelPickerModal({
 
   return (
     <>
-      <Semantic id="model-picker" role="dialog" isModal name="Providers">
+      <Semantic
+        id="model-picker"
+        role="dialog"
+        isModal
+        name="Providers"
+        focus={(focused && !oauthLogin && !apiKeyPrompt) || undefined}
+      >
         <box
           position="absolute"
           left={0}

@@ -5932,16 +5932,67 @@ export function useAppLogic(props: AppLogicProps) {
   // See src/ui/modal-focus.ts for the measurement this fixes.
   const modalOpenOrderRef = useRef(createModalOpenOrder());
   const modalKeyboardOwner = useMemo<ModalSurfaceId | null>(() => {
+    // Flags mirror the RENDER conditions in app.tsx (1787-2291) exactly: only a
+    // card that is actually rendered can carry the published `focus` flag, so a
+    // surface hidden by a sibling condition (`showMcpModal && !showMcpEditor`)
+    // must not be counted open here.
     const open = collectOpenModalSurfaces({
+      planQuestions: !!activePlan?.questions?.length,
+      paymentApproval: pendingPaymentApproval !== null,
       haltCard: activeHaltCard !== null,
       initNewForm: initNewForm !== null,
       pointToExistingForm: pointToExistingForm !== null,
       askcard: pendingCouncilQuestion !== null,
       preflight: pendingCouncilPreflight !== null,
+      apiKeyModal: showApiKeyModal,
+      // `setShowUpdateModal(true)` only ever runs after `setUpdateInfo(result)`
+      // in the same `.then` (:3702, :3709, :3713), so `showUpdateModal` implies
+      // the `updateInfo` half of app.tsx's render condition.
+      updateModal: showUpdateModal,
+      mcpNeedsKeyCard: needsKeyQueue.length > 0,
+      eeConnectCard: eeConnectVisible && needsKeyQueue.length === 0,
+      lspSetupCard: lspSetupVisible && needsKeyQueue.length === 0 && !eeConnectVisible,
+      mcpModal: showMcpModal && !showMcpEditor,
+      mcpEditor: showMcpEditor,
+      scheduleModal: showScheduleModal,
+      subagentsModal: showAgentsModal && !showAgentsEditor,
+      subagentEditor: showAgentsEditor,
+      modelPicker: showModelPicker,
+      sessionPicker: showSessionPicker,
+      walletPicker: showWalletPicker,
+      sandboxPicker: showSandboxPicker,
+      connectModal: showConnectModal,
+      telegramTokenModal: showTelegramTokenModal,
+      telegramPairModal: showTelegramPairModal,
     });
     reconcileModalOpenOrder(modalOpenOrderRef.current, open);
     return resolveModalKeyboardOwner(modalOpenOrderRef.current, open);
-  }, [activeHaltCard, initNewForm, pointToExistingForm, pendingCouncilQuestion, pendingCouncilPreflight]);
+  }, [
+    activeHaltCard,
+    initNewForm,
+    pointToExistingForm,
+    pendingCouncilQuestion,
+    pendingCouncilPreflight,
+    activePlan,
+    pendingPaymentApproval,
+    showApiKeyModal,
+    showUpdateModal,
+    needsKeyQueue,
+    eeConnectVisible,
+    lspSetupVisible,
+    showMcpModal,
+    showMcpEditor,
+    showScheduleModal,
+    showAgentsModal,
+    showAgentsEditor,
+    showModelPicker,
+    showSessionPicker,
+    showWalletPicker,
+    showSandboxPicker,
+    showConnectModal,
+    showTelegramTokenModal,
+    showTelegramPairModal,
+  ]);
 
   const showPlanPanel = !!activePlan?.questions?.length;
   const planQuestions = activePlan?.questions ?? [];
@@ -6229,12 +6280,38 @@ export function useAppLogic(props: AppLogicProps) {
       // for at most one render (ref nulled, state not yet committed); routing
       // always follows THIS resolution, and the published `focus` catches up on
       // the commit that removes the card anyway.
+      // Flags mirror, expression for expression, the branch conditions below:
+      // a ref where the branch reads a ref, state where it reads state. Without
+      // that parity the guard and the branch it guards could disagree.
       const openModalSurfacesNow = collectOpenModalSurfaces({
+        // `showPlanPanel` is exactly what the branch at the bottom tests; using
+        // the same identifier (not a re-derivation from `activePlan`) keeps the
+        // guard and the branch condition literally the same expression.
+        planQuestions: showPlanPanel,
+        paymentApproval: pendingPaymentApproval !== null,
         haltCard: activeHaltCard !== null,
         initNewForm: initNewForm !== null,
         pointToExistingForm: pointToExistingForm !== null,
         askcard: pendingCouncilQuestionRef.current !== null,
         preflight: pendingCouncilPreflight !== null,
+        apiKeyModal: showApiKeyModalRef.current,
+        updateModal: showUpdateModalRef.current,
+        mcpNeedsKeyCard: needsKeyQueueRef.current.length > 0,
+        eeConnectCard: eeConnectVisibleRef.current && needsKeyQueueRef.current.length === 0,
+        lspSetupCard:
+          lspSetupVisibleRef.current && needsKeyQueueRef.current.length === 0 && !eeConnectVisibleRef.current,
+        mcpModal: showMcpModalRef.current && !showMcpEditorRef.current,
+        mcpEditor: showMcpEditorRef.current,
+        scheduleModal: showScheduleModalRef.current,
+        subagentsModal: showAgentsModalRef.current && !showAgentsEditorRef.current,
+        subagentEditor: showAgentsEditorRef.current,
+        modelPicker: showModelPicker,
+        sessionPicker: showSessionPicker,
+        walletPicker: showWalletPicker,
+        sandboxPicker: showSandboxPicker,
+        connectModal: showConnectModalRef.current,
+        telegramTokenModal: showTelegramTokenModalRef.current,
+        telegramPairModal: showTelegramPairModalRef.current,
       });
       reconcileModalOpenOrder(modalOpenOrderRef.current, openModalSurfacesNow);
       const modalOwnerNow = resolveModalKeyboardOwner(modalOpenOrderRef.current, openModalSurfacesNow);
@@ -6898,7 +6975,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
       }
-      if (showPlanPanel) {
+      if (showPlanPanel && modalOwnsKeyboard(modalOwnerNow, "plan-questions")) {
         const q = planQuestions[pqs.tab];
 
         // Escape always dismisses
@@ -7023,7 +7100,7 @@ export function useAppLogic(props: AppLogicProps) {
 
         return;
       }
-      if (showUpdateModalRef.current) {
+      if (showUpdateModalRef.current && modalOwnsKeyboard(modalOwnerNow, "update-modal")) {
         if (isEscapeKey(key)) {
           setShowUpdateModal(false);
           return;
@@ -7034,7 +7111,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showMcpEditorRef.current) {
+      if (showMcpEditorRef.current && modalOwnsKeyboard(modalOwnerNow, "mcp-editor")) {
         if (isEscapeKey(key)) {
           setShowMcpEditor(false);
           setMcpEditorError(null);
@@ -7059,7 +7136,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
       }
-      if (showAgentsEditorRef.current) {
+      if (showAgentsEditorRef.current && modalOwnsKeyboard(modalOwnerNow, "subagent-editor")) {
         if (isEscapeKey(key)) {
           setShowAgentsEditor(false);
           setAgentsEditorError(null);
@@ -7099,7 +7176,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
       }
-      if (showMcpModalRef.current) {
+      if (showMcpModalRef.current && modalOwnsKeyboard(modalOwnerNow, "mcp-modal")) {
         const row = mcpRows[mcpModalIndex];
         if (isEscapeKey(key)) {
           setShowMcpEditor(false);
@@ -7151,7 +7228,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showScheduleModalRef.current) {
+      if (showScheduleModalRef.current && modalOwnsKeyboard(modalOwnerNow, "schedule-modal")) {
         const row = scheduleRows[scheduleModalIndex];
         if (isEscapeKey(key)) {
           setShowScheduleModal(false);
@@ -7188,7 +7265,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showAgentsModalRef.current && !showAgentsEditorRef.current) {
+      if (showAgentsModalRef.current && !showAgentsEditorRef.current && modalOwnsKeyboard(modalOwnerNow, "subagents-modal")) {
         const row = agentRows[agentsModalIndex];
         if (isEscapeKey(key)) {
           setShowAgentsModal(false);
@@ -7228,7 +7305,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (needsKeyQueueRef.current.length > 0) {
+      if (needsKeyQueueRef.current.length > 0 && modalOwnsKeyboard(modalOwnerNow, "mcp-needs-key-card")) {
         const server = needsKeyQueueRef.current[0];
         const mode = needsKeyModeRef.current;
         if (mode === "validating") return; // swallow input while the key probe runs
@@ -7262,7 +7339,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (eeConnectVisibleRef.current) {
+      if (eeConnectVisibleRef.current && modalOwnsKeyboard(modalOwnerNow, "ee-connect-card")) {
         const mode = eeConnectModeRef.current;
         if (mode === "validating") return; // swallow input while the probe runs
         if (mode === "input") {
@@ -7301,7 +7378,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (lspSetupVisibleRef.current) {
+      if (lspSetupVisibleRef.current && modalOwnsKeyboard(modalOwnerNow, "lsp-setup-card")) {
         // Multi-select card: this branch must consume EVERY key (including
         // Space) so nothing falls through to the composer behind the modal.
         const mode = lspSetupModeRef.current;
@@ -7353,7 +7430,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showTelegramTokenModalRef.current) {
+      if (showTelegramTokenModalRef.current && modalOwnsKeyboard(modalOwnerNow, "telegram-token-modal")) {
         if (isEscapeKey(key)) {
           setShowTelegramTokenModal(false);
           setTelegramTokenError(null);
@@ -7364,7 +7441,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showTelegramPairModalRef.current) {
+      if (showTelegramPairModalRef.current && modalOwnsKeyboard(modalOwnerNow, "telegram-pair-modal")) {
         if (isEscapeKey(key)) {
           setShowTelegramPairModal(false);
           setTelegramPairError(null);
@@ -7375,7 +7452,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showConnectModalRef.current) {
+      if (showConnectModalRef.current && modalOwnsKeyboard(modalOwnerNow, "connect-modal")) {
         if (isEscapeKey(key)) {
           setShowConnectModal(false);
           return;
@@ -7395,7 +7472,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showApiKeyModalRef.current) {
+      if (showApiKeyModalRef.current && modalOwnsKeyboard(modalOwnerNow, "api-key-modal")) {
         if (isEscapeKey(key)) {
           closeApiKeyModal();
           return;
@@ -7533,7 +7610,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showSessionPicker) {
+      if (showSessionPicker && modalOwnsKeyboard(modalOwnerNow, "session-picker")) {
         if (isEscapeKey(key)) {
           setShowSessionPicker(false);
           return;
@@ -7577,7 +7654,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showModelPicker) {
+      if (showModelPicker && modalOwnsKeyboard(modalOwnerNow, "model-picker")) {
         // Sub-modal: OAuth login in progress (browser-based). Only Esc (cancel)
         // is actionable — the flow completes via the browser/loopback callback.
         if (oauthLogin) {
@@ -7664,7 +7741,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (pendingPaymentApproval) {
+      if (pendingPaymentApproval && modalOwnsKeyboard(modalOwnerNow, "payment-approval")) {
         if (isEscapeKey(key)) {
           setPendingPaymentApproval(null);
           return;
@@ -7740,7 +7817,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showWalletPicker) {
+      if (showWalletPicker && modalOwnsKeyboard(modalOwnerNow, "wallet-picker")) {
         if (isEscapeKey(key)) {
           setShowWalletPicker(false);
           return;
@@ -7783,7 +7860,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showSandboxPicker) {
+      if (showSandboxPicker && modalOwnsKeyboard(modalOwnerNow, "sandbox-picker")) {
         const visibleRows = getSandboxVisibleRows(sandboxMode);
 
         if (sandboxSettingsEditing) {

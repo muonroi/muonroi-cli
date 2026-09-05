@@ -16,12 +16,19 @@ export function ConnectModal({
   height,
   selectedIndex,
   channels,
+  focused,
 }: {
   t: Theme;
   width: number;
   height: number;
   selectedIndex: number;
   channels: { id: string; label: string; description: string }[];
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   */
+  focused?: boolean;
 }) {
   const listRef = useRef<ScrollBoxRenderable>(null);
   useEffect(() => {
@@ -33,7 +40,7 @@ export function ConnectModal({
   const top = bottomAlignedModalTop(height, panelHeight);
   const overlayBg = "#000000cc" as string;
   return (
-    <Dialog id="connect-modal" name="Connect">
+    <Dialog id="connect-modal" name="Connect" focused={focused}>
       <box
         position="absolute"
         left={0}
@@ -100,6 +107,7 @@ export function TelegramTokenModal({
   inputRef,
   error,
   onSubmit,
+  focused,
 }: {
   t: Theme;
   width: number;
@@ -107,6 +115,12 @@ export function TelegramTokenModal({
   inputRef: React.RefObject<TextareaRenderable | null>;
   error: string | null;
   onSubmit: () => void;
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   */
+  focused?: boolean;
 }) {
   const overlayBg = "#000000cc" as string;
   const panelWidth = Math.min(68, width - 6);
@@ -114,7 +128,7 @@ export function TelegramTokenModal({
   const top = bottomAlignedModalTop(height, panelHeight);
 
   return (
-    <Dialog id="telegram-token-modal" name="Telegram bot token">
+    <Dialog id="telegram-token-modal" name="Telegram bot token" focused={focused}>
       <box
         position="absolute"
         left={0}
@@ -187,6 +201,7 @@ export function TelegramPairModal({
   inputRef,
   error,
   onSubmit,
+  focused,
 }: {
   t: Theme;
   width: number;
@@ -194,6 +209,12 @@ export function TelegramPairModal({
   inputRef: React.RefObject<TextareaRenderable | null>;
   error: string | null;
   onSubmit: () => void;
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   */
+  focused?: boolean;
 }) {
   const overlayBg = "#000000cc" as string;
   const panelWidth = Math.min(68, width - 6);
@@ -201,7 +222,7 @@ export function TelegramPairModal({
   const top = bottomAlignedModalTop(height, panelHeight);
 
   return (
-    <Dialog id="telegram-pair-modal" name="Pairing code">
+    <Dialog id="telegram-pair-modal" name="Pairing code" focused={focused}>
       <box
         position="absolute"
         left={0}
