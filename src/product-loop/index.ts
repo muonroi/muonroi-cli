@@ -26,6 +26,7 @@ import { composeRunTranscript, extractRunToEE } from "./cross-run-memory.js";
 import { buildContinueFeedback, type ContinueFeedback } from "./feedback-routing.js";
 import { type DriverContext, type DriverResult, runLoopDriver } from "./loop-driver.js";
 import { resolveRoles } from "./role-registry.js";
+import { deriveRunVerdict, runIsTerminal } from "./run-verdict.js";
 import { polishDelivery } from "./ship-polish.js";
 import { applySprintAssignments, planSprints } from "./sprint-planner.js";
 import { runSprint } from "./sprint-runner.js";
@@ -1464,10 +1465,20 @@ async function* drainSprints(args: {
 }
 
 function chatEnvConfig(): { client: import("../chat/types.js").ChatClient } | null {
-  // Lazy load to avoid circular imports
-  const { readChatProvider } = require("../chat/factory.js") as typeof import("../chat/factory.js");
-  const client = readChatProvider();
-  return client ? { client } : null;
+  // Lazy load to avoid circular imports. The CJS `require` is unavailable in
+  // some ESM hosts, and a resolution failure here used to propagate out of
+  // runPhasesPath and abort the whole run — chat broadcasting is optional, so a
+  // missing chat provider must degrade to "no chat", never kill the loop.
+  try {
+    const { readChatProvider } = require("../chat/factory.js") as typeof import("../chat/factory.js");
+    const client = readChatProvider();
+    return client ? { client } : null;
+  } catch (err) {
+    console.error(
+      `[product-loop] chatEnvConfig: chat provider unavailable, continuing without chat: ${(err as Error)?.message}`,
+    );
+    return null;
+  }
 }
 
 /**
@@ -1737,23 +1748,45 @@ async function* runPhasesPath(args: {
     yield chunk;
   }
 
-  if (!phaseOutcome.pass) {
-    return {
-      runId: ctx.runId,
-      stage: "halted",
-      success: false,
-      reason: phaseOutcome.reason ?? "phase-orchestrator-halt",
-    };
-  }
+  // The run-level verdict is DERIVED from the sprint outcomes this run actually
+  // recorded — never asserted. It was previously a hardcoded
+  // `{pass:true, score:1, reason:"phases_complete"}` written whenever the phase
+  // orchestrator returned, so a run whose every sprint failed its engineering
+  // floor still marked itself passed AND stamped `doneAt`, which made it
+  // permanently unresumable (findLatestIncompleteRun skips any manifest with
+  // doneAt set).
+  const sprintOutcomes = await readSprintOutcomes(ctx.flowDir, ctx.runId).catch((e) => {
+    console.error(
+      `[product-loop] run verdict: readSprintOutcomes failed for ${ctx.runId}: ${(e as Error)?.message}` +
+        " — treating as no outcomes, which cannot pass",
+    );
+    return [];
+  });
+  const runVerdict = deriveRunVerdict({
+    outcomes: sprintOutcomes,
+    phasesPassed: phaseOutcome.pass,
+    phaseReason: phaseOutcome.reason,
+  });
 
-  // All phases done — write final manifest.
+  // Persist the derived verdict on every path, pass or fail, so `/ideal status`
+  // reports the truth. `doneAt` is stamped ONLY for a terminal (passing) run;
+  // a failed run stays resumable.
   const finalManifest = await readManifest(ctx.flowDir, ctx.runId);
   if (finalManifest) {
     await writeManifest(ctx.flowDir, ctx.runId, {
       ...finalManifest,
-      doneAt: new Date(),
-      verdict: { pass: true, score: 1, failedCondition: undefined as any, reason: "phases_complete" },
+      ...(runIsTerminal(runVerdict) ? { doneAt: new Date() } : {}),
+      verdict: runVerdict,
     });
+  }
+
+  if (!runVerdict.pass) {
+    return {
+      runId: ctx.runId,
+      stage: "halted",
+      success: false,
+      reason: runVerdict.reason ?? phaseOutcome.reason ?? "phase-orchestrator-halt",
+    };
   }
   // P1.3: extract run artifacts to EE for cross-run memory. Non-fatal —
   // EE client absorbs failures into the offline queue.
@@ -1778,7 +1811,7 @@ async function* runPhasesPath(args: {
     runId: ctx.runId,
     stage: "approved",
     success: true,
-    reason: "phases_complete",
+    reason: runVerdict.reason ?? "phases_complete",
     shipped: true,
   };
 }
