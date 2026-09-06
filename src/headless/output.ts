@@ -284,9 +284,12 @@ function formatToolCallLabel(tc: ToolCall): string {
 export function createHeadlessTextEmitter(): {
   consumeChunk(chunk: StreamChunk): HeadlessWrites;
   flush(): HeadlessWrites;
+  /** True once a `structured_response` chunk has been consumed (terminal answer reached). */
+  hasAnswer: boolean;
 } {
   let pendingContent = "";
   let structuredEmitted = false;
+  let _hasAnswer = false;
 
   function consumeChunk(chunk: StreamChunk): HeadlessWrites {
     switch (chunk.type) {
@@ -296,7 +299,7 @@ export function createHeadlessTextEmitter(): {
       case "structured_response":
         if (!chunk.structuredResponse) return {};
         // Terminal answer is authoritative — drop any buffered preamble.
-        pendingContent = "";
+        _hasAnswer = true;
         structuredEmitted = true;
         return { stdout: `${formatStructuredResponseText(chunk.structuredResponse)}\n` };
       case "done":
@@ -312,7 +315,12 @@ export function createHeadlessTextEmitter(): {
     return { stdout: `${pendingContent}\n` };
   }
 
-  return { consumeChunk, flush };
+  const result = { consumeChunk, flush };
+  Object.defineProperty(result, "hasAnswer", {
+    get: () => _hasAnswer,
+    enumerable: true,
+  });
+  return result;
 }
 
 function jsonLine(event: HeadlessJsonEvent): string {
@@ -330,10 +338,13 @@ export function createHeadlessJsonlEmitter(sessionId?: string): {
   consumeChunk(chunk: StreamChunk): HeadlessWrites;
   /** Call after the `processMessage` iterator completes to flush any trailing observer output. */
   flush(): HeadlessWrites;
+  /** True once a `structured_response` chunk has been consumed (terminal answer reached). */
+  hasAnswer: boolean;
 } {
   let pending = "";
   let currentStep = 0;
   let textBuffer = "";
+  let _hasAnswer = false;
   /** Tool call id → timing from {@link ProcessMessageObserver.onToolStart} / {@link ProcessMessageObserver.onToolFinish}. */
   const toolTiming = new Map<string, { startedAt?: number; finishedAt?: number }>();
 
@@ -456,6 +467,7 @@ export function createHeadlessJsonlEmitter(sessionId?: string): {
 
       case "structured_response": {
         if (chunk.structuredResponse) {
+          _hasAnswer = true;
           // Flush any buffered preamble text first so ordering is preserved,
           // then emit the typed terminal answer (previously dropped entirely).
           if (textBuffer.length > 0) {
@@ -503,5 +515,10 @@ export function createHeadlessJsonlEmitter(sessionId?: string): {
     return stdout ? { stdout } : {};
   }
 
-  return { observer, consumeChunk, flush };
+  const jsonResult = { observer, consumeChunk, flush };
+  Object.defineProperty(jsonResult, "hasAnswer", {
+    get: () => _hasAnswer,
+    enumerable: true,
+  });
+  return jsonResult;
 }

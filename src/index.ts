@@ -687,29 +687,36 @@ async function runHeadless(
     const { enhancedMessage } = processAtMentions(prompt, process.cwd());
 
     if (format === "json") {
-      const { observer, consumeChunk, flush } = createHeadlessJsonlEmitter(agent.getSessionId() || undefined);
+      const jsonEmitter = createHeadlessJsonlEmitter(agent.getSessionId() || undefined);
+      const { observer, consumeChunk, flush } = jsonEmitter;
+      let hasAnswer = false;
       for await (const chunk of agent.processMessage(enhancedMessage, observer)) {
         maybeAutoAnswer(chunk);
         const writes = consumeChunk(chunk);
+        hasAnswer = jsonEmitter.hasAnswer;
         if (writes.stdout) writeSafe(process.stdout, writes.stdout);
         if (writes.stderr) writeSafe(process.stderr, writes.stderr ?? "");
       }
       const tail = flush();
       if (tail.stdout) writeSafe(process.stdout, tail.stdout);
       if (tail.stderr) writeSafe(process.stderr, tail.stderr ?? "");
+      process.exitCode = hasAnswer ? 0 : 1;
       return;
     }
 
     const textEmitter = createHeadlessTextEmitter();
+    let hasAnswer = false;
     for await (const chunk of agent.processMessage(enhancedMessage)) {
       maybeAutoAnswer(chunk);
       const writes = textEmitter.consumeChunk(chunk);
+      hasAnswer = textEmitter.hasAnswer;
       if (writes.stdout) writeSafe(process.stdout, writes.stdout);
       if (writes.stderr) writeSafe(process.stderr, writes.stderr);
     }
     const textTail = textEmitter.flush();
     if (textTail.stdout) writeSafe(process.stdout, textTail.stdout);
     if (textTail.stderr) writeSafe(process.stderr, textTail.stderr ?? "");
+    process.exitCode = hasAnswer ? 0 : 1;
   } finally {
     await agent.cleanup();
   }
