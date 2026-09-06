@@ -315,11 +315,13 @@ export function createHeadlessTextEmitter(): {
     return { stdout: `${pendingContent}\n` };
   }
 
-  const result = { consumeChunk, flush };
-  Object.defineProperty(result, "hasAnswer", {
-    get: () => _hasAnswer,
-    enumerable: true,
-  });
+  const result: ReturnType<typeof createHeadlessTextEmitter> = {
+    consumeChunk,
+    flush,
+    get hasAnswer() {
+      return _hasAnswer;
+    },
+  };
   return result;
 }
 
@@ -515,10 +517,13 @@ export function createHeadlessJsonlEmitter(sessionId?: string): {
     return stdout ? { stdout } : {};
   }
 
-  const jsonResult = { observer, consumeChunk, flush };
-  Object.defineProperty(jsonResult, "hasAnswer", {
-    get: () => _hasAnswer,
-    enumerable: true,
-  });
+  const jsonResult: ReturnType<typeof createHeadlessJsonlEmitter> = {
+    observer,
+    consumeChunk,
+    flush,
+    get hasAnswer() {
+      return _hasAnswer;
+    },
+  };
   return jsonResult;
 }
