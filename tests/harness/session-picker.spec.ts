@@ -33,8 +33,18 @@ describe("resume picker collapses conversation trees", () => {
     closeDatabase();
 
     harness = await spawnHarness({ cwd: home, env: { HOME: home, USERPROFILE: home } });
+    // Gate on the readiness signal, NOT on idle. `wait_for({idle:true})` is
+    // captured-start based and resolves on an empty pre-mount frame — measured
+    // here at ~90 ms, roughly 330 ms BEFORE the React input bridge registers.
+    // That is why this spec failed 3/3 at retry:0: the leading "/" of "/resume"
+    // was sent into the window and discarded, so the slash menu never opened and
+    // Enter had nothing to select. A retry only "fixed" it because beforeAll
+    // spawns once, so the second attempt reused the already-warm process.
+    // `input-ready` is one-shot and replay-safe (the driver scans its buffered
+    // event ring), so this resolves whether it arrives before or after the call.
+    await harness.driver.wait_for({ event: "input-ready", timeoutMs: 30_000 });
     await harness.driver.wait_for({ idle: true, timeoutMs: 20_000 });
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => {
     harness?.proc?.kill();

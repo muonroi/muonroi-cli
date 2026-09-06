@@ -81,7 +81,12 @@ describe("harness-driver capabilities", () => {
     // is ADDED; never lower it to make a removal pass (plan §2.5).
     // 23 → 24 when model-fallback was added (council provider switch observability).
     expect(eventKinds).toContain("model-fallback");
-    expect(eventKinds.length).toBe(24);
+    // 24 → 25 when input-ready was added: the one-shot signal that the React
+    // input bridge has registered, i.e. that a type/press can now reach the UI.
+    // Pinned by name — a driver that cannot name it is back to gating on
+    // `idle`, which resolves on an empty pre-mount frame.
+    expect(eventKinds).toContain("input-ready");
+    expect(eventKinds.length).toBe(25);
   });
 
   it("advertises the role vocabulary and the custom-role prefix", () => {

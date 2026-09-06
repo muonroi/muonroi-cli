@@ -48,6 +48,11 @@ export const LIFECYCLE_PRESET: ReadonlySet<EventKind> = new Set<EventKind>([
   // harness (stop → start --session). Dropping it would silently swallow the
   // only signal that a relaunch was suppressed.
   "resume-request",
+  // The readiness signal. It fires ONCE, very early, and is the only structured
+  // answer to "can I type at this TUI yet?" — dropping it from the default
+  // preset would leave every driver on the default env back to gating on
+  // `idle`, which resolves on an empty pre-mount frame.
+  "input-ready",
   "usage",
   // Ephemeral kinds carry a visualText snapshot for wake-at-milestone monitors
   // (event-tee.ts EPHEMERAL_KINDS). The default preset must not drop them, or a

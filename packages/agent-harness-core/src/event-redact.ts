@@ -176,6 +176,15 @@ const ALLOWED_FIELDS: Record<EventKind, Record<string, FieldSpec>> = {
     sessionId: "pass",
     ts: "pass",
   },
+  // Two counters and a timestamp — no user text, no prompt, no model output.
+  // `dropped` is the whole point of the event carrying a payload at all: a
+  // bare {t, kind} would announce "input is ready" while hiding that commands
+  // were lost getting there.
+  "input-ready": {
+    flushed: "pass",
+    dropped: "pass",
+    ts: "pass",
+  },
   toast: {
     level: "pass",
     text: 500, // cap to 500 chars, then scrub

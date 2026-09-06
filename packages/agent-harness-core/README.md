@@ -53,6 +53,7 @@ serialized as JSONL on the sidechannel (fd 3 / named pipe) and ingested by
 
 | kind | Payload fields | Volume | Default emitted |
 |---|---|---|---|
+| `input-ready` | `flushed`, `dropped`, `ts` — **the TUI can now receive input**; fires once, when the React input bridge registers. The transport accepts commands ~120 ms after process start but the bridge mounts 445–745 ms later; commands sent in between are buffered (cap 256) and replayed, `flushed` counts them and `dropped` counts any lost to overflow. Gate on this, not on `idle` — `idle` resolves on an empty pre-mount frame | low | yes |
 | `route-decision` | `path` ("hot-path"\|"council"), `complexity`, `forceCouncil`, `runId` | low | yes |
 | `council-step` | `phaseId`, `phaseKind`, `state`, `label`, `elapsedMs?` | low | yes |
 | `council-speaker` | `role`, `status` ("start"\|"done"), `round?`, `correlationId` | low | yes |

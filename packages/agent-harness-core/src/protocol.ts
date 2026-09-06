@@ -469,6 +469,30 @@ export type LiveEvent =
       sessionId: string;
       ts: number;
     }
+  // Emitted exactly once per process, at the moment the React input bridge
+  // registers its command handler — i.e. the first instant a `type`/`press`
+  // can actually reach the UI.
+  //
+  // Before this existed there was no way to ask "is this TUI ready for input?".
+  // The transport accepts commands ~120 ms after process start, but nothing
+  // consumed them until the bridge mounted 445-745 ms later (measured), and
+  // everything sent inside that window was discarded by an empty handler array
+  // with no error and no event. Those commands are now buffered across the
+  // window (`agent-mode.ts`), and this event is how a driver LEARNS the window
+  // closed — and, via `dropped`, whether anything was lost after all.
+  //
+  // Gate on `wait_for({event:"input-ready"})`, not `wait_for({idle:true})`: the
+  // event condition is replay-safe (the driver scans its buffered ring), while
+  // `idle` is captured-start based and resolves on an empty pre-mount frame.
+  | {
+      t: "event";
+      kind: "input-ready";
+      /** Pre-mount commands replayed into the bridge at registration. */
+      flushed: number;
+      /** Commands discarded because the pre-mount buffer overflowed (normally 0). */
+      dropped: number;
+      ts: number;
+    }
   | { t: "idle" };
 
 /** The `kind` discriminant of every non-sentinel {@link LiveEvent} member. */
@@ -512,6 +536,7 @@ export const LIVE_EVENT_KINDS = [
   "grounding-flag",
   "steer-inject",
   "resume-request",
+  "input-ready",
 ] as const;
 
 /** Fails to compile unless `T` is `never`. */

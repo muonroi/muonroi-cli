@@ -43,6 +43,10 @@ export const EPHEMERAL_KINDS: ReadonlySet<string> = new Set<string>([
   "ee-timeout",
   "ee-error",
   "grounding-flag",
+  // Deliberately NOT here: "input-ready". It is one-shot like the kinds above,
+  // but a visual snapshot of it is worthless — it fires while the screen is
+  // still the boot splash — and its own payload (flushed/dropped) is complete
+  // without one. Adding it would cost a render per spawn for a blank frame.
 ]);
 
 /** One teed JSONL record. */
