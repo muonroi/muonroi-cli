@@ -662,7 +662,10 @@ async function runHeadless(
     try {
       stream.write(data);
     } catch (e: unknown) {
-      if ((e as NodeJS.ErrnoException).code === "EPIPE") process.exit(0);
+      if ((e as NodeJS.ErrnoException).code === "EPIPE") {
+        // Consumer closed the pipe — swallow the error so we don't crash.
+        return;
+      }
       throw e;
     }
   }
@@ -687,8 +690,9 @@ async function runHeadless(
     const { enhancedMessage } = processAtMentions(prompt, process.cwd());
 
     if (format === "json") {
-      const { observer, consumeChunk, flush } = createHeadlessJsonlEmitter(agent.getSessionId() || undefined);
-      for await (const chunk of agent.processMessage(enhancedMessage, observer)) {
+      const emitter = createHeadlessJsonlEmitter(agent.getSessionId() || undefined);
+      const { consumeChunk, flush } = emitter;
+      for await (const chunk of agent.processMessage(enhancedMessage, emitter.observer)) {
         maybeAutoAnswer(chunk);
         const writes = consumeChunk(chunk);
         if (writes.stdout) writeSafe(process.stdout, writes.stdout);
@@ -697,6 +701,7 @@ async function runHeadless(
       const tail = flush();
       if (tail.stdout) writeSafe(process.stdout, tail.stdout);
       if (tail.stderr) writeSafe(process.stderr, tail.stderr ?? "");
+      if (!emitter.hasAnswer) process.exitCode = 1;
       return;
     }
 
@@ -710,6 +715,7 @@ async function runHeadless(
     const textTail = textEmitter.flush();
     if (textTail.stdout) writeSafe(process.stdout, textTail.stdout);
     if (textTail.stderr) writeSafe(process.stderr, textTail.stderr ?? "");
+    if (!textEmitter.hasAnswer) process.exitCode = 1;
   } finally {
     await agent.cleanup();
   }
