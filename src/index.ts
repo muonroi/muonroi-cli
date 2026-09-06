@@ -694,7 +694,16 @@ async function runHeadless(
         maybeAutoAnswer(chunk);
         const writes = consumeChunk(chunk);
         hasAnswer = jsonEmitter.hasAnswer;
-        if (writes.stdout) writeSafe(process.stdout, writes.stdout);
+        if (writes.stdout) {
+          try {
+            writeSafe(process.stdout, writes.stdout);
+          } catch (e) {
+            const err = e as NodeJS.ErrnoException;
+            if (err.code !== "EPIPE") throw err;
+            // EPIPE: downstream consumer closed the pipe; swallow to prevent
+            // crash and leave hasAnswer as-is (write did not succeed).
+          }
+        }
         if (writes.stderr) writeSafe(process.stderr, writes.stderr ?? "");
       }
       const tail = flush();
