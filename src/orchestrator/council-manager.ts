@@ -18,9 +18,9 @@ import { loadKeyForProvider } from "../providers/keychain.js";
 import {
   createProviderFactory,
   detectProviderForModel,
+  resolveMaxOutputTokensParam,
   resolveModelRuntime,
   resolveTemperatureParam,
-  shouldDropParam,
 } from "../providers/runtime.js";
 import { generateTextStreamed } from "../providers/streamed-generate.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
@@ -263,7 +263,11 @@ export class CouncilManager {
       model: runtime.model,
       system,
       prompt,
-      ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: maxTokens }),
+      // `maxTokens` is a VISIBLE-output budget. On a reasoning model the
+      // provider's max_tokens is shared with the thinking block, so a literal
+      // sized for the answer alone is spent before any answer is emitted (see
+      // resolveMaxOutputTokens). Callers below pass 2048 / 1024 / 256.
+      ...resolveMaxOutputTokensParam(runtime, maxTokens),
       ...resolveTemperatureParam(runtime, 0.7),
       ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     });
@@ -317,7 +321,7 @@ export class CouncilManager {
         prompt: userPrompt,
         tools: researchTools,
         stopWhen: stepCountIs(10),
-        ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 4096 }),
+        ...resolveMaxOutputTokensParam(runtime, 4096),
         ...resolveTemperatureParam(runtime, 0.3),
         ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
         ...(signal ? { abortSignal: signal } : {}),

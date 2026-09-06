@@ -751,6 +751,22 @@ export interface ModelInfo {
   supportsClientTools?: boolean;
   supportsMaxOutputTokens?: boolean;
   /**
+   * The model's declared maximum output tokens, from `catalog.json`'s
+   * `max_output_tokens`. This budget is SHARED with the model's thinking block
+   * on every reasoning model measured so far (StepFun, OpenAI Responses,
+   * Anthropic, DeepSeek all bill reasoning inside the output cap), which is why
+   * `resolveMaxOutputTokens` in src/providers/capabilities.ts sizes a reasoning
+   * request from this field instead of the caller's visible-output number.
+   *
+   * `undefined` when the catalog declares `0` — that is the "not published /
+   * not applicable" SENTINEL, not a ceiling of zero (see `step-3.7-flash`,
+   * whose own catalog description reads "The documented maximum output-token
+   * limit is not published", and the six StepFun audio/image models). Callers
+   * must treat undefined as "unknown ceiling" and fall back to a declared
+   * default; never as 0.
+   */
+  maxOutputTokens?: number;
+  /**
    * When set, the provider rejects any temperature other than this exact value
    * (e.g. Moonshot/Kimi: "only 1 is allowed for this model"). Callers must send
    * this value verbatim rather than their preferred temperature — see

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
 import type { ModelInfo } from "../types/index.js";
 import { getReasoningEffortForModel, loadUserSettings } from "../utils/settings.js";
-import { getProviderCapabilities } from "./capabilities.js";
+import { getProviderCapabilities, resolveMaxOutputTokens } from "./capabilities.js";
 import { isProviderDefaultApiBase } from "./endpoints.js";
 import { ceilingForCall, type GateStage, wrapModelWithGate } from "./model-gate.js";
 import { getProviderStrategy } from "./strategies/registry.js";
@@ -438,6 +438,30 @@ export function resolveTemperatureParam(runtime: ResolvedModelRuntime, desired: 
   const fixed = runtime.modelInfo?.fixedTemperature;
   if (typeof fixed === "number") return { temperature: fixed };
   return { temperature: desired };
+}
+
+/**
+ * Resolve the `maxOutputTokens` spread for a streamText/generateText call —
+ * the output-budget twin of `resolveTemperatureParam`.
+ *
+ * Returns `{}` when the param must be omitted (OAuth `unsupportedParams`, e.g.
+ * ChatGPT Codex 400s on `max_output_tokens`; or a catalog
+ * `supports_max_output_tokens: false`). Otherwise defers the VALUE to
+ * `resolveMaxOutputTokens` in ../providers/capabilities.ts, which treats
+ * `desired` as a visible-output budget and widens it to the model's declared
+ * ceiling on a reasoning model — where `max_tokens` is shared with the thinking
+ * block and a too-small budget yields a silent EMPTY completion.
+ *
+ * `desired` stays meaningful: it is what a non-reasoning model receives
+ * verbatim, and it still wins when it exceeds the declared ceiling.
+ */
+export function resolveMaxOutputTokensParam(
+  runtime: ResolvedModelRuntime,
+  desired: number,
+): { maxOutputTokens?: number } {
+  if (shouldDropParam(runtime, "maxOutputTokens")) return {};
+  const resolved = resolveMaxOutputTokens(runtime.modelInfo?.provider ?? "", runtime.modelInfo, desired);
+  return resolved === undefined ? {} : { maxOutputTokens: resolved };
 }
 
 export function detectProviderForModel(modelId: string): ProviderId {

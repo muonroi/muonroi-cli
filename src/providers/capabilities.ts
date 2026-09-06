@@ -507,3 +507,72 @@ export function resolveTemperature(
   if (typeof model?.fixedTemperature === "number") return model.fixedTemperature;
   return desired;
 }
+
+/**
+ * Output budget for a REASONING model whose catalog entry declares no ceiling
+ * (`max_output_tokens: 0` — the "not published" sentinel; `step-3.7-flash` is
+ * the only reasoning model that carries it, and its own catalog description
+ * says the limit is unpublished).
+ *
+ * This is a DECLARED default, deliberately not a silent one: a model that lands
+ * here is visibly using a documented fallback rather than inheriting a caller's
+ * visible-output number that thinking would eat. The real fix for any model
+ * that reaches this constant is to publish the vendor's ceiling in
+ * `catalog.json`, after which nothing consults this value for that model.
+ *
+ * Set to the ceiling StepFun publishes for its other two reasoning text models
+ * (`step-3.5-flash`, `step-3.5-flash-2603` — both 8192), i.e. the most
+ * conservative same-vendor evidence available for the one model that needs it.
+ */
+export const DEFAULT_REASONING_OUTPUT_BUDGET_TOKENS = 8192;
+
+/**
+ * Resolve the `maxOutputTokens` value to send for a given (provider, model),
+ * or `undefined` to omit the field entirely.
+ *
+ * WHY THIS EXISTS. A caller's number is a *visible-output* budget ("give me a
+ * ~1KB JSON spec"). On a reasoning model the provider's `max_tokens` does not
+ * bound visible output — it bounds **thinking + visible output together**, and
+ * thinking is emitted FIRST. Measured live against StepFun on 2026-09-05 with
+ * the council's own spec-synthesis prompt at the hardcoded `maxTokens: 1024`:
+ *
+ *     finish_reason: "length"   content: 0 chars
+ *     reasoning_content: 5134 chars   completion_tokens: 1024 (== the cap)
+ *     completion_tokens_details.reasoning_tokens: 0
+ *
+ * The entire budget went into the thinking block, the visible answer never
+ * started, and — because the provider reports `reasoning_tokens: 0` — nothing
+ * in the usage payload says so. Downstream, `stripThinkBlocks` returned `""`
+ * and the council's fallback chain read it as `empty-completion`, walking every
+ * candidate model and failing `/ideal` spec synthesis outright.
+ *
+ * A client CANNOT predict how long a model will think, and StepFun exposes no
+ * effort knob (`supports_effort: false`). So the only budget that guarantees
+ * the visible answer gets a chance to be emitted is the model's own declared
+ * maximum. `max_tokens` is a CEILING, not a reservation — unused tokens are
+ * never billed — so raising it costs nothing when the model stops early, while
+ * any value below the ceiling re-introduces a silent total failure as soon as a
+ * prompt grows. Non-reasoning models keep the caller's number exactly.
+ *
+ * This is the same class of bug as the hardcoded council temperatures that
+ * broke Kimi (see `resolveTemperature` above): a literal at the call site
+ * bypassing a per-model fact the catalog already declares. Every request that
+ * sets an output budget MUST go through this helper (or its runtime-flavored
+ * wrapper `resolveMaxOutputTokensParam`) rather than inlining a number.
+ */
+export function resolveMaxOutputTokens(
+  providerId: ProviderId | string,
+  model: ModelInfo | undefined,
+  desiredVisible: number,
+): number | undefined {
+  const caps = getProviderCapabilities(providerId);
+  if (!caps.acceptsParam("maxOutputTokens", model)) return undefined;
+  // Non-reasoning model: `max_tokens` bounds visible output only, so the
+  // caller's number means what it says.
+  if (model?.reasoning !== true) return desiredVisible;
+  const ceiling = model.maxOutputTokens ?? DEFAULT_REASONING_OUTPUT_BUDGET_TOKENS;
+  // Never shrink a caller that already asked for more than the declared
+  // ceiling — that is the caller's explicit intent, and the provider clamps or
+  // rejects on its own terms.
+  return Math.max(desiredVisible, ceiling);
+}

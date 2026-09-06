@@ -99,6 +99,10 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
       shouldDropParam: vi.fn().mockReturnValue(false),
+      // Mocked runtime carries no modelInfo, so the real helper would pass the
+      // caller number through unchanged (the reasoning-model widening in
+      // resolveMaxOutputTokens needs modelInfo.reasoning). Mirror that.
+      resolveMaxOutputTokensParam: vi.fn((_rt: unknown, n: number) => ({ maxOutputTokens: n })),
     }));
 
     const { createCouncilLLM } = await import("../llm.js");
@@ -141,6 +145,10 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
       shouldDropParam: vi.fn().mockReturnValue(false),
+      // Mocked runtime carries no modelInfo, so the real helper would pass the
+      // caller number through unchanged (the reasoning-model widening in
+      // resolveMaxOutputTokens needs modelInfo.reasoning). Mirror that.
+      resolveMaxOutputTokensParam: vi.fn((_rt: unknown, n: number) => ({ maxOutputTokens: n })),
     }));
 
     const { createCouncilLLM } = await import("../llm.js");
@@ -180,6 +188,10 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
       shouldDropParam: vi.fn().mockReturnValue(false),
+      // Mocked runtime carries no modelInfo, so the real helper would pass the
+      // caller number through unchanged (the reasoning-model widening in
+      // resolveMaxOutputTokens needs modelInfo.reasoning). Mirror that.
+      resolveMaxOutputTokensParam: vi.fn((_rt: unknown, n: number) => ({ maxOutputTokens: n })),
     }));
 
     const { createCouncilLLM } = await import("../llm.js");
@@ -212,6 +224,10 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
       shouldDropParam: vi.fn().mockReturnValue(false),
+      // Mocked runtime carries no modelInfo, so the real helper would pass the
+      // caller number through unchanged (the reasoning-model widening in
+      // resolveMaxOutputTokens needs modelInfo.reasoning). Mirror that.
+      resolveMaxOutputTokensParam: vi.fn((_rt: unknown, n: number) => ({ maxOutputTokens: n })),
     }));
 
     const { createCouncilLLM } = await import("../llm.js");
@@ -275,6 +291,10 @@ describe("planDebate — forwards signal to the direct generateObject attempt", 
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
       shouldDropParam: vi.fn().mockReturnValue(false),
+      // Mocked runtime carries no modelInfo, so the real helper would pass the
+      // caller number through unchanged (the reasoning-model widening in
+      // resolveMaxOutputTokens needs modelInfo.reasoning). Mirror that.
+      resolveMaxOutputTokensParam: vi.fn((_rt: unknown, n: number) => ({ maxOutputTokens: n })),
     }));
 
     const { planDebate } = await import("../debate-planner.js");

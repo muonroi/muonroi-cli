@@ -16,8 +16,8 @@ import {
   createProviderFactoryAsync,
   detectProviderForModel,
   type ResolvedModelRuntime,
+  resolveMaxOutputTokensParam,
   resolveModelRuntime,
-  shouldDropParam,
 } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import { wireDebug } from "../providers/wire-debug.js";
@@ -395,9 +395,26 @@ const COUNCIL_LLM_TIMEOUT_MS = (() => {
  * generate on a Codex-OAuth session was failing wholesale. Mirrors the
  * orchestrator + classify paths, which already gate this param via
  * `shouldDropParam`.
+ *
+ * This is the SINGLE choke-point for the council's output budget: all three
+ * wire sites in this file (generate / debate / research) route through it, and
+ * every product-loop `leader.generate({maxTokens})` adapter funnels into
+ * `CouncilLLM.generate`. So `n` — whatever literal a caller passed — is a
+ * *visible-output* budget here, and `resolveMaxOutputTokensParam` widens it to
+ * the model's catalog-declared ceiling on a reasoning model, where `max_tokens`
+ * is shared with the thinking block.
+ *
+ * That distinction is exactly what the old literals got wrong. `maxTokens:
+ * 1024` at clarifier.ts (spec synthesis) burned all 1024 tokens inside
+ * step-3.5-flash's thinking block — measured `finish_reason:"length"`, 0 chars
+ * of content, 5134 chars of reasoning — so `stripThinkBlocks` returned `""`,
+ * every candidate model reported `empty-completion`, and `/ideal` died at spec
+ * synthesis. The `6144` literal below carries a comment describing the same
+ * failure being papered over by raising the number; sizing from the catalog
+ * replaces that guess.
  */
 function maxOutSpread(runtime: ResolvedModelRuntime, n: number): { maxOutputTokens?: number } {
-  return shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: n };
+  return resolveMaxOutputTokensParam(runtime, n);
 }
 
 /**
@@ -664,6 +681,9 @@ export function createCouncilLLM(
       const providerId = detectProviderForModel(modelId);
       await ensureCouncilFactory(providerId);
       const runtime = resolveModelRuntime(modelId, { stage: "council", sessionId });
+      // Resolve once so the debug record reports the budget actually sent, not
+      // the caller's pre-resolution `maxTokens` argument.
+      const genMaxOut = maxOutSpread(runtime, maxTokens);
       const t0 = Date.now();
       // Combine the user-abort signal (when threaded from runCouncil) with the
       // per-call wall-clock deadline. Without the parent signal, an Esc/Ctrl-C
@@ -684,7 +704,7 @@ export function createCouncilLLM(
                   model: runtime.model,
                   system,
                   prompt,
-                  ...maxOutSpread(runtime, maxTokens),
+                  ...genMaxOut,
                   // Never hardcode temperature: some upstreams (Moonshot/Kimi via
                   // opencode-go) reject any value but their pinned one, which
                   // failed every clarify/spec call on a Kimi session. resolveTemperature
@@ -722,7 +742,7 @@ export function createCouncilLLM(
           provider: providerId,
           systemChars: system.length,
           promptChars: prompt.length,
-          maxTokens,
+          maxTokens: genMaxOut.maxOutputTokens ?? maxTokens,
           durationMs: durMs,
           ok: true,
           textChars: (result.text ?? "").length,
@@ -749,7 +769,7 @@ export function createCouncilLLM(
           provider: providerId,
           systemChars: system.length,
           promptChars: prompt.length,
-          maxTokens,
+          maxTokens: genMaxOut.maxOutputTokens ?? maxTokens,
           durationMs: Date.now() - t0,
           ok: false,
           textChars: 0,
@@ -802,6 +822,11 @@ export function createCouncilLLM(
       const providerId = detectProviderForModel(modelId);
       await ensureCouncilFactory(providerId);
       const runtime = resolveModelRuntime(modelId, { stage: "council", sessionId });
+      // Resolve ONCE so the request and the debug record cannot disagree. The
+      // record used to log the raw `6144` literal while the wire may now carry
+      // the model's declared ceiling — a forensics trap of exactly the kind
+      // this budget bug was hidden behind.
+      const debateMaxOut = maxOutSpread(runtime, 6144);
 
       // Verification tools — re-introduced after the no-tools fix (session
       // a7a5690d2049). The original failure was stepCountIs(4) + full toolset
@@ -875,7 +900,7 @@ export function createCouncilLLM(
                   // text. E2E showed 2048 caused finishReason=length on 3KB debate
                   // prompts. 6144 leaves ~4000 tokens for text after typical reasoning
                   // overhead and avoids cuts mid-thought.
-                  ...maxOutSpread(runtime, 6144),
+                  ...debateMaxOut,
                   // See generate(): capability-aware temperature (omit / clamp).
                   temperature: resolveTemperature(providerId, runtime.modelInfo, 0.7),
                   providerOptions: runtime.providerOptions as Record<string, unknown> | undefined,
@@ -936,7 +961,7 @@ export function createCouncilLLM(
           provider: providerId,
           systemChars: system.length,
           promptChars: prompt.length,
-          maxTokens: 6144,
+          maxTokens: debateMaxOut.maxOutputTokens ?? 6144,
           durationMs: Date.now() - t0,
           ok: true,
           textChars: (result.text ?? "").length,
@@ -963,7 +988,7 @@ export function createCouncilLLM(
           provider: providerId,
           systemChars: system.length,
           promptChars: prompt.length,
-          maxTokens: 6144,
+          maxTokens: debateMaxOut.maxOutputTokens ?? 6144,
           durationMs: Date.now() - t0,
           ok: false,
           textChars: 0,
@@ -1012,6 +1037,9 @@ export function createCouncilLLM(
       const providerId = detectProviderForModel(modelId);
       await ensureCouncilFactory(providerId);
       const runtime = resolveModelRuntime(modelId, { stage: "council", sessionId });
+      // Resolve once — see the same hoist in debate(): request and debug record
+      // must report the identical budget.
+      const researchMaxOut = maxOutSpread(runtime, 4096);
 
       const builtinTools = createTools(bash, mode);
 
@@ -1089,7 +1117,7 @@ export function createCouncilLLM(
                     const stripped = researchCaps.sanitizeHistory(messages as never) as typeof messages;
                     return stripped === messages ? {} : { messages: stripped };
                   },
-                  ...maxOutSpread(runtime, 4096),
+                  ...researchMaxOut,
                   // See generate(): capability-aware temperature (omit / clamp).
                   ...(() => {
                     const t = resolveTemperature(providerId, runtime.modelInfo, 0.3);
@@ -1132,7 +1160,7 @@ export function createCouncilLLM(
           provider: providerId,
           systemChars: systemPrompt.length,
           promptChars: userPrompt.length,
-          maxTokens: 4096,
+          maxTokens: researchMaxOut.maxOutputTokens ?? 4096,
           durationMs: Date.now() - t0,
           ok: true,
           textChars: (result.text ?? "").length,
@@ -1186,7 +1214,7 @@ export function createCouncilLLM(
           provider: providerId,
           systemChars: systemPrompt.length,
           promptChars: userPrompt.length,
-          maxTokens: 4096,
+          maxTokens: researchMaxOut.maxOutputTokens ?? 4096,
           durationMs: Date.now() - t0,
           ok: false,
           textChars: 0,

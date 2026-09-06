@@ -454,6 +454,12 @@ export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
     id: m.id,
     name: m.name,
     contextWindow: m.context_window,
+    // `0` is the catalog's "not published / not applicable" sentinel, NOT a
+    // ceiling of zero — 7 of 42 models carry it (six StepFun audio/image
+    // models, plus step-3.7-flash whose description says the limit "is not
+    // published"). Mapping it to `undefined` keeps a downstream budget
+    // resolver from ever requesting `max_tokens: 0`.
+    maxOutputTokens: m.max_output_tokens > 0 ? m.max_output_tokens : undefined,
     inputPrice: m.input_price_per_million,
     outputPrice: m.output_price_per_million,
     cachedInputPrice: m.cached_input_price_per_million,
