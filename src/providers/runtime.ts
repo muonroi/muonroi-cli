@@ -289,11 +289,23 @@ export function resolveModelRuntime(modelId: string, opts?: ResolveRuntimeOpts):
   // new object (never mutates), meter-only for now (no ceiling enforcement).
   // Universal: a new call site cannot get a model without this factory. Sites
   // that have not migrated a stage are metered as `unattributed` (H8).
+  // The gate is also where declared provider rate limits are ENFORCED. Limits
+  // travel the same route as `ceiling`: catalog data -> ModelInfo -> GateContext,
+  // so no call site names a provider or a number (Zero Hardcode). A model whose
+  // catalog entry declares no `rate_limits` gets `undefined` here and is
+  // dispatched unpaced — see UNDECLARED_RATE_LIMITS in ./rate-limiter.ts.
   resolved.model = wrapModelWithGate(resolved.model, {
     stage: opts?.stage ?? "unattributed",
     modelId: resolved.modelId,
     sessionId: opts?.sessionId,
     ceiling: ceilingForCall(resolved.modelInfo),
+    providerId: resolved.modelInfo?.provider,
+    // A MOCK model issues no network request, so there is no account budget to
+    // protect and pacing it would only make tests sleep against a real 60s
+    // window (and, worse, block on a concurrency slot held by a stream a test
+    // never drains). Metering still runs on the mock path — only enforcement of
+    // someone else's rate limit is skipped, because that limit cannot be reached.
+    rateLimits: mockModel ? undefined : resolved.modelInfo?.rateLimits,
   });
 
   // P0-5b — provider-boundary output guard. StepFun emits its native

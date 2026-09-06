@@ -61,6 +61,10 @@ export const LIFECYCLE_PRESET: ReadonlySet<EventKind> = new Set<EventKind>([
   "ee-error",
   "grounding-flag",
   "stream-retry",
+  // A deliberate pacing wait. A driver on the default env MUST see this: it is
+  // the only structured difference between "the run is deliberately holding to
+  // stay inside a declared provider limit" and "the run has hung".
+  "rate-limit-wait",
   // A council model-fallback switched provider mid-run. A driver on the default
   // env MUST see this: it is the only structured signal that the model policy it
   // was told to run under was violated.

@@ -68,6 +68,7 @@ serialized as JSONL on the sidechannel (fd 3 / named pipe) and ingested by
 | `toast` | `level` ("info"\|"warn"\|"error"), `text`, `ttlMs?` | low | yes |
 | `stream.delta` | `target`, `text` | medium | yes |
 | `model-fallback` | `fromModel`, `toModel` (null when exhausted), `reason` ("error"\|"empty-completion"\|"blocked"), `attempt`, `totalCandidates`, `exhausted?`, `label?`, `provider?`, `statusCode?`, `errorName?`, `errorMessage?`, `ts` — **a council fallback chain switched model**; the structured signal that a model policy was violated. Not `stream-retry`: that is the SAME model retried with a backoff and carries no model identity. Filter the terminal record on `exhausted === true`, not `toModel === null` | low | yes |
+| `rate-limit-wait` | `provider`, `modelId`, `stage`, `limitKind` ("requests-per-minute"\|"concurrency"), `limit`, `waitMs`, `ts` — **a call was deliberately held to stay inside a catalog-declared provider limit**. Emitted only when a wait was actually incurred. Not `stream-retry`: that means an error happened and the call is being re-attempted; here no error occurred, no attempt was consumed, and the request has not been sent yet. Without this, a paced call and a hung one look identical to a driver | low | yes |
 
 ### correlationId
 

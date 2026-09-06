@@ -86,7 +86,11 @@ describe("harness-driver capabilities", () => {
     // Pinned by name — a driver that cannot name it is back to gating on
     // `idle`, which resolves on an empty pre-mount frame.
     expect(eventKinds).toContain("input-ready");
-    expect(eventKinds.length).toBe(25);
+    // 25 → 26 when rate-limit-wait was added: the request pacer holding a call to
+    // stay inside a catalog-declared provider limit. Pinned by name — without it
+    // a deliberate hold and a hang are the same silence to a driver.
+    expect(eventKinds).toContain("rate-limit-wait");
+    expect(eventKinds.length).toBe(26);
   });
 
   it("advertises the role vocabulary and the custom-role prefix", () => {

@@ -272,3 +272,117 @@ describe("ceilingForCall", () => {
     expect(ceilingForCall({} as any)).toBeUndefined();
   });
 });
+
+// ─── Request pacing (declared catalog rate limits, enforced at the gate) ─────
+
+const { __resetRateLimiterForTests, RATE_LIMIT_WINDOW_MS } = await import("./rate-limiter.js");
+
+/** Minimal LanguageModelV3-shaped stub whose doStream returns a real stream. */
+function streamModel(inner = vi.fn(async () => ({ stream: new ReadableStream({ start: (c) => c.close() }) }))) {
+  return {
+    model: {
+      specificationVersion: "v3" as const,
+      provider: "x",
+      modelId: "m1",
+      supportedUrls: {},
+      doGenerate: vi.fn(async () => ({})),
+      doStream: inner,
+    },
+    inner,
+  };
+}
+
+describe("wrapModelWithGate request pacing", () => {
+  const PACED = { concurrency: 5, requestsPerMinute: 2 };
+
+  afterEach(() => {
+    __resetRateLimiterForTests();
+    delete (globalThis as Record<string, unknown>).__muonroiAgentRuntime;
+    delete process.env.MUONROI_RATE_LIMIT;
+  });
+
+  it("does not wrap or pace a model whose catalog declares no rate limits", async () => {
+    const { model, inner } = streamModel();
+    // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+    const wrapped = wrapModelWithGate(model as any, { stage: "main", modelId: "m1", sessionId: "s1" });
+    await wrapped.doStream({ prompt: [{ role: "user", content: "hi" }] });
+    expect(inner).toHaveBeenCalledTimes(1);
+  });
+
+  it("still paces when the METER is disabled — MUONROI_GATE=0 must not disarm rate limiting", () => {
+    process.env.MUONROI_GATE = "0";
+    const { model } = streamModel();
+    const paced = wrapModelWithGate(
+      // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+      model as any,
+      { stage: "main", modelId: "m1", providerId: "stepfun", rateLimits: PACED },
+    );
+    expect(paced).not.toBe(model); // wrapped for pacing even with the meter off
+    // ...whereas an unpaced model with the meter off is returned untouched.
+    // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+    expect(wrapModelWithGate(model as any, { stage: "main", modelId: "m1" })).toBe(model);
+  });
+
+  it("emits rate-limit-wait so a driver can tell a deliberate hold from a hang", async () => {
+    // Fake timers: the held call really would sleep a full window otherwise.
+    vi.useFakeTimers();
+    try {
+      const events: Array<Record<string, unknown>> = [];
+      (globalThis as Record<string, unknown>).__muonroiAgentRuntime = {
+        emitEvent: (e: unknown) => events.push(e as Record<string, unknown>),
+      };
+      const { model, inner } = streamModel();
+      const ctx = { stage: "main" as const, modelId: "m1", providerId: "stepfun", rateLimits: PACED };
+      // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+      const wrapped = wrapModelWithGate(model as any, ctx);
+      const p = [{ role: "user" as const, content: "hi" }];
+      await wrapped.doStream({ prompt: p });
+      await wrapped.doStream({ prompt: p });
+      expect(events).toHaveLength(0); // the first two fit the declared budget of 2
+      expect(inner).toHaveBeenCalledTimes(2);
+
+      const third = wrapped.doStream({ prompt: p });
+      // Let the pacer reach its sleep without advancing the clock.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // The hold is announced IMMEDIATELY — before the call completes. If it were
+      // announced on release, the wait would be invisible for its whole duration,
+      // which is the "paced looks exactly like hung" failure this event exists to
+      // remove. And the request must NOT have been dispatched yet.
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        kind: "rate-limit-wait",
+        provider: "stepfun",
+        modelId: "m1",
+        stage: "main",
+        limitKind: "requests-per-minute",
+        limit: 2,
+        waitMs: RATE_LIMIT_WINDOW_MS,
+      });
+      expect(inner).toHaveBeenCalledTimes(2); // held, not sent
+
+      await vi.advanceTimersByTimeAsync(RATE_LIMIT_WINDOW_MS);
+      await third;
+      expect(inner).toHaveBeenCalledTimes(3); // released and dispatched
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("MUONROI_RATE_LIMIT=0 disables pacing", async () => {
+    process.env.MUONROI_RATE_LIMIT = "0";
+    const events: unknown[] = [];
+    (globalThis as Record<string, unknown>).__muonroiAgentRuntime = { emitEvent: (e: unknown) => events.push(e) };
+    const { model, inner } = streamModel();
+    const wrapped = wrapModelWithGate(
+      // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+      model as any,
+      { stage: "main", modelId: "m1", providerId: "stepfun", rateLimits: PACED },
+    );
+    const p = [{ role: "user" as const, content: "hi" }];
+    for (let i = 0; i < 6; i++) await wrapped.doStream({ prompt: p });
+    expect(inner).toHaveBeenCalledTimes(6);
+    expect(events).toHaveLength(0);
+  });
+});

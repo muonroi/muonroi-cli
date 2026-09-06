@@ -479,5 +479,19 @@ export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
     roles: m.roles,
     nativeWebResearch: m.native_web_research ?? false,
     emitsNativeToolCallMarkup: m.emits_native_tool_call_markup,
+    // Declared provider limits must SURVIVE into runtime. Omitting this mapping
+    // is what made `rate_limits` a dead field: it was typed above, validated by
+    // `CatalogModelSchema`, asserted by catalog-validation.test.ts, and then
+    // dropped here — so nine stepfun models published `requests_per_minute: 10`
+    // that no production code could read, and a /ideal run died to HTTP 429
+    // "current: 11, limit: 10". Consumed by src/providers/rate-limiter.ts.
+    // `undefined` (catalog declares nothing) means unpaced, never "zero".
+    rateLimits: m.rate_limits
+      ? {
+          concurrency: m.rate_limits.concurrency,
+          requestsPerMinute: m.rate_limits.requests_per_minute,
+          tokensPerMinute: m.rate_limits.tokens_per_minute,
+        }
+      : undefined,
   };
 }

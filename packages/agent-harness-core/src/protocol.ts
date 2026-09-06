@@ -382,6 +382,41 @@ export type LiveEvent =
       errorMessage: string;
       nextDelayMs: number;
     }
+  // A call was deliberately HELD to stay inside a provider limit the catalog
+  // declares (`rate_limits` in catalog.json). Emitted by the request pacer
+  // (src/providers/rate-limiter.ts) via the metered gate, only when a wait was
+  // actually incurred — a call that fits the budget emits nothing.
+  //
+  // Deliberately NOT folded into `stream-retry`, for the same reason
+  // `model-fallback` is not: `stream-retry` means an error already happened and
+  // the SAME call is being re-attempted, and it carries `attempt`/`maxAttempts`/
+  // `errorName`/`errorMessage` to say which error and which try. A pacing wait is
+  // the opposite — no error occurred, no attempt was consumed, and the request
+  // has not been sent yet. Reusing the kind would mean fabricating an error name
+  // and an attempt number for a healthy call, corrupting exactly the retry metric
+  // that comment protects, and making "attempt 2 of 3" ambiguous between "the
+  // provider rejected us" and "we chose to wait".
+  //
+  // A driving agent needs this: without it a paced call is indistinguishable from
+  // a hung one, which is the precise failure shape ("reported success for
+  // something that did not happen") this protocol exists to eliminate.
+  | {
+      t: "event";
+      kind: "rate-limit-wait";
+      /** Provider whose account-level budget produced the wait. */
+      provider: string;
+      /** Model the held call was going to. */
+      modelId: string;
+      /** Pipeline stage of the held call (main / council / subagent / …). */
+      stage: string;
+      /** Which declared budget bound: the per-minute request count, or in-flight concurrency. */
+      limitKind: "requests-per-minute" | "concurrency";
+      /** The declared ceiling that produced the wait, verbatim from the catalog. */
+      limit: number;
+      /** How long the call was held, in ms. */
+      waitMs: number;
+      ts: number;
+    }
   // A council model-fallback chain advanced to a DIFFERENT model, or ran out of
   // candidates. Distinct from `stream-retry` on purpose: that kind means the SAME
   // model is retried after a transient error with a backoff, and carries no model
@@ -532,6 +567,7 @@ export const LIVE_EVENT_KINDS = [
   "ee-error",
   "disconnect",
   "stream-retry",
+  "rate-limit-wait",
   "model-fallback",
   "grounding-flag",
   "steer-inject",

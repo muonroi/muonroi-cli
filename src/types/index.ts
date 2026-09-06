@@ -733,6 +733,27 @@ export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
 export type ModelTier = "fast" | "balanced" | "premium";
 
+/**
+ * Provider account limits for a model, as DECLARED by `catalog.json`'s
+ * `rate_limits` block. Runtime-facing (camelCase) mirror of `CatalogRateLimits`.
+ *
+ * `undefined` on any field means the catalog publishes no value for it — see
+ * `UNDECLARED_RATE_LIMITS` in src/providers/rate-limiter.ts for the policy that
+ * applies then. Never treat a missing field as zero.
+ */
+export interface ModelRateLimits {
+  /** Maximum simultaneous in-flight requests. */
+  concurrency?: number;
+  /** Maximum requests started per minute. */
+  requestsPerMinute?: number;
+  /**
+   * Maximum tokens per minute. Carried for completeness and forensics; NOT
+   * enforced by the pacer, because a call's token cost is not knowable before
+   * the response. See the SCOPE note in src/providers/rate-limiter.ts.
+   */
+  tokensPerMinute?: number;
+}
+
 export interface ModelInfo {
   id: string;
   name: string;
@@ -784,6 +805,18 @@ export interface ModelInfo {
   roles?: string[];
   /** Part E — model has native online web research (its own web_search/browsing). */
   nativeWebResearch?: boolean;
+  /**
+   * Provider account limits declared by `catalog.json`'s `rate_limits`, mapped
+   * through `catalogModelToModelInfo`. Consumed by the request pacer in
+   * src/providers/rate-limiter.ts via the metered gate.
+   *
+   * `undefined` means the catalog declares nothing for this model — that model
+   * is dispatched unpaced (see `UNDECLARED_RATE_LIMITS`). Before this field
+   * existed the catalog's `rate_limits` block was validated, unit-tested, and
+   * then silently discarded here, so nine models published a 10 RPM ceiling that
+   * no production code could read.
+   */
+  rateLimits?: ModelRateLimits;
   /**
    * P0-5b — model emits its NATIVE tool-call markup as plain-text content when a
    * request carries no tool schemas. Arms the provider-boundary output guard

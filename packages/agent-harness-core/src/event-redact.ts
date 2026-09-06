@@ -250,6 +250,23 @@ const ALLOWED_FIELDS: Record<EventKind, Record<string, FieldSpec>> = {
     errorMessage: 500,
     nextDelayMs: "pass",
   },
+  // Emit site: src/providers/model-gate.ts (emitRateLimitWait). Shape: protocol.ts.
+  //
+  // Every field is machine-generated rather than user or provider text: `provider`
+  // and `modelId` are catalog ids, `stage` is the GateStage union, `limitKind` is a
+  // two-value union, and `limit`/`waitMs`/`ts` are numbers. Nothing here can carry
+  // a serialized upstream response body, so no field needs the cap that bounds
+  // `stream-retry.errorMessage`. The three ids are still capped rather than
+  // "pass" so that no field on this kind is an unbounded channel.
+  "rate-limit-wait": {
+    provider: 60,
+    modelId: 120,
+    stage: 40,
+    limitKind: 40,
+    limit: "pass",
+    waitMs: "pass",
+    ts: "pass",
+  },
   // Emit site: src/council/llm.ts (tracedGenerateWithFallback). Shape: protocol.ts.
   //
   // Every free-text field here is CAPPED, never "pass". `errorMessage` is the

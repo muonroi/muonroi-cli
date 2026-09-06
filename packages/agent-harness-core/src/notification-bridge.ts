@@ -50,6 +50,9 @@ const LOG_KINDS = new Set([
   "disconnect",
   // A silent provider switch is exactly the kind of thing a host log must show.
   "model-fallback",
+  // Likewise a deliberate pacing hold: to a host watching only the log, a paced
+  // call and a hung one are the same silence unless the wait is stated.
+  "rate-limit-wait",
 ]);
 
 export type BridgeCapabilities = {

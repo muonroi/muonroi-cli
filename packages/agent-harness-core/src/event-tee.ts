@@ -39,6 +39,7 @@ export const EPHEMERAL_KINDS: ReadonlySet<string> = new Set<string>([
   "toast",
   "disconnect",
   "stream-retry",
+  "rate-limit-wait",
   "model-fallback",
   "ee-timeout",
   "ee-error",

@@ -32,7 +32,8 @@
 
 import { wrapLanguageModel } from "ai";
 import { logInteraction } from "../storage/interaction-log.js";
-import type { ModelInfo } from "../types/index.js";
+import type { ModelInfo, ModelRateLimits } from "../types/index.js";
+import { acquireRateLimitSlot, type RateLimitLease, type RateLimitWait } from "./rate-limiter.js";
 
 /**
  * The pipeline stage a call belongs to. `unattributed` means the resolve site
@@ -47,6 +48,18 @@ export interface GateContext {
   sessionId?: string;
   /** Per-call context ceiling in tokens (catalog contextWindow). Recorded, not enforced. */
   ceiling?: number;
+  /**
+   * The provider this model talks to. Used as the request-pacing key: a
+   * `requests_per_minute` budget is an ACCOUNT-level counter (the provider's own
+   * 429 names no model), so all models of one provider must share one window.
+   * Absent → no pacing, exactly as before.
+   */
+  providerId?: string;
+  /**
+   * Declared provider limits for this model, from `catalog.json` via
+   * `ModelInfo.rateLimits`. Enforced — unlike `ceiling`, which is recorded only.
+   */
+  rateLimits?: ModelRateLimits;
 }
 
 export interface CallComposition {
@@ -190,6 +203,18 @@ const THROW_ELIGIBLE: ReadonlySet<GateStage> = new Set<GateStage>(["subagent", "
 const DEFAULT_THROW_MAX_TOKENS = 100_000;
 
 /**
+ * How long a single stream may hold a rate-limit concurrency slot before the
+ * slot is force-released with a logged error.
+ *
+ * This is a deadlock backstop, not a timeout: it never cancels the stream, it
+ * only stops one un-drained stream from stranding a slot forever and wedging
+ * every later call to that provider. Deliberately far longer than any real
+ * completion — a long reasoning turn plus tool round-trips is minutes, not
+ * fifteen of them — so a legitimate stream can never trip it.
+ */
+const STREAM_SLOT_WATCHDOG_MS = 15 * 60_000;
+
+/**
  * The absolute est-token ceiling above which a throw-eligible stage THROWS.
  *
  * Calibrated (2026-07-19, live measurement): `chars/4` under-estimates real
@@ -309,21 +334,156 @@ function gateCall(prompt: unknown, ctx: GateContext, op: "stream" | "generate"):
  */
 // biome-ignore lint/suspicious/noExplicitAny: AI SDK model handle is provider-shaped (any) across the codebase
 export function wrapModelWithGate(model: any, ctx: GateContext): any {
-  if (!model || gateDisabled()) return model;
+  // Pacing and metering are INDEPENDENT switches. `MUONROI_GATE=0` turns off the
+  // meter; it must not silently also turn off rate limiting, or a user disabling
+  // cost telemetry would quietly re-arm the 429 that killed a run.
+  const paces = pacingApplies(ctx);
+  if (!model || (gateDisabled() && !paces)) return model;
   return wrapLanguageModel({
     model,
     middleware: {
       specificationVersion: "v3",
       wrapStream: async ({ doStream, params }) => {
-        gateCall((params as { prompt?: unknown }).prompt, ctx, "stream");
-        return doStream();
+        if (!gateDisabled()) gateCall((params as { prompt?: unknown }).prompt, ctx, "stream");
+        const lease = await paceCall(ctx);
+        let result: Awaited<ReturnType<typeof doStream>>;
+        try {
+          result = await doStream();
+        } catch (err) {
+          lease.release();
+          throw err;
+        }
+        // A stream is in flight until it ENDS, not until its promise resolves —
+        // so a held concurrency slot spans the whole stream. When no slot is held
+        // there is nothing to release, and the stream is returned untouched: a
+        // model that declares no `concurrency` must not pay a pipeThrough.
+        if (!lease.holdsSlot) return result;
+        return { ...result, stream: releaseOnStreamEnd(result.stream, lease, ctx) };
       },
       wrapGenerate: async ({ doGenerate, params }) => {
-        gateCall((params as { prompt?: unknown }).prompt, ctx, "generate");
-        return doGenerate();
+        if (!gateDisabled()) gateCall((params as { prompt?: unknown }).prompt, ctx, "generate");
+        const lease = await paceCall(ctx);
+        try {
+          return await doGenerate();
+        } finally {
+          lease.release();
+        }
       },
     },
   });
+}
+
+/** Whether this context declares anything the pacer would act on. */
+function pacingApplies(ctx: GateContext): boolean {
+  const rl = ctx.rateLimits;
+  return Boolean(ctx.providerId && rl && (rl.requestsPerMinute || rl.concurrency));
+}
+
+/**
+ * Hold the call until it fits the declared budget, and surface any wait.
+ *
+ * Fail-open on an unexpected pacer fault: a bug in the limiter must never make
+ * the app unable to talk to a provider. A 429 is recoverable; a wedged pacer is
+ * not.
+ */
+async function paceCall(ctx: GateContext): Promise<RateLimitLease> {
+  if (!pacingApplies(ctx)) return { waits: [], holdsSlot: false, release: () => {} };
+  try {
+    // Emit through the callback, NOT by walking `lease.waits` afterwards: the
+    // lease only resolves once the wait is OVER, so reporting from it would hide
+    // the hold for exactly as long as the hold lasts.
+    return await acquireRateLimitSlot(ctx.providerId!, ctx.rateLimits, undefined, (wait) =>
+      emitRateLimitWait(wait, ctx),
+    );
+  } catch (err) {
+    console.error(
+      `[model-gate] rate-limit pacing failed (proceeding unpaced): ${(err as Error)?.message}`,
+      { provider: ctx.providerId, model: ctx.modelId, stage: ctx.stage },
+    );
+    return { waits: [], holdsSlot: false, release: () => {} };
+  }
+}
+
+/**
+ * Release the concurrency slot when the stream finishes or is cancelled.
+ *
+ * Guarded twice. If `TransformStream` cannot be used for any reason the slot is
+ * released immediately and the ORIGINAL stream is returned untouched — degrading
+ * to "concurrency measured at request initiation" is acceptable; corrupting the
+ * model's output stream is not. A watchdog then guarantees that even a stream
+ * which is neither drained nor cancelled cannot strand a slot forever, because a
+ * stranded slot would deadlock every later call to that provider — a far worse
+ * failure than the 429 this module exists to prevent.
+ */
+function releaseOnStreamEnd<T extends ReadableStream<unknown>>(stream: T, lease: RateLimitLease, ctx: GateContext): T {
+  const watchdog = setTimeout(() => {
+    console.error(
+      `[model-gate] rate-limit concurrency slot force-released after ${STREAM_SLOT_WATCHDOG_MS}ms — ` +
+        `stream neither ended nor cancelled`,
+      { provider: ctx.providerId, model: ctx.modelId, stage: ctx.stage },
+    );
+    lease.release();
+  }, STREAM_SLOT_WATCHDOG_MS);
+  // Never keep the process alive just to police a slot.
+  (watchdog as unknown as { unref?: () => void }).unref?.();
+  const done = () => {
+    clearTimeout(watchdog);
+    lease.release();
+  };
+  try {
+    return stream.pipeThrough(
+      new TransformStream({
+        transform: (chunk, controller) => controller.enqueue(chunk),
+        flush: done,
+        cancel: done,
+      }),
+    ) as T;
+  } catch (err) {
+    console.error(
+      `[model-gate] could not wrap stream for concurrency release, releasing early: ${(err as Error)?.message}`,
+      { provider: ctx.providerId, model: ctx.modelId, stage: ctx.stage },
+    );
+    done();
+    return stream;
+  }
+}
+
+/**
+ * Surface a pacing wait to a driving agent.
+ *
+ * A silently stalled run is the exact shape this repo's plan exists to
+ * eliminate — "the system reported success for something that did not happen".
+ * A paced call looks identical to a hung one unless the wait is announced.
+ *
+ * Uses the same `globalThis.__muonroiAgentRuntime.emitEvent` channel as the
+ * council's model-fallback telemetry (src/council/llm.ts) — no new transport,
+ * and no dependency from the provider layer onto the UI. Telemetry must never
+ * break a call, so the emit is guarded; per the No-Silent-Catch rule the guard
+ * still logs.
+ */
+function emitRateLimitWait(wait: RateLimitWait, ctx: GateContext): void {
+  try {
+    const runtime = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    if (!runtime?.emitEvent) return;
+    runtime.emitEvent({
+      t: "event",
+      kind: "rate-limit-wait",
+      provider: ctx.providerId ?? "",
+      modelId: ctx.modelId,
+      stage: ctx.stage,
+      limitKind: wait.kind,
+      limit: wait.limit,
+      waitMs: wait.waitMs,
+      ts: Date.now(),
+    });
+  } catch (err) {
+    console.error(`[model-gate] rate-limit-wait emit failed: ${(err as Error)?.message}`, {
+      provider: ctx.providerId,
+      model: ctx.modelId,
+    });
+  }
 }
 
 /**
