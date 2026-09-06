@@ -16,6 +16,38 @@ import { defineConfig } from "vitest/config";
 
 const PKG_ROOT = resolve("packages/agent-harness-core/src");
 
+/**
+ * Retry policy for the harness suite — env-controlled, NOT a constant.
+ *
+ * Two callers want opposite things from the same suite:
+ *
+ *  - **Development / CI regression runs** want `retry: 2`. Real-subprocess E2E
+ *    under CPU starvation is transient: a child can be momentarily starved and
+ *    miss a round/render inside an attempt's window.
+ *  - **Measurement runs** (the agent-drivability gate, `docs/agent-first/
+ *    SELF-IMPROVEMENT-PLAN.md` §5.3 / §10 row 5) want `retry: 0`. With blanket
+ *    retries the suite cannot distinguish "this axis is fixed" from "this axis
+ *    got lucky on the third attempt", so axis A5 degrades to a coin flip.
+ *
+ * `MUONROI_HARNESS_RETRY` picks. Default is 2 — today's behaviour, unchanged for
+ * every existing caller. `bun run test:harness:strict` sets it to 0.
+ */
+const DEFAULT_HARNESS_RETRY = 2;
+function resolveHarnessRetry(): number {
+  const raw = process.env.MUONROI_HARNESS_RETRY;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_HARNESS_RETRY;
+  const parsed = Number(raw.trim());
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    console.warn(
+      `[vitest.harness] MUONROI_HARNESS_RETRY=${JSON.stringify(raw)} is not a non-negative integer — ` +
+        `falling back to ${DEFAULT_HARNESS_RETRY}`,
+    );
+    return DEFAULT_HARNESS_RETRY;
+  }
+  return parsed;
+}
+const HARNESS_RETRY = resolveHarnessRetry();
+
 export default defineConfig({
   resolve: {
     alias: [
@@ -62,7 +94,9 @@ export default defineConfig({
     // a real logic bug fails all attempts and the suite still goes red.
     // Generalizes the per-describe `retry: 2` that error-states.spec.ts
     // already relied on, to every spec.
-    retry: 2,
+    // NOTE: measurement runs override this to 0 via MUONROI_HARNESS_RETRY —
+    // see resolveHarnessRetry() above. Default is unchanged at 2.
+    retry: HARNESS_RETRY,
     fileParallelism: false,
     env: {
       // Suppress the agent-harness shim deprecation warning for in-repo runs.

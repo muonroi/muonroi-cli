@@ -22,6 +22,45 @@ import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnHarness } from "./helpers.js";
 
+/**
+ * Tear down one spawned surface.
+ *
+ * `proc.kill()` is asynchronous: on Windows the child still holds open handles
+ * on files inside `home` (the session DB above all) for a short window after
+ * the signal, and `rmSync` then throws `EPERM` — which `force: true` does NOT
+ * suppress (it only swallows ENOENT). Because this runs in `afterAll`, and
+ * vitest does not apply `retry` to hook failures, that EPERM failed the whole
+ * suite file DETERMINISTICALLY at every retry setting.
+ *
+ * So: wait for the child to actually exit (bounded at 2s) before removing the
+ * directory, and treat a still-failing removal as a leaked temp dir — logged,
+ * never fatal. Mirrors the pattern already used in session-picker.spec.ts.
+ */
+async function teardownSurface(proc: ChildProcess | undefined, cleanup: (() => void) | undefined, home: string) {
+  proc?.kill();
+  await new Promise<void>((resolve) => {
+    if (!proc) return resolve();
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    proc.on("exit", done);
+    proc.on("close", done);
+    setTimeout(done, 2_000);
+  });
+  cleanup?.();
+  if (!home) return;
+  try {
+    rmSync(home, { recursive: true, force: true });
+  } catch (err) {
+    // Not fatal: a leaked temp dir under os.tmpdir() is harmless, whereas
+    // failing the hook turns a passing suite red for a teardown race.
+    console.error(`[council-surface.spec] temp home cleanup failed for ${home}: ${(err as Error).message}`);
+  }
+}
+
 async function bootSurface(
   cols: number,
 ): Promise<{ proc: ChildProcess; driver: Driver; cleanup: () => void; home: string }> {
@@ -50,10 +89,8 @@ describe("council surface — two-pane at ≥96 cols", () => {
     ({ proc, driver, cleanup, home } = await bootSurface(100));
   }, 60_000);
 
-  afterAll(() => {
-    proc?.kill();
-    cleanup?.();
-    if (home) rmSync(home, { recursive: true, force: true });
+  afterAll(async () => {
+    await teardownSurface(proc, cleanup, home);
   });
 
   it("resolves layout=two-pane", () => {
@@ -84,10 +121,8 @@ describe("council surface — strip at <96 cols", () => {
     ({ proc, driver, cleanup, home } = await bootSurface(80));
   }, 60_000);
 
-  afterAll(() => {
-    proc?.kill();
-    cleanup?.();
-    if (home) rmSync(home, { recursive: true, force: true });
+  afterAll(async () => {
+    await teardownSurface(proc, cleanup, home);
   });
 
   it("resolves layout=strip", () => {

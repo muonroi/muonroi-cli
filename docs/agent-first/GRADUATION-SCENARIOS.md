@@ -394,3 +394,35 @@ Stated so nobody mistakes a 100% for the north star:
 A row with a frontier model in the `agent model` column is a **partial result**. Graduation needs a
 row whose model is `step-3.7-flash`, whose `interventions` and `unnameable states` are both `0`,
 and whose `GSD gate` cell names (a) or (b).
+
+### GSD gate — decision of record: **(a) rely on the gate, from a reset `STATE.md`**
+
+Every row's `GSD gate` cell should read `(a)` unless that attempt deliberately sets
+`MUONROI_GSD_HARD_GATE=0`, in which case it reads `(b)`.
+
+`SELF-IMPROVEMENT-PLAN.md` §3.4 assumed "a fresh worktree lacking plan artifacts yields
+`depth: null`", making the gate structurally inert for sprints. **Measured, that premise is wrong
+in a way that matters, and wrong in a way that does not:**
+
+- `depth` is **not** null when the gate runs. `evaluateMutationGate` is called from the tool wrapper
+  in `tool-engine.ts:1363`, reached via `executeToolEngine` (`message-processor.ts:1414`), which is
+  strictly after `syncWorkflowContext` (`message-processor.ts:800`) in the same turn. That call
+  cannot pass null: `message-processor.ts:737` is
+  `pilCtx.modelDepthTier ?? pilCtx.complexityTier ?? "standard"`. Measured on a fresh worktree —
+  `readState().depth` is `null` at checkout, `"standard"` immediately after
+  `ensurePlanningWorkspace`, and exactly the value passed for each of `quick`/`standard`/`heavy`.
+- What *was* inert is different and worse: a worktree used to **inherit a stale run's phase**.
+  `.planning/STATE.md` was tracked, so every worktree started at
+  `{depth:"standard", phase:"plan", planVerified:false}` — carrying `| Ideal Run | mrq8mesr0389 |`,
+  another run's state. At `heavy` that makes `canExecute` refuse with
+  `STATE.md phase is "plan"` before the sprint has done anything.
+
+`.planning/STATE.md` is now untracked (see `docs/planning/README.md`), so a sprint worktree has no
+`STATE.md` and `ensurePlanningWorkspace` writes `DEFAULT_STATE_MD` — `Depth: standard`,
+`Phase: discuss`, `Plan Verified: no`. That is option (a)'s "reset `STATE.md` to a known value at
+worktree creation", obtained structurally rather than as a bootstrap step someone can forget.
+
+**The gate is therefore live, and still advisory below `heavy` by design.** That is deliberate
+(`mutation-gate.ts:33-42`), not a defect: a sprint only gets the hard plan-review requirement when
+layer-1 classify or the leader-tier assessor rates it `heavy`. A sprint that must be plan-gated has
+to be *classified* `heavy` — do not read a `standard` sprint's unblocked edits as the gate failing.

@@ -35,6 +35,7 @@
     "test": "bunx vitest run",
     "test:watch": "bunx vitest",
     "test:harness": "bunx vitest -c vitest.harness.config.ts run tests/harness/",
+    "test:harness:strict": "MUONROI_HARNESS_RETRY=0 bunx vitest -c vitest.harness.config.ts run tests/harness/",
     "test:core": "bunx vitest run packages/agent-harness-core/__tests__/",
     "test:harness-react": "bunx vitest -c packages/agent-harness-react/vitest.config.ts run",
     "test:harness-angular": "bunx vitest -c vitest.harness-angular.config.ts run tests/harness-angular/",
