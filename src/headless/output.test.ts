@@ -56,6 +56,7 @@ describe("headless output helpers", () => {
 
     expect(renderHeadlessChunk(chunk)).toEqual({
       stderr: "\u001b[33m▸ bash\u001b[0m\n\u001b[33m▸ read_file\u001b[0m\n",
+      eventType: "progress",
     });
   });
 
@@ -71,6 +72,7 @@ describe("headless output helpers", () => {
 
     expect(renderHeadlessChunk(chunk)).toEqual({
       stderr: "\u001b[31m✗ bash\u001b[0m\n",
+      eventType: "progress",
     });
   });
 
@@ -87,6 +89,7 @@ describe("headless output helpers", () => {
 
     expect(renderHeadlessChunk(chunk)).toEqual({
       stderr: "\u001b[32m▸ generate_image\u001b[0m\n  /tmp/generated.png (https://example.com/generated.png)\n",
+      eventType: "progress",
     });
   });
 
@@ -270,6 +273,52 @@ describe("headless output helpers", () => {
       const sr = events.find((ev) => ev.type === "structured_response");
       expect(sr).toMatchObject({ type: "structured_response", taskType: "general", data: { response: "The answer." } });
       expectSessionAndTimestamp(sr, "sess-sr");
+    });
+  });
+
+  // Sprint 2 — per-batch hasAnswer semantics with mixed events
+  describe("per-batch hasAnswer semantics with mixed events", () => {
+    it("text emitter: content + error in same flush round-trip preserves hasAnswer on the final flush", () => {
+      const e = createHeadlessTextEmitter();
+      // content chunks are buffered; they return no hasAnswer until flush.
+      e.consumeChunk({ type: "content", content: "hello " });
+      // error is pure progress — streams to stderr, carries no hasAnswer.
+      const errW = e.consumeChunk({ type: "error", content: "boom" });
+      expect(errW.hasAnswer).toBeUndefined();
+      // Flushing after buffered content produces hasAnswer: true even though
+      // the batch also contained an error event (errors don't cancel answers).
+      const tail = e.flush();
+      expect(tail.stdout).toBe("hello \n");
+      expect(tail.hasAnswer).toBe(true);
+    });
+
+    it("json emitter: buffered text flushed after consumeChunk carries hasAnswer", () => {
+      const { consumeChunk, flush } = createHeadlessJsonlEmitter("batch-sem");
+      consumeChunk({ type: "content", content: "the answer" });
+      const tail = flush();
+      expect(tail.hasAnswer).toBe(true);
+      expect(tail.stdout).toBeDefined();
+      expect(tail.stdout).toContain("the answer");
+    });
+
+    it("json emitter: error event does not carry hasAnswer (errors are not answers)", () => {
+      const { consumeChunk } = createHeadlessJsonlEmitter("batch-err");
+      // In JSONL mode errors are serialized as JSON lines to stdout.
+      const w = consumeChunk({ type: "error", content: "something went wrong" });
+      expect(w.stdout).toBeDefined();
+      expect(w.stdout).toContain("something went wrong");
+      // hasAnswer must NOT be set for an error-only write.
+      expect(w.hasAnswer).toBeUndefined();
+    });
+
+    it("text emitter: structured_response chunk sets hasAnswer immediately", () => {
+      const e = createHeadlessTextEmitter();
+      const w = e.consumeChunk({
+        type: "structured_response",
+        structuredResponse: { taskType: "general", data: { response: "final answer" } },
+      });
+      expect(w.stdout).toBe("final answer\n");
+      expect(w.hasAnswer).toBe(true);
     });
   });
 });

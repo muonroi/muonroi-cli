@@ -4,12 +4,17 @@ import type {
   ProcessMessageStepStart,
 } from "../orchestrator/agent-options";
 import type { StreamChunk, StructuredResponse, ToolCall, ToolResult } from "../types";
+import type { Agent } from "../orchestrator/orchestrator";
 
 export type HeadlessOutputFormat = "text" | "json";
 
 export interface HeadlessWrites {
   stdout?: string;
   stderr?: string;
+  /** Present when this write carries actual answer content (content, structured_response, or tool_result). */
+  hasAnswer?: true;
+  /** Discriminator identifying which event type was emitted in this batch. */
+  eventType?: "answer" | "progress" | "error";
 }
 
 /** Semantic JSONL events for headless `--format json` (OpenCode-style). */
@@ -69,6 +74,24 @@ export type HeadlessJsonEvent =
       timestamp: number;
     };
 
+/** Discriminator for the kind of event emitted in a single flush / consumeChunk batch. */
+export const HeadlessEventType = {
+  answer: "answer",
+  progress: "progress",
+  error: "error",
+} as const;
+
+export type HeadlessEventTypeValue = (typeof HeadlessEventType)[keyof typeof HeadlessEventType];
+
+/** Returns the event type for a batch of writes. */
+function classifyEventType(w: HeadlessWrites): HeadlessEventTypeValue {
+  if (w.eventType) return w.eventType;
+  if (w.hasAnswer) return HeadlessEventType.answer;
+  if (w.stderr) return HeadlessEventType.progress;
+  if (w.stdout) return HeadlessEventType.answer;
+  return HeadlessEventType.progress;
+}
+
 export function isHeadlessOutputFormat(value: string): value is HeadlessOutputFormat {
   return value === "text" || value === "json";
 }
@@ -91,12 +114,13 @@ export function renderHeadlessPrelude(format: HeadlessOutputFormat, sessionId?: 
 export function renderHeadlessChunk(chunk: StreamChunk): HeadlessWrites {
   switch (chunk.type) {
     case "content":
-      return chunk.content ? { stdout: chunk.content } : {};
+      return chunk.content ? { stdout: chunk.content, hasAnswer: true, eventType: HeadlessEventType.answer } : {};
 
     case "tool_calls":
       return chunk.toolCalls?.length
         ? {
             stderr: chunk.toolCalls.map((tc) => `\x1b[33m▸ ${formatToolCallLabel(tc)}\x1b[0m\n`).join(""),
+            eventType: HeadlessEventType.progress,
           }
         : {};
 
@@ -114,20 +138,24 @@ export function renderHeadlessChunk(chunk: StreamChunk): HeadlessWrites {
           return `  ${asset.path}${suffix}`;
         }) ?? [];
       const stderr = [`${color}${icon} ${label}\x1b[0m`, ...mediaLines].join("\n");
-      return { stderr: `${stderr}\n` };
+      return { stderr: `${stderr}\n`, eventType: HeadlessEventType.progress };
     }
 
     case "structured_response":
       // A respond_* terminal answer arrives ONLY as this chunk (never as
       // `content`). Without this case it hit the no-op default below and the
       // answer was silently dropped from `--format text` stdout.
-      return chunk.structuredResponse ? { stdout: `${formatStructuredResponseText(chunk.structuredResponse)}\n` } : {};
+      return chunk.structuredResponse
+        ? { stdout: `${formatStructuredResponseText(chunk.structuredResponse)}\n`, eventType: HeadlessEventType.answer }
+        : {};
 
     case "error":
-      return chunk.content ? { stderr: `\x1b[31m${chunk.content}\x1b[0m\n` } : {};
+      return chunk.content
+        ? { stderr: `\x1b[31m${chunk.content}\x1b[0m\n`, eventType: HeadlessEventType.error }
+        : { eventType: HeadlessEventType.error };
 
     case "done":
-      return { stdout: "\n" };
+      return { stdout: "\n", eventType: HeadlessEventType.progress };
 
     case "reasoning":
       return {};
@@ -298,7 +326,9 @@ export function createHeadlessTextEmitter(): {
         // Terminal answer is authoritative — drop any buffered preamble.
         pendingContent = "";
         structuredEmitted = true;
-        return { stdout: `${formatStructuredResponseText(chunk.structuredResponse)}\n` };
+        return { stdout: `${formatStructuredResponseText(chunk.structuredResponse)}\n`, hasAnswer: true, eventType: HeadlessEventType.answer };
+      case "error":
+        return { stderr: chunk.content ? `\x1b[31m${chunk.content}\x1b[0m\n` : "", hasAnswer: undefined, eventType: HeadlessEventType.error };
       case "done":
         // Trailing newline is emitted by flush() alongside the final answer.
         return {};
@@ -309,7 +339,7 @@ export function createHeadlessTextEmitter(): {
 
   function flush(): HeadlessWrites {
     if (structuredEmitted || pendingContent.length === 0) return {};
-    return { stdout: `${pendingContent}\n` };
+    return { stdout: `${pendingContent}\n`, hasAnswer: true, eventType: HeadlessEventType.answer };
   }
 
   return { consumeChunk, flush };
@@ -317,6 +347,25 @@ export function createHeadlessTextEmitter(): {
 
 function jsonLine(event: HeadlessJsonEvent): string {
   return `${JSON.stringify(event)}\n`;
+}
+
+/**
+ * Returns true when the JSONL string contains at least one line whose parsed
+ * event type is a recognised answer carrier (text / tool_use /
+ * structured_response).  Metadata lines (step_start / step_finish) and error
+ * lines are ignored so a stream that only produced step metadata does not
+ * look like a successful answer.
+ */
+function hasAnswerEvent(jsonl: string): boolean {
+  return jsonl.split("\n").some((line) => {
+    if (!line.trim()) return false;
+    try {
+      const ev = JSON.parse(line) as HeadlessJsonEvent;
+      return ev.type === "text" || ev.type === "tool_use" || ev.type === "structured_response";
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
@@ -392,8 +441,25 @@ export function createHeadlessJsonlEmitter(sessionId?: string): {
   }
 
   function flush(): HeadlessWrites {
+    // Emit any accumulated textBuffer as a JSONL text event first so that
+    // a content-only turn that never called onStepFinish still produces an
+    // answer event.  Mirrors the text emitter's flush which always drains
+    // pendingContent.
+    if (textBuffer.length > 0) {
+      pending += jsonLine(
+        withSession({
+          type: "text",
+          stepNumber: currentStep,
+          text: textBuffer,
+          timestamp: Date.now(),
+        }) as HeadlessJsonEvent,
+      );
+      textBuffer = "";
+    }
     const stdout = drainPending();
-    return stdout ? { stdout } : {};
+    return stdout
+      ? { stdout, eventType: classifyEventType({ stdout }), ...(hasAnswerEvent(stdout) ? { hasAnswer: true } : {}) }
+      : {};
   }
 
   function consumeChunk(chunk: StreamChunk): HeadlessWrites {
@@ -500,8 +566,78 @@ export function createHeadlessJsonlEmitter(sessionId?: string): {
         break;
     }
 
-    return stdout ? { stdout } : {};
+    return stdout ? { stdout, eventType: classifyEventType({ stdout }), ...(hasAnswerEvent(stdout) ? { hasAnswer: true } : {}) } : {};
   }
 
   return { observer, consumeChunk, flush };
+}
+
+/**
+ * Headless end-to-end runner.
+ *
+ * Creates the emitter for the chosen format, runs `agent.processMessage(prompt)`,
+ * feeds every emitted chunk to the emitter, and returns the final exit code:
+ *   - 0  — at least one answer-carrying flush was observed (hasAnyAnswer === true)
+ *   - 1  — no answer content was produced
+ *
+ * The `hasAnyAnswer` tracker accumulates with OR semantics so a single answer
+ * in any batch is enough for a clean exit.
+ *
+ * @param agent          Ready-to-use Agent instance (caller owns lifecycle).
+ * @param prompt         The user prompt to run.
+ * @param outputFormat   `"text"` for plain-text stdout/stderr, `"json"` for JSONL.
+ * @param sessionId      Optional session id forwarded to JSONL events.
+ */
+export async function runHeadless(
+  agent: Agent,
+  prompt: string,
+  outputFormat: HeadlessOutputFormat,
+  sessionId?: string,
+): Promise<{ exitCode: number; hasAnyAnswer: boolean }> {
+  // Split JSON vs text before the try block so TS can narrow emitter.observer.
+  const isJson = outputFormat === "json";
+  const jsonEmitter = isJson ? createHeadlessJsonlEmitter(sessionId) : undefined;
+  const textEmitter = isJson ? undefined : createHeadlessTextEmitter();
+
+  // Prepend format-appropriate prelude to stderr (text mode only; json is silent).
+  const prelude = renderHeadlessPrelude(outputFormat, sessionId);
+  if (prelude.stderr) process.stderr.write(prelude.stderr);
+
+  let hasAnyAnswer = false;
+  const writes: HeadlessWrites[] = [];
+
+  try {
+    if (jsonEmitter) {
+      // JSON mode: use observer hooks for step-level granularity.
+      const obs = jsonEmitter.observer;
+      for await (const chunk of agent.processMessage(prompt, obs)) {
+        const w = jsonEmitter.consumeChunk(chunk);
+        writes.push(w);
+        if (w.hasAnswer) hasAnyAnswer = true;
+      }
+    } else if (textEmitter) {
+      // Text mode: no observer support, pass undefined directly.
+      for await (const chunk of agent.processMessage(prompt, undefined)) {
+        const w = textEmitter.consumeChunk(chunk);
+        writes.push(w);
+        if (w.hasAnswer) hasAnyAnswer = true;
+      }
+    }
+  } catch (err) {
+    // Emit the error as a write so stderr gets it; still set hasAnyAnswer=false.
+    writes.push({ stderr: `\x1b[31m${(err as Error).message}\x1b[0m\n`, eventType: HeadlessEventType.error });
+  } finally {
+    // Final flush drains any buffered tail content.
+    const tail = (jsonEmitter ?? textEmitter)!.flush();
+    writes.push(tail);
+    if (tail.hasAnswer) hasAnyAnswer = true;
+
+    // Write everything to the real stdout/stderr.
+    for (const w of writes) {
+      if (w.stdout) process.stdout.write(w.stdout);
+      if (w.stderr) process.stderr.write(w.stderr);
+    }
+  }
+
+  return { exitCode: hasAnyAnswer ? 0 : 1, hasAnyAnswer };
 }

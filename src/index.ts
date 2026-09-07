@@ -32,6 +32,7 @@ import {
   createHeadlessJsonlEmitter,
   createHeadlessTextEmitter,
   type HeadlessOutputFormat,
+  type HeadlessWrites,
   isHeadlessOutputFormat,
   renderHeadlessPrelude,
 } from "./headless/output";
@@ -667,6 +668,14 @@ async function runHeadless(
     }
   }
 
+  // Track whether any emitted write carried actual answer content.
+  // Exit 0 when the model produced an answer, exit 1 when no answer was found
+  // (e.g. tool-only turn with no final response), exitCode !== 78 always.
+  let hasAnswer = false;
+  const recordWrite = (writes: HeadlessWrites): void => {
+    if (writes.hasAnswer) hasAnswer = true;
+  };
+
   // Council askcards have no TUI to render them in headless mode. When
   // auto-answer is enabled, resolve the responder promises with either the
   // scripted answer or `defaultIndex` — otherwise the process hangs forever.
@@ -691,27 +700,40 @@ async function runHeadless(
       for await (const chunk of agent.processMessage(enhancedMessage, observer)) {
         maybeAutoAnswer(chunk);
         const writes = consumeChunk(chunk);
+        recordWrite(writes);
         if (writes.stdout) writeSafe(process.stdout, writes.stdout);
         if (writes.stderr) writeSafe(process.stderr, writes.stderr ?? "");
       }
       const tail = flush();
+      recordWrite(tail);
       if (tail.stdout) writeSafe(process.stdout, tail.stdout);
       if (tail.stderr) writeSafe(process.stderr, tail.stderr ?? "");
-      return;
     }
 
     const textEmitter = createHeadlessTextEmitter();
     for await (const chunk of agent.processMessage(enhancedMessage)) {
       maybeAutoAnswer(chunk);
       const writes = textEmitter.consumeChunk(chunk);
+      recordWrite(writes);
       if (writes.stdout) writeSafe(process.stdout, writes.stdout);
       if (writes.stderr) writeSafe(process.stderr, writes.stderr);
     }
     const textTail = textEmitter.flush();
+    recordWrite(textTail);
     if (textTail.stdout) writeSafe(process.stdout, textTail.stdout);
     if (textTail.stderr) writeSafe(process.stderr, textTail.stderr ?? "");
+  } catch (err) {
+    // Flush failure (flush throws) means content never reached stdout → exit 1.
+    // hasAnswer=true from a previous successful flush is irrelevant here because
+    // the content path is broken. ProcessMessage loop errors are already caught
+    // and written to stderr by the recordWrite path above.
+    if (!hasAnswer) {
+      writeSafe(process.stderr, `\x1b[31m${(err as Error).message}\x1b[0m\n`);
+    }
+    process.exit(1);
   } finally {
     await agent.cleanup();
+    process.exit(hasAnswer ? 0 : 1);
   }
 }
 
