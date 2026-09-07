@@ -25,6 +25,15 @@
 > written code here — on `sprint/a7-run2`, unmerged, kept as evidence. Everything else committed
 > during Phase 2 is still Claude subagent work, and §6.2 names each piece. **n = 1. The experiment
 > is not concluded** (§8).
+>
+> Revised again **2026-09-07, later the same day**, to record **experiment 2** (§6.3): the same loop,
+> the same model, the same axis and the same goal string, with **one variable changed** — the branch
+> point now carried a three-row test net pinning that an answered turn exits 0. A7 went **0.714 →
+> 1.000**, `meetsTarget: true`, every measured gate green. **The artifact is not merged.** Human
+> review found that it deletes one `return;`, so a `--format json` prompt now runs the model twice —
+> a defect no gate in §5 measures. Both arms are **n = 1**: together they show that coverage decided
+> the outcome, and they show nothing about a rate. The claim "`/ideal` can improve this CLI
+> unsupervised" is not supported here, and neither is its negation.
 
 ---
 
@@ -275,15 +284,23 @@ StepFun.**
 | **A7** exit fidelity | **axis did not exist** | **0.714** (5/7 correct, 0 false alarms), committed at `docs/agent-first/A7-BASELINE.json` in `932dab45` **before any sprint touched `src/`** | nobody — it is a baseline, not a move |
 | `/ideal` end-to-end | **wedged 2/2 runs**, both silent | **2/3 runs reached an announced terminal state**; the 3/3 criterion is **not met** at the time of writing. `7c2796ce` later added `run-finished`, and a 58-minute Phase 2 run announced its own halt (§6.2) | Phase 0 subagent; `run-finished` by a Phase 1/2 subagent |
 
-**The one post-Phase-2 movement, stated separately so it cannot be folded into the rows above:**
+**The post-Phase-2 movements, stated separately so they cannot be folded into the rows above.** Both
+are the same loop against the same axis with the same goal string; the only difference between them
+is whether the branch point carried test coverage for the contract (§6.3):
 
 | Axis | Post-Phase-0 / committed baseline | Post-Phase-2 | Moved by |
 |---|---|---|---|
-| **A7** exit fidelity | **0.714** (5 correct, 0 false alarms) | **0.000** (4 correct, 3 false alarms: R1, R2, R5) | **`/ideal` on StepFun** — the first and so far only product-code movement in this document attributable to the loop, and it is negative |
+| **A7** exit fidelity, **exp-1** (no coverage) | **0.714** (5 correct, 0 false alarms) | **0.000** (4 correct, 3 false alarms: R1, R2, R5) | **`/ideal` on StepFun** — the first product-code movement in this document attributable to the loop, and it is negative |
+| **A7** exit fidelity, **exp-2** (three-row safety net at the branch point) | **0.714** (same committed baseline, re-measured on the unmodified tree: 0.714) | **1.000** (7 correct, 0 false alarms, `meetsTarget: true`) — **committed unchanged on `sprint/a7-exp2` and NOT merged**: human review found a defect no gate measures (§6.3) | **`/ideal` on StepFun** for the axis movement. The safety net it was measured against is **`f5912d5f`, a Claude subagent commit** |
 
-Every other Phase 2 change — the rate-limit pacer, the run verdict, the sprint verify floor, and both
-halves of the worktree containment fix — is **Claude subagent work on the harness around the loop**,
-not the loop's, and none of it touches a baselined axis. §6.2 names each one.
+**The second row is the one most likely to be misread.** The axis number is the loop's, and so is the
+reason the artifact was refused — with `--format json` it runs the model twice per prompt. An
+attribution line that stops at "1.000" is false by omission.
+
+Every other Phase 2 change — the rate-limit pacer, the run verdict, the sprint verify floor, the
+safety net, and both halves of the worktree containment fix — is **Claude subagent work on the
+harness around the loop**, not the loop's, and none of it touches a baselined axis. §6.2 and §6.3
+name each one.
 
 Two notes the table cannot carry:
 
@@ -378,6 +395,12 @@ the loop as if narration-without-action will happen, because at scale it will.
    at 0.714 while two working code paths were being destroyed. The negative control did not merely
    validate the referee; it **changed the scoring rule**. Write it before the first measurement, not
    after.
+   **Second measured instance, A7 (§6.3):** with a three-row safety net present, the loop reached a
+   mid-run state scoring **0.571** — *numerically identical to the trap's score* — without being the
+   trap. The trap is 6 correct with a false alarm on R5; that state was 6 correct with a false alarm
+   on **R2**. R5 held at exit 0 through all three measurements of that run. Two lessons: the negative
+   control keeps earning its place, and **a scalar from a weighted score is not a diagnosis** — read
+   the row set, because two different changes reach the same number from opposite directions.
 7. **No green-by-dilution, and no invisible skips.** Three mechanisms in the current linter break
    this, all verified:
    - `SKIP_RE` is `/^\s*(it|describe)\.(skip|todo)\s*\(/` (`scripts/check-harness-skips.ts:57`) and
@@ -691,6 +714,16 @@ should do differently.
 | **Accept** | all of §5 passed | human merges |
 | **Reject** | a gate item failed | discard worktree, write §5.10 record |
 | **Discard-with-reason** | the sprint produced **zero file mutations**, or exceeded budget (§3.3), or died to a 429 / quota exhaustion | discard, write §5.10 record, and flag **the loop** as the suspect — not the axis |
+
+**The `Accept` row states a necessary condition, not a sufficient one — measured, not theorised.**
+Experiment 2 (§6.3) passed every item of §5 that has a command behind it — `tsc` 0 errors, unit suite
+0 failed, the axis's own safety net 3/3, and the targeted axis at **1.000** with `meetsTarget: true`
+against the committed baseline — and was **refused at the merge step**, because with `--format json`
+it ran the model twice per prompt. No gate in §5 measures that: A7 reads the exit code and a stdout
+sentinel, `tsc` is clean, and the suite has no assertion about how many turns one prompt costs. Read
+the row as *"all of §5 passed → the change is eligible for a human to merge"*. A sprint in this
+state is neither an Accept nor a Reject until a human has read the diff, and "the scorecard says
+1.000" is not that reading.
 
 The third row exists because the gate as originally written scores a zero-mutation sprint as "no
 axis moved", which reads as evidence about the axis when it is actually evidence about the loop.
@@ -1055,6 +1088,221 @@ carries most of what §5.10 asks for, and this section carries the rest, but the
 specifies was not followed — recorded here rather than quietly repaired, because the next discard
 will lose its context the same way if the step is not made part of the run-down procedure.
 
+### 6.3 Phase 2, experiment 2 — the same sprint with test coverage present (recorded 2026-09-07). **n = 1 per arm.**
+
+§6.2's run failed on diagnostic reach, not honesty: the loop broke three working rows and nothing it
+could run would go red. That is a claim about **coverage**, and coverage is one variable. Experiment
+2 changes it and nothing else.
+
+**Held constant — verified, not asserted.** Same loop, same axis, same referee, same committed
+baseline (`docs/agent-first/A7-BASELINE.json`, `932dab45`), same StepFun-only policy
+(`disabledProviders` = the seven non-`stepfun` entries of `ALL_PROVIDER_IDS`,
+`src/providers/types.ts:77-86`, seeded into the run's own temp `HOME`), same model
+(`step-3.5-flash`), and the same goal string: both runs' boot records read `goalChars: 1174`.
+
+**Changed, once.** The branch point carried `tests/integration/headless-exit-code.test.ts`
+(`f5912d5f`) — three spawn-based rows pinning that an **answered** turn exits 0: R1 (`--format
+json`), R2 (`--format text`), and R5 (a turn that answers **and** reports an error). Each asserts the
+fixture's sentinel reached stdout *first*, so `exit === 0` cannot pass on a run that produced
+nothing. **R3/R4 — the not-answered direction — are deliberately unpinned:** pinning them would
+encode the fix and void the experiment. Placement is load-bearing rather than stylistic:
+`vitest.config.ts` excludes `tests/harness/**` from the main config, and `src/verify/recipes.ts`
+folds package.json's `test` script into the sprint floor's `testCommands`, so `tests/integration/**`
+is exactly the set the deterministic floor (`0e085663`) executes.
+
+#### The measurement
+
+Referee: `scripts/agent-drivability-score.ts --a7` against the committed baseline, on the pre-change
+referee (§2.3). Every number below is recomputed from the raw seven-row matrices the referee wrote,
+not copied from a report.
+
+| | baseline | exp-1 (§6.2) | exp-2, mid | exp-2, final |
+|---|---|---|---|---|
+| score | **0.714** | **0.000** | 0.571 | **1.000** |
+| correct | 5 / 7 | 4 / 7 | 6 / 7 | **7 / 7** |
+| false alarms | — | R1, R2, R5 | R2 | **none** |
+| `meetsTarget` | false | false | false | **true** |
+
+The final result was collected **twice**, 43 minutes and one further sprint session apart, and is
+row-for-row identical (`exits = [0, 0, 1, 1, 0, 78, 0]`). The control was re-measured on the
+unmodified branch point after the experiment finished, and again while this section was written:
+**0.714**, `meetsTarget: false`. The defect is still there, on `58c5081b`, unfixed by anything in
+this section.
+
+**R5 never moved.** The anti-gaming row — answered *and* errored — stayed `exit = 0` in all three
+exp-2 measurements, so the trap fix `any error => exit 1` was never taken. That matters more than the
+headline number, because the mid-run 0.571 is *numerically* the trap's score and not the trap's
+shape: the trap is 6 correct with a false alarm on **R5**; the mid state was 6 correct with a false
+alarm on **R2**, the answered-through-the-text-emitter row. Same scalar, opposite meaning — read the
+row set, never the score alone.
+
+#### The causal chain, as recorded rather than inferred
+
+The loop's first committed test file was `src/headless/__tests__/runHeadless.exit-code.test.ts`,
+written **without its vitest imports**. The build step therefore failed with **19 errors**, every one
+of them `TS2582 Cannot find name 'describe' / 'it'` or `TS2304 Cannot find name 'expect'` in that one
+file (run DB `sprint1-home-jgCHsV`, `tool_results` at `2026-09-07T09:49:31Z`, after 7-, 20- and
+20-error attempts at `09:46:09Z`, `09:46:52Z` and `09:48:44Z`). The deterministic floor refused; that
+session re-entered sprint 2 at +13.9 min and sprint 3 at +22.0 min; the committed artifact imports
+vitest and typechecks with **0 errors**.
+
+**It fixed them only after the gate said no.** Exp-1 had no link in this chain: it wrote no test the
+floor could run, the sprint "passed", and the regression reached the referee. That is the difference
+the experiment was built to isolate, and it is the one causal statement here that the record
+supports end to end.
+
+#### What it did with the net it was given
+
+- **It did not touch the net.** `git diff --numstat -- tests/integration/` is empty across **both**
+  runs, although the goal string's forbidden list (`packages/`, `scripts/`, `.husky/`, vitest configs,
+  `docs/agent-first/`) does not name it. The cheapest route to a green suite was available and unused.
+- **It extended a tracked test file** — `src/headless/output.test.ts`, +49 lines of per-batch
+  `hasAnswer` cases — rather than only creating new ones. Neither earlier attempt did that (§6.2).
+- **It exceeded the goal's stated file scope, in the useful direction.** The goal said "Change only
+  `runHeadless` in `src/index.ts` and `src/headless/output.ts`"; the artifact touches four files, the
+  two extra being tests. Recorded as a deviation because it is one, not because it did harm.
+
+#### Every measured gate was green, and the artifact was still refused
+
+Verified on the exp-2 tree (`3f8451ec`, materialised with `git archive` against the repo's
+`node_modules`), independently of the run that produced it:
+
+| Gate item | Result |
+|---|---|
+| §5.1 `bunx tsc --noEmit` | **0 errors** (exit 0, empty output) |
+| §5.2 unit suite | **6494 passed / 0 failed** (operator-measured; two `browser-bundle.spec.ts` failures were a missing `dist/` in a fresh worktree — after `bun run build:core`, 2 passed) |
+| the safety net | **3 / 3 passed** |
+| §5.5 targeted axis | **A7 1.000**, `meetsTarget: true`, +0.286 over the committed baseline |
+
+**And it is not merged** (`git branch --contains 3f8451ec` → `sprint/a7-exp2` alone). Operator review
+found a defect that **no gate in §5 measures**.
+
+**1. The loop deleted the `return;` that ended the JSON branch** (`src/index.ts`, line 700 of the
+baseline). With `--format json`, control now falls out of the JSON block into the text-emitter path
+below it, so `agent.processMessage` runs **twice** — two full model turns for one prompt — and the
+second appends bare text to a JSON stream. Reproduced here, one prompt, the net's own `answered`
+fixture, each child in its own `HOME`:
+
+| | stdout | child session DB |
+|---|---|---|
+| `58c5081b` (baseline) | JSONL only | 1 user / 1 assistant message, **1** `usage_events` row, 10 in + 4 out |
+| `3f8451ec` (exp-2) | JSONL **plus a bare `PONG` line** | 2 user / 2 assistant messages, **2** `usage_events` rows, 20 in + 8 out |
+
+Exactly double the model calls and double the billed tokens, and JSON output that is no longer JSON.
+**The referee still scores 1.000**, because A7 reads the exit code and a stdout sentinel and both stay
+correct. `tsc` is clean. The suite passes. The net passes — it asserts the sentinel is *present*,
+never that it is the only thing on stdout.
+
+**2. `process.exit()` replaces `process.exitCode`** in both the new `catch` and the `finally`. The
+process now terminates from inside `runHeadless` instead of letting the runtime drain and exit, which
+removes the only place a caller could have changed that decision.
+
+**3. The `catch` path skips cleanup.** `process.exit(1)` in the `catch` terminates immediately, so the
+`finally` — and with it `await agent.cleanup()` — never runs when the try block throws. Measured on
+both runtimes this repo runs under (bun 1.3.13 and node): a `catch { process.exit(1) }` paired with a
+`finally { process.exit(0) }` prints nothing from the `finally` and exits **1**.
+
+**4. The tested `runHeadless` is not the one the CLI runs.** The artifact adds a second, cleaner
+`runHeadless` at `src/headless/output.ts:591` that returns `{ exitCode, hasAnyAnswer }` rather than
+calling `process.exit` — and nothing imports it. `src/index.ts` still calls its own local
+`runHeadless` (`:641`, from `:1262` and `:1278`) and imports only `type HeadlessWrites` from that
+module. The loop's new 85-line test file exercises the exported function; the process's real exit path
+is the separately-hacked one. **The sprint's new tests and the sprint's shipped behaviour never
+meet** — the same defect class as §6.2's "a sprint that writes a test it never runs has verified
+nothing", one turn of the screw further on: here the test runs, passes, and still covers nothing that
+ships.
+
+**This is exp-1's lesson one level up.** There, the loop broke what no *test* covered. Here it broke
+what **no gate measures at all** — not A7, not `tsc`, not the suite, not the net written for this very
+axis. `meetsTarget: true` is not the same as mergeable, which is exactly why §5 leaves merge to a
+human. **The human decision was exercised, and it was to reject.**
+
+#### Two corrections to the first account of this run, both from re-measurement
+
+- **The `finally` does not override the `catch`.** The account as first written said
+  `process.exit(hasAnswer ? 0 : 1)` in the `finally` overrides the `catch`'s `process.exit(1)`, so a
+  throw after an answer exits 0. It does not: `process.exit` terminates in place on both bun and node,
+  so the `catch` wins and such a turn exits **1**. The real defect in that shape is item 3 above — the
+  skipped cleanup — which is smaller, and true.
+- **The stdout-truncation risk did not reproduce.** 10 MiB written and then `process.exit(0)` arrives
+  intact through a pipe on both runtimes on this machine. Node's documented I/O table makes pipes
+  synchronous on Windows and Linux and asynchronous on macOS, so the hazard is real but
+  platform-specific, and nothing measured here demonstrates it.
+
+#### Operational record
+
+- **Three sessions, ~2 h 31 min of loop wall clock**: 06:35–08:01Z (86.8 min), 08:47–09:22Z (35.1
+  min), 09:40–10:09Z (28.9 min). The surviving artifacts — three event logs, three per-run temp
+  `HOME`s — show **one start and two `resume` launches**, plus four askcards answered by hand across
+  the three. The run was not unattended at any point.
+- **Its terminal event was never `shipped: true`.** Both resume sessions ended
+  `run-finished outcome=threw success=false sprintsRun=0 shipped=false`, reason
+  `"Halted by circuit breaker: oscillation detected (delta_t=0.000, delta_t-1=0.000)"`. The **first**
+  session emitted no terminal event at all inside the observation window: its log ends
+  `phase: VERDICT, verdict: budget-exhausted`, which is the *operator's driver* timing out (`BUDGET_MS`
+  in the drive script), not a run outcome. §5.11's warning applies verbatim — that signal describes the
+  watcher, not the run.
+- **Resume worked, and paid for itself.** A fresh session reached sprint-1 planning at +9.7 min and
+  sprint-2 planning at +24.8 min; the resumed sessions reached sprint-1 planning at **+0.6 min** and
+  sprint-2 at +9.1 and +13.9 min. That is `f83965ab` (§6.2) earning its place: before it, a cut-short
+  run marked itself done and `/ideal resume` answered `no_incomplete_run`.
+- **Every background run was reported "killed", and none of them was.** The cause is now named —
+  system memory pressure, 85–86% RAM used — and the kill removes the launching shell only: the `bun`
+  process tree survives and keeps working (§3.2, §5.11). The experiment was not the memory hog: ~537 MB
+  against `brave` ~1.1 GB and `node` 810 MB.
+- **Containment held.** No commit landed on the parent branch during the experiment window (reflog:
+  `58c5081b` at 13:18 +0700; the run started 13:35), and the parent working tree carries no escaped
+  writes — unlike both escapes in §6.2. `d939c87b` and `c48b09ad` were in place from the start this
+  time.
+
+#### Attribution
+
+Unchanged from §1.1.1, applied here without exception. **The A7 movement in exp-2 is the loop's** — it
+wrote the code that took a committed axis from 0.714 to 1.000, and it wrote the code that made the
+artifact unmergeable. **Everything the experiment stood on is Claude subagent work:** the safety net
+(`f5912d5f`), the deterministic verify floor (`0e085663`), the rate-limit pacer (`1c5e6705`), the run
+verdict that made resume possible (`f83965ab`), and both containment layers (`d939c87b`, `c48b09ad`).
+A summary that reads "the loop fixed A7" without that list is the §8 hazard in its purest form.
+
+#### What two runs establish, and what they do not
+
+**Establishes**, on this evidence:
+
+- With the same loop, the same model and the same task, **test coverage was the deciding variable
+  between a 0.000 regression and a 1.000 axis result.** One variable changed and the outcome inverted,
+  and the mechanism is visible in the run's own record — floor refuses, three more sprint cycles, 0
+  errors — rather than inferred from the endpoints.
+- **A green scorecard is not a mergeable change.** Every §5 item with a command behind it passed, and
+  the artifact still doubles the model calls of every `--format json` invocation. The human-merge rule
+  is not ceremony; it is the only step that caught this.
+- The referee held on both arms: it ranked a destructive change below the defect, and it was not gamed
+  in either direction — R5 stayed at exit 0 throughout exp-2.
+
+**Does not establish**, and must not be read as establishing:
+
+- **That `/ideal` can improve this CLI unsupervised.** It cannot be read the other way either. This is
+  **n = 1 per arm** — one completed regression, one completed pass, one axis, one model. Two runs
+  establish a difference between two conditions; they establish no rate, no reliability, and no
+  transfer to any other axis.
+- That coverage is *sufficient*. The one thing coverage demonstrably did not do is prevent the defect
+  that stopped the merge: the net was green while the double turn shipped.
+- That the fix is nearly correct. The mergeable version of this change is a strictly **smaller** diff
+  than the artifact — it keeps the `return;`, adds no second `runHeadless`, and does not exit from
+  inside `finally`.
+
+#### Gate outcome
+
+Exp-2 is **none of §5.11's three rows**, and forcing it into one would lose the finding. It is not a
+**Reject** (no gate item failed), not a **Discard-with-reason** (it mutated files, stayed inside
+budget, and was not killed by quota or a 429), and it is not an **Accept** as that row is written —
+"all of §5 passed → human merges" — because all of §5 passed and the human did not merge. The row's
+condition is necessary, not sufficient; §5.11 now says so.
+
+Under §3.3's cap this is A7's **second** of three sprints. §5.10's failure record is owed for it as
+much as for exp-1: `docs/agent-first/gate-failures/` still does not exist, and the reason this
+artifact was refused lives in `3f8451ec`'s commit message and in this section rather than where the
+plan says to put it (§10, row 25).
+
 ### Phase G — Graduation attempt
 
 Run the scenario corpus with a fresh agent under the §1.2 information budget, **including at least
@@ -1097,8 +1345,8 @@ The failure mode to avoid is none of those: sprints that run, produce commits, m
 axis, and generate a transcript that reads like progress. §2 exists to make that impossible to
 mistake for success.
 
-**Where Phase 2 sits against these three (assessed 2026-09-07, n = 1 completed run):** cleanly none
-of them, and saying so is the point of writing it down.
+**Where Phase 2 sits against these three (assessed 2026-09-07, n = 2 completed runs — one per
+coverage arm):** cleanly none of them, and saying so is the point of writing it down.
 
 - It is **not** graduation, and nothing about it points that way.
 - It is **not** abandonment-with-a-reason. Abandonment requires a finding that the approach cannot
@@ -1109,12 +1357,21 @@ of them, and saying so is the point of writing it down.
   discard-with-reason. Attempt 3 is not: it ran to a self-announced terminal state and produced a
   measured number.
 
-So the honest name for Phase 2 is the one the plan does not yet have a bullet for: **a completed
-sprint that was Rejected on the gate.** That is the loop working as designed and failing the bar —
-the ordinary case, and the one §5.11's "Reject" row exists for. It is worth naming here because the
-three endings above are all *terminal*, and the most likely near-term state of this experiment is
-none of them: it is a sequence of rejects that either converges or exhausts §3.3's 3-sprint cap.
-**The cap is what turns a run of rejects into ending two.** A7 has used one of its three.
+So the honest name for Phase 2's first run is the one the plan does not yet have a bullet for: **a
+completed sprint that was Rejected on the gate.** That is the loop working as designed and failing
+the bar — the ordinary case, and the one §5.11's "Reject" row exists for. It is worth naming here
+because the three endings above are all *terminal*, and the most likely near-term state of this
+experiment is none of them: it is a sequence of rejects that either converges or exhausts §3.3's
+3-sprint cap. **The cap is what turns a run of rejects into ending two.**
+
+**Experiment 2 (§6.3) is not that bullet either, and it is not one of the three endings.** It is a
+completed sprint that **met its axis target and every measured gate item, and was refused by a human
+on review** — a fifth state, and the one this plan was least prepared for. It is not graduation
+(nothing about one axis points there), not abandonment (a 0.714 → 1.000 movement is the opposite of a
+finding that the approach cannot work), and not the budget/quota ending (it mutated files, stayed in
+budget, and its three sessions ended on a circuit breaker or an observer timeout, never on quota).
+Two runs, one per coverage arm, invert each other; **n = 1 per arm establishes a difference between
+the arms and nothing about a rate.** A7 has used **two** of its three.
 
 The failure mode this document most needs to keep guarding against is still the one below, and
 Phase 2 did **not** exhibit it: the loop wrote real code, ran it, reported failure, and stopped
@@ -1127,12 +1384,15 @@ would read, six weeks later, exactly like a successful self-improvement run. Tha
 two rows and why every one of them names who moved it.
 
 **Phase 2 made that hazard worse, not better, and the guard is extended accordingly.** Phase 2
-shipped five substantive commits — a rate-limit pacer, a real run verdict, a deterministic verify
-floor, and two halves of worktree containment — every one of them Claude subagent work performed
-*because a sprint hit the defect*. A summary that says "Phase 2 produced five fixes" is true and
-completely misleading: the loop's own product-code contribution in Phase 2 is **one axis moved from
-0.714 to 0.000**, and nothing else. Work done to repair the harness around the loop is never the
-loop's output, however directly a sprint provoked it.
+shipped six substantive commits — a rate-limit pacer, a real run verdict, a deterministic verify
+floor, two halves of worktree containment, and the A7 safety net — every one of them Claude subagent
+work performed *because a sprint hit the defect*. A summary that says "Phase 2 produced six fixes" is
+true and completely misleading: the loop's own product-code contribution in Phase 2 is **one axis
+moved from 0.714 to 0.000, and then, with coverage present, from 0.714 to 1.000 in a diff that was
+refused on review** — and nothing else. Work done to repair the harness around the loop is never the
+loop's output, however directly a sprint provoked it. **And the newest form of the hazard is the
+1.000 itself:** a reader six weeks from now meets a green scorecard attached to an unmerged branch,
+and only §6.3 says why those two facts belong together.
 
 ---
 
@@ -1198,7 +1458,7 @@ the commit named in the row. The defect statement is kept in every case so the p
 | 13 | `supports_effort: false` + no StepFun capability override | `reasoning_effort: "low"` is not settable | P0-8 |
 | 14 | StepFun 10 RPM / 5 concurrent vs parallel council fan-out | 429s mid-debate, read as wedges | §3.3 — **✅ fixed** (`1c5e6705`), and it fired for real first: a Phase 2 run died mid-implementation on `"request limited RPM reached, current: 11, limit: 10"`. Root was not the fan-out but the catalog boundary — `rate_limits` was declared for all 9 stepfun models and validated by a test, then **dropped at `catalogModelToModelInfo`**, the third instance of that pattern this session. `src/providers/rate-limiter.ts` now paces from `ModelInfo.rateLimits`, enforced in `model-gate.ts:378-395`, with a test pinning the mapping |
 | 15 | 🔴 **StepFun emits native `<tool_call>` markup as the final answer whenever the tool set is empty** — measured, 5/6 cases, incl. forced-finalize; `tool_choice` and prompting both disproven (§4.1) | a "successful" sprint turn can be 101 chars of markup; every transcript on this stack is untrustworthy until guarded | **P0-5b — ✅ fixed**: provider-boundary guard, 5/5 false-positive matrix, negative control red |
-| 16 | `/ideal` does not complete 3/3 clean runs (2/3 as of 2026-09-05) | unattended operation is not established; a sprint can still stall silently | **P0-1 — still open, and the criterion is now measurable rather than met.** Row 18's `run-finished` is what makes "a run ended" observable at all, and a Phase 2 run did complete 58 minutes / 3 sprints and announce its own halt (§6.2). That is **one** announced completion, not 3/3 consecutive; the other two Phase 2 attempts were cut off. No 3/3 has been measured — do not read the Phase 2 completion as satisfying it |
+| 16 | `/ideal` does not complete 3/3 clean runs (2/3 as of 2026-09-05) | unattended operation is not established; a sprint can still stall silently | **P0-1 — still open, and the criterion is now measurable rather than met.** Row 18's `run-finished` is what makes "a run ended" observable at all, and a Phase 2 run did complete 58 minutes / 3 sprints and announce its own halt (§6.2). That is **one** announced completion, not 3/3 consecutive; the other two Phase 2 attempts were cut off. Experiment 2 (§6.3) adds three more sessions and does **not** close this: two announced `run-finished outcome=threw` (circuit breaker), and the **first announced nothing inside the observation window** — the operator's driver timed out on its own budget first, and the run needed operator resumes to continue. Announced-halt coverage is real; **unattended** operation is still unestablished |
 | 17 | `Escape` reaches the abort path but the abort does not reach a pending council | a stuck `/ideal` turn is still uncancellable from the keyboard | **P0-4 — ✅ fixed** (`b475700e`). Two independent disconnections, not one: the `/ideal` slash path calls `runProductLoopV1` directly and never set `abortController`, so `abort()` hit null; and **zero occurrences of `AbortSignal` existed across `src/product-loop/`**, so a working controller would still have reached nothing. Fixed by extending the council's existing `withCouncilSignal` injector. Negative control, operator-verified: removing the controller gives `4 failed / 2 passed` incl. a 30 s timeout that *is* the bug; restored byte-identical → `6 passed`. **Residual, deliberately not fixed:** a pending askcard is still uncancellable (`createQuestionResponder`, `council-manager.ts:167-218` — no reject, no timeout, no signal) → see row 20 |
 | 18 | a **successful** `/ideal` run emits no terminal event | success and hang are the same observation for a driver; A2 is met for failures only | **P0-2 — ✅ fixed** (`7c2796ce`). Measured before, on a run that shipped successfully: `emittedKinds: ["route-decision","sprint-plan-committed"]`, `runFinished: []` — both *opening* signals. New `run-finished` emitted from one choke point (`product-loop/index.ts:139`) that all 33 returns across 8 dispatch targets pass through; `try → result`, `catch → threw`, `finally → abandoned` only when the consumer stopped pulling. Negative control, operator-verified: disabling the single emit gives `5 failed / 6 passed`; restored → 11/11. **Live confirmation exists for the `threw` outcome** (§6.2); the `success` outcome is spec-covered, not yet live-observed here. Still silent by design: a failure before the generator is entered, process death, and a run that genuinely never ends — that last is A2's `maxGapMs` silence half, not terminal coverage |
 | 19 | the picker/connect modal layer has not been swept for the two-focus-node hazard | a surface that publishes `focus` without suppressing the composer mirror makes `driver.query("focus")` throw `ambiguous` — worse than `null` | **P0-9 follow-up — ✅ fixed** (`f2ce2372`), and **the plan's prediction was inverted**. Sweeping all 26 surfaces that can render over the composer found the dominant defect was **ZERO** focus nodes on **21 of 26**, not two. `driver.query("focus")` returns `null` on zero and throws on >1, so both are dead ends — and `null` was the one actually happening, everywhere. Four surfaces (plan-questions, payment-approval, sandbox-picker, wallet-picker) were invisible to the harness entirely and gained their first `<Dialog>`. Both negative controls operator-verified (zero-owner and two-owner); `modal-focus-sweep.spec.ts` 11 passed |
@@ -1207,10 +1467,11 @@ the commit named in the row. The defect statement is kept in every case so the p
 | 22 | `src/ui/containers/modals-layer.tsx` is a stale duplicate of the live render path that nothing imports, carrying the un-swept wiring | a future sweep or fix applied to the dead file reads as done and changes nothing | found by `f2ce2372` — **open** |
 | 23 | `registry.ts:1386` and `:1432` snapshot `bash.getCwd()` at registry-construction time instead of reading it live | native-muonroi and vision tools go stale after any `cd`; a third drift vector the §3.2 write guard does not cover | found by `c48b09ad` — **open** |
 | 24 | sprint outcome files are named by `sprintN` alone, and `sprintN` **restarts per phase** | `writeSprintOutcome` overwrites across phases — in run `mtpd7mf19b10`, phase-3's sprint 1 overwrote phase-1's. `deriveRunVerdict` works around it by ordering on `finishedAt`, not `sprintN`; the collision itself is untouched | found by `f83965ab` — **open** |
-| 25 | `docs/agent-first/gate-failures/` does not exist, and §5.10's record was not written for Phase 2 | rejected and discarded sprints lose their context with their worktree — the exact failure §5.10 was written to prevent. Three Phase 2 worktrees are already gone | §5.10 / §6.2 — **open**; make the record part of the run-down procedure, not a step after it |
+| 25 | `docs/agent-first/gate-failures/` does not exist, and §5.10's record was not written for Phase 2 | rejected and discarded sprints lose their context with their worktree — the exact failure §5.10 was written to prevent. Three Phase 2 worktrees are already gone | §5.10 / §6.2 / §6.3 — **open, and now twice unhonoured**: `ls docs/agent-first/` returns the baseline JSON, the scenario corpus and this file, nothing else. Experiment 2's worktree (`.wt-exp2`) is an empty directory and is no longer a registered `git worktree`; its context survives only because it was committed to `sprint/a7-exp2` and written up in §6.3. Make the record part of the run-down procedure, not a step after it |
 | 26 | the `/ideal` run verdict was the literal `{pass:true, score:1, reason:"phases_complete"}` (`index.ts:1755`), and **nothing upstream could say fail** (`phase-runner.ts:475` unconditional `done`, `:481` `pass:true`) | the loop's judgment of its own work was §1's failure class in the worst possible place: a run wrote `VerdictPass: true` 15 s after its own digest said `Score: 0.00`. It also destroyed recoverability — the run was marked done, so `/ideal resume` correctly answered `no_incomplete_run` | **✅ fixed** (`f83965ab`): `deriveRunVerdict` reads real sprint outcome records; **no outcomes at all is a fail**; `runIsTerminal` gates `doneAt`. Survived this long because the finalize path is default-ON in production while every pre-existing integration test forces `MUONROI_PHASE_MODE=0` |
 | 27 | the sprint **verify** stage executed no commands — an LLM turn whose verdict was `tr.success && output.includes("VERIFY_PASS")`, a substring the verify sub-agent printed about its own run | a suite collecting zero tests and one running 6388 were the same observation; a sprint could commit source that did not typecheck and pass verification. **Correction to the record: `CLAUDE.md` calls `gsd_verify` a "deterministic floor first (tests/lint evidence)" — it is not.** `workflow-tools.ts:198-245` takes `passed: boolean` and `evidence: string` from the model and executes nothing | **✅ fixed** (`0e085663`) — a real floor that runs the recipe. Gate §5.7's reasoning applies here too: an in-sprint check the agent's own session produces is not a gate |
 | 28 | `bash.ts:170` `this.cwd = nextCwd` moved the run's cwd permanently on any `cd`, with only a directory-exists check; forked sub-sessions share one `BashTool` | **isolation escaped twice, in production, on this machine** — commits onto the parent branch (2026-09-06) and file writes into the parent tree (2026-09-07, with the commit guard already in place). See §3.2 and §6.2 | **✅ fixed in two parts** (`d939c87b` commit-scope guard, `c48b09ad` write containment: `cd` warns, writes refuse). Negative control on the write guard, operator-verified: making it a no-op turns 6 tests red. **Arbitrary shell writes remain uncontained** (row in §3.2) |
+| 29 | **§5 has no gate that a change is minimal, or that its cost is unchanged.** Every item is a pass/fail over an artifact — typecheck, suite, lint, axis score, self-verify — and none reads the diff | a sprint can meet its axis target with a change that doubles what every invocation costs, and the gate reports green throughout. **Measured, not hypothesised:** experiment 2's artifact deletes one `return;`, and a single `--format json` prompt then produces 2 model turns / 2 `usage_events` rows / 20 input + 8 output tokens where the baseline produces 1 / 1 / 10 + 4 (§6.3). A7 scored it **1.000**, `tsc` 0 errors, 6494 tests passed, and the axis's own safety net passed — the net asserts the answer sentinel is present, never that it is the only thing on stdout | found by §6.3 — **open**. The catch was a human reading the diff. Either state plainly that human diff review is a load-bearing gate item (and add it to §5), or give §5 a cost/behaviour-delta check with a negative control (§2.6); do not leave the gate reading as if it were complete |
 
 ---
 
