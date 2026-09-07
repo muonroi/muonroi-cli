@@ -10,6 +10,7 @@ import { checkCatastrophicCommand, type SafetyBlockResult } from "../utils/permi
 import type { SandboxMode, SandboxSettings } from "../utils/settings.js";
 import { posixToNative, type ResolvedShell, resolveShell, type ShellSettings } from "../utils/shell";
 import { nextBashRunId, recordBashRun, stripAnsi } from "./bash-output-cache.js";
+import { describeCwdDrift } from "./write-scope.js";
 
 const MAX_TAIL_BYTES = 8_192;
 const MAX_BACKGROUND_PROCESSES = 8;
@@ -159,6 +160,11 @@ export class BashTool {
         const dir = rawDir.replace(/^["']|["']$/g, "").replace(process.platform === "win32" ? /\\$/ : /(?!x)x/, "");
         let cdSucceeded = false;
         let cdError: ToolResult | null = null;
+        // Set when the new cwd leaves the run root. `cd` is NOT refused — escape
+        // #1's drifting command was `cd <parent> && git log`, a harmless read, and
+        // cross-repo inspection is normal work here. What made it dangerous was
+        // that the move was silent and permanent. See src/tools/write-scope.ts.
+        let driftWarning: string | null = null;
         try {
           const translated = this.resolvedShell.isPosix ? posixToNative(dir) : dir;
           const nextCwd = path.resolve(this.cwd, translated);
@@ -169,6 +175,15 @@ export class BashTool {
             const oldCwd = this.cwd;
             this.cwd = nextCwd;
             cdSucceeded = true;
+            try {
+              driftWarning = describeCwdDrift(nextCwd);
+              if (driftWarning) console.error(`[bash] cwd drift: ${oldCwd} -> ${nextCwd}`);
+            } catch (err) {
+              // Never let the advisory break a legitimate cd; the hard guard on
+              // the write path is what actually protects the tree.
+              console.error(`[bash] cwd drift check failed for ${nextCwd}: ${(err as Error)?.message}`);
+              driftWarning = null;
+            }
 
             const cwdInput: CwdChangedHookInput = {
               hook_event_name: "CwdChanged",
@@ -183,18 +198,28 @@ export class BashTool {
           cdError = { success: false, error: `Cannot change directory: ${msg}` };
         }
 
+        const cdOk = (): ToolResult => ({
+          success: true,
+          output: `Changed directory to: ${this.cwd}${driftWarning ? `\n${driftWarning}` : ""}`,
+        });
+
         if (!remainder) {
-          return cdSucceeded ? { success: true, output: `Changed directory to: ${this.cwd}` } : cdError!;
+          return cdSucceeded ? cdOk() : cdError!;
         }
 
         const shouldRunRemainder =
           chainOp === ";" || (chainOp === "&&" && cdSucceeded) || (chainOp === "||" && !cdSucceeded);
 
         if (!shouldRunRemainder) {
-          return cdSucceeded ? { success: true, output: `Changed directory to: ${this.cwd}` } : cdError!;
+          return cdSucceeded ? cdOk() : cdError!;
         }
 
-        return await this.execute(remainder, timeout, abortSignal);
+        const chained = await this.execute(remainder, timeout, abortSignal);
+        // `cd X && <cmd>` returns the REMAINDER's result, so without this the
+        // warning would be dropped for exactly the command shape that caused
+        // escape #1 (`cd <parent-repo> && git log --oneline -5`).
+        if (!driftWarning) return chained;
+        return { ...chained, output: `${driftWarning}\n${chained.output ?? ""}` };
       }
 
       if (abortSignal?.aborted) {

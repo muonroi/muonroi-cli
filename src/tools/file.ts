@@ -4,6 +4,7 @@ import { dirname, isAbsolute, resolve } from "path";
 import { summarizeDiagnostics, syncFileWithLsp } from "../lsp/runtime";
 import type { LspDiagnosticFile } from "../lsp/types";
 import type { FileTracker } from "./file-tracker.js";
+import { blockWriteIfOutOfScope } from "./write-scope.js";
 
 export interface FileDiff {
   filePath: string;
@@ -121,6 +122,11 @@ export async function writeFile(
 ): Promise<FileResult> {
   try {
     const full = resolvePath(filePath, cwd);
+    // Containment BEFORE anything is created: `full` is the post-resolution
+    // target, so this one check covers both a relative path riding a drifted
+    // tool cwd and an absolute path that bypassed the cwd entirely.
+    const scopeBlock = blockWriteIfOutOfScope(filePath, full);
+    if (scopeBlock) return { success: false, output: scopeBlock };
     const exists = existsSync(full);
     const before = exists ? readFileSync(full, "utf-8") : "";
 
@@ -166,6 +172,11 @@ export async function editFile(
 ): Promise<FileResult> {
   try {
     const full = resolvePath(filePath, cwd);
+    // Containment first — refuse before disclosing whether the out-of-scope file
+    // exists, and before any write. Covers relative-path cwd drift and absolute
+    // paths alike (both have already collapsed into `full`).
+    const scopeBlock = blockWriteIfOutOfScope(filePath, full);
+    if (scopeBlock) return { success: false, output: scopeBlock };
     if (!existsSync(full)) {
       return { success: false, output: `File not found: ${filePath}` };
     }

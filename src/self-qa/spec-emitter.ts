@@ -14,6 +14,7 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { blockWriteIfOutOfScope } from "../tools/write-scope.js";
 import type { Expectation, JudgeResult, Scenario, ScenarioStep } from "./types.js";
 
 export type EmitOptions = {
@@ -34,6 +35,14 @@ export function emitSpec(scenario: Scenario, result: JudgeResult, opts: EmitOpti
   const outDir = opts.outDir ?? resolve("tests/harness/auto");
   const now = (opts.now ?? (() => new Date()))();
   const file = resolve(outDir, `${scenario.id}.spec.ts`);
+
+  // `outDir` reaches here from the agent-callable `selfverify_start` tool
+  // (src/tools/native-tools.ts:326 -> src/mcp/self-verify-runner.ts) with no
+  // validation, and an ABSOLUTE `out` writes anywhere. It also resolves against
+  // `process.cwd()` rather than the bash cwd, so it is a second, independent way
+  // for a run to emit files outside the directory it was launched in.
+  const scopeBlock = blockWriteIfOutOfScope(file, file);
+  if (scopeBlock) throw new Error(scopeBlock);
 
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, buildSpecSource(scenario, result, now), "utf8");
