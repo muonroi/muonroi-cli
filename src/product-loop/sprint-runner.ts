@@ -1315,10 +1315,64 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   const recipeFromVerify =
     (verifyResult as ToolResult & { verifyRecipe?: VerifyRecipe | null }).verifyRecipe ?? verifyRecipe;
 
-  // Tier 3 — opt-in self-verify gate. Only fires when recipe PASSED and the
-  // sprint touched UI / harness watched surfaces. Failure downgrades the
-  // sprint verdict to FAIL so the loop iterates again with feedback.
-  // Default OFF; opt-in via MUONROI_SPRINT_SELF_VERIFY=1.
+  // ── Deterministic verify FLOOR ───────────────────────────────────────────
+  // Everything above this line is the verify sub-agent's OPINION: the verdict
+  // came from `parseVerifyResult`, which passes as soon as the model's narration
+  // contains `VERIFY_PASS`. No exit code was involved, so a sprint could commit
+  // code that does not compile and still be scored PASS.
+  //
+  // The floor runs the project's own build/typecheck and test commands —
+  // discovered from the working tree, never from the model's recipe (see
+  // verify-floor.ts) — and lets their exit codes override a claimed PASS. A
+  // floor FAIL is authoritative; a floor that could not run leaves the verdict
+  // alone but records that nothing deterministic stands behind it.
+  if (verifyVerdict === "PASS") {
+    try {
+      const { applyVerifyFloor, runVerifyFloor } = await import("./verify-floor.js");
+      const floor = await runVerifyFloor({ cwd });
+      const applied = applyVerifyFloor(verifyVerdict, floor);
+      verifyVerdict = applied.verdict;
+      if (applied.downgraded) {
+        verifyResult.error = `${verifyResult.error ?? ""}\n\n[verify-floor] ${floor.detail}`;
+        yield {
+          type: "content",
+          content: `\n> [verify-floor] Sprint ${sprintN} verdict downgraded to FAIL — the project's own gates failed (${floor.elapsedMs}ms).\n`,
+        };
+      } else if (floor.verdict === "pass") {
+        yield {
+          type: "content",
+          content: `\n> [verify-floor] Deterministic gates PASSED (${floor.checks.length} command(s), ${floor.elapsedMs}ms).\n`,
+        };
+      } else {
+        // "unavailable" — surfaced loudly so a PASS with no exit code behind it
+        // is never mistaken for a verified one.
+        yield {
+          type: "content",
+          content: `\n> [verify-floor] No deterministic evidence for sprint ${sprintN}: ${floor.detail}\n`,
+        };
+      }
+    } catch (err) {
+      // A floor that cannot run must not silently read as success. Downgrade to
+      // ERROR so the sprint loop routes it as a failed verification instead of
+      // shipping on an unverified claim, and log per the No Silent Catch rule.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[sprint-runner] verify floor threw (sprint ${sprintN}, run ${ctx.runId}): ${message}`, {
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
+      verifyVerdict = "ERROR";
+      verifyResult.error = `${verifyResult.error ?? ""}\n\n[verify-floor] floor could not run: ${message}`;
+      yield {
+        type: "content",
+        content: `\n> [verify-floor] Sprint ${sprintN} verdict downgraded to ERROR — the deterministic floor could not run: ${message}\n`,
+      };
+    }
+  }
+
+  // Tier 3 — self-verify gate. Only fires when recipe PASSED and the sprint
+  // touched UI / harness watched surfaces. Failure downgrades the sprint verdict
+  // to FAIL so the loop iterates again with feedback.
+  // Default ON in local dev; OFF in CI, and opt out with
+  // MUONROI_SPRINT_SELF_VERIFY=0 (see isEnabled() in sprint-self-verify.ts:66).
   if (verifyVerdict === "PASS") {
     try {
       const { runSprintSelfVerify } = await import("./sprint-self-verify.js");
@@ -1340,8 +1394,22 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
           content: `\n> [self-verify] Tier 1 PASS (${sv.elapsedMs}ms) — UI/harness regressions checked.\n`,
         };
       }
-    } catch {
-      /* self-verify must NEVER block the sprint pipeline */
+    } catch (err) {
+      // Self-verify is ADDITIVE (Tier 1 heuristic UI/harness QA), so a wiring or
+      // spawn failure here does not invalidate the deterministic floor that
+      // already ran above — the verdict is left standing. But it must not vanish:
+      // the previous bare `catch {}` violated the No Silent Catch rule and made
+      // "self-verify found nothing" and "self-verify never ran" indistinguishable
+      // in the transcript.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[sprint-runner] self-verify failed to run (sprint ${sprintN}, run ${ctx.runId}): ${message}`, {
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
+      verifyResult.error = `${verifyResult.error ?? ""}\n\n[self-verify] did not run: ${message}`;
+      yield {
+        type: "content",
+        content: `\n> [self-verify] Tier 1 self-QA did not run for sprint ${sprintN}: ${message}\n`,
+      };
     }
   }
 
