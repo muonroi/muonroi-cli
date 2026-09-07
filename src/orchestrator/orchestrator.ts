@@ -3706,6 +3706,14 @@ export class Agent {
             type: "content",
             content: `\n✓ Auto-committed ${auto.fileCount} file(s) → ${auto.sha} (${AUTO_COMMIT_ATTRIBUTION})\n`,
           };
+        } else if (auto.reason === "outside-run-root") {
+          // A silently-skipped commit is exactly the "reported success for
+          // something that did not happen" shape this repo exists to remove —
+          // so a containment refusal is always visible, never just logged.
+          yield {
+            type: "content",
+            content: `\n⚠ Auto-commit REFUSED — ${auto.detail ?? "commit target is outside this run's directory."}\n`,
+          };
         }
       }
     } finally {

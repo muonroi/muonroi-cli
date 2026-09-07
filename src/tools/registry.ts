@@ -843,7 +843,12 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             const detail =
               result.reason === "lsp-errors"
                 ? `\nStaged files have errors — fix them and call git_commit again:\n${result.detail ?? ""}`
-                : "";
+                : result.reason === "outside-run-root"
+                  ? // Containment refusal — tell the agent WHY and what to do. Do NOT
+                    // advertise the MUONROI_COMMIT_SCOPE bypass (a user escape hatch).
+                    `\n${result.detail ?? ""}\nYour shell cwd left the directory this run was launched in. ` +
+                    `\`cd\` back into it before writing files or committing.`
+                  : "";
             return { success: false, output: `No commit made (${result.reason}).${detail}` };
           }
           return { success: true, output: `Committed ${result.fileCount} file(s) → ${result.sha}` };

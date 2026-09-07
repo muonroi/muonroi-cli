@@ -256,6 +256,111 @@ export function isExcludedPath(path: string): boolean {
   return isSensitivePath(path) || isCliArtifactPath(path);
 }
 
+/* ------------------------------------------------------------------------- *
+ * Run-root containment gate (incident 2026-09-06)
+ *
+ * A run confined to one directory must not be able to write git history
+ * outside it. It could:
+ *
+ *   `/ideal` was launched in the linked worktree `D:\...\muonroi-cli\.sprint-a7`
+ *   (process.chdir at src/index.ts:735 via `-d`, so BashTool started there —
+ *   src/orchestrator/orchestrator.ts:489 `new BashTool(process.cwd())`, and
+ *   sessions.cwd_at_start recorded `...\.sprint-a7`). At 2026-09-06T10:15:04Z a
+ *   sub-agent ran `cd D:/sources/Core/muonroi-cli && git log --oneline -5`. The
+ *   bash tool's `cd` handler mutates BashTool.cwd with NO containment check
+ *   (src/tools/bash.ts:170 `this.cwd = nextCwd`), so the tool cwd moved
+ *   permanently to the PARENT repo. Both commit entry points read that same
+ *   cwd — orchestrator.ts:3590 `const cwd = this.bash.getCwd()` and
+ *   src/tools/registry.ts:836 `commitSpecificPaths(bash.getCwd(), ...)` — so
+ *   three commits landed on the parent repo's branch (b3ff377e, 8cbc08b7,
+ *   29b5abfe) while the run believed it was confined to the worktree.
+ *
+ * The invariant enforced here: the git worktree root of the commit cwd must
+ * equal the git worktree root of the directory the run was LAUNCHED in. A `cd`
+ * into a SUB-directory of the same repo keeps the same toplevel and is
+ * unaffected (ordinary sessions are untouched); a `cd` into a different repo —
+ * or, as here, out of a linked worktree into its parent, which git reports as a
+ * DIFFERENT toplevel — is refused before anything is staged.
+ *
+ * Fails LOUD, never silent: a block is logged AND returned as an explicit
+ * `outside-run-root` reason carrying both roots, which the orchestrator prints
+ * in the transcript and the git_commit tool hands back to the agent.
+ * ------------------------------------------------------------------------- */
+
+/** Pinned launch directory; `null` means "derive from process.cwd()". */
+let commitRunRoot: string | null = null;
+
+/**
+ * Pin the directory this run is confined to. Normally unnecessary — the default
+ * (`process.cwd()`) already IS the `-d` directory, because index.ts chdirs into
+ * it before anything else boots and nothing else in src/ ever calls chdir.
+ * Exported as the wiring/test seam.
+ */
+export function setCommitRunRoot(dir: string | null): void {
+  commitRunRoot = dir === null ? null : resolve(dir);
+}
+
+/** The directory this run is confined to. */
+export function getCommitRunRoot(): string {
+  return commitRunRoot ?? process.cwd();
+}
+
+/**
+ * Default ON. `MUONROI_COMMIT_SCOPE=0` is a USER escape hatch (mirrors the
+ * `MUONROI_AUTO_COMMIT=0` / `MUONROI_COMMIT_GATE=0` convention) for the rare
+ * session that deliberately drives commits across repos. Deliberately never
+ * surfaced to the model — same treatment as the LSP gate's bypass.
+ */
+export function isCommitScopeGuardEnabled(): boolean {
+  return process.env.MUONROI_COMMIT_SCOPE !== "0";
+}
+
+/** Absolute git worktree root for `dir`, or null when `dir` is not in a repo. */
+async function worktreeRoot(dir: string): Promise<string | null> {
+  const r = await git(dir, ["rev-parse", "--show-toplevel"]);
+  if (!r.ok) return null;
+  const top = r.stdout.trim();
+  return top ? resolve(top) : null;
+}
+
+export interface CommitScopeVerdict {
+  ok: boolean;
+  /** The directory the run was launched in. */
+  runRoot: string;
+  /** Worktree root of the cwd the commit would run in (null = not a repo). */
+  commitRoot: string | null;
+  /** Worktree root of `runRoot` (null = the run did not start inside a repo). */
+  expectedRoot: string | null;
+}
+
+/**
+ * Decide whether a commit issued with `cwd` writes history this run owns.
+ * Never throws — a git failure resolves to `null` roots and is handled below.
+ */
+export async function checkCommitScope(cwd: string): Promise<CommitScopeVerdict> {
+  const runRoot = getCommitRunRoot();
+  if (!isCommitScopeGuardEnabled()) return { ok: true, runRoot, commitRoot: null, expectedRoot: null };
+
+  const expectedRoot = await worktreeRoot(runRoot);
+  // The run did not start inside a repo, so it has no history of its own to be
+  // confined to and there is nothing to compare against. Allow (this is not the
+  // incident shape — that run was launched inside a worktree).
+  if (!expectedRoot) return { ok: true, runRoot, commitRoot: null, expectedRoot: null };
+
+  const commitRoot = await worktreeRoot(cwd);
+  return { ok: commitRoot !== null && commitRoot === expectedRoot, runRoot, commitRoot, expectedRoot };
+}
+
+/** The operator-facing explanation of a refused commit. Used for log + result detail. */
+export function describeCommitScopeBlock(cwd: string, v: CommitScopeVerdict): string {
+  return (
+    `commit target is OUTSIDE this run's directory — nothing was staged or committed. ` +
+    `cwd=${cwd} (repo ${v.commitRoot ?? "<not a repo>"}), but the run was launched in ` +
+    `${v.runRoot} (repo ${v.expectedRoot}). The tool cwd most likely drifted out of the ` +
+    `launch directory via a \`cd\`. Run the CLI from the repo you intend to commit to.`
+  );
+}
+
 /**
  * Backstop subject naming the changed FILES — used only by the deterministic
  * end-of-turn safety net (when the agent did not commit its own work via the
@@ -310,6 +415,14 @@ export async function maybeAutoCommitTurn(opts: {
 
   const inRepo = await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
   if (!inRepo.ok || inRepo.stdout.trim() !== "true") return { committed: false, reason: "not-a-repo" };
+
+  // Containment gate — before ANY staging. See "Run-root containment gate" above.
+  const scope = await checkCommitScope(cwd);
+  if (!scope.ok) {
+    const detail = describeCommitScopeBlock(cwd, scope);
+    logger.error("orchestrator", `[auto-commit] REFUSED — ${detail}`);
+    return { committed: false, reason: "outside-run-root", detail };
+  }
 
   const dirtyAfter = await snapshotDirtyPaths(cwd);
   const newPaths = [...dirtyAfter].filter((p) => !dirtyBefore.has(p) && !isExcludedPath(p));
@@ -373,6 +486,14 @@ export async function commitSpecificPaths(cwd: string, paths: string[], message:
   if (safe.length === 0) return { committed: false, reason: "no-eligible-paths" };
   const inRepo = await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
   if (!inRepo.ok || inRepo.stdout.trim() !== "true") return { committed: false, reason: "not-a-repo" };
+
+  // Containment gate — before ANY staging. See "Run-root containment gate" above.
+  const scope = await checkCommitScope(cwd);
+  if (!scope.ok) {
+    const detail = describeCommitScopeBlock(cwd, scope);
+    logger.error("orchestrator", `[git_commit] REFUSED — ${detail}`);
+    return { committed: false, reason: "outside-run-root", detail };
+  }
 
   const add = await git(cwd, ["add", "--", ...safe]);
   if (!add.ok) {
