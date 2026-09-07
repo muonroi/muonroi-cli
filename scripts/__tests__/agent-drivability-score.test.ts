@@ -16,9 +16,14 @@ import {
   A7_FIXTURES,
   A7_ROWS,
   type A7MatrixResult,
+  A9_ACCEPTED_END_OUTCOMES,
+  A9_FIXTURE,
+  A9_ROWS,
+  type A9MatrixResult,
   type AxisId,
   HEALTHY_CAPABILITIES,
   healthyA7Matrix,
+  healthyA9Matrix,
   healthyInputs,
   isNameable,
   isScrapeTool,
@@ -34,6 +39,7 @@ import {
   scoreA4,
   scoreA5,
   scoreA7,
+  scoreA9,
   scoreAll,
   segmentTurns,
   TERMINAL_KINDS,
@@ -50,12 +56,12 @@ describe("§2.6 negative controls — every axis must detect its known-bad state
     const card = scoreAll(healthyInputs());
     expect(card.summary.fails).toEqual([]);
     expect(card.summary.unknown).toEqual([]);
-    expect(card.summary.meets.sort()).toEqual(["A1", "A2", "A3", "A4", "A5", "A6", "A7"]);
+    expect(card.summary.meets.sort()).toEqual(["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A9"]);
   });
 
   it("ships exactly one negative control per axis", () => {
     const axes = NEGATIVE_CONTROLS.map((n) => n.axis).sort();
-    expect(axes).toEqual(["A1", "A2", "A3", "A4", "A5", "A6", "A7"]);
+    expect(axes).toEqual(["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A9"]);
   });
 
   for (const control of NEGATIVE_CONTROLS) {
@@ -68,7 +74,7 @@ describe("§2.6 negative controls — every axis must detect its known-bad state
 
   it("runSelfTest() agrees with the per-axis assertions and is what --self-test exits on", () => {
     const { rows, ok } = runSelfTest();
-    expect(rows).toHaveLength(7);
+    expect(rows).toHaveLength(8);
     for (const r of rows) {
       expect(r.healthyMeets).toBe(true);
       expect(r.brokenMeets).toBe(false);
@@ -85,6 +91,7 @@ describe("missing artifacts never read as a pass", () => {
     ["A5", (i) => ({ ...i, skipLint: null })],
     ["A6", (i) => ({ ...i, capabilities: null, toolsList: null })],
     ["A7", (i) => ({ ...i, a7: null })],
+    ["A9", (i) => ({ ...i, a9: null })],
   ];
   for (const [axis, strip] of stripped) {
     it(`${axis} reports meetsTarget null (not true) when its artifact is absent`, () => {
@@ -128,12 +135,12 @@ describe("the referee is honest about what it cannot compute", () => {
       expect(card.axes[axis].axisAsStated.why.length).toBeGreaterThan(50);
       expect(card.axes[axis].humanMustJudge).not.toBeNull();
     }
-    expect(card.summary.needsHumanJudgement.sort()).toEqual(["A1", "A4", "A7"]);
+    expect(card.summary.needsHumanJudgement.sort()).toEqual(["A1", "A4", "A7", "A9"]);
   });
 
   it("A2, A3, A5 and A6 are mechanical as stated and need no human judgement", () => {
     const card = scoreAll(healthyInputs());
-    expect(card.summary.mechanicalAsStated.sort()).toEqual(["A2", "A3", "A5", "A6", "A7"]);
+    expect(card.summary.mechanicalAsStated.sort()).toEqual(["A2", "A3", "A5", "A6", "A7", "A9"]);
     for (const axis of ["A2", "A3", "A5", "A6"] as const) {
       expect(card.axes[axis].humanMustJudge).toBeNull();
     }
@@ -663,6 +670,218 @@ describe("A7 — non-interactive outcome fidelity", () => {
     // cannot cover the matrix honestly.
     const notAnswered = A7_ROWS.filter((r) => r.groundTruth === "not-answered");
     expect(new Set(notAnswered.map((r) => r.fixture)).size).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("A9 — parked-run cancellability", () => {
+  /**
+   * Today's measured state, transcribed from the committed baseline: the run
+   * parks on a council askcard, a single Escape dismisses it and the loop moves
+   * on (K1), two Escapes in the SAME input batch end the run (K2), the same two
+   * keys 250 ms or 500 ms apart do not (K3/K4), an untouched card stays parked
+   * (K5) and answering proceeds (K6). 4/6, no false alarms.
+   *
+   * Measured 2026-09-07 and re-measured 2026-09-08 against 05626eba with
+   * `--a9`; every observable identical across four full runs (24 cold spawns).
+   */
+  function statusQuoA9Matrix(): A9MatrixResult {
+    const m = healthyA9Matrix();
+    m.collectedBy = "<status-quo: a spaced Escape is eaten by the next card before it can reach the abort path>";
+    for (const row of m.rows) {
+      if (row.id !== "K3" && row.id !== "K4") continue;
+      // The run does not end; every Escape is consumed by a card, and the loop
+      // opens the next one ~9-20 ms later.
+      row.runFinished = false;
+      row.runFinishedOutcome = null;
+      row.askcardCancelCount = row.id === "K3" ? 2 : 10;
+      row.advanced = true;
+      row.cardOpen = true;
+      row.kinds = ["askcard-cancel", "council-step", "askcard-open"];
+    }
+    return m;
+  }
+
+  it("catches the defect as measured on 2026-09-08: 4/6, and K3/K4 named", () => {
+    const res = scoreA9({ ...healthyInputs(), a9: statusQuoA9Matrix() });
+    // No false alarms today, so the penalty is inert and the score IS the raw
+    // fraction — the committed baseline stays the intuitive number.
+    expect(res.score).toBeCloseTo(4 / 6, 6);
+    expect(res.detail.unweightedCorrectRate).toBeCloseTo(4 / 6, 6);
+    expect(res.meetsTarget).toBe(false);
+    expect(res.detail.falseAlarms).toEqual([]);
+    const wrong = (res.detail.verdicts as { id: string; correct: boolean }[]).filter((v) => !v.correct);
+    expect(wrong.map((v) => v.id).sort()).toEqual(["K3", "K4"]);
+    expect(res.notes.join(" ")).toMatch(/MISS: K3/);
+  });
+
+  it("scores 'Escape always aborts' LOWER than the defect it replaces", () => {
+    // The load-bearing assertion of the whole axis, and the one A7's history
+    // says must be RUN rather than reasoned about. Deleting the askcard guard
+    // fixes K3/K4 and breaks K1 — the row where a single Escape means "not this
+    // question", not "throw away the run". On a plain fraction that is 5/6 =
+    // 0.833 and RANKS ABOVE today's 4/6, so a sprint loop reading `score` as
+    // progress would ship the live-verified 2026-07-06 transcript-wipe
+    // regression. The 2x penalty inverts the ranking.
+    const control = NEGATIVE_CONTROLS.find((n) => n.axis === "A9");
+    expect(control).toBeDefined();
+    const statusQuo = scoreA9({ ...healthyInputs(), a9: statusQuoA9Matrix() });
+    const broken = scoreA9(control?.mutate({ ...healthyInputs(), a9: statusQuoA9Matrix() }) ?? healthyInputs());
+    expect(broken.meetsTarget).toBe(false);
+    expect(broken.detail.falseAlarms).toEqual(["K1"]);
+    // It gets MORE rows right and must still rank lower.
+    expect(broken.detail.unweightedCorrectRate as number).toBeCloseTo(5 / 6, 6);
+    expect(broken.detail.unweightedCorrectRate as number).toBeGreaterThan(
+      statusQuo.detail.unweightedCorrectRate as number,
+    );
+    expect(broken.score as number).toBeCloseTo(0.5, 6);
+    expect(broken.score as number).toBeLessThan(statusQuo.score as number);
+    expect(broken.notes.join(" ")).toMatch(/FALSE ALARM/);
+  });
+
+  it("scores a card TIMEOUT below the defect too — the d22397a9e47d incident", () => {
+    // The second gaming path: give the parked promise a timer that resolves it
+    // with the dismissal sentinel. K3 and K4 go green BY ACCIDENT (the run
+    // drains its cards and ends) but K5 — a card nobody touched — ends on its
+    // own, which is exactly the incident where a watchdog counted a human's
+    // reading time as "no output" and discarded ~20.5 min of council work.
+    const m = statusQuoA9Matrix();
+    for (const row of m.rows) {
+      if (row.id !== "K3" && row.id !== "K4" && row.id !== "K5") continue;
+      row.runFinished = true;
+      row.runFinishedOutcome = "abandoned";
+      row.cardOpen = false;
+    }
+    const timeout = scoreA9({ ...healthyInputs(), a9: m });
+    const statusQuo = scoreA9({ ...healthyInputs(), a9: statusQuoA9Matrix() });
+    expect(timeout.detail.falseAlarms).toEqual(["K5"]);
+    expect(timeout.detail.unweightedCorrectRate as number).toBeCloseTo(5 / 6, 6);
+    expect(timeout.score as number).toBeCloseTo(0.5, 6);
+    expect(timeout.score as number).toBeLessThan(statusQuo.score as number);
+    expect(timeout.meetsTarget).toBe(false);
+  });
+
+  it("ranks 'abort on any keypress' worst of all", () => {
+    const m = statusQuoA9Matrix();
+    for (const row of m.rows) {
+      row.runFinished = true;
+      row.runFinishedOutcome = "abandoned";
+      row.cardOpen = false;
+      row.answered = false;
+      row.advanced = false;
+    }
+    const blanket = scoreA9({ ...healthyInputs(), a9: m });
+    // K1, K5 and K6 are all false alarms: 3 correct - 2*3 = -3, floored at 0.
+    expect(blanket.detail.falseAlarms).toEqual(["K1", "K5", "K6"]);
+    expect(blanket.score).toBe(0);
+    expect(blanket.meetsTarget).toBe(false);
+  });
+
+  it("does NOT credit a run that ends by throwing — cancelling is not crashing", () => {
+    const m = healthyA9Matrix();
+    for (const row of m.rows) {
+      if (row.groundTruth !== "must-end") continue;
+      row.runFinishedOutcome = "threw";
+    }
+    const res = scoreA9({ ...healthyInputs(), a9: m });
+    expect(res.meetsTarget).toBe(false);
+    expect(res.score as number).toBeLessThan(1);
+    expect(res.notes.join(" ")).toMatch(/not cancelling/);
+    expect(res.detail.acceptedEndOutcomes).toEqual([...A9_ACCEPTED_END_OUTCOMES]);
+  });
+
+  it("green-by-deletion is a BROKEN MEASUREMENT, never a pass and never a score", () => {
+    // Remove the clarify phase, the askcard, or --force-council routing and no
+    // row can reach the parked state. §2.5: that must not read as an
+    // improvement, and it must not read as a score of 0 either — it is the
+    // absence of evidence.
+    const m = healthyA9Matrix();
+    for (const row of m.rows) {
+      row.reached = false;
+      row.error = "never reached the parked state";
+    }
+    const res = scoreA9({ ...healthyInputs(), a9: m });
+    expect(res.score).toBeNull();
+    expect(res.meetsTarget).toBeNull();
+    expect(res.measured).toBe(true);
+    expect(res.notes.join(" ")).toMatch(/broken measurement, not a finding/);
+  });
+
+  it("a partial matrix is UNKNOWN, never a pass", () => {
+    const m = healthyA9Matrix();
+    const first = m.rows[0];
+    if (first) {
+      first.ran = false;
+      first.error = "spawn failed";
+    }
+    const res = scoreA9({ ...healthyInputs(), a9: m });
+    expect(res.meetsTarget).toBeNull();
+    expect(res.confidence).toBe("medium");
+    expect(res.notes.join(" ")).toMatch(/excluded from the denominator/);
+  });
+
+  it("derives every verdict from the observables — a matrix cannot assert its own correctness", () => {
+    // A7's rows carry a pre-computed `exitCorrect` that scoreA7 trusts. A9's
+    // rows carry observations only, so a collected matrix (or a tampered one)
+    // cannot claim a row is right; the scorer decides. This test proves the
+    // property by asserting a row that LOOKS passing is still judged on its
+    // observables.
+    const m = healthyA9Matrix();
+    const k3 = m.rows.find((r) => r.id === "K3");
+    if (k3) {
+      k3.runFinished = false;
+      k3.runFinishedOutcome = null;
+    }
+    const res = scoreA9({ ...healthyInputs(), a9: m });
+    expect(res.meetsTarget).toBe(false);
+    expect((res.detail.verdicts as { id: string; correct: boolean }[]).find((v) => v.id === "K3")?.correct).toBe(false);
+  });
+
+  it("ignores rows a matrix invents for itself", () => {
+    const m = healthyA9Matrix();
+    m.rows.push({ ...(m.rows[0] as A9MatrixResult["rows"][number]), id: "K99" });
+    const res = scoreA9({ ...healthyInputs(), a9: m });
+    expect(res.detail.rowsRan).toBe(A9_ROWS.length);
+    expect(res.notes.join(" ")).toMatch(/cannot introduce its own rows/);
+  });
+
+  it("says loudly when a matrix was collected against a tree that is not this repo", () => {
+    // The only legitimate use of --a9-repo-root is running a negative control
+    // against a deliberately-broken copy. Such a matrix must never be mistaken
+    // for a baseline.
+    const m = healthyA9Matrix();
+    m.repoRoot = "C:/tmp/some-other-tree";
+    m.repoRootIsDefault = false;
+    const res = scoreA9({ ...healthyInputs(), a9: m });
+    expect(res.notes.join(" ")).toMatch(/not a baseline/i);
+  });
+
+  it("A9 is mechanical as stated but STILL names a human judgement — its denominator", () => {
+    const card = scoreAll(healthyInputs());
+    expect(card.axes.A9.axisAsStated.mechanical).toBe(true);
+    expect(card.axes.A9.humanMustJudge).not.toBeNull();
+    expect(card.axes.A9.humanMustJudge ?? "").toMatch(/omission/i);
+    // …and it must say out loud that latency is outside the score.
+    expect(card.axes.A9.humanMustJudge ?? "").toMatch(/how long/i);
+  });
+
+  it("the matrix carries both cancellation directions and two distinct spacings", () => {
+    // A row set that only demanded "the run must end" would be satisfied by
+    // ending it on any key. Both directions must be present, and the must-end
+    // rows must not all share one inter-key gap.
+    expect(A9_ROWS.some((r) => r.groundTruth === "must-end")).toBe(true);
+    expect(A9_ROWS.filter((r) => r.groundTruth === "must-stay").length).toBeGreaterThanOrEqual(3);
+    const spacings = new Set(
+      A9_ROWS.filter((r) => r.groundTruth === "must-end").flatMap((r) => r.gesture.map((g) => g.afterMs)),
+    );
+    expect(spacings.size).toBeGreaterThanOrEqual(3);
+    // K5 sends nothing at all — the patience row the timer fix falls over.
+    expect(A9_ROWS.find((r) => r.id === "K5")?.gesture).toEqual([]);
+  });
+
+  it("generates its own mock fixture rather than reading a committed one", () => {
+    const parsed = JSON.parse(A9_FIXTURE) as { model?: { provider?: string }; responses?: unknown[] };
+    expect(parsed.model?.provider).toBe("mock");
+    expect(Array.isArray(parsed.responses)).toBe(true);
   });
 });
 

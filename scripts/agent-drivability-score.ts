@@ -2,7 +2,7 @@
 /**
  * scripts/agent-drivability-score.ts — the Agent-Drivability referee (P1-1).
  *
- * Scores axes A1..A7 of the scorecard in
+ * Scores axes A1..A7 and A9 of the scorecard in
  * `docs/agent-first/SELF-IMPROVEMENT-PLAN.md` §1.1 from artifacts, and emits
  * JSON (`--json`) plus a readable summary.
  *
@@ -26,7 +26,7 @@
  *
  * 2. **Every axis ships a negative control** (§2.6). {@link NEGATIVE_CONTROLS}
  *    holds, per axis, a deliberately-broken mutation of {@link HEALTHY_FIXTURE}
- *    that the scorer is REQUIRED to fail on. `--self-test` runs all seven and
+ *    that the scorer is REQUIRED to fail on. `--self-test` runs all eight and
  *    exits non-zero if any known-bad input still scores a pass. An axis whose
  *    score cannot detect a known-bad change is not measuring anything, and this
  *    is the only thing standing between an agent-written referee and a rubber
@@ -55,6 +55,7 @@
  * | A5   | mechanical | `check-harness-skips.ts --strict` exit code + scalars, with the `retry: 2` caveat recorded |
  * | A6   | mechanical | `capabilities.tools` must equal `tools/list` EXACTLY, and every field any corpus step references must appear in the payload |
  * | A7   | mechanical | 7 spawned headless invocations; per row, `(exit === 0)` must equal `(ground truth === answered)`, where the ground truth is fixed by the mock fixture BEFORE the run. A false alarm (a run that worked and exited non-zero) is subtracted at 2x, so the naive "any error => exit 1" fix ranks BELOW the defect it replaces |
+ * | A9   | mechanical | 6 spawned agent-mode TUI sessions, each driven to a parked council askcard; per row, "did `run-finished` arrive inside the window" must equal the gesture's ground truth, fixed BEFORE the run. A false alarm (a run destroyed by a gesture meant to leave it alone) is subtracted at 2x, so the naive "Escape always aborts" fix — the live-verified 2026-07-06 transcript-wipe regression — ranks BELOW the defect it replaces |
  *
  * A1 and A4 are therefore scored, but their `axisAsStated.mechanical` is
  * `false` and their `humanMustJudge` is never null: **whether the corpus
@@ -88,6 +89,15 @@
  *   bun scripts/agent-drivability-score.ts --self-test          # prove the negative controls fire
  *   bun scripts/agent-drivability-score.ts --a7                 # + A7 (spawns 7 headless runs, ~5-7 min)
  *   bun scripts/agent-drivability-score.ts --a7-matrix <path>   # + A7 from a previously collected matrix
+ *   bun scripts/agent-drivability-score.ts --a9                 # + A9 (spawns 6 agent-mode TUIs, ~2 min)
+ *   bun scripts/agent-drivability-score.ts --a9-matrix <path>   # + A9 from a previously collected matrix
+ *
+ * Reproducing the A9 baseline from a clean checkout, in ONE command — no
+ * network, no API key, no cost, ~2 min (the mock-LLM fixture is written by this
+ * file into a temp dir, and each row gets its own greenfield temp cwd, so there
+ * is no committed artifact a sprint could edit):
+ *
+ *   bun scripts/agent-drivability-score.ts --a9 --a9-out docs/agent-first/a9-baseline.json --json
  *
  * Reproducing the A7 baseline from a clean checkout, in ONE command — no
  * network, no API key, no cost (every row is driven by a generated mock-LLM
@@ -103,6 +113,14 @@
  * protocol IS their instrument, whereas A7's contract (`exitCode` + stdout) is
  * owned by `src/` and merely observed from outside here.
  *
+ * A9 SCOPE NOTE: A9 is back on the TUI-over-harness surface, but it escapes
+ * §2.2 for the same reason A7 does — its contract is the `LiveEvent` stream the
+ * harness ALREADY publishes (`run-finished`, `askcard-*`), so improving A9
+ * requires editing `src/` and adds no event kind and touches no protocol file.
+ * Its collector deliberately carries a COPY of the named-pipe / fd-3-4
+ * transport rather than importing `src/agent-harness/test-spawn.ts`, which is
+ * inside the surface a sprint may edit. See the A9 section header.
+ *
  * Exit codes: 0 = ran (see `meetsTarget` per axis for the verdict);
  *             1 = `--gate` was passed and a baselined axis is `false`;
  *             2 = the scorer itself could not run (bad args, unreadable corpus);
@@ -111,6 +129,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -127,7 +146,7 @@ const MODULE = "agent-drivability-score";
 // Types
 // ===========================================================================
 
-export type AxisId = "A1" | "A2" | "A3" | "A4" | "A5" | "A6" | "A7";
+export type AxisId = "A1" | "A2" | "A3" | "A4" | "A5" | "A6" | "A7" | "A9";
 export type Confidence = "high" | "medium" | "low" | "none";
 
 /** How a step's field is reached and named. Mirrors nothing in `src/` on purpose. */
@@ -303,6 +322,8 @@ export interface ScoreInputs {
   replay: ReplayResult | null;
   /** Non-interactive outcome matrix for A7. */
   a7: A7MatrixResult | null;
+  /** Parked-run cancellability matrix for A9. */
+  a9: A9MatrixResult | null;
   /** Silence budget for A2's "no turn goes quiet" invariant. */
   maxSilenceMs: number;
 }
@@ -407,6 +428,19 @@ export const PRE_PHASE0_BASELINE: Record<
       "§1.1 — not baselined: the axis did not exist before Phase 0. A7 was added 2026-09-05, AFTER Phase 0 shipped, " +
       "so it has no pre-Phase-0 row and Phase 0 can claim no credit on it. Its own committed baseline (5/7 = 0.714, " +
       "measured 2026-09-05 against 683a7b99 with `--a7`) is the pre-Phase-2 line a sprint is judged against.",
+  },
+  A9: {
+    score: null,
+    unit: "fraction of matrix rows whose end/stay behaviour matches the gesture's ground truth",
+    meetsTarget: null,
+    source:
+      "§1.1 — not baselined: the axis did not exist before Phase 0. A9 was added 2026-09-08, AFTER Phase 0 shipped, " +
+      "so it has no pre-Phase-0 row and Phase 0 can claim no credit on it. Its own committed baseline (4/6 = 0.667, " +
+      "measured 2026-09-07 and re-measured 2026-09-08 against 05626eba with `--a9`, every observable identical " +
+      "across four full runs) is the line a sprint is judged against. Note the axis is NOT unrelated to A3's " +
+      "pre-Phase-0 row: A3 recorded that 'Escape never reached the abort path (use-app-logic.tsx:3847)' for a run " +
+      "with no card open. A9 measures the same key on a run that IS parked on a card, which is a different guard " +
+      "and a different code path.",
   },
 };
 
@@ -1530,7 +1564,11 @@ export function scoreA7(inputs: ScoreInputs): AxisResult {
       exitCode: r.exitCode,
       stdoutBytes: r.stdoutBytes,
     })),
-    inconsistentRows: inconsistent.map((r) => ({ id: r.id, groundTruth: r.groundTruth, answerOnStdout: r.answerOnStdout })),
+    inconsistentRows: inconsistent.map((r) => ({
+      id: r.id,
+      groundTruth: r.groundTruth,
+      answerOnStdout: r.answerOnStdout,
+    })),
     // Recorded so a reader can see the stderr situation; read by NOTHING here.
     stderrBytesPerRow: Object.fromEntries(rows.map((r) => [r.id, r.stderrBytes])),
     rows,
@@ -1679,6 +1717,933 @@ export async function collectA7Matrix(opts?: {
 }
 
 // ===========================================================================
+// A9 — Parked-run cancellability
+//
+// The surface: an agent driving the TUI over the harness/MCP that has landed on
+// a council human-wait card (an "askcard"). Its contract is the `LiveEvent`
+// stream the harness already publishes — `run-finished`, `askcard-open`,
+// `askcard-cancel`, `askcard-answered` — plus whether the child process is
+// still alive. A9 adds NO event kind and reads NO protocol file, so, like A7,
+// it owns none of its contract: a change that moves A9 is confined to `src/`
+// (§2.2). The instrument is a subprocess spawn of the shipped entry point.
+//
+// ---------------------------------------------------------------------------
+// WHY THE COLLECTOR CARRIES ITS OWN TRANSPORT (this is a CORRECTNESS rule)
+// ---------------------------------------------------------------------------
+// The obvious way to reach the TUI is `tests/harness/helpers.ts` →
+// `src/agent-harness/test-spawn.ts`. That file is under `src/`, i.e. INSIDE the
+// surface a sprint may edit, so importing it would let a sprint move its own
+// instrument. `packages/agent-harness-core` deliberately owns no spawn — the
+// MCP server takes one by injection — so there is nothing importable there
+// either, and `packages/**` is named by §2.2 as part of the instrument anyway.
+// The named-pipe (Windows) / fd-3-4 (POSIX) transport below is therefore a
+// deliberate COPY, transcribed the same way A7_FIXTURES transcribes the mock
+// model's stream shapes. It must stay a copy, and this axis must stay a
+// SUBPROCESS measurement: built as an in-process unit test importing the
+// council manager, it would immediately become vulnerable to the "evidence
+// attached to code nothing calls" shape (a second, cleaner module exercised
+// only by the sprint's own tests). A key that the shipped `use-app-logic.tsx`
+// does not route produces no `run-finished`, and `run-finished` is the only
+// thing the must-end rows score on.
+//
+// ---------------------------------------------------------------------------
+// WHY THE MEASURED FAILURE IS NOT A TIMEOUT
+// ---------------------------------------------------------------------------
+// Nothing here thresholds a wall clock. Each row asks a yes/no question about a
+// DISCRETE event: did `run-finished` arrive inside the row's observation
+// window? The window bounds the run, it does not define the verdict — the
+// measured gap is not marginal. The one gesture that works fires `run-finished`
+// in well under a second; the gestures that fail never fire it at all, at any
+// spacing tried up to 1500 ms.
+//
+// ---------------------------------------------------------------------------
+// WHY THE SCORE IS NOT A PLAIN FRACTION — the same false-alarm penalty as A7
+// ---------------------------------------------------------------------------
+// The cheapest fix a model reaches for is "make a dismiss also stop the run" —
+// firing the abort path from the askcard's own cancel branch. That is the KNOWN
+// 2026-07-06 regression, recorded in the comment at
+// `src/ui/use-app-logic.tsx:3845-3850`: Stage 2 fired on a dismissal and wiped
+// the whole debate transcript. On a plain fraction it scores 5/6 = 0.833 and
+// RANKS ABOVE the 4/6 = 0.667 defect it replaces, because it is right on more
+// rows. With a false alarm subtracted at 2x it scores (5 - 2)/6 = 0.500 and
+// ranks below. Both numbers are MEASURED, not argued: this collector was run
+// against a throwaway copy of the tree carrying that change
+// (`--a9 --a9-repo-root <copy>`), and the matrix that run produced is the
+// {@link NEGATIVE_CONTROLS} fixture for this axis.
+//
+// A CORRECTION worth carrying, because it cost a full measurement cycle to
+// find: the obvious reading — "the blocker is the `pendingCouncilQuestionRef`
+// guard at :3852-3854, so deleting it makes Escape abort" — is FALSE. Deleting
+// those three lines in a copy of the tree and re-running this collector
+// reproduced the baseline EXACTLY, every observable, 0.667. The guard is not on
+// the path a card-consumed Escape takes at all: the card branch
+// (`:6749`ff) calls `key.preventDefault()` AND `key.stopPropagation()` before
+// it does anything else, which ends dispatch — so neither the renderer-internal
+// Escape listener (`:3878`) nor the `interruptActiveRun` call site at `:7945`
+// ever sees the key. Traced directly: with the guard AND the `defaultPrevented`
+// early-return both removed, the internal listener still logged every typed
+// character and the submitting Enter, and NOT the Escape.
+//
+// The asymmetry is the same one A7 states. A MISS (a parked run that cannot be
+// ended) wastes the agent's remaining budget but leaves it able to answer the
+// card. A FALSE ALARM (a run destroyed by a gesture that was supposed to leave
+// it alone) is unrecoverable — the work is gone. K5 additionally guards the
+// `d22397a9e47d` incident, where a 120 s idle watchdog counted a human's
+// reading time as "no output" and discarded ~20.5 min of council work: a fix
+// that ends a parked run on a TIMER rather than on the agent's gesture turns K5
+// into a false alarm and is penalised at 2x.
+//
+// ---------------------------------------------------------------------------
+// WHAT IS DELIBERATELY NOT SCORED
+// ---------------------------------------------------------------------------
+// Wall-clock latency, the number of keystrokes needed, anything rendered to the
+// screen, and stderr. A fix that ends the run promptly and one that ends it at
+// the very edge of the window score identically. And an END is only credited
+// when the run reports an outcome of `abandoned` or `halted`: ending by
+// THROWING is not cancellation, and without that constraint a fix that crashes
+// the run on the second Escape would score the same as one that stops it.
+// ===========================================================================
+
+/** Accepted `run-finished` outcomes for a row that MUST end. Throwing is not cancelling. */
+export const A9_ACCEPTED_END_OUTCOMES: readonly string[] = ["abandoned", "halted"];
+
+/**
+ * "must-end" = the gesture is a cancellation request an agent can actually
+ * produce, so the run is required to finish. "must-stay" = the gesture (or the
+ * absence of one) must leave the run alive and parked or advancing.
+ *
+ * The value is a fact about the GESTURE, decided before the process runs. It is
+ * never inferred from what the run did, which is the whole point: what the run
+ * did is what is on trial.
+ */
+export type A9GroundTruth = "must-end" | "must-stay";
+
+/** What a row demands beyond the "did the run end" bit. */
+export type A9Expectation = "end" | "dismiss-and-advance" | "stay-parked" | "answered";
+
+/** One keystroke, and the delay to wait BEFORE sending it. `0` = same input batch. */
+export interface A9Keystroke {
+  key: string;
+  afterMs: number;
+}
+
+export interface A9RowSpec {
+  id: string;
+  label: string;
+  groundTruth: A9GroundTruth;
+  expect: A9Expectation;
+  /** Keystrokes in order. Empty = send nothing at all. */
+  gesture: readonly A9Keystroke[];
+  /** Observation window, measured from the FIRST keystroke. */
+  budgetMs: number;
+  /** WHY the ground truth is what it is — always a statement about the gesture. */
+  basis: string;
+}
+
+/**
+ * Raw observables only. The verdict is NOT stored here: {@link scoreA9} derives
+ * it from these fields plus the row spec. A collected matrix therefore cannot
+ * assert its own correctness — a deliberate strengthening over A7, whose rows
+ * carry a pre-computed `exitCorrect` the scorer trusts.
+ */
+export interface A9RowResult {
+  id: string;
+  groundTruth: A9GroundTruth;
+  /** false when the spawn itself failed. */
+  ran: boolean;
+  /** false when the run never parked on a card — a broken measurement, not a finding. */
+  reached: boolean;
+  runFinished: boolean;
+  /** `outcome` off the `run-finished` payload; null when none arrived. */
+  runFinishedOutcome: string | null;
+  askcardCancelCount: number;
+  answered: boolean;
+  /** A further `askcard-open` or `council-step` arrived — the run moved on. */
+  advanced: boolean;
+  alive: boolean;
+  /** An `id=askcard` node was present in the last frame at the end of the window. */
+  cardOpen: boolean;
+  /** Event kinds observed inside the window, in order. Diagnostic only. */
+  kinds: string[];
+  error?: string;
+}
+
+export interface A9MatrixResult {
+  collectedAt: string;
+  collectedBy: string;
+  /** Which tree was driven. Stamped so a patched tree can never pass as a baseline. */
+  repoRoot: string;
+  repoRootIsDefault: boolean;
+  rows: A9RowResult[];
+}
+
+/**
+ * The A9 matrix. Six spawns with a ground truth fixed by the gesture.
+ *
+ * K2, K5 and K6 are no-regression rows: they pass today and a fix must not move
+ * them. K3 and K4 are the headroom — the two rows where a repeated Escape at a
+ * spacing a real driver can produce must end the run. K1 is the anti-gaming row
+ * in the cancellation direction (a cancellation that fires when it must not),
+ * K5 and K6 in the other two directions (a timer, and an over-broad "any key
+ * cancels").
+ */
+export const A9_ROWS: readonly A9RowSpec[] = [
+  {
+    id: "K1",
+    label: "ANTI-GAMING: Escape x1 must DISMISS the card and leave the run running",
+    groundTruth: "must-stay",
+    expect: "dismiss-and-advance",
+    gesture: [{ key: "Escape", afterMs: 0 }],
+    budgetMs: 12_000,
+    basis:
+      "one Escape is the documented dismiss gesture; the card answers with the dismissal sentinel and the loop moves " +
+      "on. Ending the run here is the live-verified 2026-07-06 regression (src/ui/use-app-logic.tsx:3845-3850) — the " +
+      "whole debate transcript destroyed by a keystroke that meant 'not this question'. This is the row that makes " +
+      "'Escape always aborts' score BELOW the defect it replaces.",
+  },
+  {
+    id: "K2",
+    label: "NO-REGRESSION: Escape x2 in the same input batch must end the run",
+    groundTruth: "must-end",
+    expect: "end",
+    gesture: [
+      { key: "Escape", afterMs: 0 },
+      { key: "Escape", afterMs: 0 },
+    ],
+    budgetMs: 12_000,
+    basis:
+      "the one exit that works today: both keys are delivered before the next card can repopulate the guard's ref, so " +
+      "the second reaches the abort path. Measured outcome: abandoned. It passes today and must keep passing — a fix " +
+      "that makes cancellation work for realistic spacings by breaking this one has traded a bug for a bug.",
+  },
+  {
+    id: "K3",
+    label: "HEADROOM: Escape x2, 250 ms apart (one MCP round trip)",
+    groundTruth: "must-end",
+    expect: "end",
+    gesture: [
+      { key: "Escape", afterMs: 0 },
+      { key: "Escape", afterMs: 250 },
+    ],
+    budgetMs: 12_000,
+    basis:
+      "250 ms is the smallest spacing a driver paying one tool round trip per keypress can plausibly beat; 100 ms " +
+      "already fails on today's build, so the row is not sitting on the boundary. A cancellation capability that " +
+      "exists only for same-batch delivery exists on paper and not in practice.",
+  },
+  {
+    id: "K4",
+    label: "HEADROOM: Escape x10, 500 ms apart (a human hammering the key)",
+    groundTruth: "must-end",
+    expect: "end",
+    gesture: Array.from({ length: 10 }, (_, i) => ({ key: "Escape", afterMs: i === 0 ? 0 : 500 })),
+    budgetMs: 12_000,
+    basis:
+      "the gesture a person actually makes when a run will not stop. A SECOND, structurally different spacing from " +
+      "K3, so a special case tuned to one inter-key gap cannot cover the matrix.",
+  },
+  {
+    id: "K5",
+    label: "ANTI-GAMING: no input at all — the card must stay parked",
+    groundTruth: "must-stay",
+    expect: "stay-parked",
+    gesture: [],
+    budgetMs: 20_000,
+    basis:
+      "a human-wait card must wait for the human. Session d22397a9e47d discarded ~20.5 min of council work because a " +
+      "120 s idle watchdog counted reading time as 'no output'; holdWatchdogOpen() exists because of it. A fix that " +
+      "ends a parked run on a TIMER rather than on a gesture turns this row into a false alarm at 2x.",
+  },
+  {
+    id: "K6",
+    label: "ANTI-GAMING: answering the card must proceed, not end the run",
+    groundTruth: "must-stay",
+    expect: "answered",
+    gesture: [{ key: "Enter", afterMs: 0 }],
+    budgetMs: 12_000,
+    basis:
+      "the ordinary path: the agent answers and the run continues with the answer. Present so that an over-broad " +
+      "'any keypress cancels' scores WORSE rather than better, and so that answering and dismissing stay " +
+      "distinguishable — the exact confusion the dismissal sentinel was introduced to end.",
+  },
+];
+
+/**
+ * The mock-LLM fixture body, written to a fresh temp dir by
+ * {@link collectA9Matrix} at measurement time rather than read from the repo,
+ * so there is no committed artifact a sprint could edit to make its own change
+ * score well — the same property A7_FIXTURES has.
+ *
+ * The `responses` entry is what makes the council ask a clarifying question:
+ * the model replies with a JSON array of questions, which the loop turns into
+ * the askcard every row parks on.
+ */
+export const A9_FIXTURE: string = (() => {
+  const clarify = JSON.stringify([
+    {
+      question: "Which counter behaviour should the discussion assume?",
+      why: "The two readings lead to different debates.",
+      options: [
+        { label: "Increment only", description: "A single up button.", recommended: true },
+        { label: "Increment, decrement and reset", description: "Full controls." },
+      ],
+      isRequired: true,
+    },
+  ]);
+  return `${JSON.stringify(
+    {
+      model: {
+        provider: "mock",
+        modelId: "mock-a9",
+        stream: [
+          [
+            { type: "stream-start", warnings: [] },
+            { type: "text-start", id: "t" },
+            { type: "text-delta", id: "t", delta: "Acknowledged." },
+            { type: "text-end", id: "t" },
+            {
+              type: "finish",
+              finishReason: { unified: "stop", raw: null },
+              usage: {
+                inputTokens: { total: 10, noCache: 10, cacheRead: null, cacheWrite: null },
+                outputTokens: { total: 10, text: 10, reasoning: null },
+              },
+            },
+          ],
+        ],
+      },
+      responses: [{ match: "*", text: clarify }],
+    },
+    null,
+    2,
+  )}\n`;
+})();
+
+/** Per-row verdict, DERIVED from the observables. Rows carry no verdict of their own. */
+export interface A9RowVerdict {
+  id: string;
+  correct: boolean;
+  falseAlarm: boolean;
+  why: string;
+}
+
+export function a9RowVerdict(spec: A9RowSpec, r: A9RowResult): A9RowVerdict {
+  if (!r.ran) return { id: r.id, correct: false, falseAlarm: false, why: "the row did not execute" };
+  if (!r.reached) return { id: r.id, correct: false, falseAlarm: false, why: "the run never parked on a card" };
+
+  if (spec.groundTruth === "must-end") {
+    const outcomeOk = r.runFinishedOutcome !== null && A9_ACCEPTED_END_OUTCOMES.includes(r.runFinishedOutcome);
+    const correct = r.runFinished && r.alive && outcomeOk;
+    const why = !r.runFinished
+      ? "no run-finished arrived: the parked run could not be ended by this gesture"
+      : !r.alive
+        ? "the run ended by taking the process down with it"
+        : !outcomeOk
+          ? `run-finished reported outcome=${String(r.runFinishedOutcome)}; ending that way is not cancelling`
+          : "the run ended cleanly and the process survived";
+    return { id: r.id, correct, falseAlarm: false, why };
+  }
+
+  const falseAlarm = r.runFinished;
+  let correct: boolean;
+  let why: string;
+  if (spec.expect === "dismiss-and-advance") {
+    correct = !r.runFinished && r.alive && r.askcardCancelCount === 1 && r.advanced;
+    why = r.runFinished
+      ? "the run was DESTROYED by a gesture that must only dismiss the card"
+      : `cancels=${r.askcardCancelCount} advanced=${r.advanced} alive=${r.alive}`;
+  } else if (spec.expect === "stay-parked") {
+    correct = !r.runFinished && r.alive && r.cardOpen;
+    why = r.runFinished
+      ? "the run ended with no gesture at all — something is ending parked runs on a timer"
+      : `cardOpen=${r.cardOpen} alive=${r.alive}`;
+  } else {
+    correct = !r.runFinished && r.alive && r.answered;
+    why = r.runFinished ? "answering the card ended the run" : `answered=${r.answered} alive=${r.alive}`;
+  }
+  return { id: r.id, correct, falseAlarm, why };
+}
+
+export function scoreA9(inputs: ScoreInputs): AxisResult {
+  const humanMustJudge =
+    "Whether these six gestures are the ones a real driver makes. Like A1/A4/A7 the matrix is a human-authored " +
+    "denominator and is gameable BY OMISSION — no code here can tell a complete matrix from a convenient one. Read " +
+    "A9_ROWS and decide, in particular whether 250 ms (K3) is really below the round trip an MCP driver pays per " +
+    "keypress: that number was chosen because 100 ms already fails, NOT measured against a live MCP client. Note " +
+    "also what the axis deliberately does NOT score — how long cancellation takes, how many keystrokes it costs, and " +
+    "anything on screen. A fix that ends the run at the very edge of the window scores the same as an instant one.";
+
+  const base: AxisResult = {
+    axis: "A9",
+    name: "Parked-run cancellability",
+    mechanical: true,
+    axisAsStated: {
+      mechanical: true,
+      why:
+        "'a parked run ends on a realistically-spaced cancellation gesture, and does not end otherwise' is decidable " +
+        "from a spawned process: run-finished either arrives on the sidechannel inside the row's window or it does " +
+        "not, and the ground truth is fixed by the gesture before the process starts. No human is in the loop to " +
+        "produce the number — though one still has to judge whether the gesture set is complete.",
+    },
+    measured: false,
+    measuredBy: "none",
+    score: null,
+    unit: "fraction of matrix rows whose end/stay behaviour matches the gesture's ground truth, less 2x per false alarm",
+    target: "1.0 over the fixed matrix, with K1/K5/K6 (the must-stay rows) pinned alive",
+    meetsTarget: null,
+    confidence: "none",
+    humanMustJudge,
+    detail: {},
+    notes: [],
+  };
+
+  const matrix = inputs.a9;
+  if (!matrix) {
+    base.notes.push(
+      "no A9 matrix supplied (--a9 to run it now, or --a9-matrix <path> for a collected one). A9 is unmeasured, " +
+        "NOT passing. A missing artifact is not a score of 0.",
+    );
+    return base;
+  }
+
+  const specById = new Map(A9_ROWS.map((s) => [s.id, s]));
+  const rows = matrix.rows ?? [];
+  const notRun = rows.filter((r) => !r.ran);
+  const notReached = rows.filter((r) => r.ran && !r.reached);
+  const usable = rows.filter((r) => r.ran && r.reached && specById.has(r.id));
+  const unknownIds = rows.filter((r) => !specById.has(r.id)).map((r) => r.id);
+
+  base.measured = true;
+  base.detail = {
+    collectedAt: matrix.collectedAt,
+    collectedBy: matrix.collectedBy,
+    repoRoot: matrix.repoRoot,
+    repoRootIsDefault: matrix.repoRootIsDefault,
+    rowsDeclared: A9_ROWS.length,
+    rows,
+  };
+
+  if (matrix.repoRootIsDefault === false) {
+    base.notes.push(
+      `this matrix was collected against ${matrix.repoRoot}, NOT the referee's own repo root. That is only ever ` +
+        "legitimate for running a negative control against a deliberately-broken copy. It is not a baseline and must " +
+        "not be committed as one.",
+    );
+  }
+  if (unknownIds.length > 0) {
+    base.notes.push(
+      `${unknownIds.join(", ")} are not declared in A9_ROWS and were ignored: a matrix cannot introduce its own rows.`,
+    );
+  }
+
+  if (usable.length === 0) {
+    base.measuredBy = `A9 matrix (${matrix.collectedBy}) — no row produced a usable observation`;
+    base.notes.push(
+      `no row reached the parked state (${notRun.length} did not execute, ${notReached.length} executed but never ` +
+        "parked). That is a broken measurement, not a finding about the TUI — and deleting the clarify phase, the " +
+        "askcard, or --force-council routing lands here rather than scoring well.",
+    );
+    return base;
+  }
+
+  const verdicts = usable.map((r) => a9RowVerdict(specById.get(r.id) as A9RowSpec, r));
+  const correct = verdicts.filter((v) => v.correct).length;
+  const falseAlarms = verdicts.filter((v) => v.falseAlarm);
+  const wrong = verdicts.filter((v) => !v.correct);
+
+  base.measuredBy =
+    `A9 matrix: ${usable.length} spawned TUI session(s), run-finished compared to the gesture's ground truth ` +
+    `(${matrix.collectedBy})`;
+  base.score = Math.max(0, (correct - 2 * falseAlarms.length) / usable.length);
+  base.confidence =
+    notRun.length > 0 || notReached.length > 0 ? "medium" : usable.length >= A9_ROWS.length ? "high" : "medium";
+  base.detail = {
+    ...base.detail,
+    rowsRan: usable.length,
+    rowsNotRun: notRun.map((r) => ({ id: r.id, error: r.error ?? null })),
+    rowsNotReached: notReached.map((r) => r.id),
+    correct,
+    /** The raw count, unpenalised — so the weighting never hides the data. */
+    unweightedCorrectRate: correct / usable.length,
+    falseAlarms: falseAlarms.map((v) => v.id),
+    falseAlarmPenaltyPerRow: 2,
+    acceptedEndOutcomes: [...A9_ACCEPTED_END_OUTCOMES],
+    verdicts,
+  };
+
+  if (wrong.length > 0) base.meetsTarget = false;
+  else if (notRun.length > 0 || notReached.length > 0) base.meetsTarget = null;
+  else base.meetsTarget = true;
+
+  for (const v of wrong) {
+    if (v.falseAlarm) continue;
+    base.notes.push(
+      `MISS: ${v.id} — ${v.why}. The agent's only remaining exits are to answer whatever the loop asks, or to kill ` +
+        "the process and lose the run.",
+    );
+  }
+  for (const v of falseAlarms) {
+    base.notes.push(
+      `FALSE ALARM: ${v.id} — ${v.why}. This is penalised at 2x: a run destroyed by a gesture that was supposed to ` +
+        "leave it alone cannot be recovered, whereas a run that will not stop can still be answered. Decide from " +
+        "whether the agent ASKED to cancel, not from whether a key arrived.",
+    );
+  }
+  if (notRun.length > 0 || notReached.length > 0) {
+    base.notes.push(
+      `${notRun.length + notReached.length} row(s) produced no usable observation ` +
+        `(${[...notRun, ...notReached].map((r) => r.id).join(", ")}); they are evidence about nothing and are ` +
+        "excluded from the denominator. meetsTarget cannot be true on a partial matrix.",
+    );
+  }
+  base.notes.push(
+    "latency, keystroke count and anything on screen are NOT scored. Ending by THROWING is not credited either — a " +
+      `must-end row is correct only when run-finished reports one of: ${A9_ACCEPTED_END_OUTCOMES.join(", ")}.`,
+  );
+  return base;
+}
+
+// ---------------------------------------------------------------------------
+// A9 collector — transport
+//
+// COPIED (not imported) from src/agent-harness/test-spawn.ts. See the section
+// header above for why this must remain a copy. Kept to the minimum the matrix
+// needs: two named pipes on Windows, fd 3/4 on POSIX, a newline-JSON splitter,
+// and a "does the last frame contain a node with this id / role" check. There
+// is no selector grammar and no Driver here — those live in `packages/**`,
+// which §2.2 names as part of the instrument.
+// ---------------------------------------------------------------------------
+
+const a9Sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Minimal shape of a `LiveFrame` node. Transcribed, not imported. */
+interface A9Node {
+  id?: string;
+  role?: string;
+  children?: A9Node[];
+}
+
+function a9FindNode(nodes: A9Node[] | undefined, pred: (n: A9Node) => boolean): boolean {
+  for (const n of nodes ?? []) {
+    if (pred(n)) return true;
+    if (a9FindNode(n.children, pred)) return true;
+  }
+  return false;
+}
+
+let a9PipeSeq = 0;
+function a9PipeName(role: "in" | "out"): string {
+  a9PipeSeq += 1;
+  const suffix = `${Date.now().toString(36)}${a9PipeSeq}${Math.floor(Math.random() * 1e6).toString(36)}`;
+  return `\\\\.\\pipe\\muonroi-a9-${process.pid}-${suffix}-${role}`;
+}
+
+function a9AttachGuards(w: NodeJS.WritableStream, r: NodeJS.ReadableStream): void {
+  const guard = (label: string) => (err: NodeJS.ErrnoException) => {
+    const code = err?.code ?? "unknown";
+    // EPIPE / ECONNRESET / ERR_STREAM_DESTROYED are ordinary teardown races —
+    // the child is killed while a write is in flight. Anything else is real and
+    // must not be swallowed silently.
+    if (code !== "EPIPE" && code !== "ECONNRESET" && code !== "ERR_STREAM_DESTROYED") {
+      console.error(`[${MODULE}] A9 ${label} stream error (${code}): ${err?.message}`);
+    }
+  };
+  w.on("error", guard("inWrite"));
+  r.on("error", guard("outRead"));
+}
+
+interface A9Transport {
+  proc: ReturnType<typeof spawn>;
+  inWrite: NodeJS.WritableStream;
+  outRead: NodeJS.ReadableStream;
+  cleanup: () => void;
+}
+
+async function a9SpawnWindows(
+  argv: string[],
+  env: Record<string, string>,
+  cwd: string,
+  handshakeMs: number,
+): Promise<A9Transport> {
+  const inName = a9PipeName("in");
+  const outName = a9PipeName("out");
+  const inServer = createServer({ allowHalfOpen: true });
+  const outServer = createServer({ allowHalfOpen: true });
+  await new Promise<void>((res, rej) => {
+    let done = 0;
+    const onListen = () => {
+      if (++done === 2) res();
+    };
+    inServer.once("error", rej);
+    outServer.once("error", rej);
+    inServer.listen(inName, onListen);
+    outServer.listen(outName, onListen);
+  });
+
+  const childEnv = { ...env, MUONROI_HARNESS_IN_PIPE: inName, MUONROI_HARNESS_OUT_PIPE: outName };
+  const proc = spawn("bun", ["run", ...argv], { cwd, env: childEnv, stdio: ["pipe", "pipe", "pipe"] });
+
+  const connection = (server: Server, label: string): Promise<Socket> =>
+    new Promise<Socket>((res, rej) => {
+      const timer = setTimeout(
+        () => rej(new Error(`named pipe ${label}: child did not connect within ${handshakeMs} ms`)),
+        handshakeMs,
+      );
+      server.once("connection", (s) => {
+        clearTimeout(timer);
+        res(s);
+      });
+      server.once("error", (e) => {
+        clearTimeout(timer);
+        rej(e);
+      });
+    });
+
+  let inSock: Socket;
+  let outSock: Socket;
+  try {
+    [inSock, outSock] = await Promise.all([connection(inServer, "in"), connection(outServer, "out")]);
+    await new Promise<void>((res, rej) => {
+      const timer = setTimeout(() => rej(new Error(`handshake not received within ${handshakeMs} ms`)), handshakeMs);
+      let buf = "";
+      const onData = (chunk: Buffer | string) => {
+        buf += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+        const nl = buf.indexOf("\n");
+        if (nl < 0) return;
+        clearTimeout(timer);
+        outSock.off("data", onData);
+        const line = buf.slice(0, nl);
+        try {
+          const msg = JSON.parse(line) as Record<string, unknown>;
+          if (msg.t === "handshake" && msg.ok === true) res();
+          else rej(new Error(`unexpected handshake payload: ${line}`));
+        } catch {
+          rej(new Error(`malformed handshake line: ${line}`));
+        }
+      };
+      outSock.on("data", onData);
+      outSock.once("error", (e) => {
+        clearTimeout(timer);
+        rej(e);
+      });
+    });
+  } catch (err) {
+    try {
+      proc.kill();
+    } catch (killErr) {
+      console.error(`[${MODULE}] A9: kill after a failed handshake failed: ${(killErr as Error)?.message}`);
+    }
+    inServer.close();
+    outServer.close();
+    throw err;
+  }
+
+  const cleanup = () => {
+    inServer.close();
+    outServer.close();
+  };
+  proc.once("exit", cleanup);
+  a9AttachGuards(inSock, outSock);
+  return { proc, inWrite: inSock, outRead: outSock, cleanup };
+}
+
+function a9SpawnPosix(argv: string[], env: Record<string, string>, cwd: string): A9Transport {
+  const proc = spawn("bun", ["run", ...argv], {
+    cwd,
+    env,
+    stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
+  });
+  const outRead = proc.stdio[3] as NodeJS.ReadableStream;
+  const inWrite = proc.stdio[4] as NodeJS.WritableStream;
+  a9AttachGuards(inWrite, outRead);
+  return { proc, inWrite, outRead, cleanup: () => {} };
+}
+
+/** A live TUI session: keys out, events and frames in. No selector grammar. */
+interface A9Session extends A9Transport {
+  events: { kind: string; raw: Record<string, unknown> }[];
+  idleCount: number;
+  lastFrame: { nodes?: A9Node[] } | null;
+  /**
+   * Last few KB of the child's stderr. It MUST be drained even though no row
+   * scores on it: the pipe's OS buffer is finite, and a child whose stderr
+   * fills it blocks on write — which would look exactly like a hang.
+   */
+  stderrTail: () => string;
+  press: (key: string) => void;
+  type: (text: string) => void;
+  waitFor: (cond: () => boolean, timeoutMs: number) => Promise<boolean>;
+}
+
+function a9Wire(t: A9Transport): A9Session {
+  let errTail = "";
+  // Opt-in live echo. Off by default because a passing matrix does not need it;
+  // indispensable when a row will not reach the parked state and you need to
+  // see what the child is complaining about.
+  const echo = process.env.MUONROI_A9_ECHO_STDERR === "1";
+  t.proc.stderr?.on("data", (chunk: Buffer | string) => {
+    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    errTail = (errTail + text).slice(-8192);
+    if (echo) process.stderr.write(`[a9-child] ${text}`);
+  });
+  const s: A9Session = {
+    ...t,
+    events: [],
+    idleCount: 0,
+    lastFrame: null,
+    stderrTail: () => errTail,
+    press: (key) => t.inWrite.write(`${JSON.stringify({ op: "press", key })}\n`),
+    type: (text) => t.inWrite.write(`${JSON.stringify({ op: "type", text })}\n`),
+    waitFor: async (cond, timeoutMs) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (cond()) return true;
+        await a9Sleep(25);
+      }
+      return cond();
+    },
+  };
+  let buf = "";
+  t.outRead.on("data", (chunk: Buffer | string) => {
+    buf += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    let nl = buf.indexOf("\n");
+    while (nl >= 0) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      nl = buf.indexOf("\n");
+      if (!line.trim()) continue;
+      try {
+        const msg = JSON.parse(line) as Record<string, unknown>;
+        if (msg.mode === "live") s.lastFrame = msg as { nodes?: A9Node[] };
+        else if (msg.t === "idle") s.idleCount += 1;
+        else if (msg.t === "event" && typeof msg.kind === "string") s.events.push({ kind: msg.kind, raw: msg });
+      } catch {
+        // A malformed sidechannel line is not evidence about cancellability;
+        // the rows score on events that DID parse. Recorded, never fatal.
+        s.events.push({ kind: "<unparseable>", raw: { line } });
+      }
+    }
+  });
+  return s;
+}
+
+/**
+ * Run the A9 matrix for real: generate the fixture, spawn the agent-mode TUI
+ * once per row, drive it to the parked askcard, apply the row's gesture and
+ * watch the event stream. Offline and deterministic — the model is a mock
+ * fixture, so no network, no API key, no cost.
+ *
+ * Cost: ~2 minutes for six rows on Windows, dominated by six cold boots and by
+ * K5's deliberate 20 s patience window. Rows run SEQUENTIALLY on purpose:
+ * `vitest.harness.config.ts` sets `fileParallelism:false` precisely because
+ * concurrent TUI spawns contend on idle timeouts. Parallelising this would
+ * trade a reproducible number for a faster one.
+ */
+export async function collectA9Matrix(opts?: {
+  rows?: readonly A9RowSpec[];
+  /**
+   * Tree to drive. Anything but the referee's own repo root is STAMPED as
+   * non-default on the matrix and produces a loud note from {@link scoreA9}.
+   * It exists to run a negative control against a deliberately-broken copy —
+   * never to collect a baseline.
+   */
+  repoRoot?: string;
+  /** Budget for reaching the parked state, per row. */
+  reachTimeoutMs?: number;
+  handshakeTimeoutMs?: number;
+}): Promise<A9MatrixResult> {
+  const rowSpecs = opts?.rows ?? A9_ROWS;
+  const repoRoot = opts?.repoRoot ? resolve(opts.repoRoot) : REPO_ROOT;
+  const reachTimeoutMs = opts?.reachTimeoutMs ?? 120_000;
+  const handshakeMs = opts?.handshakeTimeoutMs ?? 90_000;
+  const out: A9MatrixResult = {
+    collectedAt: new Date().toISOString(),
+    collectedBy: `collectA9Matrix (${rowSpecs.length} rows, reach timeout ${reachTimeoutMs}ms/row)`,
+    repoRoot,
+    repoRootIsDefault: repoRoot === REPO_ROOT,
+    rows: [],
+  };
+
+  let fixtureRoot: string | null = null;
+  try {
+    fixtureRoot = mkdtempSync(join(tmpdir(), "muonroi-a9-"));
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    console.error(`[${MODULE}] A9: could not create a temp dir: ${message}`);
+    out.rows = rowSpecs.map((s) => a9DeadRow(s, `temp dir creation failed: ${message}`));
+    return out;
+  }
+  const fixturesDir = join(fixtureRoot, "llm");
+  try {
+    mkdirSync(fixturesDir, { recursive: true });
+    writeFileSync(join(fixturesDir, "a9.json"), A9_FIXTURE, "utf-8");
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    console.error(`[${MODULE}] A9: fixture materialisation failed under ${fixturesDir}: ${message}`);
+  }
+
+  for (const spec of rowSpecs) {
+    out.rows.push(await a9RunRow(spec, repoRoot, fixturesDir, reachTimeoutMs, handshakeMs));
+  }
+
+  try {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  } catch (err) {
+    console.error(
+      `[${MODULE}] A9: temp dir cleanup failed (${fixtureRoot}): ${(err as Error)?.message ?? String(err)}`,
+    );
+  }
+  return out;
+}
+
+function a9DeadRow(spec: A9RowSpec, error: string): A9RowResult {
+  return {
+    id: spec.id,
+    groundTruth: spec.groundTruth,
+    ran: false,
+    reached: false,
+    runFinished: false,
+    runFinishedOutcome: null,
+    askcardCancelCount: 0,
+    answered: false,
+    advanced: false,
+    alive: false,
+    cardOpen: false,
+    kinds: [],
+    error,
+  };
+}
+
+async function a9RunRow(
+  spec: A9RowSpec,
+  repoRoot: string,
+  fixturesDir: string,
+  reachTimeoutMs: number,
+  handshakeMs: number,
+): Promise<A9RowResult> {
+  // A fresh greenfield cwd per row: /ideal's discover phase scans the working
+  // directory, and scanning a large repo is the dominant, highly-variable cost
+  // that made the council E2E flaky. It doubles as HOME so nothing the run
+  // writes lands in the developer's profile.
+  let cwd: string;
+  try {
+    cwd = mkdtempSync(join(tmpdir(), "muonroi-a9-cwd-"));
+  } catch (err) {
+    return a9DeadRow(spec, `cwd creation failed: ${(err as Error)?.message ?? String(err)}`);
+  }
+
+  const mockKey = ["muonroi", "a9", "mock", "provider", "key"].join("-");
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    HOME: cwd,
+    USERPROFILE: cwd,
+    MUONROI_INTERNAL_SHIM_OK: "1",
+    ANTHROPIC_API_KEY: mockKey,
+    OPENAI_API_KEY: mockKey,
+    GOOGLE_GENERATIVE_AI_API_KEY: mockKey,
+    DEEPSEEK_API_KEY: mockKey,
+    SILICONFLOW_API_KEY: mockKey,
+  };
+  const argv = [
+    join(repoRoot, "src/index.ts"),
+    "--agent-mode",
+    "--mock-llm",
+    fixturesDir,
+    "-k",
+    mockKey,
+    "-m",
+    "deepseek-v4-flash",
+  ];
+
+  let session: A9Session;
+  try {
+    const transport =
+      process.platform === "win32" ? await a9SpawnWindows(argv, env, cwd, handshakeMs) : a9SpawnPosix(argv, env, cwd);
+    session = a9Wire(transport);
+  } catch (err) {
+    try {
+      rmSync(cwd, { recursive: true, force: true });
+    } catch (rmErr) {
+      console.error(`[${MODULE}] A9 ${spec.id}: cwd cleanup failed: ${(rmErr as Error)?.message}`);
+    }
+    return a9DeadRow(spec, `spawn failed: ${(err as Error)?.message ?? String(err)}`);
+  }
+
+  const s = session;
+  const has = (pred: (n: A9Node) => boolean) => a9FindNode(s.lastFrame?.nodes, pred);
+  let reached = false;
+  try {
+    const idle0 = s.idleCount;
+    if (!(await s.waitFor(() => s.idleCount > idle0, reachTimeoutMs))) throw new Error("no idle after boot");
+    if (!(await s.waitFor(() => has((n) => n.role === "textbox"), 15_000))) throw new Error("no composer");
+    s.type("/ideal build a counter --max-sprints 1 --force-council");
+    const idle1 = s.idleCount;
+    await s.waitFor(() => s.idleCount > idle1, 15_000);
+    s.press("Enter");
+    if (!(await s.waitFor(() => s.events.some((e) => e.kind === "askcard-open"), reachTimeoutMs))) {
+      throw new Error("no askcard-open");
+    }
+    if (!(await s.waitFor(() => has((n) => n.id === "askcard"), 15_000))) throw new Error("no id=askcard node");
+    reached = true;
+  } catch (err) {
+    console.error(`[${MODULE}] A9 ${spec.id}: never reached the parked state: ${(err as Error)?.message}`);
+    // The child's own stderr is the only place a boot failure explains itself.
+    // Not scored — printed so a broken measurement is diagnosable instead of
+    // being mistaken for a finding about the TUI.
+    console.error(`[${MODULE}] A9 ${spec.id}: child stderr tail:\n${s.stderrTail()}`);
+  }
+
+  let result: A9RowResult;
+  if (!reached) {
+    result = { ...a9DeadRow(spec, "never reached the parked state"), ran: true };
+  } else {
+    const mark = s.events.length;
+    const t0 = Date.now();
+    for (const g of spec.gesture) {
+      // afterMs === 0 means NO await at all — that is what puts two keys in the
+      // SAME input batch, which is the only cancellation that works today. An
+      // `await sleep(0)` would already split them.
+      if (g.afterMs > 0) await a9Sleep(g.afterMs);
+      s.press(g.key);
+    }
+    await a9Sleep(Math.max(0, spec.budgetMs - (Date.now() - t0)));
+    const after = s.events.slice(mark);
+    const rf = after.find((e) => e.kind === "run-finished");
+    result = {
+      id: spec.id,
+      groundTruth: spec.groundTruth,
+      ran: true,
+      reached: true,
+      runFinished: rf !== undefined,
+      runFinishedOutcome: typeof rf?.raw.outcome === "string" ? rf.raw.outcome : null,
+      askcardCancelCount: after.filter((e) => e.kind === "askcard-cancel").length,
+      answered: after.some((e) => e.kind === "askcard-answered"),
+      advanced: after.some((e) => e.kind === "askcard-open" || e.kind === "council-step"),
+      alive: s.proc.exitCode === null && s.proc.signalCode === null,
+      cardOpen: has((n) => n.id === "askcard"),
+      kinds: after.map((e) => e.kind),
+    };
+  }
+
+  try {
+    s.proc.kill();
+  } catch (err) {
+    console.error(`[${MODULE}] A9 ${spec.id}: child kill failed: ${(err as Error)?.message}`);
+  }
+  try {
+    s.cleanup();
+  } catch (err) {
+    console.error(`[${MODULE}] A9 ${spec.id}: transport cleanup failed: ${(err as Error)?.message}`);
+  }
+  try {
+    rmSync(cwd, { recursive: true, force: true });
+  } catch (err) {
+    console.error(`[${MODULE}] A9 ${spec.id}: cwd cleanup failed: ${(err as Error)?.message}`);
+  }
+  return result;
+}
+
+// ===========================================================================
 // Assembly
 // ===========================================================================
 
@@ -1691,6 +2656,7 @@ export function scoreAll(inputs: ScoreInputs): Scorecard {
     A5: scoreA5(inputs),
     A6: scoreA6(inputs),
     A7: scoreA7(inputs),
+    A9: scoreA9(inputs),
   };
   const ids = Object.keys(axes) as AxisId[];
   const postPhase0 = {} as Scorecard["attribution"]["postPhase0"];
@@ -2168,7 +3134,40 @@ export function healthyInputs(): ScoreInputs {
       },
     },
     a7: healthyA7Matrix(),
+    a9: healthyA9Matrix(),
     maxSilenceMs: 120_000,
+  };
+}
+
+/**
+ * A fixed A9 matrix in which every gesture gets the behaviour its ground truth
+ * demands: the must-end rows end the run cleanly (`abandoned`, process alive),
+ * the must-stay rows leave it alive — dismissed-and-advancing, parked, or
+ * answered. This is the state the axis exists to reach, not today's state.
+ */
+export function healthyA9Matrix(): A9MatrixResult {
+  return {
+    collectedAt: "2026-09-08T00:00:00.000Z",
+    collectedBy: "<healthy-fixture>",
+    repoRoot: REPO_ROOT,
+    repoRootIsDefault: true,
+    rows: A9_ROWS.map((s) => {
+      const mustEnd = s.groundTruth === "must-end";
+      return {
+        id: s.id,
+        groundTruth: s.groundTruth,
+        ran: true,
+        reached: true,
+        runFinished: mustEnd,
+        runFinishedOutcome: mustEnd ? "abandoned" : null,
+        askcardCancelCount: s.expect === "dismiss-and-advance" ? 1 : mustEnd ? 1 : 0,
+        answered: s.expect === "answered",
+        advanced: s.expect === "dismiss-and-advance" || s.expect === "answered",
+        alive: true,
+        cardOpen: !mustEnd,
+        kinds: mustEnd ? ["askcard-cancel", "run-finished"] : ["askcard-cancel"],
+      };
+    }),
   };
 }
 
@@ -2362,6 +3361,53 @@ export const NEGATIVE_CONTROLS: NegativeControl[] = [
       return c;
     },
   },
+  {
+    axis: "A9",
+    name: "the over-eager fix: 'a dismissed card also stops the run' (Escape always aborts)",
+    models:
+      "the gaming path a cheap model reaches for first on A9, and the one that must SCORE LOWER rather than higher. " +
+      "It is a handful of lines in the askcard's own cancel branch (src/ui/use-app-logic.tsx:6952ff) — fire the " +
+      "Stage 2 abort alongside the dismissal — it moves K3 and K4 green, and it is the KNOWN regression: the comment " +
+      "at :3845-3850 records it as live-verified on 2026-07-06, Stage 2 firing clearLiveTurnUi() + abort() and " +
+      "wiping the whole debate transcript the instant the user dismissed the card.\n\n" +
+      "Note WHY this control needed a scoring change and not just a fixture: on a plain fraction it scores 5/6 = " +
+      "0.833 and RANKS ABOVE today's 4/6 = 0.667 defect, because it is right on more rows. The 2x false-alarm " +
+      "penalty is what makes the trade net negative (0.500 < 0.667); without it the axis would reward the very " +
+      "answer it exists to reject.\n\n" +
+      "This mutation is not a guess about what such a fix does. It was MEASURED: the change was applied to a " +
+      "throwaway copy of the tree and `--a9 --a9-repo-root <copy>` was run against it. Every row below matches that " +
+      "run — K1 ends the run (outcome abandoned, one askcard-cancel, card gone, run does not advance), which is the " +
+      "false alarm, while K2/K3/K4 all end and K5/K6 are untouched.\n\n" +
+      "The FIRST attempt at this control was wrong in an instructive way, and the wrongness is the reason to keep " +
+      "measuring rather than reasoning: deleting the pendingCouncilQuestionRef guard at :3852-3854 — the obvious " +
+      "reading of 'unreachable abort' — reproduced the baseline EXACTLY, 0.667, every observable identical. That " +
+      "guard is not on the path a card-consumed Escape takes; the card branch stops dispatch first.\n\n" +
+      "The OTHER direction — today's defect, K3/K4 unable to end a parked run — needs no fixture here: `--a9` " +
+      "measures it live against the real TUI and reports meetsTarget:false at 4/6. A live measurement outranks a " +
+      "mutation.",
+    mutate: (h) => {
+      const c = structuredClone(h);
+      if (!c.a9) return c;
+      const specById = new Map(A9_ROWS.map((s) => [s.id, s]));
+      c.a9.collectedBy = "<negative-control: escape-always-aborts (askcard guard deleted)>";
+      for (const row of c.a9.rows) {
+        const spec = specById.get(row.id);
+        // With the guard gone, ANY Escape reaches interruptActiveRun and the
+        // run is abandoned — including the very first one, which was only ever
+        // meant to dismiss the card.
+        if (!spec?.gesture.some((g) => g.key === "Escape")) continue;
+        row.runFinished = true;
+        row.runFinishedOutcome = "abandoned";
+        row.askcardCancelCount = 1;
+        row.advanced = false;
+        row.cardOpen = false;
+        row.answered = false;
+        row.alive = true;
+        row.kinds = ["askcard-cancel", "run-finished"];
+      }
+      return c;
+    },
+  },
 ];
 
 export interface SelfTestRow {
@@ -2418,6 +3464,12 @@ interface Args {
   a7Matrix: string | null;
   a7Out: string | null;
   a7TimeoutMs: number;
+  a9: boolean;
+  a9Matrix: string | null;
+  a9Out: string | null;
+  a9ReachTimeoutMs: number;
+  /** Negative-control escape hatch ONLY — see --a9-repo-root in parseArgs. */
+  a9RepoRoot: string | null;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -2439,6 +3491,11 @@ function parseArgs(argv: string[]): Args {
     a7Matrix: null,
     a7Out: null,
     a7TimeoutMs: 300_000,
+    a9: false,
+    a9Matrix: null,
+    a9Out: null,
+    a9ReachTimeoutMs: 120_000,
+    a9RepoRoot: null,
   };
   const abs = (p: string) => (isAbsolute(p) ? p : resolve(process.cwd(), p));
   for (let i = 0; i < argv.length; i++) {
@@ -2495,6 +3552,27 @@ function parseArgs(argv: string[]): Args {
         break;
       case "--a7-timeout-ms":
         a.a7TimeoutMs = Math.max(1000, Number(argv[++i] ?? 0) || 300_000);
+        break;
+      case "--a9":
+        a.a9 = true;
+        break;
+      case "--a9-matrix":
+        a.a9Matrix = abs(argv[++i] ?? "");
+        break;
+      case "--a9-out":
+        a.a9Out = abs(argv[++i] ?? "");
+        break;
+      case "--a9-reach-timeout-ms":
+        a.a9ReachTimeoutMs = Math.max(1000, Number(argv[++i] ?? 0) || 120_000);
+        break;
+      // Drive a DIFFERENT tree than the referee's own repo root. This exists to
+      // run a §2.6 negative control against a deliberately-broken copy of the
+      // product — the only way to MEASURE what a known-bad fix scores instead
+      // of computing it. Any matrix collected this way is stamped
+      // `repoRootIsDefault:false` and scoreA9 says so loudly; it is never a
+      // baseline.
+      case "--a9-repo-root":
+        a.a9RepoRoot = abs(argv[++i] ?? "");
         break;
       default:
         throw new Error(`unknown argument: ${String(arg)}`);
@@ -2587,6 +3665,32 @@ async function main(): Promise<number> {
     }
   }
 
+  let a9: A9MatrixResult | null = args.a9Matrix ? readJsonFile<A9MatrixResult>(args.a9Matrix, "A9 matrix") : null;
+  if (args.a9) {
+    if (a9) console.error(`[${MODULE}] --a9 overrides the matrix supplied by --a9-matrix`);
+    if (args.a9RepoRoot) {
+      console.error(
+        `[${MODULE}] A9: driving ${args.a9RepoRoot}, NOT this repo. The matrix will be stamped as non-default — it ` +
+          "is a negative control, not a baseline.",
+      );
+    }
+    console.error(
+      `[${MODULE}] A9: spawning ${A9_ROWS.length} agent-mode TUI sessions sequentially — expect roughly two minutes.`,
+    );
+    a9 = await collectA9Matrix({
+      reachTimeoutMs: args.a9ReachTimeoutMs,
+      ...(args.a9RepoRoot ? { repoRoot: args.a9RepoRoot } : {}),
+    });
+  }
+  if (args.a9Out && a9) {
+    try {
+      writeFileSync(args.a9Out, `${JSON.stringify(a9, null, 2)}\n`, "utf-8");
+      console.error(`[${MODULE}] A9 matrix written to ${args.a9Out}`);
+    } catch (err) {
+      console.error(`[${MODULE}] A9 matrix write failed (${args.a9Out}): ${(err as Error)?.message ?? String(err)}`);
+    }
+  }
+
   const inputs: ScoreInputs = {
     corpus,
     capabilities,
@@ -2599,6 +3703,7 @@ async function main(): Promise<number> {
     escape: escapeProbe,
     replay,
     a7,
+    a9,
     maxSilenceMs: args.maxSilenceMs,
   };
 
