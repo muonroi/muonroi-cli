@@ -284,9 +284,12 @@ function formatToolCallLabel(tc: ToolCall): string {
 export function createHeadlessTextEmitter(): {
   consumeChunk(chunk: StreamChunk): HeadlessWrites;
   flush(): HeadlessWrites;
+  /** True when the emitter produced a structured_response or buffered content during this turn. */
+  hasAnswer: boolean;
 } {
   let pendingContent = "";
   let structuredEmitted = false;
+  let hasAnswer = false;
 
   function consumeChunk(chunk: StreamChunk): HeadlessWrites {
     switch (chunk.type) {
@@ -298,6 +301,7 @@ export function createHeadlessTextEmitter(): {
         // Terminal answer is authoritative — drop any buffered preamble.
         pendingContent = "";
         structuredEmitted = true;
+        hasAnswer = true;
         return { stdout: `${formatStructuredResponseText(chunk.structuredResponse)}\n` };
       case "done":
         // Trailing newline is emitted by flush() alongside the final answer.
@@ -308,11 +312,15 @@ export function createHeadlessTextEmitter(): {
   }
 
   function flush(): HeadlessWrites {
-    if (structuredEmitted || pendingContent.length === 0) return {};
-    return { stdout: `${pendingContent}\n` };
+    if (structuredEmitted) return {};
+    if (pendingContent.length > 0) {
+      hasAnswer = true;
+      return { stdout: `${pendingContent}\n` };
+    }
+    return {};
   }
 
-  return { consumeChunk, flush };
+  return { consumeChunk, flush, hasAnswer };
 }
 
 function jsonLine(event: HeadlessJsonEvent): string {
@@ -330,10 +338,13 @@ export function createHeadlessJsonlEmitter(sessionId?: string): {
   consumeChunk(chunk: StreamChunk): HeadlessWrites;
   /** Call after the `processMessage` iterator completes to flush any trailing observer output. */
   flush(): HeadlessWrites;
+  /** True when the emitter produced a structured_response or accumulated text during this turn. */
+  hasAnswer: boolean;
 } {
   let pending = "";
   let currentStep = 0;
   let textBuffer = "";
+  let hasAnswer = false;
   /** Tool call id → timing from {@link ProcessMessageObserver.onToolStart} / {@link ProcessMessageObserver.onToolFinish}. */
   const toolTiming = new Map<string, { startedAt?: number; finishedAt?: number }>();
 
@@ -406,6 +417,7 @@ export function createHeadlessJsonlEmitter(sessionId?: string): {
 
       case "tool_calls": {
         if (textBuffer.length > 0) {
+          hasAnswer = true;
           stdout += jsonLine(
             withSession({
               type: "text",
@@ -459,6 +471,7 @@ export function createHeadlessJsonlEmitter(sessionId?: string): {
           // Flush any buffered preamble text first so ordering is preserved,
           // then emit the typed terminal answer (previously dropped entirely).
           if (textBuffer.length > 0) {
+            hasAnswer = true;
             stdout += jsonLine(
               withSession({
                 type: "text",
@@ -469,6 +482,7 @@ export function createHeadlessJsonlEmitter(sessionId?: string): {
             );
             textBuffer = "";
           }
+          hasAnswer = true;
           stdout += jsonLine(
             withSession({
               type: "structured_response",
@@ -503,5 +517,5 @@ export function createHeadlessJsonlEmitter(sessionId?: string): {
     return stdout ? { stdout } : {};
   }
 
-  return { observer, consumeChunk, flush };
+  return { observer, consumeChunk, flush, hasAnswer };
 }

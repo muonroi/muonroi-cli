@@ -687,7 +687,8 @@ async function runHeadless(
     const { enhancedMessage } = processAtMentions(prompt, process.cwd());
 
     if (format === "json") {
-      const { observer, consumeChunk, flush } = createHeadlessJsonlEmitter(agent.getSessionId() || undefined);
+      const jsonEmitter = createHeadlessJsonlEmitter(agent.getSessionId() || undefined);
+      const { observer, consumeChunk, flush } = jsonEmitter;
       for await (const chunk of agent.processMessage(enhancedMessage, observer)) {
         maybeAutoAnswer(chunk);
         const writes = consumeChunk(chunk);
@@ -697,6 +698,7 @@ async function runHeadless(
       const tail = flush();
       if (tail.stdout) writeSafe(process.stdout, tail.stdout);
       if (tail.stderr) writeSafe(process.stderr, tail.stderr ?? "");
+      process.exitCode = jsonEmitter.hasAnswer ? 0 : 1;
       return;
     }
 
@@ -710,6 +712,7 @@ async function runHeadless(
     const textTail = textEmitter.flush();
     if (textTail.stdout) writeSafe(process.stdout, textTail.stdout);
     if (textTail.stderr) writeSafe(process.stderr, textTail.stderr ?? "");
+    process.exitCode = textEmitter.hasAnswer ? 0 : 1;
   } finally {
     await agent.cleanup();
   }
