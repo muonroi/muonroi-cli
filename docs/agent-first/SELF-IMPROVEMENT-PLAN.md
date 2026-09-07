@@ -17,6 +17,14 @@
 > **No line of code in this repository has been written by StepFun or by `/ideal`.** Every Phase 0
 > commit is a Claude subagent under the §6 exception. The experiment this document exists to run
 > (Phase 2..N) has not started.
+>
+> Revised again **2026-09-07** to record Phase 2 (§6.2): **one completed `/ideal` run**, on axis A7,
+> which took the axis from its committed baseline of **0.714 to 0.000** and halted itself without
+> claiming success. That is the first product-code movement in this document attributable to the
+> loop, and it is negative. The sentence above needs one amendment and only one: `/ideal` has now
+> written code here — on `sprint/a7-run2`, unmerged, kept as evidence. Everything else committed
+> during Phase 2 is still Claude subagent work, and §6.2 names each piece. **n = 1. The experiment
+> is not concluded** (§8).
 
 ---
 
@@ -27,6 +35,14 @@
 > criterion is not met, `Escape` still cannot cancel a stuck turn, and a *successful* run still
 > announces nothing (§6.0). Everything below is the **pre-Phase-0** record and is kept verbatim,
 > with post-Phase-0 deltas marked inline. Do not read it as the current state.
+>
+> **Status after Phase 2 (2026-09-07): the wedge premise no longer holds; the 3/3 criterion still
+> does.** `Escape` now cancels (`b475700e`), every run announces its end (`7c2796ce`), and a run
+> completed 58 minutes and three sprints unattended before halting itself (§6.2). What replaced the
+> wedge is a different limit and a more interesting one: the loop ran, wrote real code, verified it
+> with a suite that could not see the defect, and regressed the axis. **Unattended operation is
+> established; unattended *correctness* is not** — and only an instrument outside the suite could
+> tell the two apart.
 
 **`/ideal` cannot currently run unattended. It wedges, reproducibly (2/2).** Measured 2026-09-03,
 both runs on `step-3.7-flash`:
@@ -162,7 +178,7 @@ for this shape **first**:
 | 2 | `/ideal` sprint-planning bail | yielded `{type:"done"}` — the turn terminator — and the TUI tore the generator down silently |
 | 3 | scoping-synthesis parse | `return`ed without yielding, leaving `loop:scoping` at `state:"active"` forever (`phaseStart` ×4, `phaseDone`/`phaseError` ×0) |
 | 4 | `tui.focus` | returned the bare string `"ok"` without moving focus — for **any** selector, in **any** state, since it was written |
-| 5 | a **successful** `/ideal` run | emits no terminal event at all, so success and hang are the same observation. **Still open** (§6.0) |
+| 5 | a **successful** `/ideal` run | emitted no terminal event at all, so success and hang were the same observation. **Fixed** by `7c2796ce`'s `run-finished` (§10 row 18); the two opening signals it used to emit instead are recorded there |
 
 All five are the same defect: a success token emitted by the layer that was supposed to *do* the
 thing, on a path where the thing did not happen. None was detectable from the return value; every
@@ -196,6 +212,7 @@ with post-Phase-0 numbers — the two-row form is the whole point (§6, Phase �
 | **A4** | Decision-field coverage | fraction of scenario steps where **the field the driver needs to choose its next action** is present in structured output (`tui.query` / `tui.last_event` / `tui.snapshot`) | same replay as A1, asserted **positively** | **not baselined** (P1-3) | 100% of the same fixed corpus |
 | **A5** | Harness determinism | `tests/harness` green at `retry: 0` for axis-defining specs; unallowlisted skip count | `bunx vitest -c vitest.harness.config.ts run tests/harness/`; `bun run lint:harness-skips:strict` | **67 spec files** (60 top-level + 7 in `tests/harness/auto/`); **8** counted hits (4 `.skip`, 4 `.todo`); **7** allowlist entries; **1 unallowlisted** (`tests/harness/gsd-pil-gate.spec.ts:389`); ratio 11.9% vs 40% threshold; **plus 11 `describe.skipIf` sites the linter deliberately exempts** | strict lint exits 0; unallowlisted = 0; the 4 CI-disabling `skipIf` sites accounted for (§2.7) |
 | **A6** | Self-description | does the capabilities payload carry every field a scenario assertion references | field-by-field diff of `buildCapabilitiesPayload()` against the assertion set in `GRADUATION-SCENARIOS.md` | **21 MCP tools**, **22** protocol event kinds, but only **14** advertised `FEATURES` strings and **0** selector/role/event-kind/semantic-id information | every field referenced by any scenario assertion appears in the payload |
+| **A7** | Non-interactive exit fidelity | fraction of a fixed 7-row matrix whose process exit code matches the run's real outcome, with a **false alarm** (a run that answered and still exited non-zero) subtracted at 2× | `agent-drivability-score.ts --a7` spawns 7 headless invocations against fixtures it generates itself into a temp dir | **the axis did not exist** — added 2026-09-05, after Phase 0 shipped, so it has no pre-Phase-0 row and Phase 0 can claim no credit on it (`agent-drivability-score.ts:402-412`) | 7/7 rows correct, 0 false alarms |
 
 #### Notes that the table cannot carry
 
@@ -221,6 +238,18 @@ with post-Phase-0 numbers — the two-row form is the whole point (§6, Phase �
   pass criterion produced by this session. It is the template the other rewrites follow.
 - **A1, A2, A4 and A6 are referee-change axes** (§2.2). Improving them means changing the
   measurement instrument. They are human-reviewed sprints, not `/ideal`-driven ones.
+- **A7 is the one axis that escapes §2.2, deliberately.** Every other axis is about an agent driving
+  the TUI over MCP, so the harness protocol *is* their instrument. A7's contract is `exitCode` +
+  stdout — the operating system's, not this repo's — and the referee spawns the CLI as a subprocess
+  with fixtures it writes into a fresh temp dir at measurement time, so there is no committed
+  artifact a sprint could edit to make its own change score well (`agent-drivability-score.ts:99-104`,
+  `:1336-1341`). That is what made it the first axis available to `/ideal` (§6, Phase 2..N).
+- **A7's false-alarm weighting is not cosmetic, and it was not derived by reasoning.** The score is
+  `max(0, (correct - 2 × falseAlarms) / rowsRun)` (`agent-drivability-score.ts:1512`). Under a plain
+  `correct / rows`, the trap fix `any error => exit 1` scores **6/7 = 0.857** — *above* the 5/7 =
+  0.714 defect it replaces — because it wins R3 and R4 and only loses R5. Weighted, it scores
+  **4/7 = 0.571**, below the defect. The weighting was found by an agent **running** the negative
+  control, not by arguing about it; §2.6 is why it exists at all.
 
 ### 1.1.1 Two committed rows per axis — pre-Phase-0 vs post-Phase-0
 
@@ -243,7 +272,18 @@ StepFun.**
 | **A4** scrape-free | unmeasured | **1 hard dead end found and fixed**: two stacked modals → `tui.query "focus"` → `null`, `tui.press` silently dropped, `tui.focus` `"ok"` without moving focus. Root cause was larger than the report (§6.0) | Phase 0 subagent |
 | **A5** harness determinism | **67 spec files**; 4 `.skip` + 4 `.todo` = 8 counted; **1 unallowlisted** (`tests/harness/gsd-pil-gate.spec.ts:389`); `lint:harness-skips:strict` **exit 1**; 11 `describe.skipIf` exempt, **4 of them disabling E2E in CI** | **7** counted hits, **0 unallowlisted**, `:strict` **exit 0**; the `.todo` was **implemented, not allowlisted** (allowlist byte-identical); `it.skipIf` now visible; the CI-disabled sites were reported unprompted | Phase 0 subagent |
 | **A6** self-description | 21 tools registered but **14 advertised** in `FEATURES`; **21 of 22** event kinds in the `tui.last_event` enum (`resume-request` missing → that call rejected at the MCP boundary); no selector grammar, no roles, no predicate grammar | `tools` derived from the registrar — **21/21 exact match with `tools/list`**; **22** event kinds; **33** roles; full selector + predicate grammar; `semantics` read from the live frame with `no-driver` / `no-frame` / `live-frame` honesty | Phase 0 subagent |
-| `/ideal` end-to-end | **wedged 2/2 runs**, both silent | **2/3 runs reached an announced terminal state**; the 3/3 criterion is **not met** | Phase 0 subagent |
+| **A7** exit fidelity | **axis did not exist** | **0.714** (5/7 correct, 0 false alarms), committed at `docs/agent-first/A7-BASELINE.json` in `932dab45` **before any sprint touched `src/`** | nobody — it is a baseline, not a move |
+| `/ideal` end-to-end | **wedged 2/2 runs**, both silent | **2/3 runs reached an announced terminal state**; the 3/3 criterion is **not met** at the time of writing. `7c2796ce` later added `run-finished`, and a 58-minute Phase 2 run announced its own halt (§6.2) | Phase 0 subagent; `run-finished` by a Phase 1/2 subagent |
+
+**The one post-Phase-2 movement, stated separately so it cannot be folded into the rows above:**
+
+| Axis | Post-Phase-0 / committed baseline | Post-Phase-2 | Moved by |
+|---|---|---|---|
+| **A7** exit fidelity | **0.714** (5 correct, 0 false alarms) | **0.000** (4 correct, 3 false alarms: R1, R2, R5) | **`/ideal` on StepFun** — the first and so far only product-code movement in this document attributable to the loop, and it is negative |
+
+Every other Phase 2 change — the rate-limit pacer, the run verdict, the sprint verify floor, and both
+halves of the worktree containment fix — is **Claude subagent work on the harness around the loop**,
+not the loop's, and none of it touches a baselined axis. §6.2 names each one.
 
 Two notes the table cannot carry:
 
@@ -332,6 +372,12 @@ the loop as if narration-without-action will happen, because at scale it will.
    nothing. Concretely for A2: without a negative control, an agent can emit a synthetic terminal
    event unconditionally from a wrapper, turn the spec green, and leave the wedge exactly as
    invisible as it was. The negative control is what makes "the spec is green" mean something.
+   **Measured instance, A7:** running the negative control — the trap fix `any error => exit 1` —
+   is what produced the 2× false-alarm weighting. Unweighted, that fix outranks the defect
+   (0.857 vs 0.714) and an unweighted A7 would have scored Phase 2's first attempt as *unchanged*
+   at 0.714 while two working code paths were being destroyed. The negative control did not merely
+   validate the referee; it **changed the scoring rule**. Write it before the first measurement, not
+   after.
 7. **No green-by-dilution, and no invisible skips.** Three mechanisms in the current linter break
    this, all verified:
    - `SKIP_RE` is `/^\s*(it|describe)\.(skip|todo)\s*\(/` (`scripts/check-harness-skips.ts:57`) and
@@ -413,9 +459,23 @@ value at worktree creation and exclude it from auto-commit.
 | usage cap ledger | ❌ **shared, and racy** | `src/usage/ledger.ts` documents a `proper-lockfile` staleness window that lets two `reserve()` bodies run concurrently — main tree + worktree is exactly that shape |
 | MCP harness extra roots | ⚠️ partial | `loadExtraRoots()` reads a gitignored `.muonroi-harness-roots.json` relative to `REPO_ROOT`, so a driver launched inside a worktree loses the allowlist — use `MUONROI_HARNESS_EXTRA_ROOTS` |
 | `/update` | ⚠️ dangerous | from a worktree it would `git pull --ff-only` the **sprint branch** (`install-manager.ts:265`, `:561`). Do not run it during a sprint |
+| **git history the run commits into** | ❌ **not isolated by the worktree alone** — was, until `d939c87b` | `-d` sets the cwd once (`index.ts:735`, the only `process.chdir` in `src/`) and the bash tool inherits it (`orchestrator.ts:489`), but `bash.ts:170` `this.cwd = nextCwd` moved it **permanently** on any `cd`, with only a directory-exists check. Both commit entry points read that same live cwd (`orchestrator.ts:3590` → `maybeAutoCommitTurn`; `registry.ts:836` `commitSpecificPaths`). Forked sub-sessions share one `BashTool` instance and `stream-runner.ts:328` propagates the drift, so **one sub-agent's `cd` moves the whole run for the rest of its life** |
+| **file writes the run performs** | ❌ **not isolated by the worktree alone** — was, until `c48b09ad` | same drift, one step earlier: a relative path resolved against a drifted cwd, or an absolute path that bypasses the cwd entirely. Contained now in `src/tools/file.ts` immediately after `resolvePath`, against `getCommitRunRoot()` (`auto-commit.ts:304`) so the write guard and the commit guard cannot disagree about what "this run" means |
+| **arbitrary shell writes** (`>`, `sed -i`, `rm`, `mv`, `git checkout`, installers) | ❌ **still not isolated** | not containable without parsing arbitrary shell (`c48b09ad`). The mitigations are the `cd` drift advisory and the commit guard — neither is containment. Also out of reach: MCP servers with filesystem write tools (`client-pool.ts:69` keys stdio servers on `process.cwd()`, so a `cd` already desynchronises MCP writes from builtin ones) and user-configured hooks |
+
+**This table's original omission is why the contamination went unnoticed.** It enumerated shared
+*state* — DB, settings, ledger — and said nothing about git history or file writes, so a reader
+checking "is a worktree enough?" got a "yes" for the two things that actually escaped. Both escapes
+are recorded in §6.2; the row above exists so the next reader does not have to rediscover them.
 
 `MUONROI_CLI_HOME` only partially isolates the home-directory state. Run one sprint at a time
 unless and until per-sprint home isolation is verified end to end.
+
+**A worktree is a filesystem boundary, not a process boundary.** Verified on this machine during
+Phase 2: killing the background task that launched a run kills **the shell, not the bun process
+tree** — `Get-Process bun` showed the driver and its TUI child alive and still writing 30+ minutes
+after the kill was reported. An orphaned run keeps holding the drifted cwd, keeps writing, and (before
+`d939c87b`) kept committing. Confirm death with a process listing, never with the task notification.
 
 `pre-push` on a fresh branch has no upstream, so the commit range is empty and both match variables
 fall back to `"run-anyway"` → full lint + compile smoke on every first push. That is the desired
@@ -637,6 +697,16 @@ axis moved", which reads as evidence about the axis when it is actually evidence
 There is documented precedent in this repo for a `/ideal` run producing 0 code in 50 minutes; that
 must surface as a loop failure, not as an axis result.
 
+**Establishing that a sprint actually stopped is itself a measurement, and the obvious signal lies.**
+Phase 2 discarded two attempts as "killed"; on this machine a killed background task takes down only
+the launching shell, and both runs were still alive and writing (§3.2). Before recording a
+discard-with-reason, confirm the process tree is gone (`Get-Process bun` / `ps`), because an orphan
+that keeps running is not a discard — it is an uncontained run mutating whatever cwd it drifted to.
+Two of Phase 2's four wrong operator conclusions came from this, and one of them was a resume test
+run *concurrently with* such an orphan whose `"Task failed: No output generated"` was reported as a
+result. It was not one. **A result produced while an orphan of the same experiment was running is
+not a result.**
+
 ---
 
 ## 6. Phases
@@ -702,6 +772,13 @@ clean process (§2.4). Nothing here is an agent's self-report.
 
 #### Still NOT met — four open items, stated so they cannot be read as done
 
+> **Status as of 2026-09-07, appended rather than edited in** — this list is the 2026-09-05 record and
+> stays as written. Items **2, 3 and 4** were subsequently fixed and independently negative-controlled
+> (`b475700e`, `7c2796ce`, `f2ce2372`); item **1 is still open**, and a single announced completion in
+> Phase 2 does not satisfy 3/3. Evidence per item in §10, rows 16-19. Item 4's prediction was
+> **inverted** by the sweep that closed it: the dominant defect was *zero* focus nodes on 21 of 26
+> surfaces, not two.
+
 1. **P0-1's third clean run.** 2/3 is not 3/3, and the exit criterion is 3/3 consecutive.
 2. **P0-4's abort propagation.** Escape now reaches the abort path but the abort does not reach a
    pending council; a stuck `/ideal` turn is still uncancellable from the keyboard.
@@ -760,8 +837,10 @@ of Phase 0, because `/ideal` cannot repair the thing that prevents it running. C
 - Phase 0 improved the CLI's **drivability**; it is not evidence that the CLI can improve itself.
 - The scorecard movement in §1.1.1 belongs to Phase 0 subagents. If any later summary attributes it
   to the loop, that summary is wrong.
-- **The experiment this document exists to run (Phase 2..N) has not started.** Not "in progress",
-  not "partially complete" — not started.
+- **The experiment this document exists to run (Phase 2..N) had not started** as of this section's
+  date. It has since: see §6.2. That does not retroactively transfer any Phase 0 credit to the loop,
+  and §6.2 carries its own attribution paragraph for exactly the same reason this one exists — most
+  of Phase 2's commits are also Claude subagent work.
 
 ### Phase 1 — Build the referee
 
@@ -789,6 +868,7 @@ axes cannot be adjudicated cleanly.
 | A2 | ❌ | delivered by P0-2 for the failure paths — **except the successful-run terminal event** (§6.0), which is likewise Phase 0 remainder work, not a sprint |
 | A1, A4, A6 | ❌ as `/ideal` sprints | **referee-change sprints** (§2.2) — improving them means changing the measurement instrument, so they are human-reviewed |
 | A5 | — | a constraint on every sprint, never a target of its own |
+| **A7** | ✅ **yes — the one available axis** | baselined at 0.714 and committed before any sprint ran (`932dab45`); not referee-owned, because its contract is `exitCode` + stdout rather than the harness protocol (§1.1); reachable by a change confined to `src/headless/output.ts` + `src/index.ts`. This is the axis Phase 2 actually ran against |
 
 **This is the plan's most uncomfortable finding, and it is stated rather than hidden: after Phase 0,
 the current scorecard leaves `/ideal` with no axis of its own to improve.** The original §6 ordering
@@ -801,6 +881,179 @@ axis that is (a) baselined, (b) not referee-owned, and (c) reachable by a change
 `src/`.** Defining that axis is Phase 1 work, and if no such axis can be defined, that is itself the
 answer to whether `/ideal` can improve muonroi-cli on the drivability dimension — report it under
 §8, do not manufacture a sprint.
+
+**That condition was met by A7** (added 2026-09-05, baseline committed at `932dab45` before any
+sprint touched `src/`), and Phase 2 ran against it. Results in §6.2.
+
+### 6.2 Phase 2 — results (recorded 2026-09-07). **n = 1 completed run.**
+
+Three `/ideal` sprint attempts against axis A7, StepFun-only (`disabledProviders` seeded into each
+run's own temp HOME with all of `ALL_PROVIDER_IDS` minus `stepfun`), each in an isolated git
+worktree of this repo. **Attempts 1 and 2 are discards under §5.11** — both were cut off mid-flight,
+and §8's third ending makes that a discard-with-reason rather than a data point about the axis. Their
+artifacts are kept: `sprint/a7-exit-fidelity` (`e750cd10`) and, for the run that escaped its
+worktree, `experiment/ideal-autocommit-a7` (`29b5abfe`).
+
+**Attempt 3 completed.** 58 minutes, 1922 events, three full sprints each running planning →
+implementation → verification → judgment. Its terminal event:
+
+```
+run-finished  outcome=threw  success=false  sprintsRun=0  shipped=false
+reason: "Halted by circuit breaker: oscillation detected (delta_t=0.000, delta_t-1=0.000)"
+```
+
+The loop halted itself after three sprints with no score movement and **did not claim success**. The
+halt string is `sprint-runner.ts:1565` (CB-2); `run-finished` is the event `7c2796ce` added for A2's
+success case, doing exactly the job it was built for on a failure. The artifact is committed
+unchanged on `sprint/a7-run2` (`9a6d9b74`) and is not merged.
+
+#### The measurement
+
+Referee: `scripts/agent-drivability-score.ts --a7`, against `docs/agent-first/A7-BASELINE.json`,
+committed at `932dab45` **before any sprint ran**.
+
+| | baseline | attempt 2 | attempt 3 |
+|---|---|---|---|
+| score | **0.714** | 0.143 | **0.000** |
+| correct | 5 / 7 | 5 / 7 | 4 / 7 |
+| false alarms | — | R1, R5 | R1, R2, R5 |
+
+Attempt 3's rows: R1 `exit=1 stdout=362 answered`, R2 `exit=1 stdout=5 answered`, R3 `exit=1
+stdout=374 not-answered`, R4 `exit=1 stdout=0 not-answered`, R5 `exit=1 stdout=493 answered`, R6
+`exit=78`, R7 `exit=0 stdout=68 answered`. **Every row that reaches the emitter path — R1 through R5
+— exits 1.** R6 (`exit 78`, the mock refusing to install) and R7 (`--smoke-boot-only`) are unchanged
+only because neither reaches `runHeadless`'s emitter at all. The loop fixed the two rows that were
+genuinely broken and broke all three that worked.
+
+`max(0, (4 - 2×3) / 7) = 0.000`. Not "no improvement" — **worse than the defect it was sent to fix,
+by the margin the axis was designed to measure.** §1.1's note records why an unweighted count would
+have shown attempt 2 as 0.714, identical to baseline, while two working paths were being destroyed.
+
+#### What the loop did well
+
+Recorded because it is part of the same result, and a summary that keeps only the `0.000` is as
+dishonest as one that keeps only this list. Across all three attempts, `/ideal`:
+
+- **asked the right design question, unprompted.** Attempt 1's first askcard was *"How should a turn
+  be judged to have 'produced an answer' for exit code purposes?"*
+- **chose the correct discriminator** — whether a content chunk arrived — rather than the trap the
+  goal string warned about (`any error => exit 1`, which the referee scores 0.571, *below* the
+  defect).
+- **touched only the two permitted files** (`src/headless/output.ts`, `src/index.ts`) on every
+  committed artifact, **never used exit code 78**, and respected every forbidden path including
+  `docs/agent-first/`.
+- **diagnosed its own closure bug**, in the *discarded* attempts: `return { …, hasAnswer }` snapshots
+  the boolean at return time, so every later mutation is invisible to the caller. Both discard
+  artifacts use `get hasAnswer()` (`e750cd10`, `29b5abfe`, both 2026-09-06).
+- **halted itself rather than looping.** Three flat sprints, CB-2 fired, run over. That is correct
+  behaviour and it is the difference between this run and the 50-minutes-zero-code precedent in §5.11.
+
+**One correction to that list, because the chronology runs the wrong way.** The closure fix was
+*lost*: the completed run (`9a6d9b74`, 2026-09-07) uses the plain `return { …, hasAnswer }` form that
+the two earlier attempts had already replaced with a getter. That single regression is why attempt 3
+scored **0.000** where attempt 2 scored 0.143 — a snapshotted `false` forces `exit 1` on *every* row
+that reaches the emitter, including R2, which attempt 2 got right. Knowledge does not carry across
+sprint attempts here: each run started from the branch point, and nothing in the loop reads the
+previous attempt's artifact. That is a property of the harness, not of the model, and it is fixable —
+§5.10's failure record is the intended channel and it was not written (see below).
+
+#### What it could not do: know what it had broken
+
+All three attempts failed on the same path — `hasAnswer` never set for a plain text-only JSON turn.
+In the JSONL emitter, `case "content"` (`src/headless/output.ts:403-405`) only appends to
+`textBuffer`, and `onStepFinish` (`:356-378`) flushes that buffer without setting any flag; only the
+`tool_calls` and `structured_response` branches set it. A turn that emits text and no tool call
+passes through neither.
+
+**Its own verification structurally could not catch that.** In the tree the measurement ran against
+(`c48b09ad` and every commit under it), **no test anywhere in `src/headless/`, `src/__tests__/` or
+`tests/` asserted a headless exit code**: the four files matching `exitCode` are all
+`handle.proc.exitCode !== null` liveness checks in harness helpers, and no test file references
+`runHeadless` or `process.exitCode` at all. Note the shape of that gap — `headless-golden.test.ts`
+is *named* integration but calls `createHeadlessJsonlEmitter` in-process, and **an emitter has no
+exit code**. The contract was untestable from where every test stood.
+
+The referee caught it because **the referee runs the CLI as a subprocess from outside the suite**.
+That is §2.2 working as designed, and it is this phase's central result: *the loop's blind spot and
+its test suite's blind spot were the same blind spot, and only an instrument outside both could see
+it.* The corollary is a standing rule, not a one-off: **an axis whose contract is a process-level
+observable cannot be gated by an in-process suite** — if the referee is the only thing that can see
+it, the referee is load-bearing and §2.2's protection of it is not bureaucracy.
+
+(Verification note, so the claim above stays falsifiable: the `grep -rEl` originally quoted as
+evidence for this does **not** return empty in this repo — the local `grep` shim cannot recurse into
+directories and exits 2 with `EISDIR`. The finding was re-established with a working search. §11's
+rule applies: a tool that fails and a tool that finds nothing must never be recorded as the same
+result.)
+
+Two attempts also produced test files that executed **zero assertions** — one whose imports could not
+resolve (`Tests  no tests`), one failing typecheck (`TS2722`, calling optional `observer.onStepStart`
+unguarded). The tracked `src/headless/output.test.ts` (275 lines) already uses the correct
+`observer.onStepStart?.(…)` idiom at `:99`. What the surviving artifacts show, stated exactly rather
+than generalised: attempt 2 wrote a **new** file, `src/__tests__/headless-emitter.test.ts`
+(`29b5abfe`), rather than extending the tracked one; attempt 3's committed artifact (`9a6d9b74`)
+carries **no test at all** — it touches only `src/headless/output.ts` and `src/index.ts`. Attempt 3
+did write into the tracked `output.test.ts`, but in the **parent** repo via the isolation escape
+(`+65` lines, `c48b09ad`), so that work landed outside its own worktree and outside its own gate. The
+worktrees are gone, so the two zero-assertion files cannot now be re-inspected; the failure strings
+above are from the operator's contemporaneous record, not re-run here.
+
+**A sprint that writes a test it never runs has verified nothing**, which is the same defect class as
+the verify stage below — and `0e085663`'s floor is the answer to both.
+
+#### Infrastructure defects found and fixed DURING Phase 2 — attribution
+
+**Every fix in this subsection is Claude subagent work, not the loop's**, and §1.1.1's attribution
+discipline extends to them without exception. Each was found because a sprint hit it.
+
+| Defect | Evidence | Fix |
+|---|---|---|
+| **StepFun 10 RPM cut a run mid-implementation.** `rate_limits` was declared in `catalog.json` for all **9** stepfun models, validated by a test (`catalog-validation.test.ts:58`), and **dropped at `catalogModelToModelInfo`** — the third instance this session of that exact catalog-boundary pattern, after `max_output_tokens` and `supportsMaxOutputTokens` | provider returned `"request limited RPM reached, current: 11, limit: 10"`, `"type":"rate_limited"`, one step before the run wired its last piece | `1c5e6705` — `src/providers/rate-limiter.ts`, paced from the declared limits; a test now pins the mapping that used to be dropped |
+| **The run verdict was a hardcoded literal, and nothing upstream could contradict it.** `index.ts:1755` wrote `{pass: true, score: 1, reason: "phases_complete"}`; `phase-runner.ts:475` marked the phase done unconditionally and `:481` returned `pass: true` unless a dependency deadlocked | a run wrote `VerdictPass: true` **15 seconds after** its own digest said `Score: 0.00, Retry sprint 1: engineering_floor`, with all three phases recording `criteriaMetCount: 0`. It also destroyed recoverability — the run was marked done, so `/ideal resume` correctly answered `no_incomplete_run` | `f83965ab` — `deriveRunVerdict` reads the real sprint outcome records; no outcomes at all is a **fail**, not a pass; `runIsTerminal` now gates `doneAt` |
+| **The sprint verify stage ran no commands.** It was an LLM turn whose verdict came from `tr.success === true && output.includes("VERIFY_PASS")` — a substring the verify sub-agent printed about its own run | a suite collecting zero tests and one running 6388 were the same observation | `0e085663` — a deterministic floor that executes the recipe |
+| **Isolation leaked, twice.** §3.2 now carries the mechanism | escape #1 (2026-09-06): `cd <parent> && git log` at 10:15:04.432Z moved `BashTool.cwd` permanently; **22 minutes later** `edit_file src/headless/output.ts` landed in the parent and three commits followed, their reflog timestamps matching the run's own commit-gate log lines to the second. escape #2 (2026-09-07, **with the commit guard already in place**): the 58-minute run pinned to `.wt-sprint` wrote +65 lines to `src/headless/output.test.ts` and +7/-1 to `src/headless/output.ts` in the parent — real lines per `git diff --numstat`, not CRLF churn. `checkCommitScope` held, zero commits escaped, but the **writes** did | `d939c87b` (commit-scope guard) + `c48b09ad` (write containment: `cd` warns, writes refuse). **Still open:** arbitrary shell writes cannot be contained without parsing shell (§3.2) |
+
+**A correction to the record on `gsd_verify`.** `CLAUDE.md` describes it as a "deterministic floor
+first (tests/lint evidence)". That description is **wrong**: `workflow-tools.ts:198-245` takes
+`passed: boolean` and `evidence: string` *from the model* and executes nothing. The floor
+`0e085663` built is the first one that exists.
+
+#### What one completed run establishes, and what it does not
+
+**Establishes**, on this evidence:
+
+- The referee works on a real adversarial case. It caught a regression that the sprint's own
+  verification, the repo's test suite, and the loop's self-report all missed, and it ranked the
+  obvious wrong fix below the defect. §2.2's separation of instrument from subject is not
+  theoretical.
+- `/ideal` on StepFun can run 58 minutes unattended, three sprints deep, and stop itself honestly.
+  That is a real change from the pre-Phase-0 baseline of "wedged 2/2 runs, both silent".
+- The loop's failure here was **not** narration-without-action (§2's stated nightmare) and **not** a
+  false success claim. It wrote real code, ran it, and reported failure. The gap was diagnostic
+  reach, not honesty.
+
+**Does not establish**, and must not be read as establishing:
+
+- Anything about the *rate* at which `/ideal` regresses an axis. n = 1 completed run, on one axis,
+  with one model. Two other attempts were discarded for reasons unrelated to the axis.
+- That the axis is hard. Attempt 3's failure is a single uncovered code path, not a deep problem.
+- That a different result is unreachable. Three of the four infrastructure defects above were fixed
+  *after* attempt 3 started or in parallel with it; no attempt has yet run against the deterministic
+  verify floor (`0e085663`) or with write containment (`c48b09ad`) in place from the start.
+
+**The experiment is not concluded.** §3.3 allows 3 sprints per axis; attempts 1 and 2 were discards,
+so A7 has consumed **one** of them. The next attempt is the first one that runs on repaired
+infrastructure.
+
+#### Gate outcome, and one obligation not yet met
+
+Attempt 3 is a **Reject** under §5.11: gate item 5.5 failed — the targeted axis moved in the wrong
+direction against its committed baseline. §5.10 requires the failure context to be written to
+`docs/agent-first/gate-failures/<axis>-<n>.md` on the main branch before the worktree is deleted.
+**The worktrees are already gone and that directory does not exist.** The `9a6d9b74` commit message
+carries most of what §5.10 asks for, and this section carries the rest, but the mechanism §5.10
+specifies was not followed — recorded here rather than quietly repaired, because the next discard
+will lose its context the same way if the step is not made part of the run-down procedure.
 
 ### Phase G — Graduation attempt
 
@@ -844,11 +1097,42 @@ The failure mode to avoid is none of those: sprints that run, produce commits, m
 axis, and generate a transcript that reads like progress. §2 exists to make that impossible to
 mistake for success.
 
+**Where Phase 2 sits against these three (assessed 2026-09-07, n = 1 completed run):** cleanly none
+of them, and saying so is the point of writing it down.
+
+- It is **not** graduation, and nothing about it points that way.
+- It is **not** abandonment-with-a-reason. Abandonment requires a finding that the approach cannot
+  work; what Phase 2 produced is one completed run that regressed one axis through a single
+  uncovered code path, on infrastructure that has since been repaired in four places (§6.2). That is
+  a bad result, not a verdict.
+- Attempts 1 and 2 **are** the third ending — a run stopping mid-flight, recorded as
+  discard-with-reason. Attempt 3 is not: it ran to a self-announced terminal state and produced a
+  measured number.
+
+So the honest name for Phase 2 is the one the plan does not yet have a bullet for: **a completed
+sprint that was Rejected on the gate.** That is the loop working as designed and failing the bar —
+the ordinary case, and the one §5.11's "Reject" row exists for. It is worth naming here because the
+three endings above are all *terminal*, and the most likely near-term state of this experiment is
+none of them: it is a sequence of rejects that either converges or exhausts §3.3's 3-sprint cap.
+**The cap is what turns a run of rejects into ending two.** A7 has used one of its three.
+
+The failure mode this document most needs to keep guarding against is still the one below, and
+Phase 2 did **not** exhibit it: the loop wrote real code, ran it, reported failure, and stopped
+itself. It failed on diagnostic reach, not on honesty.
+
 **A fourth way to get this wrong appeared before sprint 1 and is now guarded against: counting
 Phase 0 as the loop's output.** Phase 0 produced real, verified movement on five axes and eight
 commits — all of it human-directed subagent work (§6.0). A document that stops recording attribution
 would read, six weeks later, exactly like a successful self-improvement run. That is why §1.1.1 is
 two rows and why every one of them names who moved it.
+
+**Phase 2 made that hazard worse, not better, and the guard is extended accordingly.** Phase 2
+shipped five substantive commits — a rate-limit pacer, a real run verdict, a deterministic verify
+floor, and two halves of worktree containment — every one of them Claude subagent work performed
+*because a sprint hit the defect*. A summary that says "Phase 2 produced five fixes" is true and
+completely misleading: the loop's own product-code contribution in Phase 2 is **one axis moved from
+0.714 to 0.000**, and nothing else. Work done to repair the harness around the loop is never the
+loop's output, however directly a sprint provoked it.
 
 ---
 
@@ -893,8 +1177,9 @@ real zero.
 ## 10. Preconditions this plan depends on — one table
 
 Every row is a verified defect that silently neutralises part of the plan. Rows marked **✅ fixed**
-were resolved and independently verified in Phase 0 (§6.0) — the defect statement is kept so the
-pre-Phase-0 row of §1.1.1 stays legible. **No unmarked row may be assumed fixed.**
+were resolved and independently verified — in Phase 0 (§6.0), or in the Phase 1/2 window (§6.2), with
+the commit named in the row. The defect statement is kept in every case so the pre-Phase-0 row of
+§1.1.1 stays legible. **No unmarked row may be assumed fixed**, and a row marked ⚠️ is not fixed.
 
 | # | Defect | Effect if left | Owner |
 |---|---|---|---|
@@ -902,22 +1187,30 @@ pre-Phase-0 row of §1.1.1 stays legible. **No unmarked row may be assumed fixed
 | 2 | `lint:harness-skips:strict` exits 1 today (1 unallowlisted hit) | gate fails before sprint 1 | P0-7 — **✅ fixed** (exit 0, allowlist byte-identical) |
 | 3 | `describe.skipIf` invisible to the linter; 4 real E2E disabled in CI | "green harness" overstates coverage | §2.7 / P0-7 — **✅ partly fixed**: `it.skipIf` is now visible and the CI-disabled sites were reported; whether to keep the `describe.skipIf` exemption is still a policy decision |
 | 4 | Skip ratio denominator is spec **files**, inflated by the self-verify emitter | loop buys its own skip headroom | §2.7 |
-| 5 | `vitest.harness.config.ts` `retry: 2` on every spec | A5 cannot distinguish fixed from lucky | §5.3 |
+| 5 | `vitest.harness.config.ts` `retry: 2` on every spec | A5 cannot distinguish fixed from lucky | §5.3 — **⚠️ partly fixed** (`c32cad62`): `retry` is now `resolveHarnessRetry()` from `MUONROI_HARNESS_RETRY` with a `test:harness:strict` script that sets it to 0, so A5 is *measurable*. **The default is still 2**, and the measurement it enabled is bad news: at `retry: 0` the suite was **4 failed / 61 passed**; one was not a flake at all (`council-surface.spec.ts`, a deterministic Windows `rmSync` EPERM in `afterAll`, since fixed) and **3 remain genuinely flaky and named**. Gate §5.3 must run the strict variant or it is still measuring luck |
 | 6 | Tier-3 self-verify has a bare `catch`, `HEAD~1` base, contradictory defaults | gate §5.7 fails open and is evadable | §5.7 |
-| 7 | `.husky/_/` untracked → hooks absent in a fresh worktree | every hook-driven gate skips silently | §3.1 |
-| 8 | `.planning/` is 29 **tracked** files | branch-point state dirtied per sprint; merge conflicts | §3.1 |
+| 7 | `.husky/_/` untracked → hooks absent in a fresh worktree | every hook-driven gate skips silently | §3.1 — **✅ fixed** (`c538c8c7`): `git ls-files .husky` now returns 20 entries including `.husky/_/pre-push` and `.husky/_/h`, so `git worktree add` creates the hook runtime. `.husky/_/.gitignore` is still `*`, which no longer matters — gitignore does not apply to tracked paths. The `bun install` step in §3.1 remains worth running, but a skipped one is no longer silent breakage |
+| 8 | `.planning/` is 29 **tracked** files | branch-point state dirtied per sprint; merge conflicts | §3.1 — **✅ fixed for the stated effect** (`20da3ae9`, `f3858d56`): the two runtime-written files `STATE.md` and `ROADMAP.md` — the only ones `nativeStateUpdate` mutates (`native-state.ts:40`, `:66`) — are untracked, and the authored narrative was archived. **27 authored files remain tracked**, which is intended: they are documents, not state. The count in the defect statement is superseded, not the reasoning |
 | 9 | `~/.muonroi-cli/` state + usage ledger shared across worktrees | cross-sprint interference; racy `reserve()` | §3.2 |
 | 10 | GSD mutation gate fails open on `depth: null` | plan-review requirement inert for sprints | §3.4 |
 | 11 | `buildCapabilitiesPayload()` carries no selector/role/event/id information | graduation test unpassable as written | P0-6 — **✅ fixed**: 21/21 tools derived from the registrar, 22 event kinds, 33 roles, selector + predicate grammar, frame-derived `semantics` |
 | 12 | `tui.last_event` enum omits `resume-request` | that call rejected at the MCP boundary | P0-6 — **✅ fixed** (22 kinds) |
 | 13 | `supports_effort: false` + no StepFun capability override | `reasoning_effort: "low"` is not settable | P0-8 |
-| 14 | StepFun 10 RPM / 5 concurrent vs parallel council fan-out | 429s mid-debate, read as wedges | §3.3 |
+| 14 | StepFun 10 RPM / 5 concurrent vs parallel council fan-out | 429s mid-debate, read as wedges | §3.3 — **✅ fixed** (`1c5e6705`), and it fired for real first: a Phase 2 run died mid-implementation on `"request limited RPM reached, current: 11, limit: 10"`. Root was not the fan-out but the catalog boundary — `rate_limits` was declared for all 9 stepfun models and validated by a test, then **dropped at `catalogModelToModelInfo`**, the third instance of that pattern this session. `src/providers/rate-limiter.ts` now paces from `ModelInfo.rateLimits`, enforced in `model-gate.ts:378-395`, with a test pinning the mapping |
 | 15 | 🔴 **StepFun emits native `<tool_call>` markup as the final answer whenever the tool set is empty** — measured, 5/6 cases, incl. forced-finalize; `tool_choice` and prompting both disproven (§4.1) | a "successful" sprint turn can be 101 chars of markup; every transcript on this stack is untrustworthy until guarded | **P0-5b — ✅ fixed**: provider-boundary guard, 5/5 false-positive matrix, negative control red |
-| 16 | `/ideal` does not complete 3/3 clean runs (2/3 as of 2026-09-05) | unattended operation is not established; a sprint can still stall silently | **P0-1 — open** |
-| 17 | `Escape` reaches the abort path but the abort does not reach a pending council | a stuck `/ideal` turn is still uncancellable from the keyboard | **P0-4 — open** |
-| 18 | a **successful** `/ideal` run emits no terminal event | success and hang are the same observation for a driver; A2 is met for failures only | **P0-2 — open** |
-| 19 | the picker/connect modal layer has not been swept for the two-focus-node hazard | a surface that publishes `focus` without suppressing the composer mirror makes `driver.query("focus")` throw `ambiguous` — worse than `null` | **P0-9 follow-up — open** |
-| 20 | halt-recovery `init_new` never cancels a pending council askcard | dangling responder promise; `holdWatchdogOpen()` suppresses both watchdogs for the rest of the process | §9, latent bug 2 — open |
+| 16 | `/ideal` does not complete 3/3 clean runs (2/3 as of 2026-09-05) | unattended operation is not established; a sprint can still stall silently | **P0-1 — still open, and the criterion is now measurable rather than met.** Row 18's `run-finished` is what makes "a run ended" observable at all, and a Phase 2 run did complete 58 minutes / 3 sprints and announce its own halt (§6.2). That is **one** announced completion, not 3/3 consecutive; the other two Phase 2 attempts were cut off. No 3/3 has been measured — do not read the Phase 2 completion as satisfying it |
+| 17 | `Escape` reaches the abort path but the abort does not reach a pending council | a stuck `/ideal` turn is still uncancellable from the keyboard | **P0-4 — ✅ fixed** (`b475700e`). Two independent disconnections, not one: the `/ideal` slash path calls `runProductLoopV1` directly and never set `abortController`, so `abort()` hit null; and **zero occurrences of `AbortSignal` existed across `src/product-loop/`**, so a working controller would still have reached nothing. Fixed by extending the council's existing `withCouncilSignal` injector. Negative control, operator-verified: removing the controller gives `4 failed / 2 passed` incl. a 30 s timeout that *is* the bug; restored byte-identical → `6 passed`. **Residual, deliberately not fixed:** a pending askcard is still uncancellable (`createQuestionResponder`, `council-manager.ts:167-218` — no reject, no timeout, no signal) → see row 20 |
+| 18 | a **successful** `/ideal` run emits no terminal event | success and hang are the same observation for a driver; A2 is met for failures only | **P0-2 — ✅ fixed** (`7c2796ce`). Measured before, on a run that shipped successfully: `emittedKinds: ["route-decision","sprint-plan-committed"]`, `runFinished: []` — both *opening* signals. New `run-finished` emitted from one choke point (`product-loop/index.ts:139`) that all 33 returns across 8 dispatch targets pass through; `try → result`, `catch → threw`, `finally → abandoned` only when the consumer stopped pulling. Negative control, operator-verified: disabling the single emit gives `5 failed / 6 passed`; restored → 11/11. **Live confirmation exists for the `threw` outcome** (§6.2); the `success` outcome is spec-covered, not yet live-observed here. Still silent by design: a failure before the generator is entered, process death, and a run that genuinely never ends — that last is A2's `maxGapMs` silence half, not terminal coverage |
+| 19 | the picker/connect modal layer has not been swept for the two-focus-node hazard | a surface that publishes `focus` without suppressing the composer mirror makes `driver.query("focus")` throw `ambiguous` — worse than `null` | **P0-9 follow-up — ✅ fixed** (`f2ce2372`), and **the plan's prediction was inverted**. Sweeping all 26 surfaces that can render over the composer found the dominant defect was **ZERO** focus nodes on **21 of 26**, not two. `driver.query("focus")` returns `null` on zero and throws on >1, so both are dead ends — and `null` was the one actually happening, everywhere. Four surfaces (plan-questions, payment-approval, sandbox-picker, wallet-picker) were invisible to the harness entirely and gained their first `<Dialog>`. Both negative controls operator-verified (zero-owner and two-owner); `modal-focus-sweep.spec.ts` 11 passed |
+| 20 | halt-recovery `init_new` never cancels a pending council askcard | dangling responder promise; `holdWatchdogOpen()` suppresses both watchdogs for the rest of the process | §9, latent bug 2 — **open**, and `b475700e` widened it: Escape now aborts the council *turn*, but the askcard promise still has no reject, no timeout and no signal. Clean follow-up shape named in that commit: thread the same signal in and resolve with the existing `COUNCIL_ANSWER_DISMISSED` sentinel the UI's own Esc-cancel already sends — zero new exception paths |
+| 21 | `lint:semantic:strict` passes on components that have **no `<Semantic>` node at all** | the semantic linter has a hole; three such components existed and it flagged none. A surface invisible to the harness is invisible to A1/A4 by construction, and the lint that is supposed to prevent that reports green | found by `f2ce2372` — **open** |
+| 22 | `src/ui/containers/modals-layer.tsx` is a stale duplicate of the live render path that nothing imports, carrying the un-swept wiring | a future sweep or fix applied to the dead file reads as done and changes nothing | found by `f2ce2372` — **open** |
+| 23 | `registry.ts:1386` and `:1432` snapshot `bash.getCwd()` at registry-construction time instead of reading it live | native-muonroi and vision tools go stale after any `cd`; a third drift vector the §3.2 write guard does not cover | found by `c48b09ad` — **open** |
+| 24 | sprint outcome files are named by `sprintN` alone, and `sprintN` **restarts per phase** | `writeSprintOutcome` overwrites across phases — in run `mtpd7mf19b10`, phase-3's sprint 1 overwrote phase-1's. `deriveRunVerdict` works around it by ordering on `finishedAt`, not `sprintN`; the collision itself is untouched | found by `f83965ab` — **open** |
+| 25 | `docs/agent-first/gate-failures/` does not exist, and §5.10's record was not written for Phase 2 | rejected and discarded sprints lose their context with their worktree — the exact failure §5.10 was written to prevent. Three Phase 2 worktrees are already gone | §5.10 / §6.2 — **open**; make the record part of the run-down procedure, not a step after it |
+| 26 | the `/ideal` run verdict was the literal `{pass:true, score:1, reason:"phases_complete"}` (`index.ts:1755`), and **nothing upstream could say fail** (`phase-runner.ts:475` unconditional `done`, `:481` `pass:true`) | the loop's judgment of its own work was §1's failure class in the worst possible place: a run wrote `VerdictPass: true` 15 s after its own digest said `Score: 0.00`. It also destroyed recoverability — the run was marked done, so `/ideal resume` correctly answered `no_incomplete_run` | **✅ fixed** (`f83965ab`): `deriveRunVerdict` reads real sprint outcome records; **no outcomes at all is a fail**; `runIsTerminal` gates `doneAt`. Survived this long because the finalize path is default-ON in production while every pre-existing integration test forces `MUONROI_PHASE_MODE=0` |
+| 27 | the sprint **verify** stage executed no commands — an LLM turn whose verdict was `tr.success && output.includes("VERIFY_PASS")`, a substring the verify sub-agent printed about its own run | a suite collecting zero tests and one running 6388 were the same observation; a sprint could commit source that did not typecheck and pass verification. **Correction to the record: `CLAUDE.md` calls `gsd_verify` a "deterministic floor first (tests/lint evidence)" — it is not.** `workflow-tools.ts:198-245` takes `passed: boolean` and `evidence: string` from the model and executes nothing | **✅ fixed** (`0e085663`) — a real floor that runs the recipe. Gate §5.7's reasoning applies here too: an in-sprint check the agent's own session produces is not a gate |
+| 28 | `bash.ts:170` `this.cwd = nextCwd` moved the run's cwd permanently on any `cd`, with only a directory-exists check; forked sub-sessions share one `BashTool` | **isolation escaped twice, in production, on this machine** — commits onto the parent branch (2026-09-06) and file writes into the parent tree (2026-09-07, with the commit guard already in place). See §3.2 and §6.2 | **✅ fixed in two parts** (`d939c87b` commit-scope guard, `c48b09ad` write containment: `cd` warns, writes refuse). Negative control on the write guard, operator-verified: making it a no-op turns 6 tests red. **Arbitrary shell writes remain uncontained** (row in §3.2) |
 
 ---
 
