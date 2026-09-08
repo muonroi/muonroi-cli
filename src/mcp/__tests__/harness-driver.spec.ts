@@ -2,6 +2,7 @@ import {
   buildCapabilitiesPayload,
   createMcpHarnessServer,
   getRegisteredToolNames,
+  validateStartArgs,
 } from "@muonroi/agent-harness-core/mcp-server";
 import {
   evaluatePredicate,
@@ -166,6 +167,24 @@ describe("harness-driver capabilities", () => {
     expect(evaluatePredicate(predicateSchema.parse({ field: "name", op: "eq", rhs: "Prompt" }), node)).toBe(true);
     // And a field the payload does NOT advertise is rejected by the schema.
     expect(() => predicateSchema.parse({ field: "role", op: "eq", rhs: "textbox" })).toThrow();
+  });
+
+  it("publishes the tui.start argv contract, executably", () => {
+    // A graduation agent whose budget is tools/list + tui.capabilities had no
+    // way to construct a valid `args` array: the allowlist was enforced and
+    // never published. The payload must carry it, and every form it advertises
+    // must be one validateStartArgs actually accepts.
+    const { argv } = buildCapabilitiesPayload();
+    expect(argv.appliesTo).toBe("tui.start");
+    expect(argv.field).toBe("args");
+    expect(argv.forms.length).toBeGreaterThanOrEqual(4);
+    // The rule the failing run could not guess.
+    expect(argv.matching).toContain("WHOLE");
+    for (const form of argv.forms) {
+      for (const example of form.examples) expect(validateStartArgs([example])).toEqual({ ok: true });
+    }
+    for (const call of argv.callExamples) expect(validateStartArgs([...call.args])).toEqual({ ok: true });
+    for (const bad of argv.rejected) expect(validateStartArgs([bad.arg]).ok).toBe(false);
   });
 
   it("reports semantic ids from the live frame, never a static inventory", () => {

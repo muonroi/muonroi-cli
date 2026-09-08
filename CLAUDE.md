@@ -548,7 +548,7 @@ Add to your MCP client config (Claude Desktop / Cursor / etc.):
 Then drive via tool calls: `tui.start`, `tui.snapshot`, `tui.press`, `tui.type`, `tui.query`, `tui.wait_for`, `tui.expect`, `tui.last_event`, `tui.stop`.
 
 `tui.start` security boundary (enforced before any spawn):
-- argv allowlist: `--agent-*`, `--mock-llm=*`, `--profile=*`. Anything else → `{error: "argv_rejected"}`
+- argv allowlist: `--agent-<name>[=<v>]`, `--mock-llm[=<dir>]`, `--profile=<id>`, `--session=<id>`. Matching is **per-token and whole**, so a flag's value never rides in the next `args` element — `["--mock-llm", "<dir>"]` is rejected on `<dir>`; write `--mock-llm=<dir>` or pass the `mockLlmDir` input. Anything else → `{error: "argv_rejected", bad, index, message, allowed, callExamples}`. **Do not restate the rule anywhere**: it is declared once in `packages/agent-harness-core/src/argv-contract.ts`, the enforced regex is assembled from it, and `tui.capabilities` publishes it as `argv` so an agent with no repo access can build a valid call. Drift is pinned by `packages/agent-harness-core/__tests__/argv-contract.spec.ts`.
 - env strip: `NODE_OPTIONS`, `BUN_OPTIONS`, `LD_PRELOAD`, `DYLD_*`, `LD_AUDIT`, `NODE_PATH` removed
 - cwd containment: `realpathSync` against `homedir()` or repo root
 - cwd extra roots (opt-in, default-deny preserved): set env `MUONROI_HARNESS_EXTRA_ROOTS` (OS-path-list or comma-separated) **or** create `.muonroi-harness-roots.json` (`{ "roots": [...] }`, gitignored) at repo root to also allow dogfooding sibling ecosystem repos (e.g. `D:\sources\Core\*`). Clean checkouts have neither → identical to home+repo-only. Implemented in `packages/agent-harness-core/src/mcp-server.ts` (`loadExtraRoots`)

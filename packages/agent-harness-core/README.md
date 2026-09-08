@@ -40,6 +40,7 @@ The `browser` export condition strips Node-only modules (`mcp-server.ts`, `trans
 | `createWebSocketTransport` | Browser-safe WebSocket transport with envelope validation |
 | `createSidechannelTransport` | Node-only fd 3/4 + named-pipe transport |
 | `createMcpHarnessServer` | Node-only MCP server (`tui.start` etc.) — accepts `HarnessSpawn` injection |
+| `ARGV_CONTRACT`, `ARGV_ALLOW_RE`, `validateStartArgs` | The `tui.start` argv allowlist — the regex is assembled from the same declaration `tui.capabilities` publishes as `argv`, so enforcement and documentation cannot drift |
 | `findUnwrappedComponents` | Node-only lint helper for `lint:semantic` |
 | `PROTOCOL_VERSION`, `UINode`, `LiveFrame`, `LiveEvent` | Protocol types |
 
