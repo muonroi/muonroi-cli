@@ -1,0 +1,151 @@
+                  setCouncilProgress({ status: "error", specPath: "", hasContent: false, error: msg });
+                });
+              setCouncilProgress({ status: "running", specPath: "", hasContent: false });
+              return;
+            }
+            // A — sprint-break recovery. Resume/Retry/Abort re-dispatch through
+            // the existing `/ideal` slash pipeline; the runId is optional because
+            // runResume/runAbort auto-detect the newest incomplete run (A/B).
+            if (
+              chosen.id === "resume" ||
+              chosen.id === "retry" ||
+              chosen.id === "skip_verify" ||
+              chosen.id === "abort"
+            ) {
+              interruptActiveRun();
+              const rid = activeHaltCard.runId ? ` ${activeHaltCard.runId}` : "";
+              setActiveHaltCard(null);
+              setHaltSelectedIndex(0);
+              if (chosen.id === "abort") {
+                handleCommand(`/ideal abort${rid}`);
+              } else {
+                if (chosen.id === "skip_verify") {
+                  // Consumed by sprint-runner Step 5; reset on the next fresh start.
+                  process.env.MUONROI_SPRINT_SKIP_VERIFY = "1";
+                }
+                handleCommand(`/ideal resume${rid}`);
+              }
+              return;
+            }
+            console.log("halt recovery: unknown option id:", chosen.id);
+          }
+          setActiveHaltCard(null);
+          setHaltSelectedIndex(0);
+          return;
+        }
+        return;
+      }
+      if (btwState) {
+        if (isEscapeKey(key) || key.name === "return") {
+          dismissBtw();
+        }
+        return;
+      }
+      // Use ref instead of React state: a synchronous keyboard burst from
+      // the harness arriving right after askcard-open emit can race React's
+      // batched setState commit. Ref is updated synchronously in
+      // setPendingCouncilQuestionSync so the handler sees the new question
+      // immediately. (Mirror of councilCardStateRef pattern.)
+      const pendingQuestion = pendingCouncilQuestionRef.current;
+      if (pendingQuestion && councilCardStateRef.current && modalOwnsKeyboard(modalOwnerNow, "askcard")) {
+        const cardKey = mapCouncilCardKey(key);
+        if (cardKey) {
+          // Mark the key consumed BEFORE mutating card state: the renderer's
+          // internal Escape listener (onInternalKey → interruptActiveRun) runs
+          // AFTER this handler in the same dispatch, and by then the cancel
+          // branch below has already nulled pendingCouncilQuestionRef — so the
+          // ref guard alone can't tell "card just handled this Esc" from "no
+          // card at all", and Stage 2 wiped the whole debate transcript
+          // (live-verified stack trace 2026-07-06).
+          key.preventDefault?.();
+          key.stopPropagation?.();
+          const result = reduceCardKey(pendingQuestion, councilCardStateRef.current, cardKey);
+          setCouncilCardStateSync(result.state);
+          if (result.emit?.type === "answer") {
+            const qid = pendingQuestion.questionId;
+            const ans = result.emit.answer;
+            // Tool-loop-cap askcards bypass the council answer machinery — the
+            // verdict resolves a stored Promise that's awaited inside the
+            // streamText stopWhen predicate. Drain the resolver, emit the
+            // harness event, and return so the council path doesn't see this.
+            if (pendingQuestion.phase === "tool-loop-cap") {
+              const resolver = toolLoopCapResolversRef.current.get(qid);
+              toolLoopCapResolversRef.current.delete(qid);
+              setPendingCouncilQuestionSync(null);
+              setCouncilCardStateSync(null);
+              const verdict = ans.text === "continue" ? "continue" : "stop";
+              resolver?.(verdict);
+              try {
+                agentRuntime?.emitEvent({
+                  t: "event",
+                  kind: "askcard-answered",
+                  questionId: qid,
+                  answerKind: ans.kind ?? "choice",
+                  answerText: verdict,
+                });
+              } catch {
+                /* best-effort */
+              }
+              logUIInteraction(agent.getSessionId() ?? undefined, {
+                subtype: "askcard_answered",
+                data: { questionId: qid, answerKind: "choice", answerText: verdict },
+              });
+              return;
+            }
+            // Safety-override askcard: resolve the stored promise with the
+            // user's verdict (allow-once / allow-session / block).
+            if (pendingQuestion.phase === "safety-override") {
+              const resolver = safetyOverrideResolversRef.current.get(qid);
+              safetyOverrideResolversRef.current.delete(qid);
+              setPendingCouncilQuestionSync(null);
+              setCouncilCardStateSync(null);
+              let parsed: SafetyOverrideVerdict;
+              if (ans.text === "allow-once" || ans.text === "allow-session") {
+                parsed = { action: ans.text };
+              } else {
+                parsed = { action: "block" };
+              }
+              resolver?.(parsed);
+              try {
+                agentRuntime?.emitEvent({
+                  t: "event",
+                  kind: "askcard-answered",
+                  questionId: qid,
+                  answerKind: ans.kind ?? "choice",
+                  answerText: ans.text,
+                });
+              } catch {
+                /* best-effort */
+              }
+              logUIInteraction(agent.getSessionId() ?? undefined, {
+                subtype: "askcard_answered",
+                data: { questionId: qid, answerKind: "choice", answerText: ans.text },
+              });
+              return;
+            }
+            // ask_user askcard: resolve the stored promise with the user's
+            // answer string (option value or free text) — becomes the tool result.
+            if (pendingQuestion.phase === "ask-user") {
+              const resolver = askUserResolversRef.current.get(qid);
+              askUserResolversRef.current.delete(qid);
+              setPendingCouncilQuestionSync(null);
+              setCouncilCardStateSync(null);
+              resolver?.(ans.text);
+              try {
+                agentRuntime?.emitEvent({
+                  t: "event",
+                  kind: "askcard-answered",
+                  questionId: qid,
+                  answerKind: ans.kind ?? "choice",
+                  answerText: ans.text,
+                });
+              } catch {
+                /* best-effort */
+              }
+              logUIInteraction(agent.getSessionId() ?? undefined, {
+                subtype: "askcard_answered",
+                data: { questionId: qid, answerKind: ans.kind ?? "choice", answerText: ans.text },
+              });
+              return;
+            }
+            // Resolve the label of the option that was selected. For "choice"

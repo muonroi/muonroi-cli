@@ -6756,6 +6756,8 @@ export function useAppLogic(props: AppLogicProps) {
           // ref guard alone can't tell "card just handled this Esc" from "no
           // card at all", and Stage 2 wiped the whole debate transcript
           // (live-verified stack trace 2026-07-06).
+          key.preventDefault?.();
+          key.stopPropagation?.();
           const result = reduceCardKey(pendingQuestion, councilCardStateRef.current, cardKey);
           setCouncilCardStateSync(result.state);
           if (result.emit?.type === "answer") {
@@ -6968,41 +6970,6 @@ export function useAppLogic(props: AppLogicProps) {
             logUIInteraction(agent.getSessionId() ?? undefined, {
               subtype: "askcard_cancel",
               data: { questionId: qid },
-            });
-          }
-          // ── Escape sequence thresholds ─────────────────────────────────────
-          // reduceCardKey emits escape_threshold for 2×250ms ("abandoned") and
-          // 10×500ms ("halted"). Both fire a run-end event and keep the host
-          // process alive; single Esc still dismisses via the cancel branch above.
-          if (result.emit?.type === "escape_threshold") {
-            const outcome = result.emit.outcome;
-            void agentRuntime?.emitEvent({
-              t: "event",
-              kind: "askcard-cancel",
-              questionId: pendingQuestion.questionId,
-              outcome,
-            });
-            logUIInteraction(agent.getSessionId() ?? undefined, {
-              subtype: "askcard_escape_threshold",
-              data: { questionId: pendingQuestion.questionId, outcome },
-            });
-            return;
-          }
-          // "abandoned" fires asynchronously after the 250 ms window; drain the
-          // promise without blocking the keyboard handler.
-          if (result.emitWait) {
-            // eslint-disable-next-line @typescript-eslint/no-floating-promises
-            result.emitWait.then((outcome) => {
-              void agentRuntime?.emitEvent({
-                t: "event",
-                kind: "askcard-cancel",
-                questionId: pendingQuestion.questionId,
-                outcome: outcome.outcome,
-              });
-              logUIInteraction(agent.getSessionId() ?? undefined, {
-                subtype: "askcard_escape_threshold",
-                data: { questionId: pendingQuestion.questionId, outcome: outcome.outcome },
-              });
             });
           }
           return;

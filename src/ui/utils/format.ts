@@ -151,3 +151,119 @@ export function mapCouncilCardKey(key: KeyEvent): CouncilCardKey | null {
   }
   return null;
 }
+
+// ── Askcard state machine: escape-sequence tracker ───────────────────────────
+// Refs on the askcard state machine — we keep them outside React state so the
+// consecutive-press counter and inter-press timer update synchronously without
+// a React commit round-trip.
+
+const ESCAPE_SEQUENCE_STATE = Symbol("escapeSequenceState");
+
+interface EscapeSequenceState {
+  count: number;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+/** Lightweight outcome emitted by reduceCardKey when the escape threshold is hit. */
+export interface EscapeOutcome {
+  type: "escape_threshold";
+  outcome: "abandoned" | "halted";
+}
+
+/**
+ * Get-or-create the escape-sequence tracker on a card state record.
+ * Returns the mutable state object so the caller can inspect and clear it.
+ */
+function getEscapeSequenceState(
+  cardState: Record<PropertyKey, unknown>,
+): EscapeSequenceState {
+  let s = (cardState as Record<PropertyKey, unknown>)[ESCAPE_SEQUENCE_STATE] as
+    | EscapeSequenceState
+    | undefined;
+  if (!s) {
+    s = { count: 0, timer: null };
+    (cardState as Record<PropertyKey, unknown>)[ESCAPE_SEQUENCE_STATE] = s;
+  }
+  return s;
+}
+
+/** Cancel any pending timer and reset the press counter. */
+function resetEscapeSequence(s: EscapeSequenceState): void {
+  if (s.timer) {
+    clearTimeout(s.timer);
+    s.timer = null;
+  }
+  s.count = 0;
+}
+
+/**
+ * Core askcard state-machine step for a single key event.
+ *
+ * Returns `{ state, emit }` where `state` is the updated card state record and
+ * `emit` is an optional event to broadcast to the harness.
+ *
+ * Outcome thresholds (all within the same parked askcard):
+ *   - 2 Escape presses ≤ 250 ms apart  → outcome "abandoned"
+ *   - 10 Escape presses ≤ 500 ms apart → outcome "halted"
+ *
+ * A single Escape press falls through to the dismiss branch (caller nulls the
+ * refs; the run continues unmodified). This is intentionally separate from the
+ * sequence tracker so we never fire a run-end event on a lone Esc.
+ */
+export function reduceCardKey(
+  question: CouncilQuestionData,
+  cardState: Record<PropertyKey, unknown>,
+  cardKey: CouncilCardKey,
+): { state: Record<PropertyKey, unknown>; emit?: EscapeOutcome } {
+  const s = getEscapeSequenceState(cardState);
+
+  if (cardKey.kind === "escape") {
+    // Reset stale sequence: 10-press window expired → start fresh.
+    if (s.timer && Date.now() - (s.timer as unknown as number) > 500) {
+      resetEscapeSequence(s);
+    }
+
+    s.count += 1;
+
+    // ── Threshold: 2 presses within 250 ms → "abandoned"
+    if (s.count === 2) {
+      // Set a 250 ms expiry timer. If no 3rd press arrives in time the
+      // handler will see `emit` when it fires.
+      s.timer = setTimeout(() => {
+        if (s.count === 2) {
+          resetEscapeSequence(s);
+        }
+      }, 250) as unknown as ReturnType<typeof setTimeout>;
+      // Wrap the timer so the caller can await it synchronously.
+      const abandonedPromise: Promise<EscapeOutcome> = new Promise((resolve) => {
+        const id = setTimeout(() => {
+          if (s.count === 2) {
+            resetEscapeSequence(s);
+            resolve({ type: "escape_threshold", outcome: "abandoned" });
+          } else {
+            resolve({ type: "escape_threshold", outcome: "abandoned" });
+          }
+        }, 251);
+        // Keep the timer handle on the state so the unmount guard can clear it.
+        (s as EscapeSequenceState & { _abandonedTimer: ReturnType<typeof setTimeout> })._abandonedTimer = id;
+      });
+      return { state: cardState, emitWait: abandonedPromise };
+    }
+
+    // ── Threshold: 10 presses within 500 ms → "halted"
+    if (s.count === 10) {
+      resetEscapeSequence(s);
+      return { state: cardState, emit: { type: "escape_threshold", outcome: "halted" } };
+    }
+
+    // Presses 3-9: just track, don't emit yet.
+    return { state: cardState };
+  }
+
+  // Non-escape key: clear any pending escape timer.
+  if (s.timer) {
+    clearTimeout(s.timer);
+    s.timer = null;
+  }
+  return { state: cardState };
+}
