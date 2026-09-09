@@ -191,7 +191,7 @@ import { setProviderHint } from "./token-counter.js";
 import { isToolActivityLive } from "./tool-activity.js";
 import { getToolLimitAutoRecoverCap } from "./tool-limit-auto-recover.js";
 import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
-import { firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
+import { combineAbortSignals, firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
 import { hasTurnProgressSince } from "./turn-progress.js";
 
 // ---------------------------------------------------------------------------
@@ -2517,7 +2517,14 @@ export class Agent {
     // NOT inherit this turn's council-debate history — the root fix for the live
     // ctx-overflow wedge. Returns a compact ToolResult (absorbed, no parent bloat).
     // Same autonomous-permission elevation as the streamed path above.
-    const runIsolatedTask = async (request: import("../types/index.js").TaskRequest) => {
+    const runIsolatedTask = async (
+      request: import("../types/index.js").TaskRequest,
+      // N3 — per-call cancellation + activity relay. Without `abortSignal` the
+      // sprint's total-elapsed deadline could only stop AWAITING the child; the
+      // child itself kept streaming and billing (measured: 220s / 32 steps /
+      // 29.8% of a run's spend after the run was declared dead).
+      opts?: { abortSignal?: AbortSignal; onActivity?: (detail: string) => void },
+    ) => {
       const prev = self.permissionMode;
       if (self.permissionMode === "safe") self.permissionMode = "auto-edit";
       try {
@@ -2531,8 +2538,9 @@ export class Agent {
           (detail) => {
             if (this.abortController?.signal.aborted) return;
             self.emitSubagentStatus({ agent: request.agent, description: request.description, detail });
+            opts?.onActivity?.(detail);
           },
-          this.abortController?.signal,
+          combineAbortSignals(this.abortController?.signal, opts?.abortSignal),
         );
       } finally {
         self.emitSubagentStatus(null);

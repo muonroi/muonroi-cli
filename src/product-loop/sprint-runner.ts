@@ -41,6 +41,7 @@ import type { StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
 import { commitToProduct, release } from "../usage/ledger.js";
 import { CapBreachError } from "../usage/types.js";
 import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
+import { logger } from "../utils/logger.js";
 import type { SandboxSettings } from "../utils/settings.js";
 import { runVerifyOrchestration, type VerifyAgentLike } from "../verify/orchestrator.js";
 import { appendIteration, readCriteria } from "./artifact-io.js";
@@ -302,11 +303,10 @@ export async function* withImplIdleWatchdog(
  * ceiling.
  *
  * This races the isolated task against a hard total-elapsed deadline. On
- * timeout it rejects so the caller's existing try/catch converts the wedge into
- * a visible phaseError (the sprint surfaces + can recover), mirroring what
- * `withImplIdleWatchdog` / `runVerifyWithWatchdog` do for the other stages. The
- * suspended sub-agent promise may leak in the background, but the run recovers.
- * `totalMs <= 0` disables the guard (returns the task unchanged).
+ * timeout it ABORTS the child and rejects, so the caller's existing try/catch
+ * converts the wedge into a visible phaseError (the sprint surfaces + can
+ * recover), mirroring what `withImplIdleWatchdog` / `runVerifyWithWatchdog` do
+ * for the other stages. `totalMs <= 0` disables the deadline.
  */
 /**
  * Extract why an isolated implementation task failed, from its ToolResult.
@@ -373,26 +373,173 @@ export function logSprintImplError(
   }
 }
 
-export async function withIsolatedImplDeadline<T>(task: Promise<T>, totalMs: number, sprintN: number): Promise<T> {
-  if (!(Number.isFinite(totalMs) && totalMs > 0)) return task;
+/**
+ * What the deadline ACTUALLY observed about the isolated turn, as of the moment
+ * it fired. Populated from the sub-agent's own per-tool activity callback — the
+ * only signal the sprint has about the child — so the timeout message can state
+ * facts instead of a narrative.
+ */
+export interface IsolatedImplObservation {
+  /** Sub-agent activity notifications seen (one per tool call it started). */
+  events: number;
+  /** `Date.now()` of the most recent one, or null when none ever arrived. */
+  lastEventAtMs: number | null;
+}
+
+/**
+ * The isolated-impl timeout message.
+ *
+ * It reports ONLY what was measured. The previous text asserted, on every
+ * timeout, that the turn "never completed (hung on the JS side after its final
+ * response; the isolated path has no per-chunk stall guard)". Both halves were
+ * false for the 2026-09 degenerate run — the sub-agent was emitting a tool call
+ * roughly every 6s when the deadline fired, and a per-chunk stall guard does
+ * exist (`stream-runner.ts` arms `createStallWatchdog` with an any-chunk timer
+ * AND a no-forward-progress timer). That hardcoded narrative was a diagnosis
+ * carried over from a DIFFERENT incident (run mrhc43f0fb9b) and it cost a later
+ * investigation an entire hypothesis. Never restate a cause here.
+ */
+export function buildIsolatedImplTimeoutMessage(args: {
+  sprintN: number;
+  totalMs: number;
+  elapsedMs: number;
+  observation?: IsolatedImplObservation;
+  firedAtMs?: number;
+}): string {
+  const { sprintN, totalMs, elapsedMs, observation } = args;
+  const firedAt = args.firedAtMs ?? Date.now();
+  const parts: string[] = [
+    `isolated implementation stage exceeded ${Math.round(totalMs / 1000)}s total watchdog (sprint ${sprintN}) ` +
+      `and was CANCELLED after ${(elapsedMs / 1000).toFixed(1)}s`,
+  ];
+  if (!observation) {
+    parts.push("no sub-agent activity was instrumented for this call, so nothing further was observed");
+  } else if (observation.events === 0 || observation.lastEventAtMs === null) {
+    parts.push("observed 0 sub-agent activity events — nothing was seen streaming from the child");
+  } else {
+    const sinceLastMs = Math.max(0, firedAt - observation.lastEventAtMs);
+    parts.push(
+      `observed ${observation.events} sub-agent activity event(s), the last one ` +
+        `${(sinceLastMs / 1000).toFixed(1)}s before the deadline ` +
+        `(at ${new Date(observation.lastEventAtMs).toISOString()}) — ` +
+        `${sinceLastMs < 60_000 ? "the child was still emitting when it was cancelled" : "the child had gone quiet"}`,
+    );
+  }
+  parts.push("cause not diagnosed — only the observations above were measured");
+  return parts.join("; ");
+}
+
+/**
+ * Race an isolated sub-agent task against a wall-clock deadline **and cancel it
+ * when the deadline wins**.
+ *
+ * Previously this was a bare `Promise.race` over an already-started promise,
+ * with no `AbortSignal` anywhere: losing the race abandoned the child, which
+ * kept running. Measured on the 2026-09 degenerate run — the watchdog threw at
+ * 11:13:44 and the sub-agent carried on to 11:17:24, another 220s and 32 steps,
+ * accounting for 29.8% of the whole run's recorded spend AFTER the run had been
+ * declared dead. This repo already knew the failure mode: `llm-deadline.ts:105`
+ * logs "abandoned call rejected after the race settled".
+ *
+ * So `run` is now a FACTORY that receives the signal: the deadline aborts it
+ * before rejecting, and the abandoned promise's late rejection is observed and
+ * logged (never left to escape as an unattributable unhandled rejection).
+ * `totalMs <= 0` disables the deadline but still supplies a (never-aborted)
+ * signal, so the call site's wiring is identical in both modes.
+ */
+export async function withIsolatedImplDeadline<T>(
+  run: (signal: AbortSignal) => Promise<T>,
+  totalMs: number,
+  sprintN: number,
+  observe?: () => IsolatedImplObservation,
+): Promise<T> {
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  if (!(Number.isFinite(totalMs) && totalMs > 0)) return run(controller.signal);
+
+  let settled = false;
+  let deadlineFired = false;
+  let timeoutMessage = "";
+
+  const work = run(controller.signal).catch((err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (settled) {
+      // The race already resolved — nobody is awaiting this. Log with context
+      // (No-Silent-Catch: reported, just not rethrown into a dead race).
+      logger.error("orchestrator", "[sprint-runner] cancelled isolated impl task rejected after the deadline race", {
+        sprintN,
+        totalMs,
+        error: msg,
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3).join(" | ") : undefined,
+      });
+      return undefined as T;
+    }
+    // Our own cancellation surfaced first — report the deadline, not the abort.
+    if (deadlineFired) throw new Error(timeoutMessage);
+    throw err;
+  });
+
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      reject(
-        new Error(
-          `isolated implementation stage exceeded ${Math.round(totalMs / 1000)}s total watchdog and was ` +
-            `treated as stalled (sprint ${sprintN}) — the isolated sub-agent turn never completed ` +
-            `(hung on the JS side after its final response; the isolated path has no per-chunk stall guard)`,
-        ),
-      );
+      deadlineFired = true;
+      timeoutMessage = buildIsolatedImplTimeoutMessage({
+        sprintN,
+        totalMs,
+        elapsedMs: Date.now() - startedAt,
+        observation: observe?.(),
+      });
+      // Cancel the work we are giving up on BEFORE unblocking the caller.
+      controller.abort(new DOMException(timeoutMessage, "TimeoutError"));
+      logger.error("orchestrator", "[sprint-runner] isolated impl deadline fired — child cancelled", {
+        sprintN,
+        totalMs,
+        message: timeoutMessage,
+      });
+      reject(new Error(timeoutMessage));
     }, totalMs);
     (timer as { unref?: () => void }).unref?.();
   });
+
   try {
-    return await Promise.race([task, deadline]);
+    return await Promise.race([work, deadline]);
   } finally {
+    settled = true;
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * The REAL isolated-implementation invocation, extracted so the
+ * deadline → `abortSignal` wiring is exercised by tests at the call site
+ * itself rather than only on the helper.
+ *
+ * This repo has twice shipped a helper whose unit test passed while the
+ * production call site passed nothing into it. `runSprint` calls exactly this
+ * function, so a test that asserts `runIsolatedTask` receives
+ * `withIsolatedImplDeadline`'s signal cannot pass while the call site is
+ * unwired. @testonly-seam (the export exists so the wiring is pinnable).
+ */
+export async function runIsolatedImplWithDeadline(args: {
+  runIsolatedTask: NonNullable<DriverContext["runIsolatedTask"]>;
+  request: import("../types/index.js").TaskRequest;
+  totalMs: number;
+  sprintN: number;
+}): Promise<ToolResult> {
+  const observation: IsolatedImplObservation = { events: 0, lastEventAtMs: null };
+  return withIsolatedImplDeadline(
+    (signal) =>
+      args.runIsolatedTask(args.request, {
+        abortSignal: signal,
+        onActivity: () => {
+          observation.events += 1;
+          observation.lastEventAtMs = Date.now();
+        },
+      }),
+    args.totalMs,
+    args.sprintN,
+    () => ({ ...observation }),
+  );
 }
 
 export {
@@ -1047,20 +1194,25 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
             content: `\n> [impl-model] Running implementation on ${implModelId} (override of session model ${ctx.sessionModelId}).\n`,
           };
         }
-        // Wall-clock deadline: the isolated path has no per-chunk stall guard,
-        // so a post-finish JS-side hang would wedge this await forever (observed
-        // live, run mrhc43f0fb9b). Racing the total-elapsed ceiling turns a wedge
-        // into a phaseError via the try/catch below. See withIsolatedImplDeadline.
-        const result = await withIsolatedImplDeadline(
-          ctx.runIsolatedTask({
+        // Wall-clock ceiling on the whole isolated turn. (Correction to an
+        // earlier comment here: the isolated path DOES have a per-chunk stall
+        // guard — stream-runner.ts arms createStallWatchdog with both an
+        // any-chunk and a no-forward-progress timer. What it lacked was a
+        // TOTAL-elapsed ceiling, and a ceiling that actually cancels.)
+        // Losing the race now aborts the child instead of orphaning it, and the
+        // rejection becomes a phaseError via the try/catch below.
+        // See runIsolatedImplWithDeadline / withIsolatedImplDeadline.
+        const result = await runIsolatedImplWithDeadline({
+          runIsolatedTask: ctx.runIsolatedTask,
+          request: {
             agent: "general",
             description: `Sprint ${sprintN} implementation`,
             prompt: implPrompt,
             modelId: implModelId,
-          }),
-          getImplTotalTimeoutMs(),
+          },
+          totalMs: getImplTotalTimeoutMs(),
           sprintN,
-        );
+        });
         if (!result.success) {
           implError = resolveImplFailureReason(result);
         } else if (result.output?.trim()) {

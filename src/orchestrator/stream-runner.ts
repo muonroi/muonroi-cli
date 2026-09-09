@@ -104,7 +104,13 @@ import {
   shouldInjectSoftWarn,
 } from "./scope-reminder.js";
 import { recordCompaction, recordElision } from "./session-experience.js";
-import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
+import {
+  buildToolFailureLoopMessage,
+  createStallWatchdog,
+  createToolFailureLoopDetector,
+  STALL_ERROR_MESSAGE,
+  TOOL_FAILURE_LOOP_ABORT_REASON,
+} from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { applyAnthropicPromptCaching, compactSubAgentMessages } from "./subagent-compactor.js";
 import { buildSubAgentStepData, isSubAgentStepMeterEnabled } from "./subagent-step-meter.js";
@@ -543,7 +549,15 @@ export class StreamRunner {
     prepared: PreparedSubAgentCall,
     onActivity?: (detail: string) => void,
     signal?: AbortSignal,
-  ): Promise<{ output: string; lastActivity: string; cancelled: boolean; assistantText: string; stalled?: boolean }> {
+  ): Promise<{
+    output: string;
+    lastActivity: string;
+    cancelled: boolean;
+    assistantText: string;
+    stalled?: boolean;
+    /** Set when the failing-tool-loop guard terminated the turn; carries the reason. */
+    failureLoop?: string;
+  }> {
     const { childRuntime, childSystem, childMessages, childTools, maxSteps } = prepared;
     // F1 — per-turn options (with promptCacheKey) built in setup(); falls back
     // to resolve-time options when no provider/session was available.
@@ -654,6 +668,20 @@ export class StreamRunner {
         },
       },
     );
+    // N3 — usefulness guard. Both timers above are re-armed by EMISSION: `pet()`
+    // by any chunk, `petProgress()` by a text-delta or a tool-call. A sub-agent
+    // that emits a failing tool call every few seconds therefore keeps both
+    // alive indefinitely (measured: 176 steps / 1116s / ~7.45M input tokens,
+    // max inter-step gap 30.5s — no time threshold could separate it from a
+    // healthy run whose max gap is 30.2s). The discriminator is the RESULT:
+    // N consecutive same-class tool failures with no successful tool result in
+    // between means the turn is producing nothing. Aborts the same stream via
+    // its own controller so the in-flight provider request is actually
+    // cancelled, not merely un-awaited.
+    const failureLoopDetector = createToolFailureLoopDetector();
+    const failureLoopController = new AbortController();
+    let failureLoopMessage: string | null = null;
+
     // Per-step cache instrumentation: the aggregate `task` usage event only
     // reports one cache-hit % for the whole sub-agent run, so an 8% aggregate
     // can't be attributed to a step (is the growing prefix uncacheable, or does
@@ -671,7 +699,7 @@ export class StreamRunner {
       tools: !taskCaps.supportsClientTools(childRuntime.modelInfo) ? {} : childTools,
       stopWhen: _subStopWhen ?? stepCountIs(maxSteps),
       maxRetries: 0,
-      abortSignal: combineAbortSignals(signal, stall.signal),
+      abortSignal: combineAbortSignals(signal, stall.signal, failureLoopController.signal),
       // Repair malformed tool-call JSON args — same wiring as the top-level
       // loop in message-processor.ts. Without this, sub-agents on models
       // with broken tool-arg emission (Qwen3-30B-Instruct observed) loop on
@@ -966,6 +994,37 @@ export class StreamRunner {
           continue;
         }
 
+        // N3 — feed the usefulness guard. NOTE: deliberately NOT petProgress().
+        // A tool RESULT is only forward progress when it is not a repeat of the
+        // same failure; the detector decides, and the timers stay driven by
+        // emission (unchanged behaviour for every non-looping turn).
+        if (part.type === "tool-result" || part.type === "tool-error") {
+          const isErrorPart = part.type === "tool-error";
+          const payload = isErrorPart
+            ? (part as unknown as { error?: unknown }).error
+            : (part as unknown as { output?: unknown }).output;
+          const toolName = (part as unknown as { toolName?: string }).toolName ?? "unknown";
+          const outcome = failureLoopDetector.record(toolName, payload, isErrorPart);
+          if (outcome.tripped) {
+            failureLoopMessage = buildToolFailureLoopMessage(
+              toolName,
+              outcome.runLength,
+              failureLoopDetector.lastFailureText(),
+            );
+            logger.error("orchestrator", "[stream-runner] sub-agent terminated: failing-tool-loop guard fired", {
+              tool: toolName,
+              runLength: outcome.runLength,
+              failureClass: outcome.failureClass ?? undefined,
+              model: childRuntime.modelId,
+            });
+            onActivity?.(`tool-failure-loop: ${toolName} failed ${outcome.runLength}x identically`);
+            // Cancel the in-flight provider request instead of abandoning it.
+            failureLoopController.abort(new DOMException(TOOL_FAILURE_LOOP_ABORT_REASON, "AbortError"));
+            break;
+          }
+          continue;
+        }
+
         if (debugSubagent) {
           // Capture finish reasons + error parts that we'd otherwise swallow.
           if ((part as { type: string }).type === "error") {
@@ -986,6 +1045,18 @@ export class StreamRunner {
         }
       }
 
+      // N3 — the guard broke out of the drain loop; return BEFORE awaiting
+      // `result.response`, which would reject on the abort we just issued.
+      if (failureLoopMessage) {
+        return {
+          output: failureLoopMessage,
+          lastActivity,
+          cancelled: false,
+          assistantText,
+          failureLoop: failureLoopMessage,
+        };
+      }
+
       if (signal?.aborted) {
         return { output: "[Cancelled]", lastActivity, cancelled: true, assistantText };
       }
@@ -1003,6 +1074,21 @@ export class StreamRunner {
       // Returning (not throwing) means run()'s transient-retry path is skipped
       // — a stalled provider would just stall again for another full timeout.
       // (retry-classifier also marks provider-stall non-transient as defence.)
+      // N3 — our own cancellation surfaced as a throw (the SDK rejected the
+      // stream on the abort). Report the guard's reason, not the abort error.
+      if (failureLoopMessage) {
+        logger.error("orchestrator", "[stream-runner] failing-tool-loop abort surfaced as a stream rejection", {
+          error: err instanceof Error ? err.message : String(err),
+          model: childRuntime.modelId,
+        });
+        return {
+          output: failureLoopMessage,
+          lastActivity,
+          cancelled: false,
+          assistantText,
+          failureLoop: failureLoopMessage,
+        };
+      }
       if (stallTriggered) {
         try {
           const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
@@ -1104,6 +1190,23 @@ export class StreamRunner {
       assistantText = streamResult.assistantText;
       if (streamResult.cancelled) {
         return { success: false, output: "[Cancelled]" };
+      }
+      // N3 — the failing-tool-loop guard terminated the turn. Surface it as a
+      // FAILED ToolResult whose `output` names the reason, so the caller's
+      // reason resolver (product-loop `resolveImplFailureReason`, which reads
+      // `error || output`) reports WHY the sub-agent stopped.
+      if (streamResult.failureLoop) {
+        return {
+          success: false,
+          output: streamResult.failureLoop,
+          error: streamResult.failureLoop,
+          task: {
+            agent: request.agent,
+            description: request.description,
+            summary: firstLine(streamResult.failureLoop),
+            activity: lastActivity,
+          },
+        };
       }
       if (streamResult.stalled) {
         // Provider stalled — surface as a failed task so the parent agent (and

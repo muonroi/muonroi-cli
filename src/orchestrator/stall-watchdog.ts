@@ -19,6 +19,8 @@
  * `timeoutMs <= 0` disables the watchdog (signal never fires).
  */
 
+import { logger } from "../utils/logger.js";
+
 export interface StallWatchdog {
   /** Combine this into the streamText abortSignal. */
   readonly signal: AbortSignal;
@@ -264,4 +266,186 @@ export function createStallWatchdog(
       return firedFlag;
     },
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Failing-tool-loop guard (N3) — "forward progress" must mean USEFULNESS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Root cause it addresses (measured): `petProgress()` above is called on a
+// text-delta OR a tool-call, so a sub-agent that emits a tool call every ~6s
+// resets the no-forward-progress timer forever even when every one of those
+// calls fails identically. A degenerate sub-agent ran 176 steps / 1116s /
+// ~7.45M input tokens that way; the largest inter-step gap over the whole run
+// was 30.5s, so NO time-based threshold could have caught it without killing
+// healthy runs (a healthy run's largest measured gap is 30.2s).
+//
+// The discriminator is not timing, it is the RESULT: N consecutive tool results
+// that are failures of the same *class*. Class, not literal string, because the
+// looping calls carried differing arguments — which is exactly why the existing
+// `tool-repetition-detector.ts` (keyed on toolName + hash(input) + hash(error))
+// never fired: its callKey changed on every iteration.
+//
+// Verified against the local interaction DB (~/.muonroi-cli/muonroi.db,
+// tool_calls join tool_results, 647 calls across 14 sessions): the longest run
+// of consecutive same-class tool failures was 1 in 12 sessions and 2 in one
+// session; a single degenerate session contained runs of 12 and 8 — all
+// `read_file` returning `ERROR: Failed to read file: The "path" property must
+// be of type string, got undefined` with DIFFERENT arguments each time.
+// N = 8 therefore sits 4x above the observed healthy maximum and still catches
+// both degenerate runs.
+
+/** Default consecutive same-class tool failures that terminate a sub-agent turn. */
+const DEFAULT_TOOL_FAILURE_LOOP_THRESHOLD = 8;
+
+/** Abort reason attached to the signal when the failing-tool-loop guard fires. */
+export const TOOL_FAILURE_LOOP_ABORT_REASON = "tool-failure-loop";
+
+/**
+ * N for the failing-tool-loop guard. `MUONROI_TOOL_FAILURE_LOOP_N` overrides;
+ * a value below 2 disables the guard entirely. Clamped to at most 200 so a
+ * typo cannot make the guard fire on the first failure.
+ */
+export function getToolFailureLoopThreshold(): number {
+  const raw = process.env.MUONROI_TOOL_FAILURE_LOOP_N?.trim();
+  if (raw === undefined || raw === "") return DEFAULT_TOOL_FAILURE_LOOP_THRESHOLD;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_TOOL_FAILURE_LOOP_THRESHOLD;
+  if (parsed < 2) return 0; // explicit opt-out
+  return Math.min(parsed, 200);
+}
+
+/**
+ * Reduce a tool failure message to its error CLASS: the same underlying
+ * failure with different arguments must produce the same key, and two
+ * genuinely different failures must not.
+ *
+ * Erases the parts that vary per call (paths, quoted operands, numbers) and
+ * keeps the failure's prose. `ERROR: File not found: D:\a\b.ts` and
+ * `ERROR: File not found: /x/y.ts` both become `file not found: <path>`.
+ */
+export function normalizeToolErrorClass(raw: string): string {
+  return raw
+    .replace(/^\s*"?\s*ERROR:\s*/i, "")
+    .toLowerCase()
+    .replace(/[a-z]:[\\/][^\s"'`,)\]]*/g, "<path>") // windows absolute
+    .replace(/(?:[\\/][^\s"'`,)\]\\/]+){2,}/g, "<path>") // posix / nested relative
+    .replace(/"[^"]*"|'[^']*'|`[^`]*`/g, "<q>")
+    .replace(/\d+/g, "<n>")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160);
+}
+
+/**
+ * Classify one tool result. Returns the failure class key, or `null` when the
+ * result is not a failure (which RESETS the run — a single useful tool result
+ * proves the sub-agent is still making progress).
+ *
+ * A builtin tool never throws: `registry.ts:formatResult` renders a failed
+ * `ToolResult` as the string `ERROR: <message>` and the AI SDK delivers it as a
+ * normal `tool-result` part. So a leading `ERROR:` is the repo's own failure
+ * marker, matched deliberately narrowly — matching "error" anywhere would class
+ * a successful `grep` for the word "error" as a failure.
+ */
+export function toolFailureClass(toolName: string, output: unknown, isToolErrorPart = false): string | null {
+  let text: string;
+  if (typeof output === "string") text = output;
+  else if (output instanceof Error) text = output.message;
+  else if (output === undefined || output === null) text = isToolErrorPart ? "unknown tool error" : "";
+  else {
+    try {
+      text = JSON.stringify(output) ?? String(output);
+    } catch (err) {
+      // No-Silent-Catch: a non-serializable tool payload is expected (cycles,
+      // class instances); record why we fell back to String() rather than hide it.
+      logger.debug("orchestrator", "[stall-watchdog] tool output not JSON-serializable; using String()", {
+        tool: toolName,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      text = String(output);
+    }
+  }
+  const head = text.slice(0, 400);
+  if (!isToolErrorPart && !/^\s*"?\s*ERROR:/i.test(head)) return null;
+  return `${toolName}|${normalizeToolErrorClass(head)}`;
+}
+
+/** One `record()` outcome — see {@link createToolFailureLoopDetector}. */
+export interface ToolFailureLoopOutcome {
+  /** Failure class of THIS result, or null when it was not a failure. */
+  failureClass: string | null;
+  /** Length of the current consecutive same-class failure run (0 when reset). */
+  runLength: number;
+  /** True exactly once, on the result that reaches the threshold. */
+  tripped: boolean;
+}
+
+/** Stateful run-length counter over a sub-agent's tool results. */
+export interface ToolFailureLoopDetector {
+  /** Feed one tool result (or tool-error part). */
+  record(toolName: string, output: unknown, isToolErrorPart?: boolean): ToolFailureLoopOutcome;
+  /** Current consecutive same-class failure run length. */
+  runLength(): number;
+  /** The class currently being repeated, or null. */
+  currentClass(): string | null;
+  /** Verbatim text of the most recent failure (for the abort message). */
+  lastFailureText(): string;
+}
+
+/**
+ * Create the detector. A threshold below 2 disables it (record() always reports
+ * `tripped: false`, so the caller needs no extra flag).
+ */
+export function createToolFailureLoopDetector(
+  threshold: number = getToolFailureLoopThreshold(),
+): ToolFailureLoopDetector {
+  const enabled = Number.isFinite(threshold) && threshold >= 2;
+  let currentClass: string | null = null;
+  let runLength = 0;
+  let lastText = "";
+  let trippedAlready = false;
+
+  return {
+    record(toolName, output, isToolErrorPart = false) {
+      const failureClass = toolFailureClass(toolName, output, isToolErrorPart);
+      if (failureClass === null) {
+        // A non-failure result is real forward progress — reset the run.
+        currentClass = null;
+        runLength = 0;
+        trippedAlready = false;
+        return { failureClass: null, runLength: 0, tripped: false };
+      }
+      if (failureClass === currentClass) {
+        runLength += 1;
+      } else {
+        currentClass = failureClass;
+        runLength = 1;
+        trippedAlready = false;
+      }
+      lastText = typeof output === "string" ? output : String((output as Error)?.message ?? output);
+      const tripped = enabled && runLength >= threshold && !trippedAlready;
+      if (tripped) trippedAlready = true;
+      return { failureClass, runLength, tripped };
+    },
+    runLength: () => runLength,
+    currentClass: () => currentClass,
+    lastFailureText: () => lastText,
+  };
+}
+
+/**
+ * Message surfaced when the guard fires. Returned as the sub-agent's
+ * `ToolResult.output`, which is what `resolveImplFailureReason`
+ * (product-loop/sprint-runner.ts) reports as the sprint's failure reason — so
+ * the sprint says WHY it stopped instead of "isolated implementation task failed".
+ */
+export function buildToolFailureLoopMessage(toolName: string, runLength: number, lastFailureText: string): string {
+  const snippet = lastFailureText.slice(0, 240).replace(/\s+/g, " ").trim();
+  return (
+    `[tool-failure-loop abort] The sub-agent turn was terminated: "${toolName}" returned the same class of ` +
+    `failure ${runLength} times in a row with no successful tool result in between, so no forward progress ` +
+    `was being made (emitting tool calls is not progress).\n` +
+    `Last failure: ${snippet}`
+  );
 }

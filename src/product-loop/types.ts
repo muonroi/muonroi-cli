@@ -165,6 +165,17 @@ export interface DriverContext {
    */
   runIsolatedTask?: (
     request: import("../types/index.js").TaskRequest,
+    opts?: {
+      /**
+       * Per-call cancellation. The sprint's total-elapsed deadline
+       * (`withIsolatedImplDeadline`) aborts this when it gives up, so the child
+       * actually STOPS instead of running on un-awaited — the measured leak was
+       * 220s / 32 extra steps / 29.8% of a run's spend after it was declared dead.
+       */
+      abortSignal?: AbortSignal;
+      /** Per-tool activity from the child; the deadline uses it to report what it observed. */
+      onActivity?: (detail: string) => void;
+    },
   ) => Promise<import("../types/index.js").ToolResult>;
   /**
    * Optional bridge for verify-recipe detection. Mirrors `Orchestrator.detectVerifyRecipe`.

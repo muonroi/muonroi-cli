@@ -66,6 +66,7 @@ export interface ProductLoopOptions {
   /** Isolated bounded task-runner bridge — see DriverContext.runIsolatedTask. */
   runIsolatedTask?: (
     request: import("../types/index.js").TaskRequest,
+    opts?: { abortSignal?: AbortSignal; onActivity?: (detail: string) => void },
   ) => Promise<import("../types/index.js").ToolResult>;
   detectVerifyRecipe?: () => Promise<VerifyRecipe | null>;
   /** Test hook: pre-resolved role assignments so the harness can pin model ids. */
