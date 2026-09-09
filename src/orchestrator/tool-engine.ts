@@ -136,7 +136,7 @@ import {
   type SessionStore,
 } from "../storage/index.js";
 import { persistSessionExperience } from "../storage/session-experience-store.js";
-import { createBuiltinTools } from "../tools/registry.js";
+import { createBuiltinTools, setLiveToolSet } from "../tools/registry.js";
 import { snapshotFromTodoWriteArgs } from "../tools/todo-write-snapshot.js";
 import { visionToolsNeeded } from "../tools/vision-gate.js";
 import type { SessionInfo, StreamChunk, SubagentStatus, ToolCall } from "../types/index";
@@ -1282,6 +1282,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           captureToolSchemas(_pilResponseTools);
         }
 
+        // Publish the assembled set so `list_tools` / `describe_tool` can see the
+        // MCP tools too. They close over createBuiltinTools' local object, which
+        // is built before any MCP server connects and is REPLACED (not mutated)
+        // by the spread merges above - so without this both answered as if no
+        // mcp_* tool existed. See setLiveToolSet in src/tools/registry.ts.
+        setLiveToolSet(rawToolSet);
         // Apply the top-level cumulative cap once over the fully-assembled
         // raw tool set. State is per-turn; each turn gets a fresh budget.
         const topLevelCap = wrapToolSetWithCap(rawToolSet, {

@@ -9,6 +9,7 @@
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
 import { isIdealToolEntryEnabled } from "../gsd/flags.js";
 import { registerGsdWorkflowTools } from "../gsd/workflow-tools.js";
+import { MCP_FULL_INPUT_SCHEMA } from "../mcp/full-schema.js";
 import type { AskUserAskInfo, AskUserOption } from "../orchestrator/ask-user.js";
 import { requestProactiveCompact } from "../orchestrator/compact-request.js";
 import { requestCouncilConvene } from "../orchestrator/council-request.js";
@@ -188,6 +189,31 @@ function formatResult(result: ToolResult): string {
 // feedback-closing pipeline.
 export function isToolArtifactQuery(query: string): boolean {
   return /\b(?:tool-artifact|full tool result)\b/i.test(query) && /\bid\s*=/i.test(query);
+}
+
+/**
+ * The tool set the model was actually shown this turn - builtins PLUS the MCP
+ * tools merged in downstream by the tool engine.
+ *
+ * `list_tools` and `describe_tool` close over `createBuiltinTools`' local
+ * `tools` object, which is built BEFORE any MCP server is connected and is
+ * replaced (not mutated) by the engine's `{...rawToolSet, ...mcpTools}` merge.
+ * So both tools were structurally blind to every `mcp_*` tool. Measured in the
+ * 2026-09-08 graduation session: `list_tools({category:"mcp"})` returned
+ * `{"mcp_count":0,"mcp":[]}` in a run where 21 `mcp_muonroi-harness__*` tools
+ * were live and the very next call to one of them succeeded - and
+ * `describe_tool`, whose own description advertises
+ * `name='mcp_context7__something'`, would have answered "Tool not found".
+ *
+ * Single-orchestrator-at-a-time holds (see the EE render-sink note in
+ * src/index.ts), so one slot is enough: the engine publishes the assembled set
+ * for the call it is about to make, and that is the set the model can ask about.
+ */
+let liveToolSet: ToolSet | null = null;
+
+/** Publish the fully-assembled tool set for `list_tools` / `describe_tool`. */
+export function setLiveToolSet(next: ToolSet | null): void {
+  liveToolSet = next;
 }
 
 export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolRegistryOpts): ToolSet {
@@ -1667,7 +1693,8 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       const cat = (input?.category as string) || "all";
       const grouped: { native: string[]; mcp: string[] } = { native: [], mcp: [] };
 
-      for (const [name, tool] of Object.entries(tools)) {
+      const visible = liveToolSet ?? tools;
+      for (const [name, tool] of Object.entries(visible)) {
         const t = tool as { description?: string };
         const shortDesc = (t.description || "").split("\n")[0].slice(0, 140);
         const entry = `${name}: ${shortDesc}`;
@@ -1683,7 +1710,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
       return JSON.stringify(
         {
-          total: Object.keys(tools).length,
+          total: Object.keys(liveToolSet ?? tools).length,
           native_count: grouped.native.length,
           mcp_count: grouped.mcp.length,
           ...grouped,
@@ -1716,7 +1743,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       const name = typeof input?.name === "string" ? input.name.trim() : "";
       if (!name) return "ERROR: name is required";
 
-      const tool = (tools as any)[name];
+      const tool = ((liveToolSet ?? tools) as any)[name];
       if (!tool) {
         return JSON.stringify(
           {
@@ -1728,8 +1755,13 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         );
       }
 
-      const t = tool as { description?: string; inputSchema?: unknown };
-      const schema = t.inputSchema || (tool as any).parameters || null;
+      const t = tool as { description?: string; inputSchema?: unknown; [MCP_FULL_INPUT_SCHEMA]?: unknown };
+      // MCP tools ship a permissive placeholder schema to the model (Phase M1
+      // lazy schema loading, src/mcp/runtime.ts). Serving that placeholder here
+      // made describe_tool useless for exactly the tools it exists for: a model
+      // asking "what are this MCP tool's parameters?" got `{properties:{}}` and
+      // then guessed. Prefer the real schema the MCP server advertised.
+      const schema = t[MCP_FULL_INPUT_SCHEMA] || t.inputSchema || (tool as any).parameters || null;
 
       // Provide a minimal example note for common tools
       const examples: Record<string, string> = {

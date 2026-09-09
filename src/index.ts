@@ -16,6 +16,7 @@ import { createInterface } from "readline";
 //   - bun --compile virtual fs not resolving readFileSync paths
 //   - Stripping package.json from published files list
 import { PACKAGE_DESCRIPTION, PACKAGE_VERSION } from "./generated/version.js";
+import { formatRejection } from "./utils/format-rejection.js";
 
 const packageJson = { version: PACKAGE_VERSION, description: PACKAGE_DESCRIPTION };
 
@@ -80,12 +81,22 @@ export function setTuiActive(active: boolean): void {
 
 export function appendCrashLog(label: string, msg: string): void {
   try {
-    require("fs").appendFileSync(
-      require("path").join(require("os").homedir(), ".muonroi-cli", "crash.log"),
-      `[${new Date().toISOString()}] ${label}: ${msg}\n`,
-    );
-  } catch {
-    /* crash.log is best-effort diagnostics; the logger itself must never throw */
+    const fs = require("fs");
+    const dir = require("path").join(require("os").homedir(), ".muonroi-cli");
+    // On a genuinely fresh HOME the directory does not exist yet, and
+    // appendFileSync throws ENOENT — which the old bare catch swallowed, so the
+    // FIRST crash a new user or agent ever hits was the one crash that left no
+    // record at all. Measured 2026-09-09: `muonroi-cli mcp-driver` under a fresh
+    // HOME printed `Unhandled rejection: {}` and wrote no crash.log.
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(require("path").join(dir, "crash.log"), `[${new Date().toISOString()}] ${label}: ${msg}\n`);
+  } catch (err) {
+    // crash.log is best-effort diagnostics; the logger itself must never throw.
+    // But it must not be silent either (No Silent Catch) — a lost crash record
+    // is exactly the case where the operator needs to know why.
+    if (!_tuiActive) {
+      console.error(`[index] appendCrashLog failed (${label}): ${(err as Error)?.message ?? String(err)}`);
+    }
   }
 }
 
@@ -175,7 +186,7 @@ process.on("uncaughtException", (err) => {
 });
 
 process.on("unhandledRejection", (reason) => {
-  const msg = reason instanceof Error ? reason.stack || reason.message : String(reason);
+  const msg = formatRejection(reason);
   appendCrashLog("REJECTION", msg);
   // TUI mounted → do NOT corrupt the framebuffer with console.error and do NOT
   // exit. The rejection is logged; the renderer stays up so the user keeps
@@ -184,13 +195,7 @@ process.on("unhandledRejection", (reason) => {
   if (_tuiActive) {
     return;
   }
-  if (reason instanceof Error) {
-    console.error("Unhandled rejection:", reason.stack || reason.message);
-  } else if (reason && typeof reason === "object") {
-    console.error("Unhandled rejection:", JSON.stringify(reason, Object.getOwnPropertyNames(reason)));
-  } else {
-    console.error("Unhandled rejection:", String(reason));
-  }
+  console.error("Unhandled rejection:", msg);
   process.exit(1);
 });
 
