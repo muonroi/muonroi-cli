@@ -2353,17 +2353,40 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 size: _scopeSize,
                 originalPrompt: userMessage,
               });
-              // Strong "past natural budget" prefix only applies when we
-              // ACTUALLY want the model to consider wrapping up — i.e. on
-              // the crossing event or at a cadence step past ceiling, not
-              // on every silent step in between.
+              // Strong re-anchor only on the crossing event or a cadence step
+              // past ceiling, not on every silent step in between.
+              //
+              // The wording is load-bearing and was measured wrong. It used to
+              // open "[past natural budget — step N/M]" and tell the model to
+              // "emit final answer NOW". Nothing here halts anything — the
+              // matrix ceiling stopped being a halt source in Phase 5 Fix 5
+              // (see the comment above dynamicStopWhen), and the only real cap
+              // is `deps.maxToolRounds`. But the model has no way to know that,
+              // and this text repeats at cadence.
+              //
+              // Measured (2026-09-09, session e28336959a62, ceiling 10, 74 tool
+              // calls): the agent stopped mid-task with a real work list still
+              // open and wrote "CÒN LẠI (chưa làm do hết budget)" — "remaining,
+              // not done, out of budget". No budget was ever configured, and no
+              // event cut the run: `loop_cap_auto` had already auto-answered
+              // `continue`. The model was repeating this string back. A
+              // reminder said often enough stops being a hint and becomes an
+              // instruction, and the code comment above already states the
+              // intended philosophy: "done must be the agent's call, not the
+              // counter's."
+              //
+              // So: name it a scope check, say plainly that it does not stop
+              // anything, and do not ask the agent to tell the user to run
+              // /compact — post-turn compaction already runs on its own, so
+              // that line put the agent in the position of announcing someone
+              // else's job as a blocker.
               const _useStrong = _justCrossedCeiling || _pastCeilingAtCadence;
               const _scopePart =
                 _shouldRemind || _shouldWarn || _justCrossedCeiling
                   ? _useStrong
-                    ? `[past natural budget — step ${_scopeStep}/${_naturalCeiling}] If task is COMPLETE, emit final answer NOW. If you need to keep working in this long session, suggest that the user run the "/compact" slash command to compress the conversation history before continuing. Otherwise, simplify the next step. ${_baseReminder}`
+                    ? `[scope check — step ${_scopeStep}, past the typical ${_naturalCeiling} for this task shape] This is NOT a limit and nothing will stop you: keep going until the task is actually done. It is a prompt to re-check scope. If the task IS complete, emit the final answer now. If it is not, carry on — prefer the simplest next step, and do not stop or report the task as blocked on account of this message. ${_baseReminder}`
                     : _shouldWarn
-                      ? `[approaching ceiling] ${_baseReminder}`
+                      ? `[scope check — not a limit] ${_baseReminder}`
                       : _baseReminder
                   : null;
               const _reminder = _shouldRepeatReminder

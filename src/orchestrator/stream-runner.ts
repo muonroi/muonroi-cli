@@ -769,7 +769,12 @@ export class StreamRunner {
               size: _subSize,
               originalPrompt: prepared.request.prompt,
             });
-            const _reminder = _subShouldWarn ? `[approaching ceiling] ${_baseReminder}` : _baseReminder;
+            // Same wording fix as tool-engine.ts: this reminder halts nothing,
+            // so it must not read as a quota. A sub-agent run measured on
+            // 2026-09-09 (session e28336959a62) stopped mid-task and reported
+            // "hết budget" — out of budget — with no budget configured and
+            // nothing having cut the run.
+            const _reminder = _subShouldWarn ? `[scope check — not a limit] ${_baseReminder}` : _baseReminder;
             return attachReminderToMessages(compacted, _reminder);
           }
           return compacted;
