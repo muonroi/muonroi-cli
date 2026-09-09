@@ -146,7 +146,7 @@ export async function resolvePlanCouncilLeader(sessionModelId: string): Promise<
     return { modelId: getRoleModel("leader") ?? sessionModelId };
   }
 
-  const catalogLeader = getModelsForProvider(sessionProviderId).find((m) => m.roles?.includes("leader"));
+  const catalogLeader = pickCatalogLeader(sessionProviderId);
   if (catalogLeader) {
     return { modelId: catalogLeader.id };
   }
@@ -163,6 +163,38 @@ export async function resolvePlanCouncilLeader(sessionModelId: string): Promise<
   return { modelId: sessionModelId, defaulted: true };
 }
 
+/**
+ * Pick the leader among the catalog models a provider tags `role: "leader"`.
+ *
+ * `.find()` was used here and returned the FIRST tagged model in catalog file
+ * order, then returned early — skipping the tier ranking below it entirely. That
+ * is fine while exactly one model carries the tag, which is what the original
+ * comment assumed ("a catalog model with leader role"). It is wrong the moment a
+ * provider tags several: the tag stops identifying anyone and catalog line order
+ * silently decides who leads.
+ *
+ * Measured 2026-09-09 on catalog.json: stepfun tags all three of step-3.5-flash,
+ * step-3.5-flash-2603 and step-3.7-flash as leader, so a live session ran with
+ * leader step-3.5-flash (balanced) while step-3.7-flash (premium) sat unused. zai
+ * has the same shape (glm-4.7 balanced picked over glm-5.2 premium). opencode-go
+ * and anthropic happen to list their premium model first, so they were correct by
+ * accident.
+ *
+ * Highest tier wins; catalog order breaks a tie, so a single-tagged provider and
+ * an all-same-tier provider both behave exactly as before.
+ *
+ * Shared by both resolvers deliberately — the sync wrapper and the async detailed
+ * form had this logic duplicated, which is how they would drift apart again.
+ */
+function pickCatalogLeader(providerId: string): { id: string } | undefined {
+  let best: { id: string; rank: number } | undefined;
+  for (const m of getModelsForProvider(providerId)) {
+    if (!m.roles?.includes("leader")) continue;
+    const rank = m.tier ? (TIER_RANK[m.tier] ?? 0) : 0;
+    if (!best || rank > best.rank) best = { id: m.id, rank };
+  }
+  return best ? { id: best.id } : undefined;
+}
 export async function resolveLeaderModelDetailed(sessionModelId: string): Promise<LeaderResolution> {
   const sessionProviderId = detectProviderForModel(sessionModelId);
   const configured = getRoleModel("leader");
@@ -177,7 +209,7 @@ export async function resolveLeaderModelDetailed(sessionModelId: string): Promis
 
   // 1. If not manually configured, and session provider has a catalog model with "leader" role, use it!
   if (!configured) {
-    const catalogLeader = getModelsForProvider(sessionProviderId).find((m) => m.roles?.includes("leader"));
+    const catalogLeader = pickCatalogLeader(sessionProviderId);
     if (catalogLeader) {
       return { modelId: catalogLeader.id };
     }
@@ -240,7 +272,7 @@ export function resolveLeaderModel(sessionModelId: string): string {
   const configured = getRoleModel("leader");
   if (configured) return configured;
   const sessionProviderId = detectProviderForModel(sessionModelId);
-  const catalogLeader = getModelsForProvider(sessionProviderId).find((m) => m.roles?.includes("leader"));
+  const catalogLeader = pickCatalogLeader(sessionProviderId);
   if (catalogLeader) return catalogLeader.id;
   // See resolveLeaderModelDetailed for why we no longer silently upgrade to
   // the premium tier on the session provider (user may not have access).
