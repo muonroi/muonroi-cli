@@ -563,10 +563,52 @@ export function buildFollowupPrompt(ctx: {
 
 // ── Leader evaluation prompt (replaces convergence-check) ────────────────────
 
+/**
+ * One criterion's verdict as the leader itself decided it in the PREVIOUS round,
+ * projected onto the pinned spec criteria (index-aligned by the caller).
+ *
+ * The leader re-graded every criterion from scratch each round with no memory of
+ * what it had already concluded, which is how a criterion marked MET in round 2
+ * could silently regress to unmet in round 3 once the supporting exchange
+ * scrolled out of the evidence window.
+ */
+export interface LeaderPriorVerdict {
+  criterion: string;
+  met: boolean;
+  /** Closable only after the debate (code landed, tests run) — not a debate failure. */
+  deferred: boolean;
+  /** The reason/evidence the leader gave for that verdict; "" when unrecorded. */
+  evidence: string;
+}
+
+/**
+ * Render the leader's own previous verdict for the prompt TAIL.
+ *
+ * Exported for the caller to reuse and for direct testing; the builder below
+ * calls it, so it reaches the shipped path either way. Returns "" when there is
+ * nothing to show (round 1, or no pinned criteria) so the caller can concatenate
+ * unconditionally.
+ */
+export function renderPriorVerdictBlock(round: number, verdicts: readonly LeaderPriorVerdict[]): string {
+  if (verdicts.length === 0 || round <= 1) return "";
+  const lines = verdicts.map((v, i) => {
+    const mark = v.deferred ? "DEFERRED (closable only after the debate)" : v.met ? "MET" : "OPEN";
+    const why = v.evidence.trim() ? v.evidence.trim() : "(no reason recorded)";
+    return `${i + 1}. [${mark}] ${v.criterion}\n   you said: ${why}`;
+  });
+  return `## Your verdict last round (Round ${round - 1})\n${lines.join("\n")}\n\n`;
+}
+
 export function buildLeaderEvaluationPrompt(ctx: {
   spec: ClarifiedSpec;
   exchangeLogs: string;
   round: number;
+  /**
+   * B1 — the leader's OWN verdict from the previous round, per criterion, with
+   * the reason it gave. Rendered in the prompt tail (never in `system`) so the
+   * cacheable prefix stays byte-stable across rounds. Omit on round 1.
+   */
+  priorVerdicts?: readonly LeaderPriorVerdict[];
   /** Feature B — resolved council debate language (undefined → English). */
   language?: string;
   /**
@@ -628,6 +670,23 @@ export function buildLeaderEvaluationPrompt(ctx: {
       `- The remaining disagreements are minor wording, not substantive trade-offs\n` +
       `- The next round would mostly repeat already-stated positions\n` +
       `Continuing past convergence wastes ~120-150s per round and adds no new content. Prefer to stop early — the user can always /ask-followup to clarify a specific point.\n\n` +
+      // B1 — continuity rule. STATIC on purpose: it is emitted every round with
+      // identical bytes (including round 1, where it is inert) so the `system`
+      // prefix stays cacheable. The per-round DATA it refers to lives in the
+      // prompt tail, per the same discipline buildFollowupPrompt documents.
+      `## Continuity with your own prior verdict (IMPORTANT)\n` +
+      `When a "Your verdict last round" block appears in the message below, it lists what YOU already decided ` +
+      `for each criterion and the reason you gave. It is your record, not a suggestion from anyone else.\n` +
+      `- Start from it. Do not re-derive every criterion from scratch — the debate is cumulative, and evidence ` +
+      `that satisfied a criterion in an earlier round does not stop counting because it is no longer in the ` +
+      `most recent exchanges below.\n` +
+      `- A criterion you previously marked MET may be marked not-met again ONLY if you state, in that ` +
+      `criterion's "evidence", what specifically un-did it (an objection raised since, a fact that turned out ` +
+      `wrong, a scope change). Name it.\n` +
+      `- Silently flipping MET back to not-met with no such statement is a grading error, not a valid outcome: ` +
+      `it makes the run look like it is losing ground when nothing changed.\n` +
+      `- A criterion previously marked DEFERRED stays deferred unless the debate has since made it settleable ` +
+      `by argument.\n\n` +
       stanceRule +
       outOfStackCheck +
       `Output ONLY a JSON object (no markdown):\n` +
@@ -647,7 +706,12 @@ export function buildLeaderEvaluationPrompt(ctx: {
           `  "outOfStackViolations": []  // list of out-of-stack tech names cited by participants (empty when none)\n`
         : "") +
       `}`,
-    prompt: `## Debate (Round ${ctx.round})\n${ctx.exchangeLogs}`,
+    // Per-round dynamic content lives here ONLY — the `system` string above must
+    // stay byte-identical from round to round or the provider prompt cache misses
+    // on every leader evaluation (the single largest non-panel cost of a run).
+    prompt:
+      renderPriorVerdictBlock(ctx.round, ctx.priorVerdicts ?? []) +
+      `## Debate (Round ${ctx.round})\n${ctx.exchangeLogs}`,
   };
 }
 

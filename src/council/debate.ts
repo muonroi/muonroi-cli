@@ -12,6 +12,7 @@ import {
 import { logInteraction } from "../storage/index.js";
 import type { CouncilPanelLedgerEntry, CouncilQuestionOption, CouncilStanceRow, StreamChunk } from "../types/index.js";
 import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
+import { logger } from "../utils/logger.js";
 import { getCouncilLanguage } from "../utils/settings.js";
 import {
   buildDebateCheckpoint,
@@ -31,6 +32,7 @@ import {
   buildOpeningPrompt,
   buildResponsePrompt,
   buildRoundSummaryPrompt,
+  type LeaderPriorVerdict,
 } from "./prompts.js";
 import { buildStanceRows } from "./stance.js";
 import type {
@@ -127,6 +129,83 @@ export function resolveDebateRoundBudget(
  * trimmed and reported via `length`. Mirrors the goal of keeping the
  * follow-up memory record small enough to be reloaded cheaply. */
 const ARCHIVE_EXCERPT_CHARS = 400;
+
+// ── B2: the leader's judging bundle ──────────────────────────────────────────
+//
+// The judge was handed `exchangeLogs.flat().slice(-8)` and nothing else — a tail,
+// not a view of the debate. Every panelist got `runningSummary` (the LLM-condensed
+// state of rounds 1..N-1) via buildFollowupPrompt; the one participant grading the
+// run did not. So evidence that satisfied a criterion in round 2 was invisible by
+// round 4, and the verdict regressed for a reason that had nothing to do with the
+// debate.
+//
+// Sizing, against numbers already in this repo rather than taste: council caps a
+// single assembled context payload at MAX_CONTEXT_CHARS = 32_000 (context.ts:144)
+// and the mechanical debate summary at TOTAL_CHARS = 16_000 (debate-summary.ts:22).
+// The judging bundle is held under both at 6_000 (summary) + 18_000 (verbatim
+// window) = 24_000 chars ≈ 6k est tokens by this repo's chars/4 estimator
+// (CLAUDE.md → "The metered gate"), i.e. ~12k real provider tokens — a bounded
+// add per round on a call that was previously unbounded in chars.
+const LEADER_SUMMARY_CHARS = 6_000;
+const LEADER_EXCHANGE_WINDOW_CHARS = 18_000;
+/**
+ * Today's window, kept as a FLOOR. The char budget extends the view backwards
+ * from here; it must never shrink it, or a debate with long turns would hand the
+ * judge less evidence than it gets today.
+ */
+const LEADER_MIN_TAIL_CHUNKS = 8;
+
+/**
+ * Assemble what the leader judges on: the condensed state of the debate so far
+ * plus the widest verbatim tail that fits the char budget.
+ *
+ * Pure and total — it never throws — so the caller's fail-open path is only ever
+ * needed for a fault in its own inputs.
+ */
+export function buildLeaderEvidenceBundle(opts: {
+  /** Exchange chunks, oldest → newest. */
+  exchanges: readonly string[];
+  /** LLM-condensed state through the previous round; "" / undefined on round 1. */
+  runningSummary?: string;
+  minTailChunks?: number;
+  maxExchangeChars?: number;
+  maxSummaryChars?: number;
+}): string {
+  const minTail = opts.minTailChunks ?? LEADER_MIN_TAIL_CHUNKS;
+  const maxExchange = opts.maxExchangeChars ?? LEADER_EXCHANGE_WINDOW_CHARS;
+  const maxSummary = opts.maxSummaryChars ?? LEADER_SUMMARY_CHARS;
+
+  const chunks = opts.exchanges.filter((c) => typeof c === "string" && c.trim().length > 0);
+  // Floor first: exactly what the judge sees today, never less.
+  const floorStart = Math.max(0, chunks.length - minTail);
+  const picked = chunks.slice(floorStart);
+  let used = picked.reduce((n, c) => n + c.length + 2, 0);
+  // Then widen backwards while the budget allows.
+  for (let i = floorStart - 1; i >= 0; i--) {
+    const cost = chunks[i].length + 2;
+    if (used + cost > maxExchange) break;
+    picked.unshift(chunks[i]);
+    used += cost;
+  }
+  const omitted = chunks.length - picked.length;
+
+  const summaryRaw = (opts.runningSummary ?? "").trim();
+  const summary =
+    summaryRaw.length > maxSummary ? `${summaryRaw.slice(0, maxSummary)}\n[… summary truncated]` : summaryRaw;
+
+  const parts: string[] = [];
+  if (summary) {
+    parts.push(`### Discussion state so far (condensed, all earlier rounds)\n${summary}`);
+  }
+  if (picked.length > 0) {
+    const header =
+      omitted > 0
+        ? `### Recent exchanges, verbatim (${picked.length} shown, ${omitted} earlier turn(s) covered by the condensed state above)`
+        : `### Exchanges, verbatim (complete)`;
+    parts.push(`${header}\n${picked.join("\n\n")}`);
+  }
+  return parts.join("\n\n");
+}
 
 function makeExcerpt(text: string): { excerpt: string; length: number } {
   const trimmed = text.trim();
@@ -1117,6 +1196,13 @@ export async function* runDebate(
   // only AFTER the debate. Kept beside lastCriteriaMet so the escalation
   // boundary, the round receipt and the post-debate card all read one source.
   let lastCriteriaDeferred: boolean[] = [];
+  // B1 — the REASON the leader gave for each criterion's last verdict, index-
+  // aligned to spec.successCriteria. Fed back into the next round's evaluation so
+  // the judge grades against what it already concluded instead of re-deriving
+  // every criterion from a tail of the transcript. Not restored from a checkpoint
+  // (the checkpoint carries the flags, not the prose) — a resumed run simply
+  // shows "(no reason recorded)" until the first fresh evaluation refills it.
+  let lastCriteriaEvidence: string[] = [];
   // Latest per-criterion stance rows, refreshed after each leader evaluation.
   // Carried out of the loop so the closing synthesis can name who ended the run
   // still opposing (the conclusion card's Dissent section) — a converged verdict
@@ -1701,7 +1787,35 @@ export async function* runDebate(
     if (panelLedger.hasEntries()) {
       yield { type: "council_meta" as const, councilMeta: { panelLedger: panelLedger.snapshot() } };
     }
-    const allExchangeText = [...exchangeLogs.values()].flat().slice(-8).join("\n\n");
+    const flatExchanges = [...exchangeLogs.values()].flat();
+    // B2 — the judge gets the condensed state of the debate PLUS the widest
+    // verbatim tail that fits the budget, not just the last 8 chunks. Fail open:
+    // any fault here degrades to exactly today's bundle rather than failing the
+    // round (a lost evaluation costs the whole round's outcome).
+    let allExchangeText: string;
+    try {
+      allExchangeText = buildLeaderEvidenceBundle({ exchanges: flatExchanges, runningSummary });
+    } catch (err) {
+      // logger, not console.error: in TUI mode console output goes nowhere a
+      // user or a later investigation can read, and this is exactly the line
+      // someone will look for when a round grades oddly. logger writes
+      // synchronously to ~/.muonroi-cli/debug.log.
+      logger.error(
+        "orchestrator",
+        `[council] leader evidence bundle failed on round ${round}, falling back to the 8-chunk tail: ${(err as Error)?.message}`,
+        { round, error: err, stack: (err as Error)?.stack?.split("\n").slice(0, 3) },
+      );
+      allExchangeText = flatExchanges.slice(-8).join("\n\n");
+    }
+    // B1 — the leader's OWN verdict entering this round, read BEFORE the
+    // assignment below overwrites it. Empty on round 1 (and whenever no criteria
+    // are pinned), which renders nothing.
+    const priorVerdicts = buildPriorVerdicts(
+      spec.successCriteria,
+      lastCriteriaMet,
+      lastCriteriaDeferred,
+      lastCriteriaEvidence,
+    );
     let evaluation = yield* evaluateDebate(
       spec,
       allExchangeText,
@@ -1713,6 +1827,7 @@ export async function* runDebate(
       debateLanguage,
       stanceRoster,
       (usage, modelUsed) => panelLedger.recordUsage(LEADER_LEDGER_ROLE, modelUsed, usage, `evaluate r${round}`),
+      priorVerdicts,
     );
     panelLedger.recordTurn(LEADER_LEDGER_ROLE, leaderModelId);
     // Eval robustness: the leader's cost-tier eval model can be on a flaky proxy
@@ -1749,6 +1864,7 @@ export async function* runDebate(
             debateLanguage,
             stanceRoster,
             (usage, modelUsed) => panelLedger.recordUsage(LEADER_LEDGER_ROLE, modelUsed, usage, `evaluate r${round}`),
+            priorVerdicts,
           );
           if (evaluation) break;
         }
@@ -1772,6 +1888,10 @@ export async function* runDebate(
       const aligned = hasPinned ? alignCriteriaMet(spec.successCriteria, evaluation.criteriaStatus) : [];
       const alignedDeferred = hasPinned ? alignCriteriaDeferred(spec.successCriteria, evaluation.criteriaStatus) : [];
       if (hasPinned) lastCriteriaDeferred = alignedDeferred;
+      // B1 — carry the leader's stated REASON per criterion into the next round's
+      // prompt, so a verdict can be defended or explicitly revised rather than
+      // silently re-rolled.
+      if (hasPinned) lastCriteriaEvidence = alignCriteriaEvidence(spec.successCriteria, evaluation.criteriaStatus);
       // Count of pinned criteria still open this round AND still movable by more
       // debate — used by both auto-remedy and the interactive escalation
       // boundaries below. Criteria the leader marked `deferred` are excluded on
@@ -1794,7 +1914,22 @@ export async function* runDebate(
           type: "council_meta" as const,
           councilMeta: { criteriaMet: aligned, stanceRows },
         };
-        lastCriteriaMet = aligned; // B5: feed next round's directive + final unmet-flag
+        // B5: feed next round's directive + final unmet-flag.
+        //
+        // B1 — this stays a REPLACEMENT, deliberately. The obvious fix for the
+        // observed regression (a criterion MET in round 2 reading unmet in round
+        // 3) is an OR-accumulation ratchet here: `aligned[i] || lastCriteriaMet[i]`.
+        // Rejected. A ratchet makes a genuine regression inexpressible — once a
+        // criterion latched true, a panelist demolishing it in a later round could
+        // never be recorded, and the run would report criteria met that the debate
+        // had since disproved. That is a worse failure than the one being fixed,
+        // and it would hide it: the leader would keep mis-grading and the ratchet
+        // would paper over the symptom. The regression is fixed at its cause
+        // instead — the judge now sees its own prior verdict and the evidence that
+        // produced it (B1 + B2), and is instructed that reversing MET requires
+        // naming what un-did it. Regression stays possible; it just has to be
+        // argued.
+        lastCriteriaMet = aligned;
         // B4: track progress against the PINNED criteria. A round that meets a new
         // criterion resets the stuck counter; a round that meets nothing new
         // increments it. Auto-remedy reads these to decide extend-vs-give-up.
@@ -2434,6 +2569,13 @@ async function* evaluateDebate(
    * the "leader" row rather than to any debater.
    */
   onLeaderUsage?: (usage: CouncilCallUsage, modelUsed: string) => void,
+  /**
+   * B1 — the leader's own per-criterion verdict from the PREVIOUS round, with the
+   * reason it gave. Without this the judge re-derived every criterion from a tail
+   * of the transcript each round, so a criterion it had already marked MET could
+   * regress once the supporting exchange scrolled out of view.
+   */
+  priorVerdicts?: readonly LeaderPriorVerdict[],
 ): AsyncGenerator<StreamChunk, LeaderEvaluation | null, unknown> {
   try {
     const { system, prompt } = buildLeaderEvaluationPrompt({
@@ -2442,6 +2584,7 @@ async function* evaluateDebate(
       round,
       language: debateLanguage,
       participants: participantRoles,
+      priorVerdicts,
     });
     const modelId = modelOverride ?? pickCouncilTaskModel("evaluate_round", leaderModelId, costAware);
     const raw = yield* tracedGenerate(llm, {
@@ -2584,11 +2727,43 @@ export function alignCriteriaDeferred(
   return alignCriteriaField(pinned, status, (s) => s?.deferred === true);
 }
 
-function alignCriteriaField<T extends { criterion?: string }>(
+/**
+ * B1 — same projection, for the leader's per-criterion `evidence` prose. Defaults
+ * to "" on drift so a mismatched entry renders "(no reason recorded)" rather than
+ * attributing another criterion's reasoning to this one.
+ */
+export function alignCriteriaEvidence(
+  pinned: string[],
+  status: Array<{ criterion?: string; evidence?: string }>,
+): string[] {
+  return alignCriteriaField(pinned, status, (s) => (typeof s?.evidence === "string" ? s.evidence : ""));
+}
+
+/**
+ * B1 — assemble the previous round's verdict for the leader's next evaluation.
+ * Returns [] when nothing is pinned or no evaluation has landed yet (round 1),
+ * which renders as an empty block.
+ */
+export function buildPriorVerdicts(
+  criteria: string[],
+  met: readonly boolean[],
+  deferred: readonly boolean[],
+  evidence: readonly string[],
+): LeaderPriorVerdict[] {
+  if (criteria.length === 0 || met.length === 0) return [];
+  return criteria.map((criterion, i) => ({
+    criterion,
+    met: met[i] === true,
+    deferred: deferred[i] === true,
+    evidence: evidence[i] ?? "",
+  }));
+}
+
+function alignCriteriaField<T extends { criterion?: string }, V>(
   pinned: string[],
   status: T[],
-  pick: (s: T | undefined) => boolean,
-): boolean[] {
+  pick: (s: T | undefined) => V,
+): V[] {
   const aligned = status.length === pinned.length;
   return pinned.map((crit, i) => {
     if (aligned) return pick(status[i]);
