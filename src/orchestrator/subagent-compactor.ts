@@ -771,8 +771,13 @@ const ELIDED_ARGS_PREFIX = "[earlier call args elided";
  *
  * Both shapes are recognised: the current object form, and the legacy bare
  * string still present in histories persisted before the wire-validity fix.
+ *
+ * Exported because `src/tools/arg-guard.ts` must recognise the SAME marker when
+ * a model imitates it as fresh tool-call arguments (267 such calls, 266 failed,
+ * session 2026-09-08). The predicate is imported there rather than copied so a
+ * change to the marker cannot leave a stale twin that silently stops matching.
  */
-function isElidedToolCallInput(input: unknown): boolean {
+export function isElidedToolCallInput(input: unknown): boolean {
   if (typeof input === "string") return input.startsWith(ELIDED_ARGS_PREFIX);
   if (input && typeof input === "object") {
     const note = (input as Record<string, unknown>).__elided_note;

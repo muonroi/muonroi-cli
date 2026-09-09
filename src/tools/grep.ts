@@ -88,8 +88,16 @@ async function getFileMtimes(files: string[], cwd: string): Promise<Map<string, 
 }
 
 export async function executeGrep(params: GrepParams, cwd: string): Promise<ToolResult> {
-  if (!params.pattern) {
-    return { success: false, error: "pattern is required" };
+  // The bare "pattern is required" was what a stalled sub-agent read 71 times
+  // in a row without ever recovering (session 2026-09-08): it names the fault
+  // but not the fix. Keyless calls are stopped upstream by the executor guard
+  // (src/tools/arg-guard.ts); this covers a present-but-blank pattern, and says
+  // what a working call looks like.
+  if (typeof params.pattern !== "string" || params.pattern.trim() === "") {
+    return {
+      success: false,
+      error: 'grep requires a non-empty "pattern" string. Example: {"pattern":"TODO","include":"*.ts"}',
+    };
   }
 
   const searchPath = params.path ? (path.isAbsolute(params.path) ? params.path : path.join(cwd, params.path)) : cwd;

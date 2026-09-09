@@ -25,6 +25,7 @@ import { needsVisionProxy } from "../providers/vision-proxy.js";
 import { mostRecentVisionSessionId } from "../providers/vision-session.js";
 import type { AgentMode, TaskRequest, ToolResult } from "../types/index.js";
 import { loadMcpServers } from "../utils/settings.js";
+import { installArgGuards } from "./arg-guard.js";
 import type { BashTool } from "./bash.js";
 import { type BashSliceMode, bashOutputNotFoundMessage, getBashRun, sliceBashOutput } from "./bash-output-cache.js";
 import { editFile, readFile, readFiles, writeFile } from "./file.js";
@@ -498,10 +499,14 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         _eb++;
         _emptyBashStreak.set(_ebKey, _eb);
         if (_eb >= 3) {
+          // NOTE: this text deliberately names NO other tool. The previous
+          // wording ("use read_file, grep, or other tools instead") redirected
+          // a confused sub-agent into the two tools that had no arg guard at
+          // all, and every call from step 103 to 175 was malformed.
           return (
             'BLOCKED (empty-bash): the `bash` tool has been called with an empty/missing "command" 3+ times in a row. ' +
-            "Bash is now DISABLED for the remainder of this session — use read_file, grep, or other tools instead. " +
-            "If you need to run a shell command, state the blocker explicitly and the CLI will enable it again on the next turn."
+            "Bash is now DISABLED for the remainder of this session. Do not retry it. " +
+            "State the blocker in plain text and continue with what you already know; the CLI will enable it again on the next turn."
           );
         }
         if (_eb >= 2) {
@@ -1784,6 +1789,14 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       );
     },
   });
+
+  // N1 — executor-side malformed-args guard, applied to EVERY builtin after all
+  // register* helpers have contributed, so a tool added later cannot miss it.
+  // The provider does not enforce the schemas it is shown (`grep` declares
+  // required:["pattern"] and still received 94 keyless calls), so this is the
+  // only layer that can stop a keyless / elision-marker call before it runs.
+  // See src/tools/arg-guard.ts for the measured failure it exists for.
+  installArgGuards(tools, gitSafetyKey);
 
   return tools;
 }
