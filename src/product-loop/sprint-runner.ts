@@ -50,6 +50,7 @@ import { readBacklog } from "./backlog-store.js";
 import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "./circuit-breakers.js";
 import { reserveForProduct } from "./cost-scoper.js";
 import {
+  criterionIdFromText,
   extractAcceptanceCriteria,
   judgeCriteriaAgainstVerify,
   planQualityIssues,
@@ -65,6 +66,7 @@ import { postSprintBoundary } from "./phase-tracker-bridge.js";
 import { runPlanAdherenceReview } from "./plan-adherence-review.js";
 import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snapshot.js";
 import { appendRoleMemory } from "./role-memory.js";
+import { readRunSpendUsd } from "./run-spend.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
 import { loadVerifyFailureSignatures, recordVerifyFailureAndMaybePush } from "./verify-failure-tracking.js";
 import { parseVerifyResult, VERIFY_PASS_MARKER } from "./verify-result.js";
@@ -742,6 +744,19 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // function and its unit tests are kept intact for that future re-wire.
   void CB1_costProjection;
 
+  // N4(a) — snapshot the authoritative spend gauge at sprint entry so the
+  // sprint's `Cost:` line in iterations.md is a MEASURED delta. It was
+  // hardcoded `costUsd: 0` ("observed via the per-product ledger"), which is why
+  // run mttwpmu8ee5b reported `Cost: 0.000` for both sprints of a $0.78 run.
+  const sprintSpendStart = readRunSpendUsd(ctx.sessionId);
+  if (!sprintSpendStart.known) {
+    logger.warn("orchestrator", `[budget] sprint ${sprintN} started with an unreadable spend gauge`, {
+      runId: ctx.runId,
+      sprintN,
+      reason: sprintSpendStart.reason,
+    });
+  }
+
   // ── Step 2: Detect verify recipe BEFORE the planner spends any token ──────
   // CB-3 fires deterministically on sprint 1 if recipe is null or coverage === 0.
   const verifyAgent = buildVerifyAgent(ctx, cwd);
@@ -1054,6 +1069,25 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // with no gate) and fold any issues into a corrective note for the impl prompt.
   let planQualityNote = "";
   try {
+    // N4(b) — the PHASE's own successCriteria are seeded FIRST, unconditionally.
+    // Measured defect (run mttwpmu8ee5b): phases.md carried 5 successCriteria
+    // across P1–P4, yet iterations.md recorded TotalCriteria: 0 for both sprints
+    // and gray-areas.md stayed 1 byte. Only the sprint plan's `acceptance_criteria`
+    // were ever seeded, and neither sprint plan carried any (sprint-1-plan.md is a
+    // truncated JSON blob, sprint-2-plan.md is three prose bullets). `phaseScope`
+    // was passed in and used ONLY as a filter over an empty store, so the phase's
+    // criteria never became Criterion rows and the loop could not notice it had
+    // shipped against unmet criteria. The criteria ARE assessed downstream —
+    // `judgeCriteriaAgainstVerify` grades every unmet row against verify + diff —
+    // so seeding is the whole fix; no new assessment is invented here.
+    const phaseCriteriaTexts = phaseScope?.criteria ?? [];
+    const seededPhase = await seedCriteriaFromPlan(ctx.flowDir, ctx.runId, phaseCriteriaTexts, sprintN);
+    if (seededPhase > 0) {
+      yield {
+        type: "content",
+        content: `\n> [criteria] Seeded ${seededPhase} phase success criteria (the done-gate now counts them).\n`,
+      };
+    }
     const planCriteria = extractAcceptanceCriteria(planSynthesis ?? "");
     const seeded = await seedCriteriaFromPlan(ctx.flowDir, ctx.runId, planCriteria, sprintN);
     if (seeded > 0) {
@@ -1664,7 +1698,11 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // sees only the scoped subset.
   let evalCriteria = currentCriteria;
   if (phaseScope && phaseScope.criteria.length > 0) {
-    const wanted = new Set(phaseScope.criteria.map((s) => s.trim()));
+    // N4(b): match on the SAME id derivation the seeder uses. Comparing raw
+    // phase text to a Criterion.id silently missed every criterion longer than
+    // ID_MAX_LEN (criterionIdFromText truncates and appends a hash), which would
+    // have collapsed the scoped gate back to the permissive fallback below.
+    const wanted = new Set(phaseScope.criteria.map((s) => criterionIdFromText(s).trim()));
     const filtered = currentCriteria.filter((c) => wanted.has(c.id.trim()));
     // Permissive fallback: if phase.successCriteria text doesn't map to any Criterion.id
     // (gray-areas headings are slugs, not verbatim spec text), fall back to full set
@@ -1738,6 +1776,21 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // ── Step 8: Persist iteration state, role memory, EE boundary ────────────
   const scoreBefore = history.length > 0 ? history[history.length - 1].scoreAfter : 0;
 
+  // N4(a) — measured sprint spend (usage_events.cost_micros over this session's
+  // chain, sub-agents included). Unreadable at either boundary ⇒ 0 with a LOUD
+  // log, never a silent zero passed off as "this sprint was free".
+  const sprintSpendEnd = readRunSpendUsd(ctx.sessionId);
+  let sprintCostUsd = 0;
+  if (sprintSpendStart.known && sprintSpendEnd.known) {
+    sprintCostUsd = Math.max(0, sprintSpendEnd.usd - sprintSpendStart.usd);
+  } else {
+    logger.error("orchestrator", `[budget] sprint ${sprintN} cost is UNMEASURED — the gauge was blind`, {
+      runId: ctx.runId,
+      sprintN,
+      reason: sprintSpendStart.known ? (sprintSpendEnd as { reason: string }).reason : sprintSpendStart.reason,
+    });
+  }
+
   const iter: IterationState = {
     sprintN,
     stage: verdict.pass ? "shipped" : "retrospective",
@@ -1747,8 +1800,8 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     criteriaPartial: currentCriteria.filter((c) => c.status === "partial").length,
     criteriaUnmet: currentCriteria.filter((c) => c.status === "unmet").length,
     totalCriteria: currentCriteria.length,
-    costUsd: 0, // Per-sprint cost is observed via the per-product ledger; field kept for compat.
-    actualCost: 0,
+    costUsd: sprintCostUsd,
+    actualCost: sprintCostUsd,
     score: verdict.score,
     lastVerifyResult: verifyVerdict,
   };

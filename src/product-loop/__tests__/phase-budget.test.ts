@@ -4,13 +4,25 @@ import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PHASE_HINTS, recordPhaseEnd, recordPhaseStart, renderBudgetSummary } from "../phase-budget.js";
 
-vi.mock("../../usage/product-ledger.js", () => ({
-  getProductSpentUsd: vi.fn(),
+// N4(a) — the budget gauge now reads `usage_events.cost_micros` through
+// `readRunSpendUsd`, not the JSONL side-ledger. Mock the gauge, not the ledger.
+vi.mock("../run-spend.js", () => ({
+  readRunSpendUsd: vi.fn(),
 }));
 
-import { getProductSpentUsd } from "../../usage/product-ledger.js";
+import { readRunSpendUsd } from "../run-spend.js";
 
-const mockGetSpent = getProductSpentUsd as ReturnType<typeof vi.fn>;
+const mockGauge = readRunSpendUsd as ReturnType<typeof vi.fn>;
+
+/** A readable spend reading of `usd`, as the gauge would return it. */
+function spend(usd: number) {
+  return { known: true as const, usd, sessionIds: ["s-root", "s-sub"] };
+}
+
+/** A blind gauge — the failure mode that must never render as $0.000. */
+function blind(reason: string) {
+  return { known: false as const, reason };
+}
 
 describe("phase-budget (P7)", () => {
   let flowDir: string;
@@ -19,7 +31,7 @@ describe("phase-budget (P7)", () => {
   beforeEach(async () => {
     flowDir = path.join(os.tmpdir(), `budget-${Math.random().toString(36).slice(2)}`);
     await fs.mkdir(flowDir, { recursive: true });
-    mockGetSpent.mockReset();
+    mockGauge.mockReset();
   });
 
   it("old hints (discover/gather/research/scoping/sprint) sum correctly", () => {
@@ -29,8 +41,8 @@ describe("phase-budget (P7)", () => {
   });
 
   it("returns null warning when phase stays within hint", async () => {
-    mockGetSpent.mockResolvedValueOnce(0).mockResolvedValueOnce(1.5);
-    const marker = await recordPhaseStart({ flowDir, runId, phase: "research" });
+    mockGauge.mockReturnValueOnce(spend(0)).mockReturnValueOnce(spend(1.5));
+    const marker = await recordPhaseStart({ flowDir, runId, phase: "research", sessionId: "s-root" });
     // research hint = 0.35 * 50 = 17.5; spent 1.5 << 17.5*1.5
     const warning = await recordPhaseEnd({ flowDir, runId, capUsd: 50, marker });
     expect(warning).toBeNull();
@@ -38,8 +50,8 @@ describe("phase-budget (P7)", () => {
 
   it("emits warning when spent exceeds hint by >50%", async () => {
     // discover hint = 0.05 * 50 = 2.5; threshold = 3.75; spent = 5.0 > 3.75
-    mockGetSpent.mockResolvedValueOnce(0).mockResolvedValueOnce(5.0);
-    const marker = await recordPhaseStart({ flowDir, runId, phase: "discover" });
+    mockGauge.mockReturnValueOnce(spend(0)).mockReturnValueOnce(spend(5.0));
+    const marker = await recordPhaseStart({ flowDir, runId, phase: "discover", sessionId: "s-root" });
     const warning = await recordPhaseEnd({ flowDir, runId, capUsd: 50, marker });
     expect(warning).not.toBeNull();
     expect(warning).toContain("discover");
@@ -47,15 +59,15 @@ describe("phase-budget (P7)", () => {
   });
 
   it("does not warn when capUsd is zero or negative", async () => {
-    mockGetSpent.mockResolvedValueOnce(0).mockResolvedValueOnce(100);
-    const marker = await recordPhaseStart({ flowDir, runId, phase: "research" });
+    mockGauge.mockReturnValueOnce(spend(0)).mockReturnValueOnce(spend(100));
+    const marker = await recordPhaseStart({ flowDir, runId, phase: "research", sessionId: "s-root" });
     const warning = await recordPhaseEnd({ flowDir, runId, capUsd: 0, marker });
     expect(warning).toBeNull();
   });
 
   it("persists per-phase records to state.md", async () => {
-    mockGetSpent.mockResolvedValueOnce(0).mockResolvedValueOnce(1.0);
-    const marker = await recordPhaseStart({ flowDir, runId, phase: "discover" });
+    mockGauge.mockReturnValueOnce(spend(0)).mockReturnValueOnce(spend(1.0));
+    const marker = await recordPhaseStart({ flowDir, runId, phase: "discover", sessionId: "s-root" });
     await recordPhaseEnd({ flowDir, runId, capUsd: 50, marker });
     const stateFile = path.join(flowDir, "runs", runId, "state.md");
     const content = await fs.readFile(stateFile, "utf8");
@@ -64,14 +76,14 @@ describe("phase-budget (P7)", () => {
   });
 
   it("appends multiple phase records over a run", async () => {
-    mockGetSpent
-      .mockResolvedValueOnce(0)
-      .mockResolvedValueOnce(0.5) // discover
-      .mockResolvedValueOnce(0.5)
-      .mockResolvedValueOnce(2.0); // gather
-    const m1 = await recordPhaseStart({ flowDir, runId, phase: "discover" });
+    mockGauge
+      .mockReturnValueOnce(spend(0))
+      .mockReturnValueOnce(spend(0.5)) // discover
+      .mockReturnValueOnce(spend(0.5))
+      .mockReturnValueOnce(spend(2.0)); // gather
+    const m1 = await recordPhaseStart({ flowDir, runId, phase: "discover", sessionId: "s-root" });
     await recordPhaseEnd({ flowDir, runId, capUsd: 50, marker: m1 });
-    const m2 = await recordPhaseStart({ flowDir, runId, phase: "gather" });
+    const m2 = await recordPhaseStart({ flowDir, runId, phase: "gather", sessionId: "s-root" });
     await recordPhaseEnd({ flowDir, runId, capUsd: 50, marker: m2 });
 
     const summary = await renderBudgetSummary(flowDir, runId);
@@ -86,16 +98,16 @@ describe("phase-budget (P7)", () => {
   });
 
   it("flags [OVER] in summary when phase exceeded hint", async () => {
-    mockGetSpent.mockResolvedValueOnce(0).mockResolvedValueOnce(10.0);
-    const marker = await recordPhaseStart({ flowDir, runId, phase: "discover" });
+    mockGauge.mockReturnValueOnce(spend(0)).mockReturnValueOnce(spend(10.0));
+    const marker = await recordPhaseStart({ flowDir, runId, phase: "discover", sessionId: "s-root" });
     await recordPhaseEnd({ flowDir, runId, capUsd: 50, marker });
     const summary = await renderBudgetSummary(flowDir, runId);
     expect(summary).toContain("[OVER]");
   });
 
   it("clamps negative phase spend to zero (ledger anomaly safety)", async () => {
-    mockGetSpent.mockResolvedValueOnce(10).mockResolvedValueOnce(5); // end < start
-    const marker = await recordPhaseStart({ flowDir, runId, phase: "research" });
+    mockGauge.mockReturnValueOnce(spend(10)).mockReturnValueOnce(spend(5)); // end < start
+    const marker = await recordPhaseStart({ flowDir, runId, phase: "research", sessionId: "s-root" });
     const warning = await recordPhaseEnd({ flowDir, runId, capUsd: 50, marker });
     expect(warning).toBeNull();
     const summary = await renderBudgetSummary(flowDir, runId);
@@ -121,8 +133,8 @@ describe("phase-budget v2 (subsystem E)", () => {
   it("recordPhaseStart accepts new phase 'planning'", async () => {
     const flowDir = path.join(os.tmpdir(), `budget-v2-${Math.random().toString(36).slice(2)}`);
     await fs.mkdir(flowDir, { recursive: true });
-    mockGetSpent.mockResolvedValueOnce(0);
-    const marker = await recordPhaseStart({ flowDir, runId: "r1", phase: "planning" as any });
+    mockGauge.mockReturnValueOnce(spend(0));
+    const marker = await recordPhaseStart({ flowDir, runId: "r1", phase: "planning" as any, sessionId: "s-root" });
     expect(marker.phase).toBe("planning");
   });
 
@@ -165,8 +177,8 @@ describe("phase-budget verdict bucket (subsystem F)", () => {
   it("recordPhaseStart accepts new phase 'verdict'", async () => {
     const flowDir = path.join(os.tmpdir(), `budget-verdict-${Math.random().toString(36).slice(2)}`);
     await fs.mkdir(flowDir, { recursive: true });
-    mockGetSpent.mockResolvedValueOnce(0);
-    const marker = await recordPhaseStart({ flowDir, runId: "rv", phase: "verdict" as any });
+    mockGauge.mockReturnValueOnce(spend(0));
+    const marker = await recordPhaseStart({ flowDir, runId: "rv", phase: "verdict" as any, sessionId: "s-root" });
     expect(marker.phase).toBe("verdict");
   });
 });

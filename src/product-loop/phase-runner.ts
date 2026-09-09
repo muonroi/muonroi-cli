@@ -160,7 +160,7 @@ export async function readLastActivity(flowDir: string, runId: string): Promise<
 export async function collectStuckPhases(flowDir: string, runId: string): Promise<string[]> {
   const state = await readPhasePlanState(flowDir, runId);
   return Object.entries(state.phasesStatus)
-    .filter(([_, s]) => s === "blocked" || s === "pending")
+    .filter(([_, s]) => s === "blocked" || s === "pending" || s === "failed")
     .map(([id]) => id);
 }
 
@@ -266,6 +266,39 @@ async function dependsResolved(flowDir: string, runId: string, phase: Phase): Pr
     if (status !== "done") return false;
   }
   return true;
+}
+
+/**
+ * N4(c) — did the phase actually clear its own exit condition?
+ *
+ * `exitCondition: {type:"criteria-threshold", min}` (phase-plan.ts:137) was
+ * checked in exactly one place — `if (phaseRatio >= min) break;` inside the
+ * sprint loop — where it governed only whether to STOP EARLY. Falling out of the
+ * loop by exhausting `maxSprints` reached the same unconditional
+ * `markPhaseStatus(..., "done")` below it, so the condition never gated
+ * anything. Run mttwpmu8ee5b: P1 ran 2 sprints, scored 0.00 with verify FAIL on
+ * both, was marked "done", and P2 (`dependsOn: ["P1"]`) started.
+ *
+ * Fail-CLOSED: a phase whose criteria could not be counted (`total <= 0`) also
+ * fails the gate. A criteria gate that cannot read criteria must not silently
+ * pass — that is the same fail-to-zero defect as the budget meter, and here the
+ * cost of a false "done" is a dependent phase building on nothing.
+ */
+export function phaseExitSatisfied(
+  met: number,
+  total: number,
+  min: number,
+): { satisfied: boolean; ratio: number | null; reason?: string } {
+  if (!Number.isFinite(total) || total <= 0) {
+    return { satisfied: false, ratio: null, reason: "no success criteria were tracked — the exit gate cannot pass" };
+  }
+  const ratio = Math.max(0, met) / total;
+  if (ratio >= min) return { satisfied: true, ratio };
+  return {
+    satisfied: false,
+    ratio,
+    reason: `criteria ratio ${ratio.toFixed(2)} is below the phase exit threshold ${min.toFixed(2)} (${met}/${total} met)`,
+  };
 }
 
 export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChunk, { pass: boolean; reason?: string }> {
@@ -380,6 +413,9 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       criteriaMet: 0,
       totalCriteria: phase.successCriteria.length,
     };
+    // N4(c): the phase's own exit verdict. Starts UNSATISFIED so a phase that
+    // never ran a sprint (maxSprints <= 0) cannot fall through to "done".
+    let exit = phaseExitSatisfied(0, phase.successCriteria.length, phase.exitCondition.min);
 
     for (let sprintN = 1; sprintN <= phase.maxSprints; sprintN++) {
       const decisions = await getCustomerDecisions(args.flowDir, args.runId);
@@ -487,8 +523,8 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       await clearRetroPending(args.flowDir, args.runId, phase.id, sprintN);
 
       const phaseTotal = sprintResult.totalCriteria ?? phase.successCriteria.length;
-      const phaseRatio = sprintResult.criteriaMet / Math.max(1, phaseTotal);
-      if (phaseRatio >= phase.exitCondition.min) break;
+      exit = phaseExitSatisfied(sprintResult.criteriaMet, phaseTotal, phase.exitCondition.min);
+      if (exit.satisfied) break;
     }
 
     const handoff = await handoffPhaseToNext({
@@ -504,11 +540,33 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
     await appendPhaseHistory(args.flowDir, args.runId, {
       phaseId: phase.id,
       exitedAtUtc: new Date().toISOString(),
-      exitSummary: handoff.exitSummary,
+      exitSummary: exit.satisfied
+        ? handoff.exitSummary
+        : `${handoff.exitSummary}\n\n[exit-gate] Phase ${phase.id} did NOT clear its exit condition: ${exit.reason ?? "threshold not met"}. Dependent phases are blocked.`,
       sprintsExecuted: totalSprints,
       criteriaMetCount: lastSprintState.criteriaMet,
     });
-    await markPhaseStatus(args.flowDir, args.runId, phase.id, "done");
+
+    // N4(c): only a phase that cleared its own exit condition may satisfy
+    // `dependsOn` for the next one. A failed phase is marked "failed", which
+    // `dependsResolved` rejects and `collectStuckPhases` reports, so the run ends
+    // `pass:false` instead of quietly building P2 on a P1 that scored 0.00.
+    if (exit.satisfied) {
+      await markPhaseStatus(args.flowDir, args.runId, phase.id, "done");
+    } else {
+      logger.warn("orchestrator", `[exit-gate] phase ${phase.id} failed its exit condition`, {
+        runId: args.runId,
+        phaseId: phase.id,
+        min: phase.exitCondition.min,
+        ratio: exit.ratio,
+        reason: exit.reason,
+      });
+      yield {
+        type: "content",
+        content: `\n> [exit-gate] Phase ${phase.id} did not clear its exit condition — ${exit.reason ?? "threshold not met"}. Dependent phases are blocked.\n`,
+      } as StreamChunk;
+      await markPhaseStatus(args.flowDir, args.runId, phase.id, "failed");
+    }
   }
 
   const stuck = await collectStuckPhases(args.flowDir, args.runId);

@@ -420,7 +420,14 @@ export interface PhasePlanArtifact {
   phases: Phase[];
 }
 
-export type PhaseStatus = "pending" | "in-progress" | "done" | "blocked";
+/**
+ * N4(c) — "failed" is distinct from "blocked". `blocked` means a dependency has
+ * not cleared; `failed` means this phase ran its sprints and ended BELOW its own
+ * `exitCondition.min`. Before this existed, `runPhases` marked every phase
+ * "done" once its sprint loop ended for any reason, so a phase that scored 0.00
+ * with verify FAIL on both sprints still satisfied `dependsOn` for the next one.
+ */
+export type PhaseStatus = "pending" | "in-progress" | "done" | "blocked" | "failed";
 
 export interface PhasePlanState {
   version: 1;

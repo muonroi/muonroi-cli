@@ -22,11 +22,13 @@ import { loadCatalog } from "../../models/registry.js";
 const phasesOutcome: { pass: boolean; reason?: string } = { pass: true };
 
 vi.mock("../phase-runner.js", () => ({
+  // biome-ignore lint/correctness/useYield: stub of an async generator — only its return value is used, so it yields nothing by design.
   runPhases: vi.fn(async function* () {
     return phasesOutcome;
   }),
 }));
 vi.mock("../loop-driver.js", () => ({
+  // biome-ignore lint/correctness/useYield: stub of an async generator — only its return value is used, so it yields nothing by design.
   runLoopDriver: vi.fn(async function* () {
     return { runId: "ignored", stage: "approved", success: true };
   }),
@@ -40,6 +42,12 @@ vi.mock("../cross-run-memory.js", () => ({
 // index.ts `chatEnvConfig` reaches for this via CJS require(), which vitest's
 // ESM loader cannot resolve; chat is irrelevant to the verdict under test.
 vi.mock("../../chat/factory.js", () => ({ readChatProvider: () => null }));
+// N4(a): `runPhasesPath` now refuses to run under a declared cap it cannot meter
+// (CB-0, fail-closed). These tests are about verdict derivation, so declare a
+// readable gauge; `bun:sqlite` is stubbed suite-wide so the real reader is blind.
+vi.mock("../run-spend.js", () => ({
+  readRunSpendUsd: () => ({ known: true, usd: 0, sessionIds: ["s-test"] }),
+}));
 
 import { writeSprintOutcome } from "../../flow/run-artifacts.js";
 import { createRun } from "../../flow/run-manager.js";
@@ -122,8 +130,20 @@ describe("runPhasesPath finalize — the run verdict is derived, not asserted", 
     const flowDir = await tmpFlowDir();
     // The exact outcomes run mtpd7mf19b10 recorded.
     const runId = await seedRun(flowDir, [
-      { sprintN: 1, pass: false, score: 0, failedCondition: "engineering_floor", finishedAt: "2026-09-06T05:55:56.837Z" },
-      { sprintN: 2, pass: false, score: 0, failedCondition: "engineering_floor", finishedAt: "2026-09-06T05:54:46.832Z" },
+      {
+        sprintN: 1,
+        pass: false,
+        score: 0,
+        failedCondition: "engineering_floor",
+        finishedAt: "2026-09-06T05:55:56.837Z",
+      },
+      {
+        sprintN: 2,
+        pass: false,
+        score: 0,
+        failedCondition: "engineering_floor",
+        finishedAt: "2026-09-06T05:54:46.832Z",
+      },
     ]);
 
     const { result } = await drain(runProductLoop(makeOpts({ flowDir, subcommand: "resume", runId })));

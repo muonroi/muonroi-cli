@@ -298,6 +298,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           flowDir: ctx.flowDir,
           runId: ctx.runId,
           phase: "discover",
+          sessionId: ctx.sessionId,
         });
 
         // Run shallow manifest probe and deep repo audit in parallel.
@@ -411,6 +412,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           flowDir: ctx.flowDir,
           runId: ctx.runId,
           phase: "gather",
+          sessionId: ctx.sessionId,
         });
 
         // Write Resume Digest to state.md
@@ -579,6 +581,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           flowDir: ctx.flowDir,
           runId: ctx.runId,
           phase: "research",
+          sessionId: ctx.sessionId,
         });
 
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
@@ -998,6 +1001,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           flowDir: ctx.flowDir,
           runId: ctx.runId,
           phase: "scoping",
+          sessionId: ctx.sessionId,
         });
 
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };

@@ -17,15 +17,18 @@ import { defaultResolveChannelId, maybeAutoFire } from "../reporter/auto-fire.js
 import { clearWorkspaceFocus, setWorkspaceFocus } from "../state/active-run.js";
 import { logInteraction, logUIInteraction } from "../storage/index.js";
 import type { ModelInfo, StreamChunk, VerifyRecipe } from "../types/index.js";
+import { logger } from "../utils/logger.js";
 import { isProviderDisabled } from "../utils/settings.js";
 import { markIterationCrashed, readIterations, readManifest, writeManifest } from "./artifact-io.js";
 import { buildBacklog } from "./backlog-builder.js";
 import { readBacklog, writeBacklog } from "./backlog-store.js";
+import { CB0_budgetGaugeReadable } from "./circuit-breakers.js";
 import { formatCostPreview, previewRunCost } from "./cost-preview.js";
 import { composeRunTranscript, extractRunToEE } from "./cross-run-memory.js";
 import { buildContinueFeedback, type ContinueFeedback } from "./feedback-routing.js";
 import { type DriverContext, type DriverResult, runLoopDriver } from "./loop-driver.js";
 import { resolveRoles } from "./role-registry.js";
+import { readRunSpendUsd } from "./run-spend.js";
 import { deriveRunVerdict, runIsTerminal } from "./run-verdict.js";
 import { polishDelivery } from "./ship-polish.js";
 import { applySprintAssignments, planSprints } from "./sprint-planner.js";
@@ -1539,7 +1542,6 @@ async function* runPhasesPath(args: {
 
   // Load prerequisites: projectContext and manifest.
   const { readProjectContext } = await import("./discovery-persistence.js");
-  const { getProductSpentUsd } = await import("../usage/product-ledger.js");
   const { runPhases } = await import("./phase-runner.js");
 
   const projectContext = await readProjectContext(ctx.flowDir, ctx.runId);
@@ -1691,14 +1693,48 @@ async function* runPhasesPath(args: {
       leader,
       capUsd: manifest.capUsd,
       remainingUsd: async () => {
-        const { getProductSpentUsd } = await import("../usage/product-ledger.js");
-        const spent = await getProductSpentUsd(verdictArgs.runId);
-        return Math.max(0, manifest.capUsd - spent);
+        // Same authoritative gauge + same fail-closed rule as the phase path.
+        const s = readRunSpendUsd(ctx.sessionId);
+        if (!s.known) {
+          logger.error("orchestrator", "verdict remainingUsd: spend gauge unreadable — reporting zero headroom", {
+            runId: verdictArgs.runId,
+            reason: s.reason,
+          });
+          return 0;
+        }
+        return Math.max(0, manifest.capUsd - s.usd);
       },
       reviewSummary: verdictArgs.reviewSummary,
       fallback: terminalFallback,
     });
   };
+
+  // N4(a) — CB-0: refuse to run against a blind meter. `remainingUsd` below is
+  // read by every discretionary-spend gate (phase-plan, review/retro/standup,
+  // the verdict resolver); if the gauge cannot read spend those gates would all
+  // see the FULL cap as headroom, which is how run mttwpmu8ee5b spent $0.7798
+  // while every budget record said $0. Fail-CLOSED — see CB0_budgetGaugeReadable.
+  {
+    const gauge = readRunSpendUsd(ctx.sessionId);
+    const cb0 = CB0_budgetGaugeReadable(gauge, manifest.capUsd);
+    if (cb0.halt) {
+      yield {
+        type: "halt",
+        haltChunk: {
+          type: "halt",
+          reason: "budget_gauge_unreadable",
+          detail: cb0.reason ?? "spend gauge unreadable",
+          recovery_options: [],
+        },
+      } as unknown as StreamChunk;
+      return {
+        runId: ctx.runId,
+        stage: "halted",
+        success: false,
+        reason: "budget_gauge_unreadable",
+      } as ProductLoopResult;
+    }
+  }
 
   const phaseGen = runPhases({
     flowDir: ctx.flowDir,
@@ -1709,7 +1745,21 @@ async function* runPhasesPath(args: {
     leader: leader as any,
     leaderModelId,
     capUsd: manifest.capUsd,
-    remainingUsd: async () => Math.max(0, manifest.capUsd - (await getProductSpentUsd(ctx.runId))),
+    // Fail-CLOSED: an unreadable gauge reports ZERO headroom, so discretionary
+    // LLM calls degrade instead of being authorised against an unknown balance.
+    // (`getProductSpentUsd`'s JSONL side-ledger read $0.2272 of this run's real
+    // $0.7798 and $0 for the first four phases — it is not a budget source.)
+    remainingUsd: async () => {
+      const s = readRunSpendUsd(ctx.sessionId);
+      if (!s.known) {
+        logger.error("orchestrator", "remainingUsd: spend gauge unreadable — reporting zero headroom", {
+          runId: ctx.runId,
+          reason: s.reason,
+        });
+        return 0;
+      }
+      return Math.max(0, manifest.capUsd - s.usd);
+    },
     awaitCustomerVerdict,
     sprintRunner,
     projectCwd: ctx.cwd,
