@@ -169,8 +169,9 @@ import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
 import type { AskUserAskInfo } from "./ask-user.js";
 import { foldDynamicTailIntoUserMessage, splitFrontAndDynamicTail } from "./cache-prefix.js";
-import { consumeProactiveCompact } from "./compact-request.js";
+import { consumeProactiveCompact, getCompactionFocus } from "./compact-request.js";
 import { relaxCompactionSettings } from "./compaction";
+import { evaluateCompactionConsult } from "./compaction-consult.js";
 import { buildConvergenceMirror } from "./convergence-mirror.js";
 import type { CouncilManager } from "./council-manager.js";
 import { consumeCouncilConvene, hasPendingCouncilConvene, peekCouncilConveneToolCallId } from "./council-request.js";
@@ -243,6 +244,7 @@ import {
   applyCompactionHysteresis,
   compactSubAgentMessages,
   cumulativeMessageChars,
+  estimateCompactionPressure,
   initCompactionHysteresisState,
 } from "./subagent-compactor.js";
 import { foldMidConversationSystemMessages } from "./system-message-fold.js";
@@ -1627,6 +1629,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // instead of breaking every step as the keepLast boundary slides.
         const compactHysteresis = getTopLevelCompactHysteresis();
         let hysteresisState = initCompactionHysteresisState();
+        // C3 — "ask before an automatic compaction" is a ONE-SHOT per turn.
+        // Same scope as hysteresisState above (this block runs once per
+        // streamText turn). Prior art for why this must be gated rather than
+        // fired per step: the identity contract in subagent-compactor.ts, where
+        // a no-op returning a fresh array made a note fire on every step.
+        let compactConsultAskedThisTurn = false;
         // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
         deps.setLastProviderOptionsShape(
           Object.keys(providerOpts).length > 0 ? extractProviderOptionsShape(providerOpts) : null,
@@ -2185,23 +2193,46 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 ? 0.2
                 : 0.3
               : undefined;
-            const runCompaction = (): ModelMessage[] =>
+            // C1 — resolve the preservation focus the MAIN-CONTEXT agent stated
+            // via the `compact` tool. Before this, `consumeProactiveCompact()`
+            // below read `instructions` and threw it away: the agent could say
+            // HOW to compact and the answer never reached the compactor.
+            const resolveFocusNote = (override?: string | null): string | undefined => {
+              try {
+                const f = (typeof override === "string" && override.trim() ? override : null) ?? getCompactionFocus();
+                return f && f.trim().length > 0 ? f : undefined;
+              } catch (err) {
+                logger.warn("orchestrator", "[tool-engine] compaction focus lookup failed", {
+                  error: (err as Error)?.message,
+                });
+                return undefined; // fail open — compact exactly as before
+              }
+            };
+            const compactOptsBase = () => ({
+              thresholdChars: topLevelCompactThreshold,
+              // Rec #1 (cheap part): on meta/self-eval turns keep a couple more
+              // trailing tool turns verbatim — those carry the reasoning the
+              // agent is being asked to reflect on, and over-eliding them is
+              // exactly what starves a self-evaluation. One boolean, no new
+              // detection logic (isMetaAnalysisPrompt already gates layer3/5).
+              keepLastTurns: topLevelCompactKeepLast + (isMetaAnalysisPrompt(userMessage) ? 2 : 0),
+              label: "top-level",
+              envelopeChars,
+              contextWindowTokens,
+              contextFillRatio: reasoningFillRatio,
+              keepToolIds: keepToolIds.length ? keepToolIds : undefined,
+              stripOldReasoning: isReasoningModel,
+              tailBudgetChars: topLevelCompactTailBudget,
+            });
+            // Options are spelled ONCE in compactOptsBase so the C3 predictor
+            // (estimateCompactionPressure) and the compaction it predicts cannot
+            // drift apart. persistArtifact is deliberately NOT in the base: the
+            // predictor must not persist anything, only this real run may.
+            const runCompaction = (focusOverride?: string | null): ModelMessage[] =>
               compactSubAgentMessages(stripped, {
-                thresholdChars: topLevelCompactThreshold,
-                // Rec #1 (cheap part): on meta/self-eval turns keep a couple more
-                // trailing tool turns verbatim — those carry the reasoning the
-                // agent is being asked to reflect on, and over-eliding them is
-                // exactly what starves a self-evaluation. One boolean, no new
-                // detection logic (isMetaAnalysisPrompt already gates layer3/5).
-                keepLastTurns: topLevelCompactKeepLast + (isMetaAnalysisPrompt(userMessage) ? 2 : 0),
-                label: "top-level",
-                envelopeChars,
-                contextWindowTokens,
-                contextFillRatio: reasoningFillRatio,
-                keepToolIds: keepToolIds.length ? keepToolIds : undefined,
+                ...compactOptsBase(),
+                focusNote: resolveFocusNote(focusOverride),
                 persistArtifact,
-                stripOldReasoning: isReasoningModel,
-                tailBudgetChars: topLevelCompactTailBudget,
               });
 
             // O3 — compaction hysteresis (holds the frozen compacted prefix
@@ -2218,7 +2249,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             const _proactiveCompact = consumeProactiveCompact();
             let compacted: ModelMessage[];
             if (_proactiveCompact) {
-              const _forced = runCompaction();
+              const _forced = runCompaction(_proactiveCompact.instructions);
               const _didForce = _forced !== stripped;
               compacted = _forced;
               hysteresisState = _didForce
@@ -2241,6 +2272,42 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 /* toast best-effort */
               }
             } else {
+              // C3 — an AUTOMATIC compaction must ask the main-context agent
+              // first. Compute (read-only, no side effects) whether one would
+              // elide anything on this step, then let the pure policy decide
+              // whether we can afford to defer it by exactly one step.
+              // Fail-open in every direction: any fault here degrades to the
+              // pre-existing behaviour (compact silently, as before).
+              let _consult: ReturnType<typeof evaluateCompactionConsult> = null;
+              try {
+                if (!compactConsultAskedThisTurn && !getCompactionFocus()) {
+                  const _pressure = estimateCompactionPressure(stripped, compactOptsBase());
+                  _consult = evaluateCompactionConsult({
+                    wouldCompact: _pressure.wouldCompact,
+                    alreadyAsked: compactConsultAskedThisTurn,
+                    agentFocus: getCompactionFocus(),
+                    ctxFill: _pressure.ctxFill,
+                    contextWindowTokens,
+                    estPromptTokens: _pressure.estPromptTokens,
+                    stepNumber: sn,
+                  });
+                }
+              } catch (err) {
+                logger.warn("orchestrator", "[tool-engine] compaction consult evaluation failed", {
+                  error: (err as Error)?.message,
+                  step: sn,
+                });
+                _consult = null;
+              }
+
+              if (_consult?.action === "defer") {
+                // Hand this step back UN-compacted with the question attached.
+                // The compaction happens on the next step, honouring whatever
+                // focus the agent states (see resolveFocusNote above).
+                compactConsultAskedThisTurn = true;
+                return withSteers({ messages: attachReminderToMessages(stripped, _consult.note) });
+              }
+
               const _hyst = applyCompactionHysteresis({
                 stripped,
                 currChars,
@@ -2253,6 +2320,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // Count only ACTUAL (re)compactions, not held-boundary steps — the
               // compaction counter drives the cache-churn telemetry this fixes.
               if (_hyst.didRecompact) recordCompaction(sn);
+
+              if (_consult?.action === "ask-and-compact") {
+                // No headroom to spend a step waiting: the compaction already
+                // ran above, and the note says so rather than promising a
+                // deferral that did not happen.
+                compactConsultAskedThisTurn = true;
+                return withSteers({
+                  messages: attachReminderToMessages(coalesceReadOnlyMessages(compacted), _consult.note),
+                });
+              }
             }
 
             const coalesced = coalesceReadOnlyMessages(compacted);

@@ -124,6 +124,22 @@ export interface SubAgentCompactorOptions {
    * Undefined = off (sub-agent path unchanged).
    */
   tailBudgetChars?: number;
+  /**
+   * C1 — the preservation focus the MAIN-CONTEXT agent stated (the `focus`
+   * argument of the `compact` tool, src/tools/registry.ts). Before this the
+   * agent's answer was consumed at tool-engine.ts:2218 and dropped: it could
+   * say HOW to compact and nothing read it.
+   *
+   * Two truthful, non-fuzzy effects, both deterministic:
+   *   1. Protection — a tool result whose preview contains one of the focus's
+   *      concrete terms (exact, case-insensitive substring containment; see
+   *      `extractFocusTerms`) is kept verbatim instead of stubbed.
+   *   2. Visibility — every stub written in this pass names the focus, so the
+   *      model reading a stub can see what it asked to keep and whether this
+   *      particular result matched.
+   * Capped at FOCUS_NOTE_MAX_CHARS so a long focus cannot inflate the prompt.
+   */
+  focusNote?: string;
 }
 
 /** O2 — floor for the tail-budget keepLast shrink; never break the live step's
@@ -137,6 +153,54 @@ const TAIL_BUDGET_MIN_KEEP = 2;
  * tokens means we compact slightly earlier, which is the safe direction.
  */
 export const CHARS_PER_TOKEN = 4;
+
+/**
+ * C1 — hard cap on the agent's focus note as it is stored and re-rendered into
+ * stubs. Bounds the prompt cost of the visibility half of the feature.
+ */
+export const FOCUS_NOTE_MAX_CHARS = 200;
+
+/** Minimum length of a focus term to be usable for exact-containment protection. */
+const FOCUS_TERM_MIN_CHARS = 4;
+
+/**
+ * C1 — split the agent's focus into CONCRETE terms usable for exact substring
+ * protection. Deliberately NOT fuzzy: a term qualifies only when it is either
+ * path-like/dotted/underscored (`src/foo.ts`, `read_file`, `a.b`) or a word of
+ * at least 6 chars. Common short English words therefore never become terms, so
+ * "keep the current sub-task" cannot accidentally pin every tool result.
+ * Matching is plain case-insensitive `includes` — nothing is inferred.
+ */
+export function extractFocusTerms(focus: string | undefined | null): string[] {
+  if (!focus) return [];
+  const raw = focus.slice(0, FOCUS_NOTE_MAX_CHARS);
+  const out = new Set<string>();
+  for (const tok of raw.split(/[^A-Za-z0-9_./\\:-]+/)) {
+    const t = tok.trim().replace(/^[.\-/\\:]+|[.\-/\\:]+$/g, "");
+    if (t.length < FOCUS_TERM_MIN_CHARS) continue;
+    const concrete = /[/\\._]/.test(t) || t.length >= 6;
+    if (!concrete) continue;
+    out.add(t.toLowerCase());
+  }
+  return [...out];
+}
+
+/** C1 — exact, case-insensitive containment of any focus term in the preview. */
+export function previewMatchesFocus(preview: string, focusTerms: readonly string[]): boolean {
+  if (focusTerms.length === 0 || !preview) return false;
+  const hay = preview.toLowerCase();
+  for (const t of focusTerms) if (hay.includes(t)) return true;
+  return false;
+}
+
+/**
+ * G2 — the fill ratio at which `computeDynamicParams` FIRST judges the context
+ * window to be tightening and starts shrinking the verbatim keep window. Below
+ * it the compactor still considers its default keep window safe, which is
+ * exactly the property the C3 compaction consult needs before it is allowed to
+ * defer a compaction by one step.
+ */
+export const G2_FIRST_ESCALATION_FILL = 0.6;
 
 export const SUBAGENT_COMPACT_DEFAULT_THRESHOLD = 80_000;
 export const SUBAGENT_COMPACT_DEFAULT_KEEP_LAST = 3;
@@ -228,10 +292,14 @@ interface ResolvedOpts {
   ) => void;
   stripOldReasoning: boolean;
   tailBudgetChars: number;
+  focusNote: string | null;
+  focusTerms: string[];
 }
 
 function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
   const keepIds = new Set((o?.keepToolIds || []).map((s) => String(s).trim()).filter(Boolean));
+  const rawFocus = typeof o?.focusNote === "string" ? o.focusNote.trim().replace(/\s+/g, " ") : "";
+  const focus = rawFocus.length > 0 ? rawFocus.slice(0, FOCUS_NOTE_MAX_CHARS) : null;
   return {
     thresholdChars: o?.thresholdChars ?? SUBAGENT_COMPACT_DEFAULT_THRESHOLD,
     keepLastTurns: Math.max(0, o?.keepLastTurns ?? SUBAGENT_COMPACT_DEFAULT_KEEP_LAST),
@@ -244,6 +312,8 @@ function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
     persistArtifact: o?.persistArtifact,
     stripOldReasoning: o?.stripOldReasoning ?? false,
     tailBudgetChars: Math.max(0, o?.tailBudgetChars ?? 0),
+    focusNote: focus,
+    focusTerms: extractFocusTerms(focus),
   };
 }
 
@@ -304,7 +374,7 @@ function computeDynamicParams(
   const ctxFill = contextWindowTokens > 0 ? promptTokensEst / contextWindowTokens : 0;
   let effectiveKeepLastTurns = keepLastTurns;
   if (ctxFill >= 0.8) effectiveKeepLastTurns = 1;
-  else if (ctxFill >= 0.6) effectiveKeepLastTurns = Math.max(2, Math.floor(keepLastTurns / 2));
+  else if (ctxFill >= G2_FIRST_ESCALATION_FILL) effectiveKeepLastTurns = Math.max(2, Math.floor(keepLastTurns / 2));
 
   return { effectiveThresholdChars, effectiveKeepLastTurns, ctxFill };
 }
@@ -458,6 +528,8 @@ function rewriteOlderToolMessage(
     reason: string,
     summary?: string,
   ) => void,
+  focusNote?: string | null,
+  focusTerms: readonly string[] = [],
 ): ModelMessage {
   if (!isToolResultMessage(msg) || !Array.isArray(msg.content)) return msg;
   const rewritten = (msg.content as ReadonlyArray<Record<string, unknown>>).map((part) => {
@@ -470,8 +542,16 @@ function rewriteOlderToolMessage(
     if (isHighValueToolResult(tr.toolName, rawPreview, keepToolIds, toolCallId)) {
       return part; // preserve full original output
     }
+    // C1 — the main-context agent named this content as must-survive. Exact
+    // substring containment only (see extractFocusTerms): keep it verbatim.
+    if (previewMatchesFocus(rawPreview, focusTerms) || previewMatchesFocus(tr.toolName, focusTerms)) {
+      return part;
+    }
     const preview = rawPreview.slice(0, previewChars).replace(/\s+/g, " ").trim();
-    const stub = `[earlier tool_result for tool=${tr.toolName} (id=${tr.toolCallId}) — ${fullLen} chars elided by ${label} compactor; output: ${preview}]`;
+    // C1 — name the agent's own focus in the stub so the model reading it knows
+    // what it asked to keep and can see this result did not match.
+    const focusSuffix = focusNote ? `; agent focus (kept verbatim where matched): ${focusNote}` : "";
+    const stub = `[earlier tool_result for tool=${tr.toolName} (id=${tr.toolCallId}) — ${fullLen} chars elided by ${label} compactor; output: ${preview}${focusSuffix}]`;
     const summary = generateShortSummary(tr.toolName, rawPreview);
     // Idea 4: for the ones we actually elide, give caller a chance to persist full raw to EE for later on-demand fetch.
     if (persistArtifact && fullLen > 200) {
@@ -495,6 +575,53 @@ function rewriteOlderToolMessage(
 
 export function buildSlimContext(msgs: ModelMessage[]): ModelMessage[] {
   return msgs.slice(-6); // goal + last 2 turns + refs (YAGNI)
+}
+
+/**
+ * C3 — pure, read-only prediction of what `compactSubAgentMessages` WOULD do to
+ * this exact input with these exact options. It mirrors the real gate (same
+ * resolveOpts → computeDynamicParams → slice → tail-budget shrink →
+ * findKeepFromIndex chain) so the compaction consult can decide whether an
+ * automatic compaction is imminent WITHOUT performing one.
+ *
+ * `ctxFill` is 0 when the model's context window is unknown — callers must
+ * treat that as "no headroom information", never as "plenty of headroom".
+ */
+export interface CompactionPressure {
+  /** messages chars + envelope chars — the quantity the compactor thresholds on. */
+  totalChars: number;
+  /** Effective threshold after the G1 token-aware min(). */
+  thresholdChars: number;
+  /** Estimated prompt tokens (totalChars / CHARS_PER_TOKEN). */
+  estPromptTokens: number;
+  /** estPromptTokens / contextWindowTokens, or 0 when the window is unknown. */
+  ctxFill: number;
+  /** True when a call to compactSubAgentMessages with these opts would elide. */
+  wouldCompact: boolean;
+}
+
+export function estimateCompactionPressure(
+  messages: ReadonlyArray<ModelMessage>,
+  opts: SubAgentCompactorOptions = {},
+): CompactionPressure {
+  const resolved = resolveOpts(opts);
+  const totalChars = cumulativeMessageChars(messages) + resolved.envelopeChars;
+  const estPromptTokens = totalChars / CHARS_PER_TOKEN;
+  const { effectiveThresholdChars, effectiveKeepLastTurns, ctxFill } = computeDynamicParams(totalChars, resolved);
+
+  if (totalChars < effectiveThresholdChars) {
+    return { totalChars, thresholdChars: effectiveThresholdChars, estPromptTokens, ctxFill, wouldCompact: false };
+  }
+  const processed = messages.length > 30 ? sliceMessageHistory(messages, 30) : messages;
+  const budgetedKeepLast = shrinkKeepLastToTailBudget(processed, effectiveKeepLastTurns, resolved.tailBudgetChars);
+  const keepFrom = findKeepFromIndex(processed, budgetedKeepLast);
+  return {
+    totalChars,
+    thresholdChars: effectiveThresholdChars,
+    estPromptTokens,
+    ctxFill,
+    wouldCompact: keepFrom > 0,
+  };
 }
 
 /**
@@ -582,7 +709,17 @@ export function compactSubAgentMessages(
         out.push(msg);
         continue;
       }
-      out.push(rewriteOlderToolMessage(msg, outputPreviewChars, label, resolved.keepToolIds, resolved.persistArtifact));
+      out.push(
+        rewriteOlderToolMessage(
+          msg,
+          outputPreviewChars,
+          label,
+          resolved.keepToolIds,
+          resolved.persistArtifact,
+          resolved.focusNote,
+          resolved.focusTerms,
+        ),
+      );
       continue;
     }
     if (msg.role === "assistant" && Array.isArray(msg.content)) {

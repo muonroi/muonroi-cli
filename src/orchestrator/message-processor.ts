@@ -144,6 +144,7 @@ import { snapshotFromTodoWriteArgs } from "../tools/todo-write-snapshot.js";
 import { visionToolsNeeded } from "../tools/vision-gate.js";
 import type { SessionInfo, StreamChunk, SubagentStatus, ToolCall } from "../types/index";
 import { appendDecisionLog } from "../usage/decision-log.js";
+import { logger } from "../utils/logger.js";
 import { openUrl } from "../utils/open-url.js";
 import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
 import {
@@ -165,6 +166,7 @@ import { resolveShell } from "../utils/shell.js";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
 import type { AskUserAskInfo } from "./ask-user.js";
+import { beginCompactionTurn } from "./compact-request.js";
 import { relaxCompactionSettings } from "./compaction";
 import type { CouncilManager } from "./council-manager.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
@@ -590,6 +592,17 @@ export class MessageProcessor {
     // Phase C3: advance the cross-turn dedup turn counter so stubs can point
     // back to the correct prior turn.
     deps.crossTurnDedup?.beginTurn();
+
+    // Compaction-consult turn boundary: the preservation focus the agent stated
+    // via the `compact` tool is scoped to ONE user turn. Without this a focus
+    // from an early turn would keep steering compactions many turns later.
+    try {
+      beginCompactionTurn();
+    } catch (err) {
+      logger.warn("orchestrator", "[message-processor] beginCompactionTurn failed", {
+        error: (err as Error)?.message,
+      });
+    }
 
     // P0 native observation: turn boundary. Capture the prior batch via
     // resetBatch — file-revert detection (in the hook layer) reads it on

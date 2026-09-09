@@ -154,6 +154,7 @@ import {
   parseToolArgumentsOrRaw,
   toLocalToolCall,
 } from "./batch-utils";
+import { getCompactionFocus } from "./compact-request.js";
 import {
   type CompactionSettings,
   createCompactionSummaryMessage,
@@ -169,6 +170,7 @@ import {
   proposeCompaction,
   shouldCompactContext,
 } from "./compaction";
+import { buildCompactionCustomInstructions } from "./compaction-consult.js";
 import { CouncilManager } from "./council-manager.js";
 import { CrossTurnDedup, isCrossTurnDedupEnabled } from "./cross-turn-dedup.js";
 import { DelegationManager } from "./delegations";
@@ -1900,9 +1902,25 @@ export class Agent {
       }
     })();
 
-    const customInstructions = isSubSession
-      ? "This is a temporary sub-session. Under sub-sessions, it is CRITICAL to preserve active files being worked on, compiler/linter error states, and exact line coordinates in the summary. Do not omit details of files edited, tests run, or compiler diagnostics, as the model needs this specific context to continue working without re-reading the files."
-      : undefined;
+    // C2 — the summarizing compaction is performed by a DIFFERENT model
+    // (`proposeCompaction` / `generateCompactionSummary`) that only sees a
+    // serialized transcript; it cannot know which files the working agent still
+    // needs open. When the main-context agent HAS said what must survive (the
+    // `focus` argument of the `compact` tool), hand that to the summarizer as a
+    // hard requirement, MERGED with (never replacing) the sub-session
+    // instruction. Measured harm without it: interaction_logs id=6313
+    // (session e28336959a62, 2026-09-09T02:30:54.991Z, 61472 -> 24470 tokens),
+    // after which the agent re-read the files it was working on.
+    let customInstructions: string | undefined;
+    try {
+      customInstructions = buildCompactionCustomInstructions({ isSubSession, agentFocus: getCompactionFocus() });
+    } catch (err) {
+      // Fail open — a fault in the consult path must never block a compaction.
+      logger.warn("orchestrator", "[compactForContext] agent focus lookup failed", {
+        error: (err as Error)?.message,
+      });
+      customInstructions = buildCompactionCustomInstructions({ isSubSession, agentFocus: null });
+    }
 
     const { summary, usage: compactUsage } = await generateCompactionSummary(
       compactModelId,
@@ -2471,10 +2489,7 @@ export class Agent {
     // exactly this; reuse it rather than threading a signal through ten
     // product-loop modules. `runCouncil` re-wraps with its own (undefined)
     // signal downstream, which is a no-op passthrough that keeps ours.
-    const llm = withCouncilSignal(
-      createCouncilLLM(this.bash, this.mode, this.session?.id, productStats),
-      signal,
-    );
+    const llm = withCouncilSignal(createCouncilLLM(this.bash, this.mode, this.session?.id, productStats), signal);
     // Autonomous-execution permission for the product loop. /ideal's consent
     // boundary is the preflight plan-approval askcard; once the PO approves the
     // plan, the sprint IMPLEMENT turn must apply its own file-op mutations without
