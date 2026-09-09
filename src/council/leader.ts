@@ -4,6 +4,7 @@ import { getConfiguredProviders } from "../providers/keychain.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import { getRoutedModelByTier } from "../router/peak-hour.js";
+import { logger } from "../utils/logger.js";
 import { getRoleModel, getRoleModels, isProviderDisabled, type ModelRole } from "../utils/settings.js";
 
 const TIER_RANK: Record<string, number> = { fast: 1, balanced: 2, premium: 3 };
@@ -37,20 +38,75 @@ export type CouncilSubTask =
   | "maintain_review" // P15 Mode C — single LLM review agent after edit
   | "pr_body"; // P16 Mode C — generate PR body from diff + task context (fast tier)
 
-const SUB_TASK_TIER: Record<CouncilSubTask, "fast" | "balanced"> = {
-  research_need: "fast",
-  evaluate_round: "balanced",
-  round_summary: "fast",
-  clarify_questions: "balanced",
-  spec_synthesis: "balanced",
-  readiness_judge: "balanced",
-  effort_estimate: "fast",
-  sprint_goal: "fast",
-  reporter_qa: "fast",
-  maintain_design: "balanced",
-  maintain_review: "fast",
-  pr_body: "fast",
+/**
+ * "leader" means NEVER downshift: the task runs on the leader model itself.
+ *
+ * The policy is the operator's, stated plainly: every JUDGEMENT, every act of
+ * LEADING, and every act of PLANNING runs on the leader — because one wrong
+ * decision at any of those points propagates through the whole run downstream,
+ * and the few cents saved on the call that made it are irrelevant next to the
+ * cost of the rounds, sprints and edits built on top of a wrong answer.
+ *
+ * "fast" is therefore reserved for work that DECIDES NOTHING: summarizing text
+ * that has already been argued, answering an ad-hoc question, writing a PR body
+ * from a diff that is already final. If a task can change what the run does
+ * next, it is not on this list.
+ *
+ * Note on the word "premium": this pins the task to the LEADER model, not to a
+ * hardcoded premium id. resolveLeaderModel already picks the highest-tier
+ * leader-tagged model on the session provider, so on a provider that has one,
+ * leader IS premium. Forcing an arbitrary *-pro id here would 401 for any user
+ * without that entitlement — the exact failure the surrounding code stopped
+ * auto-promoting to avoid. When the leader resolves below premium, that is an
+ * entitlement/catalog fact the operator should see, not something to paper over
+ * (see warnIfLeaderNotPremium below).
+ */
+const SUB_TASK_TIER: Record<CouncilSubTask, "fast" | "balanced" | "leader"> = {
+  // ── Judgement / leading / planning — never downshifted ──────────────────
+  evaluate_round: "leader", // grades the criteria and drives the next round
+  readiness_judge: "leader", // decides whether the spec is fit to debate at all
+  spec_synthesis: "leader", // produces the spec every later stage is built on
+  clarify_questions: "leader", // shapes the whole interview
+  sprint_goal: "leader", // planning
+  effort_estimate: "leader", // planning — sizing drives what fits in a sprint
+  maintain_design: "leader", // planning
+  maintain_review: "leader", // a verdict on landed work
+  research_need: "leader", // a routing decision: a wrong "no" starves the debate
+  // ── Decides nothing — cheap is correct here ─────────────────────────────
+  round_summary: "fast", // restates what was already argued
+  reporter_qa: "fast", // ad-hoc Q&A, not part of the run's control flow
+  pr_body: "fast", // prose over an already-final diff
 };
+
+/**
+ * Say it out loud, once per (task, model), when a decision-grade call is about
+ * to run on a leader that is not premium.
+ *
+ * The policy is "judgement runs premium", but this module must not invent a
+ * premium model id to satisfy it — an id the user has no entitlement for 401s
+ * on every call. So the honest failure mode is: run on the best leader the
+ * provider actually offers, and make the shortfall VISIBLE. A silent downgrade
+ * on a judgement call is the thing being fixed; replacing it with a silent
+ * substitution would be the same defect wearing a different hat.
+ */
+const leaderTierWarned = new Set<string>();
+function warnIfLeaderNotPremium(task: CouncilSubTask, leaderModelId: string): void {
+  try {
+    if (tierOf(leaderModelId) === "premium") return;
+    const key = `${task}:${leaderModelId}`;
+    if (leaderTierWarned.has(key)) return;
+    leaderTierWarned.add(key);
+    logger.warn(
+      "orchestrator",
+      `[council] decision-grade task "${task}" is running on ${leaderModelId}, which is not premium tier — ` +
+        "the session provider offers no higher leader-tagged model. A wrong call here propagates downstream.",
+      { task, leaderModelId, leaderTier: tierOf(leaderModelId) ?? "unknown" },
+    );
+  } catch (err) {
+    // Never let a diagnostic break model selection.
+    logger.debug("orchestrator", `[council] leader-tier warning failed: ${(err as Error)?.message}`, { error: err });
+  }
+}
 
 /**
  * Pick a cheaper model for a council sub-task on the leader's provider,
@@ -70,6 +126,14 @@ export function pickCouncilTaskModel(task: CouncilSubTask, leaderModelId: string
   if (!costAware) return leaderModelId;
 
   const targetTier = SUB_TASK_TIER[task];
+
+  // Judgement / leading / planning: pinned to the leader, cost-aware or not.
+  // Returning BEFORE the tier comparison is the point — the comparison is what
+  // used to downshift a premium leader to balanced for exactly these calls.
+  if (targetTier === "leader") {
+    warnIfLeaderNotPremium(task, leaderModelId);
+    return leaderModelId;
+  }
   const leaderTier = tierOf(leaderModelId);
 
   // Already at or below target — no benefit from switching.
