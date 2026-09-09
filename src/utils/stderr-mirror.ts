@@ -83,6 +83,12 @@ export function isStderrMirrorEnabled(): boolean {
   return !(raw === "0" || raw === "off" || raw === "false" || raw === "no");
 }
 
+/**
+ * True while the tee is installed.
+ *
+ * @testonly — pins install/restore symmetry, so a mirror can never be left
+ * wrapping stderr after the TUI unmounts. No shipped caller asks.
+ */
 export function isStderrMirrorInstalled(): boolean {
   return originalWrite !== null;
 }

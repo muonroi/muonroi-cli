@@ -344,12 +344,13 @@ export function beginCouncilCall(marker: string, extra?: Record<string, unknown>
   };
 }
 
-/** Number of council calls currently registered as in flight (tests/diagnostics). */
-export function inFlightCouncilCallCount(): number {
-  return inFlight.size;
-}
-
-/** True when the heartbeat timer is currently armed (tests/diagnostics). */
+/**
+ * True when the heartbeat timer is currently armed.
+ *
+ * @testonly — the invariant it guards is that the timer is DISARMED once the
+ * last call settles, so a diagnostic cannot keep the process alive. Nothing in
+ * the shipped path needs to ask.
+ */
 export function isHeartbeatArmed(): boolean {
   return heartbeatTimer !== null;
 }

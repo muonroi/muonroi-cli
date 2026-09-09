@@ -1309,11 +1309,18 @@ export async function* runDebate(
     const steerNow = drainCouncilSteer(config.runId);
     const steerBlock = formatSteerBlock(steerNow);
     let roundDirective: string | undefined;
+    // The leader half, kept apart from `roundDirective` (which is the display /
+    // round-record composition of human steer + leader directive). Speakers must
+    // receive the two LABELLED SEPARATELY, so the round prompt takes them as two
+    // fields rather than one blob — a human instruction and the leader conducting
+    // are different kinds of authority and must not read as one voice.
+    let leaderDirectiveBlock = "";
     if (steerBlock || (leaderConductorEnabled() && spec.successCriteria.length > 0)) {
       const base =
         leaderConductorEnabled() && spec.successCriteria.length > 0
           ? buildLeaderDirective(round, spec.successCriteria, lastCriteriaMet, roundTopic)
           : "";
+      leaderDirectiveBlock = base;
       roundDirective = [steerBlock, base].filter(Boolean).join("\n\n");
       yield {
         type: "council_message" as const,
@@ -1439,6 +1446,7 @@ export async function* runDebate(
                   spec,
                   language: debateLanguage,
                   steering: steerBlock || undefined,
+                  leaderDirective: leaderDirectiveBlock || undefined,
                 });
                 const aTraces: string[] = [];
                 const aResult = await debateWithRetry(
@@ -1478,6 +1486,7 @@ export async function* runDebate(
                   spec,
                   language: debateLanguage,
                   steering: steerBlock || undefined,
+                  leaderDirective: leaderDirectiveBlock || undefined,
                 });
                 const bTraces: string[] = [];
                 const bResult = await debateWithRetry(

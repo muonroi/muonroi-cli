@@ -493,6 +493,23 @@ export function buildFollowupPrompt(ctx: {
    * exactly the rounds a user is most likely to steer.
    */
   steering?: string;
+  /**
+   * The LEADER's directive for this round — its focus plus the criteria still
+   * unmet, from `buildLeaderDirective`.
+   *
+   * Until this existed the leader graded every round with a real model call
+   * (`evaluateDebate`) and the verdict went only to the UI and the round record:
+   * the speakers never learned which criteria were still open or what the leader
+   * wanted next, so every round restarted from the same spec. That is why a live
+   * run could sit at 0/3 criteria after several rounds — nothing steered the
+   * debate toward the gap.
+   *
+   * Tail, not `system`, for the same reason as `steering`: it changes every round
+   * and would otherwise bust the cacheable prefix. Kept as its own field rather
+   * than folded into `steering` so a speaker can tell a human's instruction apart
+   * from the leader's.
+   */
+  leaderDirective?: string;
 }): { system: string; prompt: string } {
   const me = personaOf(ctx.speakerRole, ctx.speakerStance);
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
@@ -537,6 +554,7 @@ export function buildFollowupPrompt(ctx: {
       // a human watching the run, and it must not be read as part of the
       // partner's argument.
       (ctx.steering ? `${ctx.steering}\n\n` : "") +
+      (ctx.leaderDirective ? `## Leader directive for this round\n${ctx.leaderDirective}\n\n` : "") +
       (ctx.runningSummary ? `## Discussion State So Far\n${ctx.runningSummary}\n\n` : "") +
       (ctx.speakerLastPosition ? `Your previous position:\n${ctx.speakerLastPosition}\n\n` : "") +
       `Their latest (${them.label}):\n${ctx.partnerPosition}`,
