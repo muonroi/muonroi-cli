@@ -26,6 +26,8 @@
  * the cross-cutting state pattern used by cross-turn-dedup (G3).
  */
 
+import { logger } from "../utils/logger.js";
+
 export type ComplexitySize = "small" | "medium" | "large";
 
 /** Hard floor for K. Never let cadence drop below this. */
@@ -163,6 +165,65 @@ export function buildScopeReminder(opts: BuildScopeReminderOpts): string {
 }
 
 /**
+ * Append `reminder` to ONE tool-result `output` without discarding the payload
+ * it already carries.
+ *
+ * Why this is not a one-liner: the SDK's tool-result `output` is a discriminated
+ * union and only two of its members hold a plain string —
+ *   { type: "text" | "error-text",  value: string }
+ *   { type: "content",              value: Array<{type:"text",text}|media> }
+ *   { type: "json" | "error-json",  value: JSONValue }
+ *
+ * The previous code read `typeof output.value === "string" ? output.value : ""`
+ * and then REPLACED the whole output with `{type:"text", value: old + reminder}`.
+ * For every non-string member that `""` silently deleted the entire payload.
+ *
+ * Measured (repro pinned by `mcp-tool-result-payload.test.ts`): an MCP tool
+ * result — `mcpToModelOutput` in @ai-sdk/mcp ALWAYS emits `{type:"content",
+ * value:[...]}` — went from 7,780 chars of serialized output down to a 122-char
+ * reminder in the very prompt the model needed it in, and the model then
+ * reported it could not verify what the tool had returned. Built-in tools were
+ * unaffected only because their `execute` returns a plain string, which lands on
+ * the `text` member.
+ *
+ * Preserved per member:
+ *   - string members  → reminder appended to the string; `type` kept as-is, so an
+ *     `error-text` stays an error instead of being laundered into `text`.
+ *   - `content` array → reminder appended as one more `{type:"text"}` part, so
+ *     media parts and every existing text part survive untouched.
+ *   - anything else   → serialized to text with the reminder appended. Providers
+ *     already put `JSON.stringify(output.value)` on the wire for the json
+ *     members, so the model sees the same bytes plus the reminder.
+ */
+export function appendReminderToToolOutput(output: unknown, reminder: string): unknown {
+  const out = output as { type?: string; value?: unknown } | undefined;
+  if (out && typeof out === "object") {
+    if (typeof out.value === "string") {
+      return { ...out, value: `${out.value}\n\n${reminder}` };
+    }
+    if (out.type === "content" && Array.isArray(out.value)) {
+      return { ...out, value: [...out.value, { type: "text", text: `\n\n${reminder}` }] };
+    }
+  }
+  // json / error-json / an output shape we do not model. Serialize losslessly
+  // rather than dropping it (the old `""` path). JSON.stringify throws on a
+  // circular payload — degrade to the reminder alone, which is exactly the old
+  // behaviour, so a fault here is never worse than today.
+  let serialized: string;
+  try {
+    const raw = out && typeof out === "object" && "value" in out ? out.value : output;
+    serialized = JSON.stringify(raw) ?? "";
+  } catch (err) {
+    logger.warn("orchestrator", "[scope-reminder] tool-result output not serializable; reminder attached alone", {
+      error: (err as Error)?.message,
+      outputType: out?.type,
+    });
+    serialized = "";
+  }
+  return { type: "text", value: `${serialized}\n\n${reminder}` };
+}
+
+/**
  * Append `reminder` to a `messages` array via the tool_result channel.
  *
  * Strategy:
@@ -200,11 +261,9 @@ export function attachReminderToMessages<T>(messages: ReadonlyArray<T>, reminder
       const p = parts[i]!;
       if (p.type !== "tool-result") continue;
       const out_parts = parts.slice();
-      const oldOut = p.output as { type?: string; value?: unknown } | undefined;
-      const oldValue = typeof oldOut?.value === "string" ? oldOut.value : "";
       out_parts[i] = {
         ...p,
-        output: { type: "text", value: `${oldValue}\n\n${reminder}` },
+        output: appendReminderToToolOutput(p.output, reminder),
       };
       const rewritten = { ...last, content: out_parts } as unknown as T;
       const out = messages.slice() as T[];
