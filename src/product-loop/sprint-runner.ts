@@ -1481,7 +1481,18 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   if (verifyVerdict === "PASS") {
     try {
       const { applyVerifyFloor, runVerifyFloor } = await import("./verify-floor.js");
-      const floor = await runVerifyFloor({ cwd });
+      // Thread the run identity so the floor can compare against THIS run's
+      // baseline instead of against zero. Without it the floor stays in
+      // ABSOLUTE mode and fails any repo that already had a failing test —
+      // measured: run mttwpmu8ee5b scored 0.00 on both sprints because 31
+      // infra-dependent tests (PostgreSql/SqlServer/Kafka) fail for want of a
+      // database, none of them related to what the run was writing.
+      const { verifyBaselinePath } = await import("./verify-baseline.js");
+      const floor = await runVerifyFloor({
+        cwd,
+        runId: ctx.runId,
+        baselinePath: verifyBaselinePath(ctx.flowDir, ctx.runId),
+      });
       const applied = applyVerifyFloor(verifyVerdict, floor);
       verifyVerdict = applied.verdict;
       if (applied.downgraded) {

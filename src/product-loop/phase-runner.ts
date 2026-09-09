@@ -3,6 +3,7 @@ import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import { isGsdNativeEnabled } from "../gsd/flags.js";
 import { orderPhasesForExecution, syncPhasePlanToRoadmap } from "../gsd/phase-dag.js";
 import type { StreamChunk } from "../types/index.js";
+import { logger } from "../utils/logger.js";
 import { buildSprintContext, digestSprintIntoPhase, handoffPhaseToNext } from "./context-policy.js";
 import { formatProjectContextForPrompt } from "./discovery-context-format.js";
 import {
@@ -327,6 +328,41 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
   const orderedPhases = args.projectCwd
     ? orderPhasesForExecution(args.projectCwd, plan.phases)
     : orderByDeps(plan.phases);
+
+  // Capture the deterministic verify floor baseline ONCE, before any phase
+  // mutates the tree. Order is load-bearing: capturing it later would launder a
+  // sprint's own breakage into "already failing", which is exactly what the
+  // runId/commit stamping exists to keep visible.
+  //
+  // Without a baseline the floor compares against ZERO, so it fails any repo
+  // that already had a failing test. Measured: run mttwpmu8ee5b scored 0.00 on
+  // both sprints because 31 infra-dependent tests (PostgreSql 19, SqlServer 7,
+  // Kafka 5) fail instantly for want of a database — 38 other assemblies passed
+  // and the build was OK, and none of it was related to the code being written.
+  //
+  // Fail-open: any fault here leaves the floor in ABSOLUTE mode, i.e. exactly
+  // today's behaviour. This must never be the thing that stops a run.
+  if (args.projectCwd) {
+    try {
+      const { captureVerifyFloorBaseline } = await import("./verify-floor.js");
+      const cap = await captureVerifyFloorBaseline({
+        cwd: args.projectCwd,
+        runId: args.runId,
+        flowDir: args.flowDir,
+      });
+      logger.info("orchestrator", `[verify-floor] baseline captured for run ${args.runId}`, {
+        runId: args.runId,
+        path: cap.path,
+        elapsedMs: cap.elapsedMs,
+      });
+    } catch (err) {
+      logger.warn(
+        "orchestrator",
+        `[verify-floor] baseline capture failed for run ${args.runId} — the floor will run in ABSOLUTE mode: ${(err as Error)?.message}`,
+        { error: err, runId: args.runId },
+      );
+    }
+  }
 
   for (const phase of orderedPhases) {
     const status = await readPhaseStatus(args.flowDir, args.runId, phase.id);

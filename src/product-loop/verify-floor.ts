@@ -37,11 +37,37 @@
  * setup, not gates. Running them would mutate `node_modules` (or the host) as a
  * side effect of scoring a sprint, so the floor executes only the recipe's
  * build/typecheck and test commands.
+ *
+ * ## What it gates AGAINST: the delta, not zero
+ *
+ * The floor used to require ZERO failing tests. That is only satisfiable in a
+ * repository whose suite is already green, so in any real project with
+ * pre-existing failures the gate could never open — see the measured evidence in
+ * `verify-baseline.ts`. It now compares the run's result against a baseline
+ * captured before the loop started changing things, and fails only on a
+ * REGRESSION. With no usable baseline it falls back to the absolute comparison
+ * (fail-closed) and says so; the defence of that direction is in
+ * `verify-baseline.ts`.
  */
 
 import { spawnSync } from "node:child_process";
 import type { VerifyRecipe } from "../types/index.js";
+import { logger } from "../utils/logger.js";
 import { inferVerifyProjectProfile } from "../verify/recipes.js";
+import { parseFailingTestIds, type TestRunnerFormat } from "./test-failure-parse.js";
+import {
+  computeFloorDelta,
+  describeBaselineRule,
+  type FloorDelta,
+  isToleratedTestFailure,
+  loadFloorBaseline,
+  resolveBaselinePathFromEnv,
+  VERIFY_BASELINE_VERSION,
+  type VerifyBaseline,
+  type VerifyBaselineCommandResult,
+  verifyBaselinePath,
+  writeVerifyBaseline,
+} from "./verify-baseline.js";
 import { detectNoTestsExecuted, type NoTestsSignal, type VerifyVerdict } from "./verify-result.js";
 
 /** Per-command wall-clock budget. Mirrors the verify watchdog's 10-minute default. */
@@ -72,6 +98,14 @@ export interface FloorCheck {
   elapsedMs: number;
   /** Set when a test command ran but executed zero tests (see detectNoTestsExecuted). */
   noTests?: NoTestsSignal;
+  /**
+   * Failing test identities parsed from this command's FULL output — computed
+   * here, before `outputTail` truncates, because a clipped list would make the
+   * clipped-away failures look newly-failing on the next run.
+   */
+  failingTests?: string[];
+  /** Which runner grammars produced those identities. Empty when none matched. */
+  formats?: TestRunnerFormat[];
 }
 
 export interface VerifyFloorResult {
@@ -83,6 +117,11 @@ export interface VerifyFloorResult {
   elapsedMs: number;
   /** Human/agent-readable summary, safe to splice into sprint feedback. */
   detail: string;
+  /**
+   * How the verdict was reached: which comparison rule applied, what newly
+   * failed, and what was tolerated. Absent only when verdict === "unavailable".
+   */
+  delta?: FloorDelta;
 }
 
 export interface RunVerifyFloorOpts {
@@ -101,6 +140,32 @@ export interface RunVerifyFloorOpts {
    * command set. Production always discovers from disk.
    */
   commandsOverride?: { build: string[]; test: string[] };
+  /**
+   * Where this run's baseline lives. Defaults to `MUONROI_SPRINT_FLOOR_BASELINE`.
+   * When neither resolves, the floor applies the ABSOLUTE rule and says so.
+   */
+  baselinePath?: string | null;
+  /** The /ideal run asking. A baseline stamped with a different run id is rejected. */
+  runId?: string;
+}
+
+export interface CaptureBaselineOpts {
+  /** Working tree to discover commands in and execute them from. */
+  cwd: string;
+  /** The /ideal run this baseline belongs to. Stamped into the record. */
+  runId: string;
+  /** Run directory root — the baseline is written to `<flowDir>/runs/<runId>/verify-baseline.json`. */
+  flowDir?: string;
+  /** Explicit destination, overriding flowDir. */
+  baselinePath?: string;
+  timeoutMs?: number;
+  commandsOverride?: { build: string[]; test: string[] };
+}
+
+export interface CaptureBaselineResult {
+  baseline: VerifyBaseline;
+  path: string;
+  elapsedMs: number;
 }
 
 function envDisabled(name: string): boolean {
@@ -237,6 +302,9 @@ export function runFloorCommand(kind: "build" | "test", command: string, cwd: st
   const combined = `${stdout}${stderr}`;
   const noTests = kind === "test" ? (detectNoTestsExecuted(combined) ?? undefined) : undefined;
   const ok = !spawnError && !timedOut && exitCode === 0 && !noTests;
+  // Parse the FULL output — `outputTail` below is truncated, and a truncated
+  // failure list would make the clipped-away tests look newly-failing next run.
+  const parsed = kind === "test" ? parseFailingTestIds(combined) : { ids: [], formats: [] as TestRunnerFormat[] };
 
   if (!ok) {
     const why = spawnError
@@ -259,7 +327,83 @@ export function runFloorCommand(kind: "build" | "test", command: string, cwd: st
     outputTail: tail(combined),
     elapsedMs: Date.now() - started,
     noTests,
+    failingTests: parsed.ids,
+    formats: parsed.formats,
   };
+}
+
+/**
+ * Git identity of the tree under test. Used to stamp a baseline and to reject
+ * one captured on a different branch. Best-effort: a non-git directory is a
+ * legitimate working tree, so failure yields nulls rather than throwing.
+ */
+export function readGitIdentity(cwd: string): { commit: string | null; branch: string | null; dirty: boolean | null } {
+  const run = (args: string[]): string | null => {
+    try {
+      const res = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 15_000 });
+      if (res.error || res.status !== 0) return null;
+      return (res.stdout ?? "").trim();
+    } catch (err) {
+      logger.warn(
+        "orchestrator",
+        `[verify-floor] readGitIdentity: git ${args.join(" ")} failed in ${cwd}: ${err instanceof Error ? err.message : String(err)}`,
+        { operation: "readGitIdentity", cwd },
+      );
+      return null;
+    }
+  };
+  const commit = run(["rev-parse", "HEAD"]);
+  const branch = run(["rev-parse", "--abbrev-ref", "HEAD"]);
+  const status = run(["status", "--porcelain"]);
+  return { commit, branch, dirty: status === null ? null : status.length > 0 };
+}
+
+/** Cap on how many test names the message spells out before switching to a count. */
+const MAX_NAMED_NEW = 25;
+const MAX_NAMED_PRE_EXISTING = 5;
+
+function bulletList(ids: string[], cap: number): string {
+  const shown = ids.slice(0, cap).map((id) => `  - ${id}`);
+  if (ids.length > cap) shown.push(`  - …and ${ids.length - cap} more`);
+  return shown.join("\n");
+}
+
+/**
+ * The headline sentence. Every failure kind gets its own, because the human (or
+ * agent) response differs: broke-the-build, broke-a-test, and inherited-a-red-
+ * suite are three different situations that the old single sentence — "the
+ * project's own gates did not pass" — collapsed into one.
+ */
+function headline(delta: FloorDelta): string {
+  switch (delta.failureKind) {
+    case "build-failed":
+      return delta.buildAlreadyBroken
+        ? "the build/typecheck gate failed, and it was ALREADY failing at baseline. This is not this run's doing — but nothing can be verified on a broken build, so the floor cannot open until it is fixed."
+        : "this run BROKE THE BUILD. The build/typecheck gate failed, and no test result is attributable while it is red.";
+    case "test-regression":
+      return `this run BROKE ${delta.newlyFailing.length} TEST(S) that were passing at baseline.`;
+    case "test-unattributable":
+      return "a test command failed, but its output named no failing test. The failures could not be attributed, so no baseline can excuse them.";
+    case "test-absolute-no-baseline":
+      return "the test gate failed and there is no baseline to compare it against.";
+    case "no-tests-executed":
+      return "a test command executed ZERO tests. Absence of evidence is not evidence of correctness.";
+    case "infra":
+      return "a gate command could not be run to completion (spawn error or timeout), so it produced no evidence.";
+    default:
+      return "the project's own gates did not pass.";
+  }
+}
+
+/**
+ * Whether the raw output tail still carries information the structured summary
+ * does not. For a named test regression it does not — the test names ARE the
+ * evidence, and a 4000-char tail of an already-truncated log is noise. For a
+ * broken build or an unattributable failure the tail is the only evidence there
+ * is.
+ */
+function needsRawEvidence(delta: FloorDelta): boolean {
+  return delta.failureKind !== "test-regression";
 }
 
 function formatFloorDetail(result: Omit<VerifyFloorResult, "detail">, testsSkipped: boolean): string {
@@ -270,6 +414,7 @@ function formatFloorDetail(result: Omit<VerifyFloorResult, "detail">, testsSkipp
   }
 
   const lines = result.checks.map((c) => {
+    const tolerated = c.ok ? "" : result.delta?.verdict === "pass" ? " — all failures pre-existing, tolerated" : "";
     const status = c.ok
       ? "OK"
       : c.spawnError
@@ -279,25 +424,58 @@ function formatFloorDetail(result: Omit<VerifyFloorResult, "detail">, testsSkipp
           : c.noTests
             ? `NO-TESTS-EXECUTED (${c.noTests.kind}: ${c.noTests.evidence})`
             : `EXIT ${String(c.exitCode)}`;
-    return `- [${c.kind}] \`${c.command}\` → ${status} (${c.elapsedMs}ms)`;
+    return `- [${c.kind}] \`${c.command}\` → ${status}${tolerated} (${c.elapsedMs}ms)`;
   });
 
+  const delta = result.delta;
+  const ruleLine = delta ? describeBaselineRule(delta) : "";
+
   if (result.verdict === "fail") {
-    const firstFail = result.checks.find((c) => !c.ok);
-    const evidence = firstFail?.outputTail?.trim();
-    return [
-      "Deterministic verify floor FAILED — the project's own gates did not pass.",
-      ...lines,
-      evidence ? `\nFirst failing command output (tail):\n\`\`\`\n${evidence}\n\`\`\`` : "",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    const parts: string[] = [
+      `Deterministic verify floor FAILED — ${delta ? headline(delta) : "the project's own gates did not pass."}`,
+    ];
+    if (ruleLine) parts.push(ruleLine);
+    parts.push(...lines);
+
+    if (delta && delta.newlyFailing.length > 0) {
+      // Under the absolute rule there is no baseline, so "newly" would be a
+      // claim the floor cannot make — every failure is simply unattributed.
+      const label =
+        delta.rule === "delta"
+          ? `Newly failing (${delta.newlyFailing.length}) — passing at baseline, failing now. Fix these:`
+          : `Failing (${delta.newlyFailing.length}) — with no baseline the floor cannot say which of these this run caused:`;
+      parts.push(`\n${label}\n${bulletList(delta.newlyFailing, MAX_NAMED_NEW)}`);
+    }
+    if (delta && delta.preExisting.length > 0) {
+      parts.push(
+        `\nAlready failing at baseline (${delta.preExisting.length}) — IGNORED ON PURPOSE, not this run's doing:\n${bulletList(delta.preExisting, MAX_NAMED_PRE_EXISTING)}`,
+      );
+    }
+
+    if (!delta || needsRawEvidence(delta)) {
+      const firstFail = result.checks.find((c) => !c.ok);
+      const evidence = firstFail?.outputTail?.trim();
+      if (evidence) parts.push(`\nFirst failing command output (tail):\n\`\`\`\n${evidence}\n\`\`\``);
+    }
+    return parts.filter(Boolean).join("\n");
   }
 
-  const caveat = testsSkipped
-    ? "\nNOTE: the test tier was skipped (MUONROI_SPRINT_FLOOR_TESTS=0) — zero tests were executed by the floor."
-    : "";
-  return `Deterministic verify floor PASSED.\n${lines.join("\n")}${caveat}`;
+  const notes: string[] = [];
+  if (ruleLine) notes.push(ruleLine);
+  if (delta && delta.preExisting.length > 0) {
+    notes.push(
+      `NOTE: ${delta.preExisting.length} test(s) failed but were ALREADY failing at baseline, so they were ignored on purpose:\n${bulletList(delta.preExisting, MAX_NAMED_PRE_EXISTING)}`,
+    );
+  }
+  if (delta && delta.fixed.length > 0) {
+    notes.push(`NOTE: ${delta.fixed.length} test(s) that were failing at baseline now pass.`);
+  }
+  if (testsSkipped) {
+    notes.push(
+      "NOTE: the test tier was skipped (MUONROI_SPRINT_FLOOR_TESTS=0) — zero tests were executed by the floor.",
+    );
+  }
+  return [`Deterministic verify floor PASSED.`, ...lines, ...notes].join("\n");
 }
 
 /**
@@ -318,7 +496,9 @@ export async function runVerifyFloor(opts: RunVerifyFloorOpts): Promise<VerifyFl
       commandsDiscovered: { build: [], test: [] },
       elapsedMs: Date.now() - started,
     };
-    console.error("[verify-floor] disabled via MUONROI_SPRINT_VERIFY_FLOOR — no deterministic evidence for this sprint");
+    console.error(
+      "[verify-floor] disabled via MUONROI_SPRINT_VERIFY_FLOOR — no deterministic evidence for this sprint",
+    );
     return { ...base, detail: formatFloorDetail(base, false) };
   }
 
@@ -344,22 +524,138 @@ export async function runVerifyFloor(opts: RunVerifyFloorOpts): Promise<VerifyFl
     return { ...base, detail: formatFloorDetail(base, testsSkipped) };
   }
 
+  // Load the baseline BEFORE running anything: whether a red test command is a
+  // regression or an inherited failure decides whether the loop below may keep
+  // going, and re-reading it per command would let a mid-run edit change the rule.
+  const git = readGitIdentity(opts.cwd);
+  const loaded = await loadFloorBaseline({
+    baselinePath: opts.baselinePath ?? resolveBaselinePathFromEnv(),
+    cwd: opts.cwd,
+    commands: commandsDiscovered,
+    runId: opts.runId,
+    gitBranch: git.branch,
+  });
+
   const checks: FloorCheck[] = [];
   for (const { kind, command } of planned) {
     const check = runFloorCommand(kind, command, opts.cwd, timeoutMs);
     checks.push(check);
-    // Fail fast: once a gate is red the verdict cannot recover, and continuing
-    // would spend minutes of test time to learn nothing new.
-    if (!check.ok) break;
+    // Stop early only when the verdict genuinely cannot recover. A test command
+    // whose every failure was already failing at baseline is NOT such a case —
+    // breaking there would reinstate the absolute gate through the back door.
+    if (!isToleratedTestFailure(check, loaded.baseline)) break;
   }
 
+  const delta = computeFloorDelta(checks, loaded);
   const base = {
-    verdict: (checks.every((c) => c.ok) ? "pass" : "fail") as FloorVerdict,
+    verdict: delta.verdict as FloorVerdict,
     checks,
     commandsDiscovered,
     elapsedMs: Date.now() - started,
+    delta,
   };
+  if (delta.verdict === "fail") {
+    logger.error(
+      "orchestrator",
+      `[verify-floor] runVerifyFloor: FAIL (${delta.failureKind}) via ${delta.rule} rule in ${opts.cwd} — ${delta.newlyFailing.length} newly failing, ${delta.preExisting.length} pre-existing ignored`,
+      { operation: "runVerifyFloor", cwd: opts.cwd, failedCommand: delta.failedCommand },
+    );
+  }
   return { ...base, detail: formatFloorDetail(base, testsSkipped) };
+}
+
+/**
+ * Capture the project's PRE-EXISTING failure set, to be gated against later.
+ *
+ * This must run BEFORE the loop starts changing the working tree — a baseline
+ * captured after sprint 1 has already committed would launder that sprint's own
+ * breakage into "pre-existing", which is exactly the hole the record's runId /
+ * commit / command stamping exists to keep visible.
+ *
+ * It runs the same disk-derived commands the floor runs, so the two sets are
+ * comparable by construction. It never throws on a red result: a red baseline is
+ * the normal case in a real repository and is the whole point of capturing one.
+ */
+export async function captureVerifyFloorBaseline(opts: CaptureBaselineOpts): Promise<CaptureBaselineResult> {
+  const started = Date.now();
+  const timeoutMs = opts.timeoutMs ?? getFloorTimeoutMs();
+  const commands = opts.commandsOverride ?? resolveFloorCommands(opts.cwd);
+  const destination =
+    opts.baselinePath ??
+    (opts.flowDir
+      ? verifyBaselinePath(opts.flowDir, opts.runId)
+      : (() => {
+          throw new Error("captureVerifyFloorBaseline: one of baselinePath or flowDir is required");
+        })());
+
+  const results: VerifyBaselineCommandResult[] = [];
+  let buildOk = true;
+  let unattributable = false;
+  const failingTests = new Set<string>();
+
+  for (const command of commands.build) {
+    const c = runFloorCommand("build", command, opts.cwd, timeoutMs);
+    results.push({ kind: "build", command, exitCode: c.exitCode, ok: c.ok, failingTests: [], formats: [] });
+    if (!c.ok) {
+      buildOk = false;
+      // A red build makes the test tier meaningless — record it and stop.
+      break;
+    }
+  }
+
+  if (buildOk) {
+    for (const command of commands.test) {
+      const c = runFloorCommand("test", command, opts.cwd, timeoutMs);
+      const ids = c.failingTests ?? [];
+      for (const id of ids) failingTests.add(id);
+      // A failing test command we cannot attribute poisons the baseline: it
+      // would otherwise excuse every future failure of that same command.
+      if (!c.ok && ids.length === 0) unattributable = true;
+      results.push({
+        kind: "test",
+        command,
+        exitCode: c.exitCode,
+        ok: c.ok,
+        failingTests: ids,
+        formats: c.formats ?? [],
+      });
+    }
+  }
+
+  const git = readGitIdentity(opts.cwd);
+  const baseline: VerifyBaseline = {
+    version: VERIFY_BASELINE_VERSION,
+    runId: opts.runId,
+    capturedAtUtc: new Date().toISOString(),
+    cwd: opts.cwd,
+    gitCommit: git.commit,
+    gitBranch: git.branch,
+    gitDirty: git.dirty,
+    commands,
+    buildOk,
+    failingTests: [...failingTests].sort(),
+    results,
+    unattributable,
+  };
+
+  try {
+    await writeVerifyBaseline(destination, baseline);
+  } catch (err) {
+    logger.error(
+      "orchestrator",
+      `[verify-floor] captureVerifyFloorBaseline: write failed for ${destination}: ${err instanceof Error ? err.message : String(err)}`,
+      { operation: "captureVerifyFloorBaseline", cwd: opts.cwd, runId: opts.runId },
+    );
+    throw err;
+  }
+
+  logger.info(
+    "orchestrator",
+    `[verify-floor] baseline captured for run ${opts.runId}: buildOk=${buildOk}, ${baseline.failingTests.length} pre-existing test failure(s), unattributable=${unattributable}`,
+    { operation: "captureVerifyFloorBaseline", path: destination, elapsedMs: Date.now() - started },
+  );
+
+  return { baseline, path: destination, elapsedMs: Date.now() - started };
 }
 
 /**
