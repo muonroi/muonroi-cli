@@ -96,8 +96,13 @@ export function withCouncilSignal(llm: CouncilLLM, signal: AbortSignal | undefin
   if (!signal) return llm;
   return {
     ...llm,
-    generate: (modelId, system, prompt, maxTokens, onUsage, sig) =>
-      llm.generate(modelId, system, prompt, maxTokens, onUsage, sig ?? signal),
+    // onDiagnostics MUST be forwarded: it is the 7th parameter and the ONLY
+    // channel carrying per-call forensics (requestIssued / streamedChars /
+    // elapsed) up to the candidate-failure record. Dropping it here would make
+    // the G2 fields silently undefined on exactly the wrapped path — the
+    // product loop, i.e. `/ideal`, i.e. the run that crashed.
+    generate: (modelId, system, prompt, maxTokens, onUsage, sig, onDiagnostics) =>
+      llm.generate(modelId, system, prompt, maxTokens, onUsage, sig ?? signal, onDiagnostics),
     debate: (modelId, system, prompt, sig, persistTrace, options, onUsage) =>
       llm.debate(modelId, system, prompt, sig ?? signal, persistTrace, options, onUsage),
     research: (modelId, topic, conversationContext, sig, persistTrace, options, onUsage) =>

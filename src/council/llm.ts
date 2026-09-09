@@ -32,6 +32,7 @@ import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
 import { getProviderStallTimeoutMs, loadMcpServers } from "../utils/settings.js";
 import { withVisibleRetry } from "../utils/visible-retry.js";
+import { beginCouncilCall, breadcrumb, setBreadcrumbSession } from "./crash-breadcrumb.js";
 import {
   blockModel,
   consumeBlockNotification,
@@ -42,7 +43,14 @@ import {
 } from "./model-blocklist.js";
 import { buildResearchSystemPrompt } from "./prompts.js";
 import { stripThinkBlocks } from "./strip-think.js";
-import type { CouncilLLM, CouncilStats, ToolTraceEmitter, UsageCallback } from "./types.js";
+import type {
+  CouncilGenerateDiagnostics,
+  CouncilLLM,
+  CouncilStats,
+  GenerateDiagnosticsCallback,
+  ToolTraceEmitter,
+  UsageCallback,
+} from "./types.js";
 
 /**
  * Register a provider factory for a council sub-call, OAuth-aware.
@@ -654,6 +662,9 @@ export function createCouncilLLM(
   sessionId: string | undefined,
   stats: CouncilStats,
 ): CouncilLLM {
+  // Stamp every subsequent breadcrumb with this session so a crash trail can be
+  // tied back to the run in interaction_logs / usage_events.
+  setBreadcrumbSession(sessionId);
   return {
     isModelBlocked(modelId: string): boolean {
       return isModelBlockedInScope(sessionId, modelId);
@@ -671,12 +682,47 @@ export function createCouncilLLM(
       maxTokens = 4096,
       onUsage?: UsageCallback,
       signal?: AbortSignal,
+      onDiagnostics?: GenerateDiagnosticsCallback,
     ): Promise<string> {
+      // G2 forensics. Every field below is OBSERVED, never inferred: `diag` is
+      // mutated at the exact points the events happen, so `requestIssued:false`
+      // on an empty completion is proof the "" came from a short-circuit before
+      // the network rather than from the provider.
+      const diagStart = Date.now();
+      const diag: CouncilGenerateDiagnostics = {
+        durationMs: 0,
+        viaMock: false,
+        requestIssued: false,
+        sdkAttempts: 0,
+        streamedChars: 0,
+        rawTextChars: 0,
+        textChars: 0,
+        signalAbortedAtStart: signal?.aborted === true,
+        signalAbortedAtEnd: false,
+      };
+      const emitDiagnostics = (): void => {
+        if (!onDiagnostics) return;
+        diag.durationMs = Date.now() - diagStart;
+        diag.signalAbortedAtEnd = signal?.aborted === true;
+        try {
+          onDiagnostics(diag);
+        } catch (diagErr) {
+          logger.error("orchestrator", "[council.generate] onDiagnostics callback threw", {
+            modelId,
+            message: diagErr instanceof Error ? diagErr.message : String(diagErr),
+          });
+        }
+      };
       const mock = getMockLlm();
       if (mock) {
         stats.calls++;
         const result = await mock.complete({ prompt });
-        return stripThinkBlocks(result.text);
+        const mockText = stripThinkBlocks(result.text);
+        diag.viaMock = true;
+        diag.rawTextChars = (result.text ?? "").length;
+        diag.textChars = mockText.length;
+        emitDiagnostics();
+        return mockText;
       }
       const providerId = detectProviderForModel(modelId);
       await ensureCouncilFactory(providerId);
@@ -694,13 +740,19 @@ export function createCouncilLLM(
         const result = await withDeadlineRace(
           () =>
             withVisibleRetry(
-              () =>
+              () => {
+                // Observed, not inferred: we are past runtime/key resolution and
+                // are entering the SDK call right now. This is the single flag
+                // that separates "the provider returned nothing" from "we never
+                // called the provider" on an empty-completion record.
+                diag.requestIssued = true;
+                diag.sdkAttempts++;
                 // Stream + collect (NOT generateText). The codex/oauth endpoint
                 // 400s on non-stream requests ("Stream must be set to true"),
                 // which nulled every council eval/clarify/synthesis on a codex
                 // session → the opaque "evaluation unavailable" card. See
                 // collectStreamText's doc for the full diagnosis.
-                collectStreamText({
+                return collectStreamText({
                   model: runtime.model,
                   system,
                   prompt,
@@ -712,8 +764,12 @@ export function createCouncilLLM(
                   temperature: resolveTemperature(providerId, runtime.modelInfo, 0.7),
                   providerOptions: runtime.providerOptions as Record<string, unknown> | undefined,
                   abortSignal: timedSignal,
-                  onDelta: noteCouncilStreamDelta,
-                }),
+                  onDelta: (chars: number) => {
+                    if (chars > 0) diag.streamedChars += chars;
+                    noteCouncilStreamDelta(chars);
+                  },
+                });
+              },
               { label: "council.generate" },
             ),
           COUNCIL_LLM_TIMEOUT_MS + 5_000,
@@ -752,9 +808,16 @@ export function createCouncilLLM(
           finishReason: (result as { finishReason?: string }).finishReason,
           usage: (result as { usage?: unknown }).usage,
         });
-        return stripThinkBlocks(result.text);
+        const finalText = stripThinkBlocks(result.text);
+        diag.rawTextChars = (result.text ?? "").length;
+        diag.textChars = finalText.length;
+        diag.finishReason = (result as { finishReason?: string }).finishReason;
+        diag.outputTokens = callUsage.outputTokens;
+        emitDiagnostics();
+        return finalText;
       } catch (err) {
         cleanupTimeout();
+        emitDiagnostics();
         // Capture the provider-side detail (status code + response body +
         // request param shape) that `err.message` alone drops — a generic
         // "Bad Request" on the council path was previously undiagnosable
@@ -1273,6 +1336,12 @@ interface TracedGenerateArgs {
    * real "leader" line instead of a fabricated zero.
    */
   onUsage?: UsageCallback;
+  /**
+   * Per-call forensics sink (see {@link CouncilGenerateDiagnostics}). Diagnostics
+   * only: `tracedGenerateWithFallback` uses it to tell an empty completion that
+   * came from the provider apart from one that never reached the network.
+   */
+  onDiagnostics?: GenerateDiagnosticsCallback;
 }
 
 /**
@@ -1292,90 +1361,145 @@ export async function* tracedGenerate(
   const start = Date.now();
   const tickInterval = args.tickIntervalMs ?? 1000;
 
-  yield {
-    type: "council_status",
-    councilStatus: {
-      statusId,
-      state: "start",
-      phase: args.phase,
-      label: args.label,
-      detail: args.detail,
-      role: args.role,
-      elapsedMs: 0,
-    },
-  };
-
-  // Race generate vs ticks: drain ticks between generate slices using Promise.race.
-  let resolved = false;
-  let resultText = "";
-  let resultErr: unknown = null;
-
-  const generatePromise = (async () => {
-    try {
-      resultText = await llm.generate(args.modelId, args.system, args.prompt, args.maxTokens, args.onUsage);
-    } catch (err) {
-      resultErr = err;
-    } finally {
-      resolved = true;
-    }
-  })();
-
-  while (!resolved) {
-    if (tickInterval <= 0) {
-      await generatePromise;
-      break;
-    }
-    const tickPromise = new Promise<void>((resolve) => setTimeout(resolve, tickInterval));
-    await Promise.race([generatePromise, tickPromise]);
-    if (resolved) break;
+  // G1 — the measured crash left a 7m11s hole in debug.log with no line at all.
+  // The enter/exit pair plus the heartbeat armed below turn that hole into a
+  // timestamped series carrying rss/heap at every sample.
+  breadcrumb("council.phase.enter", {
+    phase: args.phase,
+    label: args.label,
+    modelId: args.modelId,
+    role: args.role,
+    statusId,
+    maxTokens: args.maxTokens,
+    systemChars: args.system.length,
+    promptChars: args.prompt.length,
+  });
+  const endHeartbeat = beginCouncilCall(`council.${args.phase}`, {
+    label: args.label,
+    modelId: args.modelId,
+    statusId,
+  });
+  // finally: an abandoned generator (consumer stops iterating / calls .return())
+  // must not leave this call registered as in flight — the heartbeat would keep
+  // reporting a call that is over. The timer itself is unref'd and can never
+  // hold the process open; this guards the noise, not the lifetime.
+  try {
     yield {
       type: "council_status",
       councilStatus: {
         statusId,
-        state: "tick",
+        state: "start",
         phase: args.phase,
         label: args.label,
         detail: args.detail,
         role: args.role,
-        elapsedMs: Date.now() - start,
+        elapsedMs: 0,
       },
     };
-  }
 
-  await generatePromise;
+    // Race generate vs ticks: drain ticks between generate slices using Promise.race.
+    let resolved = false;
+    let resultText = "";
+    let resultErr: unknown = null;
 
-  if (resultErr) {
-    const errMsg = resultErr instanceof Error ? resultErr.message : String(resultErr);
-    yield {
-      type: "council_status",
-      councilStatus: {
-        statusId,
-        state: "error",
+    const generatePromise = (async () => {
+      try {
+        resultText = await llm.generate(
+          args.modelId,
+          args.system,
+          args.prompt,
+          args.maxTokens,
+          args.onUsage,
+          undefined,
+          args.onDiagnostics,
+        );
+      } catch (err) {
+        resultErr = err;
+      } finally {
+        resolved = true;
+      }
+    })();
+
+    while (!resolved) {
+      if (tickInterval <= 0) {
+        await generatePromise;
+        break;
+      }
+      const tickPromise = new Promise<void>((resolve) => setTimeout(resolve, tickInterval));
+      await Promise.race([generatePromise, tickPromise]);
+      if (resolved) break;
+      yield {
+        type: "council_status",
+        councilStatus: {
+          statusId,
+          state: "tick",
+          phase: args.phase,
+          label: args.label,
+          detail: args.detail,
+          role: args.role,
+          elapsedMs: Date.now() - start,
+        },
+      };
+    }
+
+    await generatePromise;
+
+    endHeartbeat();
+
+    if (resultErr) {
+      const errMsg = resultErr instanceof Error ? resultErr.message : String(resultErr);
+      breadcrumb("council.phase.exit", {
         phase: args.phase,
         label: args.label,
-        detail: args.detail,
-        role: args.role,
+        modelId: args.modelId,
+        statusId,
         elapsedMs: Date.now() - start,
+        outcome: "error",
         errorMessage: errMsg,
-      },
-    };
-    throw resultErr;
-  }
+      });
+      yield {
+        type: "council_status",
+        councilStatus: {
+          statusId,
+          state: "error",
+          phase: args.phase,
+          label: args.label,
+          detail: args.detail,
+          role: args.role,
+          elapsedMs: Date.now() - start,
+          errorMessage: errMsg,
+        },
+      };
+      throw resultErr;
+    }
 
-  yield {
-    type: "council_status",
-    councilStatus: {
-      statusId,
-      state: "done",
+    breadcrumb("council.phase.exit", {
       phase: args.phase,
       label: args.label,
-      detail: args.detail,
-      role: args.role,
+      modelId: args.modelId,
+      statusId,
       elapsedMs: Date.now() - start,
-    },
-  };
+      outcome: "done",
+      textChars: resultText.length,
+    });
 
-  return resultText;
+    yield {
+      type: "council_status",
+      councilStatus: {
+        statusId,
+        state: "done",
+        phase: args.phase,
+        label: args.label,
+        detail: args.detail,
+        role: args.role,
+        elapsedMs: Date.now() - start,
+      },
+    };
+
+    return resultText;
+  } finally {
+    endHeartbeat();
+  }
 }
 
 /**
@@ -1405,6 +1529,33 @@ export interface CouncilCandidateFailure {
   responseBodyTrunc?: string;
   /** True on the single terminal record emitted when every candidate failed. */
   exhausted?: boolean;
+  /**
+   * Wall-clock ms this candidate took, measured around the `tracedGenerate`
+   * delegation. G2: the crash record showed three `empty-completion`s inside
+   * 5ms, which no real network call can produce — but the record could not say
+   * so, because it carried no duration at all. Now it does.
+   */
+  elapsedMs?: number;
+  /**
+   * `signal.aborted` sampled the instant this attempt began.
+   *
+   * Where it is meaningful (verified 2026-09-09): `tracedGenerate` itself passes
+   * `undefined` for `CouncilLLM.generate`'s `signal`, so the value depends
+   * entirely on the wrapper in front of the LLM. `withCouncilSignal`
+   * (src/council/index.ts) substitutes the run's signal when the caller's is
+   * undefined, so `/council` and the orchestrator product loop DO have one;
+   * `createProductLlm` (src/product-loop/sprint-runner.ts) forwards no signal at
+   * all, so it reads `false` there. Left absent rather than defaulted, so an
+   * unknown is never dressed up as a `false`.
+   */
+  signalAbortedAtStart?: boolean;
+  /**
+   * Full per-call forensics from `CouncilLLM.generate` — in particular
+   * `requestIssued`, which is what finally separates "the provider returned
+   * nothing" from "we never called the provider". Absent when the candidate was
+   * skipped (blocked) or when the LLM implementation does not report them.
+   */
+  diagnostics?: CouncilGenerateDiagnostics;
 }
 
 /**
@@ -1493,6 +1644,8 @@ export async function* tracedGenerateWithFallback(
   const seen = new Set<string>();
   const models = args.models.filter((m) => m && !seen.has(m) && (seen.add(m), true));
   const failures: CouncilCandidateFailure[] = [];
+  const chainStart = Date.now();
+  const chainElapsedMs = (): number => Date.now() - chainStart;
 
   /** Log + record + emit one structured switch. Never throws. */
   const noteFailure = (failure: CouncilCandidateFailure): void => {
@@ -1511,6 +1664,33 @@ export async function* tracedGenerateWithFallback(
       errorName: failure.errorName,
       message: failure.errorMessage,
       responseBody: failure.responseBodyTrunc,
+      // G2 — the fields that make an "empty completion" interpretable.
+      elapsedMs: failure.elapsedMs,
+      signalAbortedAtStart: failure.signalAbortedAtStart,
+      requestIssued: failure.diagnostics?.requestIssued,
+      sdkAttempts: failure.diagnostics?.sdkAttempts,
+      streamedChars: failure.diagnostics?.streamedChars,
+      rawTextChars: failure.diagnostics?.rawTextChars,
+      finishReason: failure.diagnostics?.finishReason,
+      // outputTokens is deliberately NOT logged here: logger.redactObject()
+      // replaces any key containing "token" with "[REDACTED]" (measured), so it
+      // would only add noise. It is preserved verbatim in the breadcrumb JSONL,
+      // which does not pass through the redactor.
+      viaMock: failure.diagnostics?.viaMock,
+    });
+    breadcrumb("council.candidate.failed", {
+      label: args.label,
+      modelId: failure.fromModel,
+      provider: failure.provider,
+      reason: failure.reason,
+      attempt: failure.attempt,
+      totalCandidates: failure.totalCandidates,
+      nextModel: failure.toModel,
+      exhausted: failure.exhausted === true,
+      elapsedMs: failure.elapsedMs,
+      statusCode: failure.statusCode,
+      errorMessage: failure.errorMessage,
+      diagnostics: failure.diagnostics,
     });
     try {
       args.onCandidateFailure?.(failure);
@@ -1525,6 +1705,10 @@ export async function* tracedGenerateWithFallback(
 
   for (let i = 0; i < models.length; i++) {
     const modelId = models[i];
+    // Resolve once per candidate: safeDetectProvider LOGS on an unresolvable id,
+    // so calling it from both the start breadcrumb and the failure record
+    // doubled that line (observed while driving the instrumentation).
+    const candidateProvider = safeDetectProvider(modelId);
     // Fix 2 — skip a candidate that already failed non-retryably (401/403 +
     // SDK isRetryable:false) earlier in this session instead of burning the
     // same rejected call again. Surface the reason once per model (not once
@@ -1541,17 +1725,46 @@ export async function* tracedGenerateWithFallback(
         reason: "blocked",
         attempt: i + 1,
         totalCandidates: models.length,
-        provider: safeDetectProvider(modelId),
+        provider: candidateProvider,
+        elapsedMs: 0,
       });
       continue;
     }
+    // G2 — a candidate had no START record at all: only failures were logged,
+    // so an attempt that vanished mid-flight was indistinguishable from one that
+    // never began. Record entry, then time the attempt.
+    const attemptStart = Date.now();
+    const attemptProvider = candidateProvider;
+    breadcrumb("council.candidate.start", {
+      label: args.label,
+      phase: args.phase,
+      modelId,
+      attempt: i + 1,
+      totalCandidates: models.length,
+      provider: attemptProvider,
+    });
+    let diagnostics: CouncilGenerateDiagnostics | undefined;
+    const captureDiagnostics: GenerateDiagnosticsCallback = (d) => {
+      diagnostics = d;
+    };
     try {
       const raw = yield* tracedGenerate(llm, {
         ...args,
         modelId,
         label: i > 0 ? `${args.label} (fallback: ${modelId})` : args.label,
+        onDiagnostics: captureDiagnostics,
       });
-      if (raw?.trim()) return raw;
+      if (raw?.trim()) {
+        breadcrumb("council.candidate.ok", {
+          label: args.label,
+          modelId,
+          attempt: i + 1,
+          elapsedMs: Date.now() - attemptStart,
+          textChars: raw.length,
+          diagnostics,
+        });
+        return raw;
+      }
       // The call SUCCEEDED and was billed, but produced nothing usable. This is
       // not a hypothetical: a reasoning model given a small maxTokens budget can
       // spend the entire budget inside <think>, so `stripThinkBlocks` returns "".
@@ -1564,7 +1777,10 @@ export async function* tracedGenerateWithFallback(
         reason: "empty-completion",
         attempt: i + 1,
         totalCandidates: models.length,
-        provider: safeDetectProvider(modelId),
+        provider: attemptProvider,
+        elapsedMs: Date.now() - attemptStart,
+        signalAbortedAtStart: diagnostics?.signalAbortedAtStart,
+        diagnostics,
       });
     } catch (err) {
       // NOT a bare catch. The provider-side detail (status + body) is the whole
@@ -1577,12 +1793,14 @@ export async function* tracedGenerateWithFallback(
         reason: "error",
         attempt: i + 1,
         totalCandidates: models.length,
-        provider: safeDetectProvider(modelId),
+        provider: attemptProvider,
         errorName: err instanceof Error ? err.name : typeof err,
         errorMessage: err instanceof Error ? err.message : String(err),
         statusCode: typeof forensics?.statusCode === "number" ? forensics.statusCode : undefined,
-        responseBodyTrunc:
-          typeof forensics?.responseBodyTrunc === "string" ? forensics.responseBodyTrunc : undefined,
+        responseBodyTrunc: typeof forensics?.responseBodyTrunc === "string" ? forensics.responseBodyTrunc : undefined,
+        elapsedMs: Date.now() - attemptStart,
+        signalAbortedAtStart: diagnostics?.signalAbortedAtStart,
+        diagnostics,
       });
     }
   }
@@ -1603,6 +1821,26 @@ export async function* tracedGenerateWithFallback(
       errorName: last?.errorName,
       errorMessage: last?.errorMessage ?? summarizeCandidateFailures(failures),
       statusCode: last?.statusCode,
+      elapsedMs: chainElapsedMs(),
+      signalAbortedAtStart: last?.signalAbortedAtStart,
+      diagnostics: last?.diagnostics,
+    });
+    breadcrumb("council.fallback.exhausted", {
+      label: args.label,
+      phase: args.phase,
+      totalCandidates: models.length,
+      elapsedMs: chainElapsedMs(),
+      summary: summarizeCandidateFailures(failures),
+      perCandidate: failures
+        .filter((f) => !f.exhausted)
+        .map((f) => ({
+          modelId: f.fromModel,
+          reason: f.reason,
+          elapsedMs: f.elapsedMs,
+          requestIssued: f.diagnostics?.requestIssued,
+          streamedChars: f.diagnostics?.streamedChars,
+          statusCode: f.statusCode,
+        })),
     });
   }
   return null;
@@ -1673,46 +1911,106 @@ export async function* tracedAsync<T>(
     }
   };
 
-  yield {
-    type: "council_status",
-    councilStatus: {
-      statusId,
-      state: "start",
-      phase: args.phase,
-      label: args.label,
-      detail: args.detail,
-      role: args.role,
-      elapsedMs: 0,
-    },
-  };
-
-  let resolved = false;
-  let result: T | undefined;
-  let err: unknown = null;
-
-  const work = (async () => {
-    try {
-      result = await fn();
-    } catch (e) {
-      err = e;
-    } finally {
-      resolved = true;
-    }
-  })();
-
-  while (!resolved) {
-    if (tickInterval <= 0) {
-      await work;
-      break;
-    }
-    const tick = new Promise<void>((resolve) => setTimeout(resolve, tickInterval));
-    await Promise.race([work, tick]);
-    if (resolved) break;
+  // Same G1 coverage as tracedGenerate, for the phases that do NOT go through
+  // `llm.generate` — research, debate rounds, and any Promise.all fan-out.
+  breadcrumb("council.phase.enter", {
+    phase: args.phase,
+    label: args.label,
+    role: args.role,
+    statusId,
+    via: "tracedAsync",
+  });
+  const endHeartbeat = beginCouncilCall(`council.${args.phase}`, {
+    label: args.label,
+    role: args.role,
+    statusId,
+    via: "tracedAsync",
+  });
+  try {
     yield {
       type: "council_status",
       councilStatus: {
         statusId,
-        state: "tick",
+        state: "start",
+        phase: args.phase,
+        label: args.label,
+        detail: args.detail,
+        role: args.role,
+        elapsedMs: 0,
+      },
+    };
+
+    let resolved = false;
+    let result: T | undefined;
+    let err: unknown = null;
+
+    const work = (async () => {
+      try {
+        result = await fn();
+      } catch (e) {
+        err = e;
+      } finally {
+        resolved = true;
+      }
+    })();
+
+    while (!resolved) {
+      if (tickInterval <= 0) {
+        await work;
+        break;
+      }
+      const tick = new Promise<void>((resolve) => setTimeout(resolve, tickInterval));
+      await Promise.race([work, tick]);
+      if (resolved) break;
+      yield {
+        type: "council_status",
+        councilStatus: {
+          statusId,
+          state: "tick",
+          phase: args.phase,
+          label: args.label,
+          detail: args.detail,
+          role: args.role,
+          elapsedMs: Date.now() - start,
+          ...livenessFields(),
+        },
+      };
+    }
+
+    await work;
+
+    if (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      yield {
+        type: "council_status",
+        councilStatus: {
+          statusId,
+          state: "error",
+          phase: args.phase,
+          label: args.label,
+          detail: args.detail,
+          role: args.role,
+          elapsedMs: Date.now() - start,
+          errorMessage: errMsg,
+        },
+      };
+      breadcrumb("council.phase.exit", {
+        phase: args.phase,
+        label: args.label,
+        statusId,
+        via: "tracedAsync",
+        elapsedMs: Date.now() - start,
+        outcome: "error",
+        errorMessage: errMsg,
+      });
+      throw err;
+    }
+
+    yield {
+      type: "council_status",
+      councilStatus: {
+        statusId,
+        state: "done",
         phase: args.phase,
         label: args.label,
         detail: args.detail,
@@ -1721,41 +2019,17 @@ export async function* tracedAsync<T>(
         ...livenessFields(),
       },
     };
-  }
 
-  await work;
-
-  if (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    yield {
-      type: "council_status",
-      councilStatus: {
-        statusId,
-        state: "error",
-        phase: args.phase,
-        label: args.label,
-        detail: args.detail,
-        role: args.role,
-        elapsedMs: Date.now() - start,
-        errorMessage: errMsg,
-      },
-    };
-    throw err;
-  }
-
-  yield {
-    type: "council_status",
-    councilStatus: {
-      statusId,
-      state: "done",
+    breadcrumb("council.phase.exit", {
       phase: args.phase,
       label: args.label,
-      detail: args.detail,
-      role: args.role,
+      statusId,
+      via: "tracedAsync",
       elapsedMs: Date.now() - start,
-      ...livenessFields(),
-    },
-  };
-
-  return result as T;
+      outcome: "done",
+    });
+    return result as T;
+  } finally {
+    endHeartbeat();
+  }
 }

@@ -704,6 +704,48 @@ export interface CouncilCallUsage {
 
 export type UsageCallback = (usage: CouncilCallUsage) => void;
 
+/**
+ * Post-mortem shape of ONE `CouncilLLM.generate` call.
+ *
+ * Exists to answer a question the logs could not (measured 2026-09-09): three
+ * candidates were recorded as `reason: "empty-completion"` within 5ms of each
+ * other. `tracedGenerate` throws when the call errors, so an empty completion
+ * means `generate` RETURNED "" successfully — but nothing in the record said
+ * whether a request had actually gone out. "The provider returned nothing" and
+ * "we never called the provider" produced the identical log line.
+ *
+ * Every field here is sourced from something the call actually observed; none
+ * is inferred. `requestIssued` is set at the moment the SDK call is entered, so
+ * `requestIssued:false` is positive proof the empty string came from a
+ * short-circuit BEFORE the network, not from the provider.
+ */
+export interface CouncilGenerateDiagnostics {
+  /** Wall-clock ms from entry of `generate` to its return/throw. */
+  durationMs: number;
+  /** True when the mock-LLM harness answered instead of a provider. */
+  viaMock: boolean;
+  /** True once the SDK stream call was actually entered (post key/runtime resolution). */
+  requestIssued: boolean;
+  /** How many times the SDK call was entered (>1 means `withVisibleRetry` retried). */
+  sdkAttempts: number;
+  /** Characters received through the stream `onDelta` callback. 0 with `requestIssued:true` = the provider answered with nothing. */
+  streamedChars: number;
+  /** Length of the provider text BEFORE `stripThinkBlocks`. */
+  rawTextChars: number;
+  /** Length of the text actually returned to the caller (post `stripThinkBlocks`). */
+  textChars: number;
+  /** Provider-reported finish reason, when the SDK surfaced one. */
+  finishReason?: string;
+  /** Provider-reported output tokens, when the SDK surfaced usage. */
+  outputTokens?: number;
+  /** `signal.aborted` sampled at entry — true means the attempt began already cancelled. */
+  signalAbortedAtStart: boolean;
+  /** `signal.aborted` sampled at exit. */
+  signalAbortedAtEnd: boolean;
+}
+
+export type GenerateDiagnosticsCallback = (diagnostics: CouncilGenerateDiagnostics) => void;
+
 export interface CouncilLLM {
   generate(
     modelId: string,
@@ -717,6 +759,12 @@ export interface CouncilLLM {
      * positional callers/mocks are unaffected. See withCouncilSignal in index.ts.
      */
     signal?: AbortSignal,
+    /**
+     * Per-call forensics sink (see {@link CouncilGenerateDiagnostics}). Trailing
+     * + optional so every existing literal test mock keeps satisfying the
+     * interface. Diagnostics only — nothing in the product path reads it.
+     */
+    onDiagnostics?: GenerateDiagnosticsCallback,
   ): Promise<string>;
   research(
     modelId: string,

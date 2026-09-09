@@ -17,10 +17,12 @@ import { createInterface } from "readline";
 //   - Stripping package.json from published files list
 import { PACKAGE_DESCRIPTION, PACKAGE_VERSION } from "./generated/version.js";
 import { formatRejection } from "./utils/format-rejection.js";
+import { installStderrMirror, restoreStderrMirror, setStderrMirrorFailureSink } from "./utils/stderr-mirror.js";
 
 const packageJson = { version: PACKAGE_VERSION, description: PACKAGE_DESCRIPTION };
 
 import { hydrateChatEnvFromKeychain } from "./chat/chat-keychain.js";
+import { breadcrumb, getLastBreadcrumb } from "./council/crash-breadcrumb.js";
 import { setRenderSink } from "./ee/render.js";
 import {
   type CouncilAnswersFile,
@@ -74,9 +76,24 @@ process.on("SIGTERM", exitCleanlyOnSigterm);
 // process alive. Headless / CLI paths keep the original fail-fast behaviour.
 let _tuiActive = false;
 
+// ── B5 (G4) — capture stderr while the TUI owns the terminal ────────────────
+// Implementation + the precise limits of what a JS-level tee can and cannot see
+// (it does NOT see a native V8/JSC fatal) live in src/utils/stderr-mirror.ts.
+setStderrMirrorFailureSink((message) => appendCrashLog("STDERR_MIRROR", message));
+
 export function setTuiActive(active: boolean): void {
   _tuiActive = active;
   (globalThis as Record<string, unknown>).__muonroiTuiActive = active;
+  try {
+    if (active) installStderrMirror();
+    else restoreStderrMirror();
+  } catch (err) {
+    // Diagnostics must never take the TUI down.
+    appendCrashLog(
+      "STDERR_MIRROR",
+      `[index] setTuiActive mirror toggle failed: ${(err as Error)?.message ?? String(err)}`,
+    );
+  }
 }
 
 export function appendCrashLog(label: string, msg: string): void {
@@ -198,6 +215,77 @@ process.on("unhandledRejection", (reason) => {
   console.error("Unhandled rejection:", msg);
   process.exit(1);
 });
+
+// ── B4 (G3) — record that the process ENDED ─────────────────────────────────
+// The measured crash left no exit record of any kind: `~/.muonroi-cli/crash.log`
+// has no entry for the day, consistent with neither `uncaughtException` nor
+// `unhandledRejection` having fired. Only sync work is legal in an `exit`
+// handler, which is exactly what a breadcrumb append is.
+//
+// CAVEAT, already known in this file (see the mock-recording dump wiring
+// further down): on Windows + bun, `process.on("exit")` callbacks have been
+// observed NOT to run when `process.exit()` is called from deep async chains.
+// So this record is confirmatory, not the primary evidence — the always-on
+// breadcrumb trail is. An exit record that is MISSING while breadcrumbs exist
+// is itself a signal: the process did not leave through a JS exit path.
+process.on("exit", (code) => {
+  const last = getLastBreadcrumb();
+  breadcrumb("process.exit", {
+    exitCode: code,
+    tuiActive: _tuiActive,
+    lastMarker: last?.marker ?? null,
+    lastMarkerAtMs: last?.tMs ?? null,
+    lastMarkerPhase: (last?.phase as string | undefined) ?? null,
+  });
+});
+
+// Signal handlers. IMPORTANT: attaching ANY listener for a signal suppresses
+// the runtime's default terminate action for it. To keep behaviour byte-identical
+// we re-raise the signal after removing ourselves WHEN WE ARE THE ONLY LISTENER
+// — i.e. when nobody else has deliberately taken the signal over. With the TUI
+// mounted, the abort-only SIGINT handler registered before mountTUI is a second
+// listener, so we correctly leave it alone and the session survives Ctrl+C.
+// Conventional 128+signum exit codes; the mock-recording wiring further down
+// this file already uses 130/143 for SIGINT/SIGTERM, so this matches.
+const SIGNAL_EXIT_CODES: Partial<Record<NodeJS.Signals, number>> = {
+  SIGHUP: 129,
+  SIGINT: 130,
+  SIGQUIT: 131,
+  SIGTERM: 143,
+  SIGBREAK: 149,
+};
+
+const SIGNALS_FOR_PLATFORM: NodeJS.Signals[] =
+  process.platform === "win32" ? ["SIGINT", "SIGTERM", "SIGBREAK"] : ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"];
+
+for (const sig of SIGNALS_FOR_PLATFORM) {
+  const handler = (): void => {
+    const last = getLastBreadcrumb();
+    breadcrumb("process.signal", {
+      signal: sig,
+      tuiActive: _tuiActive,
+      otherListeners: Math.max(0, process.listenerCount(sig) - 1),
+      lastMarker: last?.marker ?? null,
+      lastMarkerAtMs: last?.tMs ?? null,
+    });
+    if (process.listenerCount(sig) === 1) {
+      // We are the ONLY listener, so we are the reason the runtime's default
+      // terminate did not happen — a diagnostic must never turn a killable CLI
+      // into an unkillable one. Exit with the conventional 128+signum code.
+      // (Re-raising via `process.kill(self, sig)` was measured on Windows to
+      // TerminateProcess immediately without even delivering to the listener,
+      // so it is not a faithful "restore the default" either.)
+      process.exit(SIGNAL_EXIT_CODES[sig] ?? 1);
+    }
+  };
+  try {
+    process.on(sig, handler);
+  } catch (err) {
+    // Not every signal name is valid on every platform; a rejected registration
+    // must not stop the CLI from booting.
+    appendCrashLog("SIGNAL_REGISTER", `[index] cannot listen for ${sig}: ${(err as Error)?.message ?? String(err)}`);
+  }
+}
 
 // ── EE render sink wiring (CQ-16a) ─────────────────────────────────────────
 // Single-orchestrator-at-a-time invariant holds (no multi-session concurrency in v1.6).

@@ -1773,7 +1773,11 @@ function detectRoleFromSystem(system: string): string | undefined {
  */
 function createProductLlm(base: CouncilLLM, runId: string, capUsd: number): CouncilLLM {
   return {
-    async generate(modelId, system, prompt, maxTokens) {
+    // `onDiagnostics` (7th param) is forwarded so the council candidate-failure
+    // forensics survive this wrapper. `signal` is deliberately NOT touched here:
+    // this wrapper has never forwarded it and adding cancellation would be a
+    // behaviour change, not a diagnostic.
+    async generate(modelId, system, prompt, maxTokens, _onUsage, _signal, onDiagnostics) {
       const provider = detectProviderForModel(modelId);
       const estIn = Math.ceil((system.length + prompt.length) / 4);
       const estOut = maxTokens ?? 2048;
@@ -1791,9 +1795,17 @@ function createProductLlm(base: CouncilLLM, runId: string, capUsd: number): Coun
       // we fall back to chars/4 — preserves prior behavior.
       let captured: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | undefined;
       try {
-        const text = await base.generate(modelId, system, prompt, maxTokens, (u) => {
-          captured = u;
-        });
+        const text = await base.generate(
+          modelId,
+          system,
+          prompt,
+          maxTokens,
+          (u) => {
+            captured = u;
+          },
+          undefined,
+          onDiagnostics,
+        );
         const actualIn = captured?.inputTokens && captured.inputTokens > 0 ? captured.inputTokens : estIn;
         const actualOut =
           captured?.outputTokens && captured.outputTokens > 0
