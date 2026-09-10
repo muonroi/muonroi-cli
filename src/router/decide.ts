@@ -8,7 +8,7 @@
 
 import { getDefaultEEClient } from "../ee/intercept.js";
 import type { RouteOutcome } from "../ee/types.js";
-import { getModelInfo, getModelsForProvider } from "../models/registry.js";
+import { getModelInfo, getTextModelsForProvider } from "../models/registry.js";
 import { type EETier, taskTypeToRole, taskTypeToTier } from "../pil/task-tier-map.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
@@ -175,7 +175,7 @@ function resolveEffectiveDefaults(opts: DecideOpts): { model: string; provider: 
       // Guard: getModelByTier may return a model from a different provider
       // when the preferred provider has no model for the requested tier.
       if (m && m.provider === p) return { model: m.id, provider: m.provider ?? p };
-      const models = getModelsForProvider(p);
+      const models = getTextModelsForProvider(p);
       if (models.length > 0) return { model: models[0].id, provider: p };
     }
   }
@@ -201,7 +201,7 @@ function resolveTierModel(
       // Guard: getModelByTier may return a model from a different provider
       // when the preferred provider has no model for the requested tier.
       if (m && m.provider === p) return { id: m.id, provider: m.provider ?? p };
-      const models = getModelsForProvider(p);
+      const models = getTextModelsForProvider(p);
       if (models.length > 0) return { id: models[0].id, provider: p };
     }
   }

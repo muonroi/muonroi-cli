@@ -1,4 +1,4 @@
-import { getModelByTier, getModelsForProvider } from "../../models/registry.js";
+import { getModelByTier, getTextModelsForProvider } from "../../models/registry.js";
 import { PROVIDER_ENDPOINTS } from "../../providers/endpoints.js";
 import {
   KEYCHAIN_PROVIDER_IDS,
@@ -68,7 +68,7 @@ function pickModelForProvider(id: ProviderId): string | null {
     const m = getModelByTier(tier, id);
     if (m && m.provider === id) return m.id;
   }
-  const fallback = getModelsForProvider(id);
+  const fallback = getTextModelsForProvider(id);
   return fallback[0]?.id ?? null;
 }
 

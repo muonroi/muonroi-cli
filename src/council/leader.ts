@@ -1,5 +1,5 @@
 import { resolveGsdPremiumModel } from "../gsd/model-tier.js";
-import { getCatalogCouncilRouting, getModelInfo, getModelsForProvider } from "../models/registry.js";
+import { getCatalogCouncilRouting, getModelInfo, getTextModelsForProvider } from "../models/registry.js";
 import { getConfiguredProviders } from "../providers/keychain.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
@@ -252,7 +252,7 @@ export async function resolvePlanCouncilLeader(sessionModelId: string): Promise<
  */
 function pickCatalogLeader(providerId: string): { id: string } | undefined {
   let best: { id: string; rank: number } | undefined;
-  for (const m of getModelsForProvider(providerId)) {
+  for (const m of getTextModelsForProvider(providerId)) {
     if (!m.roles?.includes("leader")) continue;
     const rank = m.tier ? (TIER_RANK[m.tier] ?? 0) : 0;
     if (!best || rank > best.rank) best = { id: m.id, rank };
@@ -281,7 +281,7 @@ export async function resolveLeaderModelDetailed(sessionModelId: string): Promis
 
   // Build candidate set ON THE SESSION PROVIDER ONLY.
   const candidates = new Map<string, "fast" | "balanced" | "premium">();
-  for (const m of getModelsForProvider(sessionProviderId)) {
+  for (const m of getTextModelsForProvider(sessionProviderId)) {
     if (m.tier) candidates.set(m.id, m.tier);
   }
   // Include any configured role-models that happen to be on session provider.
@@ -388,7 +388,7 @@ async function resolveCatalogCouncilParticipants(): Promise<Array<{ role: ModelR
       if (m?.provider === provider) modelId = m.id;
     }
     if (!modelId) {
-      const models = getModelsForProvider(provider);
+      const models = getTextModelsForProvider(provider);
       const routable = models.find((m) => m.tierRouting !== false);
       modelId = routable?.id ?? models[0]?.id;
     }
@@ -483,7 +483,7 @@ export async function buildCouncilCandidatePool(
     if (byId.size >= 8) break;
     if (isProviderDisabled(provider)) continue;
     if (!(await isProviderReachable(provider))) continue;
-    for (const m of getModelsForProvider(provider)) {
+    for (const m of getTextModelsForProvider(provider)) {
       if (m.tierRouting === false) continue;
       add(m.id);
       if (byId.size >= 8) break;
@@ -501,7 +501,7 @@ async function resolveSameProviderCandidates(
   const canReach = await isProviderReachable(providerId);
   if (!canReach) return [];
 
-  const providerModels = getModelsForProvider(providerId);
+  const providerModels = getTextModelsForProvider(providerId);
   if (providerModels.length === 0) {
     return roles.map((role) => ({ role, model: sessionModelId }));
   }

@@ -9,7 +9,7 @@ import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
 import { readArtifact } from "../flow/artifact-io.js";
 import { parseResumeDigest, readSprintOutcomes } from "../flow/run-artifacts.js";
 import { createRun, loadRun } from "../flow/run-manager.js";
-import { getModelsForProvider } from "../models/registry.js";
+import { getTextModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
 import { ALL_PROVIDER_IDS } from "../providers/types.js";
@@ -2442,7 +2442,7 @@ export async function resolveRoleAssignments(
     } catch {
       continue;
     }
-    inventory.push(...getModelsForProvider(p));
+    inventory.push(...getTextModelsForProvider(p));
   }
   if (inventory.length === 0) return out;
 

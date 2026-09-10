@@ -21,6 +21,10 @@
       "aliases": ["deepseek-flash-native"],
       "supports_vision": false,
       "roles": ["research", "implement", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -42,6 +46,10 @@
       "aliases": ["deepseek-pro-native"],
       "supports_vision": false,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -64,6 +72,10 @@
       "description": "StepFun reasoning model with documented tool calling and 256K context. Uses the OpenAI-compatible chat-completions API.",
       "supports_vision": false,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -86,6 +98,10 @@
       "description": "Versioned StepFun reasoning model with documented tool calling and 256K context. Uses the OpenAI-compatible chat-completions API.",
       "supports_vision": false,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -107,6 +123,10 @@
       "description": "StepFun's multimodal reasoning model with documented tool calling, 256K context, and image/video understanding. The documented maximum output-token limit is not published.",
       "supports_vision": true,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -116,6 +136,10 @@
       "provider": "stepfun",
       "tier": "balanced",
       "tier_routing": false,
+      "modalities": {
+        "input": ["text", "audio"],
+        "output": ["text", "audio"]
+      },
       "context_window": 0,
       "max_output_tokens": 0,
       "input_price_per_million": 1.5,
@@ -134,6 +158,10 @@
       "provider": "stepfun",
       "tier": "balanced",
       "tier_routing": false,
+      "modalities": {
+        "input": ["text", "audio"],
+        "output": ["text", "audio"]
+      },
       "context_window": 0,
       "max_output_tokens": 0,
       "input_price_per_million": 1.5,
@@ -152,6 +180,10 @@
       "provider": "stepfun",
       "tier": "fast",
       "tier_routing": false,
+      "modalities": {
+        "input": ["text"],
+        "output": ["audio"]
+      },
       "context_window": 0,
       "max_output_tokens": 0,
       "input_price_per_million": 0,
@@ -171,6 +203,10 @@
       "provider": "stepfun",
       "tier": "fast",
       "tier_routing": false,
+      "modalities": {
+        "input": ["audio"],
+        "output": ["text"]
+      },
       "context_window": 0,
       "max_output_tokens": 0,
       "input_price_per_million": 0,
@@ -190,6 +226,10 @@
       "provider": "stepfun",
       "tier": "fast",
       "tier_routing": false,
+      "modalities": {
+        "input": ["audio"],
+        "output": ["text"]
+      },
       "context_window": 0,
       "max_output_tokens": 0,
       "input_price_per_million": 0,
@@ -209,6 +249,10 @@
       "provider": "stepfun",
       "tier": "balanced",
       "tier_routing": false,
+      "modalities": {
+        "input": ["image"],
+        "output": ["image"]
+      },
       "context_window": 0,
       "max_output_tokens": 0,
       "input_price_per_million": 0,
@@ -239,6 +283,10 @@
       "aliases": ["gpt-5.5-oauth"],
       "supports_vision": false,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -259,6 +307,10 @@
       "aliases": ["gpt-5.4-oauth"],
       "supports_vision": false,
       "roles": ["implement", "verify", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -279,6 +331,10 @@
       "aliases": ["gpt-5.4-mini-oauth"],
       "supports_vision": false,
       "roles": ["research", "implement", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -300,6 +356,10 @@
       "aliases": ["grok-4.5", "grok-4.5-latest", "grok-latest", "grok-4"],
       "supports_vision": true,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-search"
     },
@@ -320,6 +380,10 @@
       "aliases": ["composer-2.5", "composer-2.5-fast", "composer", "grok-composer-2.5", "grok-build-0.1"],
       "supports_vision": false,
       "roles": ["implement", "research", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-search"
     },
@@ -329,6 +393,10 @@
       "provider": "zai",
       "tier": "fast",
       "tier_routing": false,
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0.3,
@@ -361,6 +429,10 @@
       "aliases": ["glm-4-flash", "glm-4-flashx", "glm-4.7-flashx"],
       "supports_vision": false,
       "roles": ["research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -382,6 +454,10 @@
       "aliases": ["glm-4.5-airx"],
       "supports_vision": false,
       "roles": ["research", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -403,6 +479,10 @@
       "aliases": [],
       "supports_vision": false,
       "roles": ["leader", "implement"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -423,6 +503,10 @@
       "aliases": [],
       "supports_vision": false,
       "roles": ["implement", "research", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -432,6 +516,10 @@
       "provider": "zai",
       "tier": "balanced",
       "tier_routing": false,
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0.3,
@@ -464,6 +552,10 @@
       "aliases": [],
       "supports_vision": false,
       "roles": ["leader", "implement", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -484,6 +576,10 @@
       "aliases": ["glm-5.2[1m]"],
       "supports_vision": true,
       "roles": ["leader", "implement", "verify"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -505,6 +601,10 @@
       "aliases": [],
       "supports_vision": false,
       "roles": ["implement", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -526,6 +626,10 @@
       "aliases": ["kimi-k2.7-code-go"],
       "supports_vision": false,
       "roles": ["implement", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -547,6 +651,10 @@
       "aliases": ["kimi-k2.6-go"],
       "supports_vision": false,
       "roles": ["research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -567,6 +675,10 @@
       "aliases": ["glm-5.2-go"],
       "supports_vision": false,
       "roles": ["leader", "implement", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -587,6 +699,10 @@
       "aliases": ["glm-5.1-go"],
       "supports_vision": false,
       "roles": ["implement", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -595,6 +711,10 @@
       "name": "MiniMax M3 (OpenCode Go)",
       "provider": "opencode-go",
       "tier": "balanced",
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0,
@@ -614,6 +734,10 @@
       "name": "MiniMax M2.7 (OpenCode Go)",
       "provider": "opencode-go",
       "tier": "balanced",
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0,
@@ -645,6 +769,10 @@
       "aliases": ["qwen-3.7-max-go"],
       "supports_vision": false,
       "roles": ["leader", "implement", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -665,6 +793,10 @@
       "aliases": ["qwen-3.7-plus-go"],
       "supports_vision": false,
       "roles": ["implement", "verify", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -673,6 +805,10 @@
       "name": "Qwen 3.6 Plus (OpenCode Go)",
       "provider": "opencode-go",
       "tier": "balanced",
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0,
@@ -704,6 +840,10 @@
       "aliases": ["deepseek-v4-pro-go"],
       "supports_vision": false,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -724,6 +864,10 @@
       "aliases": ["deepseek-v4-flash-go"],
       "supports_vision": false,
       "roles": ["research", "implement", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -732,6 +876,10 @@
       "name": "MiMo V2.5 (OpenCode Go)",
       "provider": "opencode-go",
       "tier": "fast",
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0,
@@ -751,6 +899,10 @@
       "name": "MiMo V2.5 Pro (OpenCode Go)",
       "provider": "opencode-go",
       "tier": "balanced",
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0,
@@ -783,6 +935,10 @@
       "aliases": ["fable-5", "fable", "claude-fable-5-latest"],
       "supports_vision": true,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-search"
     },
@@ -804,6 +960,10 @@
       "aliases": ["opus-5", "opus", "claude-opus-5-latest"],
       "supports_vision": true,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-search"
     },
@@ -826,6 +986,10 @@
       "aliases": ["sonnet-5", "sonnet", "claude-sonnet-5-latest"],
       "supports_vision": true,
       "roles": ["implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-search"
     },
@@ -847,6 +1011,10 @@
       "aliases": ["claude-haiku-4-5", "haiku-4.5", "haiku"],
       "supports_vision": true,
       "roles": ["research", "verify"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-search"
     }

@@ -803,6 +803,12 @@ export interface ModelInfo {
   /** Extra tiers this model may satisfy in getModelByTier (primary tier remains `tier`). */
   routingTiers?: ModelTier[];
   roles?: string[];
+  /**
+   * What the model physically accepts and returns. Distinct from `roles`, which
+   * says which JOBS a model may be assigned — a routing concept, not a modality
+   * one. Absent means text-in/text-out (see `canServeTextRequests`).
+   */
+  modalities?: ModelModalities;
   /** Part E — model has native online web research (its own web_search/browsing). */
   nativeWebResearch?: boolean;
   /**
@@ -825,6 +831,25 @@ export interface ModelInfo {
    * capability class decides (StepFun defaults on; everyone else off).
    */
   emitsNativeToolCallMarkup?: boolean;
+}
+
+/** A modality a model can accept as input or produce as output. */
+export type Modality = "text" | "image" | "audio";
+
+/**
+ * Declared input/output modalities for a catalog model.
+ *
+ * An input/output PAIR rather than a single label, because the catalog contains
+ * models that convert between modalities: a text-to-speech row is text-in but
+ * audio-out, and a speech-recognition row is audio-in but text-out. A single
+ * label cannot express either, yet both must be kept out of a text seat — for
+ * opposite reasons (one cannot return the answer, the other cannot read the
+ * question). The pair also covers the nine text+image models without needing a
+ * second concept alongside `supports_vision`.
+ */
+export interface ModelModalities {
+  input: Modality[];
+  output: Modality[];
 }
 
 export type AgentMode = "agent" | "plan" | "ask";

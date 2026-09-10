@@ -13,7 +13,7 @@
 
 import { type ModelMessage, stepCountIs } from "ai";
 import type { IntentKind } from "../council/types.js";
-import { getModelsForProvider } from "../models/registry.js";
+import { getTextModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {
   createProviderFactory,
@@ -619,7 +619,7 @@ export class CouncilManager {
           // Guard: getModelByTier may return a model from a different provider
           // when the preferred provider has no model for the requested tier.
           if (m && m.provider === p) return { modelId: m.id };
-          const models = getModelsForProvider(p);
+          const models = getTextModelsForProvider(p);
           if (models.length > 0) return { modelId: models[0].id };
         }
       }
@@ -637,7 +637,7 @@ export class CouncilManager {
       .catch(() => false);
     if (!canReach) return [];
 
-    const providerModels = getModelsForProvider(providerId);
+    const providerModels = getTextModelsForProvider(providerId);
     if (providerModels.length === 0) {
       return roles.map((role) => ({ role, model: this.deps.getModelId() }));
     }

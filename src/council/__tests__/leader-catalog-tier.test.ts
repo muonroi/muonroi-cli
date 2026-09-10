@@ -35,9 +35,13 @@ const catalog: ModelInfo[] = [
 
 describe("resolveLeaderModel — catalog leader pick is tier-ranked, not order-ranked", () => {
   beforeEach(() => {
-    vi.spyOn(registry, "getModelsForProvider").mockImplementation(
-      (p) => catalog.filter((m) => m.provider === p) as ModelInfo[],
-    );
+    // pickCatalogLeader reads the TEXT view of the provider's catalog, so a
+    // non-text row (audio/image) can never be seated as leader. Every fixture
+    // below is a plain text model, so the two views are identical here and this
+    // test's subject — tier ranking vs catalog order — is unaffected.
+    const forProvider = (p: string) => catalog.filter((m) => m.provider === p) as ModelInfo[];
+    vi.spyOn(registry, "getModelsForProvider").mockImplementation((p) => forProvider(p));
+    vi.spyOn(registry, "getTextModelsForProvider").mockImplementation((p) => forProvider(p));
     vi.spyOn(runtime, "detectProviderForModel").mockImplementation((id) => {
       const m = catalog.find((x) => x.id === id);
       return (m?.provider ?? "stepfun") as ReturnType<typeof runtime.detectProviderForModel>;

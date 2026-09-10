@@ -116,19 +116,101 @@ function isTierRoutable(m: ModelInfo): boolean {
   return m.tierRouting !== false;
 }
 
+/**
+ * Can this model serve a TEXT request — read a text prompt and return a text
+ * completion? Every text-task selector must gate on this.
+ *
+ * Measured defect this exists for: a council seat was filled with
+ * `stepaudio-2.5-realtime` (stepfun), which answered
+ * `The model "stepaudio-2.5-realtime" does not exist or you do not have access
+ * to it` — 3 occurrences in ~/.muonroi-cli/debug.log on 2026-09-10, out of 12
+ * `[council.generate] call failed` lines. Reproduced deterministically in
+ * `__tests__/text-capability.test.ts`: role-registry hands the Reviewer slot
+ * that exact model, and `sprint-runner.ts:1360` feeds the Reviewer model to a
+ * council call.
+ *
+ * Two conditions, because each catches a mistake the other misses:
+ *
+ *  1. DECLARED MODALITY — the model must accept text and return text.
+ *     Catches a converter: `stepaudio-2.5-tts` is text-in but audio-out (it
+ *     cannot return a debate turn), `stepaudio-2.5-asr` is audio-in but
+ *     text-out (it cannot read the prompt). Absent → text-in/text-out, so a
+ *     model that never declares the field is never disqualified by it.
+ *
+ *  2. A DECLARED-ZERO TEXT CONTEXT — `contextWindow === 0`.
+ *     Catches a model whose declared modality includes text but which publishes
+ *     no text budget in either direction. Both `stepaudio-2.5-chat` and
+ *     `stepaudio-2.5-realtime` describe themselves as "Audio-and-text" in the
+ *     catalog, so modality alone would readmit them, yet both publish
+ *     `context_window: 0` / `max_output_tokens: 0` and the realtime row is
+ *     served over a WebSocket API, not chat-completions.
+ *
+ *     Note this tests for an explicit ZERO, not for "greater than zero". Both
+ *     signals follow the same rule: an ABSENT field never disqualifies, only a
+ *     declared one does. `context_window` is required by the catalog schema so
+ *     every real row states it, but a hand-built `ModelInfo` may omit it, and
+ *     "not stated" must not mean "cannot do text".
+ *
+ * `max_output_tokens` is deliberately NOT part of the test: `step-3.7-flash` is
+ * a live text model that publishes `max_output_tokens: 0`, so requiring it
+ * would drop a model that works.
+ *
+ * Neither condition looks at the model id, the provider id, or `roles`. `roles`
+ * is a routing concept — which jobs a model may be ASSIGNED — and 7 catalog
+ * rows carry no roles while being perfectly good text models (5 opencode-go
+ * LLMs, 2 zai vision models), so filtering on it would delete most of two
+ * providers' fallback pools to fix a third provider's bug.
+ */
+export function canServeTextRequests(m: ModelInfo): boolean {
+  const modalities = m.modalities;
+  const acceptsText = modalities ? modalities.input.includes("text") : true;
+  const emitsText = modalities ? modalities.output.includes("text") : true;
+  const declaresNoTextBudget = typeof m.contextWindow === "number" && m.contextWindow <= 0;
+  return acceptsText && emitsText && !declaresNoTextBudget;
+}
+
+/** True when the resolved model id can serve a text request. Unknown id → false. */
+export function modelCanServeTextRequests(idOrAlias: string): boolean {
+  const info = getModelInfo(idOrAlias);
+  return info ? canServeTextRequests(info) : false;
+}
+
 function matchesTier(m: ModelInfo, tier: "fast" | "balanced" | "premium"): boolean {
   return m.tier === tier || m.routingTiers?.includes(tier) === true;
 }
 
 export function getModelByTier(tier: "fast" | "balanced" | "premium", preferProvider?: string): ModelInfo | undefined {
   if (preferProvider) {
-    return MODELS.find((m) => matchesTier(m, tier) && m.provider === preferProvider && isTierRoutable(m));
+    return MODELS.find(
+      (m) => matchesTier(m, tier) && m.provider === preferProvider && isTierRoutable(m) && canServeTextRequests(m),
+    );
   }
-  return MODELS.find((m) => matchesTier(m, tier) && isTierRoutable(m));
+  return MODELS.find((m) => matchesTier(m, tier) && isTierRoutable(m) && canServeTextRequests(m));
 }
 
+/**
+ * Every catalog model for a provider, including non-text ones.
+ *
+ * Use this only to LIST or address models (the config screens let a user
+ * enable/disable an audio model, and `-m <id>` must still resolve one). Any
+ * caller that is picking a model to SEND A PROMPT TO wants
+ * `getTextModelsForProvider` instead.
+ */
 export function getModelsForProvider(providerId: string): ModelInfo[] {
   return MODELS.filter((m) => m.provider === providerId);
+}
+
+/**
+ * The provider's models that can serve a text request, in catalog order.
+ *
+ * This is the accessor for every text-task selector — council panels, role
+ * assignment, router fallbacks, GSD tier promotion. Filtering only removes
+ * candidates that cannot answer a text prompt at all; relative order and every
+ * text model's eligibility are untouched, so existing fallback behaviour for
+ * text models is unchanged.
+ */
+export function getTextModelsForProvider(providerId: string): ModelInfo[] {
+  return MODELS.filter((m) => m.provider === providerId && canServeTextRequests(m));
 }
 
 /**
@@ -163,13 +245,24 @@ export function modelHasNativeWebResearch(idOrAlias: string): boolean {
  */
 export function getWebResearchModel(reachableIds?: ReadonlySet<string>): ModelInfo | undefined {
   return MODELS.find(
-    (m) => m.nativeWebResearch === true && isTierRoutable(m) && (!reachableIds || reachableIds.has(m.id)),
+    (m) =>
+      m.nativeWebResearch === true &&
+      isTierRoutable(m) &&
+      canServeTextRequests(m) &&
+      (!reachableIds || reachableIds.has(m.id)),
   );
 }
 
+/**
+ * Last-resort default model (e.g. `getCatalogDefaultModel` when no provider
+ * default and no tier match exists). Text-only: this becomes the SESSION model,
+ * so a non-text row here would 404 on the user's first prompt. Today's catalog
+ * lists a text model first, which is why this was never hit — but that is
+ * catalog ordering, not a guarantee.
+ */
 export function getFirstCatalogModel(): ModelInfo {
-  const m = MODELS.find(() => true);
-  if (!m) throw new Error("No models in catalog. Check src/models/catalog.json or catalog endpoint.");
+  const m = MODELS.find(canServeTextRequests);
+  if (!m) throw new Error("No text-capable models in catalog. Check src/models/catalog.json or catalog endpoint.");
   return m;
 }
 

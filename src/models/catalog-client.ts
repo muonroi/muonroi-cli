@@ -115,6 +115,12 @@ export interface CatalogDocument {
   provider_policies?: Record<string, CatalogProviderPolicy>;
 }
 
+/** Declared input/output modalities for one catalog row. */
+export interface CatalogModalities {
+  input: string[];
+  output: string[];
+}
+
 export interface CatalogModel {
   id: string;
   name: string;
@@ -146,6 +152,20 @@ export interface CatalogModel {
   /** Additional tiers for automatic routing (primary tier remains `tier`). */
   routing_tiers?: string[];
   roles?: string[];
+  /**
+   * What the model physically accepts and returns.
+   *
+   * NOT the same axis as `roles`: `roles` says which jobs a model may be
+   * ASSIGNED, so a plain text model that carries no role tags is still a text
+   * model. Filtering text work on `roles` would drop 7 rows that are ordinary
+   * text (5 opencode-go LLMs) or text+vision (2 zai) models.
+   *
+   * Absent → text-in/text-out, so a catalog that predates this field (or a
+   * third-party one that never adopts it) keeps every model selectable.
+   * `validateCatalogModalityCoverage` is what stops the BUNDLED catalog from
+   * relying on that default.
+   */
+  modalities?: CatalogModalities;
   /**
    * Part E — model has NATIVE online web research (its own web_search / browsing
    * / Live Search), not just codebase read. Source of truth for whether the
@@ -207,6 +227,12 @@ const CatalogModelSchema = z
     tier_routing: z.boolean().optional(),
     routing_tiers: z.array(z.string()).optional(),
     roles: z.array(z.string()).optional(),
+    modalities: z
+      .object({
+        input: z.array(z.enum(["text", "image", "audio"])).min(1),
+        output: z.array(z.enum(["text", "image", "audio"])).min(1),
+      })
+      .optional(),
     native_web_research: z.boolean().optional(),
     web_research_kind: z.string().nullable().optional(),
     emits_native_tool_call_markup: z.boolean().optional(),
@@ -477,6 +503,7 @@ export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
     tierRouting: m.tier_routing ?? true,
     routingTiers: m.routing_tiers as ModelInfo["routingTiers"],
     roles: m.roles,
+    modalities: m.modalities as ModelInfo["modalities"],
     nativeWebResearch: m.native_web_research ?? false,
     emitsNativeToolCallMarkup: m.emits_native_tool_call_markup,
     // Declared provider limits must SURVIVE into runtime. Omitting this mapping
@@ -494,4 +521,30 @@ export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
         }
       : undefined,
   };
+}
+
+/**
+ * @testonly
+ *
+ * Rows in the BUNDLED catalog that do not declare `modalities`.
+ *
+ * A deliberate test seam, not a runtime path: nothing in the CLI needs to ask
+ * this at boot, because `canServeTextRequests` already treats an undeclared row
+ * as text and so degrades safely. Its only job is to fail a test when THIS
+ * repo's catalog stops declaring the field. Kept beside the schema — which is
+ * what makes the field optional — so the next person to add a row reads the
+ * reason where the looseness is defined.
+ *
+ * The field is optional in the schema on purpose (a remote or third-party
+ * catalog must keep working without it, and absent means text so nothing is
+ * silently disqualified). That default is a compatibility shim, not a licence
+ * for this repo's own catalog to skip the declaration: an audio row added
+ * without it would inherit "text" and land in a council seat again, discovered
+ * as a provider 404 in a user's run. Surfacing the omission as a failing test
+ * moves that discovery to the commit that introduces it.
+ *
+ * Returns `provider/id` for each undeclared row; empty means full coverage.
+ */
+export function validateCatalogModalityCoverage(doc: CatalogDocument): string[] {
+  return doc.models.filter((m) => !m.modalities).map((m) => `${m.provider}/${m.id}`);
 }

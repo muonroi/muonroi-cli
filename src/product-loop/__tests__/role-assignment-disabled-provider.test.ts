@@ -32,16 +32,24 @@ vi.mock("../../providers/keychain.js", () => ({
     return "sk-test";
   },
 }));
+const fixtureModels = (p: string) =>
+  [
+    { id: `${p}/premium-a`, provider: p, tier: "premium" },
+    { id: `${p}/premium-b`, provider: p, tier: "premium" },
+    { id: `${p}/balanced-a`, provider: p, tier: "balanced" },
+    { id: `${p}/balanced-b`, provider: p, tier: "balanced" },
+    { id: `${p}/fast-a`, provider: p, tier: "fast" },
+    { id: `${p}/fast-b`, provider: p, tier: "fast" },
+  ] as unknown[];
+
 vi.mock("../../models/registry.js", () => ({
-  getModelsForProvider: (p: string) =>
-    [
-      { id: `${p}/premium-a`, provider: p, tier: "premium" },
-      { id: `${p}/premium-b`, provider: p, tier: "premium" },
-      { id: `${p}/balanced-a`, provider: p, tier: "balanced" },
-      { id: `${p}/balanced-b`, provider: p, tier: "balanced" },
-      { id: `${p}/fast-a`, provider: p, tier: "fast" },
-      { id: `${p}/fast-b`, provider: p, tier: "fast" },
-    ] as unknown[],
+  getModelsForProvider: (p: string) => fixtureModels(p),
+  // Text-task selectors moved onto getTextModelsForProvider + canServeTextRequests
+  // so a non-text catalog row (audio/image) can never be seated in a role that
+  // gets prompted. These fixtures are all plain text models, so the text view is
+  // the same list and this test's behaviour is unchanged.
+  getTextModelsForProvider: (p: string) => fixtureModels(p),
+  canServeTextRequests: () => true,
 }));
 vi.mock("../../ee/bridge.js", () => ({ routeModel: async () => null }));
 
