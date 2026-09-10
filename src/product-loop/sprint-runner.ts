@@ -176,6 +176,53 @@ export function getImplTotalTimeoutMs(): number {
 }
 
 /**
+ * SILENCE budget for the ISOLATED implementation stage (ms). Override with
+ * MUONROI_SPRINT_ISOLATED_IMPL_IDLE_MS.
+ *
+ * Time since the child's LAST sub-agent activity notification (one fires per
+ * tool call it starts) — the isolated path's equivalent of the streamed path's
+ * time-to-next-chunk budget. It defaults to `getImplIdleTimeoutMs()` rather
+ * than a number of its own because `withImplIdleWatchdog` has guarded the SAME
+ * stage with that 4-minute window in production; the two paths differ in the
+ * signal available, not in how long an implementation turn may legitimately go
+ * quiet.
+ *
+ * Derivation, measured on run mtv9v1xu7615: 196 activity events across the 900s
+ * window is a mean gap of 4.6s, and the final gap was 0.8s. 240s is ~52× that
+ * mean, so a child working at anything like the observed cadence is never cut —
+ * while still leaving room for one long-running tool call (a build, a test
+ * suite) between notifications.
+ */
+export function getIsolatedImplIdleTimeoutMs(): number {
+  const raw = process.env.MUONROI_SPRINT_ISOLATED_IMPL_IDLE_MS;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(n) && n > 0) return n;
+  return getImplIdleTimeoutMs();
+}
+
+/**
+ * ABSOLUTE ceiling for the ISOLATED implementation stage (ms). Override with
+ * MUONROI_SPRINT_ISOLATED_IMPL_CEILING_MS.
+ *
+ * An idle-only rule can never end a child that emits a tool call forever, so a
+ * hard stop remains. It is NOT the wedge guard any more — the idle window above
+ * catches silence ~15× sooner — it exists solely to bound a looping child.
+ *
+ * Derivation: run mtv9v1xu7615 was STILL emitting (last event 0.8s earlier) when
+ * the old flat 900s budget cancelled it, so any ceiling at or below 900s
+ * reproduces that defect by construction. That run is the only measurement of
+ * how long a productive isolated stage lasts here, and it is a lower bound, not
+ * a duration — so the ceiling is set 4× above it. At 240× the idle window the
+ * two bounds cannot race: a silent child is always cut by the idle rule first.
+ */
+export function getIsolatedImplCeilingMs(): number {
+  const raw = process.env.MUONROI_SPRINT_ISOLATED_IMPL_CEILING_MS;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(n) && n > 0) return n;
+  return 60 * 60 * 1000; // 60 min — 4× the 900s at which a working child was cut
+}
+
+/**
  * Whether the implement stage runs in an ISOLATED bounded sub-agent context
  * (ctx.runIsolatedTask) instead of the shared top-level turn (processMessageFn).
  * Default ON. Disable with MUONROI_SPRINT_ISOLATED_IMPL=0.
@@ -353,6 +400,14 @@ export function logSprintImplError(
     implModelId?: string;
     elapsedMs: number;
     isolated: boolean;
+    /**
+     * Which isolated-impl bound fired, when the failure was a deadline. Kept as
+     * its own column rather than left to prose because "went quiet" and "was
+     * still emitting at the ceiling" are the two diagnoses a post-mortem has to
+     * separate, and run mtv9v1xu7615 showed that a single blended sentence sends
+     * the reader down the wrong one.
+     */
+    timeoutCause?: IsolatedImplTimeoutCause;
   },
 ): void {
   try {
@@ -364,6 +419,7 @@ export function logSprintImplError(
         runId: ctx.runId,
         sprintN: info.sprintN,
         isolated: info.isolated,
+        timeoutCause: info.timeoutCause ?? null,
         message: info.message.slice(0, 2000),
         stack: info.stack,
       },
@@ -402,20 +458,47 @@ export interface IsolatedImplObservation {
  * AND a no-forward-progress timer). That hardcoded narrative was a diagnosis
  * carried over from a DIFFERENT incident (run mrhc43f0fb9b) and it cost a later
  * investigation an entire hypothesis. Never restate a cause here.
+ *
+ * `cause` extends that rule rather than bending it: it is not a diagnosis, it
+ * names WHICH measured bound fired. "Went quiet for 240s" and "was still
+ * emitting at the 3600s ceiling" are different observations that call for
+ * different next steps, and run mtv9v1xu7615 proved they must not share a
+ * sentence — its message said "exceeded 900s total watchdog" while also
+ * reporting the child was emitting 0.8s earlier, and reconciling those two
+ * halves is the whole investigation. Defaults to `"ceiling"` so a caller that
+ * predates the idle rule reads exactly as it did before.
  */
+export type IsolatedImplTimeoutCause = "idle" | "ceiling";
+
 export function buildIsolatedImplTimeoutMessage(args: {
   sprintN: number;
   totalMs: number;
   elapsedMs: number;
   observation?: IsolatedImplObservation;
   firedAtMs?: number;
+  cause?: IsolatedImplTimeoutCause;
+  /** The silence budget in force, when one was armed. */
+  idleMs?: number;
 }): string {
-  const { sprintN, totalMs, elapsedMs, observation } = args;
+  const { sprintN, totalMs, elapsedMs, observation, idleMs } = args;
+  const cause: IsolatedImplTimeoutCause = args.cause ?? "ceiling";
   const firedAt = args.firedAtMs ?? Date.now();
-  const parts: string[] = [
-    `isolated implementation stage exceeded ${Math.round(totalMs / 1000)}s total watchdog (sprint ${sprintN}) ` +
-      `and was CANCELLED after ${(elapsedMs / 1000).toFixed(1)}s`,
-  ];
+  const ceilingS = Math.round(totalMs / 1000);
+  const parts: string[] =
+    cause === "idle"
+      ? [
+          `isolated implementation stage saw no sub-agent activity for ${Math.round((idleMs ?? 0) / 1000)}s ` +
+            `(sprint ${sprintN}) and was CANCELLED after ${(elapsedMs / 1000).toFixed(1)}s`,
+          `the ${ceilingS}s absolute ceiling was NOT reached — this was the SILENCE budget`,
+        ]
+      : [
+          `isolated implementation stage exceeded ${ceilingS}s total watchdog (sprint ${sprintN}) ` +
+            `and was CANCELLED after ${(elapsedMs / 1000).toFixed(1)}s`,
+          idleMs
+            ? `this was the ABSOLUTE ceiling, not the ${Math.round(idleMs / 1000)}s silence budget — ` +
+              "the child was inside its silence budget when it was cut"
+            : "this was the ABSOLUTE ceiling",
+        ];
   if (!observation) {
     parts.push("no sub-agent activity was instrumented for this call, so nothing further was observed");
   } else if (observation.events === 0 || observation.lastEventAtMs === null) {
@@ -434,8 +517,22 @@ export function buildIsolatedImplTimeoutMessage(args: {
 }
 
 /**
- * Race an isolated sub-agent task against a wall-clock deadline **and cancel it
- * when the deadline wins**.
+ * The rejection a fired isolated-impl deadline throws. Carries WHICH bound
+ * fired as a field so a consumer can branch on it without regexing prose —
+ * `runSprint` persists it alongside the message.
+ */
+export class IsolatedImplTimeoutError extends Error {
+  readonly timeoutCause: IsolatedImplTimeoutCause;
+  constructor(message: string, timeoutCause: IsolatedImplTimeoutCause) {
+    super(message);
+    this.name = "IsolatedImplTimeoutError";
+    this.timeoutCause = timeoutCause;
+  }
+}
+
+/**
+ * Bound an isolated sub-agent task by SILENCE, with an absolute ceiling behind
+ * it — **and cancel the child when either fires**.
  *
  * Previously this was a bare `Promise.race` over an already-started promise,
  * with no `AbortSignal` anywhere: losing the race abandoned the child, which
@@ -445,25 +542,62 @@ export function buildIsolatedImplTimeoutMessage(args: {
  * declared dead. This repo already knew the failure mode: `llm-deadline.ts:105`
  * logs "abandoned call rejected after the race settled".
  *
- * So `run` is now a FACTORY that receives the signal: the deadline aborts it
- * before rejecting, and the abandoned promise's late rejection is observed and
- * logged (never left to escape as an unattributable unhandled rejection).
- * `totalMs <= 0` disables the deadline but still supplies a (never-aborted)
+ * So `run` is a FACTORY that receives the signal: the deadline aborts it before
+ * rejecting, and the abandoned promise's late rejection is observed and logged
+ * (never left to escape as an unattributable unhandled rejection).
+ * `totalMs <= 0` disables BOTH bounds but still supplies a (never-aborted)
  * signal, so the call site's wiring is identical in both modes.
+ *
+ * WHY IT IS NO LONGER A FLAT BUDGET. Run mtv9v1xu7615 ended
+ * `outcome:"threw" sprintsRun:0`, reason: "…exceeded 900s total watchdog
+ * (sprint 3) and was CANCELLED after 900.0s; observed 196 sub-agent activity
+ * event(s), the last one 0.8s before the deadline". 196 events across 900s is a
+ * mean gap of 4.6s: the child was working, and it was writing the analyzer unit
+ * tests the previous sprint had failed its engineering floor for
+ * (`zero_coverage`) — 428 lines / 28 `[Fact]` tests were on disk afterwards. A
+ * flat wall clock cannot tell that apart from a wedge, and here it cut the one
+ * sprint that was unblocking the run.
+ *
+ * The signal to tell them apart was already being collected: the sub-agent's
+ * per-tool `onActivity` callback fed `observation`, and `observation` was used
+ * ONLY to phrase the error message. It now decides. `idleMs` is measured from
+ * the LAST observed activity (re-armed each time the child is seen alive), so
+ * this is the same principle `withImplIdleWatchdog` applies to the streamed
+ * path's time-to-next-chunk — the isolated path cannot wrap a stream, but it
+ * has an equivalent signal.
+ *
+ * The ceiling stays because an idle rule alone can never end a child that emits
+ * a tool call forever in a loop. It is not the wedge guard any more: the
+ * mrhc43f0fb9b wedge (2 files written, final `llm-done`, then 30+ min of
+ * silence with an idle process) starts its silence immediately, so `idleMs`
+ * ends it in ~4 min instead of at the ceiling.
+ *
+ * NO ACTIVITY SIGNAL (`observe` omitted): the idle rule is not armed and the
+ * behaviour degrades to exactly the pre-existing flat `totalMs` budget. With no
+ * observations every instant is indistinguishable from silence, so an idle rule
+ * would either fire immediately or never; and dropping the bound altogether
+ * would reinstate the wedge this function exists for. The one production call
+ * site (`runIsolatedImplWithDeadline`) always wires it — this arm is for
+ * legacy/test callers.
  */
 export async function withIsolatedImplDeadline<T>(
   run: (signal: AbortSignal) => Promise<T>,
   totalMs: number,
   sprintN: number,
   observe?: () => IsolatedImplObservation,
+  idleMs?: number,
 ): Promise<T> {
   const controller = new AbortController();
   const startedAt = Date.now();
   if (!(Number.isFinite(totalMs) && totalMs > 0)) return run(controller.signal);
 
+  const idleArmed = !!observe && Number.isFinite(idleMs) && (idleMs as number) > 0;
+  const idleBudget = idleArmed ? (idleMs as number) : 0;
+
   let settled = false;
   let deadlineFired = false;
   let timeoutMessage = "";
+  let firedCause: IsolatedImplTimeoutCause = "ceiling";
 
   const work = run(controller.signal).catch((err: unknown) => {
     const msg = err instanceof Error ? err.message : String(err);
@@ -479,37 +613,71 @@ export async function withIsolatedImplDeadline<T>(
       return undefined as T;
     }
     // Our own cancellation surfaced first — report the deadline, not the abort.
-    if (deadlineFired) throw new Error(timeoutMessage);
+    if (deadlineFired) throw new IsolatedImplTimeoutError(timeoutMessage, firedCause);
     throw err;
   });
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let ceilingTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearTimers = () => {
+    if (ceilingTimer) clearTimeout(ceilingTimer);
+    if (idleTimer) clearTimeout(idleTimer);
+  };
+
   const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
+    const fire = (cause: IsolatedImplTimeoutCause) => {
+      if (deadlineFired) return;
       deadlineFired = true;
+      firedCause = cause;
+      clearTimers();
       timeoutMessage = buildIsolatedImplTimeoutMessage({
         sprintN,
         totalMs,
         elapsedMs: Date.now() - startedAt,
         observation: observe?.(),
+        cause,
+        ...(idleArmed ? { idleMs: idleBudget } : {}),
       });
       // Cancel the work we are giving up on BEFORE unblocking the caller.
       controller.abort(new DOMException(timeoutMessage, "TimeoutError"));
       logger.error("orchestrator", "[sprint-runner] isolated impl deadline fired — child cancelled", {
         sprintN,
+        cause,
         totalMs,
+        idleMs: idleArmed ? idleBudget : null,
         message: timeoutMessage,
       });
-      reject(new Error(timeoutMessage));
-    }, totalMs);
-    (timer as { unref?: () => void }).unref?.();
+      reject(new IsolatedImplTimeoutError(timeoutMessage, cause));
+    };
+
+    ceilingTimer = setTimeout(() => fire("ceiling"), totalMs);
+    (ceilingTimer as { unref?: () => void }).unref?.();
+
+    if (!idleArmed) return;
+    // Self-rearming silence timer. `observe` is a PULL snapshot (the child
+    // pushes nothing to us), so instead of polling we sleep until the moment
+    // the current last-seen event would age out, then re-read: if the child
+    // emitted meanwhile, `lastEventAtMs` has moved and we sleep again for the
+    // remainder. Exact to the millisecond, one live timer, no polling cost.
+    const armIdle = () => {
+      if (deadlineFired || settled) return;
+      const lastSeen = observe?.().lastEventAtMs ?? startedAt;
+      const waitMs = lastSeen + idleBudget - Date.now();
+      if (waitMs <= 0) {
+        fire("idle");
+        return;
+      }
+      idleTimer = setTimeout(armIdle, waitMs);
+      (idleTimer as { unref?: () => void }).unref?.();
+    };
+    armIdle();
   });
 
   try {
     return await Promise.race([work, deadline]);
   } finally {
     settled = true;
-    if (timer) clearTimeout(timer);
+    clearTimers();
   }
 }
 
@@ -527,8 +695,11 @@ export async function withIsolatedImplDeadline<T>(
 export async function runIsolatedImplWithDeadline(args: {
   runIsolatedTask: NonNullable<DriverContext["runIsolatedTask"]>;
   request: import("../types/index.js").TaskRequest;
+  /** Absolute ceiling — `getIsolatedImplCeilingMs()` in production. */
   totalMs: number;
   sprintN: number;
+  /** Silence budget — `getIsolatedImplIdleTimeoutMs()` in production. */
+  idleMs?: number;
 }): Promise<ToolResult> {
   const observation: IsolatedImplObservation = { events: 0, lastEventAtMs: null };
   return withIsolatedImplDeadline(
@@ -543,6 +714,7 @@ export async function runIsolatedImplWithDeadline(args: {
     args.totalMs,
     args.sprintN,
     () => ({ ...observation }),
+    args.idleMs,
   );
 }
 
@@ -1202,6 +1374,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
 
   let implError: string | null = null;
   let implErrorStack: string | undefined;
+  let implTimeoutCause: IsolatedImplTimeoutCause | undefined;
   if (ctx.processMessageFn && implPrompt.trim()) {
     const useIsolated = shouldUseIsolatedImpl(!!ctx.runIsolatedTask);
     try {
@@ -1230,12 +1403,16 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
             content: `\n> [impl-model] Running implementation on ${implModelId} (override of session model ${ctx.sessionModelId}).\n`,
           };
         }
-        // Wall-clock ceiling on the whole isolated turn. (Correction to an
-        // earlier comment here: the isolated path DOES have a per-chunk stall
-        // guard — stream-runner.ts arms createStallWatchdog with both an
-        // any-chunk and a no-forward-progress timer. What it lacked was a
-        // TOTAL-elapsed ceiling, and a ceiling that actually cancels.)
-        // Losing the race now aborts the child instead of orphaning it, and the
+        // TWO bounds on the isolated turn: a SILENCE budget (measured from the
+        // child's last activity notification) and an absolute ceiling behind
+        // it. It was a single flat 15-min budget until run mtv9v1xu7615 hit it
+        // at 900.0s with 196 activity events on record and the last one 0.8s
+        // earlier — a working child, cut mid-sprint. (Correction to an earlier
+        // comment here: the isolated path DOES have a per-chunk stall guard —
+        // stream-runner.ts arms createStallWatchdog with both an any-chunk and
+        // a no-forward-progress timer. What it lacked was an OUTER bound that
+        // cancels, and the first one shipped was a wall clock.)
+        // Losing either race aborts the child instead of orphaning it, and the
         // rejection becomes a phaseError via the try/catch below.
         // See runIsolatedImplWithDeadline / withIsolatedImplDeadline.
         const result = await runIsolatedImplWithDeadline({
@@ -1246,7 +1423,8 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
             prompt: implPrompt,
             modelId: implModelId,
           },
-          totalMs: getImplTotalTimeoutMs(),
+          totalMs: getIsolatedImplCeilingMs(),
+          idleMs: getIsolatedImplIdleTimeoutMs(),
           sprintN,
         });
         if (!result.success) {
@@ -1265,6 +1443,8 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     } catch (e) {
       implError = e instanceof Error ? e.message : String(e);
       implErrorStack = e instanceof Error ? e.stack?.split("\n").slice(0, 4).join(" | ") : undefined;
+      // Carried as a field, not re-derived from the message text.
+      implTimeoutCause = e instanceof IsolatedImplTimeoutError ? e.timeoutCause : undefined;
       // No-Silent-Catch: the finally below surfaces a phaseError chunk, but log
       // here too so the hang/failure is diagnosable from stderr / MUONROI logs.
       // Persisting happens at the single convergence point below — a thrown
@@ -1319,8 +1499,9 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       implModelId: process.env.MUONROI_IDEAL_IMPL_MODEL?.trim() || ctx.sessionModelId,
       elapsedMs: Date.now() - implStartedAt,
       isolated: shouldUseIsolatedImpl(!!ctx.runIsolatedTask),
+      ...(implTimeoutCause ? { timeoutCause: implTimeoutCause } : {}),
     });
-    throw new Error(implError);
+    throw implTimeoutCause ? new IsolatedImplTimeoutError(implError, implTimeoutCause) : new Error(implError);
   }
 
   // ── Step 4b: 4A completeness re-check ─────────────────────────────────────

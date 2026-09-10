@@ -146,9 +146,10 @@ export async function* runProductLoop(
   opts: ProductLoopOptions,
 ): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   const sub = opts.subcommand ?? "start";
-  // Filled in by whichever path calls createRun, so the terminal event can name
-  // the run even on the two exits that never produce a result.
-  const runIdSink: RunIdSink = { runId: opts.runId ?? "" };
+  // Filled in by whichever path calls createRun / starts a sprint, so the
+  // terminal event can name the run AND its sprint count even on the two exits
+  // that never produce a result.
+  const runIdSink: RunIdSink = { runId: opts.runId ?? "", sprintsRun: 0 };
   let announced = false;
 
   try {
@@ -160,7 +161,10 @@ export async function* runProductLoop(
       outcome: outcomeFromResult(result),
       success: !!result.success,
       reason: result.reason ?? "",
-      sprintsRun: result.sprintsRun ?? 0,
+      // The sink is the fallback, not 0: runPhasesPath (the DEFAULT driver)
+      // returns results that carry no `sprintsRun`, so `?? 0` reported a clean
+      // multi-sprint run as zero sprints.
+      sprintsRun: result.sprintsRun ?? runIdSink.sprintsRun,
       shipped: !!result.shipped,
     });
     return result;
@@ -172,7 +176,12 @@ export async function* runProductLoop(
       outcome: "threw",
       success: false,
       reason: (err as Error)?.message ?? "unknown error",
-      sprintsRun: 0,
+      // Measured on run mtv9v1xu7615: this arm reported `sprintsRun: 0` after
+      // three sprints had run (sprint_stage rows at 08:59 / 09:31 / 09:43).
+      // Nothing skipped a counter — the arm had none to read, because the
+      // exception escaped before a result existed, and it filled the gap with a
+      // literal. It now reads the sink the sprint drivers publish to.
+      sprintsRun: runIdSink.sprintsRun,
       shipped: false,
     });
     throw err;
@@ -190,7 +199,7 @@ export async function* runProductLoop(
         outcome: "abandoned",
         success: false,
         reason: "consumer stopped iterating before the run returned",
-        sprintsRun: 0,
+        sprintsRun: runIdSink.sprintsRun,
         shipped: false,
       });
     }
@@ -202,8 +211,14 @@ export async function* runProductLoop(
  * the run on exits that never produce a `ProductLoopResult` (an exception
  * escaping, or the consumer tearing the generator down). `runId: ""` means the
  * id was genuinely never observed — it is never back-filled with a guess.
+ *
+ * `sprintsRun` rides here for exactly the same reason: those two exits have no
+ * result to read a count from, and both used to report a hardcoded 0. It counts
+ * sprints STARTED, which is what the `sprint_stage` rows record — a sprint that
+ * died mid-implementation has to appear in its own post-mortem, and run
+ * mtv9v1xu7615 is precisely a run whose LAST sprint is the one that failed.
  */
-type RunIdSink = { runId: string };
+type RunIdSink = { runId: string; sprintsRun: number };
 
 /** How a `/ideal` run ended, as carried by the `run-finished` harness event. */
 type RunFinishedOutcome = "approved" | "halted" | "error" | "threw" | "abandoned";
@@ -267,7 +282,7 @@ async function* dispatchProductLoop(
     case "review":
       return yield* runReview(opts);
     case "resume":
-      return yield* runResume(opts);
+      return yield* runResume(opts, runIdSink);
     case "abort":
       return yield* runAbort(opts);
     case "ship":
@@ -1081,7 +1096,7 @@ async function* runStart(
 
   // Subsystem E: phase-orchestrated path (default ON; set MUONROI_PHASE_MODE=0 for legacy).
   if (process.env.MUONROI_PHASE_MODE !== "0") {
-    const phaseResult = yield* runPhasesPath({ ctx, productSpec, roleAssignments });
+    const phaseResult = yield* runPhasesPath({ ctx, productSpec, roleAssignments, runIdSink });
     if (phaseResult !== null) return phaseResult;
     // phaseResult === null means runPhases prerequisites were unavailable; fall through to legacy.
   }
@@ -1092,6 +1107,7 @@ async function* runStart(
     roleAssignments,
     history: [],
     flags,
+    runIdSink,
   });
 }
 
@@ -1231,8 +1247,9 @@ async function* drainSprints(args: {
   roleAssignments: Map<RoleSlot, { modelId: string; provider: string; tier?: string }>;
   history: IterationState[];
   flags: ProductLoopFlags;
+  runIdSink?: RunIdSink;
 }): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
-  const { ctx, productSpec, roleAssignments, flags } = args;
+  const { ctx, productSpec, roleAssignments, flags, runIdSink } = args;
   const history = args.history.slice();
   let carryOver: ContinueFeedback | undefined;
   let sprintsRun = 0;
@@ -1256,6 +1273,12 @@ async function* drainSprints(args: {
         return { runId: ctx.runId, stage: "halted", success: false, reason: "budget exhausted" };
       }
     }
+    // Counted at START, not on completion. The sprint that MATTERS most to a
+    // post-mortem is the one that died, and a post-completion increment reports
+    // it as never having happened — run mtv9v1xu7615 lost its sprint 3 that way
+    // (three `sprint_stage` rows, `sprintsRun: 0` in `run-finished`).
+    sprintsRun++;
+    if (runIdSink) runIdSink.sprintsRun = sprintsRun;
     try {
       const sprintGen = runSprint({
         sprintN,
@@ -1353,7 +1376,6 @@ async function* drainSprints(args: {
     }
 
     history.push(iter);
-    sprintsRun++;
 
     // B2: auto-fire sprint-done when judgment stage completes.
     // Compute overall pct from current iteration state.
@@ -1538,8 +1560,12 @@ async function* runPhasesPath(args: {
   ctx: DriverContext;
   productSpec: ProductSpec;
   roleAssignments: Map<RoleSlot, { modelId: string; provider: string; tier?: string }>;
+  runIdSink?: RunIdSink;
 }): AsyncGenerator<StreamChunk, ProductLoopResult | null, unknown> {
-  const { ctx, productSpec, roleAssignments } = args;
+  const { ctx, productSpec, roleAssignments, runIdSink } = args;
+  // This path returned NO `sprintsRun` on any exit, so every phase-orchestrated
+  // run — the default — reported `undefined ?? 0` in `run-finished`.
+  let sprintsRun = 0;
 
   // Load prerequisites: projectContext and manifest.
   const { readProjectContext } = await import("./discovery-persistence.js");
@@ -1585,6 +1611,14 @@ async function* runPhasesPath(args: {
       conversationContext?: string;
       phaseScope?: { criteria: string[]; scope: string };
     };
+
+    // Counted here, at the top of the adapter, because this generator has NO
+    // try/catch: an implementation-stage throw (e.g. the isolated-impl deadline)
+    // escapes runPhases and runPhasesPath entirely and lands in
+    // runProductLoop's `catch`, which never sees a result. That is run
+    // mtv9v1xu7615's exact exit.
+    sprintsRun++;
+    if (runIdSink) runIdSink.sprintsRun = sprintsRun;
 
     // Reset history when a new phase begins.
     if ((sc.phaseId ?? null) !== currentPhaseId) {
@@ -1733,6 +1767,7 @@ async function* runPhasesPath(args: {
         stage: "halted",
         success: false,
         reason: "budget_gauge_unreadable",
+        sprintsRun,
       } as ProductLoopResult;
     }
   }
@@ -1838,6 +1873,7 @@ async function* runPhasesPath(args: {
       stage: "halted",
       success: false,
       reason: runVerdict.reason ?? phaseOutcome.reason ?? "phase-orchestrator-halt",
+      sprintsRun,
     };
   }
   // P1.3: extract run artifacts to EE for cross-run memory. Non-fatal —
@@ -1864,6 +1900,7 @@ async function* runPhasesPath(args: {
     stage: "approved",
     success: true,
     reason: runVerdict.reason ?? "phases_complete",
+    sprintsRun,
     shipped: true,
   };
 }
@@ -2151,7 +2188,10 @@ async function findLatestIncompleteRun(flowDir: string): Promise<{ id: string; i
   return { id: top.id, idea: top.idea };
 }
 
-async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+async function* runResume(
+  opts: ProductLoopOptions,
+  runIdSink?: RunIdSink,
+): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   // B — bare `/ideal resume` (no runId): auto-detect the newest incomplete run.
   let resolvedRunId = opts.runId;
   if (!resolvedRunId) {
@@ -2347,7 +2387,7 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
 
   // Subsystem E: phase-orchestrated path (default ON; set MUONROI_PHASE_MODE=0 for legacy).
   if (process.env.MUONROI_PHASE_MODE !== "0") {
-    const phaseResult = yield* runPhasesPath({ ctx, productSpec, roleAssignments });
+    const phaseResult = yield* runPhasesPath({ ctx, productSpec, roleAssignments, runIdSink });
     if (phaseResult !== null) return phaseResult;
     // phaseResult === null means runPhases prerequisites were unavailable; fall through to legacy.
   }
@@ -2358,6 +2398,7 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
     roleAssignments,
     history: iters.filter((i) => !i.crashed),
     flags: opts.flags,
+    runIdSink,
   });
 }
 
