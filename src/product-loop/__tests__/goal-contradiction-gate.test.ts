@@ -19,11 +19,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import type { CouncilLLM } from "../../council/types.js";
 import {
   budgetDiffByFile,
   type DiffRead,
   extractGoalVerdict,
   GOAL_GATE_DIFF_BUDGET,
+  GOAL_GATE_MAX_OUTPUT_TOKENS,
   type GoalStatement,
   runGoalContradictionGate,
   splitDiffByFile,
@@ -52,8 +54,23 @@ function fixedDiff(diff: string): (cwd: string) => DiffRead {
   return () => ({ ok: true, diff, origin: "working-tree" });
 }
 
-function judge(reply: string) {
-  return { generate: vi.fn(async () => reply) };
+/**
+ * A stubbed judge. Each reply answers one call and the last one repeats, so a
+ * single-reply judge behaves exactly as before while a two-reply judge can
+ * express "the first call came back empty and the retry answered".
+ *
+ * The mock keeps the REAL `generate` parameter list rather than `() => reply`,
+ * because one of the claims below is about an argument (the output budget) that
+ * a zero-arg mock cannot see at all.
+ */
+function judge(...replies: string[]) {
+  let n = 0;
+  const generate = vi.fn(async (..._args: Parameters<CouncilLLM["generate"]>) => {
+    const reply = replies[Math.min(n, replies.length - 1)] ?? "";
+    n += 1;
+    return reply;
+  });
+  return { generate };
 }
 
 const MODEL = "fixture-judge-model";
@@ -104,6 +121,30 @@ describe("F5 goal-contradiction gate — the real 6888526 change", () => {
     // …and the line that defeats them.
     expect(prompt).toContain(DECISIVE_REMOVAL);
     expect(prompt).toContain("+    <TargetFramework>net9.0</TargetFramework>");
+  });
+
+  it("asks for a reasoning-sized output budget — asserted on the argument, not on the constant", async () => {
+    const llm = judge(ALIGNED_REPLY);
+
+    await runGoalContradictionGate({
+      goal: F5_GOAL,
+      cwd: "/irrelevant",
+      llm,
+      modelId: MODEL,
+      diffReader: fixedDiff(REAL_DIFF),
+    });
+
+    // MEASURED against the real leader (a reasoning model): at 2048 the whole
+    // budget went to reasoning and the reply came back EMPTY on 2 of 4 calls
+    // (finishReason "length", ~36,000 streamed characters, 0 of them text);
+    // 8192 was also empty 2 of 2; 16384 answered 6 of 6.
+    //
+    // The assertion is on the ARGUMENT the gate actually passed, not on the
+    // exported constant: a constant nobody threads through is how a previous
+    // defect in this repo survived a green suite.
+    expect(llm.generate).toHaveBeenCalledTimes(1);
+    expect(llm.generate.mock.calls[0]?.[3]).toBe(GOAL_GATE_MAX_OUTPUT_TOKENS);
+    expect(GOAL_GATE_MAX_OUTPUT_TOKENS).toBe(16_384);
   });
 
   it("would have hidden that removal behind a head-slice — which is why the budget is per file", () => {
@@ -160,11 +201,14 @@ describe("F5 goal-contradiction gate — the real 6888526 change", () => {
 });
 
 describe("F5 gate — judgement fails closed", () => {
+  // An EMPTY reply is deliberately absent from this table — see the
+  // "an empty reply is infrastructure" block below for why it is the other
+  // failure direction. Everything here is a reply that ARRIVED.
   const cases: Array<[string, string]> = [
     ["prose with no verdict block at all", "Looks fine to me, I could not find anything wrong."],
     ["a truncated fence", '```goal-check\n{"verdict":"aligned","contradi'],
     ["a verdict word the contract does not define", '```goal-check\n{"verdict":"ok","contradictions":[]}\n```'],
-    ["an empty reply", ""],
+    ["a reply that is nothing but the model restating the task", "I will now examine the diff."],
   ];
 
   for (const [label, reply] of cases) {
@@ -200,6 +244,88 @@ describe("F5 gate — judgement fails closed", () => {
     // …but the reader is told it came without the evidence the contract demands.
     expect(out.contradictions[0]?.evidenced).toBe(false);
     expect(out.detail).toContain("[unevidenced]");
+  });
+});
+
+/**
+ * MEASURED, and the reason this block exists. Driving the gate against the real
+ * leader model (a reasoning model, resolved from the user's settings) on the
+ * real 32,494-character `6888526` diff at the shipped 2048-token budget:
+ *
+ *   #1 replyChars=0    streamedChars=35956 rawTextChars=0    finishReason=length
+ *   #2 replyChars=961  streamedChars=16868 rawTextChars=961  finishReason=stop
+ *   #3 replyChars=1340 streamedChars=14562 rawTextChars=1340 finishReason=stop
+ *   #4 replyChars=0    streamedChars=35565 rawTextChars=0    finishReason=length
+ *
+ * `requestIssued` was true and `sdkAttempts` 1 on every one of them: the call
+ * reached the provider and was billed, the reasoning ate the whole output
+ * budget, and `generate` returned "". Nothing arrived — and the shipped code
+ * turned that into `fired: true`, i.e. the assertion "this change works against
+ * the stated goal", from pure infrastructure. Across 8 early samples the gate
+ * returned `fired: true` 8 of 8 and never once `aligned`.
+ */
+describe("F5 gate — an empty reply is infrastructure, not judgement", () => {
+  it("does NOT fire, and says the change was never checked", async () => {
+    const out = await runGoalContradictionGate({
+      goal: F5_GOAL,
+      cwd: "/irrelevant",
+      llm: judge(""),
+      modelId: MODEL,
+      diffReader: fixedDiff(REAL_DIFF),
+    });
+
+    expect(out.fired).toBe(false);
+    expect(out.source).toBe("empty-reply");
+    // Fail-open is announced: "found nothing" and "never ran" must not read alike.
+    expect(out.detail).toContain("NOT been checked");
+  });
+
+  it("retries exactly once before falling open", async () => {
+    const llm = judge("");
+    const out = await runGoalContradictionGate({
+      goal: F5_GOAL,
+      cwd: "/irrelevant",
+      llm,
+      modelId: MODEL,
+      diffReader: fixedDiff(REAL_DIFF),
+    });
+
+    // Once, not zero (the overflow is stochastic — 2 of 4 at the small budget,
+    // so one retry is cheap relative to not checking the change at all) and not
+    // twice (this is a leader-tier call on a 24,000-character prompt).
+    expect(llm.generate).toHaveBeenCalledTimes(2);
+    expect(out.source).toBe("empty-reply");
+  });
+
+  it("uses the retry's verdict when the retry answers", async () => {
+    const llm = judge("", CONTRADICTS_REPLY);
+    const out = await runGoalContradictionGate({
+      goal: F5_GOAL,
+      cwd: "/irrelevant",
+      llm,
+      modelId: MODEL,
+      diffReader: fixedDiff(REAL_DIFF),
+    });
+
+    expect(llm.generate).toHaveBeenCalledTimes(2);
+    expect(out.fired).toBe(true);
+    expect(out.source).toBe("contradicts");
+    expect(out.detail).toContain(DECISIVE_REMOVAL);
+  });
+
+  it("does not retry a reply that arrived — an unreadable one is judged, not re-asked", async () => {
+    const llm = judge("Honestly it all looks reasonable to me.");
+    const out = await runGoalContradictionGate({
+      goal: F5_GOAL,
+      cwd: "/irrelevant",
+      llm,
+      modelId: MODEL,
+      diffReader: fixedDiff(REAL_DIFF),
+    });
+
+    expect(llm.generate).toHaveBeenCalledTimes(1);
+    expect(out.fired).toBe(true);
+    expect(out.source).toBe("unparseable");
   });
 });
 

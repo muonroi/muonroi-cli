@@ -304,6 +304,27 @@ describe("runSprint consults the goal-contradiction gate", () => {
     expect(text).toContain("NOT been checked");
   }, 90_000);
 
+  it("leaves PASS standing, announced, when the judge answers with nothing at all", async () => {
+    // MEASURED against the real leader: at the shipped 2048-token budget the
+    // reasoning consumed the whole output allowance and `generate` returned ""
+    // on 2 of 4 calls (finishReason "length"). That is infrastructure, and the
+    // sprint must not be failed by it — but it must not look like a pass either.
+    seedRepo();
+    writeCsproj(CSPROJ_BEFORE);
+    execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "ignore" });
+    git(["commit", "-q", "-m", "pre-change analyzer project"]);
+    writeCsproj(CSPROJ_AFTER);
+    judgeReply = "";
+
+    const { result, text } = await runOneSprint();
+
+    // The retry is threaded through the real call site, not only the unit test.
+    expect(goalPrompts).toHaveLength(2);
+    expect(result.lastVerifyResult).toBe("PASS");
+    expect(text).toContain("was NOT checked against the goal");
+    expect(text).toContain("empty-reply");
+  }, 90_000);
+
   it("leaves PASS standing — and never calls the judge — when there is no diff to read", async () => {
     // No repository at all: the gate cannot see the change, so it has no opinion.
     const { result, text } = await runOneSprint();

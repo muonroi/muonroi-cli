@@ -46,8 +46,9 @@
  * ## Two failure directions, deliberately opposite
  *
  * - **Infrastructure fails open.** No diff, an unreadable diff, no goal, a model
- *   call that throws — the gate has nothing to judge and must not invent an
- *   opinion. It returns `fired: false` and says why, loudly.
+ *   call that throws, or a reply with nothing in it at all (`empty-reply`) — the
+ *   gate has nothing to judge and must not invent an opinion. It returns
+ *   `fired: false` and says why, loudly.
  * - **Judgement fails closed.** A response that arrived but cannot be parsed
  *   flags. So does a "contradicts" verdict that arrives without the evidence the
  *   contract demands. A gate whose parse failure means "approve" is a rubber
@@ -55,6 +56,29 @@
  *   examined one. The council's own verdict parser already follows this rule
  *   (`src/gsd/verdict-schema.ts`: "caller MUST treat null as parse failed
  *   (conservative revise), never as approve") and this copies it.
+ *
+ * The line between the two is whether a reply ARRIVED. That distinction was
+ * learned the expensive way: the first shipped version sorted an empty reply
+ * into the fail-closed branch, so a reasoning overflow — pure infrastructure,
+ * measured below — silently became the assertion "this change works against the
+ * stated goal", and the gate fired 8 times out of 8 on live calls without ever
+ * once returning `aligned`. Zero characters is not a verdict that could not be
+ * read; it is nothing to read.
+ *
+ * ## Why the output budget is reasoning-sized
+ *
+ * The judge is the LEADER by construction, and a leader is routinely a reasoning
+ * model. Measured against the real leader on the real `6888526` diff at the
+ * original 2048-token budget, 4 calls:
+ *
+ *   #1 replyChars=0    streamedChars=35956 rawTextChars=0    finishReason=length
+ *   #2 replyChars=961  streamedChars=16868 rawTextChars=961  finishReason=stop
+ *   #3 replyChars=1340 streamedChars=14562 rawTextChars=1340 finishReason=stop
+ *   #4 replyChars=0    streamedChars=35565 rawTextChars=0    finishReason=length
+ *
+ * `requestIssued` true and `sdkAttempts` 1 throughout: the call reached the
+ * provider and was billed, the reasoning consumed the entire output allowance,
+ * and nothing was left for the answer. See {@link GOAL_GATE_MAX_OUTPUT_TOKENS}.
  *
  * ## Why the diff is budgeted per FILE and not head-sliced
  *
@@ -75,11 +99,28 @@
  */
 
 import { spawnSync } from "node:child_process";
-import type { CouncilLLM } from "../council/types.js";
+import type { CouncilGenerateDiagnostics, CouncilLLM } from "../council/types.js";
 import { logger } from "../utils/logger.js";
 
 /** Opt out with `MUONROI_IDEAL_GOAL_GATE=0`. Anything else leaves it armed. */
 export const GOAL_GATE_ENV = "MUONROI_IDEAL_GOAL_GATE";
+
+/**
+ * Output budget for the judgement call.
+ *
+ * Sized for the ROLE, not for any model: this call is pinned to the leader, and
+ * a leader is routinely a reasoning model whose reasoning is billed out of the
+ * same output allowance as its answer. Measured on the real leader against the
+ * real `6888526` diff, the reasoning alone ran 32,000–43,000 characters while
+ * the answer is only ~1,000 — so a 2048-token cap cannot fit what has to be
+ * emitted BEFORE the answer, and the reply comes back empty with
+ * `finishReason: "length"`.
+ *
+ * 16384 answered 6 of 6 live calls. 8192 was measured EMPTY 2 of 2 and is not a
+ * safe halfway house; 2048 (the original) was empty 2 of 4. Do not lower this
+ * without re-measuring against a reasoning leader.
+ */
+export const GOAL_GATE_MAX_OUTPUT_TOKENS = 16_384;
 
 /** Total characters of diff handed to the judge, split across changed files. */
 export const GOAL_GATE_DIFF_BUDGET = 24_000;
@@ -131,6 +172,13 @@ export type GoalGateSource =
   | "diff-unreadable"
   /** The model call threw. Infrastructure — fails open. */
   | "call-failed"
+  /**
+   * The call succeeded and returned nothing — twice. Infrastructure, NOT
+   * judgement, so it fails open: no verdict arrived to be misread. Measured
+   * cause is a reasoning model spending its whole output budget before the
+   * answer; see {@link GOAL_GATE_MAX_OUTPUT_TOKENS}.
+   */
+  | "empty-reply"
   /** A verdict arrived and said the change serves the goal. */
   | "aligned"
   /** A verdict arrived and named at least one contradiction. */
@@ -532,9 +580,85 @@ export async function runGoalContradictionGate(opts: {
   );
   opts.onPrompt?.(prompt);
 
+  /**
+   * One judgement call, with the provider's own forensics captured.
+   *
+   * `onDiagnostics` is the only way to tell "the provider returned nothing" from
+   * "we never called the provider" — `requestIssued` and `sdkAttempts` are set
+   * at the points those events happen, not inferred afterwards. That is exactly
+   * how the reasoning-overflow defect above was found, so the fields are logged
+   * rather than dropped.
+   */
+  const ask = async (): Promise<{ raw: string; diag?: CouncilGenerateDiagnostics }> => {
+    let diag: CouncilGenerateDiagnostics | undefined;
+    const raw = await opts.llm.generate(
+      opts.modelId,
+      GOAL_GATE_SYSTEM,
+      prompt,
+      GOAL_GATE_MAX_OUTPUT_TOKENS,
+      undefined,
+      undefined,
+      (d) => {
+        diag = d;
+      },
+    );
+    return { raw, diag };
+  };
+
+  const observed = (diag: CouncilGenerateDiagnostics | undefined): Record<string, unknown> => ({
+    requestIssued: diag?.requestIssued,
+    sdkAttempts: diag?.sdkAttempts,
+    streamedChars: diag?.streamedChars,
+    rawTextChars: diag?.rawTextChars,
+    finishReason: diag?.finishReason,
+  });
+
   let raw: string;
   try {
-    raw = await opts.llm.generate(opts.modelId, GOAL_GATE_SYSTEM, prompt, 2048);
+    let attempt = await ask();
+    if (!attempt.raw.trim()) {
+      // Retried ONCE, not more: the overflow is stochastic (2 of 4 at the old
+      // budget, so a second ask often lands) and one extra leader call is cheap
+      // next to not checking the change at all — but this is a leader-tier call
+      // on a 24,000-character prompt, so it is not retried around a loop.
+      logger.error(
+        "orchestrator",
+        "[goal-gate] the judge returned an empty reply — asking once more before giving up on this check",
+        {
+          cwd: opts.cwd,
+          modelId: opts.modelId,
+          maxOutputTokens: GOAL_GATE_MAX_OUTPUT_TOKENS,
+          ...observed(attempt.diag),
+        },
+      );
+      attempt = await ask();
+    }
+    if (!attempt.raw.trim()) {
+      // Infrastructure, not judgement: nothing arrived, so there is no verdict
+      // to misread. Firing here would assert "this change works against the
+      // stated goal" on the strength of a provider that said nothing.
+      logger.error(
+        "orchestrator",
+        "[goal-gate] the judge returned an empty reply twice — the change was NOT checked against the goal",
+        {
+          cwd: opts.cwd,
+          modelId: opts.modelId,
+          maxOutputTokens: GOAL_GATE_MAX_OUTPUT_TOKENS,
+          ...observed(attempt.diag),
+        },
+      );
+      return {
+        fired: false,
+        source: "empty-reply",
+        contradictions: [],
+        detail:
+          "The goal-alignment judge returned an empty reply twice, so this change has NOT been checked against " +
+          "the stated goal. No verdict arrived — that is a failed call, not a finding, so the sprint verdict " +
+          "stands unchanged.",
+        diffOrigin: read.origin,
+      };
+    }
+    raw = attempt.raw;
   } catch (err) {
     // Infrastructure. The gate has no opinion it can honestly assert, so it
     // fails open — but never silently: a gate that stopped running looks
@@ -555,8 +679,9 @@ export async function runGoalContradictionGate(opts: {
 
   const verdict = extractGoalVerdict(raw);
   if (!verdict) {
-    // Judgement layer: a response arrived and could not be read. Treating that
-    // as approval is the rubber stamp this module exists to refuse.
+    // Judgement layer: a response arrived — the empty case is already handled
+    // above — and could not be read. Treating that as approval is the rubber
+    // stamp this module exists to refuse.
     logger.error("orchestrator", "[goal-gate] no parseable verdict — flagging rather than approving", {
       cwd: opts.cwd,
       modelId: opts.modelId,
