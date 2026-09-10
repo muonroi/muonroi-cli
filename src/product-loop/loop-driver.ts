@@ -33,6 +33,12 @@ import { additionalPrefills, auditAsContextBlock, auditRepo, type RepoAudit } fr
 import { SEED_DIMENSIONS } from "./seed-questions.js";
 import { deriveTasksFromSpec, writeTasks } from "./typed-artifacts.js";
 import type { DriverContext, DriverResult, ProductSpec, ProductStatusCardData, Stage } from "./types.js";
+import {
+  findUndebatedCriteria,
+  resolveUndebatedGateTimeoutMs,
+  runUndebatedCriteriaGate,
+  type UndebatedGateDecision,
+} from "./undebated-criteria-gate.js";
 
 // Council usage_events recording (source="council") now happens at the single
 // source of truth inside createCouncilLLM (src/council/llm.ts → recordCouncilUsage),
@@ -974,6 +980,72 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         });
         if (researchWarn) {
           yield { type: "content", content: `\n> [budget] ${researchWarn}\n` } as StreamChunk;
+        }
+
+        // F8 — the undebated-criteria gate. THIS is the transition that ran 23
+        // seconds after the leader's closing verdict in run `mttwpmu8ee5b`
+        // (council_message 09:54:12 → phase_start{"phase":"scoping"} 09:54:35),
+        // carrying a criterion the leader had said in plain words nobody had
+        // discussed ("chưa có thảo luận nào về đóng gói NuGet") straight into
+        // sprint planning. Nothing may reach `state = "scoping"` without passing
+        // through here first. See src/product-loop/undebated-criteria-gate.ts for
+        // why an all-null stance row is the council's own record of silence and
+        // why the unattended default is to stop.
+        const undebated = findUndebatedCriteria(debateState.finalStanceRows);
+        if (undebated.length > 0) {
+          logLoopEvent(ctx, "undebated_criteria_gate", {
+            phase: "research",
+            stage: "gate-open",
+            count: undebated.length,
+            criteria: undebated.map((u) => u.criterion.slice(0, 400)),
+            // `?? []` on purpose: the type says required, but specs
+            // reconstructed from an older debate-inputs.json have arrived
+            // without it, and the gate must never crash the FSM.
+            pinnedTotal: (clarifiedSpec.successCriteria ?? []).length,
+          });
+          const gateGen = runUndebatedCriteriaGate({
+            undebated,
+            respondToQuestion: ctx.respondToQuestion,
+            timeoutMs: resolveUndebatedGateTimeoutMs(),
+          });
+          let decision: UndebatedGateDecision | undefined;
+          while (true) {
+            const { value, done } = await gateGen.next();
+            if (done) {
+              decision = value as UndebatedGateDecision;
+              break;
+            }
+            yield value as StreamChunk;
+          }
+          logLoopEvent(ctx, "undebated_criteria_gate", {
+            phase: "research",
+            stage: "gate-resolved",
+            action: decision.action,
+            unattended: decision.unattended,
+            count: undebated.length,
+          });
+          if (decision.action === "council") {
+            return {
+              runId: ctx.runId,
+              stage: "halted",
+              success: false,
+              reason: "undebated_criteria",
+              detail:
+                `the council never argued ${undebated.length} pinned criteri${undebated.length === 1 ? "on" : "a"} — ` +
+                `${undebated.map((u) => u.criterion).join("; ")}`,
+            };
+          }
+          if (decision.action === "narrow") {
+            // Drop the undebated criteria from the spec the scoping synthesis
+            // reads (`JSON.stringify(clarifiedSpec)` below), so the roadmap
+            // cannot be built around a goal nobody examined. Replaced, not
+            // mutated — the persisted debate-inputs.json keeps the original.
+            const dropped = new Set(undebated.map((u) => u.index));
+            clarifiedSpec = {
+              ...clarifiedSpec,
+              successCriteria: (clarifiedSpec.successCriteria ?? []).filter((_, i) => !dropped.has(i)),
+            };
+          }
         }
 
         state = "scoping";
