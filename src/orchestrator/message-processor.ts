@@ -1260,8 +1260,13 @@ export class MessageProcessor {
     // agent can batch-rate hints at the beginning of its next response,
     // before diving into the user's new task. Deduped by sha like guidance.
     try {
-      const { sessionRecallLedger, isRecallLedgerEnabled } = await import("../ee/recall-ledger.js");
-      if (isRecallLedgerEnabled()) {
+      const { sessionRecallLedger, isRecallLedgerEnabled, isRecallNagSuppressed } = await import(
+        "../ee/recall-ledger.js"
+      );
+      // Suppressed when the caller declared this turn MACHINE-READ (see
+      // recall-ledger.ts). The nag would otherwise instruct a sub-agent whose
+      // only job is to emit a verdict marker to go do EE bookkeeping first.
+      if (isRecallLedgerEnabled() && !isRecallNagSuppressed()) {
         const pending = sessionRecallLedger.pending();
         if (pending.length > 0) {
           const hintLines = pending

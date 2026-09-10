@@ -44,6 +44,31 @@ describe("evaluateDoneGate", () => {
     expect(verdict.score).toBe(1.0);
   });
 
+  // F2 — the gate used to re-derive the verdict by re-parsing `lastVerify`,
+  // which is the verify sub-agent's raw narration. That parse cannot see the
+  // deterministic verify floor, which runs AFTER it in sprint-runner, so a
+  // sprint the floor had upgraded on real exit codes still scored
+  // `engineering_floor` here and the upgrade was inert.
+  it("honours an ALREADY-ADJUDICATED verdict over re-parsing the raw narration", async () => {
+    ctx.lastVerify = { success: true, output: "narration with no verdict marker at all" } as ToolResult;
+
+    const withoutVerdict = await evaluateDoneGate({ ...ctx });
+    expect(withoutVerdict.failedCondition).toBe("engineering_floor");
+    expect(withoutVerdict.reason).toBe("verify_FAIL");
+
+    const withVerdict = await evaluateDoneGate({ ...ctx, verifyVerdict: "PASS" });
+    expect(withVerdict.pass).toBe(true);
+  });
+
+  it("an adjudicated non-PASS still fails the floor even when the narration says VERIFY_PASS", async () => {
+    // The downgrade direction: the floor contradicted a claimed PASS, and the
+    // gate must not read the claim back out of the same string.
+    const verdict = await evaluateDoneGate({ ...ctx, verifyVerdict: "FAIL" });
+    expect(verdict.pass).toBe(false);
+    expect(verdict.failedCondition).toBe("engineering_floor");
+    expect(verdict.reason).toBe("verify_FAIL");
+  });
+
   it("fails Cond #1: engineering_floor (no recipe)", async () => {
     ctx.recipe = null;
     const verdict = await evaluateDoneGate(ctx);

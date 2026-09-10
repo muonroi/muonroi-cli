@@ -16,7 +16,15 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
   // floor = recipe !== null && testCommands.length > 0 && coverage > 0 && lastVerify === "PASS"
   const hasTests = (ctx.recipe?.testCommands?.length ?? 0) > 0;
   const hasCoverage = (ctx.recipe?.coverage ?? 0) > 0;
-  const verifyPassed = ctx.lastVerify ? parseVerifyResult(ctx.lastVerify) === "PASS" : false;
+  // Prefer the caller's ALREADY-ADJUDICATED verdict over re-parsing the raw
+  // ToolResult. Re-parsing here sees only the verify sub-agent's narration, so
+  // it is blind to the deterministic verify floor that runs after it in
+  // sprint-runner — the floor could upgrade a sprint to PASS on real exit codes
+  // and this gate would still score `engineering_floor` off the same string.
+  // Falls back to the parse when no verdict was threaded, so legacy callers are
+  // unchanged.
+  const verifyVerdict = ctx.verifyVerdict ?? (ctx.lastVerify ? parseVerifyResult(ctx.lastVerify) : undefined);
+  const verifyPassed = verifyVerdict === "PASS";
 
   const floorPassed = ctx.recipe !== null && hasTests && hasCoverage && verifyPassed;
 

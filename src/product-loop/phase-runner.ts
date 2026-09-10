@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { phaseDone, phaseStart } from "../council/phase-events.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import { isGsdNativeEnabled } from "../gsd/flags.js";
 import { orderPhasesForExecution, syncPhasePlanToRoadmap } from "../gsd/phase-dag.js";
@@ -301,6 +302,144 @@ export function phaseExitSatisfied(
   };
 }
 
+/**
+ * How often the capture emits a "still working" beat when no command has
+ * finished. Long enough not to spam the transcript, short enough that the user
+ * never sits in front of a still screen wondering whether it hung.
+ */
+const BASELINE_HEARTBEAT_MS = 5_000;
+
+/**
+ * Capture the verify floor's baseline WITHOUT freezing the UI, and show the user
+ * what it is doing while it runs.
+ *
+ * ## The regression this closes
+ *
+ * `captureVerifyFloorBaseline` shells out to the project's own build and test
+ * commands — on a real repository that is minutes, not milliseconds. It used to
+ * do so on the main thread via `spawnSync`. Measured on run `mttwpmu8ee5b`, in
+ * the same second:
+ *
+ *     [freeze] event loop blocked for 53029ms — UI was frozen and no timer could fire
+ *     [verify-floor] baseline captured … elapsedMs: 53133
+ *
+ * 100ms apart. Every timer, every keystroke and every frame was dead for the
+ * whole minute, with nothing on screen explaining why — a user watching it sees
+ * a hang. The runner is now `spawn`-based (`verify-floor.ts` `runFloorCommand`),
+ * so the loop stays free; this function is what turns that freedom into visible
+ * progress.
+ *
+ * The awaited promise is raced against a heartbeat timer rather than simply
+ * awaited, because `yield` can only happen between awaits: without the race a
+ * non-blocking capture would still render as one long silence.
+ *
+ * Fail-open, unchanged: any fault leaves the floor in ABSOLUTE mode, i.e. exactly
+ * the pre-baseline behaviour. This must never be the thing that stops a run.
+ */
+async function* captureBaselineWithProgress(args: RunPhasesArgs): AsyncGenerator<StreamChunk, void> {
+  const phaseId = `verify-floor-baseline:${args.runId}`;
+  const label = "Verify floor — baseline";
+  const startedAt = Date.now();
+  const beats: string[] = [];
+  let wake: (() => void) | null = null;
+  const push = (line: string): void => {
+    beats.push(line);
+    wake?.();
+  };
+
+  yield phaseStart({
+    phaseId,
+    kind: "sprint_stage",
+    label,
+    detail: "Recording which of this project's tests already fail",
+    startedAt,
+  });
+
+  let settled = false;
+  const capture = (async () => {
+    const { captureVerifyFloorBaseline } = await import("./verify-floor.js");
+    return captureVerifyFloorBaseline({
+      cwd: args.projectCwd as string,
+      runId: args.runId,
+      flowDir: args.flowDir,
+      onProgress: (p) => {
+        if (p.phase === "start") {
+          push(`(${p.index + 1}/${p.total}) running ${p.kind} gate: ${p.command}`);
+        } else {
+          const verdict = p.ok ? "OK" : `EXIT ${String(p.exitCode)}`;
+          push(`(${p.index + 1}/${p.total}) ${p.kind} gate ${verdict} — ${p.command} (${p.elapsedMs}ms)`);
+        }
+      },
+    });
+  })()
+    .then((r) => ({ ok: true as const, r }))
+    .catch((e) => ({ ok: false as const, e: e as unknown }))
+    .finally(() => {
+      settled = true;
+      wake?.();
+    });
+
+  let lastDetail = "";
+  while (!settled) {
+    let heartbeat: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      new Promise<void>((r) => {
+        wake = r;
+      }),
+      new Promise<void>((r) => {
+        heartbeat = setTimeout(r, BASELINE_HEARTBEAT_MS);
+      }),
+    ]);
+    // Cleared explicitly: a race the wake side won would otherwise leave a live
+    // 5s timer behind on every beat, holding the process open at exit.
+    if (heartbeat) clearTimeout(heartbeat);
+    wake = null;
+    while (beats.length > 0) {
+      const line = beats.shift() as string;
+      lastDetail = line;
+      yield { type: "content", content: `\n> [verify-floor] baseline ${line}\n` };
+    }
+    if (!settled) {
+      // Re-emitting the same phaseId UPDATES the timeline row (upsertPhase keys
+      // on phaseId) rather than adding another — so the elapsed clock keeps
+      // moving even while one long command is mid-flight.
+      yield phaseStart({
+        phaseId,
+        kind: "sprint_stage",
+        label,
+        detail: `${Math.round((Date.now() - startedAt) / 1000)}s — ${lastDetail || "starting the project's own gates"}`,
+        startedAt,
+      });
+    }
+  }
+
+  const outcome = await capture;
+  if (outcome.ok) {
+    logger.info("orchestrator", `[verify-floor] baseline captured for run ${args.runId}`, {
+      runId: args.runId,
+      path: outcome.r.path,
+      elapsedMs: outcome.r.elapsedMs,
+    });
+    const known = outcome.r.baseline.failingTests.length;
+    yield {
+      type: "content",
+      content: `\n> [verify-floor] Baseline captured in ${Math.round(outcome.r.elapsedMs / 1000)}s — build ${outcome.r.baseline.buildOk ? "OK" : "ALREADY BROKEN"}, ${known} test(s) already failing before this run started.\n`,
+    };
+  } else {
+    const message = outcome.e instanceof Error ? outcome.e.message : String(outcome.e);
+    logger.warn(
+      "orchestrator",
+      `[verify-floor] baseline capture failed for run ${args.runId} — the floor will run in ABSOLUTE mode: ${message}`,
+      { error: outcome.e, runId: args.runId },
+    );
+    yield {
+      type: "content",
+      content: `\n> [verify-floor] Baseline capture failed (${message}) — the floor will compare against ZERO failures for this run.\n`,
+    };
+  }
+  yield phaseDone({ phaseId, kind: "sprint_stage", label, startedAt });
+}
+
 export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChunk, { pass: boolean; reason?: string }> {
   const last = await readLastActivity(args.flowDir, args.runId);
   if (await shouldRunStandup(last, args.flowDir, args.runId)) {
@@ -376,25 +515,7 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
   // Fail-open: any fault here leaves the floor in ABSOLUTE mode, i.e. exactly
   // today's behaviour. This must never be the thing that stops a run.
   if (args.projectCwd) {
-    try {
-      const { captureVerifyFloorBaseline } = await import("./verify-floor.js");
-      const cap = await captureVerifyFloorBaseline({
-        cwd: args.projectCwd,
-        runId: args.runId,
-        flowDir: args.flowDir,
-      });
-      logger.info("orchestrator", `[verify-floor] baseline captured for run ${args.runId}`, {
-        runId: args.runId,
-        path: cap.path,
-        elapsedMs: cap.elapsedMs,
-      });
-    } catch (err) {
-      logger.warn(
-        "orchestrator",
-        `[verify-floor] baseline capture failed for run ${args.runId} — the floor will run in ABSOLUTE mode: ${(err as Error)?.message}`,
-        { error: err, runId: args.runId },
-      );
-    }
+    yield* captureBaselineWithProgress(args);
   }
 
   for (const phase of orderedPhases) {

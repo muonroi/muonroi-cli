@@ -30,6 +30,7 @@ import { runCouncil } from "../council/index.js";
 import { resolveLeaderModel } from "../council/leader.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
 import type { CouncilLLM } from "../council/types.js";
+import { beginRecallNagSuppression, RECALL_NAG_SENTINEL } from "../ee/recall-ledger.js";
 import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import { renderResumeDigest, writeSprintOutcome, writeSprintVerify } from "../flow/run-artifacts.js";
@@ -1509,10 +1510,18 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   //
   // The floor runs the project's own build/typecheck and test commands —
   // discovered from the working tree, never from the model's recipe (see
-  // verify-floor.ts) — and lets their exit codes override a claimed PASS. A
-  // floor FAIL is authoritative; a floor that could not run leaves the verdict
-  // alone but records that nothing deterministic stands behind it.
-  if (verifyVerdict === "PASS") {
+  // verify-floor.ts) — and its exit codes are authoritative in BOTH directions.
+  //
+  // The gate used to be `verifyVerdict === "PASS"`, so the floor could veto but
+  // never admit: a sprint whose sub-agent emitted no verdict marker at all was
+  // scored UNKNOWN and the floor never ran. Measured, run `mttwpmu8ee5b`: a
+  // baseline costing 53s of real build+test work was captured and then never
+  // read, both sprints ended `engineering_floor` / score 0, and the run shipped
+  // nothing. UNKNOWN is the absence of a claim, so exit codes may supply the
+  // verdict the model did not. A model-reported FAIL or ERROR is a positive
+  // claim and is never upgraded — see applyVerifyFloor's contract.
+  if (verifyVerdict === "PASS" || verifyVerdict === "UNKNOWN") {
+    const verdictBeforeFloor = verifyVerdict;
     try {
       const { applyVerifyFloor, runVerifyFloor } = await import("./verify-floor.js");
       // Thread the run identity so the floor can compare against THIS run's
@@ -1535,6 +1544,16 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
           type: "content",
           content: `\n> [verify-floor] Sprint ${sprintN} verdict downgraded to FAIL — the project's own gates failed (${floor.elapsedMs}ms).\n`,
         };
+      } else if (applied.upgraded) {
+        // Deliberately NOT written to `verifyResult.error`: that field is the
+        // next sprint's failure feedback, and `parseVerifyResult` maps ANY
+        // non-empty error to ERROR — writing the floor's PASS note there would
+        // undo the upgrade one line later. The adjudicated verdict reaches the
+        // done-gate as `verifyVerdict` instead (see the evaluateDoneGate call).
+        yield {
+          type: "content",
+          content: `\n> [verify-floor] Sprint ${sprintN} verdict upgraded ${verdictBeforeFloor} → PASS — the verify agent emitted no verdict, but the project's own gates passed (${floor.checks.length} command(s), ${floor.elapsedMs}ms).\n`,
+        };
       } else if (floor.verdict === "pass") {
         yield {
           type: "content",
@@ -1553,15 +1572,34 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       // ERROR so the sprint loop routes it as a failed verification instead of
       // shipping on an unverified claim, and log per the No Silent Catch rule.
       const message = err instanceof Error ? err.message : String(err);
-      console.error(`[sprint-runner] verify floor threw (sprint ${sprintN}, run ${ctx.runId}): ${message}`, {
-        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
-      });
-      verifyVerdict = "ERROR";
-      verifyResult.error = `${verifyResult.error ?? ""}\n\n[verify-floor] floor could not run: ${message}`;
-      yield {
-        type: "content",
-        content: `\n> [verify-floor] Sprint ${sprintN} verdict downgraded to ERROR — the deterministic floor could not run: ${message}\n`,
-      };
+      logger.error(
+        "orchestrator",
+        `[sprint-runner] verify floor threw (sprint ${sprintN}, run ${ctx.runId}): ${message}`,
+        {
+          operation: "runVerifyFloor",
+          runId: ctx.runId,
+          sprintN,
+          stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+        },
+      );
+      // A floor that THREW while confirming a claimed PASS must not read as
+      // success: that claim now rests on nothing. But a floor that threw on an
+      // UNKNOWN verdict has changed nothing — it never had a claim to confirm,
+      // and rewriting UNKNOWN → ERROR here would report the floor's own crash as
+      // a verify-harness failure in this sprint's failure signatures.
+      if (verdictBeforeFloor === "PASS") {
+        verifyVerdict = "ERROR";
+        verifyResult.error = `${verifyResult.error ?? ""}\n\n[verify-floor] floor could not run: ${message}`;
+        yield {
+          type: "content",
+          content: `\n> [verify-floor] Sprint ${sprintN} verdict downgraded to ERROR — the deterministic floor could not run: ${message}\n`,
+        };
+      } else {
+        yield {
+          type: "content",
+          content: `\n> [verify-floor] Sprint ${sprintN}: the deterministic floor could not run (${message}) — verdict left at ${verdictBeforeFloor}.\n`,
+        };
+      }
     }
   }
 
@@ -1713,6 +1751,11 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
 
   const verdict = await evaluateDoneGate({
     lastVerify: verifyResult,
+    // Hand over the verdict the verify FLOOR already adjudicated. Without
+    // this the gate re-parses `verifyResult` and sees only the sub-agent's
+    // narration, so a floor upgrade (green exit codes, silent model) would be
+    // discarded here and the sprint would still score `engineering_floor`.
+    verifyVerdict,
     recipe: recipeFromVerify,
     criteria: evalCriteria,
     history,
@@ -1956,12 +1999,40 @@ function buildVerifyAgent(ctx: DriverContext, cwd: string): VerifyAgentLike {
       if (!ctx.processMessageFn) {
         return { success: true, output: "" } as ToolResult;
       }
-      const gen = ctx.processMessageFn(req.prompt);
+      // ── The machine-read boundary ─────────────────────────────────────────
+      // The loop below concatenates EVERY `content` chunk into the string that
+      // `parseVerifyResult` (and then `sprints/<n>-verify.md`) reads. That
+      // stream is not model text alone: the tool engine yields each PreToolUse
+      // hook `additionalContext` as a `content` chunk, and the EE recall nag
+      // rides in exactly there. Measured, run `mttwpmu8ee5b`: both nag lines
+      // opened `sprints/1-verify.md`, inside the verdict payload.
+      //
+      // The boundary is declared HERE, at the one place that knows this stream
+      // is machine-read, and enforced at the EMITTERS (hooks/index.ts,
+      // message-processor.ts) which consult `isRecallNagSuppressed()`. It is
+      // deliberately not a downstream filter: filtering leaves the feature
+      // writing into a channel it has no business in, and the next notice
+      // someone adds would have to be filtered all over again.
+      const releaseNagSuppression = beginRecallNagSuppression();
       let output = "";
-      for await (const chunk of gen) {
-        if (chunk.type === "content" && typeof chunk.content === "string") {
-          output += chunk.content;
+      try {
+        const gen = ctx.processMessageFn(req.prompt);
+        for await (const chunk of gen) {
+          if (chunk.type === "content" && typeof chunk.content === "string") {
+            output += chunk.content;
+          }
         }
+      } finally {
+        releaseNagSuppression();
+      }
+      // Tripwire, not a parser: if a nag reached the payload anyway the boundary
+      // has a hole, and a silent hole is how this defect survived a whole run.
+      if (output.includes(RECALL_NAG_SENTINEL)) {
+        logger.error(
+          "orchestrator",
+          "[sprint-runner] EE recall nag reached the verify payload despite suppression — the machine-read boundary has a hole",
+          { operation: "buildVerifyAgent.runTaskRequest", cwd },
+        );
       }
       return { success: true, output } as ToolResult;
     },

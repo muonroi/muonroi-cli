@@ -255,10 +255,13 @@ export async function executeEventHooks(
       // clears some entries), then stay silent until the set changes again.
       let recallReminder: string | null = null;
       try {
-        const { sessionRecallLedger, isRecallLedgerEnabled, formatPendingReminder } = await import(
-          "../ee/recall-ledger.js"
-        );
-        if (isRecallLedgerEnabled()) {
+        const { sessionRecallLedger, isRecallLedgerEnabled, isRecallNagSuppressed, formatPendingReminder } =
+          await import("../ee/recall-ledger.js");
+        // `isRecallNagSuppressed()` — the caller declared this turn's content
+        // stream MACHINE-READ (see recall-ledger.ts). additionalContexts are
+        // yielded as `content` chunks by the tool engine, so a nag built here
+        // lands inside whatever payload that stream is concatenated into.
+        if (isRecallLedgerEnabled() && !isRecallNagSuppressed()) {
           const pending = sessionRecallLedger.pending();
           if (pending.length > 0) {
             const pendingSha = pending

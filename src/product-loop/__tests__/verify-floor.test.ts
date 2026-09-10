@@ -87,35 +87,40 @@ describe("resolveFloorCommands — discovery, not hardcoding", () => {
 });
 
 describe("runFloorCommand — exit codes are authoritative", () => {
-  it("marks a zero-exit command ok", () => {
-    const check = runFloorCommand("build", PASSING, cwd, 30_000);
+  it("marks a zero-exit command ok", async () => {
+    const check = await runFloorCommand("build", PASSING, cwd, 30_000);
     expect(check.exitCode).toBe(0);
     expect(check.ok).toBe(true);
   });
 
-  it("marks a non-zero-exit command NOT ok", () => {
-    const check = runFloorCommand("build", FAILING, cwd, 30_000);
+  it("marks a non-zero-exit command NOT ok", async () => {
+    const check = await runFloorCommand("build", FAILING, cwd, 30_000);
     expect(check.exitCode).toBe(1);
     expect(check.ok).toBe(false);
   });
 
-  it("rejects a test command that exits 0 while executing zero tests", () => {
+  it("rejects a test command that exits 0 while executing zero tests", async () => {
     // Reuses detectNoTestsExecuted: a green exit code with no executed tests is
     // absence of evidence, not evidence of correctness.
-    const check = runFloorCommand("test", 'node -e "console.log(\'No test files found, exiting\')"', cwd, 30_000);
+    const check = await runFloorCommand("test", "node -e \"console.log('No test files found, exiting')\"", cwd, 30_000);
     expect(check.exitCode).toBe(0);
     expect(check.ok).toBe(false);
     expect(check.noTests?.kind).toBe("empty_selection");
   });
 
-  it("does not apply the zero-test rule to build commands", () => {
-    const check = runFloorCommand("build", 'node -e "console.log(\'No test files found, exiting\')"', cwd, 30_000);
+  it("does not apply the zero-test rule to build commands", async () => {
+    const check = await runFloorCommand(
+      "build",
+      "node -e \"console.log('No test files found, exiting')\"",
+      cwd,
+      30_000,
+    );
     expect(check.ok).toBe(true);
     expect(check.noTests).toBeUndefined();
   });
 
-  it("treats an unspawnable command as NOT ok", () => {
-    const check = runFloorCommand("build", "definitely-not-a-real-binary-xyz --version", cwd, 30_000);
+  it("treats an unspawnable command as NOT ok", async () => {
+    const check = await runFloorCommand("build", "definitely-not-a-real-binary-xyz --version", cwd, 30_000);
     expect(check.ok).toBe(false);
   });
 });

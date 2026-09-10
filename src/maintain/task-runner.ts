@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { pickCouncilTaskModel } from "../council/leader.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
+import { beginRecallNagSuppression } from "../ee/recall-ledger.js";
 import { evaluateDoneGate } from "../product-loop/done-gate.js";
 import type { Criterion } from "../product-loop/types.js";
 import type { StreamChunk } from "../types/index.js";
@@ -468,12 +469,23 @@ function buildVerifyAgent(ctx: MaintenanceCtx, recipe: import("../types/index.js
     },
     detectVerifyRecipe: async () => recipe,
     runTaskRequest: async (req) => {
-      const gen = ctx.processMessageFn(req.prompt);
+      // Same machine-read boundary as the /ideal verify agent
+      // (`sprint-runner.buildVerifyAgent`): every `content` chunk — including
+      // the framework notices the tool engine yields from PreToolUse hooks — is
+      // concatenated into the payload `parseVerifyResult` reads via
+      // `evaluateDoneGate` below. Declaring the scope keeps the EE recall nag
+      // out of it at the emitter rather than filtering it back out here.
+      const releaseNagSuppression = beginRecallNagSuppression();
       let output = "";
-      for await (const chunk of gen) {
-        if (chunk.type === "content" && typeof chunk.content === "string") {
-          output += chunk.content;
+      try {
+        const gen = ctx.processMessageFn(req.prompt);
+        for await (const chunk of gen) {
+          if (chunk.type === "content" && typeof chunk.content === "string") {
+            output += chunk.content;
+          }
         }
+      } finally {
+        releaseNagSuppression();
       }
       return { success: true, output } as import("../types/index.js").ToolResult;
     },

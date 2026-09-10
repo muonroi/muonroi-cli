@@ -126,3 +126,57 @@ export function formatPendingReminder(pending: PendingRecall[], opts: { max?: nu
     `ee_feedback(id, collection, followed|ignored|noise).\n${lines.join("\n")}${more}`
   );
 }
+
+/**
+ * Sentinel substring carried by every recall nag this module formats.
+ *
+ * Exported so a boundary that must stay nag-free can ASSERT it did, instead of
+ * trusting the suppression silently. It is a tripwire, never a parser: nothing
+ * decides a verdict by looking for this string.
+ */
+export const RECALL_NAG_SENTINEL = "EE hint(s) still unrated";
+
+/**
+ * Depth counter for `beginRecallNagSuppression`. A counter rather than a boolean
+ * so nested scopes cannot have the inner one's release re-open the outer one.
+ *
+ * Process-scoped, like `sessionRecallLedger` itself: the orchestrator serialises
+ * turns behind the write-mutex, so at most one machine-read turn is open at a
+ * time. If that ever stops holding, the failure mode is a nag suppressed on a
+ * turn that would have tolerated it — never a nag leaking into one that cannot.
+ */
+let _nagSuppressionDepth = 0;
+
+/**
+ * Is the current turn's output a MACHINE-READ channel?
+ *
+ * The recall nag is a message to a human-in-the-loop agent. Some turns are not
+ * that: their content stream is concatenated into a payload another module then
+ * parses. `/ideal`'s verify stage is one — `sprint-runner.buildVerifyAgent`
+ * assembles every `content` chunk into the string `parseVerifyResult` reads, and
+ * the PreToolUse hook's `additionalContexts` (which is where the nag rides) are
+ * yielded as `content` chunks by the tool engine. Measured: run `mttwpmu8ee5b`
+ * wrote both nag lines into `sprints/1-verify.md`, i.e. into the verdict payload.
+ *
+ * Emitters consult this BEFORE building a nag, so the nag never enters the
+ * stream at all. Filtering it back out downstream would be the weaker fix: it
+ * leaves a feature writing into a channel it has no business writing into, and
+ * every future notice would have to be filtered again.
+ */
+export function isRecallNagSuppressed(): boolean {
+  return _nagSuppressionDepth > 0;
+}
+
+/**
+ * Open a suppression scope. Returns a release function that is idempotent — a
+ * double-release must not decrement someone else's scope.
+ */
+export function beginRecallNagSuppression(): () => void {
+  _nagSuppressionDepth += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    _nagSuppressionDepth = Math.max(0, _nagSuppressionDepth - 1);
+  };
+}

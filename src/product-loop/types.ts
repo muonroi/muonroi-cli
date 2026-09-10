@@ -1,6 +1,7 @@
 import type { CouncilLLM, PreflightResponder } from "../council/types.js";
 import type { WorkflowKind } from "../gsd/types.js";
 import type { ToolResult, VerifyRecipe } from "../types/index.js";
+import type { VerifyVerdict } from "./verify-result.js";
 
 export type { WorkflowKind };
 
@@ -231,6 +232,20 @@ export interface DriverResult {
 
 export interface DoneGateContext {
   lastVerify?: ToolResult;
+  /**
+   * The ALREADY-ADJUDICATED verify verdict, when the caller has one.
+   *
+   * `lastVerify` is the raw sub-agent ToolResult, and re-parsing it here reads
+   * only the model's narration — it cannot see the deterministic verify floor's
+   * exit codes, which run afterwards in sprint-runner. That blind spot is why
+   * an upgraded verdict (floor green, model silent) has to travel as a value:
+   * without it the floor could upgrade the sprint's verdict and the done-gate
+   * would still score `engineering_floor` from the same un-adjudicated string.
+   *
+   * Optional so legacy callers (tests, scripts) keep the parse-it-yourself
+   * behaviour unchanged.
+   */
+  verifyVerdict?: VerifyVerdict;
   recipe: VerifyRecipe | null;
   criteria: Criterion[];
   history: IterationState[];

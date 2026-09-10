@@ -50,7 +50,7 @@
  * `verify-baseline.ts`.
  */
 
-import { spawnSync } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import type { VerifyRecipe } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { inferVerifyProjectProfile } from "../verify/recipes.js";
@@ -78,6 +78,33 @@ const OUTPUT_TAIL_CHARS = 4000;
 const MAX_BUFFER_BYTES = 32 * 1024 * 1024;
 
 export type FloorVerdict = "pass" | "fail" | "unavailable";
+
+/**
+ * One progress beat from the floor, emitted before and after every gate command.
+ *
+ * The floor shells out to the project's OWN build and test commands, which on a
+ * real repository is minutes of work, not milliseconds. Measured on run
+ * `mttwpmu8ee5b`: `captureVerifyFloorBaseline` took 53,133ms and the process-level
+ * freeze detector logged `event loop blocked for 53029ms` in the same second —
+ * the two numbers are 100ms apart, because the runner used `spawnSync`. The whole
+ * TUI was dead for the duration, with nothing on screen to say why.
+ *
+ * `runFloorCommand` is now `spawn`-based and awaited, so the loop stays free; this
+ * callback is what the caller turns into something for the user to look at while
+ * it runs. It carries no formatting decisions — the caller owns presentation.
+ */
+export interface FloorProgress {
+  phase: "start" | "done";
+  kind: "build" | "test";
+  command: string;
+  /** 0-based position of this command in the whole planned set. */
+  index: number;
+  total: number;
+  /** Only on `phase: "done"`. */
+  ok?: boolean;
+  exitCode?: number | null;
+  elapsedMs?: number;
+}
 
 /** Why the floor produced no evidence. Only ever set when verdict === "unavailable". */
 export type FloorUnavailableReason = "disabled" | "no-commands-discovered";
@@ -147,6 +174,8 @@ export interface RunVerifyFloorOpts {
   baselinePath?: string | null;
   /** The /ideal run asking. A baseline stamped with a different run id is rejected. */
   runId?: string;
+  /** Per-command progress beats, so a caller can keep the UI alive. See FloorProgress. */
+  onProgress?: (p: FloorProgress) => void;
 }
 
 export interface CaptureBaselineOpts {
@@ -160,6 +189,8 @@ export interface CaptureBaselineOpts {
   baselinePath?: string;
   timeoutMs?: number;
   commandsOverride?: { build: string[]; test: string[] };
+  /** Per-command progress beats, so a caller can keep the UI alive. See FloorProgress. */
+  onProgress?: (p: FloorProgress) => void;
 }
 
 export interface CaptureBaselineResult {
@@ -244,9 +275,14 @@ export function resolveFloorCommands(cwd: string): { build: string[]; test: stri
         .filter((c) => blockStyle || !isStyleGate(c)),
     };
   } catch (err) {
-    console.error(
+    logger.error(
+      "orchestrator",
       `[verify-floor] command discovery failed for cwd=${cwd}: ${err instanceof Error ? err.message : String(err)}`,
-      { stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined },
+      {
+        operation: "resolveFloorCommands",
+        cwd,
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      },
     );
     return { build: [], test: [] };
   }
@@ -265,7 +301,12 @@ function tail(s: string): string {
  * is not evidence of correctness. That check reuses `detectNoTestsExecuted` from
  * `verify-result.ts` rather than restating its patterns here.
  */
-export function runFloorCommand(kind: "build" | "test", command: string, cwd: string, timeoutMs: number): FloorCheck {
+export async function runFloorCommand(
+  kind: "build" | "test",
+  command: string,
+  cwd: string,
+  timeoutMs: number,
+): Promise<FloorCheck> {
   const started = Date.now();
   let stdout = "";
   let stderr = "";
@@ -273,31 +314,70 @@ export function runFloorCommand(kind: "build" | "test", command: string, cwd: st
   let timedOut = false;
   let spawnError: string | undefined;
 
-  try {
-    const res = spawnSync(command, {
-      cwd,
-      shell: true,
-      encoding: "utf8",
-      timeout: timeoutMs,
-      maxBuffer: MAX_BUFFER_BYTES,
-      // The gate must never wait on a prompt; keep stdin closed.
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    stdout = res.stdout ?? "";
-    stderr = res.stderr ?? "";
-    exitCode = res.status;
-    // spawnSync sets `signal` (and error.code ETIMEDOUT) when the timeout fires.
-    timedOut = res.signal !== null && res.signal !== undefined;
-    if (res.error) {
-      spawnError = res.error.message;
-      if ((res.error as NodeJS.ErrnoException).code === "ETIMEDOUT") timedOut = true;
+  await new Promise<void>((resolveRun) => {
+    let child: ChildProcess;
+    try {
+      child = spawn(command, {
+        cwd,
+        shell: true,
+        // The gate must never wait on a prompt; keep stdin closed.
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+    } catch (err) {
+      spawnError = err instanceof Error ? err.message : String(err);
+      logger.error("orchestrator", `[verify-floor] spawn threw for ${kind} command "${command}" in ${cwd}`, {
+        operation: "runFloorCommand",
+        cwd,
+        command,
+        error: spawnError,
+      });
+      resolveRun();
+      return;
     }
-  } catch (err) {
-    spawnError = err instanceof Error ? err.message : String(err);
-    console.error(`[verify-floor] spawn threw for ${kind} command "${command}" in ${cwd}: ${spawnError}`, {
-      stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveRun();
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill();
+      } catch (err) {
+        logger.warn("orchestrator", `[verify-floor] could not kill timed-out command "${command}"`, {
+          operation: "runFloorCommand",
+          cwd,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, timeoutMs);
+
+    // Bound what we hold in memory, the way spawnSync's maxBuffer did — but
+    // WITHOUT killing the run: a chatty-but-green build must not be scored as a
+    // failure just because it printed a lot.
+    let captured = 0;
+    const sink = (which: "out" | "err") => (buf: Buffer | string) => {
+      if (captured >= MAX_BUFFER_BYTES) return;
+      const text = typeof buf === "string" ? buf : buf.toString("utf8");
+      captured += text.length;
+      if (which === "out") stdout += text;
+      else stderr += text;
+    };
+    child.stdout?.on("data", sink("out"));
+    child.stderr?.on("data", sink("err"));
+    child.on("error", (err: Error) => {
+      spawnError = err.message;
+      finish();
     });
-  }
+    child.on("close", (code: number | null) => {
+      exitCode = code;
+      finish();
+    });
+  });
 
   const combined = `${stdout}${stderr}`;
   const noTests = kind === "test" ? (detectNoTestsExecuted(combined) ?? undefined) : undefined;
@@ -314,7 +394,11 @@ export function runFloorCommand(kind: "build" | "test", command: string, cwd: st
         : noTests
           ? `zero tests executed (${noTests.kind}): ${noTests.evidence}`
           : `exit ${String(exitCode)}`;
-    console.error(`[verify-floor] ${kind} gate FAILED — "${command}" in ${cwd}: ${why}`);
+    logger.warn("orchestrator", `[verify-floor] ${kind} gate FAILED — "${command}" in ${cwd}: ${why}`, {
+      operation: "runFloorCommand",
+      cwd,
+      command,
+    });
   }
 
   return {
@@ -496,8 +580,10 @@ export async function runVerifyFloor(opts: RunVerifyFloorOpts): Promise<VerifyFl
       commandsDiscovered: { build: [], test: [] },
       elapsedMs: Date.now() - started,
     };
-    console.error(
+    logger.warn(
+      "orchestrator",
       "[verify-floor] disabled via MUONROI_SPRINT_VERIFY_FLOOR — no deterministic evidence for this sprint",
+      { operation: "runVerifyFloor", cwd: opts.cwd },
     );
     return { ...base, detail: formatFloorDetail(base, false) };
   }
@@ -518,8 +604,10 @@ export async function runVerifyFloor(opts: RunVerifyFloorOpts): Promise<VerifyFl
       commandsDiscovered,
       elapsedMs: Date.now() - started,
     };
-    console.error(
-      `[verify-floor] no build/test command discoverable in ${opts.cwd} — sprint PASS has no deterministic evidence behind it`,
+    logger.warn(
+      "orchestrator",
+      `[verify-floor] no build/test command discoverable in ${opts.cwd} — the sprint verdict has no deterministic evidence behind it`,
+      { operation: "runVerifyFloor", cwd: opts.cwd },
     );
     return { ...base, detail: formatFloorDetail(base, testsSkipped) };
   }
@@ -538,8 +626,19 @@ export async function runVerifyFloor(opts: RunVerifyFloorOpts): Promise<VerifyFl
 
   const checks: FloorCheck[] = [];
   for (const { kind, command } of planned) {
-    const check = runFloorCommand(kind, command, opts.cwd, timeoutMs);
+    opts.onProgress?.({ phase: "start", kind, command, index: checks.length, total: planned.length });
+    const check = await runFloorCommand(kind, command, opts.cwd, timeoutMs);
     checks.push(check);
+    opts.onProgress?.({
+      phase: "done",
+      kind,
+      command,
+      index: checks.length - 1,
+      total: planned.length,
+      ok: check.ok,
+      exitCode: check.exitCode,
+      elapsedMs: check.elapsedMs,
+    });
     // Stop early only when the verdict genuinely cannot recover. A test command
     // whose every failure was already failing at baseline is NOT such a case —
     // breaking there would reinstate the absolute gate through the back door.
@@ -593,8 +692,22 @@ export async function captureVerifyFloorBaseline(opts: CaptureBaselineOpts): Pro
   let unattributable = false;
   const failingTests = new Set<string>();
 
+  const plannedTotal = commands.build.length + commands.test.length;
+  let plannedIndex = 0;
   for (const command of commands.build) {
-    const c = runFloorCommand("build", command, opts.cwd, timeoutMs);
+    opts.onProgress?.({ phase: "start", kind: "build", command, index: plannedIndex, total: plannedTotal });
+    const c = await runFloorCommand("build", command, opts.cwd, timeoutMs);
+    opts.onProgress?.({
+      phase: "done",
+      kind: "build",
+      command,
+      index: plannedIndex,
+      total: plannedTotal,
+      ok: c.ok,
+      exitCode: c.exitCode,
+      elapsedMs: c.elapsedMs,
+    });
+    plannedIndex += 1;
     results.push({ kind: "build", command, exitCode: c.exitCode, ok: c.ok, failingTests: [], formats: [] });
     if (!c.ok) {
       buildOk = false;
@@ -605,7 +718,19 @@ export async function captureVerifyFloorBaseline(opts: CaptureBaselineOpts): Pro
 
   if (buildOk) {
     for (const command of commands.test) {
-      const c = runFloorCommand("test", command, opts.cwd, timeoutMs);
+      opts.onProgress?.({ phase: "start", kind: "test", command, index: plannedIndex, total: plannedTotal });
+      const c = await runFloorCommand("test", command, opts.cwd, timeoutMs);
+      opts.onProgress?.({
+        phase: "done",
+        kind: "test",
+        command,
+        index: plannedIndex,
+        total: plannedTotal,
+        ok: c.ok,
+        exitCode: c.exitCode,
+        elapsedMs: c.elapsedMs,
+      });
+      plannedIndex += 1;
       const ids = c.failingTests ?? [];
       for (const id of ids) failingTests.add(id);
       // A failing test command we cannot attribute poisons the baseline: it
@@ -661,22 +786,67 @@ export async function captureVerifyFloorBaseline(opts: CaptureBaselineOpts): Pro
 /**
  * Fold the floor's result into the sprint verdict.
  *
- * A floor FAIL overrides a claimed PASS — that is the entire point of the
- * module. A floor that could not run does NOT manufacture a FAIL (that would
- * brick every project whose ecosystem the recipe profiler does not recognise,
- * and every greenfield sprint 1 that has not created a project yet); it leaves
- * the verdict alone but returns a note saying, in the sprint's own transcript,
- * that nothing deterministic stands behind the PASS.
+ * The floor is authoritative in BOTH directions — but only over the verdicts it
+ * is entitled to speak for, and only when it actually ran.
+ *
+ * ## Why it now upgrades, and why that was the whole bug
+ *
+ * The floor used to run only when the model had already claimed PASS, so it
+ * could veto but never admit. Measured, run `mttwpmu8ee5b`: the baseline was
+ * captured successfully (`buildOk=true`, 31 pre-existing failures, 53s of real
+ * work) and then never read, because the model's verdict came back UNKNOWN
+ * rather than PASS. Both sprints ended `failedCondition: "engineering_floor"`,
+ * `score: 0`, and the run shipped nothing — gated by a model narration while a
+ * green delta from the project's own build and test commands sat unused.
+ *
+ * ## UNKNOWN and FAIL are NOT the same input, and are not treated the same
+ *
+ * - `UNKNOWN` is the ABSENCE of a claim: the sub-agent emitted neither verdict
+ *   marker (it ran out of steps, wandered, or its narration was polluted). There
+ *   is nothing to contradict, so the floor may supply the verdict the model
+ *   failed to. Exit codes are strictly better evidence than silence.
+ * - `FAIL` is a POSITIVE claim: the sub-agent looked at its own run and reported
+ *   failure. Overriding that is a categorically stronger and more dangerous
+ *   assertion — the model may have observed something the floor's command set
+ *   cannot (a smoke step, a browser phase, a runtime crash outside the test
+ *   runner). A green build does not disprove it. So FAIL is never upgraded.
+ * - `ERROR` means the verify machinery itself broke (`tr.error` set). The floor
+ *   speaks to the code under test, not to the harness that could not run, so it
+ *   is never upgraded either.
+ *
+ * ## What is unchanged
+ *
+ * - A floor FAIL still overrides a claimed PASS (the original downgrade).
+ * - A floor that could NOT run (`unavailable`) changes nothing in either
+ *   direction: it must not manufacture a FAIL (that would brick every project
+ *   the recipe profiler does not recognise, and every greenfield sprint 1), and
+ *   it obviously cannot manufacture a PASS. It only returns a note saying, in
+ *   the sprint's own transcript, that nothing deterministic stands behind the
+ *   verdict.
  */
 export function applyVerifyFloor(
   current: VerifyVerdict,
   floor: VerifyFloorResult,
-): { verdict: VerifyVerdict; downgraded: boolean; note: string } {
-  if (current !== "PASS") {
-    return { verdict: current, downgraded: false, note: "" };
+): { verdict: VerifyVerdict; downgraded: boolean; upgraded: boolean; note: string } {
+  // No evidence either way — today's behaviour, deliberately preserved.
+  if (floor.verdict === "unavailable") {
+    return { verdict: current, downgraded: false, upgraded: false, note: floor.detail };
   }
+
   if (floor.verdict === "fail") {
-    return { verdict: "FAIL", downgraded: true, note: floor.detail };
+    // Only a claimed PASS is contradicted. FAIL is already FAIL; ERROR and
+    // UNKNOWN both already fail the engineering floor, and rewriting them here
+    // would change failure-signature routing for no gain in the verdict.
+    if (current === "PASS") {
+      return { verdict: "FAIL", downgraded: true, upgraded: false, note: floor.detail };
+    }
+    return { verdict: current, downgraded: false, upgraded: false, note: floor.detail };
   }
-  return { verdict: current, downgraded: false, note: floor.detail };
+
+  // floor.verdict === "pass" — the project's own build/typecheck and test
+  // commands ran to completion and produced no regression against the baseline.
+  if (current === "UNKNOWN") {
+    return { verdict: "PASS", downgraded: false, upgraded: true, note: floor.detail };
+  }
+  return { verdict: current, downgraded: false, upgraded: false, note: floor.detail };
 }
