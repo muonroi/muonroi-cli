@@ -764,10 +764,91 @@ function stripAssistantReasoning(msg: ModelMessage): ModelMessage {
 const ELIDED_ARGS_PREFIX = "[earlier call args elided";
 
 /**
+ * F10 — minimum serialised `input` size for an args elision to be worth doing.
+ *
+ * The marker this compactor substitutes is itself 133-137 chars once serialised
+ * (`buildElidedArgsInput` below; the spread is only the digit count of `sz`).
+ * The previous gate was `sz < 80`, i.e. it elided everything from 80 chars up —
+ * so every call in the 80..133 band was replaced by something LARGER. That band
+ * is not an edge case, it is the dominant population: real tool-call arguments
+ * are mostly short paths and one-line shell commands.
+ *
+ * Measured on 703 real tool calls recorded in `tool_calls` (~/.muonroi-cli/
+ * muonroi.db), sizes computed with the identical `JSON.stringify(input)` this
+ * function uses. Distribution: p25=88, p50=115, p75=166, p90=571, max=12704.
+ *
+ *   threshold  markers written  inflated  net chars saved
+ *      80          593            342        146,168
+ *     134          251              0        156,276
+ *     256          111              0        150,713   <- chosen
+ *     512           74              0        142,729
+ *
+ * At the old 80, 342 of 593 elisions (57.7%) made the prompt bigger, wasting
+ * 10,108 chars. Restricted to the band a right-censored replay can see
+ * (80 <= sz < 200, n=449, median 109) the marker was net **-7,430 chars
+ * (-14.1%)** with 76.2% of calls inflated — a token tax, not a compaction.
+ *
+ * 256 is chosen over the 134 break-even because it is better on BOTH axes than
+ * the status quo: it saves MORE chars than 80 did (+4,545) while writing 81.3%
+ * fewer markers (593 -> 111). The marker count matters independently of chars —
+ * the model imitates the shape it keeps seeing (267 imitated calls in one run,
+ * 184 of them `read_file`, then 91 in the re-run after the executor guard
+ * landed). `read_file` markers specifically collapse 235 -> 3 (-98.7%) at 256,
+ * because short-path arguments stop qualifying at all. That makes a tool-name
+ * allowlist unnecessary: the size gate already removes exactly the population
+ * ("arguments that are just a path") such an allowlist would have targeted, and
+ * it does so without a hardcoded tool list to keep in sync.
+ *
+ * Giving up 5,563 chars relative to the 134 optimum (-3.6%) to remove 140 more
+ * imitation exemplars is the trade this constant encodes.
+ */
+export const MIN_ELIDE_ARGS_CHARS = 256;
+
+/**
+ * Build the elided-args replacement object for a call whose serialised input was
+ * `sz` chars. Factored out of `stripAssistantToolCallArgs` so that the marker's
+ * own serialised cost is measurable by the caller (and by tests) rather than
+ * being an unstated constant the threshold has to be kept in sync with by hand.
+ *
+ * The shape must satisfy TWO constraints that pull in opposite directions.
+ *
+ * F3b — it must not read as a plausible tool schema. The original elision was
+ * `{_elided:true,original_chars:N}`, and the LLM hallucinated that shape as its
+ * NEXT tool input (session 101870b4d9bb: read_file called with
+ * `{_elided:true,original_chars:75}` → "path must be string, got undefined").
+ * For the same reason the marker must NOT preserve the real argument keys with
+ * placeholder values: that is strictly more imitable, and a copied
+ * `write_file({file_path:"[elided]",content:"[elided]"})` would pass the
+ * executor's empty-args guard and overwrite a real source file. The single
+ * `__elided_note` key's one virtue is that it is inert.
+ *
+ * Wire validity — it must still be an OBJECT. `input` is serialized into OpenAI
+ * `tool_calls[].function.arguments`, which the spec defines as a JSON string
+ * that parses to an object. F3b's fix (a bare string) parses to a JSON *string*,
+ * which is malformed there: StepFun renders history through a Jinja chat
+ * template that does `arguments | fromjson` and then iterates the result, so a
+ * non-object 400s the whole request —
+ * `{"stage":"prefill","error":{"message":"No filter named 'fromjson' found."}}`
+ * (measured 2026-09-03 against step-3.7-flash; proved both directions: wrapping
+ * this value in an object turned the failing request 200, and injecting a bare
+ * string into a passing request turned it 400).
+ */
+export function buildElidedArgsInput(sz: number): Record<string, unknown> {
+  return {
+    __elided_note: `${ELIDED_ARGS_PREFIX} by sub-agent compactor — ${sz} chars; consult the matching tool_result for what came back]`,
+  };
+}
+
+/**
  * A3 cache-stability / idempotency: never re-wrap an already-elided marker.
- * The marker is itself ~95 chars, so without this guard a second pass re-wrapped
- * it ("…— 200 chars…" → "…— 95 chars…"), changing the bytes and churning the
- * cached prefix every call. Once elided, leave it terminal.
+ * The marker is itself 133-137 chars serialised, so without this guard a second
+ * pass re-wrapped it ("…— 400 chars…" → "…— 134 chars…"), changing the bytes and
+ * churning the cached prefix every call. Once elided, leave it terminal.
+ *
+ * This guard is load-bearing INDEPENDENTLY of MIN_ELIDE_ARGS_CHARS. The marker
+ * happens to serialise below that threshold today, so the size gate would also
+ * decline to re-wrap it — but that is a coincidence of two numbers, not a
+ * contract. Idempotency is asserted here, on the marker's identity.
  *
  * Both shapes are recognised: the current object form, and the legacy bare
  * string still present in histories persisted before the wire-validity fix.
@@ -794,41 +875,24 @@ function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
     if (part.type !== "tool-call") return part;
     const input = part.input;
     // A3 cache-stability / idempotency: never re-wrap an already-elided marker.
-    // The marker is itself ~95 chars, so without this guard a second pass
-    // re-wrapped it ("…— 200 chars…" → "…— 95 chars…"), changing the bytes and
-    // churning the cached prefix every call. Once elided, leave it terminal.
+    // The marker is itself 133-137 chars serialised, so without this guard a
+    // second pass re-wrapped it ("…— 400 chars…" → "…— 134 chars…"), changing the
+    // bytes and churning the cached prefix every call. Once elided, terminal.
     if (isElidedToolCallInput(input)) return part;
     const sz = typeof input === "string" ? input.length : JSON.stringify(input ?? "").length;
-    if (sz < 80) return part; // tiny calls aren't worth touching
+    // F10 — below this the marker is not worth writing: it costs ~134 chars of
+    // its own, and every marker written is one more exemplar of a shape the
+    // model demonstrably imitates. See MIN_ELIDE_ARGS_CHARS for the measurement.
+    if (sz < MIN_ELIDE_ARGS_CHARS) return part;
+    const elided = buildElidedArgsInput(sz);
+    // F10 — structural no-inflation guard. MIN_ELIDE_ARGS_CHARS already sits far
+    // above the marker's serialised length, so this never fires today. It exists
+    // so that "an elision must never make a call bigger" is enforced by
+    // construction rather than by a constant someone must remember to raise if
+    // the marker sentence ever grows. Measure the real bytes, don't assume them.
+    if (JSON.stringify(elided).length >= sz) return part;
     mutated = true;
-    // The marker must satisfy TWO constraints that pull in opposite directions.
-    //
-    // F3b — it must not read as a plausible tool schema. The original elision
-    // was `{_elided:true,original_chars:N}`, and the LLM hallucinated that shape
-    // as its NEXT tool input (session 101870b4d9bb: read_file called with
-    // `{_elided:true,original_chars:75}` → "path must be string, got undefined").
-    //
-    // Wire validity — it must still be an OBJECT. `input` is serialized into
-    // OpenAI `tool_calls[].function.arguments`, which the spec defines as a JSON
-    // string that parses to an object. F3b's fix (a bare string) parses to a
-    // JSON *string*, which is malformed there: StepFun renders history through a
-    // Jinja chat template that does `arguments | fromjson` and then iterates the
-    // result, so a non-object 400s the whole request —
-    // `{"stage":"prefill","error":{"message":"No filter named 'fromjson' found."}}`
-    // (measured 2026-09-03 against step-3.7-flash; proved both directions:
-    // wrapping this value in an object turned the failing request 200, and
-    // injecting a bare string into a passing request turned it 400).
-    //
-    // An object with ONE obviously-non-schema key whose value is the same full
-    // English sentence keeps F3b's property (no tool declares `__elided_note`,
-    // and the sentence is not copyable as an argument value) while restoring a
-    // well-formed object on the wire.
-    return {
-      ...part,
-      input: {
-        __elided_note: `[earlier call args elided by sub-agent compactor — ${sz} chars; consult the matching tool_result for what came back]`,
-      },
-    } as Record<string, unknown>;
+    return { ...part, input: elided } as Record<string, unknown>;
   });
   if (!mutated) return msg;
   return { ...msg, content: next } as unknown as ModelMessage;
