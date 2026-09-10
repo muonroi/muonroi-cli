@@ -18,6 +18,9 @@ const OPENING = "Opening position: prefer the library-first path with explicit e
 const DEBATE_TURN = "Round turn: agreed, but pin the parser version and add golden tests.";
 const SUMMARY_TEXT = "Summary: consensus on library-first with version pinning and golden tests.";
 
+/** The opening sentence of `buildRoundSummaryPrompt`'s system string. */
+const IS_SUMMARY_PROMPT = /^Summarize this discussion/;
+
 function makeSpec(): ClarifiedSpec {
   return {
     problemStatement: "Choose a CSV parsing approach for a small CLI.",
@@ -63,10 +66,13 @@ describe("F9 — runDebate always returns a non-empty summary (real generator)",
     let summaryGenerated = false;
     const llm = {
       // generate covers openings, leader eval, and the closing summary. The
-      // closing-summary prompt asks to condense the debate; return SUMMARY_TEXT
-      // for it and OPENING otherwise so we can distinguish the two.
-      generate: async (_model: string, prompt: string) => {
-        if (/summ/i.test(prompt)) {
+      // closing-summary prompt is the one built by `buildRoundSummaryPrompt`,
+      // whose system string opens with that exact sentence; match it rather than
+      // a bare /summ/ over the whole system prompt, which also fires on the
+      // debate language rule ("...a running summary...") and would make every
+      // opening look like a summary call.
+      generate: async (_model: string, system: string) => {
+        if (IS_SUMMARY_PROMPT.test(system)) {
           summaryGenerated = true;
           return SUMMARY_TEXT;
         }
@@ -93,9 +99,9 @@ describe("F9 — runDebate always returns a non-empty summary (real generator)",
 
   it("falls back to a synthesized summary when the closing-summary model call fails", async () => {
     const llm = {
-      // Openings succeed; any summary-style prompt throws → deterministic backstop.
-      generate: async (_model: string, prompt: string) => {
-        if (/summ/i.test(prompt)) throw new Error("summary model unavailable");
+      // Openings succeed; the closing-summary call throws → deterministic backstop.
+      generate: async (_model: string, system: string) => {
+        if (IS_SUMMARY_PROMPT.test(system)) throw new Error("summary model unavailable");
         return OPENING;
       },
       debate: async () => ({ text: DEBATE_TURN, toolCalls: [] }),

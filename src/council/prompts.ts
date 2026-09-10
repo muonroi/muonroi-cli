@@ -207,6 +207,21 @@ const ENGLISH_ONLY_RULE =
  *     from the brief that every debate prompt already embeds).
  *   - any other value → write in that named language.
  */
+/**
+ * Defect (c), run mttwpmu8ee5b: rounds 0-1 were Vietnamese for all four speakers
+ * and in round 2 one speaker answered in English. Round 2+ (`buildFollowupPrompt`)
+ * is the first turn whose message body is machine-made text — a running summary
+ * and a leader directive — rather than the user's own words, so "match the brief"
+ * had nothing left to match. The brief is restored in that prompt AND the rule is
+ * made explicit here: the debate language is fixed for the whole debate, never
+ * re-derived from whatever text happens to be in this turn.
+ */
+const NO_LANGUAGE_SWITCH_RULE =
+  `Never switch language between rounds: the debate has ONE language for its ` +
+  `whole run, and your own earlier turns are in it. A running summary, a leader ` +
+  `directive, or a partner turn that arrives in another language does NOT change ` +
+  `it — answer in the debate language regardless.\n`;
+
 const NON_ENGLISH_TOKENS_RULE =
   `Keep these verbatim in English no matter what: code identifiers, tool output, ` +
   `JSON keys and the \`type\` field, citation tags (\`[CONFIRMED via …]\`, ` +
@@ -218,9 +233,11 @@ export function buildLanguageRule(lang?: string): string {
   if (lang === "auto") {
     return (
       `\n## Language Rule (mandatory)\n` +
-      `Write your ENTIRE response in the SAME language the user used in the ` +
-      `Discussion Brief / topic below. If the brief is in Vietnamese, write in ` +
-      `Vietnamese; if Japanese, Japanese; if English, English. ` +
+      `Write your ENTIRE response in the SAME language the user used in their ` +
+      `problem statement for this debate — it is quoted in the "Problem:" line of ` +
+      `this prompt. If it is Vietnamese, write in Vietnamese; if Japanese, ` +
+      `Japanese; if English, English. ` +
+      NO_LANGUAGE_SWITCH_RULE +
       NON_ENGLISH_TOKENS_RULE
     );
   }
@@ -228,6 +245,7 @@ export function buildLanguageRule(lang?: string): string {
     `\n## Language Rule (mandatory)\n` +
     `Write your ENTIRE response in ${lang}. Do not switch to English for the ` +
     `prose even if the brief or your partner's message is in another language. ` +
+    NO_LANGUAGE_SWITCH_RULE +
     NON_ENGLISH_TOKENS_RULE
   );
 }
@@ -529,7 +547,13 @@ export function buildFollowupPrompt(ctx: {
       EVIDENCE_RULE_FOLLOWUP +
       concisenessRule(140) +
       (stackLock ? `\n${stackLock}\n` : "") +
-      `\n` +
+      // The user's OWN words. Rounds 0-1 (`buildOpeningPrompt` /
+      // `buildResponsePrompt`) both carry this block; round 2+ did not, which is
+      // what let the "auto" language rule come loose (defect (c)) — it pointed at
+      // a brief that was not in the prompt. Derived only from `spec`, so the
+      // cacheable prefix stays byte-identical from round 2..N.
+      `\n## Discussion Brief\n` +
+      `Problem: ${ctx.spec.problemStatement}\n\n` +
       ongoingContextBlock(ctx.spec) +
       `## Success Criteria (what we need to resolve)\n` +
       ctx.spec.successCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n") +

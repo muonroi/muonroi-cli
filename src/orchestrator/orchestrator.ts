@@ -11,6 +11,7 @@ import {
 import { getTenantId } from "../ee/tenant.js";
 import { emitTranscriptToDisk } from "../ee/transcript-emit.js";
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
+import { runAnchoredStateRoot } from "../flow/run-root.js";
 import { ensureFlowDir } from "../flow/scaffold.js";
 import {
   isContextRailEnabled,
@@ -2547,7 +2548,9 @@ export class Agent {
         self.permissionMode = prev;
       }
     };
-    const flowDir = nodePath.join(this.bash.getCwd(), ".muonroi-flow");
+    // F7 — the flow dir belongs to the RUN, not to the tool cwd, which the bash
+    // `cd` handler mutates permanently. See src/flow/run-root.ts.
+    const flowDir = nodePath.join(runAnchoredStateRoot(this.bash.getCwd()), ".muonroi-flow");
 
     // P2.7 (LLM-first — no-regex routing): the work-depth tier that decides
     // /ideal's route is judged by the MODEL (the same depthTier the PIL Layer-1
@@ -3453,7 +3456,7 @@ export class Agent {
       const parentSessionId = this.session.id;
       try {
         const path = await import("node:path");
-        const flowDir = path.join(this.bash.getCwd(), ".muonroi-flow");
+        const flowDir = path.join(runAnchoredStateRoot(this.bash.getCwd()), ".muonroi-flow");
         const { deliberateCompact } = await import("../flow/compaction/index.js");
         const { getDatabase } = await import("../storage/db.js");
         const { appendCompaction, getNextMessageSequence } = await import("../storage/transcript.js");

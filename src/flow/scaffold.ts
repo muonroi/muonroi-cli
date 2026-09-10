@@ -7,6 +7,7 @@
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { runAnchoredStateRoot } from "./run-root.js";
 
 export const FLOW_DIR_NAME = ".muonroi-flow";
 
@@ -27,8 +28,8 @@ const SUBDIRS = ["history", "runs"];
  * Returns the absolute path to the .muonroi-flow/ directory.
  * Only creates files if they do NOT already exist (idempotent).
  */
-export async function ensureFlowDir(cwd: string): Promise<string> {
-  const flowDir = path.join(cwd, FLOW_DIR_NAME);
+export async function ensureFlowDir(rawCwd: string): Promise<string> {
+  const flowDir = path.join(runAnchoredStateRoot(rawCwd), FLOW_DIR_NAME);
 
   // Create the root directory and subdirectories
   await fs.mkdir(flowDir, { recursive: true });

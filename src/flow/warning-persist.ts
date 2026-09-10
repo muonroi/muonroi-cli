@@ -12,6 +12,7 @@ import { renderInterceptWarning } from "../ee/render.js";
 import type { InterceptMatch } from "../ee/types.js";
 import { getSection } from "./parser.js";
 import { getActiveRunId, loadRun, updateRunFile } from "./run-manager.js";
+import { runAnchoredStateRoot } from "./run-root.js";
 import { FLOW_DIR_NAME } from "./scaffold.js";
 
 const MAX_STORED_WARNINGS = 20;
@@ -54,7 +55,7 @@ function trimSnapshot(snapshot: string, _newUuid: string): string {
 
 export async function persistWarning(cwd: string, match: InterceptMatch): Promise<void> {
   try {
-    const flowDir = path.join(cwd, FLOW_DIR_NAME);
+    const flowDir = path.join(runAnchoredStateRoot(cwd), FLOW_DIR_NAME);
     try {
       await fs.access(flowDir);
     } catch {

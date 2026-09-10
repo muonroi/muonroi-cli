@@ -62,7 +62,8 @@ async function fetchFlowState(cwd: string, budget: number): Promise<string> {
     // `.muonroi-flow/active-run` file had no writer in src and always read stale
     // (F8 follow-up: dropped that dead path in favor of the single source).
     const { getActiveRunId } = await import("../flow/run-manager.js");
-    const flowDir = path.join(cwd, ".muonroi-flow");
+    const { runAnchoredStateRoot } = await import("../flow/run-root.js");
+    const flowDir = path.join(runAnchoredStateRoot(cwd), ".muonroi-flow");
     const runId = await getActiveRunId(flowDir);
     if (!runId) return "";
     const statePath = path.join(flowDir, "runs", runId, "state.md");

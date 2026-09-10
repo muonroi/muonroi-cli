@@ -1,5 +1,6 @@
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { runAnchoredStateRoot } from "../flow/run-root.js";
 
 export const PLANNING_DIR = ".planning";
 
@@ -20,7 +21,8 @@ export const FOLDED_PLANNING_DIR = join(".muonroi-flow", "planning");
  * no longer exists, GSD reads transparently continue from the consolidated tree.
  * This is purely additive: no live cutover, no desync risk.
  */
-export function planningRoot(cwd: string): string {
+export function planningRoot(rawCwd: string): string {
+  const cwd = runAnchoredStateRoot(rawCwd);
   const canonical = join(cwd, PLANNING_DIR);
   // Existing `.planning/` projects keep using it (back-compat, no disruption).
   if (existsSync(canonical)) return canonical;

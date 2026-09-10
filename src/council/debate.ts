@@ -1208,6 +1208,8 @@ export async function* runDebate(
   // still opposing (the conclusion card's Dissent section) — a converged verdict
   // otherwise erases the position the council existed to hear argued.
   let lastStanceRows: CouncilStanceRow[] = [];
+  // Defect (b) — the coverage extension is granted at most once per debate.
+  let coverageExtensionUsed = false;
   // S5 — announce this run as the one accepting steering. The UI has no other
   // way to learn the key: /council uses the session id, /ideal's loop-driver
   // passes its own run id.
@@ -2077,7 +2079,58 @@ export async function* runDebate(
         }
       }
 
-      if (!evaluation.shouldContinue) {
+      // ── Coverage extension (defect (b)) ──────────────────────────────────
+      //
+      // A pinned criterion NO panelist has spoken to in ANY round is a coverage
+      // miss, and until now the leader could see it and do nothing about it: in
+      // run mttwpmu8ee5b it wrote "chưa có thảo luận nào về đóng gói NuGet" and
+      // the debate still ended on its budget with that criterion open, closing
+      // with a request the code could not honour ("re-run with an extended round
+      // budget"). Every other extension path was shut: auto-remedy and a
+      // leader-requested `extendRounds` both need `maxRounds < effectiveCeiling`
+      // (so neither can fire at the kind cap), the interactive escalation needs a
+      // `respondToQuestion` channel, and all three sit AFTER the stop-break
+      // below — so a leader that says "stop" reaches none of them.
+      //
+      // This runs BEFORE the stop-break for that reason, and is deliberately
+      // allowed past the KIND cap (never past ABSOLUTE_MAX_ROUNDS) — the same
+      // licence `ESCALATION_EXTEND_ROUNDS` already has, because a bound that
+      // stops at the kind cap is a no-op in exactly the configuration that
+      // produced the defect. See COVERAGE_EXTEND_ROUNDS for the bound's defence.
+      let coverageExtendedThisRound = false;
+      const debateWouldEndNow = !evaluation.shouldContinue || round >= maxRounds;
+      if (
+        debateWouldEndNow &&
+        hasPinned &&
+        !coverageExtensionUsed &&
+        coverageExtensionEnabled() &&
+        maxRounds < ABSOLUTE_MAX_ROUNDS
+      ) {
+        const untouched = zeroEngagementCriteria(lastStanceRows, lastCriteriaDeferred);
+        if (untouched.length > 0) {
+          coverageExtensionUsed = true;
+          coverageExtendedThisRound = true;
+          const newMax = Math.min(ABSOLUTE_MAX_ROUNDS, Math.max(maxRounds, round) + COVERAGE_EXTEND_ROUNDS);
+          const granted = newMax - maxRounds;
+          maxRounds = newMax;
+          const names = untouched.map((i) => shortCriterion(spec.successCriteria[i], 56));
+          const noun = names.length === 1 ? "criterion" : "criteria";
+          nextTopic = `No panelist has argued these yet — take them head-on: ${names.join("; ")}`;
+          yield {
+            type: "content",
+            content:
+              `\n> Leader extending debate by ${granted} round (now ${maxRounds}/${ABSOLUTE_MAX_ROUNDS}) — ` +
+              `${names.length} pinned ${noun} had zero engagement from the whole panel: ${names.join("; ")}.\n`,
+          };
+          logger.info("orchestrator", "[council] coverage extension granted", {
+            round,
+            newMax,
+            criteria: names,
+          });
+        }
+      }
+
+      if (!evaluation.shouldContinue && !coverageExtendedThisRound) {
         // B4 escalation site 1 — the leader is declaring the debate done. If
         // pinned criteria are still unmet and we have an interactive channel,
         // ask the user before accepting a partial outcome (the "3/5 → stop,
@@ -2134,7 +2187,7 @@ export async function* runDebate(
       const canExitEarly = (round >= 2 && lockRatio >= 0.8) || (round === 1 && lockRatio >= 0.8 && skepticClean);
       // A user "extend" at this round's stop boundary overrides a convergence
       // break — the user explicitly asked for more rounds to close open criteria.
-      if (canExitEarly && !userExtendedThisRound) {
+      if (canExitEarly && !userExtendedThisRound && !coverageExtendedThisRound) {
         const reason =
           round === 1
             ? `round 1 converged early (lock=${Math.round(lockRatio * 100)}%, no unresolved points)`
@@ -2336,7 +2389,16 @@ export async function* runDebate(
           ? "you accepted these as open — synthesis proceeds with them noted as unresolved."
           : escalation?.action === "rescope"
             ? "you asked to narrow the scope — re-run the council on just these criteria with a tighter problem statement."
-            : diagnoseUnmetRemedy({ stuck, atCeiling, effectiveCeiling, roundsSinceProgress });
+            : diagnoseUnmetRemedy({
+                stuck,
+                atCeiling,
+                effectiveCeiling,
+                roundsSinceProgress,
+                // Only "exhausted" when the extra round was actually spent AND
+                // the criteria it targeted are still untouched.
+                coverageExhausted:
+                  coverageExtensionUsed && zeroEngagementCriteria(lastStanceRows, lastCriteriaDeferred).length > 0,
+              });
       yield {
         type: "council_message" as const,
         councilMessage: {
@@ -2874,6 +2936,57 @@ export function autoRemedyWantsExtend(pinnedUnmet: number, roundsSinceProgress: 
 }
 
 /**
+ * Defect (b) — coverage extension. Default ON under the conductor; opt out with
+ * MUONROI_COUNCIL_COVERAGE_EXTEND=0.
+ */
+export function coverageExtensionEnabled(): boolean {
+  return leaderConductorEnabled() && process.env.MUONROI_COUNCIL_COVERAGE_EXTEND !== "0";
+}
+
+/**
+ * How many rounds a coverage miss buys. ONE, once per debate.
+ *
+ * Defence of the bound. Zero engagement is a COVERAGE failure, not an argument
+ * deadlock: nobody has taken the criterion yet, so a single directed round is
+ * the smallest thing that can change the observation, and it is also the largest
+ * thing worth spending. If a whole round aimed squarely at the criterion still
+ * ends with every seat null, the panel structurally cannot reach it (wrong
+ * lenses, or it is only closable after the debate) and further rounds buy
+ * nothing — the same reasoning `autoRemedyWantsExtend` already uses when it
+ * refuses to chase a stuck criterion. Capping at one grant per debate also fixes
+ * the worst case at exactly +1 round no matter how many criteria are untouched,
+ * because the extra round is aimed at all of them at once.
+ */
+const COVERAGE_EXTEND_ROUNDS = 1;
+
+/**
+ * Pinned criteria that NO panelist has spoken to, from the leader's own
+ * per-criterion stance map.
+ *
+ * Conservative by construction, because acting on this spends a round:
+ *   - a criterion already met, or marked `deferred` (closable only after the
+ *     debate), is never reported — more debate cannot help either one;
+ *   - a row with no roster columns is never reported;
+ *   - and if the leader emitted NO marks anywhere in the round, nothing is
+ *     reported at all. `buildStanceRows` renders both "the leader said nobody
+ *     spoke" and "the leader's model omitted the stances field" as an all-null
+ *     row; requiring at least one mark somewhere in the round is what separates
+ *     evidence of silence from absence of evidence.
+ */
+export function zeroEngagementCriteria(rows: readonly CouncilStanceRow[], deferred: readonly boolean[]): number[] {
+  const leaderGradedStances = rows.some((r) => Object.values(r.stances).some((m) => m !== null));
+  if (!leaderGradedStances) return [];
+  const out: number[] = [];
+  rows.forEach((r, i) => {
+    if (r.met || deferred[i] === true) return;
+    const marks = Object.values(r.stances);
+    if (marks.length === 0) return;
+    if (marks.every((m) => m === null)) out.push(i);
+  });
+  return out;
+}
+
+/**
  * B4: the diagnostic closing-remedy line for a debate that ended with unmet
  * pinned criteria — distinguishes a stuck criterion (needs evidence/rescope)
  * from a genuine ceiling hit (needs a higher budget) from an ordinary early
@@ -2884,7 +2997,21 @@ export function diagnoseUnmetRemedy(opts: {
   atCeiling: boolean;
   effectiveCeiling: number;
   roundsSinceProgress: number;
+  /**
+   * Defect (b) — the coverage extension has already been spent and criteria are
+   * STILL untouched. "Re-run with a bigger budget" is then a lie: a round aimed
+   * squarely at them changed nothing, so the panel's lenses do not reach them
+   * and only a different panel or a narrower scope can. Optional so existing
+   * callers and their pinned strings are unaffected.
+   */
+  coverageExhausted?: boolean;
 }): string {
+  if (opts.coverageExhausted) {
+    return (
+      `no panelist argued these even after a round aimed at them — the panel's lenses do not ` +
+      `reach them, so re-run with a stance that owns this ground, or drop them from the criteria.`
+    );
+  }
   if (opts.stuck) {
     return (
       `these made no progress across the last ${opts.roundsSinceProgress} rounds — ` +

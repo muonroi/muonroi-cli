@@ -24,6 +24,9 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
 const FLOW_DIR = ".muonroi-flow";
+
+import { runAnchoredStateRoot } from "./run-root.js";
+
 const PLANNING_DIR = ".planning";
 const FOLDED_SUBDIR = "planning";
 const MARKER = ".migrated";
@@ -67,7 +70,9 @@ async function copyTreePreserving(src: string, dest: string): Promise<number> {
  * Perform the fold. Safe to call repeatedly; returns `{migrated:false}` when the
  * marker is already present or there is no `.planning/` to fold.
  */
-export async function foldPlanningIntoFlow(cwd: string): Promise<FoldResult> {
+export async function foldPlanningIntoFlow(rawCwd: string): Promise<FoldResult> {
+  // F7 — anchor to the run, not to a drifted tool cwd (src/flow/run-root.ts).
+  const cwd = runAnchoredStateRoot(rawCwd);
   const foldedRoot = path.join(cwd, FLOW_DIR, FOLDED_SUBDIR);
   const markerPath = path.join(foldedRoot, MARKER);
 
