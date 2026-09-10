@@ -21,6 +21,21 @@ function freshState(max: number, dedupEnabled = true): SubAgentCapState {
   };
 }
 
+/**
+ * Wordings that tell a mid-task agent to wind up. Asserted against the string
+ * compressForCap() actually EMITS (not raw file text), so the comments that
+ * quote the old wording on purpose cannot satisfy or trip these.
+ */
+const FINISH_INSTRUCTION_PATTERNS = [
+  /finali[sz]e/i,
+  /summari[sz]e/i,
+  /summary/i,
+  /wrap up/i,
+  /final answer/i,
+  /conclude/i,
+  /\band return\b/i,
+];
+
 describe("compressForCap", () => {
   it("passes through small outputs while under 30% budget", () => {
     const state = freshState(100_000);
@@ -38,12 +53,43 @@ describe("compressForCap", () => {
     expect(out).toContain("trimmed by sub-agent cap");
   });
 
-  it("trims to ~2k head plus 'budget low' warning over 70% budget", () => {
+  it("trims to ~2k head plus a budget-reached note over 70% budget", () => {
     const state = freshState(100_000);
     state.cumulative = 75_000;
     const out = compressForCap(state, "z".repeat(20_000));
-    expect(out).toContain("finalize work");
+    expect(out).toContain("tool-output budget reached");
+    expect(out).toContain("trimmed harder from here");
     expect(out.length).toBeLessThan(20_000);
+    for (const re of FINISH_INSTRUCTION_PATTERNS) expect(out).not.toMatch(re);
+  });
+
+  // F12 — the over-budget tier still has WORKING tools (only `hardMax` stops
+  // them), so its note may describe the harder trim but must never read as an
+  // instruction to wind the task up. Measured 2026-09-10: an agent that had
+  // worked 29 build errors down to 6 read the old
+  //   "[Warning: top-level tool budget exceeded (…). Please finalize your work
+  //    and summarize findings now.]"
+  // and wrote back "Top-level budget exceeded. I need to mak…", then stopped
+  // and committed a tree with 6 compile errors in it. sub-agent-cap.ts's own
+  // design note: "'done' must be the agent's call, not the counter's."
+  it("over-budget note names the harder trim and carries no finish instruction (F12)", () => {
+    const state = freshState(100_000);
+    // wrapToolSetWithCap() always sets hardMax = max * 2 (sub-agent-cap.ts),
+    // so ≥ max is a live tier in production, not an instant exhaustion; the
+    // bare freshState() helper omits hardMax and would collapse the two.
+    state.hardMax = 200_000;
+    state.cumulative = 100_000; // ≥ max but < hardMax → tools still run
+    const out = compressForCap(state, "q".repeat(20_000));
+
+    // The cap is real and must still be announced, with the live counts:
+    expect(out).toContain("tool-output budget reached");
+    expect(out).toContain("100000/100000");
+    // …and the reason it matters: less tool output per call, so call narrower.
+    expect(out).toContain("trimmed to its first 2000 chars");
+    // …and an explicit denial that the task itself is over:
+    expect(out).toContain("keep working until the work itself is done");
+
+    for (const re of FINISH_INSTRUCTION_PATTERNS) expect(out).not.toMatch(re);
   });
 
   it("emits exhausted stub once budget is fully spent", () => {

@@ -11,8 +11,11 @@
  *
  * Fix: wrap each tool's `execute` with a cumulative-cost tracker. As the
  * sub-agent burns through its budget, returns are truncated more
- * aggressively — eventually telling the agent "budget low, wrap up" so
- * it stops scheduling more reads and produces its summary.
+ * aggressively, and the agent is told that trimming got harder so it can
+ * choose narrower calls. What the budget governs is how much tool output
+ * the agent can afford to pull in — NOT whether its task is finished.
+ * Until the hard ceiling, tools keep working; "done" stays the agent's
+ * call, not the counter's.
  *
  * This is per-invocation state: each call to createSubAgentToolCap()
  * returns a fresh wrapper with its own counters. Don't share across
@@ -33,8 +36,10 @@
  * Tiers (percentages of whichever budget is in effect, NOT of 120_000):
  *   < 30%   → pass through (A1's 32KB per-call cap already applied)
  *   30-70%  → truncate each new result to 8_000 chars head/tail
- *   70-100% → truncate to 2_000 chars head + "[budget low, finalize work]" note
- *   ≥ 100%  → return error stub that signals the agent to stop expanding scope
+ *   70-100% → truncate to 2_000 chars head + "[budget reached, trimming harder]" note
+ *   ≥ 100%  → same head trim + a note naming the trim (tools still work)
+ *   ≥ hardMax (2× budget) → error stub; every further tool call returns it,
+ *             so at THAT point (and only there) the agent is told to return
  */
 
 import { createHash } from "node:crypto";
@@ -75,8 +80,8 @@ export interface SubAgentCapOptions {
    */
   midTierRatio?: number;
   /**
-   * Ratio at which high-tier compression (head only + "finalize" note)
-   * kicks in. Default 0.7 for sub-agents; top-level uses 0.8.
+   * Ratio at which high-tier compression (head only + a note naming the
+   * harder trim) kicks in. Default 0.7 for sub-agents; top-level uses 0.8.
    */
   highTierRatio?: number;
   /**
@@ -108,7 +113,11 @@ export interface SubAgentCapState {
   max: number;
   /** Hard cap ceiling (e.g. max * 2). */
   hardMax?: number;
-  /** True once `cumulative >= max` (sub-agent should wrap up). */
+  /**
+   * True once `cumulative >= hardMax` — from there every tool call returns the
+   * exhausted stub instead of running. NOT set at `cumulative >= max`: that
+   * tier only trims harder, and tools still work.
+   */
   exhausted: boolean;
   /** Number of duplicate-output detections (telemetry / tests). */
   dedupHits: number;
@@ -134,7 +143,10 @@ function trimHeadTail(text: string, target: number, label: string): string {
 
 function trimHead(text: string, target: number, label: string): string {
   if (text.length <= target) return text;
-  return `${text.slice(0, target)}\n\n... [${text.length - target} chars trimmed — ${label} budget low; finalize work] ...`;
+  // The marker states what happened to THIS result. It must not read as an
+  // instruction to wind the task up — see the note on the over-budget warning
+  // in compressForCap() for the measured cost of that wording.
+  return `${text.slice(0, target)}\n\n... [${text.length - target} chars trimmed — ${label} tool-output budget reached; results are trimmed harder from here] ...`;
 }
 
 function shortHash(text: string): string {
@@ -145,6 +157,10 @@ export function compressForCap(state: SubAgentCapState, raw: string): string {
   const hardCeiling = state.hardMax ?? state.max;
   if (state.exhausted || state.cumulative >= hardCeiling) {
     state.exhausted = true;
+    // Unlike the over-budget tier below, "summarize and return" is TRUE here:
+    // past the hard ceiling every tool call — reads, writes, bash — returns
+    // this stub instead of running, so no further work is possible and saying
+    // otherwise would strand the agent in a loop of dead calls.
     return `[${state.label} tool budget exhausted (${state.cumulative}/${state.max} chars). Further tool calls will return this stub. Summarize findings now and return.]`;
   }
   state.callIndex += 1;
@@ -170,7 +186,16 @@ export function compressForCap(state: SubAgentCapState, raw: string): string {
   let out: string;
   if (state.cumulative >= state.max) {
     const trimmed = trimHead(raw, state.highTierChars, state.label);
-    out = `${trimmed}\n\n[Warning: ${state.label} tool budget exceeded (${state.cumulative}/${state.max} chars). Please finalize your work and summarize findings now.]`;
+    // This cap is REAL (cumulative/max are actual chars) and must be announced —
+    // but it governs how much tool OUTPUT the agent can pull in, not whether its
+    // task is finished. Tools still run at this tier; only the hard ceiling
+    // (hardMax, above) stops them. The wording used to be "Please finalize your
+    // work and summarize findings now", and the model read it as a quota it had
+    // run out of: measured 2026-09-10, an agent that had worked 29 build errors
+    // down to 6 wrote "Top-level budget exceeded. I need to mak…", stopped, and
+    // committed a tree with 6 compile errors still in it. Say what is true — the
+    // trim got harder — and leave "done" where it belongs: with the agent.
+    out = `${trimmed}\n\n[Tool-output budget reached for ${state.label} (${state.cumulative}/${state.max} chars). Every tool result is now trimmed to its first ${state.highTierChars} chars, so prefer narrow, targeted calls (one file, one line range, one precise pattern) over broad ones. Tool calls still run and the task is not blocked on this message: keep working until the work itself is done.]`;
   } else if (ratio >= state.highTierRatio) {
     out = trimHead(raw, state.highTierChars, state.label);
   } else if (ratio >= state.midTierRatio) {
