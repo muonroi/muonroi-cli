@@ -33,12 +33,7 @@ import { additionalPrefills, auditAsContextBlock, auditRepo, type RepoAudit } fr
 import { SEED_DIMENSIONS } from "./seed-questions.js";
 import { deriveTasksFromSpec, writeTasks } from "./typed-artifacts.js";
 import type { DriverContext, DriverResult, ProductSpec, ProductStatusCardData, Stage } from "./types.js";
-import {
-  findUndebatedCriteria,
-  resolveUndebatedGateTimeoutMs,
-  runUndebatedCriteriaGate,
-  type UndebatedGateDecision,
-} from "./undebated-criteria-gate.js";
+import { enforceUndebatedCriteriaGate, undebatedHaltDetail } from "./undebated-criteria-gate.js";
 
 // Council usage_events recording (source="council") now happens at the single
 // source of truth inside createCouncilLLM (src/council/llm.ts → recordCouncilUsage),
@@ -991,61 +986,45 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         // through here first. See src/product-loop/undebated-criteria-gate.ts for
         // why an all-null stance row is the council's own record of silence and
         // why the unattended default is to stop.
-        const undebated = findUndebatedCriteria(debateState.finalStanceRows);
-        if (undebated.length > 0) {
-          logLoopEvent(ctx, "undebated_criteria_gate", {
-            phase: "research",
-            stage: "gate-open",
-            count: undebated.length,
-            criteria: undebated.map((u) => u.criterion.slice(0, 400)),
-            // `?? []` on purpose: the type says required, but specs
-            // reconstructed from an older debate-inputs.json have arrived
-            // without it, and the gate must never crash the FSM.
-            pinnedTotal: (clarifiedSpec.successCriteria ?? []).length,
-          });
-          const gateGen = runUndebatedCriteriaGate({
-            undebated,
-            respondToQuestion: ctx.respondToQuestion,
-            timeoutMs: resolveUndebatedGateTimeoutMs(),
-          });
-          let decision: UndebatedGateDecision | undefined;
-          while (true) {
-            const { value, done } = await gateGen.next();
-            if (done) {
-              decision = value as UndebatedGateDecision;
-              break;
-            }
-            yield value as StreamChunk;
-          }
-          logLoopEvent(ctx, "undebated_criteria_gate", {
-            phase: "research",
-            stage: "gate-resolved",
-            action: decision.action,
-            unattended: decision.unattended,
-            count: undebated.length,
-          });
-          if (decision.action === "council") {
-            return {
-              runId: ctx.runId,
-              stage: "halted",
-              success: false,
-              reason: "undebated_criteria",
-              detail:
-                `the council never argued ${undebated.length} pinned criteri${undebated.length === 1 ? "on" : "a"} — ` +
-                `${undebated.map((u) => u.criterion).join("; ")}`,
-            };
-          }
-          if (decision.action === "narrow") {
-            // Drop the undebated criteria from the spec the scoping synthesis
-            // reads (`JSON.stringify(clarifiedSpec)` below), so the roadmap
-            // cannot be built around a goal nobody examined. Replaced, not
-            // mutated — the persisted debate-inputs.json keeps the original.
-            const dropped = new Set(undebated.map((u) => u.index));
-            clarifiedSpec = {
-              ...clarifiedSpec,
-              successCriteria: (clarifiedSpec.successCriteria ?? []).filter((_, i) => !dropped.has(i)),
-            };
-          }
+        //
+        // F8b — this is no longer the ONLY gated transition, and the call also
+        // PERSISTS `finalStanceRows` against the run. A `/ideal resume` never
+        // reaches this case (measured: sprint stages with zero phase_start rows),
+        // so `runResume` consults the same gate off the same record before it
+        // enters sprint work. Passing the rows here is what puts them on disk.
+        const gate = yield* enforceUndebatedCriteriaGate({
+          runDir,
+          respondToQuestion: ctx.respondToQuestion,
+          stanceRows: debateState.finalStanceRows,
+          audit: (data) =>
+            logLoopEvent(ctx, "undebated_criteria_gate", {
+              phase: "research",
+              // `?? []` on purpose: the type says required, but specs
+              // reconstructed from an older debate-inputs.json have arrived
+              // without it, and the gate must never crash the FSM.
+              pinnedTotal: (clarifiedSpec?.successCriteria ?? []).length,
+              ...data,
+            }),
+        });
+        if (!gate.proceed) {
+          return {
+            runId: ctx.runId,
+            stage: "halted",
+            success: false,
+            reason: "undebated_criteria",
+            detail: undebatedHaltDetail(gate.undebated),
+          };
+        }
+        if (gate.action === "narrow") {
+          // Drop the undebated criteria from the spec the scoping synthesis
+          // reads (`JSON.stringify(clarifiedSpec)` below), so the roadmap
+          // cannot be built around a goal nobody examined. Replaced, not
+          // mutated — the persisted debate-inputs.json keeps the original.
+          const dropped = new Set(gate.undebated.map((u) => u.index));
+          clarifiedSpec = {
+            ...clarifiedSpec,
+            successCriteria: (clarifiedSpec.successCriteria ?? []).filter((_, i) => !dropped.has(i)),
+          };
         }
 
         state = "scoping";

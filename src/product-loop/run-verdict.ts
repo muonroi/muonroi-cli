@@ -1,6 +1,31 @@
 import type { SprintOutcome } from "../flow/run-artifacts.js";
 import type { DoneCondition, DoneVerdict } from "./types.js";
 
+/**
+ * F9 - render a failed verdict as `<condition>: <reason>`.
+ *
+ * `evaluateDoneGate` computes both halves and every display surface used to
+ * print only the first. `engineering_floor` alone narrows the cause to four
+ * possibilities (`no_recipe` | `no_test_commands` | `zero_coverage` |
+ * `verify_FAIL`) and names none; the observed sprint outcome
+ * `{"verify":"PASS","failedCondition":"engineering_floor"}` was therefore
+ * undiagnosable from every artifact the run produced. Accepts the loose
+ * `{failedCondition, reason}` shape so a `DoneVerdict` (union-typed) and a
+ * `SprintOutcome` read back off disk (plain strings) both fit.
+ *
+ * Returns `undefined` when neither half is present, so callers keep their own
+ * "unknown" wording rather than printing an empty parenthetical.
+ */
+export function describeVerdictFailure(v: {
+  failedCondition?: string | null;
+  reason?: string | null;
+}): string | undefined {
+  const condition = v.failedCondition?.trim() || "";
+  const reason = v.reason?.trim() || "";
+  if (condition && reason && reason !== condition) return `${condition}: ${reason}`;
+  return condition || reason || undefined;
+}
+
 export interface RunVerdictInput {
   /** Every `sprints/<n>-outcome.json` recorded by this run, in any order. */
   outcomes: SprintOutcome[];
@@ -75,8 +100,12 @@ export function deriveRunVerdict(input: RunVerdictInput): DoneVerdict {
     const verdict: DoneVerdict = {
       pass: false,
       score,
+      // F9 - carry the done-gate's own reason (`no_test_commands`,
+      // `score_below_threshold: 0.40 < 0.90`, …) into the run-level verdict.
+      // Without it the run reported `sprint_1_failed: engineering_floor` and
+      // the cause died with the process.
       reason:
-        `sprint_${last.sprintN}_failed: ${condition ?? "unknown"}` +
+        `sprint_${last.sprintN}_failed: ${describeVerdictFailure(last) ?? condition ?? "unknown"}` +
         (failed.length > 1 ? ` (${failed.length} sprints failed)` : ""),
     };
     // `failedCondition` is typed as the DoneCondition union but reaches us as a

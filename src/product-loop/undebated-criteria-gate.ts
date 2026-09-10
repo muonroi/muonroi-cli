@@ -53,7 +53,10 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { promises as fs } from "node:fs";
+import * as path from "node:path";
 import type { QuestionResponder } from "../council/types.js";
+import { atomicWriteJSON } from "../storage/atomic-io.js";
 import type { CouncilStanceRow, StreamChunk } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 
@@ -318,4 +321,277 @@ async function awaitAnswer(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+// ─── F8b — the record that survives the process ──────────────────────────────
+//
+// The gate above only ever ran on the research→scoping transition, reading
+// `DebateState.finalStanceRows` out of RAM. Measured 2026-09-10: two
+// `/ideal resume <runId>` runs went straight into sprint stages
+//
+//   02:38:04  sprint_stage {sprintIndex:1, stage:"planning"}
+//   02:38:04  sprint_stage {sprintIndex:1, stage:"implementation"}
+//
+// with zero `phase_start` and zero `council_message` rows — the transition the
+// gate guards never happened, so the gate could not fire on the path that
+// actually schedules sprints. And the defect it exists to stop is precisely a
+// RESUME defect: a resume re-enters the same sprint plan whose sprint 2 goal was
+// "Package all formatting analyzers into installable TCIS.CodeStandards.Analyzers
+// NuGet" — the criterion nobody argued.
+//
+// The stance rows were NOT persisted anywhere: `debate-checkpoint.json` is
+// mid-debate state and is deleted on normal completion, `debate-inputs.json`
+// holds the pre-debate spec, and the `council_summary` forensics row records
+// participant positions, not stances. This section closes that gap by writing
+// the SAME record to disk — not a second source of truth derived from something
+// else. A run that finished its debate before this landed has no record, and the
+// gate correctly reports "no evidence" rather than inventing silence.
+
+/** Bump when the record shape changes incompatibly so stale files are ignored. */
+export const UNDEBATED_RECORD_VERSION = 1 as const;
+export const UNDEBATED_RECORD_FILE = "undebated-criteria.json";
+
+/** A decision a human actually made, pinned to the criteria it was made about. */
+export interface UndebatedGateResolution {
+  action: UndebatedGateAction;
+  /**
+   * The criteria the human was shown. A later debate producing a DIFFERENT set
+   * is a different question and must be asked again.
+   */
+  criteria: UndebatedCriterion[];
+  /** Raw answer value, for forensics. */
+  answer: string;
+  decidedAt: string;
+}
+
+export interface UndebatedGateRecord {
+  version: typeof UNDEBATED_RECORD_VERSION;
+  /** The council's own final stance rows, verbatim — the gate's only evidence. */
+  stanceRows: CouncilStanceRow[];
+  savedAt: string;
+  /**
+   * Present only once a HUMAN answered. An unattended timeout deliberately
+   * writes nothing: nobody answered, so there is no answer to honour, and
+   * persisting the timeout's halt would make an unattended run unresumable.
+   */
+  resolution?: UndebatedGateResolution;
+}
+
+function recordPath(runDir: string): string {
+  return path.join(runDir, UNDEBATED_RECORD_FILE);
+}
+
+/**
+ * Read the record. Absent / unparseable / stale-version all return null: a
+ * missing record is missing evidence, and the gate must never manufacture
+ * silence out of it (the same rule as an empty stance map).
+ */
+export async function readUndebatedGateRecord(runDir: string): Promise<UndebatedGateRecord | null> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(recordPath(runDir), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      logger.error("orchestrator", "[undebated-gate] record read failed", {
+        runDir,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as UndebatedGateRecord;
+    if (parsed?.version !== UNDEBATED_RECORD_VERSION) return null;
+    if (!Array.isArray(parsed.stanceRows)) return null;
+    return parsed;
+  } catch (err) {
+    logger.error("orchestrator", "[undebated-gate] record parse failed", {
+      runDir,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * Persist the debate's final stance rows against the run, preserving any answer
+ * a human already gave. Called on the live path the moment the debate returns —
+ * whether or not the gate fires, so a resume can tell "the panel argued
+ * everything" apart from "no evidence was ever recorded".
+ *
+ * Non-fatal: a write failure forfeits gate coverage on a later resume; it must
+ * never break the run in front of the user. Logged, never swallowed.
+ */
+export async function writeUndebatedStanceRecord(
+  runDir: string,
+  stanceRows: readonly CouncilStanceRow[],
+  resolution?: UndebatedGateResolution,
+): Promise<void> {
+  const record: UndebatedGateRecord = {
+    version: UNDEBATED_RECORD_VERSION,
+    stanceRows: [...stanceRows],
+    savedAt: new Date().toISOString(),
+    ...(resolution ? { resolution } : {}),
+  };
+  try {
+    await fs.mkdir(runDir, { recursive: true });
+    await atomicWriteJSON(recordPath(runDir), record);
+  } catch (err) {
+    logger.error("orchestrator", "[undebated-gate] stance record write failed — a later resume loses gate coverage", {
+      runDir,
+      rows: stanceRows.length,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Attach a human's answer to the existing record. No-ops (loudly) when there is
+ * no record to attach to — writing one here would fabricate stance evidence.
+ */
+export async function recordUndebatedResolution(runDir: string, resolution: UndebatedGateResolution): Promise<void> {
+  const existing = await readUndebatedGateRecord(runDir);
+  if (!existing) {
+    logger.error("orchestrator", "[undebated-gate] no stance record to attach the answer to — a resume will re-ask", {
+      runDir,
+      action: resolution.action,
+    });
+    return;
+  }
+  await writeUndebatedStanceRecord(runDir, existing.stanceRows, resolution);
+}
+
+/** Same question? Compared on criterion TEXT — indices shift when a spec is narrowed. */
+function sameCriteria(a: readonly UndebatedCriterion[], b: readonly UndebatedCriterion[]): boolean {
+  if (a.length !== b.length) return false;
+  const norm = (xs: readonly UndebatedCriterion[]) => xs.map((x) => x.criterion.trim()).sort();
+  const x = norm(a);
+  const y = norm(b);
+  return x.every((v, i) => v === y[i]);
+}
+
+/** Why the gate reached its answer — carried into the audit row, never guessed. */
+export type UndebatedGateSource =
+  /** No stance record on disk and none supplied: nothing to judge. */
+  | "no-record"
+  /** Stance evidence exists and every pinned criterion was engaged. */
+  | "all-argued"
+  /** A human already answered this exact question for this run. */
+  | "honoured"
+  /** The card was shown and resolved in this call. */
+  | "asked";
+
+export interface UndebatedGateOutcome {
+  /** False only when the decision is "take it back to the council". */
+  proceed: boolean;
+  source: UndebatedGateSource;
+  action?: UndebatedGateAction;
+  undebated: UndebatedCriterion[];
+  unattended?: boolean;
+}
+
+/**
+ * The single entry every path that schedules or resumes sprint work goes
+ * through.
+ *
+ * The live path (`loop-driver`, research→scoping) passes `stanceRows`, and the
+ * rows get persisted here. The resume path (`runResume`, immediately before
+ * sprint entry) passes none and reads the persisted rows — the same evidence,
+ * off disk.
+ *
+ * Honouring a prior answer is not an optimisation, it is a correctness rule:
+ * re-asking a question the human already settled trains people to click through
+ * it, which is how a gate becomes decorative. Only a HUMAN answer is persisted,
+ * so an unattended timeout leaves the question genuinely open and the next
+ * (probably attended) resume asks it properly.
+ *
+ * A prior `council` answer keeps stopping the run. That is the answer being
+ * honoured, not a bug: "take it back to the council" means the plan standing on
+ * that criterion is not to be executed, and a resume is exactly an attempt to
+ * execute it. The remedy is to run the council again.
+ */
+export async function* enforceUndebatedCriteriaGate(opts: {
+  /** `.muonroi-flow/runs/<runId>` — where the record lives. */
+  runDir: string;
+  respondToQuestion: QuestionResponder;
+  /** Supplied by the live path, which holds the rows in memory. */
+  stanceRows?: readonly CouncilStanceRow[] | undefined;
+  timeoutMs?: number;
+  /** Forensics sink (`logLoopEvent` / `logInteraction`). Must not throw. */
+  audit?: (data: Record<string, unknown>) => void;
+}): AsyncGenerator<StreamChunk, UndebatedGateOutcome, unknown> {
+  const audit = opts.audit ?? (() => {});
+  const timeoutMs = opts.timeoutMs ?? resolveUndebatedGateTimeoutMs();
+
+  const existing = await readUndebatedGateRecord(opts.runDir);
+  if (opts.stanceRows) {
+    // Persist BEFORE evaluating, so the evidence survives even when the gate
+    // does not fire and even if the user kills the run at the card.
+    await writeUndebatedStanceRecord(opts.runDir, opts.stanceRows, existing?.resolution);
+  }
+  const rows = opts.stanceRows ?? existing?.stanceRows;
+  const undebated = findUndebatedCriteria(rows);
+
+  if (undebated.length === 0) {
+    const source: UndebatedGateSource = rows && rows.length > 0 ? "all-argued" : "no-record";
+    audit({ stage: "gate-skipped", source });
+    return { proceed: true, source, undebated: [] };
+  }
+
+  const prior = existing?.resolution;
+  if (prior && sameCriteria(prior.criteria, undebated)) {
+    audit({
+      stage: "gate-honoured",
+      action: prior.action,
+      decidedAt: prior.decidedAt,
+      count: undebated.length,
+    });
+    yield {
+      type: "content",
+      content:
+        `\n  ↳ Undebated criteria: honouring the answer already given for this run ` +
+        `(${prior.action}, ${prior.decidedAt}) — not asking again.\n`,
+    } as StreamChunk;
+    return { proceed: prior.action !== "council", source: "honoured", action: prior.action, undebated };
+  }
+
+  audit({
+    stage: "gate-open",
+    count: undebated.length,
+    criteria: undebated.map((u) => u.criterion.slice(0, 400)),
+  });
+  const decision = yield* runUndebatedCriteriaGate({
+    undebated,
+    respondToQuestion: opts.respondToQuestion,
+    timeoutMs,
+  });
+  audit({
+    stage: "gate-resolved",
+    action: decision.action,
+    unattended: decision.unattended,
+    count: undebated.length,
+  });
+  if (!decision.unattended) {
+    await recordUndebatedResolution(opts.runDir, {
+      action: decision.action,
+      criteria: undebated,
+      answer: decision.answer,
+      decidedAt: new Date().toISOString(),
+    });
+  }
+  return {
+    proceed: decision.action !== "council",
+    source: "asked",
+    action: decision.action,
+    undebated,
+    unattended: decision.unattended,
+  };
+}
+
+/** Halt detail shared by every call site, so the criteria are always named. */
+export function undebatedHaltDetail(undebated: readonly UndebatedCriterion[]): string {
+  return (
+    `the council never argued ${undebated.length} pinned criteri${undebated.length === 1 ? "on" : "a"} — ` +
+    `${undebated.map((u) => u.criterion).join("; ")}`
+  );
 }

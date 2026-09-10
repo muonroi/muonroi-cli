@@ -29,12 +29,13 @@ import { buildContinueFeedback, type ContinueFeedback } from "./feedback-routing
 import { type DriverContext, type DriverResult, runLoopDriver } from "./loop-driver.js";
 import { resolveRoles } from "./role-registry.js";
 import { readRunSpendUsd } from "./run-spend.js";
-import { deriveRunVerdict, runIsTerminal } from "./run-verdict.js";
+import { deriveRunVerdict, describeVerdictFailure, runIsTerminal } from "./run-verdict.js";
 import { polishDelivery } from "./ship-polish.js";
 import { applySprintAssignments, planSprints } from "./sprint-planner.js";
 import { runSprint } from "./sprint-runner.js";
 import { readSprintPlan, setActiveSprint, writeSprintPlan } from "./sprint-store.js";
 import type { ImplementationPlanArtifact, IterationState, ProductSpec, RoleSlot } from "./types.js";
+import { enforceUndebatedCriteriaGate, undebatedHaltDetail } from "./undebated-criteria-gate.js";
 
 export interface ProductLoopFlags {
   maxCost: number;
@@ -1949,7 +1950,9 @@ async function* runStatus(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
       for (const o of outcomes) {
         lines.push(
           `  #${o.sprintN}  ${o.pass ? "✓ pass" : "✗ fail"}  score=${o.score.toFixed(2)}  verify=${o.verify}` +
-            (o.failedCondition ? `  (${o.failedCondition})` : ""),
+            // F9 - name the cause, not just the condition. `engineering_floor`
+            // alone leaves four possible causes and identifies none of them.
+            (describeVerdictFailure(o) ? `  (${describeVerdictFailure(o)})` : ""),
         );
       }
     }
@@ -2034,12 +2037,12 @@ async function* runReview(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
       "",
       "## Sprint scores",
       "",
-      "| Sprint | Result | Score | Verify | Failed condition |",
-      "|---|---|---|---|---|",
+      "| Sprint | Result | Score | Verify | Failed condition | Reason |",
+      "|---|---|---|---|---|---|",
     );
     for (const o of outcomes) {
       header.push(
-        `| ${o.sprintN} | ${o.pass ? "pass" : "fail"} | ${o.score.toFixed(2)} | ${o.verify} | ${o.failedCondition ?? "—"} |`,
+        `| ${o.sprintN} | ${o.pass ? "pass" : "fail"} | ${o.score.toFixed(2)} | ${o.verify} | ${o.failedCondition ?? "—"} | ${o.reason ?? "—"} |`,
       );
     }
   }
@@ -2289,6 +2292,54 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
       type: "content",
       content: `\n> Committed: ${sprintCount} sprint${sprintCount === 1 ? "" : "s"} planned. Sprint 1 active.\n`,
     } as StreamChunk;
+  }
+
+  // F8b — the undebated-criteria gate, on the path a resume actually takes.
+  //
+  // Measured 2026-09-10: two `/ideal resume <runId>` runs produced sprint_stage
+  // rows from 02:38:04 and NOTHING else — zero phase_start, zero
+  // council_message. A resume never re-enters research→scoping, which is where
+  // the gate lived, so the gate could not fire on the path that schedules the
+  // sprints. That is not a theoretical hole: the sprint plan a resume re-enters
+  // is the one whose sprint 2 goal was built on the criterion the council had
+  // just reported nobody discussed.
+  //
+  // This sits after the interrupted-debate branch on purpose. That branch runs
+  // the loop-driver, which consults the same gate and records the answer; the
+  // call below then finds that answer and honours it instead of asking twice.
+  // Every route out of `runResume` into sprint work — phase-orchestrated and
+  // legacy alike — passes through here.
+  {
+    const gate = yield* enforceUndebatedCriteriaGate({
+      runDir,
+      respondToQuestion: opts.respondToQuestion,
+      audit: (data) => {
+        try {
+          logInteraction(opts.sessionId ?? resolvedRunId, "council", {
+            eventSubtype: "undebated_criteria_gate",
+            data: { phase: "resume", runId: resolvedRunId, ...data },
+          });
+        } catch (err) {
+          // Audit trail only — a broken DB must not stop the gate it is
+          // recording, but it must not vanish either (No Silent Catch).
+          console.error(`[product-loop] undebated gate audit failed: ${(err as Error)?.message}`);
+        }
+      },
+    });
+    if (!gate.proceed) {
+      const detail = undebatedHaltDetail(gate.undebated);
+      yield {
+        type: "content",
+        content: `\n> Stopping this resume — ${detail}. Take them back to a council before running sprints against them.\n`,
+      } as StreamChunk;
+      return {
+        runId: resolvedRunId,
+        stage: "halted",
+        success: false,
+        reason: "undebated_criteria",
+        sprintsRun: 0,
+      };
+    }
   }
 
   const productSpec = await loadProductSpec(opts.flowDir, resolvedRunId, manifest.idea, manifest.stack);

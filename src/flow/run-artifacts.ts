@@ -215,6 +215,20 @@ export interface SprintOutcome {
   score: number;
   verify: string;
   failedCondition?: string;
+  /**
+   * The precise cause behind `failedCondition`, as computed by
+   * `evaluateDoneGate` — e.g. `no_recipe` | `no_test_commands` |
+   * `zero_coverage` | `verify_FAIL` for an engineering-floor failure, the
+   * offending criterion ids for `evidence_regex`, the score gap for
+   * `weighted_score`.
+   *
+   * Persisted because it was previously computed and thrown away: a sprint
+   * outcome carrying `{"verify":"PASS","failedCondition":"engineering_floor"}`
+   * narrows the cause to three possibilities and names none of them, and the
+   * reason survived nowhere else — not in the DB, not in the logs. A verdict
+   * without its evidence cannot be acted on.
+   */
+  reason?: string;
   criteriaMet: number;
   criteriaPartial: number;
   criteriaUnmet: number;

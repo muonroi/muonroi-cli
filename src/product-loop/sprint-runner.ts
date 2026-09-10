@@ -68,6 +68,7 @@ import { runPlanAdherenceReview } from "./plan-adherence-review.js";
 import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snapshot.js";
 import { appendRoleMemory } from "./role-memory.js";
 import { readRunSpendUsd } from "./run-spend.js";
+import { describeVerdictFailure } from "./run-verdict.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
 import { loadVerifyFailureSignatures, recordVerifyFailureAndMaybePush } from "./verify-failure-tracking.js";
 import { parseVerifyResult, VERIFY_PASS_MARKER } from "./verify-result.js";
@@ -1860,7 +1861,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       lastCompleted: `sprint-${sprintN} ${iter.stage}`,
       nextAction: verdict.pass
         ? "Definition-of-Done met — advance to the next phase or ship"
-        : `Retry sprint ${sprintN}: ${verdict.failedCondition ?? "continue toward Definition-of-Done"}`,
+        : `Retry sprint ${sprintN}: ${describeVerdictFailure(verdict) ?? "continue toward Definition-of-Done"}`,
       sprintN,
       score: verdict.score,
       verify: verifyVerdict,
@@ -1879,6 +1880,13 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       score: verdict.score,
       verify: verifyVerdict,
       failedCondition: verdict.failedCondition ?? undefined,
+      // F9 - the done-gate computed a precise cause (`no_recipe` |
+      // `no_test_commands` | `zero_coverage` | `verify_FAIL` for the
+      // engineering floor, and an equally specific string for every other
+      // condition) and this record used to drop it on the floor. A sprint that
+      // failed with verify=PASS and failedCondition=engineering_floor left the
+      // cause unrecoverable from the artifacts, the DB and the logs alike.
+      reason: verdict.reason ?? undefined,
       criteriaMet: iter.criteriaMet,
       criteriaPartial: iter.criteriaPartial,
       criteriaUnmet: iter.criteriaUnmet,
@@ -1943,13 +1951,14 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     kind: "sprint-execution",
     phaseRef: `runs/${ctx.runId}#sprint-${sprintN}`,
     sessionId: ctx.runId,
-    text: `Sprint ${sprintN} ${verdict.pass ? "passed" : "failed"} (score ${verdict.score.toFixed(2)}, verify ${verifyVerdict})${verdict.failedCondition ? ` — ${verdict.failedCondition}` : ""}`,
+    text: `Sprint ${sprintN} ${verdict.pass ? "passed" : "failed"} (score ${verdict.score.toFixed(2)}, verify ${verifyVerdict})${describeVerdictFailure(verdict) ? ` — ${describeVerdictFailure(verdict)}` : ""}`,
     payload: {
       sprintN,
       pass: verdict.pass,
       score: verdict.score,
       verify: verifyVerdict,
       failedCondition: verdict.failedCondition ?? null,
+      reason: verdict.reason ?? null,
     },
   });
 
@@ -1967,7 +1976,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     iter.nextFocus = `${fb.focus}${deviationNote}`;
     yield {
       type: "content",
-      content: `\n> Sprint ${sprintN} did not satisfy Definition-of-Done (${verdict.failedCondition ?? "unknown"}). Next focus: ${fb.focus}\n`,
+      content: `\n> Sprint ${sprintN} did not satisfy Definition-of-Done (${describeVerdictFailure(verdict) ?? "unknown"}). Next focus: ${fb.focus}\n`,
     };
   } else {
     yield {

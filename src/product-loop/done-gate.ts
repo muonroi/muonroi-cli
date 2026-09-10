@@ -1,4 +1,5 @@
 import { runPreflight } from "../council/preflight.js";
+import { logger } from "../utils/logger.js";
 import { blockingAssumptions, readLedger } from "./assumption-ledger.js";
 import { evidenceLooksValid } from "./reality-anchor.js";
 import type { Criterion, DoneGateContext, DoneVerdict } from "./types.js";
@@ -81,10 +82,20 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
           score,
         };
       }
-    } catch {
+    } catch (err) {
       // Ledger read failure is non-fatal — a missing/corrupt ledger should
       // not block ship that otherwise passes #1-#3. The user can still
       // catch via the customer debate or final approval gates.
+      //
+      // It must NOT be silent, though: swallowing this is the same defect
+      // class as dropping `reason` — a condition that never ran looks exactly
+      // like a condition that passed, and nothing anywhere records which.
+      logger.error("orchestrator", "[done-gate] assumption-ledger read failed — condition #6 skipped", {
+        runId: ctx.runId,
+        flowDir: ctx.flowDir,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
     }
   }
 

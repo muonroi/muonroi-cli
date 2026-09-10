@@ -39,8 +39,14 @@ export function buildContinueFeedback(
   switch (verdict.failedCondition) {
     case "engineering_floor": {
       const detail = lastVerify?.output || lastVerify?.error || "No verify output available.";
+      // F9 - the floor fails for four distinct reasons and only one of them
+      // ("verify_FAIL") is visible in the verify output. On `no_recipe`,
+      // `no_test_commands` and `zero_coverage` the output is silent about the
+      // cause, so the next sprint was told to "fix verify failures" over a log
+      // that had nothing to do with why the sprint failed. Name the cause.
+      const cause = verdict.reason ? ` (${verdict.reason})` : "";
       return {
-        focus: `fix verify failures\n\n${detail}`,
+        focus: `fix verify failures${cause}\n\n${detail}`,
       };
     }
 

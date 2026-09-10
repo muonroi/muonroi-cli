@@ -16,8 +16,10 @@
  *     all (the gate is not a tax on normal runs).
  */
 
+import { promises as fs } from "node:fs";
 import * as os from "node:os";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import * as path from "node:path";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getTestModels } from "../../__test-helpers__/catalog-fixtures.js";
 import { loadCatalog } from "../../models/registry.js";
 import type { CouncilStanceRow } from "../../types/index.js";
@@ -73,6 +75,13 @@ describe("loop-driver research→scoping consults the undebated-criteria gate", 
   let ctx: DriverContext;
   let clarifiedSpec: any;
   let synthesisPrompts: string[];
+  // A FRESH run dir per test. The file used to pin `flowDir: os.tmpdir()` with a
+  // fixed runId, so every test in it — and every process that ever ran it —
+  // shared one `runs/f8-callsite` directory. That was invisible until the gate
+  // began persisting its record there: the "accept" answered in one test was
+  // then honoured in the next, and the gate correctly stopped asking. Shared
+  // run state between tests is the bug; the honouring is the feature.
+  let flowDir: string;
 
   function seedDebate(finalStanceRows: CouncilStanceRow[] | undefined) {
     const debateState = {
@@ -90,9 +99,10 @@ describe("loop-driver research→scoping consults the undebated-criteria gate", 
     });
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     synthesisPrompts = [];
+    flowDir = await fs.mkdtemp(path.join(os.tmpdir(), "f8-callsite-"));
 
     clarifiedSpec = {
       problemStatement: "Chuẩn hoá code style cho TCIS",
@@ -121,7 +131,7 @@ describe("loop-driver research→scoping consults the undebated-criteria gate", 
 
     ctx = {
       runId: "f8-callsite",
-      flowDir: os.tmpdir(),
+      flowDir,
       idea: "Chuẩn hoá code style cho TCIS",
       sessionModelId: getTestModels().balanced,
       llm: {
@@ -137,6 +147,12 @@ describe("loop-driver research→scoping consults the undebated-criteria gate", 
       respondToQuestion: vi.fn().mockResolvedValue(UNDEBATED_OPTION_ACCEPT),
       respondToPreflight: vi.fn().mockResolvedValue(true),
     } as DriverContext;
+  });
+
+  afterEach(async () => {
+    await fs.rm(flowDir, { recursive: true, force: true }).catch(() => {
+      /* temp dir cleanup is best-effort */
+    });
   });
 
   async function run() {
