@@ -27,6 +27,7 @@
 
 import { createHash } from "node:crypto";
 import type { ToolSet } from "ai";
+import { isGuardRejectableCall } from "../tools/arg-guard.js";
 import { RAW_FOR_DEDUP } from "./sub-agent-cap";
 
 const DEFAULT_MAX_ENTRIES = 200;
@@ -236,6 +237,12 @@ export function wrapToolSetWithDedup(tools: ToolSet, dedup: CrossTurnDedup | nul
     wrapped[name] = {
       ...(tool as object),
       execute: async (input: unknown, ctx?: unknown) => {
+        // F3 — see isGuardRejectableCall. A malformed call never ran, so there
+        // is no prior result to "reuse"; its correction must reach the model
+        // verbatim every time, however often the shape repeats. Only calls the
+        // arg guard would block take this branch, so well-formed traffic is
+        // deduped exactly as before.
+        if (isGuardRejectableCall(tool, name, input)) return await innerExecute(input, ctx);
         const result = await innerExecute(input, ctx);
         return dedupResult(dedup, name, result);
       },

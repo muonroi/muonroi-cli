@@ -18,6 +18,7 @@
  * re-read loops. Override via MUONROI_MAX_READS_PER_PATH; disable with 0.
  */
 import type { ToolSet } from "ai";
+import { isGuardRejectableCall } from "../tools/arg-guard.js";
 
 // Matches built-in read tools + common MCP read tools (filesystem read_file,
 // read_text_file, etc). We don't include "ls" / "list_directory" because
@@ -174,6 +175,13 @@ export function wrapToolSetWithReadBudget(tools: ToolSet, budget: ReadPathBudget
       wrapped[name] = {
         ...(tool as object),
         execute: async (input: unknown, ctx?: unknown) => {
+          // F3 — this is the one outer wrapper that pre-empts the call instead
+          // of post-processing it, so a malformed call could be answered with
+          // "refer to your earlier result" WITHOUT the arg guard ever running:
+          // no correction, and no strike on the escalation ladder either. It
+          // would also key the per-path counter on the elision marker itself,
+          // since the marker lands in `file_path` and reads as a path.
+          if (isGuardRejectableCall(tool, name, input)) return innerExecute(input, ctx);
           const path = extractPath(input);
           if (path) {
             const stub = budget.checkAndIncrement(name, path);

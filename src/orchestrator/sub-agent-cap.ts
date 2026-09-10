@@ -39,6 +39,7 @@
 
 import { createHash } from "node:crypto";
 import type { ToolSet } from "ai";
+import { isGuardRejectableCall } from "../tools/arg-guard.js";
 
 /**
  * H5: the cross-turn dedup (C3) wraps this cap on the OUTSIDE, so it would
@@ -232,6 +233,14 @@ function wrapInternal(tools: ToolSet, state: SubAgentCapState): ToolSet {
     wrapped[name] = {
       ...(tool as object),
       execute: async (input: unknown, ctx?: unknown) => {
+        // F3 — a call the executor-side arg guard rejects never runs, so its
+        // result is a CORRECTION, not tool output. Compressing it would count
+        // it against the budget, and the cap's own content dedup would replace
+        // the second identical correction with `[dup of call #N — reuse it]` —
+        // telling the model to reuse the answer to a call that never succeeded.
+        // Measured 2026-09-09 15:30:21 / 15:30:27; the model then repeated the
+        // malformed shape instead of repairing it.
+        if (isGuardRejectableCall(tool, name, input)) return await innerExecute(input, ctx);
         const result = await innerExecute(input, ctx);
         return compressResult(state, result);
       },

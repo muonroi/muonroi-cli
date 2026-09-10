@@ -227,12 +227,55 @@ interface GuardableTool {
 }
 
 /**
- * Idempotence marker. Every register* helper builds fresh `dynamicTool(...)`
- * objects per `createBuiltinTools()` call today, so double-installation cannot
- * happen — but a module-level tool singleton introduced later would otherwise
- * accumulate one wrapper per registry rebuild.
+ * Idempotence marker, and the answer to "is this tool guarded at all?".
+ * Every register* helper builds fresh `dynamicTool(...)` objects per
+ * `createBuiltinTools()` call today, so double-installation cannot happen — but
+ * a module-level tool singleton introduced later would otherwise accumulate one
+ * wrapper per registry rebuild. `{...tool}` (how every outer wrapper clones a
+ * tool) copies own enumerable symbol keys, so the marker survives all of them.
  */
 const GUARD_INSTALLED = Symbol.for("muonroi.argGuardInstalled");
+
+/**
+ * F3 — "will the executor-side guard refuse to RUN this call?"
+ *
+ * The tool-set wrappers layered outside the registry (sub-agent cap,
+ * cross-turn dedup, read-path budget) either post-process a tool's result or
+ * pre-empt it with a stub. A call this guard rejects **never ran**, so it has
+ * no prior result to point at — and every one of those stubs says some form of
+ * "you already have this answer, reuse it".
+ *
+ * Measured (2026-09-09): three malformed calls were blocked in one run. The two
+ * whose correction reached the model (15:16:54, 15:28:51) were each repaired on
+ * the very next call. The third (15:30:21, repeated 15:30:27) had its correction
+ * replaced by the cap's `[dup of call #171 — reuse it]` stub, because the guard's
+ * corrective message is itself a tool output and hashed equal to an earlier
+ * correction. The model was told to reuse the answer to a call that had never
+ * once succeeded, learned nothing, and repeated the shape.
+ *
+ * The outer wrappers ask THIS function rather than re-deriving the rule, so the
+ * bypass can never drift from what the guard actually blocks. It returns true
+ * only when the guard is genuinely installed on `tool`: an un-guarded tool (an
+ * MCP tool, say) has nobody to speak for it, so dedup/cap/budget keep their
+ * normal behaviour there.
+ *
+ * Never throws — a probe that cannot decide must not be able to disable dedup.
+ */
+export function isGuardRejectableCall(tool: unknown, toolName: string, input: unknown): boolean {
+  if (!tool || typeof tool !== "object") return false;
+  const candidate = tool as GuardableTool & { [GUARD_INSTALLED]?: boolean };
+  if (!candidate[GUARD_INSTALLED]) return false;
+  try {
+    return evaluateToolArgs(toolName, input, extractJsonSchema(candidate.inputSchema)) !== null;
+  } catch (err) {
+    logger.warn("orchestrator", "[tools/arg-guard] rejectability probe failed; treating call as well-formed", {
+      tool: toolName,
+      error: (err as Error)?.message,
+      stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+    });
+    return false;
+  }
+}
 
 /**
  * Wrap every tool's `execute` with the guard. Called once at the end of

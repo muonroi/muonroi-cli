@@ -238,6 +238,7 @@ import {
   stallRepromptBackoffMs,
 } from "./stall-watchdog.js";
 import { planSteerInjection } from "./steer-inbox.js";
+import type { SubAgentCapOptions, SubAgentCapState } from "./sub-agent-cap.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import {
   applyAnthropicPromptCaching,
@@ -562,6 +563,43 @@ export function spliceConveneToolResult<T extends { role: string; content?: any 
     return changed ? ({ ...m, content: newContent } as T) : m;
   });
   return { messages: replaced ? out : messages, replaced };
+}
+
+export interface TurnToolPipelineOptions {
+  /** Cumulative-cap configuration. State is per-turn: a fresh budget each call. */
+  capOptions: SubAgentCapOptions;
+  /** Session-lifetime cross-turn output dedup, or null when disabled. */
+  dedup: CrossTurnDedup | null;
+  /** Per-path read budget, or null when disabled (the default). */
+  readBudget: ReadPathBudget | null;
+}
+
+/**
+ * The turn's tool-set pipeline, assembled in ONE place so the layering is a
+ * thing a test can execute rather than a shape re-typed at each call site.
+ *
+ * Order, innermost first:
+ *   registry tools (arg guard installed here, by `createBuiltinTools`)
+ *     → cumulative cap        (trims / dedups / exhausts tool OUTPUT)
+ *     → cross-turn dedup      (stubs repeated tool OUTPUT)
+ *     → read-path budget      (pre-empts a re-read BEFORE it runs)
+ *
+ * The guard being innermost is what F3 turned on: every outer layer answers a
+ * repeat with "you already have this result", which is a lie about a call that
+ * never ran. Each wrapper therefore consults `isGuardRejectableCall` and passes
+ * a guard-rejectable call straight through — see src/tools/arg-guard.ts. This
+ * function exists so that property is pinned against the composition the engine
+ * actually builds, not against a hand-rolled stack in a test.
+ */
+export function buildTurnToolPipeline(
+  raw: ToolSet,
+  opts: TurnToolPipelineOptions,
+): { tools: ToolSet; capState: SubAgentCapState } {
+  // Apply the cumulative cap once over the fully-assembled raw tool set.
+  const cap = wrapToolSetWithCap(raw, opts.capOptions);
+  // Phase C3: layer cross-turn dedup on top of the cap, then the C4 read budget.
+  const tools = wrapToolSetWithReadBudget(wrapToolSetWithDedup(cap.tools, opts.dedup), opts.readBudget);
+  return { tools, capState: cap.state };
 }
 
 export class SimpleMutex {
@@ -1290,22 +1328,20 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // by the spread merges above - so without this both answered as if no
         // mcp_* tool existed. See setLiveToolSet in src/tools/registry.ts.
         setLiveToolSet(rawToolSet);
-        // Apply the top-level cumulative cap once over the fully-assembled
-        // raw tool set. State is per-turn; each turn gets a fresh budget.
-        const topLevelCap = wrapToolSetWithCap(rawToolSet, {
-          maxCumulativeChars: getTopLevelToolBudgetChars(deps.maxToolRounds, contextWindow),
-          midTierRatio: 0.5,
-          highTierRatio: 0.8,
-          label: "top-level",
+        const pipeline = buildTurnToolPipeline(rawToolSet, {
+          capOptions: {
+            maxCumulativeChars: getTopLevelToolBudgetChars(deps.maxToolRounds, contextWindow),
+            midTierRatio: 0.5,
+            highTierRatio: 0.8,
+            label: "top-level",
+          },
+          dedup: deps.crossTurnDedup,
+          readBudget: deps.readBudget,
         });
         // Expose the cap state so the reactive-delegation signal can read this
         // turn's cumulative tool load at turn end (see report at success exit).
-        _topLevelCapState = topLevelCap.state;
-        // Phase C3: layer cross-turn dedup on top of the top-level cap.
-        const tools: ToolSet = wrapToolSetWithReadBudget(
-          wrapToolSetWithDedup(topLevelCap.tools, deps.crossTurnDedup),
-          deps.readBudget,
-        );
+        _topLevelCapState = pipeline.capState;
+        const tools: ToolSet = pipeline.tools;
 
         // Wrap non-read-only tools in a turn-scoped mutex to prevent race conditions during parallel execution.
         const writeMutex = new SimpleMutex();
