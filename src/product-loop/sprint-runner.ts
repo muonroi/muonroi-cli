@@ -1649,6 +1649,91 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     }
   }
 
+  // ── F5 — the goal-contradiction gate ─────────────────────────────────────
+  // Every gate above this line asks "did it work?" — the sub-agent's narration,
+  // the project's own exit codes, the UI self-QA. None of them asks "does this
+  // serve what was asked for?", which is why two independent runs (the full
+  // loop, and a single sub-agent with no council, no sprints and no floor) both
+  // committed a change that builds, tests green, and cannot do the one thing the
+  // user asked for. See goal-contradiction-gate.ts for the measured artefact.
+  //
+  // It FAILS THE SPRINT rather than warning, deliberately. The warning was
+  // already tried on this exact run: the leader's "2 of 5 criteria still unmet"
+  // closing verdict was a warning, and the loop walked past it 23 seconds later.
+  // Failing the sprint is the loop's OWN feedback channel — the same one the
+  // verify floor and self-verify use — so a fire costs one iteration and carries
+  // the contradiction text into the next sprint's focus via `verifyResult.error`,
+  // instead of costing the 98 minutes run 1 spent building on top of the defect.
+  //
+  // It runs on EVERY sprint, not only before ship, for two measured reasons:
+  // the loop-less run had exactly one unit of work and no ship stage at all, so
+  // a ship-only gate would have had nothing to inspect; and in the looped run
+  // two further sprints were planned on top of the broken change. The gate
+  // belongs at the smallest unit of completed work.
+  if (verifyVerdict === "PASS") {
+    try {
+      const { runGoalContradictionGate } = await import("./goal-contradiction-gate.js");
+      const goalGate = await runGoalContradictionGate({
+        // The user's literal text, never a restatement of it — the whole defect
+        // is a run that satisfied its own paraphrase. `productSpec.mvp` is what
+        // the loop already treats as this run's success criteria (index.ts:1160).
+        goal: { idea: ctx.idea, successCriteria: productSpec.mvp },
+        cwd,
+        llm: productLlm,
+        // Decision-grade judgement: pinned to the leader, never downshifted, and
+        // deliberately NOT overridable by MUONROI_IDEAL_REVIEW_MODEL the way the
+        // plan-adherence reviewer is. See SUB_TASK_TIER in src/council/leader.ts:
+        // a wrong answer here either ships the defect or costs a sprint, which is
+        // exactly the class of call that table pins to the leader.
+        modelId: resolveLeaderModel(ctx.sessionModelId),
+      });
+      idealTrace("sprint.goal-gate.after", {
+        runId: ctx.runId,
+        sprintN,
+        fired: goalGate.fired,
+        source: goalGate.source,
+        contradictions: goalGate.contradictions.length,
+      });
+      if (goalGate.fired) {
+        verifyVerdict = "FAIL";
+        verifyResult.error = `${verifyResult.error ?? ""}\n\n[goal-gate] ${goalGate.detail}`;
+        yield {
+          type: "content",
+          content:
+            `\n> [goal-gate] Sprint ${sprintN} verdict downgraded to FAIL — the change works against the stated goal ` +
+            `(${goalGate.source}).\n${goalGate.detail}\n`,
+        };
+      } else if (goalGate.source === "aligned") {
+        yield {
+          type: "content",
+          content: `\n> [goal-gate] The change serves the stated goal (judged on the ${goalGate.diffOrigin} diff).\n`,
+        };
+      } else if (goalGate.source !== "disabled") {
+        // Fail-open paths are ANNOUNCED. "the gate found nothing" and "the gate
+        // never ran" must never look the same in the transcript.
+        yield {
+          type: "content",
+          content: `\n> [goal-gate] Sprint ${sprintN} was NOT checked against the goal (${goalGate.source}): ${goalGate.detail}\n`,
+        };
+      }
+    } catch (err) {
+      // Wiring/infrastructure failure. The deterministic floor above already
+      // ran, so the verdict stands — but per No Silent Catch this is logged and
+      // surfaced, never swallowed.
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error("orchestrator", `[sprint-runner] goal-contradiction gate failed to run (sprint ${sprintN})`, {
+        runId: ctx.runId,
+        sprintN,
+        error: message,
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
+      yield {
+        type: "content",
+        content: `\n> [goal-gate] Sprint ${sprintN} was NOT checked against the goal: ${message}\n`,
+      };
+    }
+  }
+
   // P3.3: Track repeating failures; push to EE judge-worker when count hits 3.
   if (verifyVerdict === "FAIL" || verifyVerdict === "ERROR") {
     const errorMessage = verifyResult.error?.trim() ? verifyResult.error : (verifyResult.output ?? "");

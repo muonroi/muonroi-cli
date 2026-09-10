@@ -1,0 +1,801 @@
+diff --git a/src/TCIS.CodeStandards/Analyzers/TCIS0001_MaxLineLengthAnalyzer.cs b/src/TCIS.CodeStandards/Analyzers/TCIS0001_MaxLineLengthAnalyzer.cs
+index 7cac2d6..11be712 100644
+--- a/src/TCIS.CodeStandards/Analyzers/TCIS0001_MaxLineLengthAnalyzer.cs
++++ b/src/TCIS.CodeStandards/Analyzers/TCIS0001_MaxLineLengthAnalyzer.cs
+@@ -1,9 +1,10 @@
+-namespace TCIS.CodeStandards.Analyzers;
+-
+ using System.IO;
++using Microsoft.CodeAnalysis;
+ using Microsoft.CodeAnalysis.Text;
+ using TCIS.CodeStandards.Diagnostics;
+ 
++namespace TCIS.CodeStandards.Analyzers;
++
+ /// <summary>
+ /// TCIS0001: Flags any physical source line that exceeds 150 characters
+ /// inside TCIS.* non-test namespaces. Generates a warning so the developer
+@@ -21,22 +22,22 @@ public sealed class TCIS0001_MaxLineLengthAnalyzer : DiagnosticAnalyzer
+     {
+         context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
+         context.EnableConcurrentExecution();
+-        context.RegisterSyntaxTreeAction(AnalyzeTree);
++        context.RegisterSyntaxNodeAction(AnalyzeRoot, SyntaxKind.CompilationUnit);
+     }
+ 
+-    private static void AnalyzeTree(SyntaxTreeAnalysisContext context)
++    private static void AnalyzeRoot(SyntaxNodeAnalysisContext context)
+     {
+-        if (TCISAnalyzerHelpers.IsTestAssembly(context.SemanticModel.Compilation))
++        if (TCISAnalyzerHelpers.IsTestAssembly(context.Compilation))
+         {
+             return;
+         }
+ 
+-        if (TCISAnalyzerHelpers.IsGeneratedFile(context.Tree))
++        SyntaxTree? tree = context.Compilation.SyntaxTrees.FirstOrDefault();
++        if (tree is null || TCISAnalyzerHelpers.IsGeneratedFile(tree))
+         {
+             return;
+         }
+ 
+-        SyntaxTree tree = context.Tree;
+         if (!tree.TryGetText(out SourceText? sourceText))
+         {
+             return;
+@@ -46,14 +47,12 @@ public sealed class TCIS0001_MaxLineLengthAnalyzer : DiagnosticAnalyzer
+ 
+         foreach (TextLine line in sourceText.Lines)
+         {
+-            // Skip lines that are entirely whitespace / empty.
+             if (string.IsNullOrWhiteSpace(line.ToString()))
+             {
+                 continue;
+             }
+ 
+-            // Skip lines outside the tree span (e.g. shebang / BOM).
+-            if (line.Span.Start < treeSpan.Start || line.Span.End > treeSpan.End)
++            if (line.Span.End <= treeSpan.Start || line.Span.Start >= treeSpan.End)
+             {
+                 continue;
+             }
+@@ -64,7 +63,6 @@ public sealed class TCIS0001_MaxLineLengthAnalyzer : DiagnosticAnalyzer
+                 continue;
+             }
+ 
+-            // Report on the text span of the line.
+             Location location = tree.GetLocation(line.Span);
+             context.ReportDiagnostic(Diagnostic.Create(
+                 TCISDiagnosticDescriptors.TCIS0001MaxLineLength,
+diff --git a/src/TCIS.CodeStandards/Analyzers/TCIS0002_LineBreakStyleAnalyzer.cs b/src/TCIS.CodeStandards/Analyzers/TCIS0002_LineBreakStyleAnalyzer.cs
+index 67d8239..d20d981 100644
+--- a/src/TCIS.CodeStandards/Analyzers/TCIS0002_LineBreakStyleAnalyzer.cs
++++ b/src/TCIS.CodeStandards/Analyzers/TCIS0002_LineBreakStyleAnalyzer.cs
+@@ -1,3 +1,7 @@
++using Microsoft.CodeAnalysis;
++using Microsoft.CodeAnalysis.Text;
++using TCIS.CodeStandards.Diagnostics;
++
+ namespace TCIS.CodeStandards.Analyzers;
+ 
+ /// <summary>
+@@ -14,32 +18,20 @@ public sealed class TCIS0002_LineBreakStyleAnalyzer : DiagnosticAnalyzer
+     {
+         context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
+         context.EnableConcurrentExecution();
+-
+-        // Method / constructor / indexer invocations
+         context.RegisterSyntaxNodeAction(AnalyzeInvocation, SyntaxKind.InvocationExpression);
+-
+-        // Object / collection / array initialisers
+         context.RegisterSyntaxNodeAction(AnalyzeInitializer, SyntaxKind.ObjectCreationExpression);
+         context.RegisterSyntaxNodeAction(AnalyzeInitializer, SyntaxKind.ArrayInitializerExpression);
+-
+-        // Lambda / anonymous-method bodies
+         context.RegisterSyntaxNodeAction(AnalyzeLambda, SyntaxKind.SimpleLambdaExpression);
+         context.RegisterSyntaxNodeAction(AnalyzeLambda, SyntaxKind.ParenthesizedLambdaExpression);
+-
+-        // Binary expressions (&&, ||, ?? etc.)
+         context.RegisterSyntaxNodeAction(AnalyzeBinary, SyntaxKind.LogicalAndExpression);
+         context.RegisterSyntaxNodeAction(AnalyzeBinary, SyntaxKind.LogicalOrExpression);
+         context.RegisterSyntaxNodeAction(AnalyzeBinary, SyntaxKind.CoalesceExpression);
+-
+-        // if / catch / foreach / using statements
+         context.RegisterSyntaxNodeAction(AnalyzeStatement, SyntaxKind.IfStatement);
+         context.RegisterSyntaxNodeAction(AnalyzeStatement, SyntaxKind.CatchClause);
+         context.RegisterSyntaxNodeAction(AnalyzeStatement, SyntaxKind.ForEachStatement);
+         context.RegisterSyntaxNodeAction(AnalyzeStatement, SyntaxKind.UsingStatement);
+     }
+ 
+-    #region Invocation
+-
+     private static void AnalyzeInvocation(SyntaxNodeAnalysisContext context)
+     {
+         if (TCISAnalyzerHelpers.IsTestAssembly(context.Compilation))
+@@ -48,35 +40,30 @@ public sealed class TCIS0002_LineBreakStyleAnalyzer : DiagnosticAnalyzer
+         }
+ 
+         var invocation = (InvocationExpressionSyntax)context.Node;
+-
+-        if (!IsMultiLine(invocation, context.SemanticModel))
++        if (!IsMultiLine(invocation, context.SemanticModel!))
+         {
+             return;
+         }
+ 
+-        if (!TCISAnalyzerHelpers.IsTCISNamespace(
+-                TCISAnalyzerHelpers.GetNamespace(invocation)))
++        string? ns = GetNamespace(invocation, context.Compilation);
++        if (!TCISAnalyzerHelpers.IsTCISNamespace(ns ?? string.Empty))
+         {
+             return;
+         }
+ 
+-        ArgumentListSyntax? argList = invocation.ArgumentList;
+-        if (argList is null || argList.Arguments.Count == 0)
++        if (invocation.ArgumentList is not { } argList || argList.Arguments.Count == 0)
+         {
+             return;
+         }
+ 
+-        // Fire if two or more arguments share the same physical line.
+         SyntaxNode? lastNodeOnLine = null;
+         foreach (SyntaxNode child in argList.Arguments.GetWithSeparators())
+         {
+             if (child is ArgumentSyntax arg)
+             {
+-                if (lastNodeOnLine is not null && SamePhysicalLine(lastNodeOnLine, arg, context.SemanticModel))
++                if (lastNodeOnLine is not null && SamePhysicalLine(lastNodeOnLine, arg, context.SemanticModel!))
+                 {
+-                    context.ReportDiagnostic(Diagnostic.Create(
+-                        TCISDiagnosticDescriptors.TCIS0002LineBreakStyle,
+-                        arg.GetLocation()));
++                    context.ReportDiagnostic(Diagnostic.Create(TCISDiagnosticDescriptors.TCIS0002LineBreakStyle, arg.GetLocation()));
+                     return;
+                 }
+                 lastNodeOnLine = arg;
+@@ -84,10 +71,6 @@ public sealed class TCIS0002_LineBreakStyleAnalyzer : DiagnosticAnalyzer
+         }
+     }
+ 
+-    #endregion
+-
+-    #region Initializer
+-
+     private static void AnalyzeInitializer(SyntaxNodeAnalysisContext context)
+     {
+         if (TCISAnalyzerHelpers.IsTestAssembly(context.Compilation))
+@@ -95,42 +78,33 @@ public sealed class TCIS0002_LineBreakStyleAnalyzer : DiagnosticAnalyzer
+             return;
+         }
+ 
+-        SyntaxNode node = context.Node;
+-
+-        if (!IsMultiLine(node, context.SemanticModel))
++        if (context.Node is not InitializerExpressionSyntax init)
+         {
+             return;
+         }
+ 
+-        SeparatedSyntaxList<ExpressionSyntax> items = node switch
++        if (!IsMultiLine(init, context.SemanticModel!))
+         {
+-            InitializerExpressionSyntax init => init.Expressions,
+-            _ => default
+-        };
++            return;
++        }
+ 
+-        if (items.Count == 0)
++        if (init.Expressions.Count == 0)
+         {
+             return;
+         }
+ 
+         SyntaxNode? lastNodeOnLine = null;
+-        foreach (SyntaxNode item in items.GetWithSeparators())
++        foreach (SyntaxNode child in init.Expressions.GetWithSeparators())
+         {
+-            if (lastNodeOnLine is not null && SamePhysicalLine(lastNodeOnLine, item, context.SemanticModel))
++            if (lastNodeOnLine is not null && SamePhysicalLine(lastNodeOnLine, child, context.SemanticModel!))
+             {
+-                context.ReportDiagnostic(Diagnostic.Create(
+-                    TCISDiagnosticDescriptors.TCIS0002LineBreakStyle,
+-                    item.GetLocation()));
++                context.ReportDiagnostic(Diagnostic.Create(TCISDiagnosticDescriptors.TCIS0002LineBreakStyle, child.GetLocation()));
+                 return;
+             }
+-            lastNodeOnLine = item;
++            lastNodeOnLine = child;
+         }
+     }
+ 
+-    #endregion
+-
+-    #region Lambda
+-
+     private static void AnalyzeLambda(SyntaxNodeAnalysisContext context)
+     {
+         if (TCISAnalyzerHelpers.IsTestAssembly(context.Compilation))
+@@ -139,45 +113,33 @@ public sealed class TCIS0002_LineBreakStyleAnalyzer : DiagnosticAnalyzer
+         }
+ 
+         var lambda = (LambdaExpressionSyntax)context.Node;
+-
+-        if (!IsMultiLine(lambda, context.SemanticModel))
++        if (!IsMultiLine(lambda, context.SemanticModel!))
+         {
+             return;
+         }
+ 
+-        // Multiple parameters on one wrapped line.
+-        ParameterListSyntax? paramList = lambda.ParameterList;
+-        if (paramList is not null && paramList.Parameters.Count > 1)
++        CheckExpressionChain(lambda.Body as ExpressionSyntax, context);
++    }
++
++    private static void AnalyzeLambdaParam(ParameterSyntax param, SyntaxNodeAnalysisContext context)
++    {
++        CheckExpressionChain(param, context);
++    }
++
++    private static void AnalyzeLambdaParams(SeparatedSyntaxList<ParameterSyntax> parameters, SyntaxNodeAnalysisContext context)
++    {
++        SyntaxNode? lastNodeOnLine = null;
++        foreach (SyntaxNode child in parameters.GetWithSeparators())
+         {
+-            SyntaxNode? lastNodeOnLine = null;
+-            foreach (SyntaxNode param in paramList.Parameters.GetWithSeparators())
++            if (lastNodeOnLine is not null && SamePhysicalLine(lastNodeOnLine, child, context.SemanticModel!))
+             {
+-                if (lastNodeOnLine is not null && SamePhysicalLine(lastNodeOnLine, param, context.SemanticModel))
+-                {
+-                    context.ReportDiagnostic(Diagnostic.Create(
+-                        TCISDiagnosticDescriptors.TCIS0002LineBreakStyle,
+-                        param.GetLocation()));
+-                    return;
+-                }
+-                lastNodeOnLine = param;
++                context.ReportDiagnostic(Diagnostic.Create(TCISDiagnosticDescriptors.TCIS0002LineBreakStyle, child.GetLocation()));
++                return;
+             }
+-        }
+-
+-        // Fluent chain: check member-access chain on multi-line body.
+-        if (lambda.Body is BlockSyntax block)
+-        {
+-            CheckBlockItems(block, context);
+-        }
+-        else if (lambda.Body is ExpressionSyntax exprBody)
+-        {
+-            CheckExpressionChain(exprBody, context);
++            lastNodeOnLine = child;
+         }
+     }
+ 
+-    #endregion
+-
+-    #region BinaryExpression
+-
+     private static void AnalyzeBinary(SyntaxNodeAnalysisContext context)
+     {
+         if (TCISAnalyzerHelpers.IsTestAssembly(context.Compilation))
+@@ -186,48 +148,50 @@ public sealed class TCIS0002_LineBreakStyleAnalyzer : DiagnosticAnalyzer
+         }
+ 
+         var binary = (BinaryExpressionSyntax)context.Node;
+-
+-        if (!IsMultiLine(binary, context.SemanticModel))
++        if (!IsMultiLine(binary, context.SemanticModel!))
+         {
+             return;
+         }
+ 
+         SyntaxNode? lastNodeOnLine = null;
+-        foreach (SyntaxNode child in GetBinaryConditions(binary))
++        foreach (SyntaxNode child in WalkBinary(binary))
+         {
+-            if (lastNodeOnLine is not null && SamePhysicalLine(lastNodeOnLine, child, context.SemanticModel))
++            if (lastNodeOnLine is not null && SamePhysicalLine(lastNodeOnLine, child, context.SemanticModel!))
+             {
+-                context.ReportDiagnostic(Diagnostic.Create(
+-                    TCISDiagnosticDescriptors.TCIS0002LineBreakStyle,
+-                    child.GetLocation()));
++                context.ReportDiagnostic(Diagnostic.Create(TCISDiagnosticDescriptors.TCIS0002LineBreakStyle, child.GetLocation()));
+                 return;
+             }
+             lastNodeOnLine = child;
+         }
+     }
+ 
+-    private static IEnumerable<SyntaxNode> GetBinaryConditions(BinaryExpressionSyntax binary)
++    private static IEnumerable<SyntaxNode> WalkBinary(BinaryExpressionSyntax node)
+     {
+-        // Collect leaf conditions (left side of each && / || node).
+-        SyntaxNode? current = binary;
+-        while (current is BinaryExpressionSyntax bes
+-               && (bes.OperatorToken.IsKind(SyntaxKind.AmpersandAmpersandToken)
+-                   || bes.OperatorToken.IsKind(SyntaxKind.BarBarToken)))
++        if (node.Left is BinaryExpressionSyntax lb)
+         {
+-            yield return bes.Left;
+-            current = bes.Right;
++            foreach (var n in WalkBinary(lb))
++            {
++                yield return n;
++            }
++        }
++        else
++        {
++            yield return node.Left;
+         }
+ 
+-        if (current is not null)
++        if (node.Right is BinaryExpressionSyntax rb)
++        {
++            foreach (var n in WalkBinary(rb))
++            {
++                yield return n;
++            }
++        }
++        else
+         {
+-            yield return current;
++            yield return node.Right;
+         }
+     }
+ 
+-    #endregion
+-
+-    #region Statement
+-
+     private static void AnalyzeStatement(SyntaxNodeAnalysisContext context)
+     {
+         if (TCISAnalyzerHelpers.IsTestAssembly(context.Compilation))
+@@ -235,41 +199,50 @@ public sealed class TCIS0002_LineBreakStyleAnalyzer : DiagnosticAnalyzer
+             return;
+         }
+ 
+-        SyntaxNode node = context.Node;
+-
+-        if (!IsMultiLine(node, context.SemanticModel))
++        if (!IsMultiLine(context.Node, context.SemanticModel!))
+         {
+             return;
+         }
+ 
+-        SyntaxNode target = node switch
++        SyntaxNode? lastNodeOnLine = null;
++        foreach (SyntaxNodeOrToken child in context.Node.ChildNodesAndTokens())
+         {
+-            IfStatementSyntax ifs => (SyntaxNode)ifs.Condition,
+-            CatchDeclarationSyntax catchDecl => (SyntaxNode)catchDecl.Identifier,
+-            ForEachStatementSyntax fe => (SyntaxNode)fe.Identifier,
+-            UsingStatementSyntax us => us.Declaration ?? (SyntaxNode)us.Expression!,
+-            _ => null
+-        };
++            if (child.IsToken)
++            {
++                continue;
++            }
+ 
+-        if (target is null || target.Span.IsEmpty)
+-        {
+-            return;
++            SyntaxNode node = child.AsNode()!;
++            if (lastNodeOnLine is not null && SamePhysicalLine(lastNodeOnLine, node, context.SemanticModel!))
++            {
++                context.ReportDiagnostic(Diagnostic.Create(TCISDiagnosticDescriptors.TCIS0002LineBreakStyle, node.GetLocation()));
++                return;
++            }
++            lastNodeOnLine = node;
+         }
++    }
+ 
+-        // If it is an identifier sitting alone on a line — no children to inspect.
+-        if (target is IdentifierNameSyntax || target is IdentifierTokenSyntax)
++    private static void CheckExpressionChain(ExpressionSyntax? expr, SyntaxNodeAnalysisContext context)
++    {
++        while (expr is MemberAccessExpressionSyntax maes)
+         {
+-            return;
++            if (IsMultiLine(maes, context.SemanticModel!))
++            {
++                SyntaxNode? lastNodeOnLine = null;
++                foreach (SyntaxNode child in maes.DescendantNodesAndSelf().Where(n => n != maes))
++                {
++                    if (lastNodeOnLine is not null && SamePhysicalLine(lastNodeOnLine, child, context.SemanticModel!))
++                    {
++                        context.ReportDiagnostic(Diagnostic.Create(TCISDiagnosticDescriptors.TCIS0002LineBreakStyle, child.GetLocation()));
++                        return;
++                    }
++                    lastNodeOnLine = child;
++                }
++            }
++            expr = maes.Expression;
+         }
+-
+-        // For conditions / expressions that span multiple items, check children.
+-        CheckNodesOnSameLine(target, context);
+     }
+ 
+-    #endregion
+-
+-    #region Shared helpers
+-
+     private static bool IsMultiLine(SyntaxNode node, SemanticModel model)
+     {
+         if (node.Span.IsEmpty)
+@@ -283,10 +256,10 @@ public sealed class TCIS0002_LineBreakStyleAnalyzer : DiagnosticAnalyzer
+             return false;
+         }
+ 
+-        LinePosition start = text.Lines.GetLinePosition(node.SpanStart);
+-        LinePosition end = text.Lines.GetLinePosition(node.Span.End);
++        var startLine = text.Lines.GetLineFromPosition(node.SpanStart)!;
++        var endLine = text.Lines.GetLineFromPosition(node.Span.End)!;
+ 
+-        return start.Line != end.Line;
++        return startLine.LineNumber != endLine.LineNumber;
+     }
+ 
+     private static bool SamePhysicalLine(SyntaxNode a, SyntaxNode b, SemanticModel model)
+@@ -297,72 +270,24 @@ public sealed class TCIS0002_LineBreakStyleAnalyzer : DiagnosticAnalyzer
+             return false;
+         }
+ 
+-        LinePosition posA = text.Lines.GetLinePosition(a.SpanStart);
+-        LinePosition posB = text.Lines.GetLinePosition(b.SpanStart);
+-        return posA.Line == posB.Line;
+-    }
+-
+-    private static void CheckBlockItems(BlockSyntax block, SyntaxNodeAnalysisContext context)
+-    {
+-        // Check fluent chains inside expression statements.
+-        foreach (StatementSyntax stmt in block.Statements)
+-        {
+-            if (stmt is ExpressionStatementSyntax exprStmt)
+-            {
+-                CheckExpressionChain(exprStmt.Expression, context);
+-            }
+-        }
+-    }
++        var lineA = text.Lines.GetLineFromPosition(a.SpanStart)!;
++        var lineB = text.Lines.GetLineFromPosition(b.SpanStart)!;
+ 
+-    private static void CheckExpressionChain(ExpressionSyntax expr, SyntaxNodeAnalysisContext context)
+-    {
+-        // Walk member-access chains: a.B().C().D()
+-        ExpressionSyntax? current = expr;
+-        while (current is MemberAccessExpressionSyntax maes)
+-        {
+-            if (IsMultiLine(maes, context.SemanticModel))
+-            {
+-                // Each member in the chain must be on its own line.
+-                SyntaxNode? lastNodeOnLine = null;
+-                foreach (SyntaxNode child in maes.DescendantNodesAndSelf().Where(n => n != maes))
+-                {
+-                    if (child is IdentifierTokenSyntax || child is IdentifierNameSyntax)
+-                    {
+-                        if (lastNodeOnLine is not null
+-                            && SamePhysicalLine(lastNodeOnLine, child, context.SemanticModel))
+-                        {
+-                            context.ReportDiagnostic(Diagnostic.Create(
+-                                TCISDiagnosticDescriptors.TCIS0002LineBreakStyle,
+-                                child.GetLocation()));
+-                            return;
+-                        }
+-                        lastNodeOnLine = child;
+-                    }
+-                }
+-            }
+-            current = maes.Expression;
+-        }
++        return lineA.LineNumber == lineB.LineNumber;
+     }
+ 
+-    private static void CheckNodesOnSameLine(SyntaxNode node, SyntaxNodeAnalysisContext context)
++    private static string? GetNamespace(SyntaxNode node, Compilation compilation)
+     {
+-        if (node is ArgumentListSyntax argList && argList.Arguments.Count > 1)
++        ISymbol? symbol = compilation.GetSemanticModel(node.SyntaxTree).GetSymbolInfo(node).Symbol;
++        return symbol switch
+         {
+-            SyntaxNode? lastNodeOnLine = null;
+-            foreach (SyntaxNode arg in argList.Arguments.GetWithSeparators())
+-            {
+-                if (lastNodeOnLine is not null
+-                    && SamePhysicalLine(lastNodeOnLine, arg, context.SemanticModel))
+-                {
+-                    context.ReportDiagnostic(Diagnostic.Create(
+-                        TCISDiagnosticDescriptors.TCIS0002LineBreakStyle,
+-                        arg.GetLocation()));
+-                    return;
+-                }
+-                lastNodeOnLine = arg;
+-            }
+-        }
++            IMethodSymbol m => m.ContainingNamespace.ToDisplayString(),
++            INamedTypeSymbol t => t.ContainingNamespace.ToDisplayString(),
++            IPropertySymbol p => p.ContainingNamespace.ToDisplayString(),
++            IFieldSymbol f => f.ContainingNamespace.ToDisplayString(),
++            ILocalSymbol l => l.ContainingNamespace.ToDisplayString(),
++            IParameterSymbol p2 => p2.ContainingNamespace.ToDisplayString(),
++            _ => null,
++        };
+     }
+-
+-    #endregion
+ }
+diff --git a/src/TCIS.CodeStandards/Analyzers/TCIS0003_ExcessiveBlankLinesAnalyzer.cs b/src/TCIS.CodeStandards/Analyzers/TCIS0003_ExcessiveBlankLinesAnalyzer.cs
+index 62e9f8d..61947e5 100644
+--- a/src/TCIS.CodeStandards/Analyzers/TCIS0003_ExcessiveBlankLinesAnalyzer.cs
++++ b/src/TCIS.CodeStandards/Analyzers/TCIS0003_ExcessiveBlankLinesAnalyzer.cs
+@@ -1,6 +1,9 @@
++using Microsoft.CodeAnalysis;
+ using Microsoft.CodeAnalysis.Text;
+ using TCIS.CodeStandards.Diagnostics;
+ 
++namespace TCIS.CodeStandards.Analyzers;
++
+ /// <summary>
+ /// TCIS0003: Flags occurrences of two or more consecutive blank lines anywhere
+ /// in a TCIS.* non-test source file. A single blank line is allowed as a
+@@ -45,30 +48,23 @@ public sealed class TCIS0003_ExcessiveBlankLinesAnalyzer : DiagnosticAnalyzer
+ 
+         int consecutiveBlanks = 0;
+ 
+-        foreach (TextLine line in sourceText.Lines)
++        for (int i = 0; i < sourceText.Lines.Count; i++)
+         {
+-            // Lines outside the tree span are ignored.
+-            if (line.Span.End <= treeSpan.Start || line.Span.Start >= treeSpan.End)
++            TextLine line = sourceText.Lines[i];
++
++            if (!treeSpan.IntersectsWith(line.Span))
+             {
+-                // Reset counter so a run of blanks before the tree does not
+-                // carry over into it.
+-                consecutiveBlanks = 0;
+                 continue;
+             }
+ 
+-            bool isBlank = string.IsNullOrWhiteSpace(line.ToString());
+-
+-            if (isBlank)
++            if (line.Span.IsEmpty || sourceText.ToString(line.Span).Trim().Length == 0)
+             {
+                 consecutiveBlanks++;
+                 if (consecutiveBlanks > MaxAllowedConsecutiveBlankLines)
+                 {
+-                    Location location = tree.GetLocation(line.Span);
+                     context.ReportDiagnostic(Diagnostic.Create(
+                         TCISDiagnosticDescriptors.TCIS0003ExcessiveBlankLines,
+-                        location,
+-                        consecutiveBlanks,
+-                        MaxAllowedConsecutiveBlankLines));
++                        Location.Create(tree, new TextSpan(line.Span.Start, 0))));
+                 }
+             }
+             else
+diff --git a/src/TCIS.CodeStandards/TCIS.CodeStandards.csproj b/src/TCIS.CodeStandards/TCIS.CodeStandards.csproj
+index 68eb144..eac1585 100644
+--- a/src/TCIS.CodeStandards/TCIS.CodeStandards.csproj
++++ b/src/TCIS.CodeStandards/TCIS.CodeStandards.csproj
+@@ -1,6 +1,6 @@
+ <Project Sdk="Microsoft.NET.Sdk">
+   <PropertyGroup>
+-    <TargetFramework>netstandard2.0</TargetFramework>
++    <TargetFramework>net9.0</TargetFramework>
+     <IsRoslynComponent>true</IsRoslynComponent>
+     <Nullable>enable</Nullable>
+     <LangVersion>latest</LangVersion>
+@@ -16,7 +16,6 @@
+   <ItemGroup>
+     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
+     <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" />
+-    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.Common" />
+   </ItemGroup>
+   <ItemGroup>
+     <None Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+diff --git a/src/TCISLibraries.sln b/src/TCISLibraries.sln
+index 6b056a1..1791134 100644
+--- a/src/TCISLibraries.sln
++++ b/src/TCISLibraries.sln
+@@ -218,6 +218,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TCIS.Observability.ElasticA
+ EndProject
+ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TCIS.Observability.ElasticApm.Tests", "tests\TCIS.Observability.ElasticApm.Tests\TCIS.Observability.ElasticApm.Tests.csproj", "{9515BB12-6BB8-43F0-A2BC-AB343450501D}"
+ EndProject
++Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TCIS.CodeStandards", "TCIS.CodeStandards\TCIS.CodeStandards.csproj", "{4EA36AAD-B447-4EF7-9D0C-B30AB4BE4572}"
++EndProject
++Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TCIS.CodeStandards.Tests", "..\tests\TCIS.CodeStandards.Tests\TCIS.CodeStandards.Tests.csproj", "{550512B4-6619-49B0-AEFB-C3490115CDB4}"
++EndProject
+ Global
+ 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+ 		Debug|Any CPU = Debug|Any CPU
+@@ -1404,6 +1408,30 @@ Global
+ 		{9515BB12-6BB8-43F0-A2BC-AB343450501D}.Release|x64.Build.0 = Release|Any CPU
+ 		{9515BB12-6BB8-43F0-A2BC-AB343450501D}.Release|x86.ActiveCfg = Release|Any CPU
+ 		{9515BB12-6BB8-43F0-A2BC-AB343450501D}.Release|x86.Build.0 = Release|Any CPU
++		{4EA36AAD-B447-4EF7-9D0C-B30AB4BE4572}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
++		{4EA36AAD-B447-4EF7-9D0C-B30AB4BE4572}.Debug|Any CPU.Build.0 = Debug|Any CPU
++		{4EA36AAD-B447-4EF7-9D0C-B30AB4BE4572}.Debug|x64.ActiveCfg = Debug|Any CPU
++		{4EA36AAD-B447-4EF7-9D0C-B30AB4BE4572}.Debug|x64.Build.0 = Debug|Any CPU
++		{4EA36AAD-B447-4EF7-9D0C-B30AB4BE4572}.Debug|x86.ActiveCfg = Debug|Any CPU
++		{4EA36AAD-B447-4EF7-9D0C-B30AB4BE4572}.Debug|x86.Build.0 = Debug|Any CPU
++		{4EA36AAD-B447-4EF7-9D0C-B30AB4BE4572}.Release|Any CPU.ActiveCfg = Release|Any CPU
++		{4EA36AAD-B447-4EF7-9D0C-B30AB4BE4572}.Release|Any CPU.Build.0 = Release|Any CPU
++		{4EA36AAD-B447-4EF7-9D0C-B30AB4BE4572}.Release|x64.ActiveCfg = Release|Any CPU
++		{4EA36AAD-B447-4EF7-9D0C-B30AB4BE4572}.Release|x64.Build.0 = Release|Any CPU
++		{4EA36AAD-B447-4EF7-9D0C-B30AB4BE4572}.Release|x86.ActiveCfg = Release|Any CPU
++		{4EA36AAD-B447-4EF7-9D0C-B30AB4BE4572}.Release|x86.Build.0 = Release|Any CPU
++		{550512B4-6619-49B0-AEFB-C3490115CDB4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
++		{550512B4-6619-49B0-AEFB-C3490115CDB4}.Debug|Any CPU.Build.0 = Debug|Any CPU
++		{550512B4-6619-49B0-AEFB-C3490115CDB4}.Debug|x64.ActiveCfg = Debug|Any CPU
++		{550512B4-6619-49B0-AEFB-C3490115CDB4}.Debug|x64.Build.0 = Debug|Any CPU
++		{550512B4-6619-49B0-AEFB-C3490115CDB4}.Debug|x86.ActiveCfg = Debug|Any CPU
++		{550512B4-6619-49B0-AEFB-C3490115CDB4}.Debug|x86.Build.0 = Debug|Any CPU
++		{550512B4-6619-49B0-AEFB-C3490115CDB4}.Release|Any CPU.ActiveCfg = Release|Any CPU
++		{550512B4-6619-49B0-AEFB-C3490115CDB4}.Release|Any CPU.Build.0 = Release|Any CPU
++		{550512B4-6619-49B0-AEFB-C3490115CDB4}.Release|x64.ActiveCfg = Release|Any CPU
++		{550512B4-6619-49B0-AEFB-C3490115CDB4}.Release|x64.Build.0 = Release|Any CPU
++		{550512B4-6619-49B0-AEFB-C3490115CDB4}.Release|x86.ActiveCfg = Release|Any CPU
++		{550512B4-6619-49B0-AEFB-C3490115CDB4}.Release|x86.Build.0 = Release|Any CPU
+ 	EndGlobalSection
+ 	GlobalSection(SolutionProperties) = preSolution
+ 		HideSolutionNode = FALSE
+diff --git a/tests/TCIS.CodeStandards.Tests/TCIS.CodeStandards.Tests.csproj b/tests/TCIS.CodeStandards.Tests/TCIS.CodeStandards.Tests.csproj
+new file mode 100644
+index 0000000..dd7a8fe
+--- /dev/null
++++ b/tests/TCIS.CodeStandards.Tests/TCIS.CodeStandards.Tests.csproj
+@@ -0,0 +1,21 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup>
++    <TargetFramework>net9.0</TargetFramework>
++    <ImplicitUsings>enable</ImplicitUsings>
++    <Nullable>enable</Nullable>
++    <IsPackable>false</IsPackable>
++  </PropertyGroup>
++  <ItemGroup>
++    <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="4.8.0">
++      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
++      <PrivateAssets>all</PrivateAssets>
++    </PackageReference>
++    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
++  </ItemGroup>
++  <ItemGroup>
++    <Using Include="Xunit" />
++  </ItemGroup>
++  <ItemGroup>
++    <ProjectReference Include="..\..\src\TCIS.CodeStandards\TCIS.CodeStandards.csproj" />
++  </ItemGroup>
++</Project>
+diff --git a/tests/TCIS.CodeStandards.Tests/TCIS0001_MaxLineLengthAnalyzerTests.cs b/tests/TCIS.CodeStandards.Tests/TCIS0001_MaxLineLengthAnalyzerTests.cs
+new file mode 100644
+index 0000000..7c40a08
+--- /dev/null
++++ b/tests/TCIS.CodeStandards.Tests/TCIS0001_MaxLineLengthAnalyzerTests.cs
+@@ -0,0 +1,122 @@
++namespace TCIS.CodeStandards.Tests;
++
++using System.Collections.Immutable;
++using System.IO;
++using Microsoft.CodeAnalysis;
++using Microsoft.CodeAnalysis.CSharp;
++using Microsoft.CodeAnalysis.Diagnostics;
++using Xunit;
++
++/// <summary>
++/// TCIS0001 — No source line may exceed 150 characters.
++/// </summary>
++public class TCIS0001_MaxLineLengthAnalyzerTests
++{
++    private static ImmutableArray<Diagnostic> GetDiagnostics(string source)
++    {
++        CSharpParseOptions parseOptions = CSharpParseOptions.Default
++            .WithLanguageVersion(LanguageVersion.Latest);
++        CSharpCompilation compilation = CSharpCompilation.Create(
++            "TestAssembly",
++            new[] { CSharpSyntaxTree.ParseText(source, parseOptions) },
++            GetReferences(),
++            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
++
++        ImmutableArray<DiagnosticAnalyzer> analyzers =
++            ImmutableArray.Create<DiagnosticAnalyzer>(new TCIS.CodeStandards.Analyzers.TCIS0001_MaxLineLengthAnalyzer());
++        return compilation.WithAnalyzers(analyzers)
++            .GetAnalyzerDiagnosticsAsync().GetAwaiter().GetResult();
++    }
++
++    private static List<MetadataReference> GetReferences()
++    {
++        string tpa = (string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!;
++        return tpa
++            .Split(Path.PathSeparator)
++            .Where(p => p.Length > 0)
++            .Select(p => (MetadataReference)MetadataReference.CreateFromFile(p))
++            .ToList();
++    }
++
++    [Fact]
++    public void TCIS0001_LineUnder150_ShouldNotWarn()
++    {
++        string line = new string('x', 149);
++        string source = $$"""
++namespace TCIS.MyApp
++{
++    public class MyService
++    {
++        public void Run() { var x = "{{line}}"; }
++    }
++}
++""";
++        Assert.DoesNotContain(GetDiagnostics(source), d => d.Id == "TCIS0001");
++    }
++
++    [Fact]
++    public void TCIS0001_LineExactly150_ShouldNotWarn()
++    {
++        string line = new string('x', 150);
++        string source = $$"""
++namespace TCIS.MyApp
++{
++    public class MyService
++    {
++        public void Run() { var x = "{{line}}"; }
++    }
++}
++""";
++        Assert.DoesNotContain(GetDiagnostics(source), d => d.Id == "TCIS0001");
++    }
++
++    [Fact]
++    public void TCIS0001_LineExceeds150_ShouldWarn()
++    {
++        string line = new string('x', 151);
++        string source = $$"""
++namespace TCIS.MyApp
++{
++    public class MyService
++    {
++        public void Run() { var x = "{{line}}"; }
++    }
++}
++""";
++        Assert.Contains(GetDiagnostics(source), d => d.Id == "TCIS0001");
++    }
++
++    [Fact]
++    public void TCIS0001_VeryLongLine_ShouldWarn()
++    {
++        string sql = new string('S', 300);
++        string source = $$"""
++using TCIS.MyApp;
++
++namespace TCIS.MyApp
++{
++    public class MyService
++    {
++        public string GetSql() { return "{{sql}}"; }
++    }
++}
++""";
++        Assert.Contains(GetDiagnostics(source), d => d.Id == "TCIS0001");
++    }
++
++    [Fact]
++    public void TCIS0001_NonTCISNamespace_ShouldNotWarn()
++    {
++        string line = new string('x', 200);
++        string source = $$"""
++namespace MyApp.Services
++{
++    public class MyService
++    {
++        public void Run() { var x = "{{line}}"; }
++    }
++}
++""";
++        Assert.DoesNotContain(GetDiagnostics(source), d => d.Id == "TCIS0001");
++    }
++}

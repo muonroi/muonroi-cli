@@ -1,0 +1,594 @@
+/**
+ * src/product-loop/goal-contradiction-gate.ts
+ *
+ * F5 — the goal-contradiction gate.
+ *
+ * ## The defect this closes
+ *
+ * The user's task text ends, in their own words:
+ *
+ *   "…mong đợi tất cả dự án cài đặt bộ thư viện codestandard chuẩn … sẽ bắt
+ *    được warn các vấn đề nêu trên **mong đợi là khi vi phạm thì sẽ báo warning
+ *    trong visual studio**"
+ *
+ * — *when a rule is violated it must show a warning in Visual Studio*.
+ *
+ * Two independent runs then produced the same commit:
+ *
+ *   run 1  the full `/ideal` loop — council, sprints, verify floor, done gate
+ *   run 2  a single sub-agent — no council, no sprints, no floor
+ *
+ * both changing the analyzer project's target framework off the one framework a
+ * Roslyn analyzer must target to be loaded by the IDE, and dropping the NuGet
+ * packaging metadata that was one of the five stated success criteria. Measured
+ * artefact: commit `6888526` in `D:\sources\CompanyLibs\tcis-libraries`.
+ *
+ * Everything was green. The build passed, the tests passed, the verify floor
+ * passed, the done gate passed. Every existing gate in this repository asks
+ * *"did it work?"*. None asks *"does this serve what was asked for?"* — so a
+ * change that works perfectly and defeats the goal walks through all of them.
+ *
+ * That it happened in the loop-less run too is what settles the diagnosis: it is
+ * not a loop defect and not a test-coverage defect. It is a missing question.
+ *
+ * ## What this asks
+ *
+ * Exactly one question, over exactly two inputs that already exist in the run:
+ * the **stated goal** (the user's own idea text plus the clarified success
+ * criteria) and the **change actually made** (a git diff). Does the change work
+ * against the goal?
+ *
+ * Nothing here knows anything about analyzers, target frameworks, .NET, NuGet or
+ * any other domain. There is no rule list to keep current — a rule list would
+ * only ever catch the defect that has already been paid for once. The gate reads
+ * the goal the user wrote and reasons from that.
+ *
+ * ## Two failure directions, deliberately opposite
+ *
+ * - **Infrastructure fails open.** No diff, an unreadable diff, no goal, a model
+ *   call that throws — the gate has nothing to judge and must not invent an
+ *   opinion. It returns `fired: false` and says why, loudly.
+ * - **Judgement fails closed.** A response that arrived but cannot be parsed
+ *   flags. So does a "contradicts" verdict that arrives without the evidence the
+ *   contract demands. A gate whose parse failure means "approve" is a rubber
+ *   stamp, which is worse than no gate: it launders an unexamined change as an
+ *   examined one. The council's own verdict parser already follows this rule
+ *   (`src/gsd/verdict-schema.ts`: "caller MUST treat null as parse failed
+ *   (conservative revise), never as approve") and this copies it.
+ *
+ * ## Why the diff is budgeted per FILE and not head-sliced
+ *
+ * Measured on the real `6888526` diff (32,498 bytes, 7 files): the decisive line
+ *
+ *     -    <TargetFramework>netstandard2.0</TargetFramework>
+ *
+ * sits at byte ~23,600, behind a 460-line rewrite of one analyzer. The existing
+ * plan-adherence reviewer passes `diff.slice(0, 12000)`; `head -c 12000` of this
+ * diff contains the string `TargetFramework` exactly ZERO times. A head slice
+ * would have handed the judge a prompt with the defect cut out of it and then
+ * reported "aligned" — a rubber stamp produced by truncation rather than by the
+ * model.
+ *
+ * So the budget is split per changed file, with unused share redistributed. A
+ * three-line project-file edit can never be crowded out by a large refactor in
+ * the same sprint, which is precisely the shape this defect takes.
+ */
+
+import { spawnSync } from "node:child_process";
+import type { CouncilLLM } from "../council/types.js";
+import { logger } from "../utils/logger.js";
+
+/** Opt out with `MUONROI_IDEAL_GOAL_GATE=0`. Anything else leaves it armed. */
+export const GOAL_GATE_ENV = "MUONROI_IDEAL_GOAL_GATE";
+
+/** Total characters of diff handed to the judge, split across changed files. */
+export const GOAL_GATE_DIFF_BUDGET = 24_000;
+
+/** Floor on any single file's share, so a many-file sprint still shows each one. */
+const MIN_FILE_SHARE = 400;
+
+/** Characters of goal text handed to the judge. The goal is short by nature. */
+const GOAL_BUDGET = 6_000;
+
+/** Per-command wall clock for the git reads. */
+const GIT_TIMEOUT_MS = 20_000;
+
+const GIT_MAX_BUFFER = 32 * 1024 * 1024;
+
+/** The stated goal, verbatim. Never a summary — a summary is where intent dies. */
+export interface GoalStatement {
+  /** The user's own words (`DriverContext.idea` / the run manifest's `idea`). */
+  idea: string;
+  /** Stated success criteria, verbatim. May be empty; `idea` may not. */
+  successCriteria: readonly string[];
+}
+
+/** One way the change works against the goal, as the judge reported it. */
+export interface GoalContradiction {
+  /** The fragment of the stated goal the change defeats. */
+  goal: string;
+  /** The diff line(s) that defeat it. */
+  change: string;
+  /** One sentence: why the change defeats that goal. */
+  why: string;
+  /**
+   * False when the judge named a contradiction but quoted no diff evidence for
+   * it. Such a verdict still fires (an opinion that the change contradicts the
+   * goal is never silently dropped) but is reported as unevidenced so a reader
+   * can weigh it.
+   */
+  evidenced: boolean;
+}
+
+export type GoalGateSource =
+  /** `MUONROI_IDEAL_GOAL_GATE=0`. */
+  | "disabled"
+  /** No goal text — nothing to judge against. */
+  | "no-goal"
+  /** The working tree and the last commit are both empty of changes. */
+  | "no-diff"
+  /** git could not be read (not a repo, spawn failure, timeout). */
+  | "diff-unreadable"
+  /** The model call threw. Infrastructure — fails open. */
+  | "call-failed"
+  /** A verdict arrived and said the change serves the goal. */
+  | "aligned"
+  /** A verdict arrived and named at least one contradiction. */
+  | "contradicts"
+  /** A response arrived and no verdict could be parsed out of it. */
+  | "unparseable";
+
+export interface GoalGateOutcome {
+  /** True only when the gate is asserting the change works against the goal. */
+  fired: boolean;
+  source: GoalGateSource;
+  contradictions: GoalContradiction[];
+  /** One human-readable line; on `fired` it is the sprint's failure feedback. */
+  detail: string;
+  /** Which diff the judge saw. Absent when no call was made. */
+  diffOrigin?: DiffOrigin;
+}
+
+// ─── the goal ────────────────────────────────────────────────────────────────
+
+export function hasGoal(goal: GoalStatement | undefined): boolean {
+  return !!goal && goal.idea.trim().length > 0;
+}
+
+/**
+ * Render the goal for the judge. The user's literal text comes FIRST and is
+ * never paraphrased, because the whole defect is a run that satisfied its own
+ * restatement of the task rather than the task.
+ */
+export function formatGoalStatement(goal: GoalStatement, budget = GOAL_BUDGET): string {
+  const criteria = goal.successCriteria
+    .map((c) => c.trim())
+    .filter((c) => c.length > 0)
+    .map((c, i) => `${i + 1}. ${c}`)
+    .join("\n");
+  const body =
+    `WHAT THE USER ASKED FOR, in their own words:\n${goal.idea.trim()}\n` +
+    (criteria ? `\nSTATED SUCCESS CRITERIA:\n${criteria}\n` : "");
+  return body.length > budget ? `${body.slice(0, budget)}\n… [goal text truncated]\n` : body;
+}
+
+// ─── the change ──────────────────────────────────────────────────────────────
+
+export type DiffOrigin = "working-tree" | "last-commit";
+
+export type DiffRead =
+  | { ok: true; diff: string; origin: DiffOrigin }
+  | { ok: false; reason: "no-diff" | "diff-unreadable"; detail: string };
+
+function git(cwd: string, args: string[]): { ok: boolean; stdout: string; detail: string } {
+  try {
+    const r = spawnSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
+      maxBuffer: GIT_MAX_BUFFER,
+    });
+    if (r.error) return { ok: false, stdout: "", detail: r.error.message };
+    if (r.status !== 0) {
+      const stderr = (r.stderr ?? "").trim().split("\n")[0] ?? "";
+      return {
+        ok: false,
+        stdout: "",
+        detail: `git ${args.join(" ")} exited ${r.status}${stderr ? `: ${stderr}` : ""}`,
+      };
+    }
+    return { ok: true, stdout: r.stdout ?? "", detail: "" };
+  } catch (err) {
+    return { ok: false, stdout: "", detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Read what this unit of work changed.
+ *
+ * The working tree comes first (a sprint's edits before it commits); when it is
+ * clean the last commit is used instead, because the measured defect landed as a
+ * commit (`6888526`) rather than as pending edits. Both empty is `no-diff`, and
+ * a git that cannot be read at all is `diff-unreadable` — two different facts
+ * that must not be collapsed, since one means "nothing was changed" and the
+ * other means "we cannot tell".
+ */
+export function readChangeDiff(cwd: string): DiffRead {
+  const worktree = git(cwd, ["diff", "HEAD"]);
+  if (!worktree.ok) {
+    logger.error("orchestrator", "[goal-gate] could not read the working-tree diff — gate skipped for this change", {
+      cwd,
+      detail: worktree.detail,
+    });
+    return { ok: false, reason: "diff-unreadable", detail: worktree.detail };
+  }
+  if (worktree.stdout.trim()) return { ok: true, diff: worktree.stdout, origin: "working-tree" };
+
+  const committed = git(cwd, ["diff", "HEAD~1", "HEAD"]);
+  if (committed.ok && committed.stdout.trim()) {
+    return { ok: true, diff: committed.stdout, origin: "last-commit" };
+  }
+  return { ok: false, reason: "no-diff", detail: committed.ok ? "no changes since HEAD" : committed.detail };
+}
+
+/** Split a unified diff into per-file sections, header included. */
+export function splitDiffByFile(diff: string): string[] {
+  const lines = diff.split("\n");
+  const sections: string[] = [];
+  let current: string[] | null = null;
+  for (const line of lines) {
+    if (line.startsWith("diff --git ")) {
+      if (current) sections.push(current.join("\n"));
+      current = [line];
+    } else if (current) {
+      current.push(line);
+    }
+  }
+  if (current) sections.push(current.join("\n"));
+  return sections.length > 0 ? sections : diff.trim() ? [diff] : [];
+}
+
+/**
+ * Fit a diff into `budget` characters WITHOUT letting any changed file vanish.
+ *
+ * Equal shares, then leftovers from files that fit are redistributed to the ones
+ * that do not. See the module header for the measurement that makes this
+ * necessary rather than tidy.
+ */
+export function budgetDiffByFile(diff: string, budget = GOAL_GATE_DIFF_BUDGET): string {
+  if (diff.length <= budget) return diff;
+  const sections = splitDiffByFile(diff);
+  if (sections.length === 0) return "";
+  if (sections.length === 1) return truncateSection(sections[0] as string, budget);
+
+  const share = Math.max(MIN_FILE_SHARE, Math.floor(budget / sections.length));
+  let spare = 0;
+  const needy: number[] = [];
+  const out: (string | null)[] = sections.map((s) => {
+    if (s.length <= share) {
+      spare += share - s.length;
+      return s;
+    }
+    return null;
+  });
+  out.forEach((v, i) => {
+    if (v === null) needy.push(i);
+  });
+  const bonus = needy.length > 0 ? Math.floor(spare / needy.length) : 0;
+  for (const i of needy) {
+    out[i] = truncateSection(sections[i] as string, share + bonus);
+  }
+  return (out as string[]).join("\n");
+}
+
+function truncateSection(section: string, limit: number): string {
+  if (section.length <= limit) return section;
+  const omitted = section.length - limit;
+  return `${section.slice(0, limit)}\n… [${omitted} characters of this file's diff omitted]`;
+}
+
+// ─── the verdict ─────────────────────────────────────────────────────────────
+
+const VERDICT_FENCE_LABEL = "goal-check";
+
+interface RawVerdict {
+  verdict?: unknown;
+  contradictions?: unknown;
+  rationale?: unknown;
+}
+
+export interface GoalVerdict {
+  verdict: "aligned" | "contradicts";
+  contradictions: GoalContradiction[];
+  rationale: string;
+}
+
+function asText(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+
+function normalizeContradictions(raw: unknown): GoalContradiction[] {
+  if (!Array.isArray(raw)) return [];
+  const out: GoalContradiction[] = [];
+  for (const item of raw) {
+    if (typeof item === "string") {
+      const why = item.trim();
+      if (why) out.push({ goal: "", change: "", why, evidenced: false });
+      continue;
+    }
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Record<string, unknown>;
+    const goal = asText(rec.goal);
+    const change = asText(rec.change);
+    const why = asText(rec.why);
+    if (!goal && !change && !why) continue;
+    out.push({ goal, change, why, evidenced: goal.length > 0 && change.length > 0 });
+  }
+  return out;
+}
+
+/**
+ * Parse the judge's structured verdict, or `null`.
+ *
+ * `null` means "no verdict" and the caller MUST treat it as a flag, never as an
+ * approval — the same contract as `extractStructuredVerdict` in
+ * `src/gsd/verdict-schema.ts`. This is a separate implementation only because
+ * that one is bound to the plan-council's schema; the extraction strategy
+ * (labelled fence → any fence → bare object, last-wins) is deliberately the
+ * same, since the model is told to reason first and emit the block last.
+ */
+export function extractGoalVerdict(raw: string): GoalVerdict | null {
+  if (!raw || !raw.trim()) return null;
+  for (const candidate of verdictCandidates(raw)) {
+    let parsed: RawVerdict;
+    try {
+      parsed = JSON.parse(candidate) as RawVerdict;
+    } catch {
+      // Not JSON — try the next candidate. Every candidate failing yields null,
+      // which the caller turns into a flag, so nothing is swallowed here.
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object") continue;
+    const verdict = asText(parsed.verdict).toLowerCase();
+    if (verdict !== "aligned" && verdict !== "contradicts") continue;
+    const contradictions = normalizeContradictions(parsed.contradictions);
+    // A "contradicts" verdict with an empty list names nothing actionable; the
+    // rationale is preserved as the single contradiction so the opinion is not
+    // dropped, and it is marked unevidenced.
+    if (verdict === "contradicts" && contradictions.length === 0) {
+      const why = asText(parsed.rationale) || "the judge reported a contradiction but named none";
+      contradictions.push({ goal: "", change: "", why, evidenced: false });
+    }
+    return { verdict, contradictions, rationale: asText(parsed.rationale) };
+  }
+  return null;
+}
+
+/** Fenced blocks (labelled first, then any), then bare objects — each last-wins. */
+function verdictCandidates(raw: string): string[] {
+  const labelled: string[] = [];
+  const otherFences: string[] = [];
+  const fence = /```([a-zA-Z0-9_+-]+)?[^\S\n]*\n([\s\S]*?)\n?```/g;
+  for (const m of raw.matchAll(fence)) {
+    const label = (m[1] ?? "").toLowerCase();
+    const body = (m[2] ?? "").trim();
+    if (!body) continue;
+    if (label === VERDICT_FENCE_LABEL) labelled.push(body);
+    else otherFences.push(body);
+  }
+  return [...labelled.reverse(), ...otherFences.reverse(), ...findBareObjects(raw).reverse()];
+}
+
+/** Top-level `{...}` substrings, string-aware so braces inside quotes don't count. */
+function findBareObjects(raw: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < raw.length) {
+    if (raw[i] !== "{") {
+      i += 1;
+      continue;
+    }
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    let j = i;
+    for (; j < raw.length; j += 1) {
+      const ch = raw[j] as string;
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === "\\") esc = true;
+        else if (ch === '"') inStr = false;
+      } else if (ch === '"') inStr = true;
+      else if (ch === "{") depth += 1;
+      else if (ch === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          out.push(raw.slice(i, j + 1));
+          break;
+        }
+      }
+    }
+    i = j >= raw.length ? j : j + 1;
+  }
+  return out;
+}
+
+// ─── the prompt ──────────────────────────────────────────────────────────────
+
+export const GOAL_GATE_SYSTEM =
+  "You judge whether a code change works AGAINST the goal it was made to serve. " +
+  "You are the last reader before the change is scored as done, and everything else has already passed: " +
+  "it compiles, the tests are green, the plan was followed. None of that tells anyone whether the change " +
+  "still does what was asked for. That is the only question you answer.";
+
+/**
+ * Build the judge's prompt.
+ *
+ * The instructions are deliberately about the SHAPE of the finding, not about
+ * any technology: quote the goal, quote the diff, say why one defeats the other.
+ * Nothing in this string, or anywhere in this module, names a language, a
+ * framework or a file type — the gate must generalise past the defect that paid
+ * for it, and a rule list cannot.
+ */
+export function buildGoalCheckPrompt(goalBlock: string, diffBlock: string): string {
+  return [
+    "=== THE GOAL ===",
+    goalBlock,
+    "",
+    "=== THE CHANGE THAT WAS MADE (git diff) ===",
+    diffBlock,
+    "",
+    "=== YOUR TASK ===",
+    "Decide whether anything in this change works AGAINST the goal above.",
+    "",
+    "A CONTRADICTION is a change that makes a stated goal impossible, or materially harder, to reach —",
+    "something the goal explicitly asks for that this change removes, disables, or replaces with something",
+    "that cannot deliver it. Judge the change on its own terms and against the goal's own words: if the goal",
+    "says a particular observable behaviour must happen, ask whether the code as changed can still produce it.",
+    "",
+    "These are NOT contradictions, and must not be reported:",
+    "- work that is merely unfinished, partial, or not yet started;",
+    "- a goal this change simply does not address;",
+    "- style, naming, structure or test-coverage opinions;",
+    "- anything you would phrase as 'could be better' rather than 'now cannot happen'.",
+    "",
+    "Most changes contradict nothing. An empty list is the expected answer, and inventing a contradiction to",
+    "look thorough is worse than missing one — it trains the reader to ignore you. But do not soften a real",
+    "one: if the change defeats something the user explicitly asked for, say so plainly.",
+    "",
+    "Every contradiction you report MUST quote the goal fragment verbatim in `goal` and the diff line(s)",
+    "verbatim in `change`. If you cannot quote both, you do not have a contradiction.",
+    "",
+    "Emit your decision as the LAST thing in your reply, as a fenced block in EXACTLY this shape:",
+    "```goal-check",
+    '{"verdict":"aligned|contradicts","contradictions":[{"goal":"<verbatim goal fragment>","change":"<verbatim diff line(s)>","why":"<one sentence>"}],"rationale":"<one short sentence>"}',
+    "```",
+  ].join("\n");
+}
+
+// ─── the gate ────────────────────────────────────────────────────────────────
+
+export function isGoalGateEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[GOAL_GATE_ENV] !== "0";
+}
+
+function renderDetail(contradictions: readonly GoalContradiction[]): string {
+  const lines = contradictions.map((c, i) => {
+    const head = c.goal ? `goal: "${c.goal}"` : "goal: (not quoted by the judge)";
+    const change = c.change ? `\n     change: ${c.change.replace(/\n/g, "\n             ")}` : "";
+    const unevidenced = c.evidenced ? "" : "  [unevidenced]";
+    return `  ${i + 1}. ${c.why}${unevidenced}\n     ${head}${change}`;
+  });
+  return [
+    `The change works against ${contradictions.length === 1 ? "the stated goal" : "the stated goals"}:`,
+    ...lines,
+  ].join("\n");
+}
+
+/**
+ * Run the gate.
+ *
+ * `fired: true` is an assertion that the change defeats something the user
+ * asked for. The caller decides what to do with it; see the call site in
+ * `sprint-runner.ts` for why it fails the sprint rather than warning.
+ */
+export async function runGoalContradictionGate(opts: {
+  goal: GoalStatement | undefined;
+  cwd: string;
+  llm: Pick<CouncilLLM, "generate">;
+  /**
+   * MUST be the leader model. This is a decision-grade judgement: a wrong answer
+   * either ships the defect or costs a sprint, so it is never downshifted. See
+   * the report accompanying this change for the `SUB_TASK_TIER` entry that pins
+   * it if it is ever routed through `pickCouncilTaskModel`.
+   */
+  modelId: string;
+  env?: NodeJS.ProcessEnv;
+  /** Injectable for tests; defaults to reading git in `cwd`. */
+  diffReader?: (cwd: string) => DiffRead;
+  /** Observability sink for the exact prompt sent. Diagnostics only. */
+  onPrompt?: (prompt: string) => void;
+}): Promise<GoalGateOutcome> {
+  const env = opts.env ?? process.env;
+  if (!isGoalGateEnabled(env)) {
+    return { fired: false, source: "disabled", contradictions: [], detail: `${GOAL_GATE_ENV}=0` };
+  }
+  const goal = opts.goal;
+  if (!hasGoal(goal)) {
+    logger.warn("orchestrator", "[goal-gate] no goal text for this run — the change cannot be judged against intent", {
+      cwd: opts.cwd,
+    });
+    return { fired: false, source: "no-goal", contradictions: [], detail: "no stated goal to judge against" };
+  }
+
+  const read = (opts.diffReader ?? readChangeDiff)(opts.cwd);
+  if (!read.ok) {
+    return { fired: false, source: read.reason, contradictions: [], detail: read.detail };
+  }
+
+  const prompt = buildGoalCheckPrompt(
+    formatGoalStatement(goal as GoalStatement),
+    budgetDiffByFile(read.diff, GOAL_GATE_DIFF_BUDGET),
+  );
+  opts.onPrompt?.(prompt);
+
+  let raw: string;
+  try {
+    raw = await opts.llm.generate(opts.modelId, GOAL_GATE_SYSTEM, prompt, 2048);
+  } catch (err) {
+    // Infrastructure. The gate has no opinion it can honestly assert, so it
+    // fails open — but never silently: a gate that stopped running looks
+    // identical to a gate that found nothing unless it says so.
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error(
+      "orchestrator",
+      "[goal-gate] the judgement call failed — the change was NOT checked against the goal",
+      {
+        cwd: opts.cwd,
+        modelId: opts.modelId,
+        error: message,
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      },
+    );
+    return { fired: false, source: "call-failed", contradictions: [], detail: message, diffOrigin: read.origin };
+  }
+
+  const verdict = extractGoalVerdict(raw);
+  if (!verdict) {
+    // Judgement layer: a response arrived and could not be read. Treating that
+    // as approval is the rubber stamp this module exists to refuse.
+    logger.error("orchestrator", "[goal-gate] no parseable verdict — flagging rather than approving", {
+      cwd: opts.cwd,
+      modelId: opts.modelId,
+      replyChars: raw.length,
+      replyHead: raw.slice(0, 300),
+    });
+    return {
+      fired: true,
+      source: "unparseable",
+      contradictions: [],
+      detail:
+        "The goal-alignment judge returned no parseable verdict, so this change has NOT been checked against " +
+        "the stated goal. Flagged rather than approved — an unread verdict is not an approval.",
+      diffOrigin: read.origin,
+    };
+  }
+
+  if (verdict.verdict === "aligned") {
+    return {
+      fired: false,
+      source: "aligned",
+      contradictions: [],
+      detail: verdict.rationale || "the change serves the stated goal",
+      diffOrigin: read.origin,
+    };
+  }
+
+  return {
+    fired: true,
+    source: "contradicts",
+    contradictions: verdict.contradictions,
+    detail: renderDetail(verdict.contradictions),
+    diffOrigin: read.origin,
+  };
+}
