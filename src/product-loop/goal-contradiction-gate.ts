@@ -96,10 +96,54 @@
  * So the budget is split per changed file, with unused share redistributed. A
  * three-line project-file edit can never be crowded out by a large refactor in
  * the same sprint, which is precisely the shape this defect takes.
+ *
+ * ## Why the diff includes files git has not been told about
+ *
+ * The head-slice reasoning above has a second door, and the same rubber stamp
+ * walks through it. `git diff HEAD` does not show untracked files at all.
+ *
+ * MEASURED on the repository of a live run, mid-run, after two full sprints of
+ * work (read-only probe — no index written):
+ *
+ *   git diff HEAD                            → 5,874 characters, 3 files
+ *   contains the decisive project setting    → false
+ *   git ls-files --others --exclude-standard → 57 files
+ *
+ * Every file those sprints produced was untracked, and the run committed nothing
+ * across either sprint, so HEAD never moved and the `HEAD~1..HEAD` fallback never
+ * engaged either. The judge was handed the sprint's package-version and solution
+ * bookkeeping — and answered, reasonably, that it was aligned. A gate shown only
+ * the bookkeeping is a rubber stamp produced by enumeration rather than by
+ * truncation; the outcome is identical.
+ *
+ * So untracked-but-not-ignored files are folded in. Two constraints shape HOW:
+ *
+ * - **This must not write to the index.** The obvious construction, `git add -N`,
+ *   mutates the index of a repository the user is working in and changes what
+ *   `git status` shows them. This gate runs against other people's repositories
+ *   mid-run; a read-only check stays read-only. Enumeration is
+ *   `ls-files --others --exclude-standard` (which honours the ignore rules —
+ *   verified against a real repository whose build-output directory is ignored,
+ *   and against the live run above, whose 57 files included none of its own two
+ *   ignored build directories) and rendering is `diff --no-index` against
+ *   `/dev/null`, neither of which touches the index.
+ * - **The run's own artifacts are not the change.** 49 of those 57 files were the
+ *   loop's own bookkeeping. At the 400-character per-file floor below, 57 files
+ *   claim 22,800 of the 24,000-character budget, so the loop's paperwork would
+ *   crowd the sprint's actual output down to a few hundred characters each — and,
+ *   since this module now writes its own verdict into that directory, would hand
+ *   the judge its own previous output as "the change that was made". The caller
+ *   passes `excludeDir` so the module needs no knowledge of what that directory
+ *   is called.
  */
 
 import { spawnSync } from "node:child_process";
+import { statSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { isAbsolute, join, relative } from "node:path";
 import type { CouncilGenerateDiagnostics, CouncilLLM } from "../council/types.js";
+import { sprintsDir } from "../flow/run-artifacts.js";
+import { atomicWriteJSON } from "../storage/atomic-io.js";
 import { logger } from "../utils/logger.js";
 
 /** Opt out with `MUONROI_IDEAL_GOAL_GATE=0`. Anything else leaves it armed. */
@@ -135,6 +179,28 @@ const GOAL_BUDGET = 6_000;
 const GIT_TIMEOUT_MS = 20_000;
 
 const GIT_MAX_BUFFER = 32 * 1024 * 1024;
+
+/**
+ * How many untracked files are rendered before the read stops.
+ *
+ * Two independent ceilings meet here. `budgetDiffByFile` floors every file at
+ * {@link MIN_FILE_SHARE} characters, so at 200 files the diff already claims
+ * 80,000 characters — 3.3x {@link GOAL_GATE_DIFF_BUDGET} — and a 201st file
+ * cannot show the judge anything it would not already have. And rendering costs
+ * one process per file: MEASURED at 2,614 ms for 100 files on the machine this
+ * was developed on, so 200 is ~5 s of a sprint that runs for minutes.
+ */
+export const GOAL_GATE_MAX_UNTRACKED_FILES = 200;
+
+/**
+ * Above this size an untracked file is named but not read.
+ *
+ * Derived, not guessed: a single file's share of the prompt can never exceed
+ * {@link GOAL_GATE_DIFF_BUDGET} (24,000 characters), so 2 MiB is already ~87x
+ * the most any one file could ever be shown. Reading further only buys memory
+ * pressure on a file the budget will truncate anyway.
+ */
+export const GOAL_GATE_UNTRACKED_FILE_MAX_BYTES = 2 * 1024 * 1024;
 
 /** The stated goal, verbatim. Never a summary — a summary is where intent dies. */
 export interface GoalStatement {
@@ -195,6 +261,16 @@ export interface GoalGateOutcome {
   detail: string;
   /** Which diff the judge saw. Absent when no call was made. */
   diffOrigin?: DiffOrigin;
+  /**
+   * The files in the diff the judge was actually shown, and its size.
+   *
+   * These two are the pair that makes a rubber stamp visible without re-running
+   * anything: the live run that this gate failed to catch would have recorded
+   * three bookkeeping files and 5,874 characters next to an `aligned` verdict,
+   * which reads wrong at a glance. Absent when no diff was read.
+   */
+  diffFiles?: string[];
+  diffChars?: number;
 }
 
 // ─── the goal ────────────────────────────────────────────────────────────────
@@ -228,7 +304,16 @@ export type DiffRead =
   | { ok: true; diff: string; origin: DiffOrigin }
   | { ok: false; reason: "no-diff" | "diff-unreadable"; detail: string };
 
-function git(cwd: string, args: string[]): { ok: boolean; stdout: string; detail: string } {
+function git(
+  cwd: string,
+  args: string[],
+  /**
+   * Exit codes that are an ANSWER rather than a failure. `diff --no-index`
+   * exits 1 to mean "these differ", which for a file being compared against
+   * nothing is the only outcome that ever happens.
+   */
+  okStatuses: readonly number[] = [0],
+): { ok: boolean; stdout: string; detail: string } {
   try {
     const r = spawnSync("git", args, {
       cwd,
@@ -237,7 +322,7 @@ function git(cwd: string, args: string[]): { ok: boolean; stdout: string; detail
       maxBuffer: GIT_MAX_BUFFER,
     });
     if (r.error) return { ok: false, stdout: "", detail: r.error.message };
-    if (r.status !== 0) {
+    if (r.status === null || !okStatuses.includes(r.status)) {
       const stderr = (r.stderr ?? "").trim().split("\n")[0] ?? "";
       return {
         ok: false,
@@ -251,17 +336,121 @@ function git(cwd: string, args: string[]): { ok: boolean; stdout: string; detail
   }
 }
 
+/** Options for {@link readChangeDiff}. */
+export interface ChangeDiffOptions {
+  /**
+   * A directory whose contents are the RUN's output rather than the CHANGE's —
+   * excluded from the untracked scan. Absolute, or relative to `cwd`. See the
+   * module header for the 49-of-57 measurement that makes this load-bearing.
+   */
+  excludeDir?: string;
+  /** Injectable only so the cap can be proven to engage without 200 real files. */
+  maxUntrackedFiles?: number;
+}
+
+/**
+ * The untracked-but-not-ignored half of the change, rendered as a unified diff.
+ *
+ * Nothing here writes: `ls-files --others` reads the ignore rules, and
+ * `diff --no-index` compares two paths on disk without consulting the index at
+ * all. A `git add -N` would produce a shorter implementation and would silently
+ * restage a customer's repository mid-run.
+ */
+function readUntrackedDiff(
+  cwd: string,
+  opts: ChangeDiffOptions,
+): { ok: true; diff: string } | { ok: false; detail: string } {
+  const listed = git(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  if (!listed.ok) return { ok: false, detail: listed.detail };
+
+  const excludePrefix = normalizeExcludePrefix(cwd, opts.excludeDir);
+  const all = listed.stdout
+    .split("\0")
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0)
+    .filter((p) => !excludePrefix || !p.startsWith(excludePrefix));
+
+  const cap = opts.maxUntrackedFiles ?? GOAL_GATE_MAX_UNTRACKED_FILES;
+  const paths = all.slice(0, cap);
+  if (all.length > paths.length) {
+    logger.warn(
+      "orchestrator",
+      "[goal-gate] more untracked files than the judge's budget can show — the rest are not read",
+      {
+        cwd,
+        untrackedFiles: all.length,
+        shown: paths.length,
+      },
+    );
+  }
+
+  const sections: string[] = [];
+  for (const p of paths) {
+    const oversized = untrackedFileSize(cwd, p);
+    if (oversized !== null && oversized > GOAL_GATE_UNTRACKED_FILE_MAX_BYTES) {
+      sections.push(
+        `diff --git a/${p} b/${p}\nnew file mode 100644\n… [new file, ${oversized} bytes — larger than any share of the judge's budget, content not read]`,
+      );
+      continue;
+    }
+    // Exit 1 is the normal answer here: a file compared against nothing differs.
+    const rendered = git(cwd, ["diff", "--no-index", "--", "/dev/null", p], [0, 1]);
+    if (!rendered.ok) {
+      // One unreadable path is not a reason to lose the other 56. It is still
+      // named, so a reader can see the judge was not shown it.
+      logger.warn("orchestrator", "[goal-gate] could not render an untracked file into the diff", {
+        cwd,
+        path: p,
+        detail: rendered.detail,
+      });
+      sections.push(
+        `diff --git a/${p} b/${p}\nnew file mode 100644\n… [new file, could not be read: ${rendered.detail}]`,
+      );
+      continue;
+    }
+    if (rendered.stdout.trim()) sections.push(rendered.stdout.replace(/\n+$/, ""));
+  }
+  return { ok: true, diff: sections.join("\n") };
+}
+
+/** `excludeDir` as a `cwd`-relative, slash-separated prefix, or "" when it is outside `cwd`. */
+function normalizeExcludePrefix(cwd: string, excludeDir: string | undefined): string {
+  if (!excludeDir) return "";
+  const rel = isAbsolute(excludeDir) ? relative(cwd, excludeDir) : excludeDir;
+  const posix = rel.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+  if (!posix || posix.startsWith("..")) return "";
+  return `${posix}/`;
+}
+
+function untrackedFileSize(cwd: string, relPath: string): number | null {
+  try {
+    return statSync(join(cwd, relPath)).size;
+  } catch (err) {
+    // A path git listed a moment ago and fs cannot stat now (a race with the
+    // sprint's own writes, a symlink to nowhere). Fall through to the render,
+    // which will report its own failure rather than this one.
+    logger.warn("orchestrator", "[goal-gate] could not size an untracked file before reading it", {
+      cwd,
+      path: relPath,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
 /**
  * Read what this unit of work changed.
  *
- * The working tree comes first (a sprint's edits before it commits); when it is
- * clean the last commit is used instead, because the measured defect landed as a
- * commit (`6888526`) rather than as pending edits. Both empty is `no-diff`, and
- * a git that cannot be read at all is `diff-unreadable` — two different facts
- * that must not be collapsed, since one means "nothing was changed" and the
- * other means "we cannot tell".
+ * The working tree comes first (a sprint's edits before it commits) and means
+ * BOTH halves of it: tracked edits from `diff HEAD`, and untracked-not-ignored
+ * additions, which that command does not show at all. When the working tree is
+ * clean in both senses the last commit is used instead, because the first
+ * measured defect landed as a commit (`6888526`) rather than as pending edits.
+ * Both empty is `no-diff`, and a git that cannot be read at all is
+ * `diff-unreadable` — two different facts that must not be collapsed, since one
+ * means "nothing was changed" and the other means "we cannot tell".
  */
-export function readChangeDiff(cwd: string): DiffRead {
+export function readChangeDiff(cwd: string, opts: ChangeDiffOptions = {}): DiffRead {
   const worktree = git(cwd, ["diff", "HEAD"]);
   if (!worktree.ok) {
     logger.error("orchestrator", "[goal-gate] could not read the working-tree diff — gate skipped for this change", {
@@ -270,13 +459,45 @@ export function readChangeDiff(cwd: string): DiffRead {
     });
     return { ok: false, reason: "diff-unreadable", detail: worktree.detail };
   }
-  if (worktree.stdout.trim()) return { ok: true, diff: worktree.stdout, origin: "working-tree" };
+
+  const untracked = readUntrackedDiff(cwd, opts);
+  if (!untracked.ok) {
+    // The tracked half alone is what the live run was judged on, and it was the
+    // wrong answer. Reporting a partial view as the whole change is the failure
+    // this section exists to close, so an unreadable enumeration is unreadable.
+    logger.error("orchestrator", "[goal-gate] could not enumerate untracked files — gate skipped for this change", {
+      cwd,
+      detail: untracked.detail,
+    });
+    return { ok: false, reason: "diff-unreadable", detail: untracked.detail };
+  }
+
+  const combined = [worktree.stdout.trim(), untracked.diff.trim()].filter((s) => s.length > 0).join("\n");
+  if (combined) return { ok: true, diff: combined, origin: "working-tree" };
 
   const committed = git(cwd, ["diff", "HEAD~1", "HEAD"]);
   if (committed.ok && committed.stdout.trim()) {
     return { ok: true, diff: committed.stdout, origin: "last-commit" };
   }
   return { ok: false, reason: "no-diff", detail: committed.ok ? "no changes since HEAD" : committed.detail };
+}
+
+/**
+ * The files present in a diff, in order, named as the diff names them.
+ *
+ * Read off the diff STRING rather than off the enumeration that produced it, so
+ * it reports what the judge was actually shown after budgeting — which is the
+ * only version of that fact worth auditing.
+ */
+export function diffFilePaths(diff: string): string[] {
+  const out: string[] = [];
+  for (const line of diff.split("\n")) {
+    if (!line.startsWith("diff --git ")) continue;
+    const m = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    const path = m?.[2] ?? m?.[1];
+    if (path && !out.includes(path)) out.push(path);
+  }
+  return out;
 }
 
 /** Split a unified diff into per-file sections, header included. */
@@ -552,8 +773,13 @@ export async function runGoalContradictionGate(opts: {
    */
   modelId: string;
   env?: NodeJS.ProcessEnv;
+  /**
+   * The run's own artifact directory, excluded from the change. See
+   * {@link ChangeDiffOptions.excludeDir}.
+   */
+  excludeDir?: string;
   /** Injectable for tests; defaults to reading git in `cwd`. */
-  diffReader?: (cwd: string) => DiffRead;
+  diffReader?: (cwd: string, opts: ChangeDiffOptions) => DiffRead;
   /** Observability sink for the exact prompt sent. Diagnostics only. */
   onPrompt?: (prompt: string) => void;
 }): Promise<GoalGateOutcome> {
@@ -569,15 +795,15 @@ export async function runGoalContradictionGate(opts: {
     return { fired: false, source: "no-goal", contradictions: [], detail: "no stated goal to judge against" };
   }
 
-  const read = (opts.diffReader ?? readChangeDiff)(opts.cwd);
+  const read = (opts.diffReader ?? readChangeDiff)(opts.cwd, { excludeDir: opts.excludeDir });
   if (!read.ok) {
     return { fired: false, source: read.reason, contradictions: [], detail: read.detail };
   }
 
-  const prompt = buildGoalCheckPrompt(
-    formatGoalStatement(goal as GoalStatement),
-    budgetDiffByFile(read.diff, GOAL_GATE_DIFF_BUDGET),
-  );
+  const judgedDiff = budgetDiffByFile(read.diff, GOAL_GATE_DIFF_BUDGET);
+  // Recorded off the budgeted string, so what is reported is what was shown.
+  const seen = { diffOrigin: read.origin, diffFiles: diffFilePaths(judgedDiff), diffChars: judgedDiff.length };
+  const prompt = buildGoalCheckPrompt(formatGoalStatement(goal as GoalStatement), judgedDiff);
   opts.onPrompt?.(prompt);
 
   /**
@@ -655,7 +881,7 @@ export async function runGoalContradictionGate(opts: {
           "The goal-alignment judge returned an empty reply twice, so this change has NOT been checked against " +
           "the stated goal. No verdict arrived — that is a failed call, not a finding, so the sprint verdict " +
           "stands unchanged.",
-        diffOrigin: read.origin,
+        ...seen,
       };
     }
     raw = attempt.raw;
@@ -674,7 +900,7 @@ export async function runGoalContradictionGate(opts: {
         stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
       },
     );
-    return { fired: false, source: "call-failed", contradictions: [], detail: message, diffOrigin: read.origin };
+    return { fired: false, source: "call-failed", contradictions: [], detail: message, ...seen };
   }
 
   const verdict = extractGoalVerdict(raw);
@@ -695,7 +921,7 @@ export async function runGoalContradictionGate(opts: {
       detail:
         "The goal-alignment judge returned no parseable verdict, so this change has NOT been checked against " +
         "the stated goal. Flagged rather than approved — an unread verdict is not an approval.",
-      diffOrigin: read.origin,
+      ...seen,
     };
   }
 
@@ -705,7 +931,7 @@ export async function runGoalContradictionGate(opts: {
       source: "aligned",
       contradictions: [],
       detail: verdict.rationale || "the change serves the stated goal",
-      diffOrigin: read.origin,
+      ...seen,
     };
   }
 
@@ -714,6 +940,100 @@ export async function runGoalContradictionGate(opts: {
     source: "contradicts",
     contradictions: verdict.contradictions,
     detail: renderDetail(verdict.contradictions),
-    diffOrigin: read.origin,
+    ...seen,
   };
+}
+
+// ─── the record ──────────────────────────────────────────────────────────────
+
+/**
+ * What the gate decided, and on what.
+ *
+ * `source` widens past {@link GoalGateSource} by one value the gate itself can
+ * never return: `gate-error`, written by the call site when the gate could not
+ * be reached at all. Without it, "the gate never ran" would be the one outcome
+ * with no record — which is exactly the outcome that most needs one.
+ */
+export interface GoalGateRecord {
+  sprintN: number;
+  runId: string;
+  /** True only when the gate asserted the change works against the goal. */
+  fired: boolean;
+  source: GoalGateSource | "gate-error";
+  detail: string;
+  contradictions: GoalContradiction[];
+  /** Which diff was judged, the files in it, and its size. Absent when none was read. */
+  diffOrigin?: DiffOrigin;
+  diffFiles?: string[];
+  diffChars?: number;
+  /** The judge. Recorded because a verdict is only as good as who gave it. */
+  modelId: string;
+  judgedAt: string;
+}
+
+/** `sprints/<n>-goal-gate.json` — beside `<n>-outcome.json` and `<n>-verify.md`. */
+export function goalGateRecordPath(flowDir: string, runId: string, sprintN: number): string {
+  return join(sprintsDir(flowDir, runId), `${sprintN}-goal-gate.json`);
+}
+
+/** Build the record from an outcome the gate returned. */
+export function toGoalGateRecord(
+  outcome: Pick<GoalGateOutcome, "fired" | "detail" | "contradictions" | "diffOrigin" | "diffFiles" | "diffChars"> & {
+    source: GoalGateSource | "gate-error";
+  },
+  meta: { runId: string; sprintN: number; modelId: string },
+): GoalGateRecord {
+  return {
+    sprintN: meta.sprintN,
+    runId: meta.runId,
+    fired: outcome.fired,
+    source: outcome.source,
+    detail: outcome.detail,
+    contradictions: outcome.contradictions,
+    diffOrigin: outcome.diffOrigin,
+    diffFiles: outcome.diffFiles,
+    diffChars: outcome.diffChars,
+    modelId: meta.modelId,
+    judgedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Persist the gate's decision beside the sprint artifacts the loop already writes.
+ *
+ * MEASURED, and the reason this exists: the gate ran on sprint 2 of a live run
+ * and its verdict was afterwards unfindable — not in the CLI's database (every
+ * text column of `messages`, `interaction_logs` and `tool_results` searched for
+ * `goal-gate`), not in `debug.log`, and not under the run's own artifacts. That
+ * it had run at all had to be inferred from control flow. `idealTrace` is a
+ * no-op unless `MUONROI_IDEAL_TRACE` is set (`ideal-trace.ts:35`), the TUI
+ * discards stderr with the alternate screen buffer, and the `aligned` path
+ * yielded only a transcript chunk nothing persists.
+ *
+ * `diffFiles` and `diffChars` ride alongside the verdict deliberately: an
+ * `aligned` sitting next to three bookkeeping files and 5,874 characters is a
+ * wrong answer a reader can SEE, and finding that out the first time took a
+ * live probe of a running repository.
+ *
+ * Never throws. A record that cannot be written is a lost audit trail; a record
+ * that fails a sprint is a lost sprint. The failure is logged with its context
+ * per the No Silent Catch rule and the caller carries on.
+ */
+export async function writeGoalGateRecord(flowDir: string, record: GoalGateRecord): Promise<boolean> {
+  try {
+    await mkdir(sprintsDir(flowDir, record.runId), { recursive: true });
+    await atomicWriteJSON(goalGateRecordPath(flowDir, record.runId, record.sprintN), record);
+    return true;
+  } catch (err) {
+    logger.error("orchestrator", "[goal-gate] could not persist the gate's verdict — the decision is not auditable", {
+      flowDir,
+      runId: record.runId,
+      sprintN: record.sprintN,
+      source: record.source,
+      fired: record.fired,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+    });
+    return false;
+  }
 }

@@ -1852,8 +1852,17 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // two further sprints were planned on top of the broken change. The gate
   // belongs at the smallest unit of completed work.
   if (verifyVerdict === "PASS") {
+    // The judge's identity, declared out here so the catch below can still name
+    // it in the record it writes when the gate never got as far as running —
+    // but RESOLVED inside the try, because model resolution is itself allowed to
+    // throw (the zero-hardcode rule forbids a fallback string), and moving that
+    // call outside the guard would turn a resolution failure into a dead sprint.
+    let goalJudgeModelId = "";
     try {
-      const { runGoalContradictionGate } = await import("./goal-contradiction-gate.js");
+      goalJudgeModelId = resolveLeaderModel(ctx.sessionModelId);
+      const { runGoalContradictionGate, toGoalGateRecord, writeGoalGateRecord } = await import(
+        "./goal-contradiction-gate.js"
+      );
       const goalGate = await runGoalContradictionGate({
         // The user's literal text, never a restatement of it — the whole defect
         // is a run that satisfied its own paraphrase. `productSpec.mvp` is what
@@ -1866,7 +1875,12 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         // plan-adherence reviewer is. See SUB_TASK_TIER in src/council/leader.ts:
         // a wrong answer here either ships the defect or costs a sprint, which is
         // exactly the class of call that table pins to the leader.
-        modelId: resolveLeaderModel(ctx.sessionModelId),
+        modelId: goalJudgeModelId,
+        // The run writes its own artifacts under flowDir. Measured on a live
+        // run, 49 of the 57 untracked files in the judged repository were that
+        // paperwork — including, now, this gate's own verdict. Feeding a judge
+        // its previous answer as "the change that was made" is not a check.
+        excludeDir: ctx.flowDir,
       });
       idealTrace("sprint.goal-gate.after", {
         runId: ctx.runId,
@@ -1875,6 +1889,15 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         source: goalGate.source,
         contradictions: goalGate.contradictions.length,
       });
+      // EVERY outcome is recorded, including the ones that change nothing.
+      // idealTrace above is a no-op unless MUONROI_IDEAL_TRACE is set and the
+      // TUI eats stderr, so before this the only trace of a verdict was a
+      // transcript chunk nothing persists — a live run's gate decision could
+      // not be found afterwards in the DB, the debug log, or the run artifacts.
+      await writeGoalGateRecord(
+        ctx.flowDir,
+        toGoalGateRecord(goalGate, { runId: ctx.runId, sprintN, modelId: goalJudgeModelId }),
+      );
       if (goalGate.fired) {
         verifyVerdict = "FAIL";
         verifyResult.error = `${verifyResult.error ?? ""}\n\n[goal-gate] ${goalGate.detail}`;
@@ -1908,6 +1931,27 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         error: message,
         stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
       });
+      // The gate never produced an outcome, so nothing above recorded one — and
+      // "the gate could not run" is precisely the state an auditor must not have
+      // to infer. A second failure here (the module itself is what threw) still
+      // must not derail the sprint, so the write is guarded on its own.
+      try {
+        const { toGoalGateRecord, writeGoalGateRecord } = await import("./goal-contradiction-gate.js");
+        await writeGoalGateRecord(
+          ctx.flowDir,
+          toGoalGateRecord(
+            { fired: false, source: "gate-error", detail: message, contradictions: [] },
+            { runId: ctx.runId, sprintN, modelId: goalJudgeModelId },
+          ),
+        );
+      } catch (recordErr) {
+        logger.error("orchestrator", `[sprint-runner] could not record the goal gate's failure (sprint ${sprintN})`, {
+          runId: ctx.runId,
+          sprintN,
+          error: recordErr instanceof Error ? recordErr.message : String(recordErr),
+          stack: recordErr instanceof Error ? recordErr.stack?.split("\n").slice(0, 3) : undefined,
+        });
+      }
       yield {
         type: "content",
         content: `\n> [goal-gate] Sprint ${sprintN} was NOT checked against the goal: ${message}\n`,

@@ -18,7 +18,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -75,7 +75,7 @@ import { runCouncil } from "../../council/index.js";
 import { runVerifyOrchestration } from "../../verify/orchestrator.js";
 import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
 import { evaluateDoneGate } from "../done-gate.js";
-import { GOAL_GATE_SYSTEM } from "../goal-contradiction-gate.js";
+import { GOAL_GATE_SYSTEM, type GoalGateRecord } from "../goal-contradiction-gate.js";
 import { runSprint } from "../sprint-runner.js";
 import type { ProductSpec, RoleSlot } from "../types.js";
 import { F5_GOAL } from "./fixtures/f5-tcis-goal.js";
@@ -200,6 +200,13 @@ function makeCtx(): any {
     }),
     detectVerifyRecipe: vi.fn(async () => ({ testCommands: [], coverage: 80, shellInitCommands: [] })),
   };
+}
+
+/** The gate's durable record, read back the way an auditor would. */
+function readGoalGateRecord(sprintN = 1): GoalGateRecord | null {
+  const p = join(flowDir, "runs", "run-f5-callsite", "sprints", `${sprintN}-goal-gate.json`);
+  if (!existsSync(p)) return null;
+  return JSON.parse(readFileSync(p, "utf8")) as GoalGateRecord;
 }
 
 async function runOneSprint(): Promise<{ result: any; text: string }> {
@@ -335,6 +342,23 @@ describe("runSprint consults the goal-contradiction gate", () => {
     expect(text).toContain("was NOT checked against the goal");
   }, 90_000);
 
+  it("still scores PASS — and sees the work — when the sprint never committed anything", async () => {
+    // MEASURED, live run, mid-run: `git diff HEAD` was 5,874 characters of
+    // package-version and solution bookkeeping and the sprint's entire output
+    // was untracked, so the judge was shown none of it and answered "aligned".
+    // HEAD never moved across two sprints, so the HEAD~1 fallback never fired.
+    seedRepo();
+    writeCsproj(CSPROJ_AFTER); // never added, never committed
+    judgeReply = CONTRADICTS;
+
+    const { result } = await runOneSprint();
+
+    expect(goalPrompts).toHaveLength(1);
+    expect(goalPrompts[0]).toContain("<TargetFramework>net9.0</TargetFramework>");
+    expect(result.lastVerifyResult).toBe("FAIL");
+    expect(readGoalGateRecord()?.diffFiles).toContain(CSPROJ_PATH);
+  }, 90_000);
+
   it("is skipped entirely under MUONROI_IDEAL_GOAL_GATE=0", async () => {
     process.env.MUONROI_IDEAL_GOAL_GATE = "0";
     try {
@@ -350,6 +374,122 @@ describe("runSprint consults the goal-contradiction gate", () => {
       expect(goalPrompts).toEqual([]);
       expect(result.lastVerifyResult).toBe("PASS");
       expect(text).not.toContain("[goal-gate]");
+    } finally {
+      delete process.env.MUONROI_IDEAL_GOAL_GATE;
+    }
+  }, 90_000);
+});
+
+/**
+ * F5 — the verdict has to OUTLIVE the run.
+ *
+ * MEASURED: the gate ran on sprint 2 of a live `/ideal` run (the sprint ended
+ * `verify: PASS`, so the call site was reached) and its verdict could not be
+ * found afterwards anywhere — not in `~/.muonroi-cli/muonroi.db` (every text
+ * column of `messages`, `interaction_logs` and `tool_results` searched for
+ * `goal-gate`), not in `~/.muonroi-cli/debug.log`, and not under the run's own
+ * `.muonroi-flow/runs/<runId>/`. That it had run at all was an inference from
+ * control flow. `idealTrace` is a no-op unless `MUONROI_IDEAL_TRACE` is set
+ * (`ideal-trace.ts:35`), the TUI discards stderr with the alternate screen
+ * buffer, and the `aligned` path only yielded a transcript chunk nothing keeps.
+ *
+ * So the record goes next to the sprint artifacts the loop already writes, and
+ * it carries the two fields that would have made the untracked-diff defect
+ * visible on sight — WHICH files the judge saw and HOW MANY characters — rather
+ * than only the verdict they produced.
+ */
+describe("the goal gate leaves a durable record", () => {
+  it("records a firing verdict with its evidence and the diff it judged", async () => {
+    seedRepo();
+    writeCsproj(CSPROJ_BEFORE);
+    execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "ignore" });
+    git(["commit", "-q", "-m", "pre-change analyzer project"]);
+    writeCsproj(CSPROJ_AFTER);
+    judgeReply = CONTRADICTS;
+
+    await runOneSprint();
+    const rec = readGoalGateRecord();
+
+    expect(rec).not.toBeNull();
+    expect(rec?.fired).toBe(true);
+    expect(rec?.source).toBe("contradicts");
+    expect(rec?.sprintN).toBe(1);
+    expect(rec?.runId).toBe("run-f5-callsite");
+    // The decision is auditable without re-running it: both halves of the
+    // evidence, not a count.
+    expect(rec?.contradictions?.[0]?.goal).toContain(GOAL_FRAGMENT);
+    expect(rec?.contradictions?.[0]?.change).toContain(DECISIVE_REMOVAL);
+    // …and what the judge was actually shown.
+    expect(rec?.diffOrigin).toBe("working-tree");
+    expect(rec?.diffFiles).toContain(CSPROJ_PATH);
+    expect(rec?.diffChars).toBeGreaterThan(0);
+    expect(typeof rec?.judgedAt).toBe("string");
+  }, 90_000);
+
+  it("records an ALIGNED verdict too — the case that produced no evidence at all", async () => {
+    seedRepo();
+    writeCsproj(CSPROJ_BEFORE);
+    execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "ignore" });
+    git(["commit", "-q", "-m", "pre-change analyzer project"]);
+    writeCsproj(CSPROJ_AFTER.replace("net9.0", "netstandard2.0"));
+    judgeReply = ALIGNED;
+
+    await runOneSprint();
+    const rec = readGoalGateRecord();
+
+    expect(rec?.fired).toBe(false);
+    expect(rec?.source).toBe("aligned");
+    // The pair that makes a rubber stamp visible on sight: an "aligned" beside
+    // a file list holding nothing but bookkeeping is a wrong answer you can see.
+    expect(rec?.diffFiles).toContain(CSPROJ_PATH);
+    expect(rec?.diffChars).toBeGreaterThan(0);
+  }, 90_000);
+
+  it("records a fail-open outcome, so 'found nothing' and 'never ran' stay different facts", async () => {
+    // No repository at all — the gate has nothing to read and no opinion.
+    await runOneSprint();
+    const rec = readGoalGateRecord();
+
+    expect(rec).not.toBeNull();
+    expect(rec?.fired).toBe(false);
+    expect(rec?.source).toBe("diff-unreadable");
+    expect(rec?.detail.length).toBeGreaterThan(0);
+    // Nothing was judged, so nothing is claimed about what was seen.
+    expect(rec?.diffFiles).toBeUndefined();
+  }, 90_000);
+
+  it("records the empty-reply fail-open, which the transcript alone loses", async () => {
+    seedRepo();
+    writeCsproj(CSPROJ_BEFORE);
+    execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "ignore" });
+    git(["commit", "-q", "-m", "pre-change analyzer project"]);
+    writeCsproj(CSPROJ_AFTER);
+    judgeReply = "";
+
+    const { result } = await runOneSprint();
+    const rec = readGoalGateRecord();
+
+    expect(result.lastVerifyResult).toBe("PASS");
+    expect(rec?.source).toBe("empty-reply");
+    expect(rec?.fired).toBe(false);
+    // A diff WAS read and shown — the failure was on the way back, and the
+    // record has to say so, or an auditor cannot tell it from "no diff".
+    expect(rec?.diffFiles).toContain(CSPROJ_PATH);
+  }, 90_000);
+
+  it("records that the gate was switched off, rather than writing nothing", async () => {
+    process.env.MUONROI_IDEAL_GOAL_GATE = "0";
+    try {
+      seedRepo();
+      writeCsproj(CSPROJ_BEFORE);
+      execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "ignore" });
+      git(["commit", "-q", "-m", "pre-change analyzer project"]);
+      writeCsproj(CSPROJ_AFTER);
+
+      await runOneSprint();
+
+      // "Off" is the one state a reader is most likely to mistake for "clean".
+      expect(readGoalGateRecord()?.source).toBe("disabled");
     } finally {
       delete process.env.MUONROI_IDEAL_GOAL_GATE;
     }
