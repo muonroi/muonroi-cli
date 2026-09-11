@@ -45,7 +45,13 @@ export function isIdealRunUnlimited(): boolean {
   return storage.getStore() !== undefined;
 }
 
-/** Run `fn` (and everything it awaits) inside the `/ideal` scope. */
+/**
+ * Run `fn` (and everything it awaits) inside the `/ideal` scope.
+ *
+ * @testonly Production enters the scope only through `scopeGeneratorToIdealRun`
+ * (wrapped around the product loop in `runProductLoopV1`). Tests use this seam to
+ * assert the limit getters from inside a run without building a generator.
+ */
 export function runInIdealScope<T>(fn: () => T, label = "ideal"): T {
   return storage.run({ label }, fn);
 }
