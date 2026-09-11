@@ -105,6 +105,22 @@ export interface VerifyBaseline {
    * load rather than used to wave through an unreadable failure.
    */
   unattributable: boolean;
+  /**
+   * Wall-clock ms `captureVerifyFloorBaseline` spent running `commands` above.
+   *
+   * This is THIS REPOSITORY'S OWN measured cost of one build+test pass, taken
+   * before any sprint has changed the tree. It is recorded because the verify
+   * stage's watchdog is derived from it (see `computeVerifyBudget` in
+   * sprint-runner.ts): a budget that does not scale with the repo it is
+   * measuring punishes progress. Measured on run `mttwpmu8ee5b`: 53,133ms.
+   *
+   * OPTIONAL, and deliberately NOT a version bump: a record written before this
+   * field existed is still perfectly valid for everything the baseline is
+   * primarily for (the failing-test delta), so rejecting it would be a
+   * regression. Absence means "not measured" and a consumer must treat it as
+   * unknown — never as zero, which would derive a budget of 0.
+   */
+  elapsedMs?: number;
 }
 
 export type BaselineRejectReason =

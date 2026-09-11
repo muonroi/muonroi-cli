@@ -145,6 +145,7 @@ import type { CouncilGenerateDiagnostics, CouncilLLM } from "../council/types.js
 import { sprintsDir } from "../flow/run-artifacts.js";
 import { atomicWriteJSON } from "../storage/atomic-io.js";
 import { logger } from "../utils/logger.js";
+import type { VerifyVerdict } from "./verify-result.js";
 
 /** Opt out with `MUONROI_IDEAL_GOAL_GATE=0`. Anything else leaves it armed. */
 export const GOAL_GATE_ENV = "MUONROI_IDEAL_GOAL_GATE";
@@ -947,19 +948,31 @@ export async function runGoalContradictionGate(opts: {
 // ─── the record ──────────────────────────────────────────────────────────────
 
 /**
- * What the gate decided, and on what.
+ * What a record may name as its source.
  *
- * `source` widens past {@link GoalGateSource} by one value the gate itself can
- * never return: `gate-error`, written by the call site when the gate could not
- * be reached at all. Without it, "the gate never ran" would be the one outcome
- * with no record — which is exactly the outcome that most needs one.
+ * Widens {@link GoalGateSource} by two values the gate itself can never return,
+ * because both describe the gate NOT running — and "the gate never ran" is
+ * exactly the outcome that most needs a record:
+ *
+ * - `gate-error`      — the call site reached for the gate and it threw.
+ * - `verdict-not-pass` — the call site never reached for it, because the whole
+ *   F5 block is gated on `verifyVerdict === "PASS"`. MEASURED: across four real
+ *   runs of one task, verify never once reached PASS, so this was every sprint
+ *   of every run and the gate has never executed in production. Before this
+ *   value the skip left no artefact at all and had to be inferred from
+ *   `<N>-outcome.json`.
+ */
+export type GoalGateRecordSource = GoalGateSource | "gate-error" | "verdict-not-pass";
+
+/**
+ * What the gate decided, and on what.
  */
 export interface GoalGateRecord {
   sprintN: number;
   runId: string;
   /** True only when the gate asserted the change works against the goal. */
   fired: boolean;
-  source: GoalGateSource | "gate-error";
+  source: GoalGateRecordSource;
   detail: string;
   contradictions: GoalContradiction[];
   /** Which diff was judged, the files in it, and its size. Absent when none was read. */
@@ -969,6 +982,19 @@ export interface GoalGateRecord {
   /** The judge. Recorded because a verdict is only as good as who gave it. */
   modelId: string;
   judgedAt: string;
+  /**
+   * The verify verdict that caused the gate to be skipped. Set ONLY alongside
+   * `source: "verdict-not-pass"`; absent on every path where the gate actually
+   * ran.
+   *
+   * Its own field rather than prose because FAIL and ERROR call for different
+   * reading: FAIL means the change was judged and found wanting, ERROR means no
+   * judgement was reached at all (a watchdog, a floor that could not run). A
+   * reader auditing why the goal gate is dark needs to separate those, and run
+   * `mtw9mpjt1ce3` is precisely the case where they diverge — its sprint 2 was
+   * green and was recorded ERROR by a timeout.
+   */
+  verifyVerdict?: VerifyVerdict;
 }
 
 /** `sprints/<n>-goal-gate.json` — beside `<n>-outcome.json` and `<n>-verify.md`. */
@@ -979,9 +1005,9 @@ export function goalGateRecordPath(flowDir: string, runId: string, sprintN: numb
 /** Build the record from an outcome the gate returned. */
 export function toGoalGateRecord(
   outcome: Pick<GoalGateOutcome, "fired" | "detail" | "contradictions" | "diffOrigin" | "diffFiles" | "diffChars"> & {
-    source: GoalGateSource | "gate-error";
+    source: GoalGateRecordSource;
   },
-  meta: { runId: string; sprintN: number; modelId: string },
+  meta: { runId: string; sprintN: number; modelId: string; verifyVerdict?: VerifyVerdict },
 ): GoalGateRecord {
   return {
     sprintN: meta.sprintN,
@@ -995,6 +1021,7 @@ export function toGoalGateRecord(
     diffChars: outcome.diffChars,
     modelId: meta.modelId,
     judgedAt: new Date().toISOString(),
+    ...(meta.verifyVerdict === undefined ? {} : { verifyVerdict: meta.verifyVerdict }),
   };
 }
 

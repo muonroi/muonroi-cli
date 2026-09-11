@@ -78,53 +78,347 @@ import { parseVerifyResult, VERIFY_PASS_MARKER } from "./verify-result.js";
 // without touching DriverContext / IterationState shapes.
 const _cb2RetryUsed = new Map<string, boolean>();
 
-/** Watchdog ceiling for the verify stage (ms). Override with MUONROI_SPRINT_VERIFY_TIMEOUT_MS. */
-function getVerifyWatchdogTimeoutMs(): number {
-  const raw = process.env.MUONROI_SPRINT_VERIFY_TIMEOUT_MS;
+function envPositiveInt(name: string, fallback: number): number {
+  const raw = process.env[name];
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
   if (Number.isFinite(n) && n > 0) return n;
-  return 10 * 60 * 1000; // 10 min default
+  return fallback;
 }
 
 /**
- * Bound the verify stage with a watchdog timeout.
+ * FLOOR of the verify stage's budget (ms). Override with
+ * MUONROI_SPRINT_VERIFY_TIMEOUT_MS — the same variable that used to set the
+ * whole (flat) budget, with its exact parse semantics preserved: a non-positive
+ * or unparseable value falls back to the default rather than disabling the
+ * watchdog. This stage has never had a `<= 0` disable and does not gain one
+ * here; an unbounded verify is the hang this watchdog exists for.
+ *
+ * 600s is retained as the floor because it is the bound that was already in
+ * production. A derived budget must never come out SMALLER than the constant it
+ * replaces, or a repository with a cheap build would newly start losing sprints
+ * that pass today. It also covers the part of the stage that does NOT scale with
+ * the repo: the verify sub-agent's own LLM turns cost roughly the same whatever
+ * the project's size, so scaling alone under-serves a tiny baseline.
+ */
+export function getVerifyBudgetFloorMs(): number {
+  return envPositiveInt("MUONROI_SPRINT_VERIFY_TIMEOUT_MS", 10 * 60 * 1000);
+}
+
+/**
+ * How many times this run's own measured verify baseline the stage may take.
+ * Override with MUONROI_SPRINT_VERIFY_BUDGET_MULTIPLIER.
+ *
+ * DERIVATION, from the four measured runs of one task. Verify-stage durations
+ * (`sprint_stage verification` → `sprint_stage judgment`, `interaction_logs`):
+ *
+ *     run mttwpmu8ee5b   sprint1 186s   sprint2 230s
+ *     run mtv9v1xu7615   sprint1 412s   sprint2 340s
+ *     run mtw9mpjt1ce3   sprint1 464s   sprint2 600s  ← cut by the flat cap
+ *
+ * The only run with a recorded baseline cost is `mttwpmu8ee5b`: 53,133ms
+ * (`verify-floor.ts:87`). Against it those durations are 3.50x and 4.33x for its
+ * own two sprints, 8.73x for the largest UNCENSORED observation anywhere in the
+ * table (464s), and >= 11.29x for the censored one (600s is a lower bound — the
+ * stage was killed, so its true duration is unknown).
+ *
+ * 20x sits ~1.8x above that censored lower bound. The headroom is the point: the
+ * defect being fixed is that verify cost GROWS as a run accumulates code, so the
+ * multiplier must cover growth beyond the largest value ever observed, not just
+ * match it.
+ *
+ * HONEST LIMIT OF THIS EVIDENCE: runs `mtv9v1xu7615` and `mtw9mpjt1ce3` have no
+ * recorded baseline cost of their own, so their 8.73x / 11.29x ratios assume a
+ * baseline comparable to `mttwpmu8ee5b`'s on the same task. Once `elapsedMs` is
+ * being persisted (this change) a future run can compute its own ratios and this
+ * constant can be re-derived from same-run pairs instead.
+ */
+export function getVerifyBudgetMultiplier(): number {
+  const raw = process.env.MUONROI_SPRINT_VERIFY_BUDGET_MULTIPLIER;
+  const n = raw ? Number(raw) : Number.NaN;
+  if (Number.isFinite(n) && n > 0) return n;
+  return 20;
+}
+
+/**
+ * ABSOLUTE ceiling on the derived budget (ms). Override with
+ * MUONROI_SPRINT_VERIFY_CEILING_MS.
+ *
+ * A derived bound still needs a hard stop, or a pathological baseline sets a
+ * budget no hang could ever reach. 60 min is chosen to sit above the slowest
+ * verify this code can legitimately produce: `getFloorTimeoutMs()` allows 600s
+ * PER COMMAND, and the recipe measured here is three of them (`dotnet restore`
+ * -> `dotnet build` -> `dotnet test`), so 1800s of command time alone is
+ * reachable without anything being wrong. It is also the same 60 min
+ * `getIsolatedImplCeilingMs()` uses for the neighbouring stage.
+ */
+export function getVerifyBudgetCeilingMs(): number {
+  return envPositiveInt("MUONROI_SPRINT_VERIFY_CEILING_MS", 60 * 60 * 1000);
+}
+
+/** Which term of the clamp produced the budget. Reported, never diagnosed. */
+export type VerifyBudgetBasis = "no-baseline" | "baseline-derived" | "floor" | "ceiling";
+
+export interface VerifyBudget {
+  /** The bound actually armed. */
+  budgetMs: number;
+  basis: VerifyBudgetBasis;
+  /** This run's measured build+test cost, or null when none was recorded. */
+  baselineMs: number | null;
+  /** `baselineMs * multiplier`, before clamping. Null when there was no baseline. */
+  derivedMs: number | null;
+  multiplier: number;
+  floorMs: number;
+  ceilingMs: number;
+}
+
+/**
+ * Size the verify stage's watchdog from the work it is measuring.
+ *
+ * THE DEFECT THIS REPLACES: a flat 600s. The stage shells out to the project's
+ * own build/test recipe, so its cost grows with the amount of code the run has
+ * produced — the budget was fixed while the work it bounds grew monotonically,
+ * which punishes progress: the further a run gets, the likelier verify is
+ * killed. On sprint 2 of run `mtw9mpjt1ce3` it fired on a sprint that had
+ * ALREADY SUCCEEDED (every compile error fixed, `dotnet build` green with 0
+ * errors, confirmed by hand afterwards) and recorded it as `verify: "ERROR"`.
+ * Because both the criteria judge and the F5 goal gate are gated on
+ * `verifyVerdict === "PASS"`, that one number kept `CriteriaMet` at 0 for every
+ * sprint of all four runs and the goal gate never executed in production at all.
+ *
+ * WHY SCALED-FROM-BASELINE AND NOT AN IDLE WINDOW. The neighbouring isolated
+ * implementation stage was converted from a flat budget to silence-plus-ceiling
+ * (`withIsolatedImplDeadline`), and the same signal is wired here — this
+ * stage's `onProgress` is handed straight to `runTaskRequest` as its
+ * `onActivity` (`verify/orchestrator.ts:138`). But the two stages differ in the
+ * DENSITY of that signal, and density is what makes an idle rule work:
+ *
+ *   - `onActivity` fires in exactly one place, on `part.type === "tool-call"`
+ *     (`stream-runner.ts:993`) — when the model EMITS a call, not while the call
+ *     runs. Nothing is emitted during a tool's execution.
+ *   - On the impl stage that is dense: 196 events across 900s, a mean gap of
+ *     4.6s (measured, run `mtv9v1xu7615`). Silence there really is silence.
+ *   - On the verify stage the dominant cost IS one tool call — `dotnet test`
+ *     across ~36 assemblies — so the longest silent gap is most of the stage,
+ *     and it is precisely the quantity that grows with the codebase. An idle
+ *     window would have to exceed the longest single command, i.e. be tuned to
+ *     the same growing number the flat budget got wrong. It would reproduce this
+ *     defect in a subtler form, and cut a green `dotnet test` mid-run.
+ *
+ * So the budget is derived from a measurement of that same command set instead:
+ * `captureVerifyFloorBaseline` already runs the project's build and test
+ * commands once, at run start, before any sprint has touched the tree. Activity
+ * IS still observed here — it is reported in the timeout message (see
+ * `buildVerifyTimeoutMessage`), it just does not decide, because on this stage
+ * it cannot.
+ *
+ * `baselineMs === null` (no baseline captured, an older record, a different
+ * run's) yields exactly the previous behaviour: the 600s floor.
+ */
+export function computeVerifyBudget(
+  baselineMs: number | null,
+  opts: { multiplier?: number; floorMs?: number; ceilingMs?: number } = {},
+): VerifyBudget {
+  const multiplier = opts.multiplier ?? getVerifyBudgetMultiplier();
+  const floorMs = opts.floorMs ?? getVerifyBudgetFloorMs();
+  // A ceiling below the floor would silently undercut the bound that already
+  // shipped, so the floor wins that contradiction.
+  const ceilingMs = Math.max(opts.ceilingMs ?? getVerifyBudgetCeilingMs(), floorMs);
+  const base = { baselineMs, multiplier, floorMs, ceilingMs };
+
+  if (baselineMs === null || !Number.isFinite(baselineMs) || baselineMs <= 0) {
+    return { ...base, baselineMs: null, derivedMs: null, budgetMs: floorMs, basis: "no-baseline" };
+  }
+  const derivedMs = baselineMs * multiplier;
+  if (derivedMs < floorMs) return { ...base, derivedMs, budgetMs: floorMs, basis: "floor" };
+  if (derivedMs > ceilingMs) return { ...base, derivedMs, budgetMs: ceilingMs, basis: "ceiling" };
+  return { ...base, derivedMs, budgetMs: derivedMs, basis: "baseline-derived" };
+}
+
+/**
+ * What the verify watchdog ACTUALLY observed, as of the moment it fired.
+ * Populated from the stage's own progress callback — the only signal the sprint
+ * has about it — so the timeout message can state facts instead of a narrative.
+ */
+export interface VerifyStageObservation {
+  /** Progress notifications seen (orchestration beats + one per tool call started). */
+  events: number;
+  /** `Date.now()` of the most recent one, or null when none ever arrived. */
+  lastEventAtMs: number | null;
+  /** The text of that most recent one, verbatim. Null when none arrived. */
+  lastDetail: string | null;
+}
+
+/**
+ * The verify-stage timeout message.
+ *
+ * It reports ONLY what was measured. The text this replaces asserted a cause on
+ * every single timeout — verbatim from run `mtw9mpjt1ce3`:
+ *
+ *     verify-timeout: verify stage exceeded 600s watchdog and was aborted
+ *     (sprint 2, run mtw9mpjt1ce3) - likely a hung sandbox checkpoint (shuru)
+ *     or a verify sub-agent LLM call with no TTFB timeout
+ *
+ * NEITHER GUESS WAS TRUE. The sandbox was fine and the build had already
+ * succeeded; the sprint was finished and green when the clock cut it. This is
+ * the same anti-pattern `buildIsolatedImplTimeoutMessage` documents next door,
+ * where a canned narrative carried over from a different incident cost a later
+ * investigation an entire hypothesis. Never restate a cause here.
+ *
+ * `basis` is not a diagnosis: it names WHICH term of the clamp set the bound, so
+ * a reader can tell "this project measured slow and still overran" from "no
+ * baseline was recorded, so it got the default".
+ */
+export function buildVerifyTimeoutMessage(args: {
+  sprintN: number;
+  runId: string;
+  budget: VerifyBudget;
+  elapsedMs: number;
+  observation?: VerifyStageObservation;
+  firedAtMs?: number;
+}): string {
+  const { sprintN, runId, budget, elapsedMs, observation } = args;
+  const firedAt = args.firedAtMs ?? Date.now();
+  const s = (ms: number) => (ms / 1000).toFixed(1);
+  const parts: string[] = [
+    `verify stage exceeded its ${Math.round(budget.budgetMs / 1000)}s budget (sprint ${sprintN}, run ${runId}) ` +
+      `and was aborted after ${s(elapsedMs)}s`,
+  ];
+
+  switch (budget.basis) {
+    case "baseline-derived":
+      parts.push(
+        `budget = this run's measured verify baseline ${s(budget.baselineMs as number)}s x ${budget.multiplier} ` +
+          `= ${s(budget.derivedMs as number)}s (floor ${Math.round(budget.floorMs / 1000)}s, ` +
+          `ceiling ${Math.round(budget.ceilingMs / 1000)}s)`,
+      );
+      break;
+    case "floor":
+      parts.push(
+        `budget = the ${Math.round(budget.floorMs / 1000)}s FLOOR — derived ${s(budget.derivedMs as number)}s ` +
+          `(baseline ${s(budget.baselineMs as number)}s x ${budget.multiplier}) was below it`,
+      );
+      break;
+    case "ceiling":
+      parts.push(
+        `budget = the ${Math.round(budget.ceilingMs / 1000)}s CEILING — derived ${s(budget.derivedMs as number)}s ` +
+          `(baseline ${s(budget.baselineMs as number)}s x ${budget.multiplier}) was above it`,
+      );
+      break;
+    default:
+      parts.push(
+        `budget = the ${Math.round(budget.floorMs / 1000)}s floor; no verify baseline cost was recorded for this ` +
+          "run, so nothing could be derived from it",
+      );
+      break;
+  }
+
+  if (!observation) {
+    parts.push("no stage activity was instrumented for this call, so nothing further was observed");
+  } else if (observation.events === 0 || observation.lastEventAtMs === null) {
+    parts.push("observed 0 stage activity events — nothing was seen coming from the verify stage");
+  } else {
+    const sinceLastMs = Math.max(0, firedAt - observation.lastEventAtMs);
+    parts.push(
+      `observed ${observation.events} stage activity event(s), the last one ${s(sinceLastMs)}s before the ` +
+        `deadline (at ${new Date(observation.lastEventAtMs).toISOString()}), reading: ` +
+        `"${(observation.lastDetail ?? "").slice(0, 200)}"`,
+    );
+  }
+
+  parts.push("cause not diagnosed — only the observations above were measured");
+  return parts.join("; ");
+}
+
+/**
+ * Resolve this sprint's verify budget from the run's own baseline record.
+ *
+ * Never throws: a budget that cannot be derived falls back to the floor, which
+ * is exactly the behaviour that shipped before it was derivable at all.
+ */
+export async function resolveVerifyBudget(flowDir: string | undefined, runId: string): Promise<VerifyBudget> {
+  if (!flowDir) return computeVerifyBudget(null);
+  try {
+    const [{ readBaselineVerifyCostMs }, { verifyBaselinePath }] = await Promise.all([
+      import("./verify-floor.js"),
+      import("./verify-baseline.js"),
+    ]);
+    const baselineMs = await readBaselineVerifyCostMs(verifyBaselinePath(flowDir, runId), runId);
+    return computeVerifyBudget(baselineMs);
+  } catch (err) {
+    logger.error("orchestrator", "[sprint-runner] could not derive the verify budget — falling back to the floor", {
+      runId,
+      flowDir,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+    });
+    return computeVerifyBudget(null);
+  }
+}
+
+/**
+ * Bound the verify stage with a watchdog sized to the work it is measuring.
  *
  * `runVerifyOrchestration` can hang indefinitely with no visible signal:
  * `prepareVerifyRun` → `ensureVerifyCheckpoint` spawns the `shuru` sandbox
- * (`spawnWithProgress("shuru", …)`) which stalls on hosts where shuru is
- * unavailable/misconfigured (e.g. Windows), and the verify sub-agent itself has
- * no TTFB timeout. Because sprint-runner previously called it as a bare
+ * (`spawnWithProgress("shuru", …)`) which can stall, and the verify sub-agent
+ * itself has no TTFB timeout. Because sprint-runner once called it as a bare
  * `await runVerifyOrchestration(agent)` with NO abortSignal and NO timeout, a
- * single hung verify BRICKED the whole /ideal run silently — no error, no
- * recovery card — observed live as a 30+ min dead stall right after
- * "Committed: N sprints planned" (the impl turn finished, verify never returned).
+ * single hung verify BRICKED the whole /ideal run silently.
+ *
+ * The bound is no longer a constant. See `computeVerifyBudget` for the defect
+ * that made it one and the derivation that replaced it; `opts.flowDir` is how
+ * this call reaches the run's own baseline measurement. `opts.budget` lets a
+ * caller (and a test) supply the budget directly.
  *
  * On timeout we abort the sub-agent, log with context (No-Silent-Catch), and
  * return an ERROR ToolResult so the sprint loop treats it as a failed verify
  * (Step 5 → verifyVerdict FAIL/ERROR → feedback-routing) instead of hanging
- * forever. The hung sandbox op may leak in the background, but the run recovers
- * and the failure is surfaced + resumable. `onProgress` is forwarded to console
- * so a future hang is diagnosable (e.g. "Creating checkpoint: <name>").
+ * forever. The hung op may leak in the background, but the run recovers and the
+ * failure is surfaced + resumable.
+ *
+ * Progress beats are RECORDED as well as forwarded to the debug console: they
+ * are the only thing the sprint can actually observe about this stage, so they
+ * are what the timeout message reports instead of a guess.
  */
-async function runVerifyWithWatchdog(
+export async function runVerifyWithWatchdog(
   verifyAgent: VerifyAgentLike,
   runId: string,
   sprintN: number,
+  opts?: { flowDir?: string; budget?: VerifyBudget },
 ): Promise<ToolResult> {
-  const timeoutMs = getVerifyWatchdogTimeoutMs();
+  const budget = opts?.budget ?? (await resolveVerifyBudget(opts?.flowDir, runId));
+  const timeoutMs = budget.budgetMs;
   const controller = new AbortController();
+  const startedAt = Date.now();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const observation: VerifyStageObservation = { events: 0, lastEventAtMs: null, lastDetail: null };
   const onProgress = (detail: string) => {
+    observation.events += 1;
+    observation.lastEventAtMs = Date.now();
+    observation.lastDetail = detail;
     if (process.env.MUONROI_DEBUG_VERIFY === "1") console.error(`[verify:sprint-${sprintN}] ${detail}`);
   };
   const timeout = new Promise<ToolResult>((resolve) => {
     timer = setTimeout(() => {
+      const msg = buildVerifyTimeoutMessage({
+        sprintN,
+        runId,
+        budget,
+        elapsedMs: Date.now() - startedAt,
+        observation: { ...observation },
+      });
+      // Cancel the work we are giving up on BEFORE unblocking the caller.
       controller.abort();
-      const msg =
-        `verify stage exceeded ${Math.round(timeoutMs / 1000)}s watchdog and was aborted ` +
-        `(sprint ${sprintN}, run ${runId}) — likely a hung sandbox checkpoint (shuru) or a ` +
-        `verify sub-agent LLM call with no TTFB timeout`;
       console.error(`[sprint-runner] ${msg}`);
+      logger.error("orchestrator", "[sprint-runner] verify watchdog fired", {
+        runId,
+        sprintN,
+        budgetMs: timeoutMs,
+        basis: budget.basis,
+        baselineMs: budget.baselineMs,
+        observedEvents: observation.events,
+        message: msg,
+      });
       resolve({ success: false, output: "", error: `verify-timeout: ${msg}` });
     }, timeoutMs);
   });
@@ -1672,7 +1966,10 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       content: `\n> [skip-verify] Verify stage bypassed for sprint ${sprintN} (user recovery choice).\n`,
     };
   } else {
-    verifyResult = await runVerifyWithWatchdog(verifyAgent, ctx.runId, sprintN);
+    // `flowDir` is how the watchdog reaches THIS run's measured build+test cost
+    // (`verify-baseline.json`, written by captureVerifyFloorBaseline before any
+    // sprint ran) and sizes itself to the project instead of to a constant.
+    verifyResult = await runVerifyWithWatchdog(verifyAgent, ctx.runId, sprintN, { flowDir: ctx.flowDir });
   }
   yield phaseDone({
     phaseId: verifyPhaseId,
@@ -1957,6 +2254,46 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         content: `\n> [goal-gate] Sprint ${sprintN} was NOT checked against the goal: ${message}\n`,
       };
     }
+  } else {
+    // The gate did not run because the whole block above is gated on PASS. That
+    // is a SKIP, and a skip must leave an artefact: the gate's own principle is
+    // that "found nothing" and "never ran" must never look alike, and this is
+    // the arm where nothing was written at all. MEASURED: across four real runs
+    // of one task verify never once reached PASS, so this branch was every
+    // sprint of every run — the gate has never executed in production, and that
+    // had to be inferred from `<N>-outcome.json` rather than read off a record.
+    //
+    // Same writer, same shape, no second format. `modelId` is empty because no
+    // judge was ever chosen: resolving one here would spend a call (and can
+    // throw) to fill in a field describing work that did not happen.
+    try {
+      const { toGoalGateRecord, writeGoalGateRecord } = await import("./goal-contradiction-gate.js");
+      await writeGoalGateRecord(
+        ctx.flowDir,
+        toGoalGateRecord(
+          {
+            fired: false,
+            source: "verdict-not-pass",
+            detail: `goal gate skipped — the verify verdict was ${verifyVerdict}, and the gate only runs on PASS`,
+            contradictions: [],
+          },
+          { runId: ctx.runId, sprintN, modelId: "", verifyVerdict },
+        ),
+      );
+    } catch (err) {
+      // A lost audit trail must not take down the sprint it describes.
+      logger.error("orchestrator", `[sprint-runner] could not record the skipped goal gate (sprint ${sprintN})`, {
+        runId: ctx.runId,
+        sprintN,
+        verifyVerdict,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
+    }
+    yield {
+      type: "content",
+      content: `\n> [goal-gate] Sprint ${sprintN} was NOT checked against the goal — verify verdict was ${verifyVerdict}, not PASS.\n`,
+    };
   }
 
   // P3.3: Track repeating failures; push to EE judge-worker when count hits 3.

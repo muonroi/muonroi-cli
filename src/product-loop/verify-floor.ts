@@ -51,6 +51,7 @@
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { promises as fsp } from "node:fs";
 import type { VerifyRecipe } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { inferVerifyProjectProfile } from "../verify/recipes.js";
@@ -761,6 +762,10 @@ export async function captureVerifyFloorBaseline(opts: CaptureBaselineOpts): Pro
     failingTests: [...failingTests].sort(),
     results,
     unattributable,
+    // Measured BEFORE the write, so it is the cost of the commands themselves
+    // and not of persisting the record. This is the number the verify stage's
+    // budget is derived from — see `computeVerifyBudget` in sprint-runner.ts.
+    elapsedMs: Date.now() - started,
   };
 
   try {
@@ -849,4 +854,69 @@ export function applyVerifyFloor(
     return { verdict: "PASS", downgraded: false, upgraded: true, note: floor.detail };
   }
   return { verdict: current, downgraded: false, upgraded: false, note: floor.detail };
+}
+
+/**
+ * Read back THIS RUN'S measured cost of one build+test pass, in ms.
+ *
+ * The number `captureVerifyFloorBaseline` recorded at run start, read by the
+ * sprint loop to size the verify stage's watchdog (see `computeVerifyBudget` in
+ * sprint-runner.ts). Returns null whenever no usable measurement exists.
+ *
+ * WHY THIS IS NOT `loadFloorBaseline`. That loader answers a different question
+ * — "may this record excuse a failing test?" — and is deliberately strict about
+ * it: it rejects on `commands-changed`, `different-branch` and
+ * `baseline-unattributable` (`baselineRejectReason` in verify-baseline.ts), and
+ * it re-derives the command set from disk to do so. Every one of those
+ * rejections is correct for authorising a failure and wrong for sizing a clock:
+ * a run that switched branch mid-flight, or whose baseline could not attribute
+ * its own failures, still measured how long this project takes to build and
+ * test. Using the strict loader here would silently drop the budget back to the
+ * floor for reasons that say nothing about duration.
+ *
+ * So the checks here are exactly the two that bear on whether the NUMBER means
+ * what we think: the record must be a version this code understands, and it must
+ * belong to the run asking (another run's tree is a different amount of code).
+ *
+ * Never throws — a missing baseline is an ordinary state (the capture is skipped
+ * when the floor is disabled) and the caller falls back to the floor budget.
+ * Unexpected failures are logged per the No Silent Catch rule.
+ */
+export async function readBaselineVerifyCostMs(baselinePath: string, runId?: string): Promise<number | null> {
+  let raw: string;
+  try {
+    raw = await fsp.readFile(baselinePath, "utf8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    // ENOENT is the normal "no baseline was captured for this run" case.
+    if (code !== "ENOENT") {
+      logger.warn("orchestrator", `[verify-floor] readBaselineVerifyCostMs: read failed for ${baselinePath}`, {
+        operation: "readBaselineVerifyCostMs",
+        path: baselinePath,
+        code,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return null;
+  }
+
+  let parsed: VerifyBaseline;
+  try {
+    parsed = JSON.parse(raw) as VerifyBaseline;
+  } catch (err) {
+    logger.warn("orchestrator", `[verify-floor] readBaselineVerifyCostMs: JSON parse failed for ${baselinePath}`, {
+      operation: "readBaselineVerifyCostMs",
+      path: baselinePath,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== "object") return null;
+  if (parsed.version !== VERIFY_BASELINE_VERSION) return null;
+  if (runId && parsed.runId !== runId) return null;
+
+  const ms = parsed.elapsedMs;
+  // Absence means "not measured", never zero — a 0 would derive a 0 budget.
+  return typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? ms : null;
 }
