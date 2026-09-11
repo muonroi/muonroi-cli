@@ -88,6 +88,7 @@ import type {
 import { appendCostLog } from "../usage/cost-log.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { projectCostUSD, sanitizeInputTokens } from "../usage/estimator.js";
+import { scopeGeneratorToIdealRun } from "../utils/ideal-run-scope.js";
 import { logger } from "../utils/logger.js";
 import type { PermissionMode } from "../utils/permission-mode.js";
 import {
@@ -179,6 +180,7 @@ import { loadFlowResumeDigest } from "./flow-resume.js";
 import { beginInteractivePause, endInteractivePause, isInteractivePaused } from "./interactive-pause.js";
 import { MessageProcessor, type MessageProcessorDeps } from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
+import { createNoProgressGuard } from "./no-progress-guard.js";
 import { buildSystemPrompt, HARD_MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS } from "./prompts";
 import { getReactiveDelegationThresholdChars, shouldReactivelyEscalate } from "./reactive-delegation.js";
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
@@ -1443,10 +1445,16 @@ export class Agent {
     // batch loop the re-sent history balloons exactly like the stream path did
     // before B3. Apply the same compactor here (round >= 1, mirroring the
     // stream path's `stepNumber >= 1` gate). High-value results stay verbatim.
-    const batchCompactThreshold = getSubAgentCompactThresholdChars();
-    const batchCompactKeepLast = getSubAgentCompactKeepLast();
     const batchChildCtxWindow = childRuntime.modelInfo?.contextWindow ?? 0;
+    const batchCompactThreshold = getSubAgentCompactThresholdChars(batchChildCtxWindow);
+    const batchCompactKeepLast = getSubAgentCompactKeepLast();
     const batchIsReasoningModel = childRuntime.modelInfo?.reasoning === true;
+    // `maxSteps` is Infinity only inside an `/ideal` run (no limits, user decision;
+    // see StreamRunner.setup). Such a loop ends when the model stops calling tools,
+    // or when consecutive rounds only repeat calls it already made with the same
+    // results (no-progress-guard.ts).
+    const batchNoProgress = Number.isFinite(maxSteps) ? null : createNoProgressGuard();
+    const batchRounds: unknown[] = [];
     for (let round = 0; round < maxSteps; round++) {
       const batchRequestId = `task-${Date.now()}-${round + 1}`;
       const roundMessages =
@@ -1552,6 +1560,34 @@ export class Agent {
       const toolMessage = buildToolBatchMessage(toolParts);
       if (toolMessage) {
         turnMessages.push(toolMessage);
+      }
+
+      if (batchNoProgress) {
+        batchRounds.push({
+          toolCalls: toolParts.map((p) => ({
+            toolCallId: p.toolCall.id,
+            toolName: p.toolCall.function.name,
+            input: p.input,
+          })),
+          toolResults: toolParts.map((p) => ({ toolCallId: p.toolCall.id, output: p.toolResult })),
+        });
+        if (batchNoProgress(batchRounds)) {
+          console.error(
+            `[orchestrator] batch sub-agent stopped after ${round + 1} rounds: rounds only repeated earlier calls with identical results (no progress)`,
+            { agent: request.agent, model: childRuntime.modelId },
+          );
+          if (hasUsage(totalUsage)) {
+            this.recordUsage(totalUsage, "task", childRuntime.modelId);
+          }
+          const output =
+            assistantText.trim() ||
+            `Task stopped: no progress after ${round + 1} batch rounds. Last action: ${lastActivity}`;
+          return {
+            success: false,
+            output,
+            task: { agent: request.agent, description: request.description, summary: output, activity: lastActivity },
+          };
+        }
       }
     }
 
@@ -2446,9 +2482,12 @@ export class Agent {
       idea?: string;
       runId?: string;
       flags: {
-        maxCost: number;
-        maxSprints: number;
+        /** @deprecated Ignored — `/ideal` has no spend cap. */
+        maxCost?: number;
+        /** Sprint ceiling only when the user typed `--max-sprints N`; absent = none. */
+        maxSprints?: number;
         doneThreshold: number;
+        /** @deprecated Ignored — `/ideal` has no token budget. */
         budgetTokens?: number;
         stack?: string;
         noCustomerDebate?: boolean;
@@ -2676,40 +2715,48 @@ export class Agent {
         ? (this._buildRecentTurnsSummary() ?? undefined)
         : undefined;
 
-    const gen = runProductLoop({
-      subcommand: payload.subcommand,
-      idea: payload.idea ?? "",
-      runId: payload.runId,
-      flowDir,
-      sessionModelId: this.modelId,
-      llm,
-      flags: {
-        maxCost: payload.flags.maxCost,
-        maxSprints: payload.flags.maxSprints,
-        doneThreshold: payload.flags.doneThreshold,
-        budgetTokens: payload.flags.budgetTokens,
-        stack: payload.flags.stack,
-        forceCouncil: routeForceCouncil,
-      },
-      respondToQuestion: this.councilManager.createQuestionResponder(),
-      respondToPreflight: this.councilManager.createPreflightResponder(),
-      cwd: this.bash.getCwd(),
-      processMessageFn,
-      runIsolatedTask,
-      // Mode C — wire verify-recipe detector so runProductLoop auto-detect can probe cwd.
-      detectVerifyRecipe: () => this.detectVerifyRecipe(),
-      skipPriorContext: payload.flags.noPriorContext === true,
-      conversationContext,
-      complexity,
-      needsClarification,
-      sufficiencyMissing,
-      // Mode C explicit override + gh pr create opt-in (see .planning/MAINTAIN-MODE.md).
-      mode: payload.flags.mode,
-      ghPr: payload.flags.ghPr === true,
-      // Chat session id — used as the FK key for interaction_logs telemetry.
-      // The /ideal runId is NOT a sessions.id and would silently fail FK insert.
-      sessionId: this.session?.id,
-    } as Parameters<typeof runProductLoop>[0]);
+    // The run-scoped "no limits" switch (src/utils/ideal-run-scope.ts). Every
+    // resumption of the product loop — and everything it reaches through
+    // processMessageFn, runIsolatedTask and the council LLM — runs inside the
+    // scope. This method's own `for await` below does not, so neither does the
+    // TUI that drives it, nor any chat turn it starts concurrently or afterwards.
+    const gen = scopeGeneratorToIdealRun(
+      runProductLoop({
+        subcommand: payload.subcommand,
+        idea: payload.idea ?? "",
+        runId: payload.runId,
+        flowDir,
+        sessionModelId: this.modelId,
+        llm,
+        // No maxCost / budgetTokens: `/ideal` has no spend cap and no token budget
+        // (user decision). maxSprints is set only when the user typed it.
+        flags: {
+          maxSprints: payload.flags.maxSprints,
+          doneThreshold: payload.flags.doneThreshold,
+          stack: payload.flags.stack,
+          forceCouncil: routeForceCouncil,
+        },
+        respondToQuestion: this.councilManager.createQuestionResponder(),
+        respondToPreflight: this.councilManager.createPreflightResponder(),
+        cwd: this.bash.getCwd(),
+        processMessageFn,
+        runIsolatedTask,
+        // Mode C — wire verify-recipe detector so runProductLoop auto-detect can probe cwd.
+        detectVerifyRecipe: () => this.detectVerifyRecipe(),
+        skipPriorContext: payload.flags.noPriorContext === true,
+        conversationContext,
+        complexity,
+        needsClarification,
+        sufficiencyMissing,
+        // Mode C explicit override + gh pr create opt-in (see .planning/MAINTAIN-MODE.md).
+        mode: payload.flags.mode,
+        ghPr: payload.flags.ghPr === true,
+        // Chat session id — used as the FK key for interaction_logs telemetry.
+        // The /ideal runId is NOT a sessions.id and would silently fail FK insert.
+        sessionId: this.session?.id,
+      } as Parameters<typeof runProductLoop>[0]),
+      `ideal:${payload.subcommand}`,
+    );
 
     try {
       for await (const chunk of gen) {

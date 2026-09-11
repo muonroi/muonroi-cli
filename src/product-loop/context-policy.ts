@@ -1,10 +1,16 @@
 import type { CustomerDecision, Phase, PhaseDigestEntry, PhaseHistoryEntry } from "./types.js";
 
-export const CONTEXT_CAPS = {
-  SPRINT_CONTEXT_BYTES: 8192,
-  PHASE_DIGEST_BYTES: 4096,
-  PHASE_HISTORY_BYTES: 2048,
-} as const;
+/*
+ * Sprint context assembly for the phase-orchestrated `/ideal` loop.
+ *
+ * The context used to be squeezed into byte budgets (8,192 bytes for the whole
+ * sprint context, 4,096 for the phase digest, oldest entries dropped first).
+ * Those were character budgets, not a context-window guard: they bound what a
+ * sprint may know about its own run regardless of the model's window. `/ideal`
+ * has no limits (user decision), so every block is kept whole. The request still
+ * has to fit the model's real window — that is compaction's job in the
+ * orchestrator, which reads the actual window, not this module's.
+ */
 
 export interface BuildSprintContextArgs {
   projectContextFormatted: string;
@@ -48,96 +54,19 @@ function renderDigest(items: PhaseDigestEntry[]): string {
   return lines.join("\n");
 }
 
-function bytes(s: string): number {
-  return Buffer.byteLength(s, "utf8");
-}
-
-function truncTail(s: string, budget: number): string {
-  if (bytes(s) <= budget) return s;
-  const trimmed = s.slice(0, Math.max(0, budget - 32));
-  return `${trimmed}\n[…truncated ${bytes(s) - bytes(trimmed)} bytes]`;
-}
-
-function truncOldestFirst(lines: string[], header: string, budget: number): string {
-  const joined = [header, ...lines].join("\n");
-  if (bytes(joined) <= budget) return joined;
-  let dropped = 0;
-  while (lines.length > 1 && bytes([header, ...lines].join("\n")) > budget - 32) {
-    lines.shift();
-    dropped += 1;
-  }
-  return [header, ...lines, `[…truncated ${dropped} oldest entries]`].join("\n");
-}
-
 export function buildSprintContext(args: BuildSprintContextArgs): string {
-  const project = args.projectContextFormatted;
-  const decisions = renderDecisions(args.customerDecisions);
-  const essentialSize = bytes(project) + bytes(decisions) + 4;
-
-  if (essentialSize > CONTEXT_CAPS.SPRINT_CONTEXT_BYTES) {
-    return [
-      project,
-      decisions,
-      `[oversize: essential blocks alone = ${essentialSize} bytes; raise SPRINT_CONTEXT_BYTES or trim project-context]`,
-    ].join("\n\n");
-  }
-
-  const remaining = CONTEXT_CAPS.SPRINT_CONTEXT_BYTES - essentialSize;
-  const current = renderCurrent(args.currentPhase);
-  const history = renderHistory(args.phaseHistory);
-  const digest = renderDigest(args.phaseDigest);
-  const tail = `## Sprint Tail\n${args.sprintTail}`;
-
-  let used = 0;
-  const out: string[] = [project, decisions];
-
-  const addIfFits = (block: string): boolean => {
-    const blockSize = bytes(block) + 2;
-    if (used + blockSize <= remaining) {
-      out.push(block);
-      used += blockSize;
-      return true;
-    }
-    return false;
-  };
-
-  if (!addIfFits(history)) {
-    const lines = args.phaseHistory.map((h) => `- ${h.phaseId} (exited ${h.exitedAtUtc}): ${h.exitSummary}`);
-    out.push(truncOldestFirst(lines, "## Phase History", remaining - used - 2));
-    used = remaining;
-  }
-
-  if (used < remaining) addIfFits(current);
-
-  if (used < remaining && !addIfFits(digest)) {
-    const lines = args.phaseDigest.map((d) => `- sprint ${d.sprintN} (${d.timestampUtc}): ${d.lessonText}`);
-    out.push(truncOldestFirst(lines, "## Phase Digest", remaining - used - 2));
-    used = remaining;
-  }
-
-  if (used < remaining) {
-    const tailBudget = remaining - used - 2;
-    out.push(truncTail(tail, tailBudget));
-  }
-
-  return out.join("\n\n");
+  return [
+    args.projectContextFormatted,
+    renderDecisions(args.customerDecisions),
+    renderHistory(args.phaseHistory),
+    renderCurrent(args.currentPhase),
+    renderDigest(args.phaseDigest),
+    `## Sprint Tail\n${args.sprintTail}`,
+  ].join("\n\n");
 }
 
 export function digestSprintIntoPhase(existing: PhaseDigestEntry[], newEntry: PhaseDigestEntry): PhaseDigestEntry[] {
-  const next = [...existing, newEntry];
-  let dropped = 0;
-  while (next.length > 1 && Buffer.byteLength(JSON.stringify(next), "utf8") > CONTEXT_CAPS.PHASE_DIGEST_BYTES) {
-    next.shift();
-    dropped += 1;
-  }
-  if (dropped > 0) {
-    next.unshift({
-      sprintN: -1,
-      timestampUtc: new Date().toISOString(),
-      lessonText: `[digest pruned: ${dropped} entries dropped, oldest-first]`,
-    });
-  }
-  return next;
+  return [...existing, newEntry];
 }
 
 export async function handoffPhaseToNext(args: {
@@ -146,14 +75,8 @@ export async function handoffPhaseToNext(args: {
   criteriaMet: number;
   totalCriteria: number;
   leader: import("./discovery-prompt-parser.js").LeaderLike;
-  capUsd: number;
-  remainingUsd: number;
   backoffDelays?: number[];
 }): Promise<{ exitSummary: string; usedFallback: boolean }> {
-  const floor = Math.max(0.05, 0.005 * args.capUsd);
-  if (args.remainingUsd < floor) {
-    return { exitSummary: deterministicHandoff(args), usedFallback: true };
-  }
   const prompt =
     `Summarize phase ${args.phaseId}: ${args.sprintsExecuted} sprints executed, ` +
     `${args.criteriaMet}/${args.totalCriteria} criteria met. ` +
@@ -165,7 +88,10 @@ export async function handoffPhaseToNext(args: {
       { delays: args.backoffDelays },
     );
     return { exitSummary: res.content.trim().slice(0, 300), usedFallback: false };
-  } catch {
+  } catch (err) {
+    console.error(
+      `[context-policy] phase handoff summary failed for ${args.phaseId}; using the deterministic summary: ${(err as Error)?.message}`,
+    );
     return { exitSummary: deterministicHandoff(args), usedFallback: true };
   }
 }

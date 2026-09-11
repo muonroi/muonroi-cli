@@ -288,3 +288,44 @@ export async function commitToProduct(
     console.warn(`[ledger] failed to append to product ledger ${productRunId}: ${err.message}`);
   });
 }
+
+/**
+ * Record real spend on the monthly ledger WITHOUT a reservation and WITHOUT a
+ * cap check. Returns the USD amount recorded.
+ *
+ * `/ideal` has no spend cap (user decision), so its model calls are never
+ * refused — but spend must still be MEASURED. This is `commit()` minus the
+ * reservation: the actual cost is added to `current_usd` and the threshold
+ * notifications are still evaluated (they inform; nothing here refuses a call).
+ */
+export async function commitUnreserved(args: {
+  provider: string;
+  model: string;
+  actualInputTokens: number;
+  actualOutputTokens: number;
+  homeOverride?: string;
+}): Promise<number> {
+  const filePath = path.join(muonroiHome(args.homeOverride), "usage.json");
+  const cap = await loadCapUSD(args.homeOverride);
+  const actual = projectCostUSD(args.provider, args.model, args.actualInputTokens, args.actualOutputTokens);
+
+  const pendingEvents = await withLock(filePath, async (state) => {
+    const prevUsd = state.current_usd;
+    const nextUsd = prevUsd + actual;
+    const thresholdResult = evaluateThresholds({
+      prevUsd,
+      nextUsd,
+      capUsd: cap,
+      firedThisMonth: state.thresholds_fired_this_month ?? [],
+    });
+    return {
+      next: { ...state, current_usd: nextUsd, thresholds_fired_this_month: thresholdResult.nextFired },
+      result: thresholdResult.events,
+    };
+  });
+
+  for (const ev of pendingEvents) {
+    emit(ev);
+  }
+  return actual;
+}

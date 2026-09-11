@@ -105,7 +105,6 @@ async function seedResumableRun(stanceRows: CouncilStanceRow[] | null): Promise<
   const run = await createRun(flowDir);
   await writeManifest(flowDir, run.id, {
     idea: "Chuẩn hoá code style cho TCIS",
-    capUsd: 50,
     maxSprints: 3,
     doneThreshold: 0.9,
     createdAt: new Date("2026-09-10T02:00:00.000Z"),

@@ -81,7 +81,6 @@ describe("product-loop types", () => {
   it("should have correct ProductRunManifest shape", () => {
     const _manifest: ProductRunManifest = {
       idea: "test",
-      capUsd: 50,
       maxSprints: 8,
       doneThreshold: 0.9,
       createdAt: new Date(),
@@ -93,7 +92,6 @@ describe("product-loop types", () => {
       sprintN: 1,
       totalSprints: 8,
       costSpent: 5,
-      costCap: 50,
       criteriaMet: 1,
       criteriaPartial: 2,
       criteriaUnmet: 3,

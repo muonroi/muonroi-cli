@@ -14,7 +14,6 @@ vi.mock("../done-gate.js", () => ({
   evaluateDoneGate: vi.fn(),
 }));
 vi.mock("../circuit-breakers.js", () => ({
-  CB1_costProjection: vi.fn(() => ({ halt: false, projection: 0, headroom: 100 })),
   CB2_oscillation: vi.fn(() => ({ halt: false, delta_t: 0, delta_t_minus_1: 0 })),
   CB3_verifyBlank: vi.fn(() => ({ halt: false })),
 }));
@@ -37,27 +36,17 @@ vi.mock("../../usage/ledger.js", () => ({
   release: vi.fn(async () => undefined),
 }));
 vi.mock("../cost-scoper.js", () => ({
-  reserveForProduct: vi.fn(async () => ({
-    id: "tok",
-    model: "m",
-    provider: "p",
-    projected_usd: 0.1,
-    est_input_tokens: 100,
-    est_output_tokens: 100,
-    createdAtMs: Date.now(),
-  })),
+  recordProductSpend: vi.fn(async () => undefined),
 }));
 vi.mock("../../providers/runtime.js", () => ({
   detectProviderForModel: vi.fn(() => "anthropic"),
 }));
 
 import { runCouncil } from "../../council/index.js";
-import { release } from "../../usage/ledger.js";
-import { CapBreachError } from "../../usage/types.js";
 import { runVerifyOrchestration } from "../../verify/orchestrator.js";
 import { appendIteration } from "../artifact-io.js";
-import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
-import { reserveForProduct } from "../cost-scoper.js";
+import { CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
+import { recordProductSpend } from "../cost-scoper.js";
 import { evaluateDoneGate } from "../done-gate.js";
 import { postSprintBoundary } from "../phase-tracker-bridge.js";
 import { runSprint } from "../sprint-runner.js";
@@ -136,7 +125,6 @@ afterEach(() => {
 describe("sprint-runner", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (CB1_costProjection as any).mockReturnValue({ halt: false, projection: 0, headroom: 100 });
     (CB2_oscillation as any).mockReturnValue({ halt: false, delta_t: 0, delta_t_minus_1: 0 });
     (CB3_verifyBlank as any).mockReturnValue({ halt: false });
     (evaluateDoneGate as any).mockResolvedValue({ pass: true, score: 1.0 });
@@ -269,18 +257,9 @@ describe("sprint-runner", () => {
     expect(runVerifyOrchestration).not.toHaveBeenCalled();
   });
 
-  // CB-1 is intentionally disabled in sprint-runner (see comment at "Step 1").
-  // Provider pricing gaps produced false halts; re-enable once cost
-  // normalisation is reliable.
-  it.skip("CB-1 trips when projected cost exceeds 1.5x remaining headroom", async () => {
-    (CB1_costProjection as any).mockReturnValue({ halt: true, projection: 50, headroom: 5 });
-    const ctx = makeCtx();
-    const { error } = await drain(
-      runSprint({ sprintN: 4, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
-    );
-    expect((error as Error).message).toContain("cost projection");
-    expect(runCouncil).not.toHaveBeenCalled();
-  });
+  // The skipped "CB-1 trips when projected cost exceeds 1.5x remaining headroom"
+  // test is gone: CB-1 was deleted, not just disabled, with `/ideal`'s spend cap
+  // (user decision: no limits), so there is nothing left to re-enable.
 
   it("CB-2 trips when last 2 deltas are non-positive at sprint >= 3", async () => {
     (CB2_oscillation as any).mockReturnValue({ halt: true, delta_t: -0.05, delta_t_minus_1: 0 });
@@ -344,45 +323,11 @@ describe("sprint-runner", () => {
     expect(result!.nextFocus).toContain("fix verify failures");
   });
 
-  it("releases reservation when council generate throws (no leaked reservations)", async () => {
-    // Force the planner to call llm.generate which throws — ensure release is invoked.
-    (reserveForProduct as any).mockResolvedValue({
-      id: "tok",
-      model: "m",
-      provider: "p",
-      projected_usd: 0.1,
-      est_input_tokens: 1,
-      est_output_tokens: 1,
-      createdAtMs: Date.now(),
-    });
-    // Make council itself yield, then trigger an error on the implementation pass.
-    (runCouncil as any).mockImplementation(async function* () {
-      yield { type: "content", content: "planning" };
-      return "plan-text";
-    });
-    // Drive base llm.generate via product-llm wrapper inside the test indirectly:
-    // since council is mocked to NOT call llm, we simulate by directly invoking
-    // the sprint-runner happy path and then asserting release is NOT called when
-    // there is no failure. Then a separate path: cap breach.
-    const ctx = makeCtx();
-    const { result } = await drain(
-      runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
-    );
-    expect(result).toBeDefined();
-    // No error, so release should NOT have been called by the wrapper.
-    expect(release).not.toHaveBeenCalled();
-  });
-
-  it("propagates CapBreachError as readable Error from product-LLM wrapper", async () => {
-    // Trigger reserveForProduct to return a CapBreachError during the LLM call inside the
-    // wrapper. We invoke the wrapper indirectly by having runCouncil call ctx.llm.generate
-    // through the wrapper. The simplest way is to check that the cost-scoper signals
-    // breach correctly when invoked manually — covered already by cost-scoper tests.
-    // Here we just ensure that if reserveForProduct surfaces a breach, the wrapper rethrows.
-    (reserveForProduct as any).mockResolvedValue(new CapBreachError(40, 5, 10, 50));
-
-    // Simulate by importing the wrapper indirectly via runSprint: drive llm through
-    // a custom test by providing a council mock that calls llm.generate.
+  // Previously: "releases reservation when council generate throws" and "propagates
+  // CapBreachError as readable Error from product-LLM wrapper". `/ideal` has no
+  // spend cap (user decision): the wrapper reserves nothing and refuses nothing; it
+  // records the spend after each call returns.
+  it("the product-LLM wrapper meters every call and never refuses one on spend", async () => {
     (runCouncil as any).mockImplementation(async function* (
       _topic: string,
       _model: string,
@@ -390,24 +335,29 @@ describe("sprint-runner", () => {
       _sid: string,
       llm: any,
     ) {
-      // Invoke the wrapped llm — this should throw inside the wrapper.
       yield { type: "content", content: "planning" };
-      await llm.generate("m", "sys", "prompt");
-      return "unreachable";
+      const text = await llm.generate("m", "sys", "prompt");
+      return `plan: ${text}`;
     });
 
     const ctx = makeCtx();
-    const { error } = await drain(
+    const { error, result } = await drain(
       runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
     );
-    expect((error as Error).message).toMatch(/Cost cap breached/);
+    expect(error).toBeUndefined();
+    expect(result).toBeDefined();
+    expect(ctx.llm.generate).toHaveBeenCalled();
+    expect(recordProductSpend).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "anthropic", model: "m" }),
+      "run-123",
+      expect.objectContaining({ callsite: "sprint.generate" }),
+    );
   });
 });
 
 describe("sprint-runner phaseScope (subsystem E)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (CB1_costProjection as any).mockReturnValue({ halt: false, projection: 0, headroom: 100 });
     (CB2_oscillation as any).mockReturnValue({ halt: false, delta_t: 0, delta_t_minus_1: 0 });
     (CB3_verifyBlank as any).mockReturnValue({ halt: false });
     (runVerifyOrchestration as any).mockResolvedValue({
@@ -507,7 +457,6 @@ describe("sprint-runner phaseScope (subsystem E)", () => {
 describe("sprint-runner halt chunk forwarding (Task 5.1)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (CB1_costProjection as any).mockReturnValue({ halt: false, projection: 0, headroom: 100 });
     (CB2_oscillation as any).mockReturnValue({ halt: false, delta_t: 0, delta_t_minus_1: 0 });
     (CB3_verifyBlank as any).mockReturnValue({ halt: false });
     (evaluateDoneGate as any).mockResolvedValue({ pass: true, score: 1.0 });

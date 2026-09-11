@@ -24,6 +24,7 @@ import { apiBaseFor, PROVIDER_ENDPOINTS } from "../providers/endpoints.js";
 import type { ProviderId } from "../providers/types.js";
 import { ALL_PROVIDER_IDS } from "../providers/types.js";
 import type { AgentMode, ReasoningEffort } from "../types/index";
+import { isIdealRunUnlimited } from "./ideal-run-scope.js";
 import { logger } from "./logger.js";
 import { normalizeShellSettings, type ShellSettings } from "./shell";
 
@@ -1061,6 +1062,11 @@ export function getAutoCompactMinNewTokens(): number {
  * disable the absolute cap, restoring pure window-relative behavior).
  */
 export function getAutoCompactAbsoluteFloorTokens(): number {
+  // `/ideal` has no limits (user decision). This floor is an absolute token count
+  // chosen for cost ("bounds windows > 200K"), not a property of the model's
+  // window, so it is off inside an `/ideal` run. The window-relative trigger
+  // (contextWindow × thresholdPct, orchestrator.ts) still applies there.
+  if (isIdealRunUnlimited()) return 0;
   const envRaw = process.env.MUONROI_AUTO_COMPACT_ABS_FLOOR;
   if (envRaw !== undefined && envRaw !== "") {
     const n = Number(envRaw);
@@ -1080,6 +1086,14 @@ export function getAutoCompactAbsoluteFloorTokens(): number {
  * schedule. Env override: MUONROI_SUB_AGENT_BUDGET_CHARS.
  */
 export function getSubAgentBudgetChars(): number {
+  // No budget inside an `/ideal` run (user decision: no limits). `Infinity` makes
+  // `wrapToolSetWithCap` pass every result through untouched (its tiers compare
+  // `cumulative / max`, which stays 0). This counter is not a context-window
+  // guard: it only ever grows — compaction removes results from the model's view
+  // but never decrements it — so it measures effort spent, not what is in context.
+  // Measured cost: run mtwnfp8p3869 logged "Tool-output budget reached for
+  // sub-agent (410846/240000 chars)" and the sub-agent stopped with the build red.
+  if (isIdealRunUnlimited()) return Number.POSITIVE_INFINITY;
   const envRaw = process.env.MUONROI_SUB_AGENT_BUDGET_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
@@ -1206,7 +1220,15 @@ export function getSteerInjectionEnabled(): boolean {
  * into short summary stubs. Below the threshold compaction is a no-op.
  * Env override: MUONROI_SUBAGENT_COMPACT_THRESHOLD_CHARS.
  */
-export function getSubAgentCompactThresholdChars(): number {
+export function getSubAgentCompactThresholdChars(contextWindowTokens?: number): number {
+  // Inside an `/ideal` run the absolute 40K-char trigger is a budget (it was
+  // lowered from 80K to save money, see below), not a context-window guard. The
+  // compactor already takes min(threshold, window × fillRatio × 4), so Infinity
+  // leaves exactly the window-relative trigger. With no known window there is
+  // nothing else to guard against overflow with, so the absolute value stays.
+  if (isIdealRunUnlimited() && typeof contextWindowTokens === "number" && contextWindowTokens > 0) {
+    return Number.POSITIVE_INFINITY;
+  }
   const envRaw = process.env.MUONROI_SUBAGENT_COMPACT_THRESHOLD_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
@@ -1243,6 +1265,12 @@ export function getSubAgentCompactKeepLast(): number {
  * Env override: MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS.
  */
 export function getTopLevelCompactThresholdChars(contextWindowTokens?: number): number {
+  // Inside `/ideal` only the window-relative part applies (35% of the real
+  // window, in chars). The 200K-char absolute cap below is a budget that makes a
+  // large-window model compact long before its window is under any pressure.
+  if (isIdealRunUnlimited() && contextWindowTokens && contextWindowTokens > 0) {
+    return Math.floor(contextWindowTokens * 4 * 0.35);
+  }
   const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
@@ -1257,6 +1285,20 @@ export function getTopLevelCompactThresholdChars(contextWindowTokens?: number): 
     return Math.min(200_000, dynamicThreshold);
   }
   return 200_000;
+}
+
+/**
+ * The context window compaction should plan against for a turn.
+ *
+ * A sub-session clamps it to 45K tokens regardless of the model's real window
+ * (tool-engine.ts) — a budget, not a guard: a 256K model would compact as if it
+ * could only hold 45K. Inside an `/ideal` run (user decision: no limits) the real
+ * window is used. Normal chat is unchanged.
+ */
+export function effectiveCompactionWindowTokens(contextWindowTokens: number, isSubSession: boolean): number {
+  if (!(contextWindowTokens > 0)) return 0;
+  if (isSubSession && !isIdealRunUnlimited()) return Math.min(45_000, contextWindowTokens);
+  return contextWindowTokens;
 }
 
 /**
@@ -1316,6 +1358,13 @@ export function getTopLevelCompactKeepLast(contextWindowTokens?: number): number
  * results are large. 0 disables. Env: MUONROI_TOP_LEVEL_COMPACT_TAIL_BUDGET_CHARS.
  */
 export function getTopLevelCompactTailBudgetChars(contextWindowTokens?: number): number {
+  // Inside `/ideal` only the window-relative part applies (a tail of up to 20% of
+  // the real window, in chars). The 50K-char absolute default is a cost budget
+  // ("~7K tokens/call saved") that trims the verbatim tail even when the window
+  // has room. With no known window there is nothing to size it against: off.
+  if (isIdealRunUnlimited()) {
+    return contextWindowTokens && contextWindowTokens > 0 ? Math.floor(contextWindowTokens * 4 * 0.2) : 0;
+  }
   const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_TAIL_BUDGET_CHARS;
   if (envRaw !== undefined && envRaw.trim() !== "") {
     const n = Number(envRaw);
@@ -1344,6 +1393,13 @@ export function getTopLevelCompactTailBudgetChars(contextWindowTokens?: number):
  * MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS.
  */
 export function getTopLevelToolBudgetChars(maxRounds?: number, contextWindowTokens?: number): number {
+  // No budget inside an `/ideal` run (user decision: no limits). The small-window
+  // branch below describes itself as a window guard, but the counter it feeds
+  // only ever GROWS — compaction removes old results from the model's view and
+  // never decrements it — so it trims new results even when the window has room.
+  // Fitting the real window is compaction's job (getTopLevelCompactThresholdChars,
+  // pre-stream compaction, overflow recovery), all of which stay in force.
+  if (isIdealRunUnlimited()) return Number.POSITIVE_INFINITY;
   const envRaw = process.env.MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS;
   if (envRaw) {
     const n = Number(envRaw);

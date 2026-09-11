@@ -90,7 +90,14 @@ export async function* runPlanAdherenceReview(args: {
   /** Injectable for tests; defaults to `git diff HEAD` in cwd. */
   diffProvider?: (cwd: string) => string;
 }): AsyncGenerator<StreamChunk, AdherenceVerdict, unknown> {
-  const maxRounds = Math.max(1, Math.min(4, args.maxRounds ?? 2));
+  // No round ceiling by default: `/ideal` has no limits (user decision). A caller
+  // may still pass `maxRounds` explicitly. The loop ends when the reviewer
+  // approves, returns no parseable verdict, a fix task fails, or a fix round
+  // makes NO PROGRESS (the same deviations come back, or the diff is unchanged).
+  const maxRounds =
+    typeof args.maxRounds === "number" && Number.isFinite(args.maxRounds) && args.maxRounds >= 1
+      ? Math.floor(args.maxRounds)
+      : Number.POSITIVE_INFINITY;
   const plan = args.planSynthesis.trim();
   if (!plan) return { rounds: 0, adherent: true, deviations: [] };
   const getDiff = args.diffProvider ?? currentDiff;
@@ -102,6 +109,7 @@ export async function* runPlanAdherenceReview(args: {
   }
 
   let lastDeviations: string[] = [];
+  let previousDeviationKey: string | null = null;
   for (let round = 1; round <= maxRounds; round++) {
     const reviewPrompt =
       `You are a SENIOR code reviewer. Judge whether the implementation faithfully ` +
@@ -121,7 +129,6 @@ export async function* runPlanAdherenceReview(args: {
         description: `Sprint ${args.sprintN} plan-adherence review (round ${round})`,
         prompt: reviewPrompt,
         modelId: args.reviewModelId,
-        maxToolRounds: 12,
       },
       `adherence-review-s${args.sprintN}-r${round}`,
     );
@@ -152,6 +159,17 @@ export async function* runPlanAdherenceReview(args: {
         lastDeviations.map((d) => `  - ${d}`).join("\n") +
         "\n",
     };
+
+    // No progress: the previous fix left exactly the same deviations behind.
+    const deviationKey = [...lastDeviations].sort().join("\n");
+    if (previousDeviationKey !== null && deviationKey === previousDeviationKey) {
+      yield {
+        type: "content",
+        content: `\n> [adherence] Round ${round}: no progress — the last fix left the same deviation(s) behind; leaving them for the verify+criteria gate.\n`,
+      };
+      return { rounds: round, adherent: false, deviations: lastDeviations };
+    }
+    previousDeviationKey = deviationKey;
 
     if (round === maxRounds) {
       yield {
@@ -195,5 +213,6 @@ export async function* runPlanAdherenceReview(args: {
     diff = getDiff(args.cwd);
   }
 
-  return { rounds: maxRounds, adherent: false, deviations: lastDeviations };
+  // Reached only when an explicit, finite `maxRounds` was exhausted.
+  return { rounds: Number.isFinite(maxRounds) ? maxRounds : 0, adherent: false, deviations: lastDeviations };
 }

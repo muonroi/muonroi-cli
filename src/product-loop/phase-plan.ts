@@ -14,13 +14,13 @@ export const PHASE_PLANNER_SYSTEM =
   "sequential phases. Output strict JSON only. Each phase covers a subset of successCriteria " +
   "verbatim from the input spec. Union of all phases.successCriteria MUST equal the input " +
   "successCriteria array (no drift, no omission).\n\n" +
-  "Size each phase to its REAL difficulty. For every phase, YOU decide its `maxSprints` — the " +
-  "maximum sprint iterations that phase may need — from that phase's own scope, risk, and " +
+  "Size each phase to its REAL difficulty. For every phase, YOU estimate its `maxSprints` — the " +
+  "sprint iterations that phase is likely to need — from that phase's own scope, risk, and " +
   "uncertainty, exactly as a tech lead would in agile planning: a simple/mechanical phase needs " +
   "1; a phase with hard, uncertain, or risky work needs more (2–5). Do NOT split a fixed budget " +
-  "evenly, do NOT pad to a quota, and never emit a fraction. `maxSprints` is a CEILING — the " +
-  "done-gate ends a phase early once its criteria are met — so give genuinely hard phases enough " +
-  "room to iterate rather than rationing them.";
+  "evenly, do NOT pad to a quota, and never emit a fraction. `maxSprints` is an ESTIMATE, not a " +
+  "ceiling — a phase keeps iterating while its sprints make progress and ends once its criteria " +
+  "are met — so size it honestly rather than rationing it.";
 
 /**
  * Coerce a phase id / dependsOn element to the canonical `phase-N` string form.
@@ -48,24 +48,20 @@ function normalizePhaseRef(ref: unknown): string {
  * Mutates and returns the same plan object. Safe on already-normalised plans.
  */
 /**
- * Coerce a plan's per-phase `maxSprints` to a usable sprint COUNT: an integer
- * in [1, 20]. This is a pure VALIDITY FLOOR — it does NOT allocate or divide any
- * budget. The PO/leader decides each phase's `maxSprints` from that phase's
- * difficulty (see PHASE_PLANNER_SYSTEM); this only defends the executor against a
- * malformed value the model might still emit.
+ * Coerce a plan's per-phase `maxSprints` to a usable sprint ESTIMATE: an integer
+ * >= 1. This is a pure VALIDITY FLOOR — it does NOT allocate or divide any
+ * budget, and there is no upper clamp (the old one was 20): `/ideal` has no sprint
+ * ceiling (user decision). The phase loop runs until the phase's exit condition
+ * is met or its sprints stop making progress (sprint-progress.ts); this number is
+ * the planner's sizing, recorded for the roadmap and the status view.
  *
- * The sprint loop is `for (sprintN = 1; sprintN <= phase.maxSprints; sprintN++)`,
- * so any value < 1 makes `1 <= 0.n` false → the loop body NEVER runs → `runSprint`
- * is never called → implementation is silently skipped (the historical
- * "plan is great but implement never starts / hangs" bug — a small `--max-sprints`
- * once made the old "divide the budget across phases" prompt emit fractions like
- * `0.3 / 0.2 / 0.5`). Flooring to an integer ≥ 1 guarantees every planned phase
- * executes at least one sprint regardless of what the model returns.
+ * Flooring still matters: a fraction like `0.3` (the historical "plan is great
+ * but implement never starts" bug) must not reach any consumer that reads it.
  */
 export function clampMaxSprints(raw: unknown): number {
   const n = typeof raw === "number" ? raw : Number(raw);
   if (!Number.isFinite(n) || n < 1) return 1;
-  return Math.min(20, Math.round(n));
+  return Math.round(n);
 }
 
 export function normalizePhasePlan(plan: PhasePlanArtifact): PhasePlanArtifact {
@@ -136,7 +132,7 @@ export function fallbackSinglePhase(spec: ClarifiedSpec, manifest: ProductRunMan
         scope: (spec.scope ?? "").slice(0, 300),
         exitCondition: { type: "criteria-threshold", min: manifest.doneThreshold },
         dependsOn: [],
-        maxSprints: manifest.maxSprints,
+        maxSprints: clampMaxSprints(manifest.maxSprints ?? 1),
       },
     ],
   };
@@ -147,12 +143,11 @@ export async function generatePhasePlan(args: {
   clarifiedSpec: ClarifiedSpec;
   manifest: ProductRunManifest;
   leader: LeaderLike;
-  capUsd: number;
-  remainingUsd: number;
   backoffDelays?: number[];
 }): Promise<PhasePlanArtifact> {
-  const floor = Math.max(0.2, 0.02 * args.capUsd);
-  if (args.remainingUsd < floor) return fallbackSinglePhase(args.clarifiedSpec, args.manifest);
+  // No remaining-spend floor: the planner always runs. `/ideal` has no spend cap
+  // (user decision); it used to fall back to a single phase once headroom under
+  // `--max-cost` dropped below max($0.20, 2% of the cap).
   const prompt = buildPhasePlannerPrompt(args);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -185,11 +180,12 @@ function buildPhasePlannerPrompt(args: {
     // system prompt) — NOT a global budget to divide. The user's --max-sprints is
     // only a SOFT guide for overall ambition, never an arithmetic cap the planner
     // must partition. Each phase's "maxSprints" MUST be a whole integer >= 1.
-    `Sprint sizing: decide each phase's "maxSprints" from its own difficulty/scope/risk — a whole ` +
-      `integer >= 1, more for harder phases. The user suggested roughly ${args.manifest.maxSprints} ` +
-      `sprint(s) total as a soft guide to overall ambition; you may use fewer if the work is simple ` +
-      `or allocate more per phase if the work genuinely needs it. Do not divide it evenly and do not ` +
-      `treat it as a hard budget.`,
+    `Sprint sizing: estimate each phase's "maxSprints" from its own difficulty/scope/risk — a whole ` +
+      `integer >= 1, more for harder phases. It is an estimate, not a budget: a phase keeps ` +
+      `iterating while its sprints make progress. Do not divide any number evenly across phases.` +
+      (typeof args.manifest.maxSprints === "number"
+        ? ` The user set an explicit ceiling of ${args.manifest.maxSprints} sprint(s) per phase.`
+        : ""),
     `Output JSON shape: { version:1, generatedAt:<ISO>, phases:[{id,name,goal,successCriteria,scope,exitCondition:{type:"criteria-threshold",min:${args.manifest.doneThreshold}},dependsOn,maxSprints}] }`,
   ].join("\n");
 }

@@ -377,11 +377,10 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         const discoverWarn = await recordPhaseEnd({
           flowDir: ctx.flowDir,
           runId: ctx.runId,
-          capUsd: ctx.flags.maxCost,
           marker: phaseMarker_discover,
         });
         if (discoverWarn) {
-          yield { type: "content", content: `\n> [budget] ${discoverWarn}\n` } as StreamChunk;
+          yield { type: "content", content: `\n> [spend] ${discoverWarn}\n` } as StreamChunk;
         }
 
         // Emit an initial product_status_card so the UI shows the status panel
@@ -391,7 +390,6 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           sprintN: 0,
           totalSprints: ctx.flags.maxSprints,
           costSpent: 0,
-          costCap: ctx.flags.maxCost,
           criteriaMet: 0,
           criteriaPartial: 0,
           criteriaUnmet: 0,
@@ -440,18 +438,10 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         let gatherResult: Awaited<ReturnType<typeof runGatherPhase>> | undefined;
         const gatherTask = (async () => {
           try {
-            gatherResult = await runGatherPhase(
-              ctx.flowDir,
-              ctx.runId,
-              ctx.idea,
-              ctx.flags.maxCost,
-              ctx.llm,
-              ctx.sessionModelId,
-              {
-                emit: (chunk) => gatherEmitted.push(chunk),
-                respondToQuestion: ctx.respondToQuestion,
-              },
-            );
+            gatherResult = await runGatherPhase(ctx.flowDir, ctx.runId, ctx.idea, ctx.llm, ctx.sessionModelId, {
+              emit: (chunk) => gatherEmitted.push(chunk),
+              respondToQuestion: ctx.respondToQuestion,
+            });
           } catch (err) {
             gatherError = err;
           } finally {
@@ -539,11 +529,10 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           const gatherWarn = await recordPhaseEnd({
             flowDir: ctx.flowDir,
             runId: ctx.runId,
-            capUsd: ctx.flags.maxCost,
             marker: phaseMarker_gather,
           });
           if (gatherWarn) {
-            yield { type: "content", content: `\n> [budget] ${gatherWarn}\n` } as StreamChunk;
+            yield { type: "content", content: `\n> [spend] ${gatherWarn}\n` } as StreamChunk;
           }
 
           state = "research";
@@ -970,11 +959,10 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         const researchWarn = await recordPhaseEnd({
           flowDir: ctx.flowDir,
           runId: ctx.runId,
-          capUsd: ctx.flags.maxCost,
           marker: phaseMarker_research,
         });
         if (researchWarn) {
-          yield { type: "content", content: `\n> [budget] ${researchWarn}\n` } as StreamChunk;
+          yield { type: "content", content: `\n> [spend] ${researchWarn}\n` } as StreamChunk;
         }
 
         // F8 — the undebated-criteria gate. THIS is the transition that ran 23
@@ -1310,11 +1298,10 @@ interface ProductSpec {
         const scopingWarn = await recordPhaseEnd({
           flowDir: ctx.flowDir,
           runId: ctx.runId,
-          capUsd: ctx.flags.maxCost,
           marker: phaseMarker_scoping,
         });
         if (scopingWarn) {
-          yield { type: "content", content: `\n> [budget] ${scopingWarn}\n` } as StreamChunk;
+          yield { type: "content", content: `\n> [spend] ${scopingWarn}\n` } as StreamChunk;
         }
 
         if (approved) {

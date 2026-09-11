@@ -4,6 +4,7 @@ import { getConfiguredProviders } from "../providers/keychain.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import { getRoutedModelByTier } from "../router/peak-hour.js";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { logger } from "../utils/logger.js";
 import { getRoleModel, getRoleModels, isProviderDisabled, type ModelRole } from "../utils/settings.js";
 
@@ -123,7 +124,10 @@ function warnIfLeaderNotPremium(task: CouncilSubTask, leaderModelId: string): vo
  *   - no cataloged model on the leader's provider matches the target tier
  */
 export function pickCouncilTaskModel(task: CouncilSubTask, leaderModelId: string, costAware: boolean): string {
-  if (!costAware) return leaderModelId;
+  // Cost-aware downshifting exists to save money. `/ideal` has no spend limit
+  // (user decision), so inside an `/ideal` run every sub-task runs on the leader.
+  // A standalone `/council` keeps the user's `councilCostAware` setting.
+  if (!costAware || isIdealRunUnlimited()) return leaderModelId;
 
   const targetTier = SUB_TASK_TIER[task];
 

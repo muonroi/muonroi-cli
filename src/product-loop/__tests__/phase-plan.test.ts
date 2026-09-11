@@ -17,7 +17,7 @@ const spec: ClarifiedSpec = {
   rawQA: [],
 };
 
-const manifest = { idea: "X", capUsd: 10, maxSprints: 6, doneThreshold: 0.8, createdAt: new Date() } as any;
+const manifest = { idea: "X", maxSprints: 6, doneThreshold: 0.8, createdAt: new Date() } as any;
 
 describe("clampMaxSprints — fractional-budget regression (implement-never-runs)", () => {
   it("rounds a fractional per-phase budget up to an executable integer >= 1", () => {
@@ -33,12 +33,14 @@ describe("clampMaxSprints — fractional-budget regression (implement-never-runs
     expect(clampMaxSprints(2.4)).toBe(2);
     expect(clampMaxSprints(2.6)).toBe(3);
   });
-  it("clamps zero / negative / non-numeric to 1 and caps at 20", () => {
+  it("clamps zero / negative / non-numeric to 1, with no upper clamp", () => {
     expect(clampMaxSprints(0)).toBe(1);
     expect(clampMaxSprints(-5)).toBe(1);
     expect(clampMaxSprints("nope")).toBe(1);
     expect(clampMaxSprints(undefined)).toBe(1);
-    expect(clampMaxSprints(999)).toBe(20);
+    // Previously capped at 20. `/ideal` has no sprint ceiling (user decision: no
+    // limits); the planner's estimate is kept as given.
+    expect(clampMaxSprints(999)).toBe(999);
   });
   it("parsePhasePlanJson normalizes fractional maxSprints so every phase runs >= 1 sprint", () => {
     const raw = JSON.stringify({
@@ -210,8 +212,6 @@ describe("generatePhasePlan (subsystem E)", () => {
     projectContext: { context: {}, prefillSource: {}, version: 1 } as any,
     clarifiedSpec: spec,
     manifest,
-    capUsd: 10,
-    remainingUsd: 5,
     backoffDelays: [1, 1, 1],
   };
 
@@ -276,19 +276,9 @@ describe("generatePhasePlan (subsystem E)", () => {
     expect(leader.generate).toHaveBeenCalledTimes(3);
   });
 
-  it("falls back when remainingUsd < floor", async () => {
-    const leader = { generate: vi.fn() };
-    const result = await generatePhasePlan({ ...baseArgs, leader, remainingUsd: 0.05, capUsd: 10 });
-    expect(leader.generate).not.toHaveBeenCalled();
-    expect(result.phases).toHaveLength(1);
-  });
-
-  it("fallback at high capUsd boundary", async () => {
-    const leader = { generate: vi.fn() };
-    const result = await generatePhasePlan({ ...baseArgs, leader, remainingUsd: 1.99, capUsd: 100 });
-    expect(leader.generate).not.toHaveBeenCalled();
-    expect(result.phases).toHaveLength(1);
-  });
+  // Removed: "falls back when remainingUsd < floor" and "fallback at high capUsd
+  // boundary". The planner no longer has a remaining-spend floor — `/ideal` has no
+  // spend cap (user decision); ideal-no-limits.test.ts pins that it always runs.
 
   it("falls back after 3 malformed responses", async () => {
     const leader = { generate: vi.fn().mockResolvedValue({ content: "not json", costUsd: 0.1 }) };
@@ -333,8 +323,11 @@ describe("generatePhasePlan (subsystem E)", () => {
     // highest-priority phases 1 sprint each") must be gone.
     expect(call.prompt).not.toMatch(/total sprints across all phases/i);
     expect(call.prompt).not.toMatch(/highest-priority phases 1 sprint each/i);
-    // The user's --max-sprints is now only a SOFT guide, not a budget to divide.
-    expect(call.prompt).toMatch(/soft guide/i);
+    // Previously pinned "soft guide". `/ideal` has no default sprint ceiling (user
+    // decision: no limits): the per-phase number is an estimate, and a --max-sprints
+    // the user typed (this manifest carries 6) is stated as an explicit ceiling.
+    expect(call.prompt).toMatch(/an estimate, not a budget/i);
+    expect(call.prompt).toMatch(/explicit ceiling of 6 sprint\(s\) per phase/);
     // maxSprints stays a whole integer >= 1 (validity floor lives in the parser).
     expect(call.prompt).toMatch(/integer >= 1/i);
   });

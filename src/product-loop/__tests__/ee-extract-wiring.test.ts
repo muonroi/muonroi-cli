@@ -186,7 +186,6 @@ describe("P1.3 — EE extract wiring", () => {
     // Create a proper manifest so runAbort can read it via readManifest.
     await writeManifest(flowDir, runId, {
       idea: "abort test idea",
-      capUsd: 50,
       maxSprints: 3,
       doneThreshold: 0.9,
       createdAt: new Date(),

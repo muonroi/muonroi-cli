@@ -17,6 +17,7 @@ import { downgradeChain, emitDowngrade, getDowngradeChain } from "../usage/downg
 import { release, reserve } from "../usage/ledger.js";
 import { midstreamPolicy } from "../usage/midstream.js";
 import { CapBreachError } from "../usage/types.js";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import {
   getRoleModel,
   getRoutingPromoteMax,
@@ -396,6 +397,11 @@ async function capCheck(
   exempt?: boolean,
 ): Promise<RouteDecision> {
   let current = exempt ? { ...dec } : applyPromotionCap({ ...dec }, opts.defaultModel);
+  // `/ideal` has no spend limit (user decision): a turn it drives is never
+  // downgraded or halted on the monthly cap. The reservation below is a dry run
+  // (reserved and released in the same call), so skipping it leaks nothing, and
+  // real spend is still recorded by the usage pipeline. Normal chat is unchanged.
+  if (isIdealRunUnlimited()) return current;
   const homeOverride = opts.homeOverride;
   let attempts = 0;
 

@@ -14,6 +14,11 @@
  *      0.00 with verify FAIL on both sprints and was still marked `done`, so
  *      P2 (`dependsOn: ["P1"]`) started.
  *
+ * `/ideal` has since lost its spend cap (user decision: no limits). The meter in
+ * (a) stays — it is now the "Phase Spend" measurement — but CB-0 (halt on a blind
+ * gauge to protect the cap) and the `remainingUsd` headroom gates are gone, and
+ * the call-site pins below assert that.
+ *
  * This repo has been bitten three times by a helper-level test staying green
  * while the real call site passed nothing, so every section below either drives
  * the production entry point (`runPhases`) or pins the production source.
@@ -25,7 +30,6 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readArtifact } from "../../flow/artifact-io.js";
-import { CB0_budgetGaugeReadable } from "../circuit-breakers.js";
 import { criterionIdFromText, seedCriteriaFromPlan } from "../criteria-seed.js";
 import { writePhasePlan } from "../phase-plan.js";
 import { phaseExitSatisfied, runPhases } from "../phase-runner.js";
@@ -33,10 +37,10 @@ import { phaseExitSatisfied, runPhases } from "../phase-runner.js";
 const src = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
 
 // ─────────────────────────────────────────────────────────────────────────────
-// (a) the budget meter — real spend, and LOUD when it cannot read
+// (a) the spend meter — real spend, and LOUD when it cannot read
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("N4(a) — phase budget reads the authoritative ledger, and never fails to zero", () => {
+describe("N4(a) — phase spend reads the authoritative ledger, and never fails to zero", () => {
   let flowDir: string;
   const runId = "n4a";
 
@@ -57,62 +61,46 @@ describe("N4(a) — phase budget reads the authoritative ledger, and never fails
   }
 
   it("records a MEASURED delta, with the session chain that produced it", async () => {
-    const { recordPhaseStart, recordPhaseEnd, renderBudgetSummary } = await withGauge([
+    const { recordPhaseStart, recordPhaseEnd, renderPhaseSpendSummary } = await withGauge([
       { known: true, usd: 0.1, sessionIds: ["root", "sub"] },
       { known: true, usd: 0.88, sessionIds: ["root", "sub"] },
     ]);
     const marker = await recordPhaseStart({ flowDir, runId, phase: "research", sessionId: "root" });
-    await recordPhaseEnd({ flowDir, runId, capUsd: 50, marker });
+    await recordPhaseEnd({ flowDir, runId, marker });
 
     const map = await readArtifact(path.join(flowDir, "runs", runId), "state.md");
-    const record = JSON.parse(map!.sections.get("Phase Budget")!).records[0];
+    const record = JSON.parse(map!.sections.get("Phase Spend")!).records[0];
     expect(record.spendKnown).toBe(true);
     expect(record.spentUsd).toBeCloseTo(0.78, 6);
     // Sub-agent attribution is the point: the isolated impl sub-agents bill under
     // their own session_id rows and are where the money went.
     expect(record.sessionIds).toEqual(["root", "sub"]);
-    expect(await renderBudgetSummary(flowDir, runId)).toContain("$0.780");
+    expect(await renderPhaseSpendSummary(flowDir, runId)).toContain("$0.780");
   });
 
   it("an unreadable gauge records UNKNOWN and warns — it must not render $0.000", async () => {
-    const { recordPhaseStart, recordPhaseEnd, renderBudgetSummary } = await withGauge([
+    const { recordPhaseStart, recordPhaseEnd, renderPhaseSpendSummary } = await withGauge([
       { known: false, reason: "usage_events query failed: disk I/O error" },
       { known: false, reason: "usage_events query failed: disk I/O error" },
     ]);
     const marker = await recordPhaseStart({ flowDir, runId, phase: "research", sessionId: "root" });
-    const warning = await recordPhaseEnd({ flowDir, runId, capUsd: 50, marker });
+    const warning = await recordPhaseEnd({ flowDir, runId, marker });
 
     expect(warning).toContain("UNKNOWN");
     expect(warning).toContain("disk I/O error");
 
     const map = await readArtifact(path.join(flowDir, "runs", runId), "state.md");
-    const record = JSON.parse(map!.sections.get("Phase Budget")!).records[0];
+    const record = JSON.parse(map!.sections.get("Phase Spend")!).records[0];
     expect(record.spendKnown).toBe(false);
     expect(record.spentUsd).toBeNull();
     expect(record.startUsd).toBeNull();
 
-    const summary = await renderBudgetSummary(flowDir, runId);
+    const summary = await renderPhaseSpendSummary(flowDir, runId);
     expect(summary).toContain("UNKNOWN");
     expect(summary).not.toContain("$0.000");
   });
 
-  it("CB-0 is fail-CLOSED: a blind gauge under a declared cap halts", () => {
-    const blind = { known: false as const, reason: "no session id" };
-    expect(CB0_budgetGaugeReadable(blind, 50).halt).toBe(true);
-    expect(CB0_budgetGaugeReadable(blind, 50).reason).toContain("MUONROI_IDEAL_ALLOW_BLIND_BUDGET");
-    expect(CB0_budgetGaugeReadable({ known: true, usd: 0.78 }, 50).halt).toBe(false);
-    // No cap declared (programmatic callers only — the CLI clamps --max-cost to 1..1000).
-    expect(CB0_budgetGaugeReadable(blind, 0).halt).toBe(false);
-    // The one user-typeable opt-out.
-    process.env.MUONROI_IDEAL_ALLOW_BLIND_BUDGET = "1";
-    try {
-      expect(CB0_budgetGaugeReadable(blind, 50).halt).toBe(false);
-    } finally {
-      delete process.env.MUONROI_IDEAL_ALLOW_BLIND_BUDGET;
-    }
-  });
-
-  it("CALL SITES: nothing on the budget path reads the JSONL side-ledger any more", () => {
+  it("CALL SITES: spend is measured from the authoritative gauge, and nothing gates on it", () => {
     const budget = src("../phase-budget.ts");
     expect(budget).toContain('from "./run-spend.js"');
     expect(budget).not.toContain("getProductSpentUsd");
@@ -124,14 +112,10 @@ describe("N4(a) — phase budget reads the authoritative ledger, and never fails
     expect(starts).toHaveLength(4);
     for (const call of starts) expect(call).toContain("sessionId: ctx.sessionId");
 
-    // remainingUsd — read by every discretionary-spend gate — must use the
-    // authoritative gauge, and CB-0 must be wired ahead of runPhases.
+    // No spend gate is wired ahead of runPhases any more: `/ideal` has no cap.
     const index = src("../index.ts");
-    expect(index).toContain("CB0_budgetGaugeReadable(gauge, manifest.capUsd)");
-    expect(index).not.toMatch(
-      /remainingUsd: async \(\) => Math\.max\(0, manifest\.capUsd - \(await getProductSpentUsd/,
-    );
-    expect(index.match(/readRunSpendUsd\(ctx\.sessionId\)/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    expect(index).not.toMatch(/CB0_budgetGaugeReadable\(/);
+    expect(index).not.toMatch(/remainingUsd\s*:/);
 
     // The per-sprint Cost: line must be a measured delta, not a hardcoded 0.
     const sprint = src("../sprint-runner.ts");
@@ -252,7 +236,7 @@ describe("N4(c) — a phase below its exitCondition blocks phases that dependOn 
     const args = {
       flowDir,
       runId,
-      manifest: { idea: "X", capUsd: 10, maxSprints: 6, doneThreshold: 0.9, createdAt: new Date() },
+      manifest: { idea: "X", maxSprints: 6, doneThreshold: 0.9, createdAt: new Date() },
       clarifiedSpec: { problemStatement: "p", constraints: [], successCriteria: ["A", "B"], scope: "s", rawQA: [] },
       projectContext: { context: {}, prefillSource: {}, version: 1 },
       leader: {
@@ -262,8 +246,6 @@ describe("N4(c) — a phase below its exitCondition blocks phases that dependOn 
         }),
       },
       leaderModelId: "m1",
-      capUsd: 10,
-      remainingUsd: async () => 5,
       awaitCustomerVerdict: async () => ({ verdict: "accept" as const }),
       suppressPush: true,
       backoffDelays: [1, 1, 1],
@@ -295,7 +277,8 @@ describe("N4(c) — a phase below its exitCondition blocks phases that dependOn 
     expect(state.phasesStatus.P2).toBe("blocked");
     expect(final.pass).toBe(false);
     expect(final.reason).toContain("phases-deadlocked");
-    // P1 burned both its sprints; P2 contributed none.
+    // P1 ran until two consecutive sprints made no progress (there is no sprint
+    // ceiling any more — sprint-progress.ts); P2 contributed none.
     expect(sprintRunner).toHaveBeenCalledTimes(2);
   });
 

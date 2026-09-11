@@ -12,10 +12,14 @@
  *   /ideal ship   <runId>    force user-approval gate (skip if Cond #1-#4 pass)
  *
  * Flags (all optional):
- *   --max-cost       <usd>   default 50,  range 1..1000
- *   --max-sprints    <n>     default 8,   range 1..20
+ *   --max-sprints    <n>     optional sprint ceiling; default none
  *   --done-threshold <0..1>  default 0.9, range 0.7..1.0   (clamped, warning emitted)
  *   --stack          <text>  free-form stack hint
+ *
+ * `/ideal` has no spend cap and no token budget — the user's decision (their
+ * model usage is sponsored). `--max-cost` and `--budget-tokens` are still
+ * accepted so existing invocations keep parsing, but they are ignored with a
+ * warning and never reach the loop.
  *
  * Internal-only env hatch (intentionally not registered with commander so it
  * does not appear in --help):
@@ -34,9 +38,12 @@ import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 
 export interface IdealFlags {
+  /** @deprecated Ignored — `/ideal` has no token budget. The parser never sets it. */
   budgetTokens?: number;
-  maxCost: number;
-  maxSprints: number;
+  /** @deprecated Ignored — `/ideal` has no spend cap. The parser never sets it. */
+  maxCost?: number;
+  /** Sprint ceiling the user typed explicitly. Absent = no ceiling. */
+  maxSprints?: number;
   doneThreshold: number;
   stack?: string;
   /** Set internally when MUONROI_DEV=1; never accepted as a CLI flag. */
@@ -74,8 +81,8 @@ export interface IdealParseResult {
   warnings: string[];
 }
 
-// Budget defaults shared with the programmatic entry points (orchestrator
-// ENTER_IDEAL route + enter_ideal tool) so the three paths cannot drift.
+// Defaults shared with the programmatic entry points (orchestrator ENTER_IDEAL
+// route + enter_ideal tool) so the three paths cannot drift.
 const DEFAULTS: IdealFlags = { ...IDEAL_LOOP_DEFAULTS };
 
 const HELP_TEXT = [
@@ -92,8 +99,7 @@ const HELP_TEXT = [
   "  /ideal ship   <runId>    Force user-approval gate (skip Cond #1-#4 if passing)",
   "",
   "Flags (start only):",
-  "  --max-cost       <usd>   default 50,  range 1..1000",
-  "  --max-sprints    <n>     default 8,   range 1..20",
+  "  --max-sprints    <n>     optional sprint ceiling (default: none — runs until done or no progress)",
   "  --done-threshold <0..1>  default 0.9, range 0.7..1.0 (clamped)",
   "  --stack          <hint>  free-form stack description",
   "  --no-prior-context       skip cross-run workspace memory (greenfield)",
@@ -101,16 +107,16 @@ const HELP_TEXT = [
   "  --maintain               force Mode C (existing project → single PR) regardless of recipe detection",
   "  --new                    force Mode A (greenfield) even if cwd has a verify recipe",
   "  --gh-pr                  Mode C only — run `gh pr create` after building the PR artifact",
+  "",
+  "/ideal has no spend cap and no token budget: --max-cost and --budget-tokens are accepted and ignored.",
 ].join("\n");
 
-function parseIntInRange(min: number, max: number) {
-  return (raw: string): number => {
-    const n = Number.parseInt(raw, 10);
-    if (!Number.isFinite(n) || n < min || n > max) {
-      throw new InvalidArgumentError(`must be an integer in [${min}, ${max}]`);
-    }
-    return n;
-  };
+function parsePositiveInt(raw: string): number {
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) {
+    throw new InvalidArgumentError("must be a positive integer");
+  }
+  return n;
 }
 
 function _parseFloatInRange(min: number, max: number) {
@@ -174,8 +180,8 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
     .name("ideal")
     .description("Start a new product run")
     .argument("[idea...]", "free-form product idea")
-    .option("--max-cost <usd>", "max cost in USD (1..1000)", parseIntInRange(1, 1000), DEFAULTS.maxCost)
-    .option("--max-sprints <n>", "max sprints (1..20)", parseIntInRange(1, 20), DEFAULTS.maxSprints)
+    .option("--max-cost <usd>", "ignored — /ideal has no spend cap")
+    .option("--max-sprints <n>", "optional sprint ceiling (default: none)", parsePositiveInt)
     .option(
       "--done-threshold <ratio>",
       "done threshold (0.7..1.0)",
@@ -203,7 +209,7 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
     .option("--maintain", "force Mode C (existing project → single PR)")
     .option("--new", "force Mode A (greenfield) — overrides verify-recipe auto-detect")
     .option("--gh-pr", "Mode C only — run gh pr create after building the PR artifact")
-    .option("--budget-tokens <N>", "halt when total tokens exceed N", parseInt)
+    .option("--budget-tokens <N>", "ignored — /ideal has no token budget")
     .exitOverride(); // never call process.exit on parse error
 
   // commander expects a leading argv with [node, script, ...args]; we synthesize.
@@ -221,11 +227,11 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
   }
 
   const opts = parsed.opts() as {
-    maxCost: number;
-    maxSprints: number;
+    maxCost?: string;
+    maxSprints?: number;
     doneThreshold: number;
     stack?: string;
-    budgetTokens?: number;
+    budgetTokens?: string;
     /** Commander emits priorContext=false when user passes --no-prior-context. */
     priorContext?: boolean;
     forceCouncil?: boolean;
@@ -247,6 +253,13 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
     };
   }
 
+  if (opts.maxCost !== undefined) {
+    warnings.push(`--max-cost ${opts.maxCost} ignored: /ideal has no spend cap.`);
+  }
+  if (opts.budgetTokens !== undefined) {
+    warnings.push(`--budget-tokens ${opts.budgetTokens} ignored: /ideal has no token budget.`);
+  }
+
   // --maintain and --new are mutually exclusive — surface as a warning + prefer --maintain.
   let mode: "maintain" | "new" | undefined;
   if (opts.maintain === true && opts.new === true) {
@@ -266,14 +279,12 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
     subcommand: "start",
     idea,
     flags: {
-      maxCost: opts.maxCost,
       maxSprints: opts.maxSprints,
       doneThreshold: opts.doneThreshold,
       stack: opts.stack,
       noCustomerDebate,
       noPriorContext: opts.priorContext === false ? true : undefined,
       forceCouncil: opts.forceCouncil === true ? true : undefined,
-      budgetTokens: opts.budgetTokens ? opts.budgetTokens : undefined,
       mode,
       ghPr: opts.ghPr === true ? true : undefined,
     },

@@ -29,10 +29,12 @@ import { appendSystemMessage } from "../storage/index.js";
 import type { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import type { AgentMode, StreamChunk } from "../types/index";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { isProviderDisabled, type ModelRole } from "../utils/settings";
 import { COUNCIL_COLOR_BG, COUNCIL_COLOR_RESET, COUNCIL_ROLE_COLORS, type CouncilOutcome } from "./agent-options";
 import { extractUserContent, getCompactionSummaryText, isCompactionSummaryMessage } from "./compaction";
 import { beginInteractivePause, endInteractivePause } from "./interactive-pause.js";
+import { createNoProgressStopWhen } from "./no-progress-guard.js";
 
 /**
  * Dependency callbacks the CouncilManager needs to reach back into Agent state
@@ -320,7 +322,9 @@ export class CouncilManager {
         system: systemPrompt,
         prompt: userPrompt,
         tools: researchTools,
-        stopWhen: stepCountIs(10),
+        // No step count inside `/ideal` (user decision: no limits); stop instead
+        // when steps only repeat earlier calls with the same results.
+        stopWhen: isIdealRunUnlimited() ? createNoProgressStopWhen() : stepCountIs(10),
         ...resolveMaxOutputTokensParam(runtime, 4096),
         ...resolveTemperatureParam(runtime, 0.3),
         ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),

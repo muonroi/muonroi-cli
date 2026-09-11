@@ -21,6 +21,7 @@ import { getTestModels } from "../../__test-helpers__/catalog-fixtures.js";
 import { loadCatalog } from "../../models/registry.js";
 
 vi.mock("../loop-driver.js", () => ({
+  // biome-ignore lint/correctness/useYield: mock returns immediately; consumer drains via .next()
   runLoopDriver: vi.fn(async function* () {
     return { runId: "ignored", stage: "approved", success: true };
   }),
@@ -83,7 +84,6 @@ async function seedFailedRun(flowDir: string, stampDoneAt: boolean): Promise<str
   expect(verdict.pass).toBe(false);
   await writeManifest(flowDir, run.id, {
     idea: "make the headless exit code tell the truth",
-    capUsd: 50,
     maxSprints: 8,
     doneThreshold: 0.9,
     createdAt: new Date("2026-09-06T05:22:22.917Z"),

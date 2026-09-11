@@ -11,6 +11,7 @@ import {
 } from "../state/council-steer.js";
 import { logInteraction } from "../storage/index.js";
 import type { CouncilPanelLedgerEntry, CouncilQuestionOption, CouncilStanceRow, StreamChunk } from "../types/index.js";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
 import { getCouncilLanguage } from "../utils/settings.js";
@@ -87,8 +88,48 @@ function makeToolBudget(): ToolBudget {
 }
 const MAX_EMPTY_WITH_TOOLS = 2;
 
-/** Hard ceiling — leader can extend `plannedRounds` up to but not past this. */
+/**
+ * Hard ceiling — leader can extend `plannedRounds` up to but not past this.
+ * A normal `/council` only: inside an `/ideal` run there is no round ceiling
+ * (user decision: no limits) — see `absoluteMaxRounds()`.
+ */
 const ABSOLUTE_MAX_ROUNDS = 8;
+
+/** The absolute round ceiling in effect: 8 for a normal council, none inside `/ideal`. */
+function absoluteMaxRounds(): number {
+  return isIdealRunUnlimited() ? Number.POSITIVE_INFINITY : ABSOLUTE_MAX_ROUNDS;
+}
+
+/** `now 5/8` in a normal council, `now 5` inside `/ideal` (no ceiling to show). */
+function roundOfCeiling(current: number, ceiling: number): string {
+  return Number.isFinite(ceiling) ? `${current}/${ceiling}` : `${current}`;
+}
+
+/**
+ * Whether a leader-requested or auto-remedy extension may add rounds at the last
+ * planned round.
+ *
+ * Normal council: only below the ceiling (unchanged). Inside `/ideal` the ceiling
+ * is gone, so the grant additionally requires PROGRESS — a criterion newly met
+ * within the last 2 rounds (`roundsSinceProgress < 2`). Auto-remedy already
+ * requires that; a leader's own `extendRounds` did not, and without a ceiling a
+ * leader that keeps asking would keep a debate going forever on criteria nobody
+ * is moving.
+ */
+export function shouldGrantRoundExtension(opts: {
+  round: number;
+  maxRounds: number;
+  effectiveCeiling: number;
+  leaderAskedExtend: boolean;
+  autoRemedy: boolean;
+  roundsSinceProgress: number;
+}): boolean {
+  if (opts.round !== opts.maxRounds) return false;
+  if (!(opts.maxRounds < opts.effectiveCeiling)) return false;
+  if (!opts.leaderAskedExtend && !opts.autoRemedy) return false;
+  if (isIdealRunUnlimited() && opts.roundsSinceProgress >= 2) return false;
+  return true;
+}
 /** Default initial round budget when the planner does not propose one. */
 const DEFAULT_PLANNED_ROUNDS = 3;
 
@@ -118,12 +159,20 @@ export function resolveDebateRoundBudget(
   planKind: string | undefined,
   plannedRounds: number | undefined,
 ): { maxRounds: number; effectiveCeiling: number; kindCapped: boolean } {
+  const planned = Math.max(
+    1,
+    typeof plannedRounds === "number" && plannedRounds > 0 ? plannedRounds : DEFAULT_PLANNED_ROUNDS,
+  );
+  // Inside `/ideal` the planner's round count stays the plan, but there is no
+  // kind cap and no absolute ceiling (user decision: no limits). What still ends
+  // such a debate: the leader's stop, convergence, the planned count unless an
+  // extension is granted — and an extension needs progress (shouldGrantRoundExtension).
+  if (isIdealRunUnlimited()) {
+    return { maxRounds: planned, effectiveCeiling: Number.POSITIVE_INFINITY, kindCapped: false };
+  }
   const kindCap = planKind !== undefined ? KIND_MAX_ROUNDS[planKind] : undefined;
   const effectiveCeiling = Math.min(ABSOLUTE_MAX_ROUNDS, kindCap ?? ABSOLUTE_MAX_ROUNDS);
-  const maxRounds = Math.min(
-    effectiveCeiling,
-    Math.max(1, typeof plannedRounds === "number" && plannedRounds > 0 ? plannedRounds : DEFAULT_PLANNED_ROUNDS),
-  );
+  const maxRounds = Math.min(effectiveCeiling, planned);
   return { maxRounds, effectiveCeiling, kindCapped: kindCap !== undefined };
 }
 /** Cap on the size of a single archived position. Anything longer is
@@ -1172,7 +1221,9 @@ export async function* runDebate(
   let maxRounds = plannedMaxRounds;
   const ceilingNote = kindCapped
     ? ` (hard ceiling ${effectiveCeiling} for ${planKind})`
-    : ` (hard ceiling ${ABSOLUTE_MAX_ROUNDS})`;
+    : Number.isFinite(absoluteMaxRounds())
+      ? ` (hard ceiling ${ABSOLUTE_MAX_ROUNDS})`
+      : " (no round ceiling)";
   yield {
     type: "content",
     content: `\n> Leader-proposed debate budget: ${maxRounds} round${maxRounds === 1 ? "" : "s"}${ceilingNote}.\n`,
@@ -1184,7 +1235,13 @@ export async function* runDebate(
     type: "council_meta",
     councilMeta: {
       roundBudget: maxRounds,
-      roundCeiling: kindCapped ? effectiveCeiling : ABSOLUTE_MAX_ROUNDS,
+      // Inside `/ideal` there is no ceiling: omit it rather than send Infinity to
+      // the UI (app.tsx renders any number as "up to N").
+      roundCeiling: kindCapped
+        ? effectiveCeiling
+        : Number.isFinite(absoluteMaxRounds())
+          ? ABSOLUTE_MAX_ROUNDS
+          : undefined,
     },
   };
 
@@ -1280,7 +1337,7 @@ export async function* runDebate(
       openCriteria: openList,
       pinnedUnmet,
       stuck,
-      atAbsoluteMax: maxRounds >= ABSOLUTE_MAX_ROUNDS,
+      atAbsoluteMax: maxRounds >= absoluteMaxRounds(),
       currentMax: maxRounds,
     });
     escalation = { action: dec.action, grantedRounds: dec.grantedRounds || undefined };
@@ -2115,13 +2172,13 @@ export async function* runDebate(
         hasPinned &&
         !coverageExtensionUsed &&
         coverageExtensionEnabled() &&
-        maxRounds < ABSOLUTE_MAX_ROUNDS
+        maxRounds < absoluteMaxRounds()
       ) {
         const untouched = zeroEngagementCriteria(lastStanceRows, lastCriteriaDeferred);
         if (untouched.length > 0) {
           coverageExtensionUsed = true;
           coverageExtendedThisRound = true;
-          const newMax = Math.min(ABSOLUTE_MAX_ROUNDS, Math.max(maxRounds, round) + COVERAGE_EXTEND_ROUNDS);
+          const newMax = Math.min(absoluteMaxRounds(), Math.max(maxRounds, round) + COVERAGE_EXTEND_ROUNDS);
           const granted = newMax - maxRounds;
           maxRounds = newMax;
           const names = untouched.map((i) => shortCriterion(spec.successCriteria[i], 56));
@@ -2130,7 +2187,7 @@ export async function* runDebate(
           yield {
             type: "content",
             content:
-              `\n> Leader extending debate by ${granted} round (now ${maxRounds}/${ABSOLUTE_MAX_ROUNDS}) — ` +
+              `\n> Leader extending debate by ${granted} round (now ${roundOfCeiling(maxRounds, absoluteMaxRounds())}) — ` +
               `${names.length} pinned ${noun} had zero engagement from the whole panel: ${names.join("; ")}.\n`,
           };
           logger.info("orchestrator", "[council] coverage extension granted", {
@@ -2223,7 +2280,16 @@ export async function* runDebate(
       // implementation_plan cap of 3 to 4).
       const leaderAskedExtend = typeof evaluation.extendRounds === "number" && evaluation.extendRounds > 0;
       const autoRemedy = leaderAutoRemedyEnabled() && autoRemedyWantsExtend(pinnedUnmet, roundsSinceProgress);
-      if (round === maxRounds && maxRounds < effectiveCeiling && (leaderAskedExtend || autoRemedy)) {
+      if (
+        shouldGrantRoundExtension({
+          round,
+          maxRounds,
+          effectiveCeiling,
+          leaderAskedExtend,
+          autoRemedy,
+          roundsSinceProgress,
+        })
+      ) {
         const requested = leaderAskedExtend ? Math.max(1, Math.floor(evaluation.extendRounds as number)) : 1;
         const newMax = Math.min(effectiveCeiling, maxRounds + requested);
         const grantedExtra = newMax - maxRounds;
@@ -2233,7 +2299,7 @@ export async function* runDebate(
             : `${pinnedUnmet} pinned criteri${pinnedUnmet === 1 ? "on" : "a"} still unmet`;
           yield {
             type: "content",
-            content: `\n> Leader extending debate by ${grantedExtra} round${grantedExtra === 1 ? "" : "s"} (now ${newMax}/${ABSOLUTE_MAX_ROUNDS}) — ${why}.\n`,
+            content: `\n> Leader extending debate by ${grantedExtra} round${grantedExtra === 1 ? "" : "s"} (now ${roundOfCeiling(newMax, absoluteMaxRounds())}) — ${why}.\n`,
           };
           maxRounds = newMax;
           // Steer the extra round at the open criteria when auto-remedy fired and
@@ -3150,12 +3216,13 @@ export async function* runEscalationPrompt(opts: {
   }
 
   if (answer === "escalate_extend" && !atAbsoluteMax) {
-    const newMax = Math.min(ABSOLUTE_MAX_ROUNDS, currentMax + ESCALATION_EXTEND_ROUNDS);
+    // `absoluteMaxRounds()` is Infinity inside `/ideal` (user decision: no limits).
+    const newMax = Math.min(absoluteMaxRounds(), currentMax + ESCALATION_EXTEND_ROUNDS);
     const grantedRounds = Math.max(0, newMax - currentMax);
     if (grantedRounds > 0) {
       yield {
         type: "content",
-        content: `\n> User extended debate by ${grantedRounds} round${grantedRounds === 1 ? "" : "s"} (now ${newMax}/${ABSOLUTE_MAX_ROUNDS}) — pushing past the budget to close the open criteria.\n`,
+        content: `\n> User extended debate by ${grantedRounds} round${grantedRounds === 1 ? "" : "s"} (now ${roundOfCeiling(newMax, absoluteMaxRounds())}) — pushing past the budget to close the open criteria.\n`,
       };
       return { action: "extend", grantedRounds };
     }

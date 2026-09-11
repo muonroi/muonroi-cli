@@ -9,13 +9,11 @@ export async function writeManifest(flowDir: string, runId: string, m: ProductRu
   const runDir = path.join(flowDir, "runs", runId);
   const manifestMap = (await readArtifact(runDir, "manifest.md")) ?? { preamble: "", sections: new Map() };
 
-  const lines = [
-    `Idea: ${m.idea}`,
-    `CapUsd: ${m.capUsd}`,
-    `MaxSprints: ${m.maxSprints}`,
-    `DoneThreshold: ${m.doneThreshold}`,
-    `CreatedAt: ${m.createdAt.toISOString()}`,
-  ];
+  const lines = [`Idea: ${m.idea}`, `DoneThreshold: ${m.doneThreshold}`, `CreatedAt: ${m.createdAt.toISOString()}`];
+
+  // Only an explicit `--max-sprints N` is written: `/ideal` has no sprint ceiling
+  // and no spend cap otherwise (user decision).
+  if (typeof m.maxSprints === "number") lines.push(`MaxSprints: ${m.maxSprints}`);
 
   if (m.stack) lines.push(`Stack: ${m.stack}`);
   if (m.doneAt) lines.push(`DoneAt: ${m.doneAt.toISOString()}`);
@@ -52,11 +50,17 @@ export async function readManifest(flowDir: string, runId: string): Promise<Prod
 
   const m: ProductRunManifest = {
     idea: data.Idea,
-    capUsd: Number.parseFloat(data.CapUsd),
-    maxSprints: Number.parseInt(data.MaxSprints, 10),
     doneThreshold: Number.parseFloat(data.DoneThreshold),
     createdAt: new Date(data.CreatedAt),
   };
+  // A manifest written before `/ideal` lost its limits carries `CapUsd:` and ALWAYS
+  // wrote `MaxSprints:` (the old default was 8), so its sprint count cannot be told
+  // apart from one the user typed. Resuming such a run applies no ceiling — the
+  // user's decision is no limits. A current manifest writes `MaxSprints:` only for
+  // an explicit `--max-sprints N`, and that is honoured.
+  const legacyCapManifest = data.CapUsd !== undefined;
+  const maxSprints = Number.parseInt(data.MaxSprints, 10);
+  if (!legacyCapManifest && Number.isFinite(maxSprints) && maxSprints >= 1) m.maxSprints = maxSprints;
 
   if (data.Stack) m.stack = data.Stack;
   if (data.DoneAt) m.doneAt = new Date(data.DoneAt);

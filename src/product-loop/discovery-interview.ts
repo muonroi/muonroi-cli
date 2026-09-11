@@ -76,7 +76,6 @@ export interface IterateOpts {
   flowDir: string;
   runId: string;
   idea: string;
-  capUsd: number;
   detection: ExistingProjectSignals;
   userPrompt: UserPromptFn;
   recommender: RecommenderLike;

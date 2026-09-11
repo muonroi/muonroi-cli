@@ -15,6 +15,7 @@ import {
   writePhasePlan,
 } from "./phase-plan.js";
 import { generateSprintReview, runRetro, runStandup, shouldRunStandup } from "./phase-rituals.js";
+import { createSprintProgressTracker } from "./sprint-progress.js";
 import type {
   CustomerDecision,
   Phase,
@@ -447,8 +448,6 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       flowDir: args.flowDir,
       runId: args.runId,
       leader: args.leader,
-      capUsd: args.capUsd,
-      remainingUsd: await args.remainingUsd(),
       backoffDelays: args.backoffDelays,
     });
     if (standup) {
@@ -487,8 +486,6 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       clarifiedSpec: args.clarifiedSpec,
       manifest: args.manifest,
       leader: args.leader,
-      capUsd: args.capUsd,
-      remainingUsd: await args.remainingUsd(),
       backoffDelays: args.backoffDelays,
     });
     await writePhasePlan(args.flowDir, args.runId, plan);
@@ -538,7 +535,17 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
     // never ran a sprint (maxSprints <= 0) cannot fall through to "done".
     let exit = phaseExitSatisfied(0, phase.successCriteria.length, phase.exitCondition.min);
 
-    for (let sprintN = 1; sprintN <= phase.maxSprints; sprintN++) {
+    // No sprint ceiling (user decision: `/ideal` has no limits). `phase.maxSprints`
+    // is the planner's estimate, not a bound. The loop ends when the phase's exit
+    // condition is met, the customer aborts, sprints stop making progress
+    // (sprint-progress.ts), or an explicit `--max-sprints N` the user typed is hit.
+    const userSprintCeiling =
+      typeof args.manifest.maxSprints === "number" && Number.isFinite(args.manifest.maxSprints)
+        ? args.manifest.maxSprints
+        : Number.POSITIVE_INFINITY;
+    const progress = createSprintProgressTracker();
+
+    for (let sprintN = 1; sprintN <= userSprintCeiling; sprintN++) {
       const decisions = await getCustomerDecisions(args.flowDir, args.runId);
       const history = await getPhaseHistory(args.flowDir, args.runId);
       const digest = await getPhaseDigest(args.flowDir, args.runId, phase.id);
@@ -585,8 +592,6 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
         },
         phase,
         leader: args.leader,
-        capUsd: args.capUsd,
-        remainingUsd: await args.remainingUsd(),
         backoffDelays: args.backoffDelays,
       });
       if (!args.suppressPush) {
@@ -628,8 +633,6 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
         const lessons = await runRetro({
           sprintState: { sprintN, ...sprintResult },
           leader: args.leader,
-          capUsd: args.capUsd,
-          remainingUsd: await args.remainingUsd(),
           backoffDelays: args.backoffDelays,
         });
         const newDigest = digestSprintIntoPhase(digest, {
@@ -646,6 +649,28 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       const phaseTotal = sprintResult.totalCriteria ?? phase.successCriteria.length;
       exit = phaseExitSatisfied(sprintResult.criteriaMet, phaseTotal, phase.exitCondition.min);
       if (exit.satisfied) break;
+
+      // The replacement for the removed sprint ceiling: a phase whose sprints
+      // stop moving its criteria or score ends here instead of iterating forever.
+      const progressVerdict = progress.record({
+        criteriaMet: sprintResult.criteriaMet ?? 0,
+        scoreAfter: sprintResult.scoreAfter ?? 0,
+      });
+      if (progressVerdict.stop) {
+        logger.warn("orchestrator", `[phase-runner] phase ${phase.id} ended: no progress`, {
+          runId: args.runId,
+          phaseId: phase.id,
+          sprintN,
+          sprintsWithoutProgress: progressVerdict.streak,
+          criteriaMet: sprintResult.criteriaMet,
+          scoreAfter: sprintResult.scoreAfter,
+        });
+        yield {
+          type: "content",
+          content: `\n> [phase] ${phase.id}: ${progressVerdict.streak} consecutive sprint(s) made no progress on its criteria or score — ending the phase.\n`,
+        };
+        break;
+      }
     }
 
     const handoff = await handoffPhaseToNext({
@@ -654,8 +679,6 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       criteriaMet: lastSprintState.criteriaMet,
       totalCriteria: lastSprintState.totalCriteria,
       leader: args.leader,
-      capUsd: args.capUsd,
-      remainingUsd: await args.remainingUsd(),
       backoffDelays: args.backoffDelays,
     });
     await appendPhaseHistory(args.flowDir, args.runId, {

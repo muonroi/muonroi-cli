@@ -40,8 +40,6 @@ describe("discordAwaitVerdict", () => {
       channelId: "c1",
       client: makeClient(),
       leader: { generate: vi.fn() },
-      capUsd: 10,
-      remainingUsd: async () => 5,
       reviewSummary: "Sprint 1 complete.",
       backoffDelays: [1, 1, 1],
       pollIntervalMs: 1,
@@ -123,38 +121,28 @@ describe("discordAwaitVerdict", () => {
     expect(out.feedback).toBe("[timeout-24h]");
   });
 
-  it("VERDICT_FLOOR boundary aborts with budget-exhausted", async () => {
-    const out = await discordAwaitVerdict(
-      baseArgs({
-        capUsd: 10,
-        remainingUsd: async () => 0.05,
-      }),
-    );
-    expect(out.verdict).toBe("abort");
-    expect(out.feedback).toBe("budget-exhausted");
-  });
-
-  it("cap_usd=0 immediately aborts", async () => {
-    const out = await discordAwaitVerdict(baseArgs({ capUsd: 0, remainingUsd: async () => 0 }));
-    expect(out.verdict).toBe("abort");
-    expect(out.feedback).toBe("budget-exhausted");
-  });
-
-  it("MAX_VERDICT_MESSAGES cap → fallback", async () => {
-    const messages = Array.from({ length: 25 }, (_, i) => msg(`m${i}`, "discuss please"));
+  // Removed: "VERDICT_FLOOR boundary aborts with budget-exhausted" and "cap_usd=0
+  // immediately aborts" — the spend floor went with `/ideal`'s spend cap (user
+  // decision: no limits). The cost-derived MAX_VERDICT_MESSAGES cap went too, so
+  // its test now pins the opposite: a long discussion runs to the customer's verdict.
+  it("a long discussion is not cut off by a message cap — it runs to the customer's verdict", async () => {
+    const messages = [...Array.from({ length: 25 }, (_, i) => msg(`m${i}`, "discuss please")), msg("m25", "I accept")];
     const client = makeClient({
       getChannelMessages: vi.fn().mockResolvedValueOnce(messages).mockResolvedValue([]),
     });
     const leader = {
-      generate: vi.fn().mockResolvedValue({
-        content: JSON.stringify({ intent: "discuss", reply: "ok" }),
+      generate: vi.fn().mockImplementation(async (args: { prompt: string }) => ({
+        content: JSON.stringify(
+          args.prompt.includes("I accept") ? { intent: "accept", reply: "Great" } : { intent: "discuss", reply: "ok" },
+        ),
         costUsd: 0.01,
-      }),
+      })),
     };
-    const fallback = vi.fn().mockResolvedValue({ verdict: "accept", feedback: "via-fallback" });
+    const fallback = vi.fn();
     const out = await discordAwaitVerdict(baseArgs({ client, leader, fallback }));
-    expect(fallback).toHaveBeenCalled();
-    expect(out.feedback).toBe("via-fallback");
+    expect(fallback).not.toHaveBeenCalled();
+    expect(out.verdict).toBe("accept");
+    expect(leader.generate).toHaveBeenCalledTimes(26);
   });
 
   it("malformed JSON counts as discuss then continues", async () => {
@@ -313,24 +301,6 @@ describe("discordAwaitVerdict", () => {
     expect(matches?.length).toBe(1);
   });
 
-  it("budget-exhausted during poll loop aborts with feedback", async () => {
-    let remaining = 10;
-    const client = makeClient({
-      getChannelMessages: vi
-        .fn()
-        .mockResolvedValueOnce([msg("m1", "discuss")])
-        .mockResolvedValue([]),
-    });
-    const leader = {
-      generate: vi.fn().mockImplementation(async () => {
-        remaining = 0; // exhaust budget after first process
-        return { content: JSON.stringify({ intent: "discuss", reply: "ok" }), costUsd: 0.01 };
-      }),
-    };
-    const out = await discordAwaitVerdict(
-      baseArgs({ client, leader, capUsd: 10, remainingUsd: async () => remaining }),
-    );
-    expect(out.verdict).toBe("abort");
-    expect(out.feedback).toBe("budget-exhausted");
-  });
+  // Removed: "budget-exhausted during poll loop aborts with feedback" — the verdict
+  // loop no longer reads remaining spend (`/ideal` has no spend cap, user decision).
 });

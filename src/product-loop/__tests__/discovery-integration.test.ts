@@ -112,7 +112,6 @@ describe("discovery-integration — cost guard end-to-end", () => {
       flowDir,
       runId,
       idea: "x",
-      capUsd: 10,
       detection: {
         isGitRepo: false,
         hasCommitHistory: false,

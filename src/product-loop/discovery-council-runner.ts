@@ -47,7 +47,10 @@ export function buildDiscoveryDebateRunner(deps: RealCouncilDeps): CouncilDebate
         leaderModelId: deps.leaderModelId,
         participants: deps.participants,
         debatePlan: plan,
-        costAware: true,
+        // `/ideal`-only runner: no spend-driven model downshift (user decision:
+        // `/ideal` has no limits). pickCouncilTaskModel also refuses to downshift
+        // inside the run scope; this keeps the intent explicit at the call site.
+        costAware: false,
       };
       return (async function* () {
         for await (const chunk of deps.runDebate(spec, config, deps.llm)) {

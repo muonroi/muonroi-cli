@@ -8,6 +8,7 @@ import type { McpToolBundle } from "../mcp/runtime.js";
 import { buildMcpToolSet } from "../mcp/runtime.js";
 import { getModelInfo } from "../models/registry.js";
 import { isAuthenticationError, summarizeApiErrorForLog } from "../orchestrator/error-utils.js";
+import { createNoProgressStopWhen } from "../orchestrator/no-progress-guard.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "../orchestrator/stall-watchdog.js";
 import { combineAbortSignals } from "../orchestrator/tool-utils.js";
 import { getProviderCapabilities, resolveTemperature } from "../providers/capabilities.js";
@@ -28,6 +29,7 @@ import { createBuiltinTools as createTools } from "../tools/registry.js";
 import type { AgentMode, CouncilStatusPhase, StreamChunk } from "../types/index.js";
 import { appendCostLog } from "../usage/cost-log.js";
 import { projectCostUSD } from "../usage/estimator.js";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
 import { getProviderStallTimeoutMs, loadMcpServers } from "../utils/settings.js";
@@ -975,7 +977,11 @@ export function createCouncilLLM(
                   ...(verificationTools && Object.keys(verificationTools).length > 0
                     ? {
                         tools: verificationTools,
-                        stopWhen: stepCountIs(2),
+                        // Normal council: one verification call, then forced text.
+                        // Inside `/ideal` there is no step count (user decision: no
+                        // limits); the turn ends on the model's own stop, or when
+                        // steps only repeat earlier calls with the same results.
+                        stopWhen: isIdealRunUnlimited() ? createNoProgressStopWhen() : stepCountIs(2),
                         prepareStep: ({ stepNumber, messages }) => {
                           if (stepNumber < 1) return {};
                           const stripped = debateCaps.sanitizeHistory(messages as never) as typeof messages;
@@ -1174,7 +1180,9 @@ export function createCouncilLLM(
                   system: systemPrompt,
                   prompt: userPrompt,
                   tools: allTools,
-                  stopWhen: stepCountIs(15),
+                  // No step count inside `/ideal` (user decision: no limits);
+                  // stop instead when steps only repeat earlier calls.
+                  stopWhen: isIdealRunUnlimited() ? createNoProgressStopWhen() : stepCountIs(15),
                   prepareStep: ({ stepNumber, messages }) => {
                     if (stepNumber < 1) return {};
                     const stripped = researchCaps.sanitizeHistory(messages as never) as typeof messages;

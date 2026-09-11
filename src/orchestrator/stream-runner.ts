@@ -63,6 +63,7 @@ import { logInteraction } from "../storage/interaction-log.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import type { AgentMode, TaskRequest, ToolResult, VerifyRecipe } from "../types/index";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { logger } from "../utils/logger.js";
 import { openUrl } from "../utils/open-url.js";
 import {
@@ -82,6 +83,7 @@ import { asNumber } from "./batch-utils";
 import { buildConvergenceMirror } from "./convergence-mirror.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
+import { createNoProgressStopWhen } from "./no-progress-guard.js";
 import {
   applyModelConstraints,
   buildSubagentPrompt,
@@ -515,7 +517,11 @@ export class StreamRunner {
     const childMessages: ModelMessage[] = [{ role: "user", content: childPrompt }];
 
     // The main agent manages its sub-agents, so don't apply an arbitrary hard limit.
-    const maxSteps = request.maxToolRounds ?? this.deps.getMaxToolRounds() * 2;
+    // Inside an `/ideal` run there is no step count at all (user decision: no
+    // limits) — not even one a request asks for. That loop ends on the model's own
+    // stop, the no-progress guard (see runStream), or the hang watchdogs.
+    const unlimited = isIdealRunUnlimited();
+    const maxSteps = unlimited ? Number.POSITIVE_INFINITY : (request.maxToolRounds ?? this.deps.getMaxToolRounds() * 2);
 
     // F1 parity — derive per-turn providerOptions so the sub-agent OpenAI calls
     // carry a stable session-derived promptCacheKey (every tool round routes to
@@ -607,7 +613,7 @@ export class StreamRunner {
     // Phase B3: compact older tool_results out of the running message history
     // before each AI SDK step. First step (stepNumber === 0) has no history
     // worth compacting; later steps are where cumulative input balloons.
-    const compactThreshold = getSubAgentCompactThresholdChars();
+    const compactThreshold = getSubAgentCompactThresholdChars(childRuntime.modelInfo?.contextWindow ?? 0);
     const compactKeepLast = getSubAgentCompactKeepLast();
     // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
     this.deps.setLastProviderOptionsShape(extractProviderOptionsShape(childProviderOptions));
@@ -638,9 +644,20 @@ export class StreamRunner {
     // vấn đề gì sẽ có main agent (khi spawn) kiểm soát đừng hard"
     const _subCeiling = isExplore ? resolveCeiling("analyze", "large") : resolveCeiling("general", "medium");
     const _subCounterKey = `subagent:${subCallId}`;
+    // `maxSteps` is Infinity only inside an `/ideal` run (see setup). A loop with no
+    // step count must still end when it is going nowhere: stop after consecutive
+    // steps that only repeat calls it already made with the same result.
+    const _subNoProgress = Number.isFinite(maxSteps) ? null : createNoProgressStopWhen();
     const _subStopWhen = (async (state: { steps: ReadonlyArray<unknown> }) => {
       incSessionStep(_subCounterKey); // Keep telemetry counter ticking
       if (state.steps.length >= maxSteps) return true;
+      if (_subNoProgress?.(state)) {
+        console.error(
+          `[stream-runner] sub-agent stopped: consecutive steps only repeated earlier calls with identical results ` +
+            `(no progress) after ${state.steps.length} steps model=${childRuntime.modelId}`,
+        );
+        return true;
+      }
       return false;
     }) as unknown as Parameters<typeof streamText>[0]["stopWhen"];
 

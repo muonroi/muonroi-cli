@@ -13,12 +13,15 @@
  * main.tsx each read 2× across edit turns; C3 missed because file bytes
  * changed between reads.
  *
- * Default cap N = 3 — generous enough that legitimate "edit → verify"
- * patterns still get a fresh read once, but tight enough to break runaway
- * re-read loops. Override via MUONROI_MAX_READS_PER_PATH; disable with 0.
+ * Default cap N = 0 (disabled); opt in via MUONROI_MAX_READS_PER_PATH.
+ *
+ * Never enforced inside an `/ideal` run: `/ideal` has no limits (user decision,
+ * see src/utils/ideal-run-scope.ts). The check is made at call time, so the same
+ * session-lifetime budget object still binds a normal chat turn.
  */
 import type { ToolSet } from "ai";
 import { isGuardRejectableCall } from "../tools/arg-guard.js";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 
 // Matches built-in read tools + common MCP read tools (filesystem read_file,
 // read_text_file, etc). We don't include "ls" / "list_directory" because
@@ -146,7 +149,7 @@ export function getReadPathBudgetCap(): number {
 /**
  * Wrap a ToolSet so:
  *   - read-tool execute() calls are short-circuited once a per-path cap is
- *     exceeded
+ *     exceeded (never inside an `/ideal` run)
  *   - write/edit-tool execute() calls invalidate the read counter for the
  *     same path AFTER a successful invocation, so the agent can refresh its
  *     view of post-write content without tripping the cap
@@ -183,7 +186,7 @@ export function wrapToolSetWithReadBudget(tools: ToolSet, budget: ReadPathBudget
           // since the marker lands in `file_path` and reads as a path.
           if (isGuardRejectableCall(tool, name, input)) return innerExecute(input, ctx);
           const path = extractPath(input);
-          if (path) {
+          if (path && !isIdealRunUnlimited()) {
             const stub = budget.checkAndIncrement(name, path);
             if (stub !== null) return stub;
           }

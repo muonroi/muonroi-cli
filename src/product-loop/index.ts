@@ -22,7 +22,6 @@ import { isProviderDisabled } from "../utils/settings.js";
 import { markIterationCrashed, readIterations, readManifest, writeManifest } from "./artifact-io.js";
 import { buildBacklog } from "./backlog-builder.js";
 import { readBacklog, writeBacklog } from "./backlog-store.js";
-import { CB0_budgetGaugeReadable } from "./circuit-breakers.js";
 import { formatCostPreview, previewRunCost } from "./cost-preview.js";
 import { composeRunTranscript, extractRunToEE } from "./cross-run-memory.js";
 import { buildContinueFeedback, type ContinueFeedback } from "./feedback-routing.js";
@@ -32,19 +31,22 @@ import { readRunSpendUsd } from "./run-spend.js";
 import { deriveRunVerdict, describeVerdictFailure, runIsTerminal } from "./run-verdict.js";
 import { polishDelivery } from "./ship-polish.js";
 import { applySprintAssignments, planSprints } from "./sprint-planner.js";
+import { createSprintProgressTracker } from "./sprint-progress.js";
 import { runSprint } from "./sprint-runner.js";
 import { readSprintPlan, setActiveSprint, writeSprintPlan } from "./sprint-store.js";
 import type { ImplementationPlanArtifact, IterationState, ProductSpec, RoleSlot } from "./types.js";
 import { enforceUndebatedCriteriaGate, undebatedHaltDetail } from "./undebated-criteria-gate.js";
 
 export interface ProductLoopFlags {
-  maxCost: number;
-  maxSprints: number;
+  /** @deprecated Ignored — `/ideal` has no spend cap (user decision). Still accepted so callers type-check. */
+  maxCost?: number;
+  /** Sprint ceiling only when the user typed `--max-sprints N`; absent = none. */
+  maxSprints?: number;
   doneThreshold: number;
   stack?: string;
   /** P2.7: when true, always run full council debate even for low-complexity ideas. */
   forceCouncil?: boolean;
-  /** If set, halt when total tokens exceed this limit. */
+  /** @deprecated Ignored — `/ideal` has no token budget (user decision). */
   budgetTokens?: number;
 }
 
@@ -419,8 +421,7 @@ async function* runHotPath(
 
   await writeManifest(flowDir, runId, {
     idea,
-    capUsd: flags.maxCost,
-    maxSprints: 1, // hot-path always caps at 1 sprint
+    maxSprints: 1, // hot-path: a trivial task is routed to one pass by design (a route, not a budget)
     doneThreshold: flags.doneThreshold,
     stack: flags.stack,
     createdAt: new Date(),
@@ -728,8 +729,7 @@ async function* runMaintain(
 
   await writeManifest(flowDir, runId, {
     idea,
-    capUsd: flags.maxCost,
-    maxSprints: 1,
+    maxSprints: 1, // Mode C: one task → one PR by design (a route, not a budget)
     doneThreshold: flags.doneThreshold,
     stack: flags.stack,
     createdAt: new Date(),
@@ -807,7 +807,7 @@ async function* runMaintain(
     codebaseIntel: intel,
     ctx,
     leaderModelId: sessionModelId,
-    costAware: true,
+    costAware: false, // /ideal: no spend-driven model downshift (user decision: no limits)
   });
 
   if (taskResult.status !== "done") {
@@ -827,7 +827,7 @@ async function* runMaintain(
       result: taskResult,
       cwd,
       leaderModelId: sessionModelId,
-      costAware: true,
+      costAware: false, // /ideal: no spend-driven model downshift (user decision: no limits)
       llm: { generate: ctx.llm.generate },
     });
   } catch (err) {
@@ -920,7 +920,6 @@ async function* runStart(
 
   await writeManifest(flowDir, runId, {
     idea,
-    capUsd: flags.maxCost,
     maxSprints: flags.maxSprints,
     doneThreshold: flags.doneThreshold,
     stack: flags.stack,
@@ -943,14 +942,12 @@ async function* runStart(
     }
   }
 
-  // Surface a cost-vs-cap preview before the loop kicks off so $50 isn't
-  // an arbitrary number — show predicted spend per sprint × max-sprints
-  // against the configured cap, with a recommended max-sprints if it
-  // would exceed. Falls back gracefully for unknown-pricing models.
+  // Surface a cost ESTIMATE before the loop kicks off — for information only.
+  // `/ideal` has no spend cap (user decision), so nothing is compared against one
+  // and nothing recommends shrinking the run. Unknown-pricing models say so.
   const preview = previewRunCost({
     sessionModelId: opts.sessionModelId,
     maxSprints: flags.maxSprints,
-    capUsd: flags.maxCost,
   });
   yield { type: "content", content: `\n${formatCostPreview(preview)}\n` } as StreamChunk;
 
@@ -1129,10 +1126,14 @@ async function buildBacklogAndSprintPlan(args: {
   productSpec: ProductSpec;
   ctx: DriverContext;
   sessionModelId: string;
-  maxSprints: number;
+  /** Only sizes the synthetic fallback plan when no real plan could be built — never a ceiling. */
+  maxSprints?: number;
   onChunk: (chunk: StreamChunk) => void;
 }): Promise<{ sprintCount: number; sprintIds: string[] }> {
-  const { flowDir, runId, productSpec, ctx, sessionModelId, maxSprints } = args;
+  const { flowDir, runId, productSpec, ctx, sessionModelId } = args;
+  // Size of the synthetic plan used only when no real plan could be built. One
+  // sprint when the user set no ceiling — the loop itself decides how many run.
+  const maxSprints = typeof args.maxSprints === "number" && args.maxSprints >= 1 ? args.maxSprints : 1;
 
   // ── Check idempotency ──────────────────────────────────────────────────────
   const existingBacklog = await readBacklog(flowDir, runId).catch(() => null);
@@ -1186,7 +1187,7 @@ async function buildBacklogAndSprintPlan(args: {
         implementationPlan,
         llm: ctx.llm,
         leaderModelId,
-        costAware: true,
+        costAware: false, // /ideal: no spend-driven model downshift (user decision: no limits)
       });
       await writeBacklog(flowDir, runId, backlog);
     } catch (err) {
@@ -1208,7 +1209,7 @@ async function buildBacklogAndSprintPlan(args: {
         backlog,
         llm: ctx.llm,
         leaderModelId,
-        costAware: true,
+        costAware: false, // /ideal: no spend-driven model downshift (user decision: no limits)
         targetEffortPerSprint: 8,
       });
       await writeSprintPlan(flowDir, runId, plan);
@@ -1254,25 +1255,16 @@ async function* drainSprints(args: {
   let carryOver: ContinueFeedback | undefined;
   let sprintsRun = 0;
 
-  for (let sprintN = history.length + 1; sprintN <= flags.maxSprints; sprintN++) {
+  // No sprint ceiling unless the user typed `--max-sprints N`, and no token budget:
+  // `/ideal` has no limits (user decision). The loop ends when a sprint ships,
+  // halts or throws — or when sprints stop making progress (sprint-progress.ts).
+  const sprintCeiling =
+    typeof flags.maxSprints === "number" && Number.isFinite(flags.maxSprints)
+      ? flags.maxSprints
+      : Number.POSITIVE_INFINITY;
+  const progress = createSprintProgressTracker();
+  for (let sprintN = history.length + 1; sprintN <= sprintCeiling; sprintN++) {
     let iter: IterationState;
-    // Check token budget
-    if (flags.budgetTokens) {
-      const { getProductTotalTokens } = await import("../usage/product-ledger.js");
-      const totalTokens = await getProductTotalTokens(ctx.runId);
-      if (totalTokens > flags.budgetTokens) {
-        yield {
-          type: "halt",
-          haltChunk: {
-            type: "halt",
-            reason: "budget_exhausted",
-            detail: `Token budget exceeded: used ${totalTokens} > limit ${flags.budgetTokens}`,
-            recovery_options: [],
-          },
-        } as StreamChunk;
-        return { runId: ctx.runId, stage: "halted", success: false, reason: "budget exhausted" };
-      }
-    }
     // Counted at START, not on completion. The sprint that MATTERS most to a
     // post-mortem is the one that died, and a post-completion increment reports
     // it as never having happened — run mtv9v1xu7615 lost its sprint 3 that way
@@ -1474,11 +1466,30 @@ async function* drainSprints(args: {
           ? `improve criteria coverage: met=${iter.criteriaMet}, partial=${iter.criteriaPartial}, unmet=${iter.criteriaUnmet}`
           : `fix verify failures (last result: ${iter.lastVerifyResult})`,
     };
+
+    // The replacement for the removed sprint ceiling: sprints that stop moving the
+    // criteria or the score end the loop (sprint-progress.ts).
+    const progressVerdict = progress.record({ criteriaMet: iter.criteriaMet ?? 0, scoreAfter: iter.scoreAfter ?? 0 });
+    if (progressVerdict.stop) {
+      yield {
+        type: "content",
+        content: `\n> ${progressVerdict.streak} consecutive sprint(s) made no progress on the criteria or score — stopping without satisfying Definition-of-Done.\n`,
+      } as StreamChunk;
+      clearWorkspaceFocus();
+      return {
+        runId: ctx.runId,
+        stage: "halted",
+        success: false,
+        reason: "no_progress",
+        sprintsRun,
+      };
+    }
   }
 
+  // Reached only when the user typed `--max-sprints N` and all N sprints ran.
   yield {
     type: "content",
-    content: `\n> Reached max-sprints (${flags.maxSprints}) without satisfying Definition-of-Done.\n`,
+    content: `\n> Reached --max-sprints (${flags.maxSprints}) without satisfying Definition-of-Done.\n`,
   } as StreamChunk;
   // B1: clear active-run when max-sprints reached.
   clearWorkspaceFocus();
@@ -1726,51 +1737,16 @@ async function* runPhasesPath(args: {
       channelId: ch.channelId,
       client: chatClient,
       leader,
-      capUsd: manifest.capUsd,
-      remainingUsd: async () => {
-        // Same authoritative gauge + same fail-closed rule as the phase path.
-        const s = readRunSpendUsd(ctx.sessionId);
-        if (!s.known) {
-          logger.error("orchestrator", "verdict remainingUsd: spend gauge unreadable — reporting zero headroom", {
-            runId: verdictArgs.runId,
-            reason: s.reason,
-          });
-          return 0;
-        }
-        return Math.max(0, manifest.capUsd - s.usd);
-      },
       reviewSummary: verdictArgs.reviewSummary,
       fallback: terminalFallback,
     });
   };
 
-  // N4(a) — CB-0: refuse to run against a blind meter. `remainingUsd` below is
-  // read by every discretionary-spend gate (phase-plan, review/retro/standup,
-  // the verdict resolver); if the gauge cannot read spend those gates would all
-  // see the FULL cap as headroom, which is how run mttwpmu8ee5b spent $0.7798
-  // while every budget record said $0. Fail-CLOSED — see CB0_budgetGaugeReadable.
-  {
-    const gauge = readRunSpendUsd(ctx.sessionId);
-    const cb0 = CB0_budgetGaugeReadable(gauge, manifest.capUsd);
-    if (cb0.halt) {
-      yield {
-        type: "halt",
-        haltChunk: {
-          type: "halt",
-          reason: "budget_gauge_unreadable",
-          detail: cb0.reason ?? "spend gauge unreadable",
-          recovery_options: [],
-        },
-      } as unknown as StreamChunk;
-      return {
-        runId: ctx.runId,
-        stage: "halted",
-        success: false,
-        reason: "budget_gauge_unreadable",
-        sprintsRun,
-      } as ProductLoopResult;
-    }
-  }
+  // No spend gate here. CB-0 (halt when the spend gauge is unreadable) and the
+  // `remainingUsd` headroom that phase-plan, review/retro/standup and the verdict
+  // resolver used to read all existed to enforce `--max-cost`; `/ideal` has no
+  // spend cap (user decision). Spend is still MEASURED per phase (phase-budget.ts)
+  // and per sprint (sprint-runner.ts), and an unreadable gauge is still reported.
 
   const phaseGen = runPhases({
     flowDir: ctx.flowDir,
@@ -1780,22 +1756,6 @@ async function* runPhasesPath(args: {
     projectContext,
     leader: leader as any,
     leaderModelId,
-    capUsd: manifest.capUsd,
-    // Fail-CLOSED: an unreadable gauge reports ZERO headroom, so discretionary
-    // LLM calls degrade instead of being authorised against an unknown balance.
-    // (`getProductSpentUsd`'s JSONL side-ledger read $0.2272 of this run's real
-    // $0.7798 and $0 for the first four phases — it is not a budget source.)
-    remainingUsd: async () => {
-      const s = readRunSpendUsd(ctx.sessionId);
-      if (!s.known) {
-        logger.error("orchestrator", "remainingUsd: spend gauge unreadable — reporting zero headroom", {
-          runId: ctx.runId,
-          reason: s.reason,
-        });
-        return 0;
-      }
-      return Math.max(0, manifest.capUsd - s.usd);
-    },
     awaitCustomerVerdict,
     sprintRunner,
     projectCwd: ctx.cwd,
@@ -1968,7 +1928,7 @@ async function* runStatus(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
     const outcomes = await readSprintOutcomes(opts.flowDir, opts.runId).catch(() => []);
     const lines = [
       `Run ${opts.runId}: ${m.idea}`,
-      `Cap: $${m.capUsd}  MaxSprints: ${m.maxSprints}  DoneThreshold: ${m.doneThreshold}`,
+      `MaxSprints: ${m.maxSprints ?? "none"}  DoneThreshold: ${m.doneThreshold}`,
       `Iterations: ${iters.length}  Aborted: ${m.aborted ?? false}  DoneAt: ${m.doneAt?.toISOString() ?? "—"}`,
     ];
     if (digest) {
@@ -1993,6 +1953,10 @@ async function* runStatus(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
         );
       }
     }
+    // Measured spend per phase (no cap to show it against — `/ideal` has none).
+    // This replaces the old "Cap: $N" line; the measurement is what stays.
+    const { renderPhaseSpendSummary } = await import("./phase-budget.js");
+    lines.push("", "Phase spend:", await renderPhaseSpendSummary(opts.flowDir, opts.runId));
     yield { type: "content", content: `${lines.join("\n")}\n` } as StreamChunk;
     return { runId: opts.runId, stage: "approved", success: true };
   }

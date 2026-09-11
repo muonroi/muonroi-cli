@@ -78,8 +78,13 @@ export interface DoneVerdict {
 
 export interface ProductRunManifest {
   idea: string;
-  capUsd: number;
-  maxSprints: number;
+  /**
+   * Only when the user typed `--max-sprints N`. Absent = no sprint ceiling:
+   * `/ideal` has no limits (user decision). There is no spend cap field —
+   * manifests written before that change still carry a `CapUsd:` line, which
+   * `readManifest` ignores.
+   */
+  maxSprints?: number;
   doneThreshold: number;
   stack?: string;
   createdAt: Date;
@@ -90,9 +95,10 @@ export interface ProductRunManifest {
 
 export interface ProductStatusCardData {
   sprintN: number;
-  totalSprints: number;
+  /** Only when the user typed `--max-sprints N`; `/ideal` has no sprint ceiling otherwise. */
+  totalSprints?: number;
+  /** Measured spend so far. There is no cap to show it against: `/ideal` has no spend limit. */
   costSpent: number;
-  costCap: number;
   criteriaMet: number;
   criteriaPartial: number;
   criteriaUnmet: number;
@@ -125,10 +131,13 @@ export interface DriverContext {
   sessionModelId: string;
   llm: import("../council/types.js").CouncilLLM;
   flags: {
-    maxCost: number;
-    maxSprints: number;
+    /** @deprecated Ignored — `/ideal` has no spend cap. Still accepted so existing callers type-check. */
+    maxCost?: number;
+    /** Sprint ceiling only when the user typed `--max-sprints N`; absent = none. */
+    maxSprints?: number;
     doneThreshold: number;
     stack?: string;
+    /** @deprecated Ignored — `/ideal` has no token budget. */
     budgetTokens?: number;
   };
   respondToQuestion: import("../council/types.js").QuestionResponder;
@@ -540,8 +549,6 @@ export interface RunPhasesOptions {
   projectContext: ProjectContext;
   leader: import("./discovery-prompt-parser.js").LeaderLike;
   leaderModelId: string;
-  capUsd: number;
-  remainingUsd: () => Promise<number>;
   awaitCustomerVerdict: (args: {
     flowDir: string;
     runId: string;

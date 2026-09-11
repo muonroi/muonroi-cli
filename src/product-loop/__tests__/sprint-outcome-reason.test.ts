@@ -27,7 +27,6 @@ vi.mock("../../council/index.js", () => ({ runCouncil: vi.fn() }));
 vi.mock("../../verify/orchestrator.js", () => ({ runVerifyOrchestration: vi.fn() }));
 vi.mock("../done-gate.js", () => ({ evaluateDoneGate: vi.fn() }));
 vi.mock("../circuit-breakers.js", () => ({
-  CB1_costProjection: vi.fn(() => ({ halt: false, projection: 0, headroom: 100 })),
   CB2_oscillation: vi.fn(() => ({ halt: false, delta_t: 0, delta_t_minus_1: 0 })),
   CB3_verifyBlank: vi.fn(() => ({ halt: false })),
 }));
@@ -43,22 +42,14 @@ vi.mock("../../usage/ledger.js", () => ({
   release: vi.fn(async () => undefined),
 }));
 vi.mock("../cost-scoper.js", () => ({
-  reserveForProduct: vi.fn(async () => ({
-    id: "tok",
-    model: "m",
-    provider: "p",
-    projected_usd: 0.1,
-    est_input_tokens: 100,
-    est_output_tokens: 100,
-    createdAtMs: Date.now(),
-  })),
+  recordProductSpend: vi.fn(async () => undefined),
 }));
 vi.mock("../../providers/runtime.js", () => ({ detectProviderForModel: vi.fn(() => "anthropic") }));
 
 import { runCouncil } from "../../council/index.js";
 import { readSprintOutcomes, type SprintOutcome, sprintsDir, writeSprintOutcome } from "../../flow/run-artifacts.js";
 import { runVerifyOrchestration } from "../../verify/orchestrator.js";
-import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
+import { CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
 import { evaluateDoneGate } from "../done-gate.js";
 import { buildContinueFeedback } from "../feedback-routing.js";
 import { deriveRunVerdict, describeVerdictFailure } from "../run-verdict.js";
@@ -119,7 +110,6 @@ beforeEach(() => {
   flowDir = mkdtempSync(join(tmpdir(), "f9-flow-"));
   projectCwd = mkdtempSync(join(tmpdir(), "f9-cwd-"));
   vi.clearAllMocks();
-  (CB1_costProjection as any).mockReturnValue({ halt: false, projection: 0, headroom: 100 });
   (CB2_oscillation as any).mockReturnValue({ halt: false, delta_t: 0, delta_t_minus_1: 0 });
   (CB3_verifyBlank as any).mockReturnValue({ halt: false });
   (runVerifyOrchestration as any).mockResolvedValue({

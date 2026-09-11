@@ -11,8 +11,9 @@ import { projectCostUSDWithCache } from "../usage/estimator.js";
  * Assume ~70% prompt cache hit rate after the first sprint (typical when the
  * spec text dominates context).
  *
- * Bias: rounded UP so the user sees a conservative estimate; better to scare
- * with $42 than surprise with $35.
+ * This is MEASUREMENT for the user's information only. `/ideal` has no spend cap
+ * (user decision), so nothing here is compared against a budget and nothing
+ * recommends shrinking the run.
  */
 export interface SprintHeuristic {
   callsPerSprint: number;
@@ -39,55 +40,43 @@ export interface CostPreview {
   pricingKnown: boolean;
   cachedInputAvailable: boolean;
   estPerSprintUsd: number;
-  estTotalUsd: number;
-  capUsd: number;
-  willExceedCap: boolean;
-  /** Recommended max-sprints if you want to stay strictly under cap. */
-  recommendedMaxSprints: number;
+  /** Only when the user typed `--max-sprints N`: the estimate for N sprints. */
+  estTotalUsd: number | null;
+  maxSprints: number | null;
 }
 
 /**
- * Predict the run's USD cost given the active session model + flags. Used by
- * runStart to surface a cost-vs-cap warning before the loop begins.
+ * Estimate what one sprint of the run costs on the active session model. Used by
+ * runStart to show the user a figure before the loop begins.
  */
 export function previewRunCost(args: {
   sessionModelId: string;
-  maxSprints: number;
-  capUsd: number;
+  maxSprints?: number;
   heuristic?: SprintHeuristic;
 }): CostPreview {
   const h = args.heuristic ?? DEFAULT_HEURISTIC;
+  const maxSprints = typeof args.maxSprints === "number" && args.maxSprints > 0 ? args.maxSprints : null;
+  const unpriced = (provider: string): CostPreview => ({
+    modelId: args.sessionModelId,
+    provider,
+    pricingKnown: false,
+    cachedInputAvailable: false,
+    estPerSprintUsd: 0,
+    estTotalUsd: null,
+    maxSprints,
+  });
+
   let provider: string;
   try {
     provider = detectProviderForModel(args.sessionModelId);
-  } catch {
-    return {
-      modelId: args.sessionModelId,
-      provider: "unknown",
-      pricingKnown: false,
-      cachedInputAvailable: false,
-      estPerSprintUsd: 0,
-      estTotalUsd: 0,
-      capUsd: args.capUsd,
-      willExceedCap: false,
-      recommendedMaxSprints: args.maxSprints,
-    };
+  } catch (err) {
+    console.error(
+      `[cost-preview] provider unknown for ${args.sessionModelId}; showing no estimate: ${(err as Error)?.message}`,
+    );
+    return unpriced("unknown");
   }
   const pricing = lookupPricing(provider, args.sessionModelId);
-
-  if (!pricing) {
-    return {
-      modelId: args.sessionModelId,
-      provider,
-      pricingKnown: false,
-      cachedInputAvailable: false,
-      estPerSprintUsd: 0,
-      estTotalUsd: 0,
-      capUsd: args.capUsd,
-      willExceedCap: false,
-      recommendedMaxSprints: args.maxSprints,
-    };
-  }
+  if (!pricing) return unpriced(provider);
 
   const inputPerSprint = h.callsPerSprint * h.inputTokensPerCall + h.debateInputPerSprint;
   const outputPerSprint = h.callsPerSprint * h.outputTokensPerCall + h.debateOutputPerSprint;
@@ -98,42 +87,29 @@ export function previewRunCost(args: {
   const inputMiss = inputPerSprint - inputHit;
 
   const estPerSprintUsd = projectCostUSDWithCache(provider, args.sessionModelId, inputMiss, inputHit, outputPerSprint);
-  const estTotalUsd = estPerSprintUsd * args.maxSprints;
-  const willExceedCap = estTotalUsd > args.capUsd;
-  const recommendedMaxSprints =
-    estPerSprintUsd > 0 ? Math.max(1, Math.floor(args.capUsd / estPerSprintUsd)) : args.maxSprints;
-
   return {
     modelId: args.sessionModelId,
     provider,
     pricingKnown: true,
     cachedInputAvailable,
     estPerSprintUsd,
-    estTotalUsd,
-    capUsd: args.capUsd,
-    willExceedCap,
-    recommendedMaxSprints,
+    estTotalUsd: maxSprints === null ? null : estPerSprintUsd * maxSprints,
+    maxSprints,
   };
 }
 
 /** Format the preview as a single content chunk for the UI. */
 export function formatCostPreview(p: CostPreview): string {
   if (!p.pricingKnown) {
-    return `**Cost preview:** pricing not known for \`${p.modelId}\` (provider \`${p.provider}\`); cap = $${p.capUsd}. Spend will be tracked but cannot be projected.`;
+    return `**Cost estimate:** pricing not known for \`${p.modelId}\` (provider \`${p.provider}\`). Spend is still measured per call.`;
   }
   const lines = [
-    `**Cost preview** (heuristic):`,
+    `**Cost estimate** (heuristic, for information — /ideal runs without a spend limit):`,
     `- Model: \`${p.modelId}\` (${p.provider})${p.cachedInputAvailable ? " · prompt-cache priced" : ""}`,
     `- Per-sprint estimate: $${p.estPerSprintUsd.toFixed(3)}`,
-    `- Total estimate (×max-sprints): $${p.estTotalUsd.toFixed(2)}`,
-    `- Cap: $${p.capUsd.toFixed(2)}`,
   ];
-  if (p.willExceedCap) {
-    lines.push(
-      `- ⚠️ Estimate **exceeds** cap. Recommended \`--max-sprints ${p.recommendedMaxSprints}\` to fit budget, or raise \`--max-cost\`.`,
-    );
-  } else {
-    lines.push(`- ✓ Estimate fits the cap.`);
+  if (p.estTotalUsd !== null && p.maxSprints !== null) {
+    lines.push(`- Estimate for ${p.maxSprints} sprint${p.maxSprints === 1 ? "" : "s"}: $${p.estTotalUsd.toFixed(2)}`);
   }
   return lines.join("\n");
 }

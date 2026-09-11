@@ -1,8 +1,18 @@
 import * as path from "node:path";
 import { readArtifact } from "../flow/artifact-io.js";
+import { logger } from "../utils/logger.js";
 import type { LeaderLike } from "./discovery-prompt-parser.js";
 import { withRateLimitBackoff } from "./discovery-recommender.js";
 import type { LessonsLearned, Phase, PhasePlanState, StandupOutcome } from "./types.js";
+
+/*
+ * Sprint rituals (review / retro / standup).
+ *
+ * These calls used to be skipped when the run's remaining spend fell under a
+ * floor derived from `--max-cost`, and standups were capped at 3 per run. Both
+ * were budgets. `/ideal` has no limits (user decision), so every ritual runs; a
+ * deterministic fallback is used only when the leader call itself fails.
+ */
 
 export interface SprintState {
   sprintN: number;
@@ -15,15 +25,6 @@ export interface SprintState {
   verifyVerdict?: string;
 }
 
-const REVIEW_FLOOR_FRACTION = 0.01;
-const REVIEW_FLOOR_MIN = 0.12;
-const STANDUP_FLOOR_FRACTION = 0.04;
-const STANDUP_FLOOR_MIN = 0.6;
-
-function reviewFloor(capUsd: number): number {
-  return Math.max(REVIEW_FLOOR_MIN, REVIEW_FLOOR_FRACTION * capUsd);
-}
-
 function deterministicReview(s: SprintState): string {
   return `Sprint ${s.sprintN}: score ${s.scoreBefore.toFixed(2)}→${s.scoreAfter.toFixed(2)}, met ${s.criteriaMet}/${s.totalCriteria} criteria`;
 }
@@ -32,13 +33,8 @@ export async function generateSprintReview(args: {
   sprintState: SprintState;
   phase: Phase;
   leader: LeaderLike;
-  capUsd: number;
-  remainingUsd: number;
   backoffDelays?: number[];
 }): Promise<{ summary: string; usedFallback: boolean }> {
-  if (args.remainingUsd < reviewFloor(args.capUsd)) {
-    return { summary: deterministicReview(args.sprintState), usedFallback: true };
-  }
   const s = args.sprintState;
   const verifyLine = s.verifyVerdict ? ` Verify: ${s.verifyVerdict}.` : "";
   const goal = args.phase.goal ? ` Phase goal: ${args.phase.goal}.` : "";
@@ -54,7 +50,12 @@ export async function generateSprintReview(args: {
       { delays: args.backoffDelays },
     );
     return { summary: res.content.trim().slice(0, 500), usedFallback: false };
-  } catch {
+  } catch (err) {
+    logger.warn("orchestrator", "[rituals] sprint review leader call failed; using the deterministic summary", {
+      sprintN: s.sprintN,
+      phaseId: args.phase.id,
+      message: (err as Error)?.message,
+    });
     return { summary: deterministicReview(args.sprintState), usedFallback: true };
   }
 }
@@ -66,7 +67,11 @@ export async function hasAnyPhaseInProgress(flowDir: string, runId: string): Pro
   try {
     const state = JSON.parse(raw) as PhasePlanState;
     return Object.values(state.phasesStatus).includes("in-progress");
-  } catch {
+  } catch (err) {
+    logger.warn("orchestrator", "[rituals] Phase Plan State is not valid JSON; treating no phase as in progress", {
+      runId,
+      message: (err as Error)?.message,
+    });
     return false;
   }
 }
@@ -85,13 +90,8 @@ export async function shouldRunStandup(
 export async function runRetro(args: {
   sprintState: SprintState;
   leader: LeaderLike;
-  capUsd: number;
-  remainingUsd: number;
   backoffDelays?: number[];
 }): Promise<LessonsLearned> {
-  if (args.remainingUsd < reviewFloor(args.capUsd)) {
-    throw new Error("RetroSkippedBudget");
-  }
   const prompt =
     `Sprint ${args.sprintState.sprintN}: score ${args.sprintState.scoreBefore.toFixed(2)}→${args.sprintState.scoreAfter.toFixed(2)}, ` +
     `met ${args.sprintState.criteriaMet}/${args.sprintState.totalCriteria}. ` +
@@ -114,32 +114,12 @@ export async function runRetro(args: {
   };
 }
 
-export const STANDUP_HARD_CAP = 3;
-
-async function readStandupCount(flowDir: string, runId: string): Promise<number> {
-  const map = await readArtifact(path.join(flowDir, "runs", runId), "state.md");
-  const raw = map?.sections.get("Standup Count");
-  if (!raw) return 0;
-  const n = Number.parseInt(raw.trim(), 10);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function standupFloor(capUsd: number): number {
-  return Math.max(STANDUP_FLOOR_MIN, STANDUP_FLOOR_FRACTION * capUsd);
-}
-
 export async function runStandup(args: {
   flowDir: string;
   runId: string;
   leader: LeaderLike;
-  capUsd: number;
-  remainingUsd: number;
   backoffDelays?: number[];
 }): Promise<StandupOutcome | null> {
-  if (args.remainingUsd < standupFloor(args.capUsd)) return null;
-  const prior = await readStandupCount(args.flowDir, args.runId);
-  if (prior >= STANDUP_HARD_CAP) return null;
-
   const prompt =
     `Daily standup. Output strict JSON: { blockers: string[] (≤5, ≤200 each), decisions: string[] (≤5, ≤200 each), nextStep: string (≤300) }. ` +
     `Be specific and decisive.`;
@@ -160,7 +140,11 @@ export async function runStandup(args: {
       decisions: cap(parsed.decisions, 5, 200),
       nextStep: String(parsed.nextStep ?? "").slice(0, 300),
     };
-  } catch {
+  } catch (err) {
+    logger.warn("orchestrator", "[rituals] standup failed; skipping this standup", {
+      runId: args.runId,
+      message: (err as Error)?.message,
+    });
     return null;
   }
 }

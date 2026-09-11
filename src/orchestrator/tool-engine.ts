@@ -146,6 +146,7 @@ import { logger } from "../utils/logger.js";
 import { openUrl } from "../utils/open-url.js";
 import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
 import {
+  effectiveCompactionWindowTokens,
   getAutoCouncilConfidence,
   getAutoCouncilMinRoles,
   getProviderProgressTimeoutMs,
@@ -182,6 +183,7 @@ import { humanizeApiError, isAuthenticationError, isContextLimitError, summarize
 import { buildGroundingFootnote, findUnverifiedClaims } from "./grounding-check.js";
 import { isInteractivePaused } from "./interactive-pause.js";
 import { buildInterruptedTurnNote } from "./interrupted-turn.js";
+import { createNoProgressGuard } from "./no-progress-guard.js";
 import type { PendingCallsLog } from "./pending-calls.js";
 import { stableCallId } from "./pending-calls.js";
 import {
@@ -252,7 +254,7 @@ import { foldMidConversationSystemMessages } from "./system-message-fold.js";
 import { detectTextEmittedToolCall, parseLeakedToolCalls } from "./text-tool-call-detector.js";
 import { beginToolActivity, endToolActivity } from "./tool-activity.js";
 import { getToolLimitAutoRecoverCap, shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
-import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
+import { createToolLoopCapPredicate, resolveTurnStepLimits, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 import {
   buildToolRepetitionAbortMessage,
   recordToolError as recordToolRepetitionError,
@@ -1086,10 +1088,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           | undefined;
         const isSubSession = !!row?.parent_session_id;
 
-        let contextWindow = modelInfo?.contextWindow || 0;
-        if (isSubSession && contextWindow > 0) {
-          contextWindow = Math.min(45000, contextWindow);
-        }
+        // A sub-session compacts against a 45K-token window regardless of the real
+        // one — a budget, not a window guard. Inside `/ideal` the real window is
+        // used (see effectiveCompactionWindowTokens); normal chat is unchanged.
+        const contextWindow = effectiveCompactionWindowTokens(modelInfo?.contextWindow || 0, isSubSession);
 
         const settings = attemptedOverflowRecovery
           ? relaxCompactionSettings(deps.getCompactionSettings(contextWindow))
@@ -1714,8 +1716,18 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Closure-mutable cap for the tool-loop askcard rescue.
         // Phase 1 (SAMR) skips the dynamic cap (it's a single-step path).
         // Algorithm extracted to ./tool-loop-cap.ts so it can be unit-tested.
+        // Normal chat: soft cap `maxToolRounds` + hard cap `hardMaxToolRounds`.
+        // Inside an `/ideal` run both are Infinity (user decision: no limits) and
+        // the turn instead stops when N consecutive steps only repeat calls this
+        // loop already made with the same result (no-progress-guard.ts).
+        const _stepLimits = resolveTurnStepLimits({
+          maxToolRounds: deps.maxToolRounds,
+          hardMaxToolRounds: deps.hardMaxToolRounds,
+        });
+        const _noProgress = _stepLimits.stopOnNoProgress ? createNoProgressGuard() : null;
+        let _noProgressHit = false;
         const _baseDynamicStopWhen = createToolLoopCapPredicate({
-          initialCap: deps.maxToolRounds,
+          initialCap: _stepLimits.softCap,
           ask: async (info) => {
             // Auto-recover a "cap" (tool-round ceiling) halt: compact the history and keep
             // going, instead of stopping and telling the user to /compact
@@ -1882,8 +1894,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // Fires AFTER the soft cap (maxToolRounds) has been bumped by the
           // user. Prevents runaway sessions (session 526a83cf22df: 16 LLM
           // calls for a single user message, 2.44M total input tokens).
-          if (state.steps.length > deps.hardMaxToolRounds) {
+          if (state.steps.length > _stepLimits.hardCap) {
             _hardCapHit = true;
+            return true;
+          }
+          // `/ideal` only (hardCap is Infinity there): end a loop that is going
+          // nowhere — consecutive steps that only repeat earlier calls with the
+          // same results.
+          if (_noProgress?.(state.steps)) {
+            _noProgressHit = true;
             return true;
           }
           // convene_council fast-path: if the model queued a council convening
@@ -4357,6 +4376,17 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           /* fail-open */
         }
 
+        // `/ideal` only: the turn has no step limit and was ended because it
+        // stopped making progress. Say so — a silent stop reads like a crash.
+        if (_noProgressHit) {
+          yield {
+            type: "content",
+            content:
+              `\n\n[Stopped: the last steps only repeated tool calls that had already run with identical results — ` +
+              `no progress. This turn has no step limit; it ends when it stops moving.]\n`,
+          };
+        }
+
         // F3b — surface hard-cap stop (absolute ceiling, cannot be bumped).
         if (_hardCapHit) {
           yield {
@@ -4374,8 +4404,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // fires with tool calls still pending — distinct from 'stop' (model
         // chose to end). We only warn when stepNumber ≥ cap so a model that
         // legitimately terminates mid-tool-call (rare) doesn't get a false
-        // warning.
-        if (_lastFinishReason === "tool-calls" && stepNumber >= deps.maxToolRounds - 1) {
+        // warning. No cap exists inside `/ideal`, so no such warning there.
+        if (
+          _lastFinishReason === "tool-calls" &&
+          Number.isFinite(_stepLimits.softCap) &&
+          stepNumber >= deps.maxToolRounds - 1
+        ) {
           yield {
             type: "content",
             content:

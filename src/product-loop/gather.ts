@@ -28,7 +28,7 @@ import {
 import type { LeaderLike } from "./discovery-prompt-parser.js";
 import { parsePromptForContext } from "./discovery-prompt-parser.js";
 import type { CouncilDebateRunner } from "./discovery-recommender.js";
-import { councilRecommend, leaderRecommend, shouldFallbackToLeader } from "./discovery-recommender.js";
+import { councilRecommend, leaderRecommend } from "./discovery-recommender.js";
 import { DISCOVERY_QUESTIONS } from "./discovery-schema.js";
 import { triageInterview } from "./discovery-triage.js";
 import { buildRepoBrief } from "./repo-brief.js";
@@ -231,7 +231,6 @@ export async function runGatherPhase(
   flowDir: string,
   runId: string,
   idea: string,
-  capUsd: number,
   // biome-ignore lint/suspicious/noExplicitAny: llm injected from driver
   llm: any,
   sessionModelId: string,
@@ -348,7 +347,6 @@ export async function runGatherPhase(
     // intentionally bypass above.
     void buildDiscoveryDebateRunner;
     void councilRecommend;
-    void shouldFallbackToLeader;
     void readDiscoveryState;
 
     // Build a real tuiAsk if the driver wired emit + respondToQuestion. The
@@ -380,7 +378,6 @@ export async function runGatherPhase(
       flowDir,
       runId,
       idea,
-      capUsd,
       detection,
       userPrompt,
       recommender,
@@ -565,8 +562,8 @@ export function clarifiedSpecFromContext(pc: ProjectContext): ClarifiedSpec {
     "non-functional": ctx.audience?.scale || truthy(ctx.deployment) ? "answered" : "unspecified",
     "tech-constraints": truthy(ctx.backendStack) || truthy(ctx.backendArchitecture) ? "answered" : "unspecified",
     "success-metric": ctx.audience?.persona ? "answered" : "unspecified",
-    // cost-tolerance has no dedicated DISCOVERY_QUESTION — the per-run capUsd
-    // flag (default $50) is the canonical answer. Treat it as answered when
+    // cost-tolerance has no dedicated DISCOVERY_QUESTION — `/ideal` has no spend
+    // cap (user decision), so there is nothing to ask. Treat it as answered when
     // gather completes (any non-null context means the user accepted defaults
     // by passing the gate).
     "cost-tolerance": Object.keys(ctx).length > 0 ? "answered" : "unspecified",

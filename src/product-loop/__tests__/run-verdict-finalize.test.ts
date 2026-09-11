@@ -98,7 +98,6 @@ async function seedRun(
   const run = await createRun(flowDir);
   await writeManifest(flowDir, run.id, {
     idea: "make the headless exit code tell the truth",
-    capUsd: 50,
     maxSprints: 8,
     doneThreshold: 0.9,
     createdAt: new Date("2026-09-06T05:22:22.917Z"),

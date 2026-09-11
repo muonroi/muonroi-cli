@@ -33,6 +33,7 @@
 import { wrapLanguageModel } from "ai";
 import { logInteraction } from "../storage/interaction-log.js";
 import type { ModelInfo, ModelRateLimits } from "../types/index.js";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { acquireRateLimitSlot, type RateLimitLease, type RateLimitWait } from "./rate-limiter.js";
 
 /**
@@ -176,18 +177,27 @@ export type CeilingMode = "off" | "warn" | "throw";
  */
 export function ceilingMode(stage?: GateStage): CeilingMode {
   const raw = process.env.MUONROI_GATE_CEILING;
+  let mode: CeilingMode;
   if (raw !== undefined && raw !== "") {
     // Explicit global override wins for every stage.
     const v = raw.toLowerCase();
-    return v === "warn" || v === "throw" || v === "off" ? v : "warn";
+    mode = v === "warn" || v === "throw" || v === "off" ? v : "warn";
+  } else {
+    // No explicit setting: per-stage DEFAULT. The sub-agent tool loop (and its
+    // vision variant) is the documented runaway source and is already bounded by
+    // the cumulative cap (~60k est), so a `throw` backstop there is safe (only an
+    // escapee past the cap trips it) and worth having on by default. Every other
+    // stage defaults to `warn` (log-only stats) — a user's own long turn or a
+    // council/compaction call is never hard-killed without an explicit opt-in.
+    mode = stage && THROW_ELIGIBLE.has(stage) ? "throw" : "warn";
   }
-  // No explicit setting: per-stage DEFAULT. The sub-agent tool loop (and its
-  // vision variant) is the documented runaway source and is already bounded by
-  // the cumulative cap (~60k est), so a `throw` backstop there is safe (only an
-  // escapee past the cap trips it) and worth having on by default. Every other
-  // stage defaults to `warn` (log-only stats) — a user's own long turn or a
-  // council/compaction call is never hard-killed without an explicit opt-in.
-  return stage && THROW_ELIGIBLE.has(stage) ? "throw" : "warn";
+  // `/ideal` has no limits (user decision). The throw line is an ABSOLUTE token
+  // budget (`throwCeilingTokens`, not derived from the model's context window),
+  // so inside an `/ideal` run it is not enforced: `throw` becomes `warn`. The
+  // call is still metered and a crossing is still logged. The provider's real
+  // window stays guarded by compaction and by overflow recovery, which read it.
+  if (mode === "throw" && isIdealRunUnlimited()) return "warn";
+  return mode;
 }
 
 /**
@@ -251,7 +261,9 @@ function buildAccountingRow(
   op: "stream" | "generate",
 ): Parameters<typeof logInteraction>[2] {
   const ceilingHit = typeof ctx.ceiling === "number" ? comp.estInputTokens > ctx.ceiling : false;
-  const eligible = THROW_ELIGIBLE.has(ctx.stage);
+  // Inside an `/ideal` run no throw line is armed (see ceilingMode), so the row
+  // must not claim one; a normal chat row is unchanged.
+  const eligible = THROW_ELIGIBLE.has(ctx.stage) && !isIdealRunUnlimited();
   const throwCeiling = eligible ? throwCeilingTokens() : null;
   return {
     eventSubtype: ctx.stage,
@@ -396,10 +408,11 @@ async function paceCall(ctx: GateContext): Promise<RateLimitLease> {
       emitRateLimitWait(wait, ctx),
     );
   } catch (err) {
-    console.error(
-      `[model-gate] rate-limit pacing failed (proceeding unpaced): ${(err as Error)?.message}`,
-      { provider: ctx.providerId, model: ctx.modelId, stage: ctx.stage },
-    );
+    console.error(`[model-gate] rate-limit pacing failed (proceeding unpaced): ${(err as Error)?.message}`, {
+      provider: ctx.providerId,
+      model: ctx.modelId,
+      stage: ctx.stage,
+    });
     return { waits: [], holdsSlot: false, release: () => {} };
   }
 }

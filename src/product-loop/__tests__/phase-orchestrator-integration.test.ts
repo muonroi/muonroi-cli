@@ -19,7 +19,7 @@ describe("phase-orchestrator integration (subsystem E)", () => {
     return {
       flowDir,
       runId,
-      manifest: { idea: "X", capUsd: 10, maxSprints: 6, doneThreshold: 0.8, createdAt: new Date() },
+      manifest: { idea: "X", maxSprints: 6, doneThreshold: 0.8, createdAt: new Date() },
       clarifiedSpec: { problemStatement: "p", constraints: [], successCriteria: ["A", "B"], scope: "s", rawQA: [] },
       projectContext: { context: {}, prefillSource: {}, version: 1 },
       leader: {
@@ -29,8 +29,6 @@ describe("phase-orchestrator integration (subsystem E)", () => {
         }),
       },
       leaderModelId: "m1",
-      capUsd: 10,
-      remainingUsd: async () => 5,
       awaitCustomerVerdict: async (_args: unknown) => ({ verdict: "accept" }),
       suppressPush: true,
       backoffDelays: [1, 1, 1],

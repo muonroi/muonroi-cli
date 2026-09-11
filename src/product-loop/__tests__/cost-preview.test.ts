@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_HEURISTIC, formatCostPreview, previewRunCost } from "../cost-preview.js";
 
-describe("previewRunCost", () => {
+// The preview used to compare the estimate against `--max-cost` (willExceedCap)
+// and recommend a smaller `--max-sprints` to fit it. `/ideal` has no spend cap
+// (user decision): the preview is an estimate for the user's information only.
+
+describe("previewRunCost — an estimate, never a cap", () => {
   it("uses cached_input price when model has one (DeepSeek flash)", () => {
-    const p = previewRunCost({
-      sessionModelId: "deepseek-v4-flash",
-      maxSprints: 8,
-      capUsd: 50,
-    });
+    const p = previewRunCost({ sessionModelId: "deepseek-v4-flash", maxSprints: 8 });
     expect(p.pricingKnown).toBe(true);
     expect(p.cachedInputAvailable).toBe(true);
     expect(p.estPerSprintUsd).toBeGreaterThan(0);
@@ -17,75 +17,31 @@ describe("previewRunCost", () => {
     expect(p.estPerSprintUsd).toBeLessThan(1);
   });
 
-  it("flags willExceedCap when total > cap and recommends fewer sprints", () => {
-    const p = previewRunCost({
-      sessionModelId: "claude-3-opus-latest",
-      maxSprints: 100,
-      capUsd: 5,
-    });
-    expect(p.willExceedCap).toBe(true);
-    expect(p.recommendedMaxSprints).toBeLessThan(100);
-    expect(p.recommendedMaxSprints).toBeGreaterThanOrEqual(1);
+  it("gives no total when the user set no sprint ceiling (the default)", () => {
+    const p = previewRunCost({ sessionModelId: "deepseek-v4-flash" });
+    expect(p.estPerSprintUsd).toBeGreaterThan(0);
+    expect(p.estTotalUsd).toBeNull();
+    expect(p.maxSprints).toBeNull();
   });
 
   it("returns pricingKnown=false for unknown model", () => {
-    const p = previewRunCost({
-      sessionModelId: "nonexistent-model-9999",
-      maxSprints: 8,
-      capUsd: 50,
-    });
+    const p = previewRunCost({ sessionModelId: "nonexistent-model-9999", maxSprints: 8 });
     expect(p.pricingKnown).toBe(false);
     expect(p.estPerSprintUsd).toBe(0);
-    expect(p.estTotalUsd).toBe(0);
-    expect(p.willExceedCap).toBe(false);
+    expect(p.estTotalUsd).toBeNull();
   });
 
-  it("ollama wildcard yields zero cost", () => {
-    const p = previewRunCost({
-      sessionModelId: "any-local-model",
-      maxSprints: 8,
-      capUsd: 50,
-    });
-    // ollama is provider-detected based on model id prefix — unknown id falls
-    // through to anthropic default. Verify the explicit ollama-prefixed case.
-    void p;
-
-    // Direct check for ollama "*" pricing via deepseek path is meaningless;
-    // instead verify when pricing exists, hit rate scales cost down.
-    const cached = previewRunCost({
-      sessionModelId: "gpt-4o-mini",
-      maxSprints: 4,
-      capUsd: 50,
-    });
-    const uncachedHeuristic = { ...DEFAULT_HEURISTIC, cacheHitRate: 0 };
+  it("cache hit rate scales the estimate down", () => {
+    const cached = previewRunCost({ sessionModelId: "gpt-4o-mini", maxSprints: 4 });
     const uncached = previewRunCost({
       sessionModelId: "gpt-4o-mini",
       maxSprints: 4,
-      capUsd: 50,
-      heuristic: uncachedHeuristic,
+      heuristic: { ...DEFAULT_HEURISTIC, cacheHitRate: 0 },
     });
     expect(cached.estPerSprintUsd).toBeLessThan(uncached.estPerSprintUsd);
   });
 
-  it("formatCostPreview renders fits-cap notice on safe runs", () => {
-    const out = formatCostPreview({
-      modelId: "deepseek-v4-flash",
-      provider: "deepseek",
-      pricingKnown: true,
-      cachedInputAvailable: true,
-      estPerSprintUsd: 0.05,
-      estTotalUsd: 0.4,
-      capUsd: 50,
-      willExceedCap: false,
-      recommendedMaxSprints: 8,
-    });
-    expect(out).toContain("Cost preview");
-    expect(out).toContain("$0.05");
-    expect(out).toMatch(/fits the cap/i);
-    expect(out).toContain("prompt-cache priced");
-  });
-
-  it("formatCostPreview renders exceed-cap warning + recommendation", () => {
+  it("formatCostPreview shows the estimate and never a cap or a recommendation to shrink the run", () => {
     const out = formatCostPreview({
       modelId: "claude-3-opus-latest",
       provider: "anthropic",
@@ -93,12 +49,14 @@ describe("previewRunCost", () => {
       cachedInputAvailable: true,
       estPerSprintUsd: 5,
       estTotalUsd: 40,
-      capUsd: 10,
-      willExceedCap: true,
-      recommendedMaxSprints: 2,
+      maxSprints: 8,
     });
-    expect(out).toMatch(/exceeds.*cap/i);
-    expect(out).toContain("--max-sprints 2");
+    expect(out).toContain("Cost estimate");
+    expect(out).toContain("$5.000");
+    expect(out).toContain("$40.00");
+    expect(out).toContain("prompt-cache priced");
+    expect(out).not.toMatch(/\bcap\b/i);
+    expect(out).not.toMatch(/--max-sprints|--max-cost/);
   });
 
   it("formatCostPreview surfaces unknown-pricing notice", () => {
@@ -108,10 +66,8 @@ describe("previewRunCost", () => {
       pricingKnown: false,
       cachedInputAvailable: false,
       estPerSprintUsd: 0,
-      estTotalUsd: 0,
-      capUsd: 50,
-      willExceedCap: false,
-      recommendedMaxSprints: 8,
+      estTotalUsd: null,
+      maxSprints: null,
     });
     expect(out).toMatch(/pricing not known/i);
   });

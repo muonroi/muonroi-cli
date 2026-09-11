@@ -39,8 +39,6 @@ import { SPRINT_EXECUTION_MARKER } from "../pil/layer6-output.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { logInteraction, logUIInteraction } from "../storage/index.js";
 import type { StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
-import { commitToProduct, release } from "../usage/ledger.js";
-import { CapBreachError } from "../usage/types.js";
 import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
 import type { SandboxSettings } from "../utils/settings.js";
@@ -48,8 +46,8 @@ import { runVerifyOrchestration, type VerifyAgentLike } from "../verify/orchestr
 import { appendIteration, readCriteria } from "./artifact-io.js";
 import { formatUnverifiedForSprintContext, readLedger } from "./assumption-ledger.js";
 import { readBacklog } from "./backlog-store.js";
-import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "./circuit-breakers.js";
-import { reserveForProduct } from "./cost-scoper.js";
+import { CB2_oscillation, CB3_verifyBlank } from "./circuit-breakers.js";
+import { recordProductSpend } from "./cost-scoper.js";
 import {
   criterionIdFromText,
   extractAcceptanceCriteria,
@@ -1203,14 +1201,10 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   const runDir = path.join(ctx.flowDir, "runs", ctx.runId);
   const cwd = ctx.cwd ?? runDir;
 
-  // ── Step 1: Cost projection (CB-1) DISABLED ───────────────────────────────
-  // Provider pricing is missing for several models (e.g. siliconflow/deepseek),
-  // so the EWMA projection becomes meaningless and halts sprints with bogus
-  // numbers like "projection $13200 exceeds headroom $50" when the real cap is
-  // $50 and nothing has actually been spent. Re-enable once per-provider price
-  // discovery + reliable usage→cost normalisation lands. The CB1_costProjection
-  // function and its unit tests are kept intact for that future re-wire.
-  void CB1_costProjection;
+  // ── Step 1: no cost projection ────────────────────────────────────────────
+  // CB-1 (halt when projected spend exceeds the cap's headroom) was deleted, not
+  // merely disabled: `/ideal` has no spend cap (user decision), so there is
+  // nothing to re-wire it to. Spend is still MEASURED for this sprint below.
 
   // N4(a) — snapshot the authoritative spend gauge at sprint entry so the
   // sprint's `Cost:` line in iterations.md is a MEASURED delta. It was
@@ -1425,7 +1419,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     `${carryOverContext}${focusContext}${assumptionContext}${projectContextStr}${backlogAnchor}\n` +
     `Goal: produce concrete edits and verifications that move the criteria toward "met".`;
 
-  const productLlm = createProductLlm(ctx.llm, ctx.runId, ctx.flags.maxCost);
+  const productLlm = createProductLlm(ctx.llm, ctx.runId);
   const sessionModelId =
     roleAssignments.get("Architect")?.modelId ?? roleAssignments.get("PO")?.modelId ?? ctx.sessionModelId;
 
@@ -1897,7 +1891,12 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         reviewModelId,
         fixModelId: ctx.sessionModelId,
         runIsolatedTask: ctx.runIsolatedTask,
-        maxRounds: Number.parseInt(process.env.MUONROI_IDEAL_ADHERENCE_ROUNDS ?? "2", 10) || 2,
+        // No default round ceiling (user decision: `/ideal` has no limits); the
+        // review ends on approval or when a fix round makes no progress. An
+        // explicit MUONROI_IDEAL_ADHERENCE_ROUNDS is still honoured.
+        maxRounds: process.env.MUONROI_IDEAL_ADHERENCE_ROUNDS
+          ? Number.parseInt(process.env.MUONROI_IDEAL_ADHERENCE_ROUNDS, 10) || undefined
+          : undefined,
       });
       idealTrace("sprint.adherence.after", {
         runId: ctx.runId,
@@ -2711,10 +2710,12 @@ function detectRoleFromSystem(system: string): string | undefined {
 }
 
 /**
- * Wraps a CouncilLLM with per-product reserve/commit semantics so every model
- * call is metered against BOTH the monthly and per-product ledgers (cost-scoper).
+ * Wraps a CouncilLLM so every model call's spend is METERED against the monthly
+ * and per-product ledgers (cost-scoper). It never refuses a call: `/ideal` has no
+ * spend cap (user decision). It used to reserve against `--max-cost` and the
+ * monthly cap first, and throw `Cost cap breached` on either breach.
  */
-function createProductLlm(base: CouncilLLM, runId: string, capUsd: number): CouncilLLM {
+export function createProductLlm(base: CouncilLLM, runId: string): CouncilLLM {
   return {
     // `onDiagnostics` (7th param) is forwarded so the council candidate-failure
     // forensics survive this wrapper. `signal` is deliberately NOT touched here:
@@ -2723,87 +2724,67 @@ function createProductLlm(base: CouncilLLM, runId: string, capUsd: number): Coun
     async generate(modelId, system, prompt, maxTokens, _onUsage, _signal, onDiagnostics) {
       const provider = detectProviderForModel(modelId);
       const estIn = Math.ceil((system.length + prompt.length) / 4);
-      const estOut = maxTokens ?? 2048;
-      const tok = await reserveForProduct(
-        { provider, model: modelId, estInputTokens: estIn, estOutputTokens: estOut },
-        runId,
-        capUsd,
-      );
-      if (tok instanceof CapBreachError) {
-        throw new Error(`Cost cap breached: ${tok.message}`);
-      }
       const startedAt = Date.now();
       // Capture real usage from the underlying council LLM via the onUsage
       // side-channel (added in Session 4). When the provider returns no usage
       // we fall back to chars/4 — preserves prior behavior.
       let captured: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | undefined;
-      try {
-        const text = await base.generate(
-          modelId,
-          system,
-          prompt,
-          maxTokens,
-          (u) => {
-            captured = u;
-          },
-          undefined,
-          onDiagnostics,
-        );
-        const actualIn = captured?.inputTokens && captured.inputTokens > 0 ? captured.inputTokens : estIn;
-        const actualOut =
-          captured?.outputTokens && captured.outputTokens > 0
-            ? captured.outputTokens
-            : Math.max(1, Math.ceil(text.length / 4));
-        await commitToProduct(tok, runId, actualIn, actualOut, undefined, {
+      const text = await base.generate(
+        modelId,
+        system,
+        prompt,
+        maxTokens,
+        (u) => {
+          captured = u;
+        },
+        undefined,
+        onDiagnostics,
+      );
+      const actualIn = captured?.inputTokens && captured.inputTokens > 0 ? captured.inputTokens : estIn;
+      const actualOut =
+        captured?.outputTokens && captured.outputTokens > 0
+          ? captured.outputTokens
+          : Math.max(1, Math.ceil(text.length / 4));
+      await recordProductSpend(
+        { provider, model: modelId, actualInputTokens: actualIn, actualOutputTokens: actualOut, estInputTokens: estIn },
+        runId,
+        {
           callsite: "sprint.generate",
           role: detectRoleFromSystem(system),
           systemChars: system.length,
           promptChars: prompt.length,
           cachedInputTokens: captured?.cachedInputTokens,
           durationMs: Date.now() - startedAt,
-        });
-        return text;
-      } catch (err) {
-        await release(tok).catch(() => undefined);
-        throw err;
-      }
+        },
+      );
+      return text;
     },
     async research(modelId, topic, conversationContext, signal) {
       const provider = detectProviderForModel(modelId);
       const estIn = Math.ceil((topic.length + conversationContext.length) / 4);
-      const estOut = 4096;
-      const tok = await reserveForProduct(
-        { provider, model: modelId, estInputTokens: estIn, estOutputTokens: estOut },
-        runId,
-        capUsd,
-      );
-      if (tok instanceof CapBreachError) {
-        throw new Error(`Cost cap breached: ${tok.message}`);
-      }
       const startedAt = Date.now();
       let captured: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | undefined;
-      try {
-        const text = await base.research(modelId, topic, conversationContext, signal, undefined, undefined, (u) => {
-          captured = u;
-        });
-        const actualIn = captured?.inputTokens && captured.inputTokens > 0 ? captured.inputTokens : estIn;
-        const actualOut =
-          captured?.outputTokens && captured.outputTokens > 0
-            ? captured.outputTokens
-            : Math.max(1, Math.ceil(text.length / 4));
-        await commitToProduct(tok, runId, actualIn, actualOut, undefined, {
+      const text = await base.research(modelId, topic, conversationContext, signal, undefined, undefined, (u) => {
+        captured = u;
+      });
+      const actualIn = captured?.inputTokens && captured.inputTokens > 0 ? captured.inputTokens : estIn;
+      const actualOut =
+        captured?.outputTokens && captured.outputTokens > 0
+          ? captured.outputTokens
+          : Math.max(1, Math.ceil(text.length / 4));
+      await recordProductSpend(
+        { provider, model: modelId, actualInputTokens: actualIn, actualOutputTokens: actualOut, estInputTokens: estIn },
+        runId,
+        {
           callsite: "sprint.research",
           role: "researcher",
           systemChars: topic.length,
           promptChars: conversationContext.length,
           cachedInputTokens: captured?.cachedInputTokens,
           durationMs: Date.now() - startedAt,
-        });
-        return text;
-      } catch (err) {
-        await release(tok).catch(() => undefined);
-        throw err;
-      }
+        },
+      );
+      return text;
     },
     // debate() delegates to base — cost metering will be added in Phase 15 Plan 02 when fully implemented.
     async debate(modelId, system, prompt, signal) {

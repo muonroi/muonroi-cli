@@ -1,12 +1,6 @@
 // src/product-loop/__tests__/discovery-recommender.test.ts
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  computeCostGuard,
-  councilRecommend,
-  leaderRecommend,
-  shouldFallbackToLeader,
-  withRateLimitBackoff,
-} from "../discovery-recommender.js";
+import { councilRecommend, leaderRecommend, withRateLimitBackoff } from "../discovery-recommender.js";
 
 function makeLeader(seq: Array<string | Error>) {
   const q = [...seq];
@@ -343,19 +337,10 @@ describe("discovery-recommender — 401 fast-fail", () => {
   });
 });
 
-describe("discovery-recommender — cost guard + 429", () => {
-  it("guard = max($2.50, 0.15 * capUsd)", () => {
-    expect(computeCostGuard(0)).toBe(2.5);
-    expect(computeCostGuard(10)).toBe(2.5);
-    expect(computeCostGuard(20)).toBe(3.0);
-    expect(computeCostGuard(50)).toBe(7.5);
-  });
-
-  it("shouldFallbackToLeader trips when cumulative + estimate exceeds guard", () => {
-    expect(shouldFallbackToLeader({ cumulative: 0, capUsd: 50 })).toBe(false);
-    expect(shouldFallbackToLeader({ cumulative: 7.2, capUsd: 50 })).toBe(true); // 7.20 + 0.45 > 7.50
-    expect(shouldFallbackToLeader({ cumulative: 2.1, capUsd: 10 })).toBe(true); // 2.10 + 0.45 > 2.50
-  });
+describe("discovery-recommender — 429", () => {
+  // The cost-guard tests (computeCostGuard / shouldFallbackToLeader) went with the
+  // guard itself: `/ideal` has no spend cap (user decision), and the guard had no
+  // live caller left (gather.ts only void-referenced it).
 
   it("withRateLimitBackoff retries 429 and succeeds on third attempt", async () => {
     const fn = vi
