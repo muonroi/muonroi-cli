@@ -221,3 +221,136 @@ describe("runUndebatedCriteriaGate — the askcard", () => {
     expect(decision).toMatchObject({ action: "council", unattended: true });
   });
 });
+
+/**
+ * The UX defect measured in session `2bd02af6e46f` / run `mtwjytbg20f2`.
+ *
+ *   06:22:24  askcard_open  optionLabels:["Take it back to the council", …]
+ *                           defaultIndex:0, recommendedLabel:"Take it back to the council"
+ *   06:29:45  askcard_answered  selectedOptionLabel:"Take it back to the council"
+ *   06:29:45  undebated_criteria_gate {"stage":"gate-resolved","action":"council"}
+ *   — last row of the session —
+ *
+ * The user read the RECOMMENDED label as "the system will now convene a council"
+ * and got a stop: *"leader có vẻ quyết định stop … đá tôi ra màn hình chat"*.
+ * The halt is correct; the words around it were not. Two separate defects:
+ *
+ *   1. the label named an action the system does not perform, and
+ *   2. it was the recommendation — while being the ONLY option with no forward
+ *      path, since `enforceUndebatedCriteriaGate` HONOURS a prior `council`
+ *      answer, so `/ideal resume` stops instantly and never re-asks
+ *      (pinned in undebated-criteria-record.test.ts).
+ */
+describe("the gate's words match what it does (session 2bd02af6e46f)", () => {
+  const two = [
+    { index: 0, criterion: NUGET },
+    { index: 3, criterion: VS_WARNING },
+  ];
+
+  function joinContent(chunks: StreamChunk[]): string {
+    return chunks.map((c) => (c.type === "content" ? (c.content ?? "") : "")).join("");
+  }
+
+  it("keeps the three option VALUES — they are already in persisted forensics rows", () => {
+    expect([UNDEBATED_OPTION_COUNCIL, UNDEBATED_OPTION_NARROW, UNDEBATED_OPTION_ACCEPT]).toEqual([
+      "undebated_council",
+      "undebated_narrow",
+      "undebated_accept",
+    ]);
+    expect(buildUndebatedQuestion(two).options.map((o) => o.value)).toEqual([
+      "undebated_council",
+      "undebated_narrow",
+      "undebated_accept",
+    ]);
+  });
+
+  it("the halt option's LABEL says the run stops — it does not promise a council", () => {
+    const council = buildUndebatedQuestion(two).options.find((o) => o.value === UNDEBATED_OPTION_COUNCIL);
+    expect(council).toBeDefined();
+    // The measured label. It reads as an action the system takes; it is not one.
+    expect(council?.label).not.toBe("Take it back to the council");
+    expect(council?.label.toLowerCase()).toContain("stop");
+    // …and it must not re-smuggle the same promise into the label either.
+    expect(council?.label.toLowerCase()).not.toMatch(/take .* back to .* council/);
+  });
+
+  it("the halt option NAMES the next command instead of gesturing at one", () => {
+    const council = buildUndebatedQuestion(two).options.find((o) => o.value === UNDEBATED_OPTION_COUNCIL);
+    expect(council?.description).toContain("/council");
+    // Resume is the one thing a user will reach for, and it is the one thing
+    // that does not work here. Silence about it sends them into the loop.
+    expect(council?.description).toContain("/ideal resume");
+  });
+
+  it("recommends the option that HAS a forward path, not the halt", () => {
+    // The attended recommendation and the unattended default are different
+    // questions. `narrow` is the only answer that both keeps the gate's
+    // guarantee (no sprint planned on an unargued goal) and lets the run move.
+    const card = buildUndebatedQuestion(two);
+    expect(card.options[card.defaultIndex]?.value).toBe(UNDEBATED_OPTION_NARROW);
+  });
+
+  it("emits that recommendation on the askcard the TUI renders", async () => {
+    const { chunks } = await drain(
+      runUndebatedCriteriaGate({
+        undebated: two,
+        respondToQuestion: vi.fn().mockResolvedValue(UNDEBATED_OPTION_NARROW),
+        timeoutMs: 5_000,
+      }),
+    );
+    const q = chunks.find((c) => c.type === "council_question")?.councilQuestion;
+    expect(q?.options?.length).toBe(3);
+    expect(q?.options?.[q.defaultIndex ?? -1]?.value).toBe(UNDEBATED_OPTION_NARROW);
+  });
+
+  it("the attended halt line reports the stop and names the way out", async () => {
+    const { chunks, decision } = await drain(
+      runUndebatedCriteriaGate({
+        undebated: two,
+        respondToQuestion: vi.fn().mockResolvedValue(UNDEBATED_OPTION_COUNCIL),
+        timeoutMs: 5_000,
+      }),
+    );
+    expect(decision).toMatchObject({ action: "council", unattended: false });
+    const text = joinContent(chunks);
+    // The measured line: an instruction to the human, phrased as a report.
+    expect(text).not.toContain("take the undebated criteria back to a council");
+    expect(text.toLowerCase()).toContain("stop");
+    expect(text).toContain("/council");
+    // This answer is persisted and honoured, so a resume will NOT continue.
+    expect(text).toContain("/ideal resume");
+  });
+
+  it("the UNATTENDED timeout still halts — and says the next resume will ask again", async () => {
+    // Must not regress: auto-accepting with nobody watching reproduces the exact
+    // defect the gate exists to catch. But an unattended halt writes NO
+    // resolution, so unlike the attended halt a later resume DOES re-ask — the
+    // two lines describe genuinely different situations and must not be shared.
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+    const { chunks, decision } = await drain(
+      runUndebatedCriteriaGate({ undebated: two, respondToQuestion: neverAnswers, timeoutMs: 20 }),
+    );
+    expect(decision).toMatchObject({ action: "council", unattended: true, answer: "" });
+    const text = joinContent(chunks);
+    expect(text).toContain("/ideal resume");
+    expect(text.toLowerCase()).toMatch(/ask(s| this| you)? again|asked again/);
+    expect(text).not.toContain("/council");
+  });
+
+  it("an explicit narrow / accept still proceeds, and neither line claims a council ran", async () => {
+    for (const [answer, action] of [
+      [UNDEBATED_OPTION_NARROW, "narrow"],
+      [UNDEBATED_OPTION_ACCEPT, "accept"],
+    ] as const) {
+      const { chunks, decision } = await drain(
+        runUndebatedCriteriaGate({
+          undebated: two,
+          respondToQuestion: vi.fn().mockResolvedValue(answer),
+          timeoutMs: 5_000,
+        }),
+      );
+      expect(decision).toMatchObject({ action, unattended: false });
+      expect(joinContent(chunks).toLowerCase()).not.toContain("council");
+    }
+  });
+});

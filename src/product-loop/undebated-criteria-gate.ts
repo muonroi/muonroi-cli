@@ -90,6 +90,32 @@ export const UNDEBATED_OPTION_NARROW = "undebated_narrow";
 export const UNDEBATED_OPTION_ACCEPT = "undebated_accept";
 
 /**
+ * The option the card RECOMMENDS to a human who is present — i.e. what
+ * `defaultIndex` points at, what Enter-on-open selects, and what headless
+ * `--yes` picks (`src/headless/council-answers.ts:108`).
+ *
+ * This is deliberately NOT the same answer as the unattended default, which is
+ * `council` (see `runUndebatedCriteriaGate`). Measured in session
+ * `2bd02af6e46f` / run `mtwjytbg20f2`: the card recommended the halt, the user
+ * took the recommendation, and the run ended — *"đá tôi ra màn hình chat"*.
+ *
+ * `council` is the wrong thing to recommend to someone who is there, because it
+ * is the one option with no forward path in the product:
+ *   - the gate does not convene a council, it stops the run (by design);
+ *   - `enforceUndebatedCriteriaGate` PERSISTS and later HONOURS that answer, so
+ *     `/ideal resume` stops instantly and never even re-shows this card;
+ *   - `/council` is a separate command whose conclusion is not written back to
+ *     this run's stance record, so it cannot clear the gate either.
+ *
+ * `narrow` is recommended instead because it is the only answer that keeps the
+ * gate's whole guarantee — no sprint is planned around a goal nobody examined —
+ * while letting the run move. `accept` is the measured defect and must never be
+ * the recommendation; the halt stays available, and stays the answer for every
+ * unclear input.
+ */
+export const UNDEBATED_RECOMMENDED_OPTION = UNDEBATED_OPTION_NARROW;
+
+/**
  * How long the gate waits for a human before applying the unattended default.
  * Generous on purpose: `/ideal` legitimately sits on approve cards for many
  * minutes (CLAUDE.md records a 17-minute wait that was NOT a hang), so a short
@@ -145,45 +171,83 @@ function shortLabel(c: string, max = 72): string {
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
 
+/**
+ * Build the card.
+ *
+ * Every string here is BEHAVIOUR, not decoration. The first option used to read
+ * "Take it back to the council" / "re-run the council pointed at these
+ * criteria", which names an action the system does not perform: it halts, and
+ * nothing re-runs. A label that describes a different system than the one
+ * running is the whole of the measured defect, so each option now says what
+ * happens when it is picked and, where the answer is "the run ends", which
+ * command actually moves it forward.
+ *
+ * On `convene_council`: the tool DOES exist on develop (registered in
+ * `src/tools/registry.ts` when `councilConfigured`), so the earlier belief that
+ * it was unmerged is wrong. It still cannot be promised here — it is a tool the
+ * MODEL calls inside a chat turn, it is not reachable from this generator, and
+ * its conclusion is not written back to this run's `undebated-criteria.json`,
+ * so it would not clear the gate. The `undebated_council` VALUE is kept exactly
+ * so that a future wiring (gate → convene_council → new stance rows) is a
+ * behaviour change here and not a re-plumb of every persisted forensics row.
+ */
 export function buildUndebatedQuestion(undebated: readonly UndebatedCriterion[]): {
   content: string;
   question: string;
   context: string;
   options: Array<{ label: string; description: string; value: string; kind: "choice" }>;
+  /** Index of `UNDEBATED_RECOMMENDED_OPTION` — what Enter and `--yes` select. */
+  defaultIndex: number;
 } {
   const n = undebated.length;
   const noun = `${n} pinned criteri${n === 1 ? "on" : "a"}`;
+  const them = n === 1 ? "it" : "them";
   // The criteria text itself, never a bare count: "2 of 5 unmet" is what the
   // old closing message said, and it is precisely why nobody acted on it.
   const list = undebated.map((u) => `${u.index + 1}. ${u.criterion}`).join("\n");
+  const options: Array<{ label: string; description: string; value: string; kind: "choice" }> = [
+    {
+      label: "Stop the run before scoping",
+      description:
+        `Ends this run — nothing is scheduled, and no council is convened: this stops the run, it does not start one. ` +
+        `To get ${them} argued, run /council yourself and then start a fresh /ideal. ` +
+        `This answer is recorded against the run, so /ideal resume stops here again instead of continuing.`,
+      value: UNDEBATED_OPTION_COUNCIL,
+      kind: "choice",
+    },
+    {
+      label: "Drop them from the scope",
+      // No "the original spec is kept" promise here: loop-driver.ts:1022 says
+      // debate-inputs.json keeps it, but loop-driver.ts:1243 deletes that file
+      // once scoping completes, so the claim is false by the time it matters.
+      description: `Recommended — scoping continues with ${them} removed, so no sprint is planned around an undebated goal.`,
+      value: UNDEBATED_OPTION_NARROW,
+      kind: "choice",
+    },
+    {
+      label: "Accept and proceed",
+      description:
+        `Continue with ${them} recorded as undebated and still open — sprints may then be planned around ${them}. ` +
+        `That is the outcome this gate exists to catch.`,
+      value: UNDEBATED_OPTION_ACCEPT,
+      kind: "choice",
+    },
+  ];
+  // Derived, never a literal: the recommendation is declared once, above.
+  const defaultIndex = Math.max(
+    0,
+    options.findIndex((o) => o.value === UNDEBATED_RECOMMENDED_OPTION),
+  );
   return {
     content:
       `**The debate ended without anyone arguing ${noun}.**\n` +
       `> Nobody spoke to: ${undebated.map((u) => shortLabel(u.criterion)).join("; ")}`,
     question:
       `No panelist took a position — for or against — on ${noun} the council was asked to settle. ` +
-      `Scoping would plan sprints against ${n === 1 ? "it" : "them"} anyway. How do you want to proceed?`,
+      `Scoping would plan sprints against ${them} anyway. How do you want to proceed?`,
     context: `Criteria nobody argued:\n${list}`,
-    options: [
-      {
-        label: "Take it back to the council",
-        description: `Stop before scoping — re-run the council pointed at ${n === 1 ? "this criterion" : "these criteria"}.`,
-        value: UNDEBATED_OPTION_COUNCIL,
-        kind: "choice",
-      },
-      {
-        label: "Drop them from the scope",
-        description: `Continue to scoping with ${n === 1 ? "it" : "them"} removed, so no sprint is planned around an undebated goal.`,
-        value: UNDEBATED_OPTION_NARROW,
-        kind: "choice",
-      },
-      {
-        label: "Accept and proceed",
-        description: `Continue with ${n === 1 ? "it" : "them"} recorded as undebated and still open.`,
-        value: UNDEBATED_OPTION_ACCEPT,
-        kind: "choice",
-      },
-    ],
+    options,
+    defaultIndex,
   };
 }
 
@@ -196,7 +260,12 @@ export function buildUndebatedQuestion(undebated: readonly UndebatedCriterion[])
  * "waiting for a human" from "hung", because a modal pause writes no
  * `interaction_logs` row, so the pause MUST be visible on the event stream.
  *
- * ## Unattended runs
+ * ## Unattended runs — a SEPARATE question from what to recommend
+ *
+ * These were one decision and had to stop being one. The unattended default is
+ * "what happens when nobody is there"; the recommendation (`defaultIndex`, see
+ * `UNDEBATED_RECOMMENDED_OPTION`) is "what to suggest to someone who is". They
+ * are answered differently and for different reasons.
  *
  * A run with nobody watching must not block forever, and both available defaults
  * are dangerous in opposite directions:
@@ -207,23 +276,41 @@ export function buildUndebatedQuestion(undebated: readonly UndebatedCriterion[])
  *   - **auto-halt**: an unattended run dies at a point a human would probably
  *     have waved through, losing the forward progress of the whole debate.
  *
- * This picks **halt** (`action: "council"`), for three reasons:
+ * The unattended default stays **halt** (`action: "council"`), for three reasons:
  *   1. Proceeding is the measured bug. A default that re-runs the bug wherever
  *      nobody is looking is not a gate.
- *   2. A halt is cheap and recoverable: the run dir and the debate checkpoint
- *      are already persisted, `/ideal --resume` exists, and the halt surfaces as
- *      `run-finished{outcome:"halted"}`. One resume, versus a whole sprint spent
- *      implementing a goal the council never examined (measured: sprint 2,
- *      "Package all formatting analyzers into … NuGet").
+ *   2. A halt is cheap and recoverable *on this path specifically*: an
+ *      unattended timeout writes NO resolution (see `enforceUndebatedCriteriaGate`),
+ *      so `/ideal resume` re-asks the question properly the next time a human is
+ *      present. One resume, versus a whole sprint spent implementing a goal the
+ *      council never examined (measured: sprint 2, "Package all formatting
+ *      analyzers into … NuGet").
  *   3. A wrong halt is loud and gets fixed; a wrong accept is silent and shipped.
  *
- * The same polarity governs every other unclear input: only the two explicit
- * proceed values (`undebated_narrow`, `undebated_accept`) proceed. An Escape
- * (`COUNCIL_ANSWER_DISMISSED` — the repo's convention for "take NO action",
- * src/council/index.ts:2138), an empty submit (which the card's `defaultIndex:0`
- * already points at "take it back to the council"), and any value the UI drifts
- * to all resolve to `council`. Permission to build sprints on an undebated goal
- * must be given explicitly; anything else fails safe and loud.
+ * Corrections to what reason 2 used to claim, both checked against develop:
+ *   - the command is **`/ideal resume [runId]`** (`src/ui/slash/ideal.ts:87`).
+ *     `/ideal --resume <path>` is a different feature — the BB scaffold
+ *     gate-failure handler in `src/scaffold/resume-from-gate-failures.ts`.
+ *   - `run-finished{outcome:"halted"}` is real (`outcomeFromResult` maps
+ *     `stage:"halted"`, `src/product-loop/index.ts:226`) but it is an
+ *     **agent-mode LiveEvent only** — `emitRunFinished` no-ops without
+ *     `__muonroiAgentRuntime`, and it is never written to `interaction_logs`.
+ *     It is what a harness observer sees; it is NOT what tells the human
+ *     anything. Only the content lines below do that, which is why they carry
+ *     the next step.
+ *   - an ATTENDED halt is the opposite of recoverable-by-resume: it IS
+ *     persisted, and a later resume honours it and stops again without
+ *     re-asking. Recommending it (as the card used to) pointed the user at the
+ *     only option with no forward path.
+ *
+ * The fail-safe polarity is unchanged, and is independent of the
+ * recommendation: only the two explicit proceed values (`undebated_narrow`,
+ * `undebated_accept`) proceed. An Escape (`COUNCIL_ANSWER_DISMISSED` — the
+ * repo's convention for "take NO action", src/council/index.ts:2138), an empty
+ * submit, and any value the UI drifts to all resolve to `council`. Moving
+ * `defaultIndex` changes which option is pre-selected, not what an unclear
+ * answer means: permission to build sprints on an undebated goal must still be
+ * given by name.
  */
 export async function* runUndebatedCriteriaGate(opts: {
   undebated: readonly UndebatedCriterion[];
@@ -246,18 +333,23 @@ export async function* runUndebatedCriteriaGate(opts: {
       context: card.context,
       isRequired: false,
       options: card.options,
-      defaultIndex: 0,
+      defaultIndex: card.defaultIndex,
     },
   } as StreamChunk;
 
   const answer = await awaitAnswer(respondToQuestion, questionId, timeoutMs);
 
   if (answer === null) {
+    // Unattended. Nothing is persisted for a timeout, so — unlike the attended
+    // halt below — the question is still genuinely open and the next resume
+    // asks it. Say that, or the two identical-looking stops teach the user that
+    // resume never works.
     yield {
       type: "content",
       content:
-        `\n  ↳ No answer within ${Math.round(timeoutMs / 1000)}s — stopping before scoping rather than ` +
-        `planning sprints against ${undebated.length === 1 ? "a criterion" : "criteria"} the council never argued.\n`,
+        `\n  ↳ No answer within ${Math.round(timeoutMs / 1000)}s — run stopped before scoping rather than ` +
+        `planning sprints against ${undebated.length === 1 ? "a criterion" : "criteria"} the council never argued.\n` +
+        `     Nobody answered, so nothing was recorded: /ideal resume will ask this again.\n`,
     } as StreamChunk;
     return { action: "council", unattended: true, answer: "" };
   }
@@ -276,12 +368,24 @@ export async function* runUndebatedCriteriaGate(opts: {
     } as StreamChunk;
     return { action: "accept", unattended: false, answer };
   }
-  // Everything else — the explicit "back to the council" pick, an Escape
-  // (COUNCIL_ANSWER_DISMISSED), an empty submit, or a value the UI drifted to —
-  // stops. See the polarity note above: proceeding must be asked for by name.
+  // Everything else — the explicit stop, an Escape (COUNCIL_ANSWER_DISMISSED),
+  // an empty submit, or a value the UI drifted to — stops. See the polarity
+  // note above: proceeding must be asked for by name.
+  //
+  // The line this replaces read "take the undebated criteria back to a council":
+  // an instruction to the human, phrased as if the system had done something.
+  // It had not. It stopped, and the user was returned to the chat prompt with
+  // no idea what to do next (session 2bd02af6e46f). Report the stop, then name
+  // the command — including the one that will NOT work, since a recorded answer
+  // makes `/ideal resume` stop here again without re-asking.
   yield {
     type: "content",
-    content: `\n  ↳ Stopping before scoping — take the undebated criteria back to a council.\n`,
+    content:
+      `\n  ↳ Run stopped before scoping. Nothing was scheduled, and no council was convened — ` +
+      `this stops the run, it does not start one.\n` +
+      `     Next: run /council on ${undebated.length === 1 ? "the criterion" : "the criteria"} above to get ` +
+      `${undebated.length === 1 ? "it" : "them"} argued, then start a fresh /ideal.\n` +
+      `     This answer is recorded against the run, so /ideal resume stops here again rather than continuing.\n`,
   } as StreamChunk;
   return { action: "council", unattended: false, answer };
 }
@@ -546,11 +650,20 @@ export async function* enforceUndebatedCriteriaGate(opts: {
       decidedAt: prior.decidedAt,
       count: undebated.length,
     });
+    // A prior `council` answer is the one that dead-ends a resume: the run
+    // stops instantly and the card is never re-shown, so without this line the
+    // user sees an unexplained loop. Name the exit here too, not just on the
+    // ask path they will not reach again.
+    const stuck =
+      prior.action === "council"
+        ? `     This run stays stopped — /ideal resume keeps stopping here rather than re-asking. ` +
+          `To move forward: run /council on the criteria, then start a fresh /ideal run.\n`
+        : "";
     yield {
       type: "content",
       content:
         `\n  ↳ Undebated criteria: honouring the answer already given for this run ` +
-        `(${prior.action}, ${prior.decidedAt}) — not asking again.\n`,
+        `(${prior.action}, ${prior.decidedAt}) — not asking again.\n${stuck}`,
     } as StreamChunk;
     return { proceed: prior.action !== "council", source: "honoured", action: prior.action, undebated };
   }

@@ -208,6 +208,28 @@ describe("F8b — enforceUndebatedCriteriaGate", () => {
     expect(outcome).toMatchObject({ proceed: false, source: "honoured", action: "council" });
   });
 
+  it("tells the user WHY the honoured stop cannot be resumed past, and what to run instead", async () => {
+    // The dead end measured in session 2bd02af6e46f: the human picks the halt,
+    // then `/ideal resume` stops instantly — without even re-showing the card,
+    // because the answer is honoured. The line that prints here is the ONLY
+    // thing standing between the user and an unexplained loop, so it must name
+    // the way out rather than restate the stop.
+    await writeUndebatedStanceRecord(runDir, [ARGUED, SILENT]);
+    await drive(
+      enforceUndebatedCriteriaGate({
+        runDir,
+        respondToQuestion: vi.fn().mockResolvedValue(UNDEBATED_OPTION_COUNCIL),
+        timeoutMs: 5_000,
+      }),
+    );
+    const { chunks } = await drive(enforceUndebatedCriteriaGate({ runDir, respondToQuestion: vi.fn(), timeoutMs: 0 }));
+    const text = chunks.map((c) => (c.type === "content" ? (c.content ?? "") : "")).join("");
+    expect(text).toContain("/council");
+    // A fresh run is the forward path; resuming this one is not.
+    expect(text).toContain("/ideal");
+    expect(text.toLowerCase()).toMatch(/resume (will|stops|keeps)|stops here again|not continue/);
+  });
+
   it("does NOT persist the unattended default — nobody answered, so nothing is honoured", async () => {
     await writeUndebatedStanceRecord(runDir, [ARGUED, SILENT]);
     const never = vi.fn().mockImplementation(() => new Promise<string>(() => {}));
