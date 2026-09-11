@@ -8,6 +8,7 @@ import { pickCouncilTaskModel } from "./leader.js";
 import { tracedAsync, tracedGenerate, tracedGenerateWithFallback } from "./llm.js";
 import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
 import { buildClarificationPrompt, buildReadinessJudgePrompt, buildSpecSynthesisPrompt } from "./prompts.js";
+import { decideInternetFirst } from "./research-mode.js";
 import type { ClarifiedSpec, CouncilLLM, QuestionResponder } from "./types.js";
 
 /** P5: Hard cap on clarification rounds regardless of judge verdict. */
@@ -309,6 +310,14 @@ export async function* researchScopeForClarification(
   llm: CouncilLLM,
   signal: AbortSignal | undefined,
   reachableModels: string[],
+  /**
+   * HINT into the research-mode decision — the workspace has no source to
+   * ground in. Defaults to false (codebase-first), which is the safe reading
+   * for any caller that does not know: grounding in a repo that exists is
+   * never wrong, and the source-preference block names the external tools in
+   * BOTH modes now. See research-mode.ts.
+   */
+  repoIsEmpty = false,
 ): AsyncGenerator<StreamChunk, string, unknown> {
   if (process.env.MUONROI_CLARIFY_RESEARCH_FIRST === "0") return "";
   if (signal?.aborted) return "";
@@ -355,7 +364,12 @@ export async function* researchScopeForClarification(
     const brief = yield* tracedAsync(
       () =>
         llm.research(researchModel, goal, conversationContext, signal, undefined, {
-          internetFirst: webTier !== "none",
+          // Same rule the council debate's research phase follows — one
+          // decision function, two call sites. This used to be
+          // `webTier !== "none"` alone, which declared internet-first inside a
+          // 1,557-file repo while runCouncilV2 used an unrelated rule
+          // (`projectInfo.isEmpty`) for the same decision. See research-mode.ts.
+          internetFirst: decideInternetFirst({ webCapable: webTier !== "none", repoIsEmpty }),
         }),
       { phase: "clarify", label: "Scope research" },
     );
@@ -402,6 +416,11 @@ export async function* runClarification(
    * thus a meaningful leader eval) instead of degrading to one generic criterion.
    */
   fallbackModels: string[] = [],
+  /**
+   * HINT forwarded to the scope-research call — the workspace has no source to
+   * ground in. Defaults to false (codebase-first). See research-mode.ts.
+   */
+  repoIsEmpty = false,
 ): AsyncGenerator<StreamChunk, ClarifiedSpec, unknown> {
   // P5: use MAX_CLARIFY_ROUNDS (12) as the hard cap; respect explicit override
   // from callers that pass maxRounds (e.g. tests that want old 3-round behavior).
@@ -428,6 +447,7 @@ export async function* runClarification(
     llm,
     signal,
     fallbackModels,
+    repoIsEmpty,
   );
   if (scopeBrief) {
     conversationContext = `${conversationContext}${conversationContext ? "\n\n" : ""}## Scope Research\n${scopeBrief}`;

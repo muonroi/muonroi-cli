@@ -1,4 +1,5 @@
 import { buildStackLockSection } from "./decisions-lock.js";
+import { buildResearchSourcePreference } from "./research-mode.js";
 import type { ClarifiedSpec, DebatePlan, DebateStance, OutputSection, OutputShape } from "./types.js";
 
 // ── Clarification prompts ────────────────────────────────────────────────────
@@ -1075,14 +1076,11 @@ export function buildResearchSystemPrompt(hasUrl: boolean, internetFirst = false
       `before reporting Frontend Findings. Do not skip this step.\n`
     : "";
 
-  const modeBlock = internetFirst
-    ? `\n## Research Mode: INTERNET-FIRST\n` +
-      `The workspace has no existing source code. Prefer internet search (tavily, web-fetch, ` +
-      `context7 docs) and official documentation. Do NOT spend cycles grep-ing an empty repo. ` +
-      `If browser/search tools are unavailable, state the gap explicitly under "Research Gap".\n`
-    : `\n## Research Mode: CODEBASE-FIRST\n` +
-      `The workspace contains source code. Investigate it first (grep, file read, ` +
-      `repo-deep-map). Use the internet only to fill gaps the codebase cannot answer.\n`;
+  // Source preference is declared ONCE in research-mode.ts and rendered
+  // identically by the isolated explore research path (debate.ts) — the two
+  // used to carry independent copies, and only the internet-first copy named
+  // any external tool. See research-mode.ts for the measured cost of that.
+  const modeBlock = `\n${buildResearchSourcePreference(internetFirst)}`;
 
   return (
     `You are a research specialist. Gather FACTS using available tools.\n` +

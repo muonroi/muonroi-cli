@@ -570,8 +570,18 @@ export interface CouncilConfig {
    * user-facing skip card. Undefined for direct runDebate callers/tests (they re-evaluate).
    */
   leaderNeedsResearch?: boolean;
-  /** When true, the working directory has no source code yet — research prompt prefers internet sources. */
-  internetFirst?: boolean;
+  /**
+   * When true, the working directory has no source code yet.
+   *
+   * This is a HINT into the research-mode decision, not the decision itself:
+   * `runDebate` combines it with the web tier that `pickResearchWebModel`
+   * reports at each research call (`decideInternetFirst`, research-mode.ts).
+   * It was previously named `internetFirst` and WAS the whole decision, which
+   * let an empty workspace with no Tavily key and no web-native model render
+   * "lead with documentation and search" next to research()'s own
+   * "no working web-search capability" gap warning.
+   */
+  repoIsEmpty?: boolean;
   /**
    * When true, the turn is an out-of-repo ("external") question: runDebate skips
    * the research phase AND grounding-verify so no council sub-path reads the repo.

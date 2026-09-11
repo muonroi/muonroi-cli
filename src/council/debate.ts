@@ -34,6 +34,7 @@ import {
   buildRoundSummaryPrompt,
   type LeaderPriorVerdict,
 } from "./prompts.js";
+import { buildResearchSourcePreference, decideInternetFirst } from "./research-mode.js";
 import { buildStanceRows } from "./stance.js";
 import type {
   ClarifiedSpec,
@@ -531,9 +532,11 @@ async function runResearchIsolated(
     conversationContext.length > 4000
       ? `${conversationContext.slice(0, 4000)}\n…[context truncated]`
       : conversationContext;
-  const sourcePref = options.internetFirst
-    ? "This is a greenfield task with little/no local source: PREFER web + documentation sources (use web_search / fetch tools if available), then any local files."
-    : "PREFER grounding every claim in THIS repo's code — cite concrete file:line. Use web sources only to fill genuine gaps.";
+  // Shared with buildResearchSystemPrompt (prompts.ts) — see research-mode.ts.
+  // The old local copy named web_search only in the greenfield branch, so the
+  // repo-first branch (the one that runs on every existing repo) pointed at no
+  // external tool at all.
+  const sourcePref = buildResearchSourcePreference(options.internetFirst === true);
   const prompt =
     `You are grounding a council debate with EVIDENCE. Research the question below and return concise, sourced findings.\n\n` +
     `## Question\n${topic}\n\n` +
@@ -796,7 +799,11 @@ export async function* runDebate(
   const turnCorrelationId = config.runId ?? "council";
   const researchSkipOverride = config.researchSkipOverride === true;
   const leaderNeedsResearch = config.leaderNeedsResearch;
-  const internetFirst = config.internetFirst === true;
+  // HINT only — "is there local source to prefer?". The research MODE is
+  // resolved per research call by decideInternetFirst, against the accurate,
+  // blocklist-aware web tier pickResearchWebModel reports there. See
+  // research-mode.ts for why neither signal decides this alone.
+  const repoIsEmpty = config.repoIsEmpty === true;
   const externalTopic = config.externalTopic === true;
   const costAware = config.costAware === true;
   // Feature B — resolved council debate language. The chosen language IS the
@@ -891,6 +898,10 @@ export async function* runDebate(
           `Configure a native-web model or a Tavily API key for grounded web research.\n`,
       } as StreamChunk;
     }
+    // Resolved HERE, not upstream: webTier is the blocklist-aware answer to
+    // "can we actually research the web on this call?", and repoIsEmpty is the
+    // hint about whether anything local exists to prefer.
+    const internetFirst = decideInternetFirst({ webCapable: webTier !== "none", repoIsEmpty });
     yield phaseStart({
       phaseId: "phase:research",
       kind: "research",
@@ -2036,7 +2047,7 @@ export async function* runDebate(
               enrichedContext,
               signal,
               (t) => midTraces.push(t),
-              {},
+              { internetFirst: decideInternetFirst({ webCapable: midWebTier !== "none", repoIsEmpty }) },
               fallbackPool,
               config.runIsolatedTask,
             ),

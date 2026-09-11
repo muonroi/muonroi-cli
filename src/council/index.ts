@@ -974,7 +974,13 @@ export async function* runCouncil(
   const conversationContext = projectInfo.snapshot
     ? `## Current Project\n${projectInfo.snapshot}\n\n---\n\n${baseContext}`
     : baseContext;
-  const internetFirst = projectInfo.isEmpty;
+  // A HINT, not the research-mode decision. "Is the repo empty?" is unrelated
+  // to "where does the answer live?", and using it as the determinant meant the
+  // larger the repo the harder research steered away from external sources —
+  // exactly where third-party contracts bite. Both research paths now resolve
+  // the mode with decideInternetFirst (research-mode.ts) at the call site,
+  // against the web tier they actually have.
+  const repoIsEmpty = projectInfo.isEmpty;
   const active: CouncilParticipant[] = participants.map((p) => ({ ...p, position: "" }));
 
   if (userAborted()) {
@@ -1045,6 +1051,9 @@ export async function* runCouncil(
         undefined,
         costAware,
         participants.map((p) => p.model),
+        // Same hint the debate research phase gets — so scope research and
+        // debate research resolve the mode identically (research-mode.ts).
+        repoIsEmpty,
       );
       let clarifyResult: IteratorResult<StreamChunk, ClarifiedSpec>;
       do {
@@ -1145,7 +1154,7 @@ export async function* runCouncil(
     // ROI: when the clarifier judged the spec ready (high confidence, no gaps),
     // the approve card is a rubber-stamp — auto-approve after showing the brief.
     const preflightGen = runPreflight(spec, participants, researchNeeded, respondToPreflight, {
-      repoEmpty: internetFirst,
+      repoEmpty: repoIsEmpty,
       researchOverridable: true,
       // An agent-convened run auto-approves the pre-debate plan card too: the
       // agent already decided to convene and no human is there to answer, so a
@@ -1215,7 +1224,7 @@ export async function* runCouncil(
       if (leaderNeedsResearch) {
         yield {
           type: "content",
-          content: `\n  ↳ Leader recommends research${internetFirst ? " (internet-first — empty workspace)" : " (codebase-first)"} — running it.\n`,
+          content: `\n  ↳ Leader recommends research${repoIsEmpty ? " (empty workspace — internet-first if a web tier is reachable)" : " (codebase-first)"} — running it.\n`,
         };
       }
     } catch (err) {
@@ -1466,7 +1475,7 @@ export async function* runCouncil(
       signal: options?.signal,
       researchSkipOverride,
       leaderNeedsResearch,
-      internetFirst,
+      repoIsEmpty,
       externalTopic,
       // S1 — a "cheap run" pick at the launch card flips this on for the debate.
       costAware: launchCostAware,
