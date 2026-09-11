@@ -10,6 +10,7 @@ function freshState(max: number, dedupEnabled = true): SubAgentCapState {
     exhausted: false,
     dedupHits: 0,
     seenHashes: new Map(),
+    staleReserves: 0,
     callIndex: 0,
     dedupEnabled,
     dedupMinChars: 500,

@@ -111,7 +111,7 @@ import {
   STALL_ERROR_MESSAGE,
   TOOL_FAILURE_LOOP_ABORT_REASON,
 } from "./stall-watchdog.js";
-import { wrapToolSetWithCap } from "./sub-agent-cap.js";
+import { noteElidedForCap, type SubAgentCapState, wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { applyAnthropicPromptCaching, compactSubAgentMessages } from "./subagent-compactor.js";
 import { buildSubAgentStepData, isSubAgentStepMeterEnabled } from "./subagent-step-meter.js";
 import { foldMidConversationSystemMessages } from "./system-message-fold.js";
@@ -176,6 +176,9 @@ export interface StreamRunnerDeps {
     childTools: ToolSet;
     maxSteps: number;
     initialDetail: string;
+    /** Cap dedup ledger for this invocation — the batch loop compacts too, and
+     *  a pointer whose payload that compaction elided is a dead pointer. */
+    subAgentCapState: SubAgentCapState;
     onActivity?: (detail: string) => void;
     signal?: AbortSignal;
   }): Promise<ToolResult>;
@@ -205,6 +208,13 @@ export interface PreparedSubAgentCall {
   lastActivity: string;
   maxSteps: number;
   closeMcp?: () => Promise<void>;
+  /**
+   * The cumulative cap's own dedup ledger for this invocation. runStream needs
+   * it so the B3 compactor can invalidate pointers whose payload it just elided
+   * — the cap mints `[dup of call #N …]` pointers and cannot otherwise learn
+   * that prepareStep removed the anchor from the model's view.
+   */
+  subAgentCapState: SubAgentCapState;
   /** True when caller should short-circuit to runTaskRequestBatch. */
   useBatchApi: boolean;
 }
@@ -535,6 +545,7 @@ export class StreamRunner {
         lastActivity,
         maxSteps,
         closeMcp,
+        subAgentCapState: subAgentCap.state,
         useBatchApi: this.deps.isBatchApiEnabled(),
       },
     };
@@ -775,6 +786,12 @@ export class StreamRunner {
           keepToolIds: subKeepToolIds.length ? subKeepToolIds : undefined,
           persistArtifact: persistSubArtifact,
           stripOldReasoning: isReasoningModel,
+          // Keep both dedup ledgers honest: anything elided here left the
+          // model's view, so no pointer from either layer may name it any more.
+          onElide: (ids) => {
+            noteElidedForCap(prepared.subAgentCapState, ids);
+            this.deps.getCrossTurnDedup()?.noteElided(ids);
+          },
         });
         if (compacted !== stripped) recordCompaction(stepNumber);
         // Phase 4A — scope reminder injection for the sub-agent loop.
@@ -1180,6 +1197,7 @@ export class StreamRunner {
           childTools: prepared.childTools,
           maxSteps: prepared.maxSteps,
           initialDetail: prepared.initialDetail,
+          subAgentCapState: prepared.subAgentCapState,
           onActivity,
           signal,
         });

@@ -180,17 +180,9 @@ describe("StreamRunner — DI surface", () => {
       setCurrentCallId: trip,
       setLastProviderOptionsShape: trip,
       getSessionId: trip as unknown as () => string | undefined,
-      runTaskRequestBatch: trip as unknown as (args: {
-        request: TaskRequest;
-        childMessages: ModelMessage[];
-        childSystem: string;
-        childRuntime: ResolvedModelRuntime;
-        childTools: Record<string, never>;
-        maxSteps: number;
-        initialDetail: string;
-        onActivity?: (detail: string) => void;
-        signal?: AbortSignal;
-      }) => Promise<ToolResult>,
+      // Derive the stub's type from the DI surface itself — an inline copy of
+      // the arg shape silently drifts every time the surface gains a field.
+      runTaskRequestBatch: trip as unknown as StreamRunnerDeps["runTaskRequestBatch"],
     });
     expect(runner).toBeInstanceOf(StreamRunner);
     expect(touched).toBe(0);

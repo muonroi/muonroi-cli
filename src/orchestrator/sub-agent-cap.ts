@@ -45,6 +45,7 @@
 import { createHash } from "node:crypto";
 import type { ToolSet } from "ai";
 import { isGuardRejectableCall } from "../tools/arg-guard.js";
+import { anchorIsProvablyGone, type DedupCallContext, readCallContext, toIdSet } from "./tool-result-visibility.js";
 
 /**
  * H5: the cross-turn dedup (C3) wraps this cap on the OUTSIDE, so it would
@@ -121,8 +122,22 @@ export interface SubAgentCapState {
   exhausted: boolean;
   /** Number of duplicate-output detections (telemetry / tests). */
   dedupHits: number;
-  /** Internal: short-hash → first call index, for "see call #N" pointers. */
-  seenHashes: Map<string, number>;
+  /**
+   * Internal: short-hash → the anchor occurrence this layer would point at.
+   *
+   * `anchorToolCallId` is what makes the pointer resolvable at all. The old
+   * pointer named only `callIndex` — an internal counter that appears NOWHERE in
+   * the model's context, so even a live payload could not be located from it,
+   * and `retrieve_tool_result` (keyed on tool_call_id) could not fetch it.
+   */
+  seenHashes: Map<string, { callIndex: number; anchorToolCallId?: string }>;
+  /**
+   * Times full content was re-served because the anchor a pointer would have
+   * named was PROVEN gone from the model's view. Each one is a dead-pointer
+   * loop that did not happen (measured: nine identical bash calls, all answered
+   * with `[dup of call #N — reuse it]` after compaction had removed call #N).
+   */
+  staleReserves: number;
   /** Internal: call counter for stable pointers. */
   callIndex: number;
   /** Internal: feature flags from options. */
@@ -153,7 +168,7 @@ function shortHash(text: string): string {
   return createHash("sha1").update(text).digest("hex").slice(0, 12);
 }
 
-export function compressForCap(state: SubAgentCapState, raw: string): string {
+export function compressForCap(state: SubAgentCapState, raw: string, call?: DedupCallContext): string {
   const hardCeiling = state.hardMax ?? state.max;
   if (state.exhausted || state.cumulative >= hardCeiling) {
     state.exhausted = true;
@@ -170,16 +185,37 @@ export function compressForCap(state: SubAgentCapState, raw: string): string {
   // re-runs the same grep mid-loop.
   if (state.dedupEnabled && raw.length >= state.dedupMinChars) {
     const hash = shortHash(raw);
-    const firstSeen = state.seenHashes.get(hash);
-    if (firstSeen !== undefined) {
+    const anchor = state.seenHashes.get(hash);
+    // A pointer may only be minted while the payload it names is still in the
+    // history the model receives. The in-loop compactor elides older tool
+    // results inside this very invocation, and the cross-turn compaction drops
+    // them outright — either way the anchor goes away while this map does not,
+    // and the agent is then told to "reuse" something it cannot read. It cannot
+    // obtain the data and cannot stop asking: measured as nine identical bash
+    // calls in a row, each answered with a 29-char dead pointer.
+    if (anchor && anchorIsProvablyGone(anchor.anchorToolCallId, call)) {
+      state.seenHashes.delete(hash);
+      state.staleReserves += 1;
+      // Fall through to normal compression: the content is re-served and
+      // re-anchored below, to a copy the model can actually see.
+    } else if (anchor) {
       state.dedupHits += 1;
-      // F4 — short marker (~50 chars vs ~150). Hash and length are nice-to-
-      // have but the LLM only needs "this is a known duplicate of call #N".
-      const stub = `[dup of call #${firstSeen} — reuse it]`;
+      // F4 — short marker (~50 chars vs ~150), now carrying the tool_call_id.
+      //
+      // The id is not a nicety. `callIndex` is a counter private to THIS cap
+      // instance: it is never written into any message, so "call #237" names
+      // nothing the model has ever seen, and `retrieve_tool_result` — keyed on
+      // tool_call_id — cannot look it up either. That made this pointer
+      // unresolvable EVEN WHEN THE PAYLOAD WAS STILL LIVE. Compaction did not
+      // create the trap; it only guaranteed that following the pointer was
+      // impossible rather than merely useless. Anyone tempted to shorten this
+      // marker again: dropping the id restores a pointer to nowhere.
+      const id = anchor.anchorToolCallId ? ` (id=${anchor.anchorToolCallId})` : "";
+      const stub = `[dup of call #${anchor.callIndex}${id} — reuse it]`;
       state.cumulative += stub.length;
       return stub;
     }
-    state.seenHashes.set(hash, state.callIndex);
+    state.seenHashes.set(hash, { callIndex: state.callIndex, anchorToolCallId: call?.toolCallId });
   }
 
   const ratio = state.cumulative / state.max;
@@ -208,9 +244,9 @@ export function compressForCap(state: SubAgentCapState, raw: string): string {
   return out;
 }
 
-function compressResult(state: SubAgentCapState, raw: unknown): unknown {
+function compressResult(state: SubAgentCapState, raw: unknown, call?: DedupCallContext): unknown {
   if (typeof raw === "string") {
-    return compressForCap(state, raw);
+    return compressForCap(state, raw, call);
   }
   if (raw && typeof raw === "object") {
     const obj = raw as Record<string, unknown>;
@@ -219,7 +255,7 @@ function compressResult(state: SubAgentCapState, raw: unknown): unknown {
       // H5: stash the RAW pre-cap output under a Symbol so the outer cross-turn
       // dedup keys off it (not the trimmed, marker-bearing capped output). The
       // Symbol never serializes to the model wire.
-      return { ...obj, output: compressForCap(state, rawOutput), [RAW_FOR_DEDUP]: rawOutput };
+      return { ...obj, output: compressForCap(state, rawOutput, call), [RAW_FOR_DEDUP]: rawOutput };
     }
     // MCP tool result shape: { type: "content", value: [{type:"text", text}, ...] }.
     // Without this branch the whole payload escaped the cumulative tracker —
@@ -235,7 +271,7 @@ function compressResult(state: SubAgentCapState, raw: unknown): unknown {
           (part as { type?: unknown }).type === "text" &&
           typeof (part as { text?: unknown }).text === "string"
         ) {
-          return { ...(part as object), text: compressForCap(state, (part as { text: string }).text) };
+          return { ...(part as object), text: compressForCap(state, (part as { text: string }).text, call) };
         }
         return part;
       });
@@ -267,7 +303,7 @@ function wrapInternal(tools: ToolSet, state: SubAgentCapState): ToolSet {
         // malformed shape instead of repairing it.
         if (isGuardRejectableCall(tool, name, input)) return await innerExecute(input, ctx);
         const result = await innerExecute(input, ctx);
-        return compressResult(state, result);
+        return compressResult(state, result, readCallContext(ctx));
       },
     } as ToolSet[string];
   }
@@ -298,6 +334,7 @@ export function wrapToolSetWithCap(
     exhausted: false,
     dedupHits: 0,
     seenHashes: new Map(),
+    staleReserves: 0,
     callIndex: 0,
     dedupEnabled: opts.dedupRepeatOutputs ?? true,
     dedupMinChars: opts.dedupMinChars ?? DEFAULT_DEDUP_MIN_CHARS,
@@ -312,6 +349,30 @@ export function wrapToolSetWithCap(
     state,
     rewrap: (next: ToolSet) => wrapInternal(next, state),
   };
+}
+
+/**
+ * A compaction layer reports tool results it removed from the model's view.
+ * Any dedup entry anchored to one of them is dropped, so the next identical
+ * output is served in full and re-anchored to a copy the model can see.
+ *
+ * The complement to the `ToolCallOptions.messages` check in `compressForCap`:
+ * the in-loop `prepareStep` compactor rewrites results for the provider only,
+ * and the AI SDK hands tool execute() the array from BEFORE that rewrite, so
+ * scanning the history cannot observe that elision. Idempotent — the compactor
+ * re-derives the same id set on every step. Returns the number dropped.
+ */
+export function noteElidedForCap(state: SubAgentCapState, toolCallIds: Iterable<string>): number {
+  const ids = toIdSet(toolCallIds);
+  if (ids.size === 0) return 0;
+  let removed = 0;
+  for (const [hash, anchor] of state.seenHashes) {
+    if (anchor.anchorToolCallId && ids.has(anchor.anchorToolCallId)) {
+      state.seenHashes.delete(hash);
+      removed += 1;
+    }
+  }
+  return removed;
 }
 
 export const SUB_AGENT_DEFAULT_BUDGET_CHARS = DEFAULT_MAX_CUMULATIVE_CHARS;

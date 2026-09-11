@@ -140,6 +140,24 @@ export interface SubAgentCompactorOptions {
    * Capped at FOCUS_NOTE_MAX_CHARS so a long focus cannot inflate the prompt.
    */
   focusNote?: string;
+  /**
+   * Reports every tool result this pass removed from the model's view — stubbed
+   * by `rewriteOlderToolMessage`, or dropped outright by `sliceMessageHistory`.
+   *
+   * Exists because this compaction is INVISIBLE to tools: it runs in
+   * `prepareStep`, so only the provider sees the rewritten array while tool
+   * execute() is handed the array from before it. The dedup layers therefore
+   * cannot detect the loss by inspecting `ToolCallOptions.messages`; they have
+   * to be told, or they go on pointing at payloads the model can no longer read
+   * (measured: nine identical bash calls, all answered with a dead pointer).
+   * The evidence for that SDK behaviour — and the probe that re-checks it after
+   * an upgrade — lives once in `tool-result-visibility.ts`; do not restate it.
+   *
+   * The set is derived by diffing input against output, not emitted per elision
+   * site, so a future elision path cannot forget to report. Called on every
+   * compacting pass with the same ids — consumers must be idempotent.
+   */
+  onElide?: (toolCallIds: string[]) => void;
 }
 
 /** O2 — floor for the tail-budget keepLast shrink; never break the live step's
@@ -294,6 +312,7 @@ interface ResolvedOpts {
   tailBudgetChars: number;
   focusNote: string | null;
   focusTerms: string[];
+  onElide?: (toolCallIds: string[]) => void;
 }
 
 function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
@@ -314,6 +333,7 @@ function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
     tailBudgetChars: Math.max(0, o?.tailBudgetChars ?? 0),
     focusNote: focus,
     focusTerms: extractFocusTerms(focus),
+    onElide: o?.onElide,
   };
 }
 
@@ -484,6 +504,29 @@ function isStubbedToolResult(msg: ModelMessage): boolean {
     if (typeof v === "string" && STUB_RE.test(v)) return true;
   }
   return false;
+}
+
+/**
+ * toolCallIds whose result is present AND still carries real content (i.e. is
+ * not itself an elision marker). Diffing this between the compactor's input and
+ * output yields exactly what the model lost on this pass, with no per-site
+ * bookkeeping to keep in sync.
+ */
+function collectLiveToolResultIds(messages: ReadonlyArray<ModelMessage>): Set<string> {
+  const ids = new Set<string>();
+  for (const msg of messages) {
+    if (msg.role !== "tool" || !Array.isArray(msg.content)) continue;
+    for (const part of msg.content as ReadonlyArray<Record<string, unknown>>) {
+      if (part?.type !== "tool-result") continue;
+      const id = typeof part.toolCallId === "string" ? part.toolCallId : "";
+      if (!id) continue;
+      const out = part.output as Record<string, unknown> | undefined;
+      const value = (out?.value ?? out) as unknown;
+      if (typeof value === "string" && STUB_RE.test(value)) continue;
+      ids.add(id);
+    }
+  }
+  return ids;
 }
 
 function generateShortSummary(toolName: string, content: string): string {
@@ -736,7 +779,34 @@ export function compactSubAgentMessages(
     }
     out.push(msg);
   }
+  reportElidedToolResults(messages, out, resolved.onElide);
   return out;
+}
+
+/**
+ * Tell the caller which tool results this pass removed from the model's view,
+ * so a layer that still references them (the cross-turn dedup ledger) can stop
+ * pointing at payloads the model can no longer read. Fail-open: a throwing
+ * consumer must not take down a compaction pass.
+ */
+function reportElidedToolResults(
+  before: ReadonlyArray<ModelMessage>,
+  after: ReadonlyArray<ModelMessage>,
+  onElide: ((toolCallIds: string[]) => void) | undefined,
+): void {
+  if (!onElide) return;
+  try {
+    const survived = collectLiveToolResultIds(after);
+    const lost: string[] = [];
+    for (const id of collectLiveToolResultIds(before)) {
+      if (!survived.has(id)) lost.push(id);
+    }
+    if (lost.length > 0) onElide(lost);
+  } catch (err) {
+    console.error(`[subagent-compactor] onElide notification failed: ${(err as Error)?.message}`, {
+      stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+    });
+  }
 }
 
 /**

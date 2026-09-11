@@ -186,6 +186,7 @@ import { withStreamRetry } from "./retry-stream.js";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
 import { salvageSubSessionOutput } from "./salvage-sub-session-output.js";
 import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
+import { noteElidedForCap, type SubAgentCapState } from "./sub-agent-cap.js";
 import { type ModelTaskKind, resolveModelForTask } from "./sub-agent-model-tier.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
@@ -1401,6 +1402,7 @@ export class Agent {
     childTools: ToolSet;
     maxSteps: number;
     initialDetail: string;
+    subAgentCapState: SubAgentCapState;
     onActivity?: (detail: string) => void;
     signal?: AbortSignal;
   }): Promise<ToolResult> {
@@ -1412,6 +1414,7 @@ export class Agent {
       childTools,
       maxSteps,
       initialDetail,
+      subAgentCapState,
       onActivity,
       signal,
     } = args;
@@ -1455,6 +1458,12 @@ export class Agent {
               contextWindowTokens: batchChildCtxWindow,
               contextFillRatio: batchIsReasoningModel ? 0.3 : undefined,
               stripOldReasoning: batchIsReasoningModel,
+              // Keep both dedup ledgers honest: anything elided here left the
+              // model's view, so no pointer from either layer may name it any more.
+              onElide: (ids) => {
+                noteElidedForCap(subAgentCapState, ids);
+                this._crossTurnDedup?.noteElided(ids);
+              },
             });
       await addBatchRequests({
         ...this.getBatchClientOptions(signal),

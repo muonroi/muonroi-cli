@@ -1485,13 +1485,20 @@ export class MessageProcessor {
       // cost-leak analysis can attribute it and a future policy fix is
       // falsifiable. Only when there is something to report.
       const dstats = deps.crossTurnDedup?.getStats();
-      if (deps.session?.id && dstats && dstats.sameTurnReservedChars > 0) {
+      if (deps.session?.id && dstats && (dstats.sameTurnReservedChars > 0 || dstats.staleReserves > 0)) {
         logInteraction(deps.session.id, "dedup", {
           data: {
             hits: dstats.hits,
             sameTurnReserves: dstats.sameTurnReserves,
             sameTurnReservedChars: dstats.sameTurnReservedChars,
             approxTokens: Math.round(dstats.sameTurnReservedChars / 4),
+            // Pointer-reachability repairs. Each staleReserve is a re-serve that
+            // replaced a pointer at a payload compaction had already removed —
+            // i.e. a nine-call dead-pointer loop that did not happen. Logged so
+            // the dedup↔compaction fix stays falsifiable from the DB alone.
+            staleReserves: dstats.staleReserves,
+            staleReservedChars: dstats.staleReservedChars,
+            invalidated: dstats.invalidated,
           },
         });
       }

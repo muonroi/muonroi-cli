@@ -239,7 +239,7 @@ import {
 } from "./stall-watchdog.js";
 import { planSteerInjection } from "./steer-inbox.js";
 import type { SubAgentCapOptions, SubAgentCapState } from "./sub-agent-cap.js";
-import { wrapToolSetWithCap } from "./sub-agent-cap.js";
+import { noteElidedForCap, wrapToolSetWithCap } from "./sub-agent-cap.js";
 import {
   applyAnthropicPromptCaching,
   applyCompactionHysteresis,
@@ -759,7 +759,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // Reactive delegation signal: reference to the top-level cap's live state so
   // this turn's cumulative tool-output load can be reported to the Agent at
   // turn end (drives next-turn sub-session escalation). See reactive-delegation.ts.
-  let _topLevelCapState: { cumulative: number } | null = null;
+  // Typed as the full cap state (not just `{cumulative}`) because the B4
+  // compactor also has to invalidate the cap's dedup ledger for results it
+  // elides — a pointer at an elided payload is the dead-pointer loop.
+  let _topLevelCapState: SubAgentCapState | null = null;
 
   // Live-queue steering: messages the user typed mid-turn are drained at a
   // prepareStep boundary and accumulated here, then re-appended (deduped) to
@@ -2269,6 +2272,22 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 ...compactOptsBase(),
                 focusNote: resolveFocusNote(focusOverride),
                 persistArtifact,
+                // Deliberately NOT in compactOptsBase, for the same reason
+                // persistArtifact is not: the base is shared with the C3
+                // predictor (estimateCompactionPressure), which only re-derives
+                // the cut point — it elides nothing. A side-effecting callback
+                // in shared options would invalidate dedup ledgers for results
+                // still in the model's view, forcing re-serves that fix nothing.
+                // Only the run that actually rewrites history may report.
+                //
+                // Anything elided HERE did leave the model's view, so no pointer
+                // from either layer may name it any more. This is the path the
+                // `compact` tool forces, and the one that preceded the measured
+                // nine-call dead-pointer loop.
+                onElide: (ids) => {
+                  if (_topLevelCapState) noteElidedForCap(_topLevelCapState, ids);
+                  deps.crossTurnDedup?.noteElided(ids);
+                },
               });
 
             // O3 — compaction hysteresis (holds the frozen compacted prefix
