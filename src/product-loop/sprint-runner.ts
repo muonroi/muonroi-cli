@@ -61,6 +61,7 @@ import { evaluateDoneGate } from "./done-gate.js";
 import type { ContinueFeedback } from "./feedback-routing.js";
 import { buildContinueFeedback } from "./feedback-routing.js";
 import { idealTrace } from "./ideal-trace.js";
+import { forwardNestedTurn } from "./nested-turn.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
 import { runPlanAdherenceReview } from "./plan-adherence-review.js";
 import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snapshot.js";
@@ -1472,30 +1473,19 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       },
     );
 
-    let planBailed = false;
-    while (true) {
-      const step = await planGen.next();
-      if (step.done) {
-        // `runCouncil` returns `null` from every early-bail path (no reachable
-        // provider, user abort, no openings, cancelled intent card). Distinguish
-        // that from a real (possibly empty-ish) synthesis so the bail becomes an
-        // accountable sprint failure below instead of an empty plan the impl
-        // stage silently builds against.
-        planBailed = step.value == null;
-        planSynthesis = step.value ?? "";
-        break;
-      }
-      const chunk = step.value as StreamChunk;
-      // Structural guarantee at the seam: this council is a SUB-STEP, so a
-      // `{type:"done"}` from it is NOT this turn's terminator. The TUI ends its
-      // `/ideal` for-await on the first `done` it sees (use-app-logic.tsx), so
-      // forwarding one here tore the entire product-loop run down mid-sprint
-      // with no halt card, no error and no terminal event — the P0-1 wedge.
-      // `runCouncil` now suppresses these under `sprintPlanningMode`; this guard
-      // keeps the invariant enforced at the boundary that actually owns it.
-      if (chunk?.type === "done") continue;
-      yield chunk;
-    }
+    // Structural guarantee at the seam: this council is a SUB-STEP, so a
+    // `{type:"done"}` from it is NOT this turn's terminator — forwarding one
+    // tore the entire product-loop run down mid-sprint (the P0-1 wedge).
+    // `runCouncil` suppresses these under `sprintPlanningMode`; forwardNestedTurn
+    // keeps the invariant enforced at the boundary that actually owns it.
+    const planTurn = yield* forwardNestedTurn(planGen);
+    // `runCouncil` returns `null` from every early-bail path (no reachable
+    // provider, user abort, no openings, cancelled intent card). Distinguish
+    // that from a real (possibly empty-ish) synthesis so the bail becomes an
+    // accountable sprint failure below instead of an empty plan the impl
+    // stage silently builds against.
+    const planBailed = planTurn.value == null;
+    planSynthesis = planTurn.value ?? "";
     idealTrace("sprint.planCouncil.after", {
       runId: ctx.runId,
       sprintN,
@@ -1724,8 +1714,15 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         const implGen = ctx.processMessageFn(implPrompt);
         // Guard the impl turn with an idle-chunk watchdog so a post-finish
         // orchestrator hang surfaces as a phaseError instead of a silent wedge.
-        for await (const chunk of withImplIdleWatchdog(implGen, getImplIdleTimeoutMs(), sprintN)) {
-          yield chunk as StreamChunk;
+        // forwardNestedTurn strips the turn's `done` — it is the TURN's
+        // terminator, and forwarding it ended the whole /ideal run (run
+        // mtwnfp8p3869). A turn that ENDED in failure fails this stage, the same
+        // outcome the isolated path already gives a stalled or thrown child
+        // (`!result.success` → implError above; stream-runner.ts:1230, :1316).
+        const implTurn = yield* forwardNestedTurn(withImplIdleWatchdog(implGen, getImplIdleTimeoutMs(), sprintN));
+        if (implTurn.failure) {
+          implError = `implementation turn ended in failure: ${implTurn.failure}`;
+          console.error(`[sprint-runner] ${implError} (sprint ${sprintN}, run ${ctx.runId})`);
         }
       }
     } catch (e) {
@@ -1822,8 +1819,16 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       let recheckErr: string | null = null;
       try {
         const recheckGen = ctx.processMessageFn(recheckPrompt);
-        for await (const chunk of withImplIdleWatchdog(recheckGen, getImplIdleTimeoutMs(), sprintN)) {
-          yield chunk as StreamChunk;
+        // Measured, run mtwnfp8p3869: this turn was forked into a sub-session and
+        // killed by the turn watchdog at 08:41:14; its `error` then `done` were
+        // forwarded verbatim and the `done` ended the whole /ideal run. Strip the
+        // terminator, keep the error visible, and close this stage as FAILED
+        // rather than `done` — it did not finish. Still not a sprint failure (see
+        // the Step 4b note above): verify remains the gate.
+        const recheckTurn = yield* forwardNestedTurn(withImplIdleWatchdog(recheckGen, getImplIdleTimeoutMs(), sprintN));
+        if (recheckTurn.failure) {
+          recheckErr = `completeness re-check turn ended in failure: ${recheckTurn.failure}`;
+          console.error(`[sprint-runner] ${recheckErr} (sprint ${sprintN}, run ${ctx.runId})`);
         }
       } catch (e) {
         recheckErr = e instanceof Error ? e.message : String(e);

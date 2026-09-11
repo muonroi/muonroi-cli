@@ -15,6 +15,7 @@ import { pickCouncilTaskModel } from "../council/leader.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
 import { beginRecallNagSuppression } from "../ee/recall-ledger.js";
 import { evaluateDoneGate } from "../product-loop/done-gate.js";
+import { forwardNestedTurn } from "../product-loop/nested-turn.js";
 import type { Criterion } from "../product-loop/types.js";
 import type { StreamChunk } from "../types/index.js";
 import { runVerifyOrchestration, type VerifyAgentLike } from "../verify/orchestrator.js";
@@ -169,9 +170,14 @@ export async function* runMaintenanceTask(
   let editError: string | null = null;
   const editPrompt = buildEditPrompt(task, designPlan);
   try {
-    const editGen = ctx.processMessageFn(editPrompt);
-    for await (const chunk of editGen) {
-      yield chunk as StreamChunk;
+    // The edit turn's `{type:"done"}` must not reach the `/ideal` stream (the TUI
+    // ends the run on it — see product-loop/nested-turn.ts). A turn that ended in
+    // failure (e.g. "Turn ended by watchdog: …") fails the edit stage instead of
+    // reporting a completed edit that never happened.
+    const editTurn = yield* forwardNestedTurn(ctx.processMessageFn(editPrompt));
+    if (editTurn.failure) {
+      editError = editTurn.failure;
+      console.error(`[task-runner] edit turn ended in failure (run ${ctx.runId}): ${editError}`);
     }
   } catch (e) {
     editError = e instanceof Error ? e.message : String(e);
