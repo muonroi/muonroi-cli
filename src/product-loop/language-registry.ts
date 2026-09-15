@@ -159,10 +159,24 @@ function buildExtensionIndex(): Map<string, LanguageSpec> {
 
 const EXT_INDEX: ReadonlyMap<string, LanguageSpec> = buildExtensionIndex();
 
-/** Every recognised source extension. Derived — do not hand-maintain. */
+/**
+ * Every recognised source extension. Derived — do not hand-maintain.
+ *
+ * @testonly Production code asks `isCodeFile()` instead of reading the set, so
+ * that adding a language cannot leave one consumer holding a stale copy — that
+ * divergence is the defect this registry exists to prevent. The set stays
+ * exported because the behavioural pin test enumerates it to prove BOTH
+ * consumers see every registered extension; a test that could not enumerate it
+ * would have to hand-write the list, reintroducing the drift.
+ */
 export const CODE_EXTENSIONS: ReadonlySet<string> = new Set(EXT_INDEX.keys());
 
-/** Extension → display language. Derived — do not hand-maintain. */
+/**
+ * Extension → display language. Derived — do not hand-maintain.
+ *
+ * @testonly Same reasoning as `CODE_EXTENSIONS`: production resolves a language
+ * through `langForFile()`.
+ */
 export const SRC_EXT_TO_LANG: Readonly<Record<string, string>> = Object.freeze(
   Object.fromEntries(Array.from(EXT_INDEX, ([ext, spec]) => [ext, spec.lang])),
 );
