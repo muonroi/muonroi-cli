@@ -422,6 +422,111 @@ export class Agent {
   private pendingCalls: import("./pending-calls.js").PendingCallsLog | null = null;
   /** Active permission mode — controls which tool calls auto-approve vs require user confirmation. */
   private permissionMode: PermissionMode = "safe";
+  /**
+   * Read-only view of the effective permission mode.
+   *
+   * The field is `private` and the only other accessor is the getter inside
+   * `_buildMessageProcessorDeps()` — itself private — so the security-relevant
+   * invariant "the session is not left elevated after the work that justified
+   * the elevation has ended" was not assertable from outside the class at all.
+   * A test could only reach it by casting `private` away, which would keep
+   * passing if the field were renamed or removed; that is exactly the kind of
+   * test this repo has been burned by. This getter is the contract instead.
+   *
+   * Deliberately read-only: exposing a setter would create a new way to elevate
+   * permissions from outside the class, which is the opposite of the point.
+   * @testonly-seam (production reads go through `_buildMessageProcessorDeps`)
+   */
+  get effectivePermissionMode(): PermissionMode {
+    return this.permissionMode;
+  }
+  /**
+   * Number of autonomous-execution elevation scopes currently open. See
+   * `beginAutonomousElevation`.
+   *
+   * Instance state, NOT module state and NOT a closure inside
+   * `runProductLoopV1`: the counter must be scoped to exactly the thing it
+   * guards, which is this instance's `permissionMode`. Module scope would make
+   * two Agents share one counter; a `runProductLoopV1`-local counter would
+   * start a fresh one per run, and `/ideal` re-enters (the `enter_ideal` tool
+   * dispatches `runProductLoopV1` from inside a `processMessage` turn), so a
+   * per-run counter would reintroduce exactly this bug across nested runs.
+   */
+  private permissionElevationDepth = 0;
+  /**
+   * The mode to put back when the LAST scope closes — set only when a scope
+   * actually promoted `safe` -> `auto-edit`, so the mechanism is a strict no-op
+   * for a session that was already `auto-edit` or `yolo`.
+   */
+  private permissionElevationRestoreTo: PermissionMode | null = null;
+
+  /**
+   * Open an autonomous-execution elevation scope (`/ideal` only).
+   *
+   * `/ideal`'s consent boundary is the preflight plan-approval askcard; once the
+   * PO approves, the sprint's implement turn must apply file mutations without a
+   * per-tool prompt, because in the driven product-loop context nothing answers
+   * a `tool_approval_request` and the turn wedges forever. Elevating
+   * `safe` -> `auto-edit` for the duration of that work is the fix; catastrophic
+   * bash stays hard-blocked by permission-mode's CATASTROPHIC_PATTERNS in every
+   * mode, and `yolo` is left alone.
+   *
+   * WHY DEPTH-COUNTED rather than the per-call `const prev = permissionMode;
+   * ... finally { permissionMode = prev }` this replaces: that pattern is
+   * correct only while the scopes strictly nest, and here they provably do not.
+   * `sprint-runner.ts` races the isolated implement child against a wall-clock
+   * deadline (`runIsolatedImplWithDeadline` -> `withIsolatedImplDeadline` ->
+   * `Promise.race([work, deadline])`, sprint-runner.ts:1088). When the deadline
+   * wins, the caller moves on while `work` is STILL LIVE — `controller.abort()`
+   * is best-effort, and the abandoned child was measured still streaming and
+   * billing for 220s / 32 steps / 29.8% of a run's spend after the run had been
+   * declared dead. Its `finally` therefore lands at an arbitrary point inside a
+   * later turn's elevation scope. With save/restore, the later scope captures
+   * the ALREADY-ELEVATED `auto-edit` as its `prev`, the abandoned child restores
+   * `safe` first, and the later scope's restore then puts `auto-edit` BACK —
+   * leaving the session able to write files without asking, after every piece of
+   * work that justified it has ended. Depth counting is order-independent:
+   * whoever closes last restores the mode captured by whoever opened first.
+   *
+   * Both `/ideal` elevation sites (`processMessageFn` and `runIsolatedTask` in
+   * `runProductLoopV1`) MUST go through this pair. A fix applied to only one of
+   * them leaves the leak alive across the cross-site interleaving, which is the
+   * reachable one. Covered by `permission-elevation.test.ts`.
+   *
+   * Pair every call with `endAutonomousElevation()` in a `finally`.
+   */
+  private beginAutonomousElevation(): void {
+    if (this.permissionElevationDepth === 0 && this.permissionMode === "safe") {
+      this.permissionElevationRestoreTo = this.permissionMode;
+      this.permissionMode = "auto-edit";
+    }
+    this.permissionElevationDepth += 1;
+  }
+
+  /** Close an elevation scope; restores the original mode when the last one closes. */
+  private endAutonomousElevation(): void {
+    if (this.permissionElevationDepth === 0) {
+      // Unbalanced release — a `finally` ran without its `begin`. Never let the
+      // counter go negative: a negative depth would make the NEXT begin fail its
+      // 0-check and silently skip the elevation, so a bookkeeping bug would turn
+      // into a permission bug. Loud, because this is security-adjacent state.
+      logger.error("orchestrator", "endAutonomousElevation called with no open elevation scope", {
+        permissionMode: this.permissionMode,
+      });
+      return;
+    }
+    this.permissionElevationDepth -= 1;
+    if (this.permissionElevationDepth > 0) return;
+    const restoreTo = this.permissionElevationRestoreTo;
+    this.permissionElevationRestoreTo = null;
+    // Only restore when we actually promoted. If a future code path gains the
+    // ability to change permissionMode mid-flight, an unconditional restore
+    // could push the session BACK UP to a mode the user had just left (e.g. we
+    // captured `yolo`, the user switched to `safe`, we restore `yolo`) — failing
+    // open. Restoring only a promotion we made can only ever move the session
+    // toward MORE restrictive, which is the safe direction to be wrong in.
+    if (restoreTo !== null) this.permissionMode = restoreTo;
+  }
   /** Flow run init promise — awaited before first message turn. */
   private _flowReady: Promise<void> | null = null;
   /** Active .muonroi-flow/ run ID for this session. */
@@ -2541,26 +2646,21 @@ export class Agent {
     // product-loop modules. `runCouncil` re-wraps with its own (undefined)
     // signal downstream, which is a no-op passthrough that keeps ours.
     const llm = withCouncilSignal(createCouncilLLM(this.bash, this.mode, this.session?.id, productStats), signal);
-    // Autonomous-execution permission for the product loop. /ideal's consent
-    // boundary is the preflight plan-approval askcard; once the PO approves the
-    // plan, the sprint IMPLEMENT turn must apply its own file-op mutations without
-    // a per-tool approval prompt. In `safe` mode a Write/Edit surfaces a
-    // tool_approval_request and awaits respondToToolApproval — but in the driven
-    // product-loop context nothing answers it and no approval askcard renders, so
-    // the impl turn wedges forever right after finishReason:tool-calls (observed
-    // live 2026-07-14: 0 files written across grok/opencode/deepseek + isolated &
-    // streamed paths — tool-engine.ts:2997). Elevating safe→auto-edit for the turn
-    // auto-approves file ops (yolo stays yolo); catastrophic bash stays hard-blocked
-    // by permission-mode's CATASTROPHIC_PATTERNS regardless of mode.
+    // Autonomous-execution permission for the product loop. Both closures below
+    // elevate through the SAME depth-counted pair — rationale, the live evidence
+    // for it (impl turn wedging at tool_approval_request; the abandoned child
+    // that outlives the sprint deadline) and why it must not be per-call
+    // save/restore all live on `beginAutonomousElevation`. Keep it one
+    // mechanism: fixing only one of these two sites leaves the leak alive across
+    // the cross-site interleaving, which is the reachable one.
     const self = this;
     const processMessageFn = (m: string): AsyncGenerator<StreamChunk, void, unknown> =>
       (async function* () {
-        const prev = self.permissionMode;
-        if (self.permissionMode === "safe") self.permissionMode = "auto-edit";
+        self.beginAutonomousElevation();
         try {
           yield* self.processMessage(m, options?.observer);
         } finally {
-          self.permissionMode = prev;
+          self.endAutonomousElevation();
         }
       })();
     // Isolated bounded task-runner bridge for the sprint implement stage: a fresh
@@ -2576,8 +2676,7 @@ export class Agent {
       // 29.8% of a run's spend after the run was declared dead).
       opts?: { abortSignal?: AbortSignal; onActivity?: (detail: string) => void },
     ) => {
-      const prev = self.permissionMode;
-      if (self.permissionMode === "safe") self.permissionMode = "auto-edit";
+      self.beginAutonomousElevation();
       try {
         // Live activity bridge: the isolated implement stage absorbs its own
         // stream (compact ToolResult only at the END), which left the main
@@ -2594,8 +2693,15 @@ export class Agent {
           combineAbortSignals(this.abortController?.signal, opts?.abortSignal),
         );
       } finally {
+        // Release the permission FIRST. `emitSubagentStatus` synchronously calls
+        // externally-registered UI listeners (`subagentStatusListeners`) with no
+        // guard, so one throwing listener propagates out of this `finally` — and
+        // in the previous order that skipped the restore entirely, stranding the
+        // session in `auto-edit` for the rest of its life. Clearing a status line
+        // is cosmetic; dropping back out of an elevated permission mode is not,
+        // so it must not be downstream of anything that can throw.
+        self.endAutonomousElevation();
         self.emitSubagentStatus(null);
-        self.permissionMode = prev;
       }
     };
     // F7 — the flow dir belongs to the RUN, not to the tool cwd, which the bash
