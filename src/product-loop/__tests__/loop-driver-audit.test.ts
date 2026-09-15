@@ -1,6 +1,9 @@
+import { promises as fs } from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getTestModels } from "../../__test-helpers__/catalog-fixtures.js";
+import { buildDebateCheckpoint, writeDebateCheckpoint, writeDebateInputs } from "../../council/debate-checkpoint.js";
 import { loadCatalog } from "../../models/registry.js";
 import type { DriverContext } from "../types.js";
 
@@ -305,6 +308,137 @@ describe("loop-driver audit logging", () => {
     await drain(runLoopDriver(ctx));
 
     expect(receivedConfig?.runIsolatedTask).toBe(fixtureRunIsolatedTask);
+  });
+
+  // R3 — /ideal never told the debate whether the repo was empty, so
+  // research-mode.ts:123-125's decideInternetFirst always defaulted the repo
+  // side of the conjunction to false (debate.ts:855) and research ran
+  // codebase-first even against a truly empty workspace. Forward it, but only
+  // from audit.hasProject (content-based), never discovery.hasProject
+  // (manifest-list based — blind to stacks like .NET with no MANIFESTS entry).
+  describe("repoIsEmpty forwarding into the CouncilConfig passed to runDebate", () => {
+    it("greenfield fixture (audit reports no project) -> config.repoIsEmpty === true", async () => {
+      const emptyDir = await fs.mkdtemp(path.join(os.tmpdir(), "loop-driver-repoempty-"));
+      const debateState = {
+        spec: mockSpec,
+        exchangeLogs: new Map(),
+        runningSummary: "x",
+        roundCount: 1,
+        researchFindings: "",
+        active: [],
+      };
+      const ctx = buildCtx();
+      ctx.cwd = emptyDir;
+      let receivedConfig: { repoIsEmpty?: boolean } | undefined;
+
+      // biome-ignore lint/correctness/useYield: mock generator returns immediately
+      (runDebate as ReturnType<typeof vi.fn>).mockImplementation(async function* (
+        _spec: unknown,
+        runOpts: { repoIsEmpty?: boolean },
+      ) {
+        receivedConfig = runOpts;
+        return debateState;
+      });
+
+      await drain(runLoopDriver(ctx));
+
+      expect(receivedConfig?.repoIsEmpty).toBe(true);
+    });
+
+    it("fixture with source files -> config.repoIsEmpty === false", async () => {
+      const srcDir = await fs.mkdtemp(path.join(os.tmpdir(), "loop-driver-repohassrc-"));
+      await fs.mkdir(path.join(srcDir, "src"), { recursive: true });
+      await fs.writeFile(path.join(srcDir, "src", "index.ts"), "export const x = 1;\n", "utf8");
+      const debateState = {
+        spec: mockSpec,
+        exchangeLogs: new Map(),
+        runningSummary: "x",
+        roundCount: 1,
+        researchFindings: "",
+        active: [],
+      };
+      const ctx = buildCtx();
+      ctx.cwd = srcDir;
+      let receivedConfig: { repoIsEmpty?: boolean } | undefined;
+
+      // biome-ignore lint/correctness/useYield: mock generator returns immediately
+      (runDebate as ReturnType<typeof vi.fn>).mockImplementation(async function* (
+        _spec: unknown,
+        runOpts: { repoIsEmpty?: boolean },
+      ) {
+        receivedConfig = runOpts;
+        return debateState;
+      });
+
+      await drain(runLoopDriver(ctx));
+
+      expect(receivedConfig?.repoIsEmpty).toBe(false);
+    });
+
+    // Regression guard: the C-v2 cross-session resume path (loop-driver.ts:260-264)
+    // skips the "discover" case entirely, so `audit` is never assigned and stays
+    // `undefined`. `repoIsEmpty: !audit?.hasProject` would collapse that to `true`
+    // — declaring a real, populated repo "empty" and flipping research
+    // internet-first purely because discovery never ran. The safe direction to be
+    // wrong in is `undefined` (debate.ts:855 defaults it to false).
+    it("resume path where audit never ran -> config.repoIsEmpty is undefined (not true)", async () => {
+      const flowDir = await fs.mkdtemp(path.join(os.tmpdir(), "loop-driver-resume-"));
+      const resumeRunId = "resume-run";
+      const runDir = path.join(flowDir, "runs", resumeRunId);
+
+      const checkpoint = buildDebateCheckpoint({
+        problemStatement: mockSpec.problemStatement,
+        roundCount: 1,
+        maxRounds: 4,
+        exchangeLogs: new Map(),
+        runningSummary: "prior round summary",
+        researchFindings: "",
+        active: [],
+        archive: [],
+        lastCriteriaMet: [],
+        bestCriteriaMetCount: 0,
+        roundsSinceProgress: 0,
+        savedAt: new Date().toISOString(),
+      });
+      await writeDebateCheckpoint(runDir, checkpoint);
+      await writeDebateInputs(runDir, {
+        version: 1,
+        problemStatement: mockSpec.problemStatement,
+        // biome-ignore lint/suspicious/noExplicitAny: mock fixture shape
+        clarifiedSpec: mockSpec as any,
+        conversationContext: "prior conversation context",
+        savedAt: new Date().toISOString(),
+      });
+
+      const debateState = {
+        spec: mockSpec,
+        exchangeLogs: new Map(),
+        runningSummary: "x",
+        roundCount: 2,
+        researchFindings: "",
+        active: [],
+      };
+      const ctx = buildCtx();
+      ctx.runId = resumeRunId;
+      ctx.flowDir = flowDir;
+      // A populated cwd — the resume path must not need it. Confirms the guard
+      // isn't accidentally satisfied by "cwd is empty too".
+      ctx.cwd = process.cwd();
+      let receivedConfig: { repoIsEmpty?: boolean } | undefined;
+
+      // biome-ignore lint/correctness/useYield: mock generator returns immediately
+      (runDebate as ReturnType<typeof vi.fn>).mockImplementation(async function* (
+        _spec: unknown,
+        runOpts: { repoIsEmpty?: boolean },
+      ) {
+        receivedConfig = runOpts;
+        return debateState;
+      });
+
+      await drain(runLoopDriver(ctx));
+
+      expect(receivedConfig?.repoIsEmpty).toBeUndefined();
+    });
   });
 
   // logInteraction throwing must never blow up the driver — audit is best-effort.

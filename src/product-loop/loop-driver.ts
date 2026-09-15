@@ -779,6 +779,27 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
               // package that 404s) in a plan. /council already passes this
               // (src/council/index.ts:1499); this makes /ideal match.
               runIsolatedTask: ctx.runIsolatedTask,
+              // R3 — feeds research-mode.ts's decideInternetFirst (debate.ts:855
+              // defaults this to false when unset). Without it /ideal always ran
+              // research codebase-first, even against a truly empty repo, where
+              // the model was told to grep nothing instead of reading docs/web —
+              // a plan built from no sources is how a hallucinated dependency
+              // gets in.
+              //
+              // Content-based `audit.hasProject`, NOT `discovery.hasProject`:
+              // discover.ts's hand-maintained MANIFESTS list has no .NET entry,
+              // so discoverProject on a real 506-file C# repo reports
+              // hasProject === false — false-empty for whole stacks.
+              //
+              // `audit` is only assigned in the "discover" case. The C-v2
+              // cross-session resume path above (readDebateCheckpoint) skips
+              // discovery entirely and jumps straight here, so `audit` can be
+              // `undefined`. `!audit?.hasProject` would collapse that to `true`,
+              // declaring a real, populated repo "empty" purely because
+              // discovery never ran on THIS process. Leave the field unset when
+              // there is no evidence — `undefined` restores today's (safe)
+              // default rather than guessing.
+              repoIsEmpty: audit ? !audit.hasProject : undefined,
             },
             ctx.llm,
           );
