@@ -61,7 +61,7 @@ import { evaluateDoneGate } from "./done-gate.js";
 import type { ContinueFeedback } from "./feedback-routing.js";
 import { buildContinueFeedback } from "./feedback-routing.js";
 import { idealTrace } from "./ideal-trace.js";
-import { forwardNestedTurn } from "./nested-turn.js";
+import { type CollectedNestedTurn, collectNestedTurn, forwardNestedTurn } from "./nested-turn.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
 import { runPlanAdherenceReview } from "./plan-adherence-review.js";
 import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snapshot.js";
@@ -2674,25 +2674,44 @@ function buildVerifyAgent(ctx: DriverContext, cwd: string): VerifyAgentLike {
       // writing into a channel it has no business in, and the next notice
       // someone adds would have to be filtered all over again.
       const releaseNagSuppression = beginRecallNagSuppression();
-      let output = "";
+      let turn: CollectedNestedTurn;
       try {
-        const gen = ctx.processMessageFn(req.prompt);
-        for await (const chunk of gen) {
-          if (chunk.type === "content" && typeof chunk.content === "string") {
-            output += chunk.content;
-          }
-        }
+        turn = await collectNestedTurn(ctx.processMessageFn(req.prompt));
       } finally {
         releaseNagSuppression();
       }
+      const output = turn.output;
       // Tripwire, not a parser: if a nag reached the payload anyway the boundary
       // has a hole, and a silent hole is how this defect survived a whole run.
+      // Checked BEFORE the failure return, so a killed turn is still inspected.
       if (output.includes(RECALL_NAG_SENTINEL)) {
         logger.error(
           "orchestrator",
           "[sprint-runner] EE recall nag reached the verify payload despite suppression — the machine-read boundary has a hole",
           { operation: "buildVerifyAgent.runTaskRequest", cwd },
         );
+      }
+      // A turn that was KILLED (turn watchdog at orchestrator.ts:3708-3709, a
+      // provider stall, a thrown provider error) leaves a TRUNCATED payload. It
+      // used to be returned as `{success:true}`, so `parseVerifyResult` scored
+      // the sprint on a verify that never finished — and a partial narration
+      // that already said `VERIFY_PASS` read as a green run. Reporting the
+      // failure in `error` makes parseVerifyResult return ERROR (never PASS),
+      // which fails the done-gate's engineering floor with `verify_FAIL`. The
+      // partial output still rides along: it is the only evidence there is, and
+      // the next sprint's feedback is built from it.
+      if (turn.failure) {
+        logger.error("orchestrator", "[sprint-runner] verify turn ended in failure — payload is truncated", {
+          operation: "buildVerifyAgent.runTaskRequest",
+          cwd,
+          failure: turn.failure,
+          outputChars: output.length,
+        });
+        return {
+          success: false,
+          output,
+          error: `verify turn ended in failure: ${turn.failure}`,
+        } as ToolResult;
       }
       return { success: true, output } as ToolResult;
     },

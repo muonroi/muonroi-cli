@@ -52,32 +52,102 @@ function errorText(chunk: StreamChunk): string {
 }
 
 /**
+ * The ONE implementation of the `NestedTurnOutcome.failure` rule above.
+ *
+ * It is factored out rather than inlined because a nested stream has two kinds
+ * of consumer and only one of them was forwarding. The COLLECTING consumers —
+ * `product-loop/sprint-runner.buildVerifyAgent` and
+ * `maintain/task-runner.buildVerifyAgent` — ran their own loop that kept only
+ * `content` chunks and dropped everything else, `error` included, then returned
+ * `{success:true, output}` unconditionally. A verify turn killed by the turn
+ * watchdog therefore reported a successful verify over whatever partial text had
+ * arrived, and `parseVerifyResult` scored the sprint on it. Giving those callers
+ * a second, hand-written copy of the rule would let the two drift; they share
+ * this one via `collectNestedTurn`.
+ */
+interface NestedTurnFailureTracker {
+  /** Feed every chunk, in stream order, before acting on it. */
+  observe(chunk: StreamChunk): void;
+  /** Call once the nested generator has returned; yields the failure text. */
+  end(): string | null;
+}
+
+function createNestedTurnFailureTracker(): NestedTurnFailureTracker {
+  let failure: string | null = null;
+  // Error text of the most recently seen chunk when it was an `error`.
+  let pendingError: string | null = null;
+  return {
+    observe(chunk: StreamChunk): void {
+      if (chunk?.type === "done") {
+        if (failure === null && pendingError !== null) failure = pendingError;
+        pendingError = null;
+        return;
+      }
+      pendingError = chunk?.type === "error" ? errorText(chunk) : null;
+    },
+    end(): string | null {
+      if (failure === null && pendingError !== null) failure = pendingError;
+      return failure;
+    },
+  };
+}
+
+/** What a COLLECTING consumer gets back from `collectNestedTurn`. */
+export interface CollectedNestedTurn {
+  /** Every `content` chunk's text, concatenated in stream order. */
+  output: string;
+  /** Same contract as `NestedTurnOutcome.failure`. */
+  failure: string | null;
+}
+
+/**
+ * Drain a nested stream into a payload string and report how it ended.
+ *
+ * The collecting counterpart of `forwardNestedTurn`, for stages whose nested
+ * turn is machine-read rather than shown: they must NOT forward the chunks (the
+ * `/ideal` stream would end on the nested `done` — see the file header) but they
+ * must still know that the turn was killed, so the payload is not mistaken for a
+ * finished one.
+ */
+export async function collectNestedTurn(
+  gen: AsyncGenerator<StreamChunk, unknown, unknown>,
+): Promise<CollectedNestedTurn> {
+  const tracker = createNestedTurnFailureTracker();
+  let output = "";
+  // `for await` unwinds the nested generator on an early exit or a throw, the
+  // same as the `finally` in forwardNestedTurn does; a throw still propagates so
+  // the caller's own `finally` (e.g. the recall-nag scope release) runs.
+  for await (const chunk of gen) {
+    tracker.observe(chunk);
+    if (chunk?.type === "content" && typeof chunk.content === "string") {
+      output += chunk.content;
+    }
+  }
+  return { output, failure: tracker.end() };
+}
+
+/**
  * Forward a nested stream's chunks upward, minus its `{type:"done"}`
  * terminators, and report how it ended. Use with `yield*`.
  */
 export async function* forwardNestedTurn<R>(
   gen: AsyncGenerator<StreamChunk, R, unknown>,
 ): AsyncGenerator<StreamChunk, NestedTurnOutcome<R>, unknown> {
-  let failure: string | null = null;
-  // Error text of the most recently forwarded chunk when it was an `error`.
-  let pendingError: string | null = null;
+  const tracker = createNestedTurnFailureTracker();
   let finished = false;
   try {
     while (true) {
       const step = await gen.next();
       if (step.done) {
         finished = true;
-        if (failure === null && pendingError !== null) failure = pendingError;
-        return { value: step.value, failure };
+        return { value: step.value, failure: tracker.end() };
       }
       const chunk = step.value;
+      tracker.observe(chunk);
       if (chunk?.type === "done") {
-        if (failure === null && pendingError !== null) failure = pendingError;
-        pendingError = null;
         // A nested terminator is not this stage's terminator — see file header.
         continue;
       }
-      pendingError = chunk?.type === "error" ? errorText(chunk) : null;
       yield chunk;
     }
   } finally {

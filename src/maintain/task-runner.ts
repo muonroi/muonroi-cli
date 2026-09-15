@@ -15,7 +15,7 @@ import { pickCouncilTaskModel } from "../council/leader.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
 import { beginRecallNagSuppression } from "../ee/recall-ledger.js";
 import { evaluateDoneGate } from "../product-loop/done-gate.js";
-import { forwardNestedTurn } from "../product-loop/nested-turn.js";
+import { type CollectedNestedTurn, collectNestedTurn, forwardNestedTurn } from "../product-loop/nested-turn.js";
 import type { Criterion } from "../product-loop/types.js";
 import type { StreamChunk } from "../types/index.js";
 import { runVerifyOrchestration, type VerifyAgentLike } from "../verify/orchestrator.js";
@@ -482,18 +482,30 @@ function buildVerifyAgent(ctx: MaintenanceCtx, recipe: import("../types/index.js
       // `evaluateDoneGate` below. Declaring the scope keeps the EE recall nag
       // out of it at the emitter rather than filtering it back out here.
       const releaseNagSuppression = beginRecallNagSuppression();
-      let output = "";
+      let turn: CollectedNestedTurn;
       try {
-        const gen = ctx.processMessageFn(req.prompt);
-        for await (const chunk of gen) {
-          if (chunk.type === "content" && typeof chunk.content === "string") {
-            output += chunk.content;
-          }
-        }
+        turn = await collectNestedTurn(ctx.processMessageFn(req.prompt));
       } finally {
         releaseNagSuppression();
       }
-      return { success: true, output } as import("../types/index.js").ToolResult;
+      // Same kill-vs-completion distinction as the /ideal verify agent: a turn
+      // ended by the watchdog (orchestrator.ts:3708-3709), a provider stall or a
+      // thrown provider error leaves a TRUNCATED payload. Returning it as
+      // `{success:true}` let `parseVerifyResult` clear the engineering floor off
+      // a partial narration that happened to contain `VERIFY_PASS`, so the judge
+      // blamed a later condition instead of the verify that never finished.
+      if (turn.failure) {
+        console.error(
+          `[task-runner] verify turn ended in failure (run ${ctx.runId}): ${turn.failure} ` +
+            `— payload truncated at ${turn.output.length} chars`,
+        );
+        return {
+          success: false,
+          output: turn.output,
+          error: `verify turn ended in failure: ${turn.failure}`,
+        } as import("../types/index.js").ToolResult;
+      }
+      return { success: true, output: turn.output } as import("../types/index.js").ToolResult;
     },
   };
 }
