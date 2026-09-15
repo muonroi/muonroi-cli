@@ -173,6 +173,7 @@ import {
   shouldCompactContext,
 } from "./compaction";
 import { buildCompactionCustomInstructions } from "./compaction-consult.js";
+import { getCouncilContinuationWatchdogMs } from "./council-continuation-budget.js";
 import { CouncilManager } from "./council-manager.js";
 import { CrossTurnDedup, isCrossTurnDedupEnabled } from "./cross-turn-dedup.js";
 import { DelegationManager } from "./delegations";
@@ -2434,8 +2435,9 @@ export class Agent {
           // working… elapsed 0s" with no rescue. On fire we abort the turn and
           // surface a toast instead of hanging forever.
           const { withTurnWatchdog, TurnStallError } = await import("./turn-watchdog.js");
-          const idleMs = Number(process.env.MUONROI_COUNCIL_CONTINUATION_IDLE_MS ?? 120_000);
-          const totalMs = Number(process.env.MUONROI_COUNCIL_CONTINUATION_TOTAL_MS ?? 600_000);
+          // Inside an `/ideal` run `totalMs` comes back 0 (guard disabled) while
+          // `idleMs` is unchanged — see council-continuation-budget.ts.
+          const { idleMs, totalMs } = getCouncilContinuationWatchdogMs();
           try {
             yield* withTurnWatchdog(this.processMessage(continuationPrompt, options?.observer), {
               idleMs,

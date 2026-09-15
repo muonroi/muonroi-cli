@@ -360,12 +360,34 @@ function getMockLlm(): { complete(req: { prompt: string }): Promise<{ text: stri
  * Range 60_000–1_800_000 ms. Default 300_000 (5 minutes) — generous enough
  * for reasoning models that take 2-3 min on long prompts, tight enough that
  * a truly dead socket fails fast and `debateWithRetry` can fall back.
+ *
+ * `0` = no wall-clock deadline, which is what an `/ideal` run gets (user
+ * decision: no limits). That is safe here and ONLY here because the thing this
+ * deadline was added for — "a stuck TCP connection … makes a single call hang
+ * forever" — is covered by a guard that did not exist when it was written:
+ * `collectStreamText` below arms `createStallWatchdog(getProviderStallTimeoutMs())`
+ * (120s default) and re-arms it on EVERY chunk, reasoning-delta included, so a
+ * dead socket still fails in ~2 minutes while a slow-but-alive reasoning model
+ * is no longer cut at 5. A caller's own `abortSignal` (Esc/Ctrl-C) is unchanged.
+ *
+ * A read, not a module const: the `/ideal` switch is an AsyncLocalStorage scope,
+ * so it can only be observed per call.
  */
-const COUNCIL_LLM_TIMEOUT_MS = (() => {
+export function councilLlmTimeoutMs(): number {
+  if (isIdealRunUnlimited()) return 0;
   const raw = Number.parseInt(process.env.MUONROI_COUNCIL_LLM_TIMEOUT_MS ?? "", 10);
   if (Number.isFinite(raw) && raw >= 60_000 && raw <= 1_800_000) return raw;
   return 300_000;
-})();
+}
+
+/**
+ * The caller-side race budget for a council call: the signal deadline plus a 5s
+ * grace, so the SDK's own abort wins when it works. `0` in, `0` out — a disabled
+ * deadline must not reappear as a 5-second one.
+ */
+function councilRaceDeadlineMs(base: number): number {
+  return base > 0 ? base + 5_000 : 0;
+}
 
 // withTimeoutSignal + withDeadlineRace moved to ../utils/llm-deadline.js so all
 // pre-flight LLM call sites (council, debate-planner, scope-ceiling) share one
@@ -737,7 +759,10 @@ export function createCouncilLLM(
       // per-call wall-clock deadline. Without the parent signal, an Esc/Ctrl-C
       // during the longest generate calls (8192-token synthesis, clarify, leader
       // eval) was a no-op — the call ran to completion or hit the 5-min timeout.
-      const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(signal, COUNCIL_LLM_TIMEOUT_MS);
+      // Read the budget ONCE per call: it is `0` (no deadline) inside an `/ideal`
+      // run, and the signal and the race must agree on that.
+      const councilTimeoutMs = councilLlmTimeoutMs();
+      const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(signal, councilTimeoutMs);
       try {
         const result = await withDeadlineRace(
           () =>
@@ -774,7 +799,7 @@ export function createCouncilLLM(
               },
               { label: "council.generate" },
             ),
-          COUNCIL_LLM_TIMEOUT_MS + 5_000,
+          councilRaceDeadlineMs(councilTimeoutMs),
           "council.generate",
           signal,
         );
@@ -945,7 +970,10 @@ export function createCouncilLLM(
       const debateCaps = getProviderCapabilities(providerId);
 
       const t0 = Date.now();
-      const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(signal, COUNCIL_LLM_TIMEOUT_MS);
+      // Read the budget ONCE per call: it is `0` (no deadline) inside an `/ideal`
+      // run, and the signal and the race must agree on that.
+      const councilTimeoutMs = councilLlmTimeoutMs();
+      const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(signal, councilTimeoutMs);
       try {
         const result = await withDeadlineRace(
           () =>
@@ -992,7 +1020,7 @@ export function createCouncilLLM(
                 }),
               { label: "council.debate" },
             ),
-          COUNCIL_LLM_TIMEOUT_MS + 5_000,
+          councilRaceDeadlineMs(councilTimeoutMs),
           "council.debate",
           signal,
         );
@@ -1159,7 +1187,8 @@ export function createCouncilLLM(
 
       const t0 = Date.now();
       // Research is multi-step tool-using so give it 2x the standard deadline.
-      const researchTimeoutMs = Math.min(COUNCIL_LLM_TIMEOUT_MS * 2, 1_800_000);
+      const councilTimeoutMs = councilLlmTimeoutMs();
+      const researchTimeoutMs = councilTimeoutMs > 0 ? Math.min(councilTimeoutMs * 2, 1_800_000) : 0;
       const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(signal, researchTimeoutMs);
       try {
         const result = await withDeadlineRace(
@@ -1205,7 +1234,7 @@ export function createCouncilLLM(
                 }),
               { label: "council.research" },
             ),
-          researchTimeoutMs + 5_000,
+          councilRaceDeadlineMs(researchTimeoutMs),
           "council.research",
           signal,
         );

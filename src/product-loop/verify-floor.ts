@@ -53,6 +53,7 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import type { VerifyRecipe } from "../types/index.js";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { logger } from "../utils/logger.js";
 import { inferVerifyProjectProfile } from "../verify/recipes.js";
 import { parseFailingTestIds, type TestRunnerFormat } from "./test-failure-parse.js";
@@ -301,6 +302,16 @@ function tail(s: string): string {
  * 0 while executing zero tests has produced no evidence, and absence of evidence
  * is not evidence of correctness. That check reuses `detectNoTestsExecuted` from
  * `verify-result.ts` rather than restating its patterns here.
+ *
+ * WHAT `timeoutMs` MEASURES depends on the run. Normally it is total elapsed:
+ * the command is killed once it has run that long, whatever it is doing. Inside
+ * an `/ideal` run (user decision: no limits) it bounds SILENCE instead — the
+ * timer is re-armed on every stdout/stderr chunk, so a build or test suite that
+ * is still printing is never killed for taking too long, while one that has
+ * printed nothing for the whole window still is. The liveness signal this needs
+ * was already being collected by the `sink` handlers below; it simply took no
+ * part in the decision. The number itself is unchanged in both modes, and so is
+ * `MUONROI_SPRINT_FLOOR_TIMEOUT_MS`.
  */
 export async function runFloorCommand(
   kind: "build" | "test",
@@ -314,6 +325,9 @@ export async function runFloorCommand(
   let exitCode: number | null = null;
   let timedOut = false;
   let spawnError: string | undefined;
+  // Read the scope ONCE, synchronously: the child's `data` events fire from
+  // listeners whose async context is not guaranteed to carry the run scope.
+  const silenceMode = isIdealRunUnlimited();
 
   await new Promise<void>((resolveRun) => {
     let child: ChildProcess;
@@ -338,30 +352,40 @@ export async function runFloorCommand(
     }
 
     let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
     const finish = (): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       resolveRun();
     };
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try {
-        child.kill();
-      } catch (err) {
-        logger.warn("orchestrator", `[verify-floor] could not kill timed-out command "${command}"`, {
-          operation: "runFloorCommand",
-          cwd,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }, timeoutMs);
+    const armTimer = (): void => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        try {
+          child.kill();
+        } catch (err) {
+          logger.warn("orchestrator", `[verify-floor] could not kill timed-out command "${command}"`, {
+            operation: "runFloorCommand",
+            cwd,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }, timeoutMs);
+    };
+    armTimer();
 
     // Bound what we hold in memory, the way spawnSync's maxBuffer did — but
     // WITHOUT killing the run: a chatty-but-green build must not be scored as a
     // failure just because it printed a lot.
     let captured = 0;
     const sink = (which: "out" | "err") => (buf: Buffer | string) => {
+      // Proof of life. Re-armed BEFORE the capture cap returns early, so a
+      // command that has already filled the buffer is still recognised as alive.
+      if (silenceMode && !settled && !timedOut) {
+        clearTimeout(timer);
+        armTimer();
+      }
       if (captured >= MAX_BUFFER_BYTES) return;
       const text = typeof buf === "string" ? buf : buf.toString("utf8");
       captured += text.length;

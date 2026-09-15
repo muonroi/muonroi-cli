@@ -39,6 +39,7 @@ import { SPRINT_EXECUTION_MARKER } from "../pil/layer6-output.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { logInteraction, logUIInteraction } from "../storage/index.js";
 import type { StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
 import type { SandboxSettings } from "../utils/settings.js";
@@ -149,8 +150,17 @@ export function getVerifyBudgetMultiplier(): number {
  * -> `dotnet build` -> `dotnet test`), so 1800s of command time alone is
  * reachable without anything being wrong. It is also the same 60 min
  * `getIsolatedImplCeilingMs()` uses for the neighbouring stage.
+ *
+ * Inside an `/ideal` run there is no absolute ceiling (user decision: no
+ * limits). The clamp it performs is the arbitrary half of the budget — it
+ * overrides a bound this run MEASURED from its own build+test cost with a
+ * constant chosen for a different repository. What survives is the derived
+ * budget itself, and inside `/ideal` `runVerifyWithWatchdog` applies it as a
+ * SILENCE window rather than a total (see there), so a stage that is still
+ * reporting progress is never cut while a stage reporting nothing still is.
  */
 export function getVerifyBudgetCeilingMs(): number {
+  if (isIdealRunUnlimited()) return Number.POSITIVE_INFINITY;
   return envPositiveInt("MUONROI_SPRINT_VERIFY_CEILING_MS", 60 * 60 * 1000);
 }
 
@@ -274,13 +284,26 @@ export function buildVerifyTimeoutMessage(args: {
   elapsedMs: number;
   observation?: VerifyStageObservation;
   firedAtMs?: number;
+  /**
+   * What the budget bounded. `"total"` is the default and the normal-chat
+   * behaviour; `"silence"` is the `/ideal` shape, where the same number is
+   * measured from the last observed activity event instead of from the start.
+   * Naming it matters for the same reason `cause` does next door: "ran too long"
+   * and "went quiet" are different observations that call for different steps.
+   */
+  mode?: "total" | "silence";
 }): string {
   const { sprintN, runId, budget, elapsedMs, observation } = args;
   const firedAt = args.firedAtMs ?? Date.now();
+  const mode = args.mode ?? "total";
+  const ceilingLabel = Number.isFinite(budget.ceilingMs) ? `${Math.round(budget.ceilingMs / 1000)}s` : "none";
   const s = (ms: number) => (ms / 1000).toFixed(1);
   const parts: string[] = [
-    `verify stage exceeded its ${Math.round(budget.budgetMs / 1000)}s budget (sprint ${sprintN}, run ${runId}) ` +
-      `and was aborted after ${s(elapsedMs)}s`,
+    mode === "silence"
+      ? `verify stage reported nothing for ${Math.round(budget.budgetMs / 1000)}s (sprint ${sprintN}, run ${runId}) ` +
+        `and was aborted after ${s(elapsedMs)}s — this was a SILENCE budget, not a total`
+      : `verify stage exceeded its ${Math.round(budget.budgetMs / 1000)}s budget (sprint ${sprintN}, run ${runId}) ` +
+        `and was aborted after ${s(elapsedMs)}s`,
   ];
 
   switch (budget.basis) {
@@ -288,7 +311,7 @@ export function buildVerifyTimeoutMessage(args: {
       parts.push(
         `budget = this run's measured verify baseline ${s(budget.baselineMs as number)}s x ${budget.multiplier} ` +
           `= ${s(budget.derivedMs as number)}s (floor ${Math.round(budget.floorMs / 1000)}s, ` +
-          `ceiling ${Math.round(budget.ceilingMs / 1000)}s)`,
+          `ceiling ${ceilingLabel})`,
       );
       break;
     case "floor":
@@ -299,7 +322,7 @@ export function buildVerifyTimeoutMessage(args: {
       break;
     case "ceiling":
       parts.push(
-        `budget = the ${Math.round(budget.ceilingMs / 1000)}s CEILING — derived ${s(budget.derivedMs as number)}s ` +
+        `budget = the ${ceilingLabel} CEILING — derived ${s(budget.derivedMs as number)}s ` +
           `(baseline ${s(budget.baselineMs as number)}s x ${budget.multiplier}) was above it`,
       );
       break;
@@ -378,6 +401,11 @@ export async function resolveVerifyBudget(flowDir: string | undefined, runId: st
  * Progress beats are RECORDED as well as forwarded to the debug console: they
  * are the only thing the sprint can actually observe about this stage, so they
  * are what the timeout message reports instead of a guess.
+ *
+ * Inside an `/ideal` run those beats also DECIDE: the budget is armed as a
+ * silence window (time since the last beat) rather than as a total, so a stage
+ * that is still reporting is never cut and a stage reporting nothing still is.
+ * See the `silenceMode` block below.
  */
 export async function runVerifyWithWatchdog(
   verifyAgent: VerifyAgentLike,
@@ -397,14 +425,24 @@ export async function runVerifyWithWatchdog(
     observation.lastDetail = detail;
     if (process.env.MUONROI_DEBUG_VERIFY === "1") console.error(`[verify:sprint-${sprintN}] ${detail}`);
   };
+  // Inside an `/ideal` run the SAME number bounds SILENCE instead of total
+  // elapsed (user decision: no limits). This is strictly more permissive —
+  // time-since-last-event is never greater than time-since-start — so no stage
+  // that passes today starts failing, while a stage that is still reporting
+  // progress can no longer be cut. `computeVerifyBudget`'s own doc argues an
+  // idle window would have to exceed the longest single command; re-using the
+  // derived budget as that window is exactly how it clears one, since the budget
+  // IS a measurement of this repo's own build+test cost.
+  const silenceMode = isIdealRunUnlimited();
   const timeout = new Promise<ToolResult>((resolve) => {
-    timer = setTimeout(() => {
+    const fire = () => {
       const msg = buildVerifyTimeoutMessage({
         sprintN,
         runId,
         budget,
         elapsedMs: Date.now() - startedAt,
         observation: { ...observation },
+        mode: silenceMode ? "silence" : "total",
       });
       // Cancel the work we are giving up on BEFORE unblocking the caller.
       controller.abort();
@@ -413,13 +451,32 @@ export async function runVerifyWithWatchdog(
         runId,
         sprintN,
         budgetMs: timeoutMs,
+        mode: silenceMode ? "silence" : "total",
         basis: budget.basis,
         baselineMs: budget.baselineMs,
         observedEvents: observation.events,
         message: msg,
       });
       resolve({ success: false, output: "", error: `verify-timeout: ${msg}` });
-    }, timeoutMs);
+    };
+    if (!silenceMode) {
+      timer = setTimeout(fire, timeoutMs);
+      return;
+    }
+    // Self-rearming silence timer, the same shape `withIsolatedImplDeadline`
+    // uses: sleep until the last-seen event would age out, then re-read — if the
+    // stage reported meanwhile, sleep again for the remainder. One live timer,
+    // no polling.
+    const armIdle = () => {
+      const waitMs = (observation.lastEventAtMs ?? startedAt) + timeoutMs - Date.now();
+      if (waitMs <= 0) {
+        fire();
+        return;
+      }
+      timer = setTimeout(armIdle, waitMs);
+      (timer as { unref?: () => void }).unref?.();
+    };
+    armIdle();
   });
   try {
     return await Promise.race([
@@ -460,8 +517,16 @@ export function getImplIdleTimeoutMs(): number {
  * NOT reset by chunks, so it catches a hang that keeps the idle guard alive with
  * heartbeat/status chunks. Generous by default so a legitimately large sprint is
  * not cut short; a genuine hang still terminates within this ceiling.
+ *
+ * NOT armed inside an `/ideal` run (user decision: no limits) — it is a total
+ * that fires on a turn which is still streaming, which is the class of cut that
+ * ended run mtv9v1xu7615 on the neighbouring stage. The idle arm of the SAME
+ * watchdog, `getImplIdleTimeoutMs()` (240s of no chunk at all), is untouched and
+ * is what still ends a wedged turn there; `withImplIdleWatchdog` arms the total
+ * only when it is finite.
  */
 export function getImplTotalTimeoutMs(): number {
+  if (isIdealRunUnlimited()) return Number.POSITIVE_INFINITY;
   const raw = process.env.MUONROI_SPRINT_IMPL_TOTAL_MS;
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
   if (Number.isFinite(n) && n > 0) return n;
@@ -507,8 +572,20 @@ export function getIsolatedImplIdleTimeoutMs(): number {
  * how long a productive isolated stage lasts here, and it is a lower bound, not
  * a duration — so the ceiling is set 4× above it. At 240× the idle window the
  * two bounds cannot race: a silent child is always cut by the idle rule first.
+ *
+ * Inside an `/ideal` run there is no ceiling at all (user decision: no limits).
+ * By this function's own derivation the ceiling is no longer the wedge guard —
+ * "it exists solely to bound a looping child" — and a looping child is now ended
+ * by signals that read what it is DOING rather than how long it has taken: the
+ * failing-tool-loop guard (8 consecutive same-class tool failures,
+ * `stall-watchdog.ts:299`) and `createNoProgressStopWhen()` (6 consecutive
+ * repeat-only steps), which `stream-runner.ts:650` arms on the sub-agent loop
+ * precisely when its step cap is non-finite — i.e. inside `/ideal`. The silence
+ * rule above stays armed: `withIsolatedImplDeadline` treats a non-finite ceiling
+ * as "no ceiling", NOT as "no bounds".
  */
 export function getIsolatedImplCeilingMs(): number {
+  if (isIdealRunUnlimited()) return Number.POSITIVE_INFINITY;
   const raw = process.env.MUONROI_SPRINT_ISOLATED_IMPL_CEILING_MS;
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
   if (Number.isFinite(n) && n > 0) return n;
@@ -593,17 +670,23 @@ export async function* withImplIdleWatchdog(
 ): AsyncGenerator<StreamChunk, void, unknown> {
   const it = gen[Symbol.asyncIterator]();
   let totalTimer: ReturnType<typeof setTimeout> | undefined;
-  const total = new Promise<never>((_, reject) => {
-    totalTimer = setTimeout(() => {
-      reject(
-        new Error(
-          `implementation stage exceeded ${Math.round(totalMs / 1000)}s total watchdog and was ` +
-            `treated as stalled (sprint ${sprintN}) — the orchestrator turn never completed ` +
-            `(likely hung after its final response while emitting only heartbeat chunks)`,
-        ),
-      );
-    }, totalMs);
-  });
+  // A non-finite (or non-positive) ceiling means "no total guard" — the state an
+  // `/ideal` run is in, where a turn that is still streaming must never be cut.
+  // The idle arm below is unaffected, so the stage is never left unbounded.
+  const totalArmed = Number.isFinite(totalMs) && totalMs > 0;
+  const total = totalArmed
+    ? new Promise<never>((_, reject) => {
+        totalTimer = setTimeout(() => {
+          reject(
+            new Error(
+              `implementation stage exceeded ${Math.round(totalMs / 1000)}s total watchdog and was ` +
+                `treated as stalled (sprint ${sprintN}) — the orchestrator turn never completed ` +
+                `(likely hung after its final response while emitting only heartbeat chunks)`,
+            ),
+          );
+        }, totalMs);
+      })
+    : null;
   try {
     while (true) {
       let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -619,8 +702,10 @@ export async function* withImplIdleWatchdog(
         }, idleMs);
       });
       let res: IteratorResult<StreamChunk, void>;
+      const racers: Array<Promise<IteratorResult<StreamChunk, void>>> = [it.next(), idle];
+      if (total) racers.push(total);
       try {
-        res = await Promise.race([it.next(), idle, total]);
+        res = await Promise.race(racers);
       } finally {
         if (idleTimer) clearTimeout(idleTimer);
       }
@@ -776,13 +861,18 @@ export function buildIsolatedImplTimeoutMessage(args: {
   const { sprintN, totalMs, elapsedMs, observation, idleMs } = args;
   const cause: IsolatedImplTimeoutCause = args.cause ?? "ceiling";
   const firedAt = args.firedAtMs ?? Date.now();
+  // A non-finite ceiling means none was armed (an `/ideal` run) — say so rather
+  // than printing "Infinitys", which reads as a bug in the watchdog.
+  const hasCeiling = Number.isFinite(totalMs);
   const ceilingS = Math.round(totalMs / 1000);
   const parts: string[] =
     cause === "idle"
       ? [
           `isolated implementation stage saw no sub-agent activity for ${Math.round((idleMs ?? 0) / 1000)}s ` +
             `(sprint ${sprintN}) and was CANCELLED after ${(elapsedMs / 1000).toFixed(1)}s`,
-          `the ${ceilingS}s absolute ceiling was NOT reached — this was the SILENCE budget`,
+          hasCeiling
+            ? `the ${ceilingS}s absolute ceiling was NOT reached — this was the SILENCE budget`
+            : "no absolute ceiling was armed — the SILENCE budget is the only bound on this stage",
         ]
       : [
           `isolated implementation stage exceeded ${ceilingS}s total watchdog (sprint ${sprintN}) ` +
@@ -872,6 +962,13 @@ export class IsolatedImplTimeoutError extends Error {
  * would reinstate the wedge this function exists for. The one production call
  * site (`runIsolatedImplWithDeadline`) always wires it — this arm is for
  * legacy/test callers.
+ *
+ * THREE `totalMs` MODES, and the difference between the last two matters:
+ *   - finite, > 0  → ceiling armed, silence rule armed (normal).
+ *   - non-finite   → NO ceiling, silence rule still armed. This is what an
+ *     `/ideal` run passes: no wall clock may cut work that is still running,
+ *     but the stage keeps a liveness bound.
+ *   - <= 0 / NaN   → BOTH bounds off (the pre-existing explicit opt-out).
  */
 export async function withIsolatedImplDeadline<T>(
   run: (signal: AbortSignal) => Promise<T>,
@@ -882,10 +979,29 @@ export async function withIsolatedImplDeadline<T>(
 ): Promise<T> {
   const controller = new AbortController();
   const startedAt = Date.now();
-  if (!(Number.isFinite(totalMs) && totalMs > 0)) return run(controller.signal);
+  // `totalMs <= 0` (or NaN) keeps its pre-existing meaning: disable BOTH bounds.
+  if (!(totalMs > 0)) return run(controller.signal);
+  // A non-finite `totalMs` means NO ABSOLUTE CEILING while the silence rule
+  // stays armed — the shape an `/ideal` run asks for. It must be distinct from
+  // the opt-out above: dropping the idle rule too would leave the stage with no
+  // liveness signal at all, which is a worse failure than the ceiling (it hangs
+  // silently and forever — the mrhc43f0fb9b wedge this function exists for).
+  const ceilingArmed = Number.isFinite(totalMs);
 
   const idleArmed = !!observe && Number.isFinite(idleMs) && (idleMs as number) > 0;
   const idleBudget = idleArmed ? (idleMs as number) : 0;
+  // Nothing left to arm. Report it rather than returning a bound-looking call
+  // that silently has none — production always wires `observe` + `idleMs`
+  // (`runIsolatedImplWithDeadline`), so reaching this is a call-site defect.
+  if (!ceilingArmed && !idleArmed) {
+    logger.warn("orchestrator", "[sprint-runner] isolated impl task is UNBOUNDED: no ceiling and no activity signal", {
+      sprintN,
+      totalMs,
+      idleMs: idleMs ?? null,
+      hasObserver: !!observe,
+    });
+    return run(controller.signal);
+  }
 
   let settled = false;
   let deadlineFired = false;
@@ -943,8 +1059,10 @@ export async function withIsolatedImplDeadline<T>(
       reject(new IsolatedImplTimeoutError(timeoutMessage, cause));
     };
 
-    ceilingTimer = setTimeout(() => fire("ceiling"), totalMs);
-    (ceilingTimer as { unref?: () => void }).unref?.();
+    if (ceilingArmed) {
+      ceilingTimer = setTimeout(() => fire("ceiling"), totalMs);
+      (ceilingTimer as { unref?: () => void }).unref?.();
+    }
 
     if (!idleArmed) return;
     // Self-rearming silence timer. `observe` is a PULL snapshot (the child
