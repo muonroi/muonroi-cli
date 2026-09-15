@@ -772,6 +772,13 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
                 cwd: ctx.flowDir,
                 sourceSession: ctx.sessionId ?? ctx.runId,
               }),
+              // Without this, runGroundingVerify (src/council/debate.ts:2511-2517)
+              // is gated on a config field /ideal never set, so the debate's only
+              // citation-enforcement check was silently dead here — how the
+              // council cited Microsoft.CodeAnalysis.Testing@1.1.1 (a NuGet
+              // package that 404s) in a plan. /council already passes this
+              // (src/council/index.ts:1499); this makes /ideal match.
+              runIsolatedTask: ctx.runIsolatedTask,
             },
             ctx.llm,
           );

@@ -273,6 +273,40 @@ describe("loop-driver audit logging", () => {
     expect((recordUsageEvent as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
   });
 
+  // runGroundingVerify (the citation-enforcement check that catches a
+  // debate hallucinating a nonexistent package/API) is gated on
+  // config.runIsolatedTask at src/council/debate.ts:2511-2517. /ideal must
+  // forward ctx.runIsolatedTask into the CouncilConfig handed to runDebate,
+  // the same way /council already does at src/council/index.ts:1499 — else
+  // that check is silently dead on the /ideal path.
+  it("forwards ctx.runIsolatedTask into the CouncilConfig passed to runDebate", async () => {
+    const debateState = {
+      spec: mockSpec,
+      exchangeLogs: new Map(),
+      runningSummary: "x",
+      roundCount: 1,
+      researchFindings: "",
+      active: [],
+    };
+    const fixtureRunIsolatedTask = vi.fn(async () => ({ success: true, output: "" }));
+    const ctx = buildCtx();
+    ctx.runIsolatedTask = fixtureRunIsolatedTask;
+    let receivedConfig: { runIsolatedTask?: unknown } | undefined;
+
+    // biome-ignore lint/correctness/useYield: mock generator returns immediately
+    (runDebate as ReturnType<typeof vi.fn>).mockImplementation(async function* (
+      _spec: unknown,
+      runOpts: { runIsolatedTask?: unknown },
+    ) {
+      receivedConfig = runOpts;
+      return debateState;
+    });
+
+    await drain(runLoopDriver(ctx));
+
+    expect(receivedConfig?.runIsolatedTask).toBe(fixtureRunIsolatedTask);
+  });
+
   // logInteraction throwing must never blow up the driver — audit is best-effort.
   it("survives logInteraction failures (best-effort)", async () => {
     (logInteraction as ReturnType<typeof vi.fn>).mockImplementation(() => {
