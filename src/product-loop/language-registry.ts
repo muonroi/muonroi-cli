@@ -239,7 +239,43 @@ export interface ManifestSpec {
    * (`Foo.sln`, `Foo.csproj`), which an exact-filename probe cannot see.
    */
   extensions?: readonly string[];
+  /**
+   * Which of this spec's `filenames` define exactly ONE project, for counting
+   * "how many projects live in this directory". Omit when every filename does
+   * (the common case: one `package.json` = one package). .NET is the exception —
+   * `Directory.Build.props` / `global.json` are shared build configuration that
+   * sits ABOVE the projects, so counting them would credit the parent directory
+   * with a phantom project and shift the observed layout one level up.
+   */
+  projectFilenames?: readonly string[];
+  /** Same, for `extensions`. Omit when every extension defines one project. */
+  projectExtensions?: readonly string[];
+  /**
+   * Extensions naming a workspace/solution INDEX — a file that enumerates the
+   * projects, so a newly created project is invisible to the build until it is
+   * registered there. Must be a subset of {@link extensions}.
+   */
+  solutionExtensions?: readonly string[];
 }
+
+/**
+ * Directories whose contents are build output rather than repository source.
+ * Shared by every scanner so a repo looks the same to all of them.
+ *
+ * `obj` matters as much as the rest: a .NET repo regenerates AssemblyInfo /
+ * GlobalUsings `.cs` files under `obj/` and they outnumber the real sources
+ * (measured on tcis-libraries: 630 generated vs 506 real). `bin` is
+ * deliberately absent — it holds no `.cs` there, and it is a legitimate source
+ * directory in Node and Python repos.
+ */
+export const BUILD_OUTPUT_DIRS: ReadonlySet<string> = new Set([
+  "node_modules",
+  "dist",
+  "build",
+  "obj",
+  "target",
+  "__pycache__",
+]);
 
 /**
  * Registry of project manifests. `matchManifest` resolves an entry name
@@ -264,10 +300,90 @@ export const MANIFEST_SPECS: readonly ManifestSpec[] = [
     lang: "C#",
     filenames: ["Directory.Build.props", "Directory.Packages.props", "global.json"],
     extensions: [".sln", ".slnx", ".csproj"],
+    // Only `.csproj` is one project. The props/json files are shared build
+    // config and `.sln` is the index that a new project must be added to.
+    projectFilenames: [],
+    projectExtensions: [".csproj"],
+    solutionExtensions: [".sln", ".slnx"],
   },
-  { type: "csproj", lang: "F#", extensions: [".fsproj"] },
-  { type: "csproj", lang: "Visual Basic", extensions: [".vbproj"] },
+  { type: "csproj", lang: "F#", extensions: [".fsproj"], projectExtensions: [".fsproj"] },
+  { type: "csproj", lang: "Visual Basic", extensions: [".vbproj"], projectExtensions: [".vbproj"] },
 ];
+
+/**
+ * Module-load invariant: the project/solution subsets must actually be subsets
+ * of what the spec matches. A pattern listed only in `projectExtensions` would
+ * never be reached by {@link matchManifest}, so the refinement would silently
+ * describe a file the scanner never sees — the class of drift this registry
+ * exists to prevent.
+ */
+for (const spec of MANIFEST_SPECS) {
+  const declaredExts = new Set(spec.extensions ?? []);
+  const declaredNames = new Set((spec.filenames ?? []).map((f) => f.toLowerCase()));
+  for (const [field, values, declared] of [
+    ["projectExtensions", spec.projectExtensions, declaredExts],
+    ["solutionExtensions", spec.solutionExtensions, declaredExts],
+    ["projectFilenames", spec.projectFilenames?.map((f) => f.toLowerCase()), declaredNames],
+  ] as const) {
+    for (const v of values ?? []) {
+      if (!declared.has(v)) {
+        throw new Error(
+          `language-registry: "${spec.lang}" lists "${v}" in ${field} but not in the matching ` +
+            "extensions/filenames, so matchManifest would never see it.",
+        );
+      }
+    }
+  }
+}
+
+function patternsOf(spec: ManifestSpec, kind: "project" | "solution"): { names: Set<string>; exts: Set<string> } {
+  if (kind === "solution") {
+    return { names: new Set(), exts: new Set(spec.solutionExtensions ?? []) };
+  }
+  // Absent refinement means every pattern the spec matches defines one project.
+  return {
+    names: new Set((spec.projectFilenames ?? spec.filenames ?? []).map((f) => f.toLowerCase())),
+    exts: new Set(spec.projectExtensions ?? spec.extensions ?? []),
+  };
+}
+
+function manifestRoleMatches(entryName: string, kind: "project" | "solution"): boolean {
+  const spec = matchManifest(entryName);
+  if (!spec) return false;
+  const { names, exts } = patternsOf(spec, kind);
+  return names.has(entryName.toLowerCase()) || exts.has(extensionOf(entryName));
+}
+
+/**
+ * True when this filename defines exactly one project — `Foo.csproj`,
+ * `package.json`, `Cargo.toml`. False for shared build config and for solution
+ * indexes, neither of which is a project.
+ */
+export function isProjectManifest(entryName: string): boolean {
+  return manifestRoleMatches(entryName, "project");
+}
+
+/**
+ * True when this filename is a workspace/solution index that enumerates the
+ * projects — a new project is invisible to the build until registered in it.
+ */
+export function isSolutionManifest(entryName: string): boolean {
+  return manifestRoleMatches(entryName, "solution");
+}
+
+/**
+ * Split a test-project directory name into the production name it pairs with
+ * and the suffix that marks it — `Foo.Tests` → `{ base: "Foo", suffix: ".Tests" }`.
+ *
+ * The suffix is returned verbatim (original case) so a caller can REPORT the
+ * convention the repo actually uses rather than a normalised guess. Returns
+ * null for exact test-root names (`tests/`, `spec/`), which pair with nothing.
+ */
+export function splitTestSuffix(dirName: string): { base: string; suffix: string } | null {
+  const m = TEST_DIR_SUFFIX_RE.exec(dirName);
+  if (!m || m.index === 0) return null;
+  return { base: dirName.slice(0, m.index), suffix: dirName.slice(m.index) };
+}
 
 /**
  * Match one directory entry name against the manifest registry. Returns the

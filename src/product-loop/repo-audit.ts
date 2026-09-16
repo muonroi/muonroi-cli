@@ -1,7 +1,8 @@
 import { execSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { isCodeFile, isTestDirName, isTestFile } from "./language-registry.js";
+import { BUILD_OUTPUT_DIRS, isCodeFile, isTestDirName, isTestFile } from "./language-registry.js";
+import { formatLayoutConvention, type LayoutConvention, scanLayoutConvention } from "./layout-convention.js";
 
 /**
  * Deeper repo audit beyond {@link discoverProject}. The latter only detects
@@ -25,6 +26,12 @@ export interface RepoAudit {
   testFramework?: string;
   hasCoverageConfig: boolean;
   hasDocs: boolean;
+  /**
+   * The repo's own observed layout convention — where projects and tests live.
+   * Undefined when the repo shows no dominant layout; absence of a convention
+   * is never reported as one (F4b).
+   */
+  layoutConvention?: LayoutConvention;
   readmeExcerpt?: string;
   readmeSections?: string[];
   packageMeta?: { name?: string; version?: string; description?: string };
@@ -41,16 +48,6 @@ const COVERAGE_HINTS = [
   ".coveragerc",
   "pyproject.toml",
 ];
-
-/**
- * Directories whose contents are build output, not repository source. `obj`
- * matters as much as the rest: a .NET repo regenerates AssemblyInfo/GlobalUsings
- * `.cs` files under `obj/` and they outnumber the real sources (measured on
- * tcis-libraries: 630 generated vs 506 real). `bin` is deliberately absent —
- * it holds no `.cs` there, and it is a legitimate source directory in Node and
- * Python repos.
- */
-const BUILD_OUTPUT_DIRS = new Set(["node_modules", "dist", "build", "obj", "target", "__pycache__"]);
 
 export async function auditRepo(cwd: string | undefined): Promise<RepoAudit> {
   const audit: RepoAudit = {
@@ -90,6 +87,10 @@ export async function auditRepo(cwd: string | undefined): Promise<RepoAudit> {
     const counts = await countCodeFiles(path.join(cwd, dir), 0, 5000, true);
     audit.testFileCount += counts.code + counts.tests;
   }
+
+  // F4b — where does new code belong? Report-only; a scan failure or an
+  // inconclusive layout simply leaves the field undefined.
+  audit.layoutConvention = (await scanLayoutConvention(cwd)) ?? undefined;
 
   // Detect test framework and coverage config
   for (const hint of COVERAGE_HINTS) {
@@ -296,6 +297,10 @@ export function auditAsContextBlock(a: RepoAudit): string {
   }
   lines.push(`Top-level dirs: ${a.topLevelDirs.join(", ")}`);
   lines.push(`Source files: ${a.srcFileCount}, test files: ${a.testFileCount}`);
+  if (a.layoutConvention) {
+    lines.push("");
+    lines.push(formatLayoutConvention(a.layoutConvention));
+  }
   if (a.testFramework)
     lines.push(`Test runner: ${a.testFramework}${a.hasCoverageConfig ? " (coverage configured)" : ""}`);
   if (a.readmeExcerpt) {

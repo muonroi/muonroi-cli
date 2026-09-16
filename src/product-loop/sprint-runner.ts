@@ -62,6 +62,7 @@ import { evaluateDoneGate } from "./done-gate.js";
 import type { ContinueFeedback } from "./feedback-routing.js";
 import { buildContinueFeedback } from "./feedback-routing.js";
 import { idealTrace } from "./ideal-trace.js";
+import { formatLayoutConvention, scanLayoutConvention } from "./layout-convention.js";
 import { type CollectedNestedTurn, collectNestedTurn, forwardNestedTurn } from "./nested-turn.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
 import { runPlanAdherenceReview } from "./plan-adherence-review.js";
@@ -1528,6 +1529,30 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     // Non-critical — proceed without backlog anchor if read fails.
   }
 
+  // F4b — the repo's OWN layout, stated with the counts as evidence.
+  //
+  // This sits deliberately next to `Folder structure:` below, which is the
+  // structure the model INVENTED during scoping. On tcis-libraries that
+  // invention put nine `.cs` files into `src/analyzers/`, a directory the
+  // solution does not reference — nothing compiled, no test ran — while 50
+  // projects under `src/src/` and 48 under `src/tests/` sat in plain sight. The
+  // planner needs the observed evidence adjacent to the guess so it has
+  // something to check the guess against.
+  //
+  // Report-only: an inconclusive layout or a failed scan contributes nothing
+  // and never blocks planning. Cost is one bounded walk (measured 153ms on
+  // tcis-libraries, 142 project files).
+  let layoutContext = "";
+  try {
+    const convention = await scanLayoutConvention(cwd);
+    if (convention) layoutContext = `\n${formatLayoutConvention(convention)}\n`;
+  } catch (err) {
+    console.error(
+      `[sprint-runner] layout-convention scan failed for "${cwd}": ${(err as Error)?.message}`,
+      (err as Error)?.stack?.split("\n").slice(0, 3),
+    );
+  }
+
   const councilTopic =
     `Plan sprint ${sprintN} for product: ${productSpec.idea}\n\n` +
     `Persona: ${productSpec.persona}\n` +
@@ -1535,6 +1560,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     `Architecture: ${productSpec.architecture}\n` +
     `IO contract: ${productSpec.ioContract}\n` +
     `Folder structure: ${productSpec.folderStructure}\n` +
+    layoutContext +
     `${carryOverContext}${focusContext}${assumptionContext}${projectContextStr}${backlogAnchor}\n` +
     `Goal: produce concrete edits and verifications that move the criteria toward "met".`;
 
