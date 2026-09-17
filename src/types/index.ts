@@ -547,6 +547,14 @@ export interface CouncilStanceRow {
   stances: Record<string, CouncilStanceMark>;
   /** One-line reason the panel is split (contested rows only). */
   split?: string;
+  /**
+   * True when the leader marked this criterion settleable only by building —
+   * not by further debate (mirrors `LeaderEvaluation.criteriaStatus[].deferred`
+   * in `council/types.ts`). R4a: persisted here so downstream gates (e.g. the
+   * undebated-criteria gate) CAN see it; carrying the flag through does not by
+   * itself change what any gate decides — see `src/council/stance.ts`.
+   */
+  deferred?: boolean;
 }
 
 /**

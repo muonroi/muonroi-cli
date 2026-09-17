@@ -15,12 +15,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CouncilStanceRow, StreamChunk } from "../../types/index.js";
 import {
   enforceUndebatedCriteriaGate,
+  findUndebatedCriteria,
   readUndebatedGateRecord,
   recordUndebatedResolution,
   UNDEBATED_OPTION_ACCEPT,
   UNDEBATED_OPTION_COUNCIL,
   UNDEBATED_OPTION_NARROW,
   UNDEBATED_RECORD_FILE,
+  UNDEBATED_RECORD_VERSION,
   type UndebatedGateOutcome,
   writeUndebatedStanceRecord,
 } from "../undebated-criteria-gate.js";
@@ -111,6 +113,32 @@ describe("F8b — persisted stance record", () => {
       decidedAt: "2026-09-10T02:00:00.000Z",
     });
     expect(await readUndebatedGateRecord(runDir)).toBeNull();
+  });
+
+  // R4a — the leader's `deferred` flag must survive the real disk round-trip
+  // (writeUndebatedStanceRecord / readUndebatedGateRecord), with the record
+  // version left untouched, so a future gate can consume it.
+  it("round-trips a row's deferred:true flag through the real persistence path", async () => {
+    const deferredRow: CouncilStanceRow = { ...SILENT, deferred: true };
+    await writeUndebatedStanceRecord(runDir, [ARGUED, deferredRow]);
+    const read = await readUndebatedGateRecord(runDir);
+    expect(read?.stanceRows).toEqual([ARGUED, deferredRow]);
+    expect(read?.stanceRows[1]?.deferred).toBe(true);
+    // The version this slice must not bump — a mismatch makes the reader
+    // return null, silently forgetting a previously recorded human halt.
+    expect(read?.version).toBe(UNDEBATED_RECORD_VERSION);
+    expect(UNDEBATED_RECORD_VERSION).toBe(1);
+  });
+
+  // No-behaviour-change pin: findUndebatedCriteria must decide identically
+  // whether or not a row carries `deferred`. This slice only makes the flag
+  // visible on disk — R4b (a later slice) may make the gate consume it, and
+  // that consumption must NOT happen here. This assertion must pass both
+  // before and after this slice's stance.ts change.
+  it("does not change what findUndebatedCriteria decides for a deferred:true row", () => {
+    const withoutDeferred = findUndebatedCriteria([ARGUED, SILENT]);
+    const withDeferred = findUndebatedCriteria([ARGUED, { ...SILENT, deferred: true }]);
+    expect(withDeferred).toEqual(withoutDeferred);
   });
 });
 
