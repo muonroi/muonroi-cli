@@ -635,7 +635,17 @@ export async function* runClarification(
       const answer = await respondToQuestion(questionId);
       allQA.push({ id: q.id, question: q.question, answer });
       clarifyHistory.push({ question: q.question, answer, ts: new Date().toISOString() });
-      yield { type: "content", content: `\n  ↳ ${answer}\n` };
+      // U1 — the interactive askcard UI already rendered ONE transcript record
+      // pairing this question with the answer (`use-app-logic.tsx`'s answer
+      // handler, via `buildAskcardAnswerEntry`); echoing it again here would
+      // duplicate the answer with no question next to it. Headless never
+      // passes a questionText through `respondToCouncilQuestion`, so
+      // `wasAnsweredByCard` is always false there and this echo — its ONLY
+      // record of the answer — is unaffected. See `QuestionResponder
+      // .wasAnsweredByCard` (council/types.ts).
+      if (!respondToQuestion.wasAnsweredByCard?.(questionId)) {
+        yield { type: "content", content: `\n  ↳ ${answer}\n` };
+      }
     }
 
     // P5: after each round's Q&A batch, call the ready-gate judge.

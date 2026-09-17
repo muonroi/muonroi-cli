@@ -3214,6 +3214,15 @@ export async function* runEscalationPrompt(opts: {
     });
     answer = "";
   }
+  // U1 — consume once, right after the answer settles (success or the
+  // caught-error fallback above). Reused by the bare "↳ <choice>" echoes
+  // below — this card reuses `phase: "post-debate"` to ride the same UI
+  // renderer as the post-debate card, so it is subject to the same
+  // duplicate-echo defect (project_askcard_transcript_qa_pairing). The
+  // "extend" branch's own line is NOT gated by this — it reports
+  // `grantedRounds`/the new round ceiling, information the UI's paired
+  // question+answer record does not have, so it is not a literal duplicate.
+  const answeredByCard = respondToQuestion.wasAnsweredByCard?.(questionId) ?? false;
 
   if (answer === "escalate_extend" && !atAbsoluteMax) {
     // `absoluteMaxRounds()` is Infinity inside `/ideal` (user decision: no limits).
@@ -3229,16 +3238,20 @@ export async function* runEscalationPrompt(opts: {
     // No headroom left even though the option showed — fall through to accept.
   }
   if (answer === "escalate_rescope") {
-    yield {
-      type: "content",
-      content: `\n  ↳ Narrow the scope — ending the debate; synthesis will note the open criteria for a re-scoped follow-up.\n`,
-    };
+    if (!answeredByCard) {
+      yield {
+        type: "content",
+        content: `\n  ↳ Narrow the scope — ending the debate; synthesis will note the open criteria for a re-scoped follow-up.\n`,
+      };
+    }
     return { action: "rescope", grantedRounds: 0 };
   }
-  yield {
-    type: "content",
-    content: `\n  ↳ Accepted the current outcome with ${noun} open.\n`,
-  };
+  if (!answeredByCard) {
+    yield {
+      type: "content",
+      content: `\n  ↳ Accepted the current outcome with ${noun} open.\n`,
+    };
+  }
   return { action: "accept", grantedRounds: 0 };
 }
 

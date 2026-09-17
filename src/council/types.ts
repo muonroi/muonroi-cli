@@ -830,5 +830,22 @@ export interface CouncilLLM {
   takeModelBlockWarning?(modelId: string): string | undefined;
 }
 
-export type QuestionResponder = (questionId: string) => Promise<string>;
+/**
+ * U1 — transcript Q&A pairing. `wasAnsweredByCard`, when present, is an
+ * optional side-channel a caller can attach onto the SAME function value
+ * passed as `respondToQuestion`: it reports (consume-on-read) whether a given
+ * `questionId`'s answer already arrived WITH its question text — which today
+ * only happens when the interactive UI card answered it (see
+ * `CouncilManager.respondToQuestion`'s `questionText` param; headless's
+ * `handleCouncilChunk` never passes it). Every echo site
+ * (`clarifier.ts`, `council/index.ts`) checks this right after `await
+ * respondToQuestion(id)` and skips its own `\n  ↳ <answer>\n` chunk when true
+ * — the UI already rendered a paired question+answer record, so echoing again
+ * would duplicate the answer with no question (the U1 defect). Undefined
+ * (every test mock, every non-UI-wired responder, and headless) means "keep
+ * echoing" — the pre-U1, backward-compatible default.
+ */
+export type QuestionResponder = ((questionId: string) => Promise<string>) & {
+  wasAnsweredByCard?: (questionId: string) => boolean;
+};
 export type PreflightResponder = (preflightId: string) => Promise<boolean>;

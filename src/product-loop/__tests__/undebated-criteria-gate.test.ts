@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { COUNCIL_ANSWER_DISMISSED } from "../../council/types.js";
+import { COUNCIL_ANSWER_DISMISSED, type QuestionResponder } from "../../council/types.js";
 import type { CouncilStanceRow, StreamChunk } from "../../types/index.js";
 import {
   buildUndebatedQuestion,
@@ -219,6 +219,92 @@ describe("runUndebatedCriteriaGate — the askcard", () => {
       }),
     );
     expect(decision).toMatchObject({ action: "council", unattended: true });
+  });
+});
+
+/**
+ * U1 — this card reuses `phase: "post-debate"` to ride the same UI renderer
+ * as the post-debate card, so it fired the SAME duplicate-echo defect
+ * (project_askcard_transcript_qa_pairing) as the original U1 slice: the
+ * interactive UI already renders one paired question+answer transcript
+ * record via `buildAskcardAnswerEntry` (`use-app-logic.tsx`), and this
+ * module's own `\n  ↳ <answer>\n` echo duplicated it. Fixed by gating every
+ * echo on `QuestionResponder.wasAnsweredByCard` (council/types.ts) — the same
+ * mechanism the original U1 clarify/post-debate/refine/plan-confirm sites use.
+ */
+describe("U1 — undebated-gate echo suppression (headless vs card-answered)", () => {
+  const undebated = [{ index: 0, criterion: NUGET }];
+
+  it.each([
+    ["council (stop)", UNDEBATED_OPTION_COUNCIL, "Run stopped before scoping"],
+    ["narrow", UNDEBATED_OPTION_NARROW, "Dropped 1 undebated criterion"],
+    ["accept", UNDEBATED_OPTION_ACCEPT, "Proceeding with 1 undebated criterion"],
+  ] as const)("headless-style responder (no wasAnsweredByCard) keeps the ↳ echo on %s — its only record of the answer", async (_label, answer, expectedSnippet) => {
+    const headlessResponder = vi.fn().mockResolvedValue(answer);
+    const { chunks } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: headlessResponder, timeoutMs: 5_000 }),
+    );
+    const text = chunks
+      .filter((c) => c.type === "content")
+      .map((c) => c.content ?? "")
+      .join("");
+    expect(text).toContain("↳");
+    expect(text).toContain(expectedSnippet);
+  });
+
+  it.each([
+    ["council (stop)", UNDEBATED_OPTION_COUNCIL],
+    ["narrow", UNDEBATED_OPTION_NARROW],
+    ["accept", UNDEBATED_OPTION_ACCEPT],
+  ] as const)("card-answered responder (wasAnsweredByCard → true) suppresses the ↳ echo on %s", async (_label, answer) => {
+    const cardResponder = vi.fn().mockResolvedValue(answer) as unknown as QuestionResponder;
+    cardResponder.wasAnsweredByCard = vi.fn().mockReturnValue(true);
+    const { chunks, decision } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: cardResponder, timeoutMs: 5_000 }),
+    );
+    const text = chunks
+      .filter((c) => c.type === "content")
+      .map((c) => c.content ?? "")
+      .join("");
+    expect(text).not.toContain("↳");
+    // The decision itself is unaffected — only the transcript echo is gated.
+    expect(decision.action).toBeDefined();
+    expect(cardResponder.wasAnsweredByCard).toHaveBeenCalledTimes(1);
+  });
+
+  it("the unattended-timeout echo is NOT gated — nobody answered, so there is no card record to avoid duplicating", async () => {
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+    const { chunks } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: neverAnswers, timeoutMs: 20 }),
+    );
+    const text = chunks
+      .filter((c) => c.type === "content")
+      .map((c) => c.content ?? "")
+      .join("");
+    expect(text).toContain("No answer within");
+  });
+
+  it("a late answer arriving AFTER a timeout drains wasAnsweredByCard instead of leaking it", async () => {
+    // The dangling responder promise (no cancel channel) can still resolve
+    // after runUndebatedCriteriaGate has already returned on the timeout path.
+    let resolveLate!: (v: string) => void;
+    const lateResponder = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveLate = resolve;
+        }),
+    ) as unknown as QuestionResponder;
+    const wasAnsweredByCard = vi.fn().mockReturnValue(true);
+    lateResponder.wasAnsweredByCard = wasAnsweredByCard;
+    const { decision } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: lateResponder, timeoutMs: 20 }),
+    );
+    expect(decision.unattended).toBe(true);
+    expect(wasAnsweredByCard).not.toHaveBeenCalled();
+    resolveLate(UNDEBATED_OPTION_ACCEPT);
+    // Let the dangling .then() microtask run.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(wasAnsweredByCard).toHaveBeenCalledTimes(1);
   });
 });
 

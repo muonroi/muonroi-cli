@@ -354,18 +354,32 @@ export async function* runUndebatedCriteriaGate(opts: {
     return { action: "council", unattended: true, answer: "" };
   }
 
+  // U1 — a real (non-timeout) answer was received: consume the card-answered
+  // flag exactly ONCE here and reuse it for every branch below. Only the
+  // interactive UI card ever sets it (see `QuestionResponder.wasAnsweredByCard`,
+  // council/types.ts); headless never does, so its echo — its only record of
+  // the answer — is unaffected. This card reuses `phase: "post-debate"` to ride
+  // the same UI renderer as the post-debate card, so it is subject to the same
+  // duplicate-echo defect (project_askcard_transcript_qa_pairing) once the UI
+  // renders its own paired record.
+  const answeredByCard = respondToQuestion.wasAnsweredByCard?.(questionId) ?? false;
+
   if (answer === UNDEBATED_OPTION_NARROW) {
-    yield {
-      type: "content",
-      content: `\n  ↳ Dropped ${undebated.length} undebated criteri${undebated.length === 1 ? "on" : "a"} from the scope — scoping continues without ${undebated.length === 1 ? "it" : "them"}.\n`,
-    } as StreamChunk;
+    if (!answeredByCard) {
+      yield {
+        type: "content",
+        content: `\n  ↳ Dropped ${undebated.length} undebated criteri${undebated.length === 1 ? "on" : "a"} from the scope — scoping continues without ${undebated.length === 1 ? "it" : "them"}.\n`,
+      } as StreamChunk;
+    }
     return { action: "narrow", unattended: false, answer };
   }
   if (answer === UNDEBATED_OPTION_ACCEPT) {
-    yield {
-      type: "content",
-      content: `\n  ↳ Proceeding with ${undebated.length} undebated criteri${undebated.length === 1 ? "on" : "a"} still open.\n`,
-    } as StreamChunk;
+    if (!answeredByCard) {
+      yield {
+        type: "content",
+        content: `\n  ↳ Proceeding with ${undebated.length} undebated criteri${undebated.length === 1 ? "on" : "a"} still open.\n`,
+      } as StreamChunk;
+    }
     return { action: "accept", unattended: false, answer };
   }
   // Everything else — the explicit stop, an Escape (COUNCIL_ANSWER_DISMISSED),
@@ -378,15 +392,17 @@ export async function* runUndebatedCriteriaGate(opts: {
   // no idea what to do next (session 2bd02af6e46f). Report the stop, then name
   // the command — including the one that will NOT work, since a recorded answer
   // makes `/ideal resume` stop here again without re-asking.
-  yield {
-    type: "content",
-    content:
-      `\n  ↳ Run stopped before scoping. Nothing was scheduled, and no council was convened — ` +
-      `this stops the run, it does not start one.\n` +
-      `     Next: run /council on ${undebated.length === 1 ? "the criterion" : "the criteria"} above to get ` +
-      `${undebated.length === 1 ? "it" : "them"} argued, then start a fresh /ideal.\n` +
-      `     This answer is recorded against the run, so /ideal resume stops here again rather than continuing.\n`,
-  } as StreamChunk;
+  if (!answeredByCard) {
+    yield {
+      type: "content",
+      content:
+        `\n  ↳ Run stopped before scoping. Nothing was scheduled, and no council was convened — ` +
+        `this stops the run, it does not start one.\n` +
+        `     Next: run /council on ${undebated.length === 1 ? "the criterion" : "the criteria"} above to get ` +
+        `${undebated.length === 1 ? "it" : "them"} argued, then start a fresh /ideal.\n` +
+        `     This answer is recorded against the run, so /ideal resume stops here again rather than continuing.\n`,
+    } as StreamChunk;
+  }
   return { action: "council", unattended: false, answer };
 }
 
@@ -411,7 +427,31 @@ async function awaitAnswer(
       timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
     });
     const winner = await Promise.race([answered, expired]);
-    return winner === TIMED_OUT ? null : winner;
+    if (winner === TIMED_OUT) {
+      // U1 — the responder promise is left dangling (no cancel channel) and
+      // may still resolve LATE, via the UI card, after this generator has
+      // already returned and no branch above ever reads `wasAnsweredByCard`.
+      // Drain it whenever it does so the flag never lingers in
+      // CouncilManager's `_cardAnsweredQuestionIds` set. `.catch` also gives
+      // the otherwise-unobserved `answered` promise a rejection handler.
+      void answered
+        .then(() => {
+          respondToQuestion.wasAnsweredByCard?.(questionId);
+        })
+        .catch((err) => {
+          // Debug only, not error: the generator has already returned its
+          // unattended-timeout decision, so there is nothing left to recover
+          // or retry here — this handler exists solely to observe a late
+          // rejection, not to react to one (No Silent Catch: still logged,
+          // never swallowed bare).
+          logger.debug("orchestrator", "[undebated-criteria-gate] late responder rejection after timeout", {
+            questionId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      return null;
+    }
+    return winner;
   } catch (err) {
     // A broken responder channel must not crash or hang the run — but it must
     // never be silent either, or a dead UI channel looks identical to a user

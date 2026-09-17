@@ -5,7 +5,7 @@
 
 import { runClarification } from "../council/clarifier.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
-import type { ClarifiedSpec, CouncilLLM } from "../council/types.js";
+import type { ClarifiedSpec, CouncilLLM, QuestionResponder } from "../council/types.js";
 import type { StreamChunk } from "../types/index.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
 import { detectExistingProject } from "./discovery-detection.js";
@@ -85,7 +85,7 @@ function buildDiscoveryDebateRunner(_deps?: any): CouncilDebateRunner {
  */
 function buildLiveTuiAsk(
   emit: (chunk: StreamChunk) => void,
-  respondToQuestion: (questionId: string) => Promise<string>,
+  respondToQuestion: QuestionResponder,
 ): (label: string, options?: string[]) => Promise<string> {
   return async (label, options) => {
     const _dbg = process.env.MUONROI_DEBUG_LEADER === "1";
@@ -119,6 +119,11 @@ function buildLiveTuiAsk(
       process.stderr.write(`[tuiask] await-start: ${JSON.stringify({ questionId })}\n`);
     }
     const result = await respondToQuestion(questionId);
+    // U1 — this card is answered directly (no `runClarification` in between),
+    // so nothing else will ever consume `wasAnsweredByCard` for this
+    // questionId, and it never echoes the answer either way. Drain it here so
+    // it cannot linger in CouncilManager's `_cardAnsweredQuestionIds` set.
+    respondToQuestion.wasAnsweredByCard?.(questionId);
     if (_dbg) {
       process.stderr.write(
         `[tuiask] await-resolved: ${JSON.stringify({ questionId, durationMs: Date.now() - _awaitStart, resultPreview: result.slice(0, 40) })}\n`,
@@ -224,7 +229,7 @@ export interface GatherIO {
   /** Stream chunks back to the loop driver so the UI can render question askcards. */
   emit?: (chunk: StreamChunk) => void;
   /** Resolve once the user answers the question on this id. Returns the chosen option's `value`. */
-  respondToQuestion?: (questionId: string) => Promise<string>;
+  respondToQuestion?: QuestionResponder;
 }
 
 export async function runGatherPhase(
@@ -420,7 +425,7 @@ async function runAgentDrivenGather(args: {
   prompted: Partial<DiscoveryContext>;
   prefillFromDetection: Partial<DiscoveryContext>;
   emit: (chunk: StreamChunk) => void;
-  respondToQuestion: (questionId: string) => Promise<string>;
+  respondToQuestion: QuestionResponder;
 }): Promise<ProjectContext> {
   // Context the CLI injects for the agent to interview AGAINST — never questions.
   let conversationContext = "";

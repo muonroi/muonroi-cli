@@ -250,7 +250,9 @@ describe("F8b — enforceUndebatedCriteriaGate", () => {
         timeoutMs: 5_000,
       }),
     );
-    const { chunks } = await drive(enforceUndebatedCriteriaGate({ runDir, respondToQuestion: vi.fn(), timeoutMs: 0 }));
+    const { chunks } = await drive(
+      enforceUndebatedCriteriaGate({ runDir, respondToQuestion: vi.fn().mockResolvedValue(""), timeoutMs: 0 }),
+    );
     const text = chunks.map((c) => (c.type === "content" ? (c.content ?? "") : "")).join("");
     expect(text).toContain("/council");
     // A fresh run is the forward path; resuming this one is not.

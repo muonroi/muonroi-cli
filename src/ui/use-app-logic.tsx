@@ -248,7 +248,6 @@ import {
   buildToolGroupEntry,
   buildToolResultEntry,
   buildUserEntry,
-  formatAnswerForLog,
   formatScheduleDetails,
   isCouncilStartPatch,
   mapCouncilCardKey,
@@ -286,6 +285,7 @@ import {
 } from "./lsp-setup-controller.js";
 import { sanitizeContent } from "./utils/text.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
+import { buildAskcardAnswerEntry } from "./askcard-transcript.js";
 import { buildSprintFailedHaltData } from "./sprint-failed-halt.js";
 
 /**
@@ -6872,14 +6872,17 @@ export function useAppLogic(props: AppLogicProps) {
             // 2217600e1f27 export). Every real answer / non-skip choice still echoes.
             const isNoopSkip = ans.kind === "choice" && !ans.text.trim() && /^skip\b/i.test(selectedOptionLabel ?? "");
             if (!isNoopSkip) {
+              // U1 — ONE transcript record pairing the question (muted
+              // sourceLabel) with the answer (content), instead of an
+              // answer-only bubble. The council generator's own echo is
+              // gated off for this questionId (QuestionResponder
+              // .wasAnsweredByCard) so the record is not duplicated.
               setMessages((prev) => [
                 ...prev,
-                buildUserEntry(
-                  formatAnswerForLog(ans, {
-                    selectedOptionLabel,
-                    questionId: pendingQuestion.question?.match(/^Question:\s*(\w+)/)?.[1],
-                  }),
-                ),
+                buildAskcardAnswerEntry(pendingQuestion, ans, {
+                  selectedOptionLabel,
+                  questionId: pendingQuestion.question?.match(/^Question:\s*(\w+)/)?.[1],
+                }),
               ]);
             }
             // E2 — start a heartbeat while we wait for the NEXT chunk from
@@ -6962,6 +6965,10 @@ export function useAppLogic(props: AppLogicProps) {
             // reads an empty submit as "take the recommended option" (that is the
             // fix for the answer silently vanishing); an Esc must stay a no-op,
             // and both used to be indistinguishable at the council side.
+            // U1 — passing the question text here also marks this dismissal
+            // "answered via card" (QuestionResponder.wasAnsweredByCard), so a
+            // dismissed card now leaves NO transcript trace instead of the old
+            // blank "  ↳ " line — intended: nothing was actually answered.
             agent.respondToCouncilQuestion(qid, COUNCIL_ANSWER_DISMISSED, pendingQuestion.question);
             // Task 2.4 — emit askcard-cancel harness event (agent-mode only).
             try {
@@ -8410,7 +8417,13 @@ export function useAppLogic(props: AppLogicProps) {
       setPendingCouncilQuestionSync(null);
       setCouncilCardStateSync(null);
       agent.respondToCouncilQuestion(qid, message.trim(), pendingCouncilQuestion.question);
-      setMessages((prev) => [...prev, buildUserEntry(message.trim())]);
+      // U1 — same paired question+answer record as the card-driven answer
+      // path above (this is the legacy fallback where the user typed the
+      // answer into the main composer instead of the card).
+      setMessages((prev) => [
+        ...prev,
+        buildAskcardAnswerEntry(pendingCouncilQuestion, { kind: "freetext", text: message.trim() }, {}),
+      ]);
       return;
     }
     // S5 — steer mode (ctrl+s). While a debate is live, what the user types goes

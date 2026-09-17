@@ -12,7 +12,7 @@
 // transposition where the field/method originally lived on Agent.
 
 import { type ModelMessage, stepCountIs } from "ai";
-import type { IntentKind } from "../council/types.js";
+import type { IntentKind, QuestionResponder } from "../council/types.js";
 import { getTextModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {
@@ -35,6 +35,14 @@ import { COUNCIL_COLOR_BG, COUNCIL_COLOR_RESET, COUNCIL_ROLE_COLORS, type Counci
 import { extractUserContent, getCompactionSummaryText, isCompactionSummaryMessage } from "./compaction";
 import { beginInteractivePause, endInteractivePause } from "./interactive-pause.js";
 import { createNoProgressStopWhen } from "./no-progress-guard.js";
+
+/**
+ * U1 — defense-in-depth bound on `_cardAnsweredQuestionIds` (see its JSDoc).
+ * Generous: a single `/ideal` run realistically answers on the order of tens
+ * of cards, not hundreds. Exported only so the leak-prevention regression
+ * test can drive the eviction path deterministically without a magic number.
+ */
+export const MAX_CARD_ANSWERED_IDS = 200;
 
 /**
  * Dependency callbacks the CouncilManager needs to reach back into Agent state
@@ -90,6 +98,26 @@ export class CouncilManager {
   private _preflightResolvers = new Map<string, (approved: boolean) => void>();
   private _bufferedQuestionAnswers = new Map<string, string>();
   private _bufferedPreflightApprovals = new Map<string, boolean>();
+  /**
+   * U1 — questionIds answered WITH their question text, i.e. via the
+   * interactive UI askcard (only `use-app-logic.tsx`'s answer handler passes
+   * `questionText` to {@link respondToQuestion}; headless's
+   * `handleCouncilChunk` never does). Consumed exactly once by
+   * `wasAnsweredByCard` right after the generator's `await
+   * respondToQuestion(id)` resolves, so the council echo sites know the UI
+   * already rendered a paired question+answer transcript record and must not
+   * echo the answer again.
+   *
+   * Every KNOWN card-answering site that never echoes (and therefore never
+   * calls `wasAnsweredByCard`) actively drains its own questionId right after
+   * receiving the answer — see `collectSpecEdit` / the launch-card edit loop
+   * in `council/index.ts` and `buildLiveTuiAsk` in `product-loop/gather.ts`.
+   * `MAX_CARD_ANSWERED_IDS` below is a defense-in-depth bound, not the primary
+   * mechanism: it protects against a FUTURE non-echoing call site that forgets
+   * to drain, at the cost of that one entry going stale rather than growing
+   * this set unbounded across a long-running process.
+   */
+  private _cardAnsweredQuestionIds = new Set<string>();
   /** One-shot watchdog-pause releasers for cards currently awaiting a human. */
   private _pauseReleasers = new Set<() => void>();
   /** Council telemetry — counts API calls and tracks debate start time. */
@@ -138,6 +166,20 @@ export class CouncilManager {
         })}\n`,
       );
     }
+    // U1 — record BEFORE resolving/buffering so `wasAnsweredByCard` sees it
+    // regardless of which branch below fires. Only the interactive UI card
+    // passes `questionText` (see the JSDoc on `_cardAnsweredQuestionIds`).
+    if (questionText) {
+      // Defense-in-depth bound (see the JSDoc on `_cardAnsweredQuestionIds`):
+      // evict the OLDEST entry (Set iteration order = insertion order) before
+      // adding, so a call site that forgets to drain cannot grow this set
+      // unbounded across a long-running process.
+      if (this._cardAnsweredQuestionIds.size >= MAX_CARD_ANSWERED_IDS) {
+        const oldest = this._cardAnsweredQuestionIds.values().next().value;
+        if (oldest !== undefined) this._cardAnsweredQuestionIds.delete(oldest);
+      }
+      this._cardAnsweredQuestionIds.add(questionId);
+    }
     const resolver = this._questionResolvers.get(questionId);
     if (resolver) {
       resolver(answer);
@@ -157,6 +199,27 @@ export class CouncilManager {
     }
   }
 
+  /**
+   * U1 — consume-on-read: true iff `questionId`'s answer was passed with its
+   * question text (i.e. answered via the interactive UI card). Deletes the
+   * entry so a stale flag can never leak into a LATER, unrelated question that
+   * happens to reuse an id (ids are `crypto.randomUUID()`, so reuse is not
+   * expected in practice, but consuming keeps this correct either way).
+   */
+  private wasAnsweredByCard(questionId: string): boolean {
+    return this._cardAnsweredQuestionIds.delete(questionId);
+  }
+
+  /**
+   * Test-only. Asserts the U1 leak-prevention contract: every card-answered
+   * questionId is eventually consumed (by an echo site or an explicit drain)
+   * or evicted by the `MAX_CARD_ANSWERED_IDS` bound — this set must not grow
+   * unbounded across a run. See `_cardAnsweredQuestionIds`'s JSDoc.
+   */
+  _cardAnsweredCountForTests(): number {
+    return this._cardAnsweredQuestionIds.size;
+  }
+
   respondToPreflight(preflightId: string, approved: boolean): void {
     const resolver = this._preflightResolvers.get(preflightId);
     if (resolver) {
@@ -167,8 +230,8 @@ export class CouncilManager {
     }
   }
 
-  createQuestionResponder(): (questionId: string) => Promise<string> {
-    return (questionId: string) =>
+  createQuestionResponder(): QuestionResponder {
+    const responder: QuestionResponder = (questionId: string) =>
       new Promise<string>((resolve) => {
         const buffered = this._bufferedQuestionAnswers.get(questionId);
         if (buffered !== undefined) {
@@ -200,6 +263,11 @@ export class CouncilManager {
           resolve(answer);
         });
       });
+    // U1 — side-channel so the echo sites can tell (right after `await`) that
+    // this questionId was answered via the interactive card. See the JSDoc on
+    // `QuestionResponder.wasAnsweredByCard` in council/types.ts.
+    responder.wasAnsweredByCard = (questionId: string) => this.wasAnsweredByCard(questionId);
+    return responder;
   }
 
   createPreflightResponder(): (preflightId: string) => Promise<boolean> {

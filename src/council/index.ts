@@ -803,7 +803,11 @@ export function buildNeutralPostCouncilContinuation(synthesis: string): string {
  * parser). The two paths cannot collide because they are different
  * question/answer round-trips, not different branches of the same one.
  */
-async function* collectSpecEdit(
+// Exported (only) so U1's Set-leak regression test can drive this
+// "council-setup"-phase askcard directly against a real CouncilManager
+// without standing up the whole runCouncil machinery — see
+// src/council/__tests__/council-setup-set-leak.test.ts.
+export async function* collectSpecEdit(
   spec: ClarifiedSpec,
   sessionId: string,
   round: number,
@@ -824,6 +828,11 @@ async function* collectSpecEdit(
     },
   } as StreamChunk;
   const topicAnswer = (await respondToQuestion(topicQuestionId)).trim();
+  // U1 — this "council-setup" card is never echoed (its answer is applied
+  // directly to `spec`, never printed back), so nothing else will ever
+  // consume `wasAnsweredByCard` for this questionId. Drain it here so it
+  // cannot linger in CouncilManager's `_cardAnsweredQuestionIds` set.
+  respondToQuestion.wasAnsweredByCard?.(topicQuestionId);
 
   const outcomeQuestionId = `council-edit-outcome-${sessionId}-${round}`;
   yield {
@@ -840,6 +849,8 @@ async function* collectSpecEdit(
     },
   } as StreamChunk;
   const outcomeAnswer = (await respondToQuestion(outcomeQuestionId)).trim();
+  // U1 — same drain as topicQuestionId above.
+  respondToQuestion.wasAnsweredByCard?.(outcomeQuestionId);
   const successCriteria = outcomeAnswer
     ? outcomeAnswer
         .split("\n")
@@ -1397,6 +1408,13 @@ export async function* runCouncil(
         },
       } as StreamChunk;
       choice = (await respondToQuestion(setupQuestionId)).trim();
+      // U1 — this "council-setup" launch card is never echoed as a literal
+      // "↳ <answer>" (the narrative lines below report DIFFERENT information —
+      // intent lock / cheap-run shape / cancel — never the raw choice), so
+      // nothing downstream consumes `wasAnsweredByCard` for this questionId.
+      // Drain it on every loop iteration (including the one that breaks the
+      // loop) so it cannot linger in CouncilManager's `_cardAnsweredQuestionIds`.
+      respondToQuestion.wasAnsweredByCard?.(setupQuestionId);
 
       // Trap 2 — this check runs BEFORE parseIntentAnswer and is an exact-
       // string match against a sentinel that is not a member of IntentKind
@@ -2219,7 +2237,11 @@ export async function* runCouncil(
       const answeredLabel = baseOptions.find((o) => o.value === answer)?.label ?? answer;
       // No "↳ choice" echo in sprint-planning mode — there was no user choice to
       // echo (the plan was auto-locked above with its own status line).
-      if (!options?.sprintPlanningMode) {
+      // U1 — nor when the interactive askcard UI already rendered a paired
+      // question+answer transcript record for this questionId (see
+      // `QuestionResponder.wasAnsweredByCard`); headless never sets that flag,
+      // so its echo — the only record it has — is unaffected.
+      if (!options?.sprintPlanningMode && !respondToQuestion.wasAnsweredByCard?.(questionId)) {
         yield { type: "content", content: `\n  ↳ ${answeredLabel}\n` };
       }
 
@@ -2411,12 +2433,18 @@ export async function* runCouncil(
             },
           } as StreamChunk;
           const ans = await respondToQuestion(sqId);
+          // U1 — read (consume) this once regardless of the skip/blank branch
+          // below, so the flag can never linger in CouncilManager's set.
+          const answeredByCard = respondToQuestion.wasAnsweredByCard?.(sqId) ?? false;
           refinedAnswers.push({ section: label, answer: ans });
           // Only echo sections the user actually filled. "Skip — leave as-is"
           // returns an empty value; echoing it emits a blank "↳ " bubble per
           // section (6 skips = 6 empty rows of transcript garbage). Prefix the
           // section label so a real answer reads as "↳ <section>: <answer>".
-          if (ans.trim().length > 0) {
+          // Also skip when the askcard UI already rendered this section's
+          // question+answer as one transcript record (headless is unaffected —
+          // see `QuestionResponder.wasAnsweredByCard`).
+          if (ans.trim().length > 0 && !answeredByCard) {
             yield { type: "content", content: `\n  ↳ ${label}: ${ans}\n` };
           }
         }
@@ -2631,7 +2659,12 @@ export async function* runCouncil(
             planAnswer = card.options[card.defaultIndex]?.value ?? "save_exit";
           }
           const planAnswerLabel = card.options.find((o) => o.value === planAnswer)?.label ?? planAnswer;
-          yield { type: "content", content: `\n  ↳ ${planAnswerLabel}\n` };
+          // U1 — skip when the askcard UI already rendered this plan-confirm
+          // question+answer as one transcript record (headless is unaffected —
+          // see `QuestionResponder.wasAnsweredByCard`).
+          if (!respondToQuestion.wasAnsweredByCard?.(planQuestionId)) {
+            yield { type: "content", content: `\n  ↳ ${planAnswerLabel}\n` };
+          }
 
           if (planAnswer === "execute_plan") {
             executePlanPath = plannerOutcome.planPath;
