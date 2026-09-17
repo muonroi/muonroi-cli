@@ -2266,6 +2266,10 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // S3b — unfinished sprint tasks (the reviewer's own verdict, never diff-touch
   // alone) survive into the next sprint's focus the same way, right below.
   let unfinishedTasks: Array<{ id: string; title: string }> = [];
+  // S5 — a build break the verify floor could NOT honestly excuse as
+  // pre-existing (run-introduced or unattributable, see describeBuildMustFix in
+  // verify-baseline.ts) carries into the next sprint's focus the same way.
+  let floorMustFixNote: string | undefined;
   // Only pass tasks into a task-aware review when the artifact actually named
   // some (`source !== "none"`) — an empty/absent array falls the review back
   // to the legacy plan-text-only path, unchanged.
@@ -2453,7 +2457,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       // measured: run mttwpmu8ee5b scored 0.00 on both sprints because 31
       // infra-dependent tests (PostgreSql/SqlServer/Kafka) fail for want of a
       // database, none of them related to what the run was writing.
-      const { verifyBaselinePath } = await import("./verify-baseline.js");
+      const { describeBuildMustFix, verifyBaselinePath } = await import("./verify-baseline.js");
       const floor = await runVerifyFloor({
         cwd,
         runId: ctx.runId,
@@ -2461,6 +2465,13 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       });
       const applied = applyVerifyFloor(verifyVerdict, floor);
       verifyVerdict = applied.verdict;
+      // S5 — a build break the floor could not honestly call pre-existing
+      // (run-introduced or unattributable) must reach the next sprint as a
+      // must-fix item, the same way S3b carries unfinished tasks.
+      if (floor.delta) {
+        const mustFix = describeBuildMustFix(floor.delta);
+        if (mustFix) floorMustFixNote = mustFix;
+      }
       if (applied.downgraded) {
         verifyResult.error = `${verifyResult.error ?? ""}\n\n[verify-floor] ${floor.detail}`;
         yield {
@@ -3072,7 +3083,10 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
             .map((t) => `- [${t.id}] ${t.title}`)
             .join("\n")}`
         : "";
-    iter.nextFocus = `${fb.focus}${deviationNote}${taskCarryOverNote}`;
+    // S5 — carry a run-introduced/unattributable build break into the next
+    // sprint's focus as a must-fix item, same as plan deviations and tasks.
+    const floorMustFixText = floorMustFixNote ? `\n\n${floorMustFixNote}` : "";
+    iter.nextFocus = `${fb.focus}${deviationNote}${taskCarryOverNote}${floorMustFixText}`;
     yield {
       type: "content",
       content: `\n> Sprint ${sprintN} did not satisfy Definition-of-Done (${describeVerdictFailure(verdict) ?? "unknown"}). Next focus: ${fb.focus}\n`,

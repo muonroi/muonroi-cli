@@ -58,12 +58,16 @@ import { logger } from "../utils/logger.js";
 import { inferVerifyProjectProfile } from "../verify/recipes.js";
 import { parseFailingTestIds, type TestRunnerFormat } from "./test-failure-parse.js";
 import {
+  boundDirtyFiles,
+  buildFailureSignature,
   computeFloorDelta,
   describeBaselineRule,
+  extractErrorSet,
   type FloorDelta,
   isToleratedTestFailure,
   loadFloorBaseline,
   resolveBaselinePathFromEnv,
+  sha256Hex,
   VERIFY_BASELINE_VERSION,
   type VerifyBaseline,
   type VerifyBaselineCommandResult,
@@ -135,6 +139,12 @@ export interface FloorCheck {
   failingTests?: string[];
   /** Which runner grammars produced those identities. Empty when none matched. */
   formats?: TestRunnerFormat[];
+  /**
+   * Error identities extracted from this command's FULL output (build/typecheck
+   * only — see `extractErrorSet`). Always computed for a build command, even
+   * when empty; used to attribute a build failure that was ALSO red at baseline.
+   */
+  errorSet?: string[];
 }
 
 export interface VerifyFloorResult {
@@ -410,6 +420,10 @@ export async function runFloorCommand(
   // Parse the FULL output — `outputTail` below is truncated, and a truncated
   // failure list would make the clipped-away tests look newly-failing next run.
   const parsed = kind === "test" ? parseFailingTestIds(combined) : { ids: [], formats: [] as TestRunnerFormat[] };
+  // Same reason: error identities are extracted from the FULL output, never the
+  // truncated tail — a clipped-away error code would look "not present" and be
+  // silently attributed away.
+  const errorSet = kind === "build" ? extractErrorSet(combined) : undefined;
 
   if (!ok) {
     const why = spawnError
@@ -438,33 +452,122 @@ export async function runFloorCommand(
     noTests,
     failingTests: parsed.ids,
     formats: parsed.formats,
+    errorSet,
   };
+}
+
+/**
+ * Run one git command, best-effort: a non-git directory is a legitimate working
+ * tree, so any failure yields null rather than throwing.
+ *
+ * ## The bug this closes
+ *
+ * The previous version of this helper caught only a SYNCHRONOUS throw from
+ * `spawnSync` itself — vanishingly rare (`spawnSync` reports failure via
+ * `res.error`/`res.status`, not by throwing). The actual failure path —
+ * `res.error` set, or a non-zero exit — returned `null` with NO log line at
+ * all, silently. That is how run `mu54vrme4c87`'s baseline recorded
+ * `gitCommit: null` while `gitBranch: "master"` resolved fine one call later:
+ * `git rev-parse HEAD` failed in that cwd for a reason nothing ever recorded,
+ * and the caller (and every reader of the baseline afterward) had no way to
+ * tell "git isn't there" from "git failed" from "this really has no commits".
+ * Every failure branch below now logs the exit code / spawn error / stderr
+ * tail, per the repo's No Silent Catch rule.
+ */
+function runGit(args: string[], cwd: string, op: string): string | null {
+  let res: import("node:child_process").SpawnSyncReturns<string>;
+  try {
+    res = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 15_000 });
+  } catch (err) {
+    logger.warn(
+      "orchestrator",
+      `[verify-floor] ${op}: git ${args.join(" ")} threw in ${cwd}: ${err instanceof Error ? err.message : String(err)}`,
+      { operation: op, cwd, args },
+    );
+    return null;
+  }
+  if (res.error) {
+    logger.warn(
+      "orchestrator",
+      `[verify-floor] ${op}: git ${args.join(" ")} failed to spawn in ${cwd}: ${res.error.message}`,
+      { operation: op, cwd, args },
+    );
+    return null;
+  }
+  if (res.status !== 0) {
+    logger.warn(
+      "orchestrator",
+      `[verify-floor] ${op}: git ${args.join(" ")} exited ${res.status} in ${cwd}: ${(res.stderr ?? "").trim().slice(0, 500)}`,
+      { operation: op, cwd, args, status: res.status },
+    );
+    return null;
+  }
+  return (res.stdout ?? "").trim();
+}
+
+/** Parse `git status --porcelain` lines into plain paths, newest-safe for renames (`old -> new` keeps `new`). */
+function parseDirtyPaths(statusOutput: string): string[] {
+  const paths = statusOutput
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const rest = line.slice(2).trim();
+      const arrow = rest.indexOf(" -> ");
+      const p = arrow >= 0 ? rest.slice(arrow + 4) : rest;
+      return p.replace(/^"(.*)"$/, "$1");
+    })
+    .filter(Boolean);
+  return boundDirtyFiles(paths);
 }
 
 /**
  * Git identity of the tree under test. Used to stamp a baseline and to reject
  * one captured on a different branch. Best-effort: a non-git directory is a
- * legitimate working tree, so failure yields nulls rather than throwing.
+ * legitimate working tree, so failure yields nulls rather than throwing (but,
+ * per `runGit`, never silently — see the doc comment there).
  */
-export function readGitIdentity(cwd: string): { commit: string | null; branch: string | null; dirty: boolean | null } {
-  const run = (args: string[]): string | null => {
-    try {
-      const res = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 15_000 });
-      if (res.error || res.status !== 0) return null;
-      return (res.stdout ?? "").trim();
-    } catch (err) {
-      logger.warn(
-        "orchestrator",
-        `[verify-floor] readGitIdentity: git ${args.join(" ")} failed in ${cwd}: ${err instanceof Error ? err.message : String(err)}`,
-        { operation: "readGitIdentity", cwd },
-      );
-      return null;
-    }
-  };
-  const commit = run(["rev-parse", "HEAD"]);
-  const branch = run(["rev-parse", "--abbrev-ref", "HEAD"]);
-  const status = run(["status", "--porcelain"]);
-  return { commit, branch, dirty: status === null ? null : status.length > 0 };
+export function readGitIdentity(cwd: string): {
+  commit: string | null;
+  branch: string | null;
+  dirty: boolean | null;
+  /** Bounded list of paths from `git status --porcelain`. Null when status could not be read. */
+  dirtyFiles: string[] | null;
+  /** sha256 of `git diff HEAD`. Null on a clean tree or when the diff could not be read. */
+  dirtyDiffHash: string | null;
+} {
+  const commit = runGit(["rev-parse", "HEAD"], cwd, "readGitIdentity");
+  const branch = runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd, "readGitIdentity");
+  const status = runGit(["status", "--porcelain"], cwd, "readGitIdentity");
+  if (status === null) {
+    return { commit, branch, dirty: null, dirtyFiles: null, dirtyDiffHash: null };
+  }
+  const dirty = status.length > 0;
+  const dirtyFiles = parseDirtyPaths(status);
+  // Only pay for the (potentially large) diff when there is one to hash.
+  const diffText = dirty ? runGit(["diff", "HEAD"], cwd, "readGitIdentity") : null;
+  const dirtyDiffHash = diffText && diffText.length > 0 ? sha256Hex(diffText) : null;
+  return { commit, branch, dirty, dirtyFiles, dirtyDiffHash };
+}
+
+/**
+ * Files that differ between the baseline's commit and the CURRENT working tree,
+ * minus the files the baseline itself already recorded as dirty — i.e. files
+ * THIS run touched since the baseline was captured, not ones that were already
+ * different before it started. Returns null when there is no commit to diff
+ * against (an old-format baseline, or one whose `gitCommit` capture failed) —
+ * `attributeBuildFailure` then falls back to the error-set rule alone.
+ */
+function computeChangedFilesSinceBaseline(cwd: string, baseline: VerifyBaseline): string[] | null {
+  if (!baseline.gitCommit) return null;
+  const diffOut = runGit(["diff", "--name-only", baseline.gitCommit], cwd, "computeChangedFilesSinceBaseline");
+  if (diffOut === null) return null;
+  const changed = diffOut
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const alreadyDirtyAtBaseline = new Set(baseline.dirtyFiles ?? []);
+  return changed.filter((f) => !alreadyDirtyAtBaseline.has(f));
 }
 
 /** Cap on how many test names the message spells out before switching to a count. */
@@ -486,9 +589,20 @@ function bulletList(ids: string[], cap: number): string {
 function headline(delta: FloorDelta): string {
   switch (delta.failureKind) {
     case "build-failed":
-      return delta.buildAlreadyBroken
-        ? "the build/typecheck gate failed, and it was ALREADY failing at baseline. This is not this run's doing — but nothing can be verified on a broken build, so the floor cannot open until it is fixed."
-        : "this run BROKE THE BUILD. The build/typecheck gate failed, and no test result is attributable while it is red.";
+      if (!delta.buildAlreadyBroken) {
+        return "this run BROKE THE BUILD. The build/typecheck gate failed, and no test result is attributable while it is red.";
+      }
+      // buildAlreadyBroken === true: the baseline was ALSO red. Which of the
+      // three honest outcomes applies decides the sentence — see BuildAttribution.
+      if (delta.buildAttribution === "run-introduced") {
+        return "the build/typecheck gate failed, and while the baseline was ALSO red, this run's failure does not match the baseline's — this run introduced its own break. The floor cannot open until THIS run's break is fixed.";
+      }
+      if (delta.buildAttribution === "unattributable") {
+        return "the build/typecheck gate failed, and the baseline was ALSO red, but there is not enough evidence to tell whether this run caused it or only inherited it. Treat it as this run's responsibility — the floor cannot open until it is fixed.";
+      }
+      // "pre-existing" (or attribution not computed by an older caller) — the
+      // original, byte-identical sentence.
+      return "the build/typecheck gate failed, and it was ALREADY failing at baseline. This is not this run's doing — but nothing can be verified on a broken build, so the floor cannot open until it is fixed.";
     case "test-regression":
       return `this run BROKE ${delta.newlyFailing.length} TEST(S) that were passing at baseline.`;
     case "test-unattributable":
@@ -670,7 +784,13 @@ export async function runVerifyFloor(opts: RunVerifyFloorOpts): Promise<VerifyFl
     if (!isToleratedTestFailure(check, loaded.baseline)) break;
   }
 
-  const delta = computeFloorDelta(checks, loaded);
+  // Only meaningful (and only costs another git call) when a baseline actually
+  // applied — used solely to attribute a build failure that was ALSO red at
+  // baseline (see attributeBuildFailure).
+  const changedFilesSinceBaseline = loaded.baseline
+    ? computeChangedFilesSinceBaseline(opts.cwd, loaded.baseline)
+    : null;
+  const delta = computeFloorDelta(checks, loaded, changedFilesSinceBaseline);
   const base = {
     verdict: delta.verdict as FloorVerdict,
     checks,
@@ -733,7 +853,15 @@ export async function captureVerifyFloorBaseline(opts: CaptureBaselineOpts): Pro
       elapsedMs: c.elapsedMs,
     });
     plannedIndex += 1;
-    results.push({ kind: "build", command, exitCode: c.exitCode, ok: c.ok, failingTests: [], formats: [] });
+    results.push({
+      kind: "build",
+      command,
+      exitCode: c.exitCode,
+      ok: c.ok,
+      failingTests: [],
+      formats: [],
+      ...(c.ok ? {} : { failureSignature: buildFailureSignature(c.outputTail), errorSet: c.errorSet ?? [] }),
+    });
     if (!c.ok) {
       buildOk = false;
       // A red build makes the test tier meaningless — record it and stop.
@@ -768,6 +896,7 @@ export async function captureVerifyFloorBaseline(opts: CaptureBaselineOpts): Pro
         ok: c.ok,
         failingTests: ids,
         formats: c.formats ?? [],
+        ...(c.ok ? {} : { failureSignature: buildFailureSignature(c.outputTail), errorSet: ids }),
       });
     }
   }
@@ -781,6 +910,8 @@ export async function captureVerifyFloorBaseline(opts: CaptureBaselineOpts): Pro
     gitCommit: git.commit,
     gitBranch: git.branch,
     gitDirty: git.dirty,
+    dirtyFiles: git.dirtyFiles ?? undefined,
+    dirtyDiffHash: git.dirtyDiffHash,
     commands,
     buildOk,
     failingTests: [...failingTests].sort(),

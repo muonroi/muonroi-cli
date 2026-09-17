@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -51,6 +52,8 @@ import { evaluateDoneGate } from "../done-gate.js";
 import { postSprintBoundary } from "../phase-tracker-bridge.js";
 import { runSprint } from "../sprint-runner.js";
 import type { IterationState, ProductSpec, RoleSlot } from "../types.js";
+import { verifyBaselinePath } from "../verify-baseline.js";
+import { captureVerifyFloorBaseline } from "../verify-floor.js";
 
 // Per-test isolated flow dir. sprint-runner does REAL filesystem persistence of
 // per-sprint plans (persistSprintPlan/readPersistedSprintPlan live in the module
@@ -321,6 +324,88 @@ describe("sprint-runner", () => {
     // adapter can thread it into the next sprint (continue the risky/failing parts).
     expect(result!.nextFocus).toBeDefined();
     expect(result!.nextFocus).toContain("fix verify failures");
+  });
+
+  it("S5 — a run-introduced build break the verify floor cannot excuse carries into nextFocus as a must-fix item", async () => {
+    // Real git repo + real `npm run build`, replaying the mu54vrme4c87 shape:
+    // a baseline captured DIRTY (an earlier run's leftover breakage) whose
+    // build was already red, then THIS run's own edit introduces a DIFFERENT
+    // build error on top of it. The old binary buildOk===false rule excused
+    // this unconditionally; it must not anymore.
+    const realCwd = mkdtempSync(join(tmpdir(), "sprint-s5-"));
+    try {
+      const git = (...args: string[]) => execFileSync("git", args, { cwd: realCwd, stdio: "ignore" });
+      const writeBuildCfg = (code: string, message: string) =>
+        writeFileSync(join(realCwd, "buildcfg.json"), JSON.stringify({ code, message }), "utf8");
+
+      writeFileSync(
+        join(realCwd, "package.json"),
+        JSON.stringify({
+          name: "s5-sprint-fixture",
+          version: "0.0.0",
+          private: true,
+          scripts: { build: "node build.js" },
+        }),
+        "utf8",
+      );
+      writeFileSync(
+        join(realCwd, "build.js"),
+        [
+          "const fs = require('fs');",
+          "const path = require('path');",
+          "const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'buildcfg.json'), 'utf8'));",
+          "console.error('error ' + cfg.code + ': ' + cfg.message);",
+          "process.exit(1);",
+        ].join("\n"),
+        "utf8",
+      );
+      writeBuildCfg("CS0103", "legacy baseline issue in Legacy.cs");
+      writeFileSync(join(realCwd, "README.md"), "seed\n", "utf8");
+
+      git("init", "-q", "-b", "main");
+      git("config", "user.email", "s5@test.local");
+      git("config", "user.name", "S5 fixture");
+      git("config", "commit.gpgsign", "false");
+      git("add", "-A");
+      git("commit", "-q", "-m", "seed");
+
+      // Dirty an unrelated file BEFORE capturing the baseline, so the baseline
+      // is itself dirty (like mu54vrme4c87) — this run must not inherit its
+      // "not this run's doing" pass just because the tree was already dirty.
+      writeFileSync(join(realCwd, "README.md"), "seed\ndirty\n", "utf8");
+
+      const ctx = makeCtx({ cwd: realCwd });
+      await captureVerifyFloorBaseline({
+        cwd: realCwd,
+        runId: ctx.runId,
+        baselinePath: verifyBaselinePath(ctx.flowDir, ctx.runId),
+      });
+
+      // This run's own edit: a NEW build error the baseline never saw, in a
+      // file (buildcfg.json) the baseline itself never recorded as dirty.
+      writeBuildCfg("NU1107", "Version conflict detected for Sample.CodeAnalysis in Directory.Packages.props");
+
+      (evaluateDoneGate as any).mockResolvedValue({
+        pass: false,
+        failedCondition: "engineering_floor",
+        score: 0,
+        reason: "verify_floor_FAIL",
+      });
+      // runVerifyOrchestration keeps the module-level PASS mock (beforeEach) so
+      // the deterministic floor actually runs and gets to decide the verdict.
+
+      const { result } = await drain(
+        runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
+      );
+
+      expect(result!.lastVerifyResult).toBe("FAIL");
+      expect(result!.nextFocus).toBeDefined();
+      expect(result!.nextFocus).toContain("Build gate");
+      expect(result!.nextFocus).toContain("this run introduced its own break");
+      expect(result!.nextFocus).toContain("Fix it before the next sprint can be verified.");
+    } finally {
+      rmSync(realCwd, { recursive: true, force: true });
+    }
   });
 
   // Previously: "releases reservation when council generate throws" and "propagates
