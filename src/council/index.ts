@@ -919,9 +919,11 @@ export async function* runCouncil(
   }
 
   if (participants.length < 2) {
+    const noReachableProviderMsg = "No reachable provider. Check API keys in user-settings.json or environment.";
+    stats.bailReason = { kind: "no-reachable-participants", detail: noReachableProviderMsg };
     yield {
       type: "content",
-      content: "\nNo reachable provider. Check API keys in user-settings.json or environment.\n",
+      content: `\n${noReachableProviderMsg}\n`,
     };
     yield* terminalDone();
     return null;
@@ -1548,6 +1550,7 @@ export async function* runCouncil(
   });
 
   if (userAborted()) {
+    stats.bailReason = { kind: "aborted", detail: "Council cancelled by user before synthesis." };
     yield { type: "content", content: "\n> Council cancelled by user — skipping synthesis.\n" };
     yield* terminalDone();
     return null;
@@ -1567,6 +1570,10 @@ export async function* runCouncil(
   if (debateState.active.length === 0) {
     const reasons = debateState.openingFailures ?? [];
     const detail = reasons.length > 0 ? `\n${reasons.map((r) => `  • ${r.model}: ${r.error}`).join("\n")}` : "";
+    stats.bailReason = {
+      kind: "no-openings",
+      detail: `Every panelist failed to produce an opening statement after ${MAX_OPENING_ATTEMPTS} attempts.${detail}`,
+    };
     yield {
       type: "content",
       content:
@@ -1612,7 +1619,12 @@ export async function* runCouncil(
     }
   } while (!planResult.done);
   let { outcome, plan, synthesisText } = planResult.value;
-  const synthesisFailReason = planResult.value.synthesisFailReason;
+  // `let`, not `const`: sprintPlanningMode re-invokes `runPlanning` a SECOND
+  // time (the plan-lock re-synthesis below) and reassigns `synthesisText` from
+  // that call's result — this must track the reason for THAT run's failure,
+  // not go stale on whichever ran first. See the "empty-synthesis" bailReason
+  // set at this function's final `return`.
+  let synthesisFailReason = planResult.value.synthesisFailReason;
   const criteriaOutcome = summarizeCriteriaOutcome(
     spec.successCriteria,
     debateState.finalCriteriaMet,
@@ -2263,6 +2275,7 @@ export async function* runCouncil(
         outcome = refineResult.value.outcome;
         plan = refineResult.value.plan;
         synthesisText = refineResult.value.synthesisText;
+        synthesisFailReason = refineResult.value.synthesisFailReason;
       } else if (isFollowupText) {
         // Re-synthesize with the follow-up framed as user input. `answer` carries
         // the user's own text when they typed one; when they picked the pinned
@@ -2291,6 +2304,7 @@ export async function* runCouncil(
         outcome = refineResult.value.outcome;
         plan = refineResult.value.plan;
         synthesisText = refineResult.value.synthesisText;
+        synthesisFailReason = refineResult.value.synthesisFailReason;
       } else if (options?.sprintPlanningMode) {
         // A1 FIX: "Lock plan and execute Sprint 1" — stay within sprint-runner.
         //
@@ -2355,6 +2369,7 @@ export async function* runCouncil(
           outcome = refineResult.value.outcome;
           plan = refineResult.value.plan;
           synthesisText = refineResult.value.synthesisText;
+          synthesisFailReason = refineResult.value.synthesisFailReason;
           yield {
             type: "content",
             content:
@@ -2432,6 +2447,7 @@ export async function* runCouncil(
         outcome = refineResult.value.outcome;
         plan = refineResult.value.plan;
         synthesisText = refineResult.value.synthesisText;
+        synthesisFailReason = refineResult.value.synthesisFailReason;
       } else if (answer === "implement") {
         // D3/Task 8 — the reviewed-plan handoff. Previously "implement" fell
         // through to normal persistence and postDebateContinuation fed the RAW
@@ -2931,6 +2947,16 @@ export async function* runCouncil(
     yield { type: "done" };
   }
   idealTrace("council.return", { sessionId, synthesisLen: (synthesisText || "").length });
+  // The debate and synthesis both genuinely RAN here (unlike the early bails
+  // above) — an empty `synthesisText` at this point means the synthesizer
+  // itself produced nothing usable, which is a materially different failure
+  // from "no reachable provider" or "no panelist opened". Record it only when
+  // there is nothing else to return, so a later refinement that DID succeed
+  // (synthesisFailReason cleared by that call) never gets overwritten by a
+  // stale early failure.
+  if (!synthesisText.trim() && synthesisFailReason) {
+    stats.bailReason = { kind: "empty-synthesis", detail: synthesisFailReason };
+  }
   return synthesisText || null;
 }
 

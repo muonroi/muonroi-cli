@@ -286,6 +286,7 @@ import {
 } from "./lsp-setup-controller.js";
 import { sanitizeContent } from "./utils/text.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
+import { buildSprintFailedHaltData } from "./sprint-failed-halt.js";
 
 /**
  * A — recovery options shown when an /ideal run breaks mid-sprint. Resume /
@@ -5306,9 +5307,14 @@ export function useAppLogic(props: AppLogicProps) {
                   recovery_options: SPRINT_FAILED_RECOVERY_OPTIONS,
                 });
                 setHaltSelectedIndex(0);
+                // The screen already shows `errMsg` (above); persist it too — a
+                // halt_card_open row used to carry only {reason, trigger,
+                // sprintN}, so a post-mortem on a run that broke this way had no
+                // error text in the DB at all (session 1f9f57415170 / run
+                // mu3ks8zwe8d5 needed exactly this and could not get it).
                 logUIInteraction(agent.getSessionId() ?? undefined, {
                   subtype: "halt_card_open",
-                  data: { reason: "sprint_failed", trigger: "loop_throw", sprintN: brokenSprintN ?? null },
+                  data: buildSprintFailedHaltData(e, { trigger: "loop_throw", sprintN: brokenSprintN ?? null }),
                 });
               } finally {
                 if (!firstChunkSeen) clearHeartbeat();
@@ -7265,7 +7271,11 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showAgentsModalRef.current && !showAgentsEditorRef.current && modalOwnsKeyboard(modalOwnerNow, "subagents-modal")) {
+      if (
+        showAgentsModalRef.current &&
+        !showAgentsEditorRef.current &&
+        modalOwnsKeyboard(modalOwnerNow, "subagents-modal")
+      ) {
         const row = agentRows[agentsModalIndex];
         if (isEscapeKey(key)) {
           setShowAgentsModal(false);

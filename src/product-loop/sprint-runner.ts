@@ -29,7 +29,7 @@ import { prependDecisionsLock, readDecisionsLock } from "../council/decisions-lo
 import { runCouncil } from "../council/index.js";
 import { resolveLeaderModel } from "../council/leader.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
-import type { CouncilLLM } from "../council/types.js";
+import type { CouncilLLM, CouncilStats } from "../council/types.js";
 import { beginRecallNagSuppression, RECALL_NAG_SENTINEL } from "../ee/recall-ledger.js";
 import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
@@ -1587,6 +1587,12 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     };
   } else {
     idealTrace("sprint.planCouncil.before", { runId: ctx.runId, sprintN });
+    // Passed by reference: `runCouncil` mutates this to say WHY it bailed
+    // (see CouncilStats.bailReason) — the generator's own return value
+    // collapses every bail path AND a genuinely empty synthesis to a bare
+    // `null`, which is not enough to tell "no reachable provider" apart from
+    // "synthesis ran and came back empty" below.
+    const planCouncilStats: CouncilStats = { calls: 0, startMs: Date.now(), phases: [] };
     const planGen = runCouncil(
       councilTopic,
       sessionModelId,
@@ -1601,6 +1607,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         cwd,
         runDir,
         suppressInlineMeta: isContextRailEnabled(),
+        councilStats: planCouncilStats,
         // The product plan + spec were already debated (CB-1) and approved at the
         // `/ideal` preflight. Re-gating and re-researching each sprint's internal
         // plan strands the loop before implementation is ever reached (the exact
@@ -1635,6 +1642,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       sprintN,
       planSynthesisLen: planSynthesis.length,
       planBailed,
+      bailReasonKind: planCouncilStats.bailReason?.kind,
     });
     if (planBailed || planSynthesis.trim().length === 0) {
       // A sprint with no plan cannot implement anything. Fail loudly: the caller
@@ -1643,7 +1651,25 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       // a terminal state the driver can see. Previously this fell through with
       // `planSynthesis === ""` and the run continued (or, with the leaked `done`,
       // vanished) with no verdict at all.
-      const reason = `Sprint ${sprintN} planning council produced no plan (council bailed before synthesis — check provider reachability and API keys for the planning model)`;
+      //
+      // The single blanket sentence this used to be — "council bailed before
+      // synthesis — check provider reachability and API keys" — is FALSE for
+      // most of these bail kinds: measured live (session 1f9f57415170, run
+      // mu3ks8zwe8d5), the debate ran fine and synthesis was billed 17 times
+      // before coming back empty every time, which has nothing to do with
+      // provider reachability. Build the message from what `runCouncil`
+      // actually recorded instead of asserting a cause it does not know.
+      const bail = planCouncilStats.bailReason;
+      const baseMsg = `Sprint ${sprintN} planning council produced no plan`;
+      const reason = !bail
+        ? `${baseMsg} (no bail detail was recorded — check debug.log for this run).`
+        : bail.kind === "no-reachable-participants"
+          ? `${baseMsg} — no reachable provider: ${bail.detail}`
+          : bail.kind === "no-openings"
+            ? `${baseMsg} — council bailed before synthesis: ${bail.detail}`
+            : bail.kind === "aborted"
+              ? `${baseMsg} — cancelled before synthesis: ${bail.detail}`
+              : `${baseMsg} — the synthesizer ran but returned no usable output: ${bail.detail}`;
       console.error(`[sprint-runner] ${reason} (run ${ctx.runId})`);
       yield phaseError({
         phaseId: planPhaseId,

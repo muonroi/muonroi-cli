@@ -695,6 +695,21 @@ export interface CouncilStats {
   calls: number;
   startMs: number;
   phases: Array<{ name: string; durationMs: number }>;
+  /**
+   * Set by `runCouncil` immediately before it resolves to a bailed or empty
+   * result, naming WHY. Threaded back to the caller through this stats object
+   * (passed by reference via `RunCouncilOptions.councilStats`) because the
+   * generator's return value collapses every early-bail path AND a genuinely
+   * empty synthesis to the same bare `null` — a caller that needs to tell "no
+   * reachable provider" apart from "synthesis ran four times and came back
+   * empty" (measured live, session 1f9f57415170 / run mu3ks8zwe8d5) reads this
+   * instead of guessing from one blanket message. See sprint-runner.ts's
+   * sprint-planning failure message, which is the reason this exists.
+   */
+  bailReason?: {
+    kind: "no-reachable-participants" | "no-openings" | "aborted" | "empty-synthesis";
+    detail: string;
+  };
 }
 
 // ── LLM abstraction ──────────────────────────────────────────────────────────

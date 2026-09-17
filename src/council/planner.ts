@@ -1,3 +1,5 @@
+import { getModelInfo } from "../models/registry.js";
+import { DEFAULT_REASONING_OUTPUT_BUDGET_TOKENS } from "../providers/capabilities.js";
 import type { StreamChunk } from "../types/index.js";
 import { getCouncilLanguage } from "../utils/settings.js";
 import { tracedGenerate } from "./llm.js";
@@ -17,6 +19,66 @@ import type {
   PreflightResponder,
 } from "./types.js";
 import { coerceIntentKind } from "./types.js";
+
+/** Visible-output budget for the FIRST synthesis attempt. */
+const SYNTHESIS_FIRST_ATTEMPT_MAX_TOKENS = 8192;
+
+/**
+ * Visible-output budget for a retry that asks the model to say LESS — the
+ * first attempt was truncated mid-JSON, or came back as unparseable prose.
+ * Unchanged from before this fix.
+ */
+const SYNTHESIS_COMPACT_RETRY_MAX_TOKENS = 4096;
+
+/**
+ * When the catalog publishes NO ceiling at all for the leader (the `0`
+ * "unpublished" sentinel — `step-3.7-flash` and StepFun's other
+ * undocumented-ceiling reasoning models), the retry multiplies the declared
+ * default (`DEFAULT_REASONING_OUTPUT_BUDGET_TOKENS`) by this factor instead of
+ * asking for it unchanged.
+ *
+ * WHY THIS EXISTS: `DEFAULT_REASONING_OUTPUT_BUDGET_TOKENS` (8192) is
+ * numerically IDENTICAL to `SYNTHESIS_FIRST_ATTEMPT_MAX_TOKENS` (8192), so
+ * "unknown ceiling → fall back to the declared default" would make the retry
+ * byte-for-byte the same request that already returned empty. Measured live
+ * (session 1f9f57415170 / run mu3ks8zwe8d5): the leader was `step-3.7-flash`,
+ * and synthesis returned an empty completion at this exact budget FOUR times
+ * in a row. On StepFun, reasoning is billed out of the same output budget as
+ * the visible answer and the provider reports `reasoning_tokens: 0` even when
+ * the whole budget went to thinking — there is no provider-side signal that
+ * the budget itself was the problem, so "unknown ceiling" must not silently
+ * resolve to "the same ask again". Precedent `f1805010` hit this identical
+ * "ceiling unknowable" class on the goal-contradiction gate and raised the
+ * judge's budget outright (2048 → 16384, after 8192 also came back empty)
+ * rather than retry with a number already proven insufficient; doubling here
+ * reaches that same 16384 by derivation instead of a second bare literal.
+ */
+const UNPUBLISHED_CEILING_RETRY_MULTIPLIER = 2;
+
+/**
+ * Output budget for the retry when the FIRST attempt came back completely
+ * empty. An empty completion out of a reasoning leader means the entire prior
+ * budget was spent on internal reasoning before any visible text began (see
+ * `resolveMaxOutputTokens` in providers/capabilities.ts) — retrying with LESS
+ * room (the pre-fix behavior: a flat 4096, roughly half of the 8192 the first
+ * attempt already had) can only make that worse. Sized from the model's own
+ * catalog-declared ceiling (`maxOutputTokens`) when one is published — never
+ * smaller than the first attempt, since a caller's own explicit ask is never
+ * shrunk (mirrors `resolveMaxOutputTokens`'s own contract). When the catalog
+ * publishes NO ceiling, see `UNPUBLISHED_CEILING_RETRY_MULTIPLIER` above — the
+ * declared default is multiplied rather than requested unchanged.
+ */
+function emptySynthesisRetryMaxTokens(leaderModelId: string): number {
+  const model = getModelInfo(leaderModelId);
+  const publishedCeiling = model?.maxOutputTokens && model.maxOutputTokens > 0 ? model.maxOutputTokens : undefined;
+  if (publishedCeiling !== undefined) {
+    return Math.max(SYNTHESIS_FIRST_ATTEMPT_MAX_TOKENS, publishedCeiling);
+  }
+  return (
+    Math.max(SYNTHESIS_FIRST_ATTEMPT_MAX_TOKENS, DEFAULT_REASONING_OUTPUT_BUDGET_TOKENS) *
+    UNPUBLISHED_CEILING_RETRY_MULTIPLIER
+  );
+}
 
 export async function* runPlanning(
   debateState: DebateState,
@@ -83,7 +145,7 @@ export async function* runPlanning(
       modelId: leaderModelId,
       system: first.system,
       prompt: first.prompt,
-      maxTokens: 8192,
+      maxTokens: SYNTHESIS_FIRST_ATTEMPT_MAX_TOKENS,
     });
 
     outcome = parseOutcome(synthesisText, debatePlan);
@@ -123,23 +185,51 @@ export async function* runPlanning(
         allExchanges: "_(exchange history omitted for retry; rely on final positions above)_",
       };
       const retry = buildSynthesisPrompt(compactArgs);
-      const retrySystem =
-        retry.system +
-        `\n\n## Retry directive\n` +
-        (truncated || emptySynthesis
+      // Truncated and unparseable both need a SMALLER, tighter ask; an empty
+      // completion needs the OPPOSITE — more room, because the question that
+      // matters is whether the answer gets a chance to start at all. Mixing
+      // these into one "ask for less" branch (the pre-fix behavior) told a
+      // reasoning leader that had just run out of output budget to "keep it
+      // SMALL", which is exactly backwards, AND gave it a smaller maxTokens
+      // than the attempt that already exhausted a bigger one.
+      const retryMaxTokens = emptySynthesis
+        ? emptySynthesisRetryMaxTokens(leaderModelId)
+        : SYNTHESIS_COMPACT_RETRY_MAX_TOKENS;
+      // Most leaders (unpublished ceiling, or a published ceiling above 8192)
+      // DO get strictly more room on this retry. A few published-ceiling
+      // leaders (e.g. step-3.5-flash at 8192) do not — `emptySynthesisRetryMaxTokens`
+      // never shrinks below the first attempt, but it cannot invent room the
+      // model's own catalog entry says does not exist. The directive text must
+      // not claim "LARGER" when the number is unchanged.
+      const emptyRetryHasMoreRoom = retryMaxTokens > SYNTHESIS_FIRST_ATTEMPT_MAX_TOKENS;
+      const retryDirective = emptySynthesis
+        ? emptyRetryHasMoreRoom
+          ? `Your previous attempt produced NO visible output at all — the entire output budget was spent before ` +
+            `any answer began (expected when a reasoning model thinks before writing). This retry has a LARGER ` +
+            `output budget than the first attempt. Emit the JSON object FIRST, then the literal line ` +
+            `\`---READABLE---\`, then the markdown. Answer directly from the final positions above — do not ` +
+            `re-debate or re-read the exchange history before writing.`
+          : `Your previous attempt produced NO visible output at all — the entire output budget was spent before ` +
+            `any answer began (expected when a reasoning model thinks before writing). This retry has the SAME ` +
+            `output budget as the first attempt — your model's own declared ceiling does not allow more. Spend as ` +
+            `little of it as possible on internal reasoning: emit the JSON object FIRST, then the literal line ` +
+            `\`---READABLE---\`, then the markdown. Answer directly from the final positions above — do not ` +
+            `re-debate or re-read the exchange history before writing.`
+        : truncated
           ? `Your previous attempt did not FIT in the output budget. Emit the JSON object FIRST and keep it SMALL: ` +
             `\`summary\` at most 400 characters, every list at most 3 entries of at most 200 characters each, ` +
             `no nested prose. Completing the JSON object matters more than covering every point. ` +
             `Skip the \`---READABLE---\` section entirely if you are running short.`
           : `Your previous attempt produced no parseable JSON. Emit the JSON object FIRST, ` +
-            `then the literal line \`---READABLE---\`, then the markdown. Do not add any preamble before the JSON.`);
+            `then the literal line \`---READABLE---\`, then the markdown. Do not add any preamble before the JSON.`;
+      const retrySystem = `${retry.system}\n\n## Retry directive\n${retryDirective}`;
       const retryText = yield* tracedGenerate(llm, {
         phase: "synthesis",
         label: "Synthesizing action plan (retry, compact)",
         modelId: leaderModelId,
         system: retrySystem,
         prompt: retry.prompt,
-        maxTokens: 4096,
+        maxTokens: retryMaxTokens,
       });
       if (retryText.trim().length > 0) {
         synthesisText = retryText;
