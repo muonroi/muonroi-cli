@@ -46,7 +46,26 @@ export interface SprintPlanTask {
   owner?: string;
   estimate?: string;
   priority?: "high" | "medium" | "low";
-  status: "pending";
+  /**
+   * S3b — a task is "done" only when the plan-adherence reviewer's per-task
+   * verdict says so (`applyTaskVerdictsToPlanArtifact` in sprint-runner.ts).
+   * Diff-touch of `targetFiles`/`targetDirs` is supplementary evidence only —
+   * see `touchedTargets` — and never flips this by itself.
+   */
+  status: "pending" | "done";
+  /** S3b — the reviewer's own evidence for the current `status`. Absent until
+   * the task-aware plan-adherence review has run at least once. Never invented. */
+  evidence?: string;
+  /** S3b — the reviewer's own note on what's missing/wrong, when `status` is
+   * still "pending". Absent until reviewed, or once the task is "done". */
+  deviation?: string;
+  /**
+   * S3b — whether the diff touched this task's declared targets, per the most
+   * recent task-aware review pass. `null` when the task names no targets at
+   * all (nothing to check). `undefined` until the task-aware review has run.
+   * Supplementary evidence only — see the field-level note on `status`.
+   */
+  touchedTargets?: boolean | null;
 }
 
 export interface SprintPlanArtifact {
@@ -310,4 +329,133 @@ export function buildSprintPlanArtifact(args: BuildSprintPlanArtifactArgs): Spri
 
   notes.push("No action items could be derived from the plan text — tasks is empty.");
   return { version: 1, sprintN, runId, planHash, source: "none", outcome: { goal, acceptance }, tasks: [], notes };
+}
+
+// ─── S3b — task checklist for the implementation prompt ─────────────────────
+
+/** Cap for task `title`/`doneCriterion` text embedded in a prompt (checklist
+ * or reviewer task list) — mirrors `plan-adherence-review.ts`'s `bound()`
+ * style so a single runaway task never blows the prompt budget. */
+export const MAX_TASK_TEXT_CHARS = 300;
+
+/** Bound a task's free text (title/doneCriterion) to `max` chars. Same shape
+ * as `plan-adherence-review.ts`'s private `bound()` — exported here so both
+ * the checklist and the reviewer task list truncate identically. */
+export function boundTaskText(text: string, max = MAX_TASK_TEXT_CHARS): string {
+  const t = text.trim();
+  return t.length > max ? `${t.slice(0, max)}…` : t;
+}
+
+export interface TopologicalTaskOrder {
+  /** `tasks`, reordered so every task follows everything it `dependsOn`. Every
+   * input task appears exactly once, INCLUDING duplicate ids — see notes. */
+  order: SprintPlanTask[];
+  /** One note per unknown `dependsOn` reference, per duplicate task id, or per cycle detected. */
+  notes: string[];
+}
+
+/**
+ * Order tasks so every task follows everything it `dependsOn` (Kahn's
+ * algorithm), breaking ties by the tasks' original array order so the result
+ * is deterministic. Graph bookkeeping is keyed by ARRAY INDEX, not task id —
+ * two tasks sharing the same id are two distinct nodes, so neither is ever
+ * silently merged or dropped (a duplicate id is possible input: e.g. a
+ * council retry that appended rather than replaced a step). Never throws —
+ * handles three failure modes a plan's own data can carry:
+ *   - an id that names no task in this set: the edge is dropped (treated as
+ *     already satisfied) and a note is added.
+ *   - a duplicate task id: every occurrence is kept (a dependency on that id
+ *     depends on ALL of them), and one note names the id + count.
+ *   - a dependency cycle: the tasks still in the cycle once no more
+ *     zero-indegree tasks remain are appended in their original order, and a
+ *     single note lists them.
+ */
+export function topologicallyOrderTasks(tasks: SprintPlanTask[]): TopologicalTaskOrder {
+  const notes: string[] = [];
+  const n = tasks.length;
+
+  // Every index sharing a given id — the id->task Map an earlier version used
+  // here collapsed duplicates onto one entry, which silently dropped every
+  // occurrence but the last from the resulting order.
+  const idToIndices = new Map<string, number[]>();
+  tasks.forEach((t, i) => {
+    const arr = idToIndices.get(t.id);
+    if (arr) arr.push(i);
+    else idToIndices.set(t.id, [i]);
+  });
+  for (const [id, idxs] of idToIndices) {
+    if (idxs.length > 1) {
+      notes.push(
+        `Task id "${id}" appears ${idxs.length} times in this sprint's plan — every occurrence is kept, in original order.`,
+      );
+    }
+  }
+
+  const indegree = new Array<number>(n).fill(0);
+  const dependents: number[][] = tasks.map(() => []);
+  tasks.forEach((t, i) => {
+    for (const dep of t.dependsOn) {
+      const depIdxs = idToIndices.get(dep);
+      if (!depIdxs || depIdxs.length === 0) {
+        notes.push(
+          `Task ${t.id} depends on "${dep}", which is not a task id in this sprint's plan — ignored for ordering.`,
+        );
+        continue;
+      }
+      for (const depIdx of depIdxs) {
+        dependents[depIdx]!.push(i);
+        indegree[i]! += 1;
+      }
+    }
+  });
+
+  const ready: number[] = [];
+  for (let i = 0; i < n; i++) if (indegree[i] === 0) ready.push(i);
+  const visited = new Array<boolean>(n).fill(false);
+  const orderIdx: number[] = [];
+  while (ready.length > 0) {
+    // Deterministic pick: lowest original index among the currently-ready set.
+    ready.sort((a, b) => a - b);
+    const idx = ready.shift()!;
+    if (visited[idx]) continue;
+    visited[idx] = true;
+    orderIdx.push(idx);
+    for (const dependentIdx of dependents[idx] ?? []) {
+      indegree[dependentIdx]! -= 1;
+      if (indegree[dependentIdx]! <= 0 && !visited[dependentIdx]) ready.push(dependentIdx);
+    }
+  }
+
+  const stuckIdx: number[] = [];
+  for (let i = 0; i < n; i++) if (!visited[i]) stuckIdx.push(i);
+  if (stuckIdx.length > 0) {
+    notes.push(
+      `Dependency cycle detected among task(s) ${stuckIdx.map((i) => tasks[i]!.id).join(", ")} — kept in their original plan order.`,
+    );
+    orderIdx.push(...stuckIdx);
+  }
+
+  return { order: orderIdx.map((i) => tasks[i]!), notes };
+}
+
+/**
+ * The checklist block appended to the implementation prompt when the sprint
+ * plan has tasks (`source !== "none"`). Empty tasks -> empty block, so a
+ * caller can unconditionally append the result. Short, imperative wording —
+ * the model already read the full plan above this block. `title`/
+ * `doneCriterion` are bounded (`boundTaskText`) so one runaway task text
+ * cannot blow the prompt budget.
+ */
+export function buildTaskChecklistBlock(tasks: SprintPlanTask[]): { block: string; notes: string[] } {
+  if (tasks.length === 0) return { block: "", notes: [] };
+  const { order, notes } = topologicallyOrderTasks(tasks);
+  const lines = order.map((t, i) => {
+    const targets = [...t.targetFiles, ...t.targetDirs];
+    const title = boundTaskText(t.title);
+    const doneSuffix = t.doneCriterion ? ` — done when: ${boundTaskText(t.doneCriterion)}` : "";
+    const targetsSuffix = targets.length > 0 ? ` — targets: ${targets.join(", ")}` : "";
+    return `${i + 1}. [${t.id}] ${title}${doneSuffix}${targetsSuffix}`;
+  });
+  const block = `\n\n--- SPRINT TASK CHECKLIST (work through these IN ORDER; do not skip any) ---\n${lines.join("\n")}\n`;
+  return { block, notes };
 }

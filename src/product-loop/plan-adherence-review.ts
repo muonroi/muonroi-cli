@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import type { StreamChunk, TaskRequest, ToolResult } from "../types/index.js";
 import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
+import { boundTaskText, type SprintPlanTask } from "./sprint-plan-artifact.js";
 
 /**
  * Run an isolated sub-agent with a wall-clock backstop. The review/fix agents
@@ -67,6 +68,13 @@ export interface AdherenceRoundRecord {
   fixRan: boolean;
   /** Present only when `fixRan` is true. */
   fixOutcome?: { success: boolean; summary: string };
+  /**
+   * S3b — set only when this round's fix was unambiguously scoped to ONE
+   * sprint task (the task-aware review path, exactly one not-done task this
+   * round). Undefined for the legacy (no `tasks` arg) path, and for a
+   * task-aware round whose fix spans more than one not-done task.
+   */
+  taskId?: string;
 }
 
 export interface AdherenceVerdict {
@@ -77,11 +85,42 @@ export interface AdherenceVerdict {
   roundRecords: AdherenceRoundRecord[];
   /** Why the loop stopped, for the persisted sprint artifact. */
   stopReason: AdherenceStopReason;
+  /**
+   * S3b — present only when `args.tasks` was provided: the per-task verdict
+   * from the LAST round the reviewer actually produced (or, on a parse
+   * failure, every task marked not-done — see `normalizeTaskVerdicts`).
+   * The caller (`sprint-runner.ts`) uses this to update
+   * `sprints/<n>-plan.json` task statuses. Undefined for the legacy path —
+   * never fabricated.
+   */
+  taskVerdicts?: TaskVerdict[];
+}
+
+/**
+ * S3b — one sprint task's plan-adherence verdict. `done` is the ONLY thing
+ * that makes a task "done" in `sprints/<n>-plan.json` — diff-touch of its
+ * `targetFiles`/`targetDirs` is carried separately as `touchedTargets`,
+ * supplementary evidence that never flips `done` by itself.
+ */
+export interface TaskVerdict {
+  taskId: string;
+  title: string;
+  done: boolean;
+  /** The reviewer's own evidence for this verdict. Empty string when the
+   * reviewer gave no verdict for this task id at all (never invented). */
+  evidence: string;
+  /** Present only when `done` is false and the reviewer named a reason. */
+  deviation?: string;
+  /** Whether the diff touched this task's own declared targets. `null` when
+   * the task names no targets at all — nothing to check. */
+  touchedTargets: boolean | null;
 }
 
 interface ReviewJson {
   adherent?: boolean;
   deviations?: Array<{ where?: string; issue?: string; fix?: string } | string>;
+  /** S3b — present only on a task-aware review call (`args.tasks` given). */
+  tasks?: Array<{ taskId?: string; done?: boolean; evidence?: string; deviation?: string }>;
 }
 
 const MAX_DEVIATION_CHARS = 400;
@@ -141,6 +180,106 @@ function normalizeDeviations(dev: ReviewJson["deviations"]): string[] {
     .filter((s) => s.length > 0);
 }
 
+/**
+ * The SENIOR-reviewer prompt, unchanged from the legacy (no-tasks) path.
+ * Extracted so the task-aware prompt below can build on it verbatim — the
+ * base text a caller without tasks receives is byte-identical to before S3b.
+ */
+function baseReviewPrompt(plan: string, diff: string): string {
+  return (
+    `You are a SENIOR code reviewer. Judge whether the implementation faithfully ` +
+    `follows the APPROVED PLAN below — both its file_edits (right files, right ` +
+    `approach: e.g. pass-through vs re-implementation, correct operation/API) and ` +
+    `its acceptance_criteria. Be strict and specific.\n\n` +
+    `=== APPROVED PLAN ===\n${plan.slice(0, 9000)}\n\n` +
+    `=== ACTUAL GIT DIFF ===\n${diff.slice(0, 12000)}\n\n` +
+    `Return ONLY JSON: {"adherent": boolean, "deviations": [{"where":"<file/symbol>",` +
+    `"issue":"<what diverges from the plan>","fix":"<concrete instruction to conform>"}]}. ` +
+    `adherent=true ONLY if there are no material deviations.`
+  );
+}
+
+/**
+ * S3b — the task-aware reviewer prompt: `baseReviewPrompt` PLUS a request to
+ * also judge each sprint task independently. Never replaces the base text —
+ * only adds to it, so a caller that stops passing `tasks` gets exactly the
+ * legacy prompt back.
+ */
+function taskAwareReviewPrompt(plan: string, diff: string, tasks: SprintPlanTask[]): string {
+  const taskList = tasks
+    .map((t) => {
+      const title = boundTaskText(t.title);
+      const doneSuffix = t.doneCriterion ? ` (done when: ${boundTaskText(t.doneCriterion)})` : "";
+      return `- ${t.id}: ${title}${doneSuffix}`;
+    })
+    .join("\n");
+  return (
+    baseReviewPrompt(plan, diff) +
+    `\n\nAlso judge EACH sprint task below independently against the diff — a task is done ONLY ` +
+    `when the diff shows it is actually complete, not merely started or scaffolded.\n` +
+    `${taskList}\n\n` +
+    `Return this per-task verdict too, in the SAME JSON object: "tasks": [{"taskId":"<id>",` +
+    `"done":boolean,"evidence":"<what in the diff shows it is/isn't done>","deviation":"<if not ` +
+    `done, what's missing or wrong>"}]. Include EVERY task id listed above.`
+  );
+}
+
+/** The target paths (files + dirs) a task itself declared. */
+function taskTargets(task: SprintPlanTask): string[] {
+  return [...task.targetFiles, ...task.targetDirs];
+}
+
+/**
+ * Whether the diff text touches ANY of a task's own declared targets — a
+ * cheap substring check (the diff already carries `a/<path>`/`b/<path>`
+ * headers for every touched file), good enough for SUPPLEMENTARY evidence.
+ * `null` when the task names no targets at all: there is nothing to check,
+ * distinct from `false` ("named targets, none touched").
+ */
+function computeTouchedTargets(task: SprintPlanTask, diff: string): boolean | null {
+  const targets = taskTargets(task);
+  if (targets.length === 0) return null;
+  return targets.some((t) => diff.includes(t));
+}
+
+/**
+ * Model-first verdict discipline, task-aware: a parse failure (`parsed ===
+ * null`) or a task id the reviewer never mentioned is NEVER auto-approved —
+ * every such task comes back `done: false`. Only an explicit `"done": true`
+ * for that exact task id marks it done.
+ */
+function normalizeTaskVerdicts(parsed: ReviewJson | null, tasks: SprintPlanTask[], diff: string): TaskVerdict[] {
+  const byId = new Map<string, { done?: boolean; evidence?: string; deviation?: string }>();
+  if (parsed && Array.isArray(parsed.tasks)) {
+    for (const raw of parsed.tasks) {
+      const taskId = typeof raw.taskId === "string" ? raw.taskId.trim() : "";
+      if (taskId) byId.set(taskId, raw);
+    }
+  }
+  return tasks.map((t) => {
+    const raw = byId.get(t.id);
+    const done = raw?.done === true;
+    const evidence = typeof raw?.evidence === "string" ? raw.evidence.trim() : "";
+    const deviation = typeof raw?.deviation === "string" ? raw.deviation.trim() : "";
+    return {
+      taskId: t.id,
+      title: t.title,
+      done,
+      evidence: evidence || (raw ? "" : "reviewer gave no verdict for this task — treated as not done"),
+      ...(deviation ? { deviation } : {}),
+      touchedTargets: computeTouchedTargets(t, diff),
+    };
+  });
+}
+
+/** One-line deviation summary for a not-done task, for `lastDeviations` (the
+ * SAME shape the legacy path's `normalizeDeviations` produces) — this is what
+ * both the transcript output and the fixer prompt's "Deviations:" list read. */
+function taskDeviationLine(task: SprintPlanTask, verdict: TaskVerdict): string {
+  const reason = verdict.deviation || verdict.evidence || "not done";
+  return `[${task.id}] ${task.title} — ${reason}`;
+}
+
 export async function* runPlanAdherenceReview(args: {
   sprintN: number;
   planSynthesis: string;
@@ -151,6 +290,15 @@ export async function* runPlanAdherenceReview(args: {
   maxRounds?: number;
   /** Injectable for tests; defaults to `git diff HEAD` in cwd. */
   diffProvider?: (cwd: string) => string;
+  /**
+   * S3b — when given (a non-empty `SprintPlanArtifact.tasks`), the review
+   * becomes task-aware: ONE reviewer call per round judges every task
+   * independently, the fixer is scoped to only the not-done tasks, and the
+   * returned `AdherenceVerdict.taskVerdicts` carries the last known status of
+   * every task. Omitted or empty -> the legacy plan-text-only review, byte
+   * identical to before S3b.
+   */
+  tasks?: SprintPlanTask[];
 }): AsyncGenerator<StreamChunk, AdherenceVerdict, unknown> {
   // No round ceiling by default: `/ideal` has no limits (user decision). A caller
   // may still pass `maxRounds` explicitly. The loop ends when the reviewer
@@ -164,6 +312,8 @@ export async function* runPlanAdherenceReview(args: {
   const roundRecords: AdherenceRoundRecord[] = [];
   if (!plan) return { rounds: 0, adherent: true, deviations: [], roundRecords, stopReason: "empty_plan" };
   const getDiff = args.diffProvider ?? currentDiff;
+  const tasks = args.tasks?.length ? args.tasks : undefined;
+  const taskMode = !!tasks;
 
   let diff = getDiff(args.cwd);
   if (!diff) {
@@ -173,17 +323,19 @@ export async function* runPlanAdherenceReview(args: {
 
   let lastDeviations: string[] = [];
   let previousDeviationKey: string | null = null;
+  // S3b fix (acceptance rejection) — count of task-mode rounds whose reviewer
+  // reply did not parse at all. When EVERY round so far was unparseable, the
+  // eventual stop is relabelled "no_verdict" (see `taskStopReason` below) so
+  // the persisted record says "the reviewer never gave us anything", not
+  // "no progress"/"round cap" — those imply a real verdict was read.
+  let unparsedRoundCount = 0;
+  /** Task-mode-only: overrides `fallback` to "no_verdict" when every round up
+   * to and including this one failed to parse. A no-op for the legacy path. */
+  const taskStopReason = (round: number, fallback: AdherenceStopReason): AdherenceStopReason =>
+    taskMode && unparsedRoundCount === round ? "no_verdict" : fallback;
+
   for (let round = 1; round <= maxRounds; round++) {
-    const reviewPrompt =
-      `You are a SENIOR code reviewer. Judge whether the implementation faithfully ` +
-      `follows the APPROVED PLAN below — both its file_edits (right files, right ` +
-      `approach: e.g. pass-through vs re-implementation, correct operation/API) and ` +
-      `its acceptance_criteria. Be strict and specific.\n\n` +
-      `=== APPROVED PLAN ===\n${plan.slice(0, 9000)}\n\n` +
-      `=== ACTUAL GIT DIFF ===\n${diff.slice(0, 12000)}\n\n` +
-      `Return ONLY JSON: {"adherent": boolean, "deviations": [{"where":"<file/symbol>",` +
-      `"issue":"<what diverges from the plan>","fix":"<concrete instruction to conform>"}]}. ` +
-      `adherent=true ONLY if there are no material deviations.`;
+    const reviewPrompt = taskMode ? taskAwareReviewPrompt(plan, diff, tasks) : baseReviewPrompt(plan, diff);
 
     const review = await runIsolatedGuarded(
       args.runIsolatedTask,
@@ -197,7 +349,11 @@ export async function* runPlanAdherenceReview(args: {
     );
 
     const parsed = review.success ? parseReview(review.output ?? "") : null;
-    if (!parsed) {
+
+    // Task-aware path branches on its OWN parse/verdict shape below; the
+    // legacy `!parsed` early-return stays exactly as before for the
+    // non-task path (same stopReason, same "leave the gate" message).
+    if (!taskMode && !parsed) {
       yield {
         type: "content",
         content: `\n> [adherence] Reviewer produced no parseable verdict (round ${round}); leaving verify+criteria as the gate.\n`,
@@ -206,15 +362,60 @@ export async function* runPlanAdherenceReview(args: {
       return { rounds: round, adherent: true, deviations: [], roundRecords, stopReason: "no_verdict" };
     }
 
-    lastDeviations = normalizeDeviations(parsed.deviations);
-    const adherent = parsed.adherent === true || lastDeviations.length === 0;
+    let taskVerdicts: TaskVerdict[] | undefined;
+    let notDoneTasks: SprintPlanTask[] = [];
+    // General (non-task-scoped) deviations the reviewer reported this round —
+    // e.g. an unplanned file, a silently redefined rule. Read from the SAME
+    // `deviations` field the legacy path already reads, even in task mode:
+    // a task-aware reply can still carry this field, and dropping it would
+    // silently lose exactly the goal-contradiction signal the review exists
+    // to catch (regression caught in acceptance review, run mu229bfiaeec).
+    let generalDeviations: string[] = [];
+    let adherent: boolean;
+
+    if (taskMode) {
+      // Model-first verdict discipline: a parse failure marks EVERY task not
+      // done (never auto-approved) — see `normalizeTaskVerdicts`. Unlike the
+      // legacy path this does NOT stop the loop; the fixer still needs
+      // something to act on, and "everything is pending" is itself the
+      // correct, non-fabricated verdict to persist.
+      taskVerdicts = normalizeTaskVerdicts(parsed, tasks, diff);
+      if (!parsed) {
+        unparsedRoundCount++;
+        yield {
+          type: "content",
+          content: `\n> [adherence] Reviewer produced no parseable verdict (round ${round}); every task treated as not done.\n`,
+        };
+      }
+      generalDeviations = normalizeDeviations(parsed?.deviations);
+      notDoneTasks = tasks.filter((t) => !taskVerdicts!.find((v) => v.taskId === t.id)?.done);
+      const notDoneTaskLines = notDoneTasks.map((t) =>
+        taskDeviationLine(t, taskVerdicts!.find((v) => v.taskId === t.id)!),
+      );
+      lastDeviations = [...generalDeviations, ...notDoneTaskLines];
+      // adherent requires BOTH every task done AND no general deviation left —
+      // "all tasks done" alone used to silently drop a reported general
+      // deviation (the blocker this comment documents).
+      adherent = notDoneTasks.length === 0 && generalDeviations.length === 0;
+    } else {
+      lastDeviations = normalizeDeviations(parsed!.deviations);
+      adherent = parsed!.adherent === true || lastDeviations.length === 0;
+    }
+
     if (adherent) {
       yield {
         type: "content",
         content: `\n> [adherence] Round ${round}: reviewer (${args.reviewModelId}) confirms the implementation follows the plan.\n`,
       };
       roundRecords.push({ round, reviewerApproved: true, deviations: [], fixRan: false });
-      return { rounds: round, adherent: true, deviations: [], roundRecords, stopReason: "approved" };
+      return {
+        rounds: round,
+        adherent: true,
+        deviations: [],
+        roundRecords,
+        stopReason: "approved",
+        ...(taskVerdicts ? { taskVerdicts } : {}),
+      };
     }
 
     yield {
@@ -225,15 +426,44 @@ export async function* runPlanAdherenceReview(args: {
         "\n",
     };
 
+    // A task-aware round's fix, when it targets exactly one not-done task
+    // AND there is no general deviation alongside it, is worth naming on the
+    // record — see `AdherenceRoundRecord.taskId`.
+    const singleTaskId =
+      taskMode && notDoneTasks.length === 1 && generalDeviations.length === 0 ? notDoneTasks[0]!.id : undefined;
+
     // No progress: the previous fix left exactly the same deviations behind.
-    const deviationKey = [...lastDeviations].sort().join("\n");
+    // Task-mode's per-task PART of this key is built from task id + the
+    // reviewer's own `deviation` field ONLY — never free-form `evidence` —
+    // so an LLM merely rephrasing its evidence text between rounds cannot
+    // defeat the no-progress stop by making the key differ each time. The
+    // general-deviations part stays plain text, same as the legacy path.
+    const deviationKey = taskMode
+      ? [
+          ...generalDeviations.slice().sort(),
+          ...notDoneTasks.map((t) => `${t.id}:${taskVerdicts!.find((v) => v.taskId === t.id)?.deviation ?? ""}`).sort(),
+        ].join("|")
+      : [...lastDeviations].sort().join("\n");
     if (previousDeviationKey !== null && deviationKey === previousDeviationKey) {
       yield {
         type: "content",
         content: `\n> [adherence] Round ${round}: no progress — the last fix left the same deviation(s) behind; leaving them for the verify+criteria gate.\n`,
       };
-      roundRecords.push({ round, reviewerApproved: false, deviations: boundDeviations(lastDeviations), fixRan: false });
-      return { rounds: round, adherent: false, deviations: lastDeviations, roundRecords, stopReason: "no_progress" };
+      roundRecords.push({
+        round,
+        reviewerApproved: false,
+        deviations: boundDeviations(lastDeviations),
+        fixRan: false,
+        ...(singleTaskId ? { taskId: singleTaskId } : {}),
+      });
+      return {
+        rounds: round,
+        adherent: false,
+        deviations: lastDeviations,
+        roundRecords,
+        stopReason: taskStopReason(round, "no_progress"),
+        ...(taskVerdicts ? { taskVerdicts } : {}),
+      };
     }
     previousDeviationKey = deviationKey;
 
@@ -242,11 +472,26 @@ export async function* runPlanAdherenceReview(args: {
         type: "content",
         content: `\n> [adherence] Max rounds reached; deviations remain for the verify+criteria gate to catch.\n`,
       };
-      roundRecords.push({ round, reviewerApproved: false, deviations: boundDeviations(lastDeviations), fixRan: false });
-      return { rounds: round, adherent: false, deviations: lastDeviations, roundRecords, stopReason: "round_cap" };
+      roundRecords.push({
+        round,
+        reviewerApproved: false,
+        deviations: boundDeviations(lastDeviations),
+        fixRan: false,
+        ...(singleTaskId ? { taskId: singleTaskId } : {}),
+      });
+      return {
+        rounds: round,
+        adherent: false,
+        deviations: lastDeviations,
+        roundRecords,
+        stopReason: taskStopReason(round, "round_cap"),
+        ...(taskVerdicts ? { taskVerdicts } : {}),
+      };
     }
 
-    // Hand the fix to the lower-tier agent.
+    // Hand the fix to the lower-tier agent. `lastDeviations` already lists
+    // only the not-done tasks in task-aware mode, so this is naturally
+    // scoped to them — same prompt text/shape either way.
     const fixPrompt =
       `The implementation deviates from the APPROVED PLAN. A senior reviewer found ` +
       `these deviations — fix EACH one by editing the code so it conforms to the plan. ` +
@@ -278,13 +523,21 @@ export async function* runPlanAdherenceReview(args: {
       deviations: boundDeviations(lastDeviations),
       fixRan: true,
       fixOutcome: { success: fix.success, summary: fixSummary },
+      ...(singleTaskId ? { taskId: singleTaskId } : {}),
     });
     if (!fix.success) {
       yield {
         type: "content",
         content: `\n> [adherence] Fix task failed (round ${round}): ${fix.error ?? "unknown"}; stopping the loop.\n`,
       };
-      return { rounds: round, adherent: false, deviations: lastDeviations, roundRecords, stopReason: "error" };
+      return {
+        rounds: round,
+        adherent: false,
+        deviations: lastDeviations,
+        roundRecords,
+        stopReason: "error",
+        ...(taskVerdicts ? { taskVerdicts } : {}),
+      };
     }
 
     // Re-read the diff for the next review round.

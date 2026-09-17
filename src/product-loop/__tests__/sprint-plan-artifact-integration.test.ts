@@ -24,7 +24,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { getTestModels } from "../../__test-helpers__/catalog-fixtures.js";
 import { readSprintPlanArtifact, writeSprintPlanArtifact } from "../../flow/run-artifacts.js";
 import { loadCatalog } from "../../models/registry.js";
-import { buildSprintPlanArtifact, computePlanHash } from "../sprint-plan-artifact.js";
+import { buildSprintPlanArtifact, buildTaskChecklistBlock, computePlanHash } from "../sprint-plan-artifact.js";
 
 vi.mock("../../council/index.js", () => ({ runCouncil: vi.fn() }));
 vi.mock("../../verify/orchestrator.js", () => ({ runVerifyOrchestration: vi.fn() }));
@@ -293,7 +293,16 @@ describe("sprints/<n>-plan.json — real runSprint wiring", () => {
     expect(after?.sprints[0]?.startedAtUtc).toBe(before?.sprints[0]?.startedAtUtc);
   });
 
-  it("leaves the implementation prompt byte-identical to what this slice found on disk before it ran", async () => {
+  // S3b note: this plan (STRUCTURED_PLAN_SYNTHESIS) HAS tasks (source
+  // "structured", step1+step2 — see the first test in this describe block),
+  // so S3b's task checklist is appended to the implementation prompt. This
+  // test is therefore no longer "byte-identical to the pre-S3b prompt" — it
+  // is updated to assert byte-identical EXCEPT for that one deterministic
+  // addition, built via the exact same `buildTaskChecklistBlock` the
+  // implementation calls. The genuinely byte-identical case (no tasks,
+  // `source: "none"`) moved to its own test right below, which still proves
+  // S3b makes NO change at all when a plan carries no tasks.
+  it("appends the S3b task checklist to the implementation prompt, after everything else, in topological order", async () => {
     await runOneSprint();
 
     expect(capturedImplPrompt).toBeDefined();
@@ -314,7 +323,49 @@ describe("sprints/<n>-plan.json — real runSprint wiring", () => {
               "\n",
             )}\nImplement to satisfy the phase goal and every acceptance criterion; do not stop at scaffolding.\n`
         : "";
-    const expectedPrompt = IMPL_EXECUTION_DIRECTIVE + STRUCTURED_PLAN_SYNTHESIS + expectedNote;
+    // The checklist itself, built from the SAME artifact this slice persists
+    // (same planSynthesis, no side-channel structuredActionItems — the mocked
+    // runCouncil here never populates CouncilStats).
+    const artifactForChecklist = buildSprintPlanArtifact({
+      sprintN: 1,
+      runId: RUN_ID,
+      planSynthesis: STRUCTURED_PLAN_SYNTHESIS,
+    });
+    const { block: expectedChecklistBlock } = buildTaskChecklistBlock(artifactForChecklist.tasks);
+    expect(expectedChecklistBlock).not.toBe(""); // this plan DOES have tasks
+
+    const expectedPrompt = IMPL_EXECUTION_DIRECTIVE + STRUCTURED_PLAN_SYNTHESIS + expectedNote + expectedChecklistBlock;
+    expect(capturedImplPrompt).toBe(expectedPrompt);
+  });
+
+  it("source: none (no tasks) leaves the implementation prompt byte-identical to before S3b — no checklist appended", async () => {
+    // A plan with no JSON header and no bullet lines: buildSprintPlanArtifact
+    // gives `source: "none"`, `tasks: []` (see sprint-plan-artifact.test.ts's
+    // own "empty input gives none" case for the pure-builder proof of this).
+    const NONE_PLAN_SYNTHESIS = "Just implement the fix directly in the analyzer. No further breakdown needed.";
+    // biome-ignore lint/suspicious/noExplicitAny: vitest mock handle
+    (runCouncil as any).mockImplementation(async function* () {
+      yield { type: "content", content: "council planning..." };
+      return NONE_PLAN_SYNTHESIS;
+    });
+
+    await runOneSprint();
+
+    expect(capturedImplPrompt).toBeDefined();
+    const artifact = await readSprintPlanArtifact(flowDir, RUN_ID, 1);
+    expect(artifact?.source).toBe("none");
+    expect(artifact?.tasks).toEqual([]);
+
+    const issues = planQualityIssues(NONE_PLAN_SYNTHESIS, 0);
+    const expectedNote =
+      issues.length > 0
+        ? `\n\n--- PLAN QUALITY WARNINGS (address these while implementing) ---\n${issues
+            .map((i) => `- ${i}`)
+            .join(
+              "\n",
+            )}\nImplement to satisfy the phase goal and every acceptance criterion; do not stop at scaffolding.\n`
+        : "";
+    const expectedPrompt = IMPL_EXECUTION_DIRECTIVE + NONE_PLAN_SYNTHESIS + expectedNote;
     expect(capturedImplPrompt).toBe(expectedPrompt);
   });
 });

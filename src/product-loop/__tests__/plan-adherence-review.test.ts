@@ -185,4 +185,44 @@ describe("runPlanAdherenceReview", () => {
     expect(called).toBe(false);
     expect(verdict.stopReason).toBe("empty_plan");
   });
+
+  // Small fix #5 (acceptance review): pin the exact no-tasks review prompt so
+  // an accidental edit to `baseReviewPrompt` (plan-adherence-review.ts) is
+  // caught here rather than silently drifting — this is the SAME text a
+  // task-aware call's prompt is built on top of (S3b's `taskAwareReviewPrompt`
+  // = `baseReviewPrompt` + an addition), so protecting it here protects both.
+  it("pins the exact none-mode (no tasks) review prompt text", async () => {
+    const plan = "## Agreed Architecture\n\nBuild src/foo.ts.";
+    const diff = "diff --git a/src/foo.ts b/src/foo.ts\n+export const foo = 1;\n";
+    let capturedPrompt = "";
+    const runIsolatedTask = async (req: TaskRequest): Promise<ToolResult> => {
+      capturedPrompt = req.prompt;
+      return { success: true, output: '{"adherent": true, "deviations": []}' };
+    };
+
+    await drain(
+      runPlanAdherenceReview({
+        sprintN: 99,
+        planSynthesis: plan,
+        cwd: "/tmp",
+        reviewModelId: "leader-pro",
+        fixModelId: "cheap-flash",
+        runIsolatedTask,
+        diffProvider: () => diff,
+      }),
+    );
+
+    const expectedPrompt =
+      `You are a SENIOR code reviewer. Judge whether the implementation faithfully ` +
+      `follows the APPROVED PLAN below — both its file_edits (right files, right ` +
+      `approach: e.g. pass-through vs re-implementation, correct operation/API) and ` +
+      `its acceptance_criteria. Be strict and specific.\n\n` +
+      `=== APPROVED PLAN ===\n${plan}\n\n` +
+      `=== ACTUAL GIT DIFF ===\n${diff}\n\n` +
+      `Return ONLY JSON: {"adherent": boolean, "deviations": [{"where":"<file/symbol>",` +
+      `"issue":"<what diverges from the plan>","fix":"<concrete instruction to conform>"}]}. ` +
+      `adherent=true ONLY if there are no material deviations.`;
+
+    expect(capturedPrompt).toBe(expectedPrompt);
+  });
 });

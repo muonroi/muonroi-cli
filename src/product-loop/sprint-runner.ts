@@ -73,7 +73,7 @@ import { idealTrace } from "./ideal-trace.js";
 import { formatLayoutConvention, scanLayoutConvention } from "./layout-convention.js";
 import { type CollectedNestedTurn, collectNestedTurn, forwardNestedTurn } from "./nested-turn.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
-import type { AdherenceVerdict } from "./plan-adherence-review.js";
+import type { AdherenceVerdict, TaskVerdict } from "./plan-adherence-review.js";
 import { boundDeviations, runPlanAdherenceReview } from "./plan-adherence-review.js";
 
 // Re-exported so existing callers that import extractPlanTargetPaths from this
@@ -87,7 +87,12 @@ import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snap
 import { appendRoleMemory } from "./role-memory.js";
 import { readRunSpendUsd } from "./run-spend.js";
 import { describeVerdictFailure } from "./run-verdict.js";
-import { buildSprintPlanArtifact, computePlanHash } from "./sprint-plan-artifact.js";
+import {
+  buildSprintPlanArtifact,
+  buildTaskChecklistBlock,
+  computePlanHash,
+  type SprintPlanArtifact,
+} from "./sprint-plan-artifact.js";
 import { upsertSprint } from "./sprint-store.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
 import { loadVerifyFailureSignatures, recordVerifyFailureAndMaybePush } from "./verify-failure-tracking.js";
@@ -1401,6 +1406,41 @@ export function buildErrorAdherenceRecord(args: {
   };
 }
 
+/**
+ * S3b — fold the plan-adherence reviewer's per-task verdicts into a
+ * `SprintPlanArtifact`: `status` flips to "done" ONLY when the matching
+ * `TaskVerdict.done` is true (never from diff-touch alone); `evidence`,
+ * `deviation` and `touchedTargets` are copied through for observability. A
+ * task the reviewer gave no verdict for this round (its id absent from
+ * `taskVerdicts`) is left exactly as it was. `planHash` is untouched — task
+ * status is not part of the plan-text staleness key. Pure and unit-testable
+ * without a real filesystem.
+ */
+export function applyTaskVerdictsToPlanArtifact(
+  artifact: SprintPlanArtifact,
+  taskVerdicts: TaskVerdict[],
+): SprintPlanArtifact {
+  const verdictById = new Map(taskVerdicts.map((v) => [v.taskId, v]));
+  const notes = [...artifact.notes];
+  const tasks = artifact.tasks.map((t) => {
+    const v = verdictById.get(t.id);
+    if (!v) return t;
+    if (v.done && v.touchedTargets === false) {
+      notes.push(
+        `Task ${t.id} was marked done by the plan-adherence reviewer, but its declared target(s) were not touched in the diff.`,
+      );
+    }
+    return {
+      ...t,
+      status: v.done ? ("done" as const) : ("pending" as const),
+      evidence: v.evidence || t.evidence,
+      touchedTargets: v.touchedTargets,
+      ...(v.deviation ? { deviation: v.deviation } : {}),
+    };
+  });
+  return { ...artifact, tasks, notes };
+}
+
 export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChunk, IterationState, unknown> {
   const { sprintN, ctx, productSpec, roleAssignments, history, carryOver, phaseScope } = args;
   const runDir = path.join(ctx.flowDir, "runs", ctx.runId);
@@ -1825,13 +1865,21 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     /* non-critical — a missing criteria seed degrades to the prior empty-criteria behavior */
   }
 
+  // S3b — hoisted so it survives past the S3a build/persist try block below:
+  // both the implementation-prompt checklist and the task-aware
+  // plan-adherence review read it. Stays null when nothing could be built —
+  // every consumer below treats null the same as "no tasks known".
+  let planArtifact: SprintPlanArtifact | null = null;
+
   // S3a — persist the sprint's structured OUTCOME + task plan as
   // `sprints/<n>-plan.json`, right here at the criteria-seeding point where
-  // `planSynthesis` is finally known. Observability/structure only: this
-  // block only READS `planSynthesis` and `planCouncilStats` — it never
-  // mutates either, so the implementation prompt built below from
-  // `planSynthesis` is unaffected (S3b will make the impl turn consume these
-  // tasks). Best-effort: a failure here is logged and the sprint continues.
+  // `planSynthesis` is finally known. S3b reads `planArtifact` (hoisted above
+  // this try so it survives past it) to append the task checklist to the
+  // implementation prompt and to drive the per-task plan-adherence review —
+  // this block itself still only READS `planSynthesis`/`planCouncilStats`,
+  // it never mutates either. Best-effort: a failure here is logged and the
+  // sprint continues, and `planArtifact` simply stays null (no checklist, no
+  // task-aware review — degrades to the pre-S3b behaviour for this sprint).
   try {
     // A resumed sprint prefers a plan artifact persisted by the run that
     // first planned this sprint — that copy still carries the fast path's
@@ -1842,7 +1890,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     // matches the CURRENT planSynthesis (planHash mismatch) — a stale
     // artifact from a different plan text is worse than none, since S3b will
     // drive implementation off these tasks.
-    let planArtifact = await readSprintPlanArtifact(ctx.flowDir, ctx.runId, sprintN);
+    planArtifact = await readSprintPlanArtifact(ctx.flowDir, ctx.runId, sprintN);
     const currentPlanHash = computePlanHash(planSynthesis ?? "");
     if (planArtifact && planArtifact.planHash !== currentPlanHash) {
       logger.debug("orchestrator", "[sprint-plan] persisted plan artifact is stale — rebuilding", {
@@ -1960,6 +2008,30 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         type: "content",
         content: `\n> [continuation] ${existingTargets.length} plan target file(s) already exist — instructed to continue, not recreate.\n`,
       };
+    }
+  }
+
+  // S3b — append the sprint's task checklist LAST, after every other prompt
+  // addition above, so the model sees the full plan/context first and the
+  // ordered work list last. `source === "none"` (no tasks known — including
+  // every empty-plan case) leaves `implPrompt` byte-identical to pre-S3b:
+  // `buildTaskChecklistBlock` returns an empty block for an empty task list,
+  // so this is a no-op rather than a conditional the caller has to reason
+  // about twice.
+  if (planArtifact && planArtifact.source !== "none" && planArtifact.tasks.length > 0) {
+    const { block: taskChecklistBlock, notes: taskChecklistNotes } = buildTaskChecklistBlock(planArtifact.tasks);
+    if (taskChecklistBlock) {
+      implPrompt = `${implPrompt}${taskChecklistBlock}`;
+      yield {
+        type: "content",
+        content: `\n> [task-checklist] ${planArtifact.tasks.length} sprint task(s) queued for this sprint, in topological order.\n`,
+      };
+      if (taskChecklistNotes.length > 0) {
+        yield {
+          type: "content",
+          content: `\n> [task-checklist] ${taskChecklistNotes.length} ordering note(s): ${taskChecklistNotes.join("; ")}\n`,
+        };
+      }
     }
   }
 
@@ -2191,6 +2263,14 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // sprint's focus (Step 9) so "chưa tuân thủ" work continues rather than being
   // silently dropped after the review.
   let residualPlanDeviations: string[] = [];
+  // S3b — unfinished sprint tasks (the reviewer's own verdict, never diff-touch
+  // alone) survive into the next sprint's focus the same way, right below.
+  let unfinishedTasks: Array<{ id: string; title: string }> = [];
+  // Only pass tasks into a task-aware review when the artifact actually named
+  // some (`source !== "none"`) — an empty/absent array falls the review back
+  // to the legacy plan-text-only path, unchanged.
+  const adherenceTasks =
+    planArtifact && planArtifact.source !== "none" && planArtifact.tasks.length > 0 ? planArtifact.tasks : undefined;
   if (ctx.runIsolatedTask && planSynthesis.trim() && process.env.MUONROI_IDEAL_ADHERENCE_REVIEW !== "0") {
     const adhPhaseId = `sprint-${sprintN}-adherence`;
     const adhStartedAt = Date.now();
@@ -2216,6 +2296,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         maxRounds: process.env.MUONROI_IDEAL_ADHERENCE_ROUNDS
           ? Number.parseInt(process.env.MUONROI_IDEAL_ADHERENCE_ROUNDS, 10) || undefined
           : undefined,
+        ...(adherenceTasks ? { tasks: adherenceTasks } : {}),
       });
       idealTrace("sprint.adherence.after", {
         runId: ctx.runId,
@@ -2225,6 +2306,32 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         deviations: verdict.deviations.length,
       });
       if (!verdict.adherent) residualPlanDeviations = verdict.deviations;
+      // S3b — fold the reviewer's per-task verdicts back into
+      // sprints/<n>-plan.json (status/evidence/touchedTargets) and carry
+      // unfinished task ids+titles into this sprint's nextFocus (Step 9).
+      // Best-effort: a write failure is logged and the sprint continues —
+      // losing this update must never break `/ideal`, same as the S3a build.
+      if (verdict.taskVerdicts && verdict.taskVerdicts.length > 0) {
+        try {
+          const baseArtifact = planArtifact ?? (await readSprintPlanArtifact(ctx.flowDir, ctx.runId, sprintN));
+          if (baseArtifact) {
+            const updatedArtifact = applyTaskVerdictsToPlanArtifact(baseArtifact, verdict.taskVerdicts);
+            const persisted = await writeSprintPlanArtifact(ctx.flowDir, ctx.runId, updatedArtifact);
+            if (persisted) {
+              planArtifact = updatedArtifact;
+            } else {
+              console.error(
+                `[sprint-runner] could not persist task-verdict statuses for sprint ${sprintN} (run ${ctx.runId})`,
+              );
+            }
+          }
+        } catch (err) {
+          console.error(
+            `[sprint-runner] applying plan-adherence task verdicts failed (sprint ${sprintN}, run ${ctx.runId}): ${(err as Error).message}`,
+          );
+        }
+        unfinishedTasks = verdict.taskVerdicts.filter((v) => !v.done).map((v) => ({ id: v.taskId, title: v.title }));
+      }
       await writeSprintAdherence(
         ctx.flowDir,
         ctx.runId,
@@ -2957,7 +3064,15 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
             .map((d) => `- ${d}`)
             .join("\n")}`
         : "";
-    iter.nextFocus = `${fb.focus}${deviationNote}`;
+    // S3b — carry unfinished sprint tasks (the reviewer's own verdict, never
+    // diff-touch alone) into the next sprint's focus, same as plan deviations.
+    const taskCarryOverNote =
+      unfinishedTasks.length > 0
+        ? `\n\nUnfinished sprint tasks (continue these):\n${unfinishedTasks
+            .map((t) => `- [${t.id}] ${t.title}`)
+            .join("\n")}`
+        : "";
+    iter.nextFocus = `${fb.focus}${deviationNote}${taskCarryOverNote}`;
     yield {
       type: "content",
       content: `\n> Sprint ${sprintN} did not satisfy Definition-of-Done (${describeVerdictFailure(verdict) ?? "unknown"}). Next focus: ${fb.focus}\n`,
