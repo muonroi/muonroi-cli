@@ -16,6 +16,11 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import type { AdherenceRoundRecord, AdherenceStopReason } from "../product-loop/plan-adherence-review.js";
 import type { SprintPlanArtifact } from "../product-loop/sprint-plan-artifact.js";
+import type {
+  VerifyFixRoundRecord,
+  VerifyFixSkipReason,
+  VerifyFixStopReason,
+} from "../product-loop/verify-fix-loop.js";
 import { atomicReadJSON, atomicWriteJSON, atomicWriteText } from "../storage/atomic-io.js";
 import { logger } from "../utils/logger.js";
 
@@ -442,6 +447,107 @@ export async function readSprintPlanArtifact(
     return await atomicReadJSON<SprintPlanArtifact>(sprintPlanArtifactPath(flowDir, runId, sprintN));
   } catch (err) {
     logger.error("orchestrator", "[sprint-plan] could not parse the structured sprint plan artifact", {
+      flowDir,
+      runId,
+      sprintN,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+// ─── sprints/<n>-verify-fix.json ────────────────────────────────────────────
+
+/**
+ * S4 — `sprints/<n>-verify-fix.json`: what the bounded verify -> fix ->
+ * re-verify loop (`product-loop/verify-fix-loop.ts`) did for this sprint.
+ * Beside `<n>-outcome.json`, `<n>-verify.md`, `<n>-adherence.json` and
+ * `<n>-plan.json` — same "always written, never silent" discipline as
+ * `SprintAdherenceRecord`: a missing file next to a run's other sprint
+ * artifacts means the WRITE failed, never that the loop didn't run.
+ */
+export interface SprintVerifyFixRecord {
+  version: 1;
+  sprintN: number;
+  runId: string;
+  /** False only when `MUONROI_IDEAL_VERIFY_FIX_ROUNDS=0` disabled the loop outright. */
+  enabled: boolean;
+  /** True once the sprint's failure was judged fixable by `computeVerifyFixTrigger`. */
+  triggered: boolean;
+  /** Present when `triggered` is false — why the loop declined to run. */
+  skippedReason?: VerifyFixSkipReason;
+  rounds: VerifyFixRoundRecord[];
+  stopReason: VerifyFixStopReason;
+  /** The fixer model id as actually used for this run — never a hardcoded literal. */
+  fixModelId?: string;
+  /**
+   * Whether the S3b per-task status update was re-run after the fix rounds,
+   * and why not when it wasn't — re-running the plan-adherence reviewer costs
+   * another LLM call, so it is only re-run when a caller judges that cheap and
+   * safe; this field makes the decision auditable either way.
+   */
+  taskStatusRefresh?: { ran: boolean; reason: string };
+  startedAt: string;
+  finishedAt: string;
+  /** Present only when a write/loop-level failure occurred outside the loop's own error handling. */
+  errorMessage?: string;
+}
+
+/** `sprints/<n>-verify-fix.json` — beside `<n>-adherence.json` and the other sprint artifacts. */
+export function sprintVerifyFixPath(flowDir: string, runId: string, sprintN: number): string {
+  return path.join(sprintsDir(flowDir, runId), `${sprintN}-verify-fix.json`);
+}
+
+/**
+ * Persist a sprint's verify-fix loop record. Best-effort and never throws: a
+ * write failure is logged with context (No Silent Catch) and the sprint loop
+ * continues — losing this audit trail must never break `/ideal`.
+ */
+export async function writeSprintVerifyFix(
+  flowDir: string,
+  runId: string,
+  record: SprintVerifyFixRecord,
+): Promise<boolean> {
+  try {
+    const dir = sprintsDir(flowDir, runId);
+    await fs.mkdir(dir, { recursive: true });
+    await atomicWriteJSON(sprintVerifyFixPath(flowDir, runId, record.sprintN), record);
+    return true;
+  } catch (err) {
+    logger.error(
+      "orchestrator",
+      "[verify-fix] could not persist the verify-fix loop record — its findings are not auditable",
+      {
+        flowDir,
+        runId,
+        sprintN: record.sprintN,
+        stopReason: record.stopReason,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      },
+    );
+    return false;
+  }
+}
+
+/**
+ * Read a sprint's verify-fix loop record. Null when absent or unparseable.
+ *
+ * @testonly No shipped entry point reads this back yet — same status as
+ * `readSprintAdherence` above: S4's scope is persisting the record for a
+ * human/agent to inspect the JSON file directly, not a `/ideal review`-style
+ * consumer. Kept next to `writeSprintVerifyFix` so a future reporting surface
+ * has a ready round-trip to build on without duplicating the read path.
+ */
+export async function readSprintVerifyFix(
+  flowDir: string,
+  runId: string,
+  sprintN: number,
+): Promise<SprintVerifyFixRecord | null> {
+  try {
+    return await atomicReadJSON<SprintVerifyFixRecord>(sprintVerifyFixPath(flowDir, runId, sprintN));
+  } catch (err) {
+    logger.error("orchestrator", "[verify-fix] could not parse the verify-fix loop record", {
       flowDir,
       runId,
       sprintN,

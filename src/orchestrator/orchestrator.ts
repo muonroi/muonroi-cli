@@ -2862,6 +2862,12 @@ export class Agent {
         // Chat session id — used as the FK key for interaction_logs telemetry.
         // The /ideal runId is NOT a sessions.id and would silently fail FK insert.
         sessionId: this.session?.id,
+        // S4 — the SAME controller that already gates `runIsolatedTask` (via
+        // `combineAbortSignals` above) and this method's own `for await`
+        // teardown below. Threaded into DriverContext so the sprint-level
+        // verify-fix loop can check `.aborted` directly instead of only
+        // learning about an abort indirectly through a failed isolated call.
+        abortSignal: signal,
       } as Parameters<typeof runProductLoop>[0]),
       `ideal:${payload.subcommand}`,
     );

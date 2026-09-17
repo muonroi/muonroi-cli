@@ -44,6 +44,7 @@ vi.mock("../../providers/runtime.js", () => ({
 }));
 
 import { runCouncil } from "../../council/index.js";
+import { readSprintVerifyFix } from "../../flow/run-artifacts.js";
 import { runVerifyOrchestration } from "../../verify/orchestrator.js";
 import { appendIteration } from "../artifact-io.js";
 import { CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
@@ -620,5 +621,129 @@ describe("sprint-runner halt chunk forwarding (Task 5.1)", () => {
     expect((halt as any).haltChunk.recovery_options).toHaveLength(3);
     // Planner must NOT have been called.
     expect(runCouncil).not.toHaveBeenCalled();
+  });
+
+  describe("S4 — bounded verify-fix loop", () => {
+    it("fixes a FAIL to PASS before judgment sees it", async () => {
+      // Round 0 (Step 5's own first verify): the agent reports FAIL.
+      // Round 1 (the fix loop's re-verify, via the SAME runVerifyAndFloorPass
+      // routine): the agent reports PASS, after the fixer "ran".
+      // parseVerifyResult checks `tr.error` BEFORE any marker — a non-empty
+      // `error` always reads as ERROR, never FAIL. A genuine FAIL verdict
+      // carries the fail marker in `output` with `error` left empty.
+      (runVerifyOrchestration as any)
+        .mockResolvedValueOnce({
+          success: false,
+          output: "VERIFY_FAIL\n1 assertion failed",
+          verifyRecipe: { testCommands: ["npm test"], coverage: 80, shellInitCommands: [] },
+        })
+        .mockResolvedValueOnce({
+          success: true,
+          output: "VERIFY_PASS\n",
+          verifyRecipe: { testCommands: ["npm test"], coverage: 80, shellInitCommands: [] },
+        });
+      // ctx.runIsolatedTask is ALSO the bridge sprint-runner uses for the
+      // sprint's own implementation step, so it fires once for that before the
+      // fix loop ever runs — filter by description to isolate the fix round.
+      const isolatedCalls: string[] = [];
+      const runIsolatedTask = vi.fn(async (req: any) => {
+        isolatedCalls.push(req.description);
+        return { success: true, output: "applied the fix" };
+      });
+      const ctx = makeCtx({ runIsolatedTask, sessionModelId: "fixer-model" });
+
+      const { result, error } = await drain(
+        runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
+      );
+
+      expect(error).toBeUndefined();
+      expect(result?.lastVerifyResult).toBe("PASS");
+      expect(runVerifyOrchestration).toHaveBeenCalledTimes(2);
+      expect(isolatedCalls.filter((d) => d.includes("verify-fix"))).toHaveLength(1);
+      // Judgment (evaluateDoneGate) must see the CORRECTED verdict, not the
+      // original FAIL.
+      expect(evaluateDoneGate).toHaveBeenCalledWith(expect.objectContaining({ verifyVerdict: "PASS" }));
+
+      const record = await readSprintVerifyFix(testFlowDir, ctx.runId, 1);
+      expect(record?.enabled).toBe(true);
+      expect(record?.triggered).toBe(true);
+      expect(record?.stopReason).toBe("pass");
+      expect(record?.rounds).toHaveLength(1);
+    });
+
+    it("MUONROI_IDEAL_VERIFY_FIX_ROUNDS=0 leaves a FAIL sprint byte-identical to today", async () => {
+      process.env.MUONROI_IDEAL_VERIFY_FIX_ROUNDS = "0";
+      try {
+        (runVerifyOrchestration as any).mockResolvedValueOnce({
+          success: false,
+          output: "VERIFY_FAIL\n1 assertion failed",
+          verifyRecipe: { testCommands: ["npm test"], coverage: 80, shellInitCommands: [] },
+        });
+        const isolatedCalls: string[] = [];
+        const runIsolatedTask = vi.fn(async (req: any) => {
+          isolatedCalls.push(req.description);
+          return { success: true, output: "applied the fix" };
+        });
+        const ctx = makeCtx({ runIsolatedTask, sessionModelId: "fixer-model" });
+
+        const { result, error } = await drain(
+          runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
+        );
+
+        expect(error).toBeUndefined();
+        // Exactly the pre-S4 behaviour: one verify call, no fix round
+        // dispatched, FAIL reaches judgment unchanged.
+        expect(runVerifyOrchestration).toHaveBeenCalledTimes(1);
+        expect(isolatedCalls.filter((d) => d.includes("verify-fix"))).toHaveLength(0);
+        expect(result?.lastVerifyResult).toBe("FAIL");
+        expect(evaluateDoneGate).toHaveBeenCalledWith(expect.objectContaining({ verifyVerdict: "FAIL" }));
+
+        const record = await readSprintVerifyFix(testFlowDir, ctx.runId, 1);
+        expect(record?.enabled).toBe(false);
+        expect(record?.stopReason).toBe("disabled");
+        expect(record?.rounds).toEqual([]);
+      } finally {
+        delete process.env.MUONROI_IDEAL_VERIFY_FIX_ROUNDS;
+      }
+    });
+
+    it("ctx.abortSignal (the REAL production abort signal) stops the loop between the fixer and the re-verify, and the record is still written", async () => {
+      // Initial Step 5 verify: FAIL — triggers the fix loop.
+      (runVerifyOrchestration as any).mockResolvedValueOnce({
+        success: false,
+        output: "VERIFY_FAIL\n1 assertion failed",
+        verifyRecipe: { testCommands: ["npm test"], coverage: 80, shellInitCommands: [] },
+      });
+      const controller = new AbortController();
+      const isolatedCalls: string[] = [];
+      // The signal fires as a side effect of the fix round's own isolated call
+      // resolving — exactly "the user hit Escape while the fixer was running".
+      const runIsolatedTask = vi.fn(async (req: any) => {
+        isolatedCalls.push(req.description);
+        if (req.description.includes("verify-fix")) controller.abort();
+        return { success: true, output: "applied the fix" };
+      });
+      const ctx = makeCtx({ runIsolatedTask, sessionModelId: "fixer-model", abortSignal: controller.signal });
+
+      const { result, error } = await drain(
+        runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
+      );
+
+      expect(error).toBeUndefined();
+      // Only the INITIAL verify ran — the abort landed before the re-verify,
+      // so no second runVerifyOrchestration call happened (no round 2 either).
+      expect(runVerifyOrchestration).toHaveBeenCalledTimes(1);
+      expect(isolatedCalls.filter((d) => d.includes("verify-fix"))).toHaveLength(1);
+      // The FAIL from before the fix round stands — nothing re-verified it.
+      expect(result?.lastVerifyResult).toBe("FAIL");
+      expect(evaluateDoneGate).toHaveBeenCalledWith(expect.objectContaining({ verifyVerdict: "FAIL" }));
+
+      const record = await readSprintVerifyFix(testFlowDir, ctx.runId, 1);
+      expect(record?.enabled).toBe(true);
+      expect(record?.triggered).toBe(true);
+      expect(record?.stopReason).toBe("aborted");
+      expect(record?.rounds).toHaveLength(1);
+      expect(record?.rounds[0]).toMatchObject({ round: 1, fixerRan: true, fixerSuccess: true });
+    });
   });
 });

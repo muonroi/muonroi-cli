@@ -126,6 +126,8 @@ export interface ProductLoopOptions {
    * sessions.id; passing runId there silently fails FK on STRICT bun:sqlite.
    */
   sessionId?: string;
+  /** S4 — see `DriverContext.abortSignal` (product-loop/types.ts). Forwarded through to every ctx build below. */
+  abortSignal?: AbortSignal;
 }
 
 export interface ProductLoopResult extends DriverResult {
@@ -541,6 +543,7 @@ async function* runHotPath(
     skipPriorContext: opts.skipPriorContext,
     sufficiencyMissing: opts.sufficiencyMissing,
     conversationContext: opts.conversationContext,
+    abortSignal: opts.abortSignal,
   };
 
   const roleAssignments = opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
@@ -998,6 +1001,7 @@ async function* runStart(
     skipPriorContext: opts.skipPriorContext,
     sufficiencyMissing: opts.sufficiencyMissing,
     conversationContext: opts.conversationContext,
+    abortSignal: opts.abortSignal,
   };
 
   // Phase 1: outer FSM (gather → research → scoping → approved | halted).
@@ -2254,6 +2258,7 @@ async function* runResume(
     processMessageFn: opts.processMessageFn,
     runIsolatedTask: opts.runIsolatedTask,
     detectVerifyRecipe: opts.detectVerifyRecipe,
+    abortSignal: opts.abortSignal,
   };
 
   // C-v2 cross-session debate resume — a persisted debate checkpoint means the

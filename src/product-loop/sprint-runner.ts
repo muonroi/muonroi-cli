@@ -37,10 +37,12 @@ import {
   readSprintPlanArtifact,
   renderResumeDigest,
   type SprintAdherenceRecord,
+  type SprintVerifyFixRecord,
   writeSprintAdherence,
   writeSprintOutcome,
   writeSprintPlanArtifact,
   writeSprintVerify,
+  writeSprintVerifyFix,
 } from "../flow/run-artifacts.js";
 import { isContextRailEnabled } from "../gsd/flags.js";
 import { SPRINT_EXECUTION_MARKER } from "../pil/layer6-output.js";
@@ -95,7 +97,10 @@ import {
 } from "./sprint-plan-artifact.js";
 import { upsertSprint } from "./sprint-store.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
+import type { FloorDelta } from "./verify-baseline.js";
 import { loadVerifyFailureSignatures, recordVerifyFailureAndMaybePush } from "./verify-failure-tracking.js";
+import { runVerifyFixLoop, type VerifyPassOutcome } from "./verify-fix-loop.js";
+import type { FloorCheck } from "./verify-floor.js";
 import { parseVerifyResult, VERIFY_PASS_MARKER } from "./verify-result.js";
 
 // P3.7: track one-shot CB-2 retry bonus per run (keyed by runId).
@@ -2369,172 +2374,320 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
 
   // ── Step 5: Verify stage ──────────────────────────────────────────────────
   yield { type: "content", content: `\n## Sprint ${sprintN} — Verification\n` };
-  const verifyPhaseId = `sprint-${sprintN}-verification`;
-  const verifyStartedAt = Date.now();
-  yield phaseStart({
-    phaseId: verifyPhaseId,
-    kind: "sprint_stage",
-    label: `Sprint ${sprintN} — Verification`,
-    detail: "Running verify recipe",
-    startedAt: verifyStartedAt,
-  });
-  // 2.5c — verification stage entry
-  try {
-    const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
-      | { emitEvent: (e: unknown) => void }
-      | undefined;
-    _ar?.emitEvent({ t: "event", kind: "sprint-stage", sprintIndex: sprintN, stage: "verification", runId: ctx.runId });
-  } catch {
-    /* best-effort */
-  }
-  logUIInteraction(ctx.sessionId, {
-    subtype: "sprint_stage",
-    data: { sprintIndex: sprintN, stage: "verification", runId: ctx.runId },
-  });
-  // A — "Skip verify" recovery option: the user chose to bypass a broken verify
-  // stage (e.g. shuru sandbox unavailable on Windows that hangs the watchdog
-  // every sprint). Treat verify as a PASS with an explicit synthetic output so
-  // the done-gate is not blocked, and log loudly so the bypass is auditable.
-  // The env var is set by the recovery-card handler and reset on the next fresh
-  // `/ideal "<idea>"` start, so a new run re-enables verification.
-  const skipVerify = process.env.MUONROI_SPRINT_SKIP_VERIFY === "1";
-  let verifyResult: ToolResult;
-  if (skipVerify) {
-    console.error(
-      `[sprint-runner] MUONROI_SPRINT_SKIP_VERIFY=1 — verify stage bypassed (sprint ${sprintN}, run ${ctx.runId})`,
-    );
-    verifyResult = {
-      success: true,
-      // Include the canonical PASS marker so parseVerifyResult → PASS (the user
-      // explicitly opted to treat verify as satisfied for this recovery).
-      output: `${VERIFY_PASS_MARKER}\nverify skipped by user recovery choice (MUONROI_SPRINT_SKIP_VERIFY=1)`,
-    };
-    yield {
-      type: "content",
-      content: `\n> [skip-verify] Verify stage bypassed for sprint ${sprintN} (user recovery choice).\n`,
-    };
-  } else {
-    // `flowDir` is how the watchdog reaches THIS run's measured build+test cost
-    // (`verify-baseline.json`, written by captureVerifyFloorBaseline before any
-    // sprint ran) and sizes itself to the project instead of to a constant.
-    verifyResult = await runVerifyWithWatchdog(verifyAgent, ctx.runId, sprintN, { flowDir: ctx.flowDir });
-  }
-  yield phaseDone({
-    phaseId: verifyPhaseId,
-    kind: "sprint_stage",
-    label: `Sprint ${sprintN} — Verification`,
-    startedAt: verifyStartedAt,
-  });
-  let verifyVerdict = parseVerifyResult(verifyResult);
-  const recipeFromVerify =
-    (verifyResult as ToolResult & { verifyRecipe?: VerifyRecipe | null }).verifyRecipe ?? verifyRecipe;
 
-  // ── Deterministic verify FLOOR ───────────────────────────────────────────
-  // Everything above this line is the verify sub-agent's OPINION: the verdict
-  // came from `parseVerifyResult`, which passes as soon as the model's narration
-  // contains `VERIFY_PASS`. No exit code was involved, so a sprint could commit
-  // code that does not compile and still be scored PASS.
-  //
-  // The floor runs the project's own build/typecheck and test commands —
-  // discovered from the working tree, never from the model's recipe (see
-  // verify-floor.ts) — and its exit codes are authoritative in BOTH directions.
-  //
-  // The gate used to be `verifyVerdict === "PASS"`, so the floor could veto but
-  // never admit: a sprint whose sub-agent emitted no verdict marker at all was
-  // scored UNKNOWN and the floor never ran. Measured, run `mttwpmu8ee5b`: a
-  // baseline costing 53s of real build+test work was captured and then never
-  // read, both sprints ended `engineering_floor` / score 0, and the run shipped
-  // nothing. UNKNOWN is the absence of a claim, so exit codes may supply the
-  // verdict the model did not. A model-reported FAIL or ERROR is a positive
-  // claim and is never upgraded — see applyVerifyFloor's contract.
-  if (verifyVerdict === "PASS" || verifyVerdict === "UNKNOWN") {
-    const verdictBeforeFloor = verifyVerdict;
+  /**
+   * S4 — the verify-agent + deterministic-floor pass, extracted into ONE
+   * reusable routine so a verify-fix re-verify round (below) runs through the
+   * EXACT same code path as the sprint's first verification — never a forked
+   * copy that could silently drift out of sync. `roundLabel` only affects
+   * phase-id/label/event text; the logic inside is identical on every call.
+   */
+  async function* runVerifyAndFloorPass(roundLabel: string): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+    const roundSuffix = roundLabel ? ` (${roundLabel})` : "";
+    const verifyPhaseId = `sprint-${sprintN}-verification${roundLabel ? `-${roundLabel}` : ""}`;
+    const verifyStartedAt = Date.now();
+    yield phaseStart({
+      phaseId: verifyPhaseId,
+      kind: "sprint_stage",
+      label: `Sprint ${sprintN} — Verification${roundSuffix}`,
+      detail: "Running verify recipe",
+      startedAt: verifyStartedAt,
+    });
+    // 2.5c — verification stage entry
     try {
-      const { applyVerifyFloor, runVerifyFloor } = await import("./verify-floor.js");
-      // Thread the run identity so the floor can compare against THIS run's
-      // baseline instead of against zero. Without it the floor stays in
-      // ABSOLUTE mode and fails any repo that already had a failing test —
-      // measured: run mttwpmu8ee5b scored 0.00 on both sprints because 31
-      // infra-dependent tests (PostgreSql/SqlServer/Kafka) fail for want of a
-      // database, none of them related to what the run was writing.
-      const { describeBuildMustFix, verifyBaselinePath } = await import("./verify-baseline.js");
-      const floor = await runVerifyFloor({
-        cwd,
+      const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+        | { emitEvent: (e: unknown) => void }
+        | undefined;
+      _ar?.emitEvent({
+        t: "event",
+        kind: "sprint-stage",
+        sprintIndex: sprintN,
+        stage: "verification",
         runId: ctx.runId,
-        baselinePath: verifyBaselinePath(ctx.flowDir, ctx.runId),
       });
-      const applied = applyVerifyFloor(verifyVerdict, floor);
-      verifyVerdict = applied.verdict;
-      // S5 — a build break the floor could not honestly call pre-existing
-      // (run-introduced or unattributable) must reach the next sprint as a
-      // must-fix item, the same way S3b carries unfinished tasks.
-      if (floor.delta) {
-        const mustFix = describeBuildMustFix(floor.delta);
-        if (mustFix) floorMustFixNote = mustFix;
-      }
-      if (applied.downgraded) {
-        verifyResult.error = `${verifyResult.error ?? ""}\n\n[verify-floor] ${floor.detail}`;
-        yield {
-          type: "content",
-          content: `\n> [verify-floor] Sprint ${sprintN} verdict downgraded to FAIL — the project's own gates failed (${floor.elapsedMs}ms).\n`,
-        };
-      } else if (applied.upgraded) {
-        // Deliberately NOT written to `verifyResult.error`: that field is the
-        // next sprint's failure feedback, and `parseVerifyResult` maps ANY
-        // non-empty error to ERROR — writing the floor's PASS note there would
-        // undo the upgrade one line later. The adjudicated verdict reaches the
-        // done-gate as `verifyVerdict` instead (see the evaluateDoneGate call).
-        yield {
-          type: "content",
-          content: `\n> [verify-floor] Sprint ${sprintN} verdict upgraded ${verdictBeforeFloor} → PASS — the verify agent emitted no verdict, but the project's own gates passed (${floor.checks.length} command(s), ${floor.elapsedMs}ms).\n`,
-        };
-      } else if (floor.verdict === "pass") {
-        yield {
-          type: "content",
-          content: `\n> [verify-floor] Deterministic gates PASSED (${floor.checks.length} command(s), ${floor.elapsedMs}ms).\n`,
-        };
-      } else {
-        // "unavailable" — surfaced loudly so a PASS with no exit code behind it
-        // is never mistaken for a verified one.
-        yield {
-          type: "content",
-          content: `\n> [verify-floor] No deterministic evidence for sprint ${sprintN}: ${floor.detail}\n`,
-        };
-      }
-    } catch (err) {
-      // A floor that cannot run must not silently read as success. Downgrade to
-      // ERROR so the sprint loop routes it as a failed verification instead of
-      // shipping on an unverified claim, and log per the No Silent Catch rule.
-      const message = err instanceof Error ? err.message : String(err);
-      logger.error(
-        "orchestrator",
-        `[sprint-runner] verify floor threw (sprint ${sprintN}, run ${ctx.runId}): ${message}`,
-        {
-          operation: "runVerifyFloor",
-          runId: ctx.runId,
-          sprintN,
-          stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
-        },
+    } catch {
+      /* best-effort */
+    }
+    logUIInteraction(ctx.sessionId, {
+      subtype: "sprint_stage",
+      data: { sprintIndex: sprintN, stage: "verification", runId: ctx.runId },
+    });
+    // A — "Skip verify" recovery option: the user chose to bypass a broken verify
+    // stage (e.g. shuru sandbox unavailable on Windows that hangs the watchdog
+    // every sprint). Treat verify as a PASS with an explicit synthetic output so
+    // the done-gate is not blocked, and log loudly so the bypass is auditable.
+    // The env var is set by the recovery-card handler and reset on the next fresh
+    // `/ideal "<idea>"` start, so a new run re-enables verification.
+    const skipVerify = process.env.MUONROI_SPRINT_SKIP_VERIFY === "1";
+    let verifyResult: ToolResult;
+    if (skipVerify) {
+      console.error(
+        `[sprint-runner] MUONROI_SPRINT_SKIP_VERIFY=1 — verify stage bypassed (sprint ${sprintN}, run ${ctx.runId})`,
       );
-      // A floor that THREW while confirming a claimed PASS must not read as
-      // success: that claim now rests on nothing. But a floor that threw on an
-      // UNKNOWN verdict has changed nothing — it never had a claim to confirm,
-      // and rewriting UNKNOWN → ERROR here would report the floor's own crash as
-      // a verify-harness failure in this sprint's failure signatures.
-      if (verdictBeforeFloor === "PASS") {
-        verifyVerdict = "ERROR";
-        verifyResult.error = `${verifyResult.error ?? ""}\n\n[verify-floor] floor could not run: ${message}`;
-        yield {
-          type: "content",
-          content: `\n> [verify-floor] Sprint ${sprintN} verdict downgraded to ERROR — the deterministic floor could not run: ${message}\n`,
-        };
-      } else {
-        yield {
-          type: "content",
-          content: `\n> [verify-floor] Sprint ${sprintN}: the deterministic floor could not run (${message}) — verdict left at ${verdictBeforeFloor}.\n`,
-        };
+      verifyResult = {
+        success: true,
+        // Include the canonical PASS marker so parseVerifyResult → PASS (the user
+        // explicitly opted to treat verify as satisfied for this recovery).
+        output: `${VERIFY_PASS_MARKER}\nverify skipped by user recovery choice (MUONROI_SPRINT_SKIP_VERIFY=1)`,
+      };
+      yield {
+        type: "content",
+        content: `\n> [skip-verify] Verify stage bypassed for sprint ${sprintN} (user recovery choice).\n`,
+      };
+    } else {
+      // `flowDir` is how the watchdog reaches THIS run's measured build+test cost
+      // (`verify-baseline.json`, written by captureVerifyFloorBaseline before any
+      // sprint ran) and sizes itself to the project instead of to a constant.
+      verifyResult = await runVerifyWithWatchdog(verifyAgent, ctx.runId, sprintN, { flowDir: ctx.flowDir });
+    }
+    yield phaseDone({
+      phaseId: verifyPhaseId,
+      kind: "sprint_stage",
+      label: `Sprint ${sprintN} — Verification${roundSuffix}`,
+      startedAt: verifyStartedAt,
+    });
+    let verifyVerdict = parseVerifyResult(verifyResult);
+    const recipeFromVerify =
+      (verifyResult as ToolResult & { verifyRecipe?: VerifyRecipe | null }).verifyRecipe ?? verifyRecipe;
+
+    // ── Deterministic verify FLOOR ───────────────────────────────────────────
+    // Everything above this line is the verify sub-agent's OPINION: the verdict
+    // came from `parseVerifyResult`, which passes as soon as the model's narration
+    // contains `VERIFY_PASS`. No exit code was involved, so a sprint could commit
+    // code that does not compile and still be scored PASS.
+    //
+    // The floor runs the project's own build/typecheck and test commands —
+    // discovered from the working tree, never from the model's recipe (see
+    // verify-floor.ts) — and its exit codes are authoritative in BOTH directions.
+    //
+    // The gate used to be `verifyVerdict === "PASS"`, so the floor could veto but
+    // never admit: a sprint whose sub-agent emitted no verdict marker at all was
+    // scored UNKNOWN and the floor never ran. Measured, run `mttwpmu8ee5b`: a
+    // baseline costing 53s of real build+test work was captured and then never
+    // read, both sprints ended `engineering_floor` / score 0, and the run shipped
+    // nothing. UNKNOWN is the absence of a claim, so exit codes may supply the
+    // verdict the model did not. A model-reported FAIL or ERROR is a positive
+    // claim and is never upgraded — see applyVerifyFloor's contract.
+    let floorDelta: FloorDelta | undefined;
+    let floorChecks: FloorCheck[] | undefined;
+    let floorMustFixNoteLocal: string | undefined;
+    if (verifyVerdict === "PASS" || verifyVerdict === "UNKNOWN") {
+      const verdictBeforeFloor = verifyVerdict;
+      try {
+        const { applyVerifyFloor, runVerifyFloor } = await import("./verify-floor.js");
+        // Thread the run identity so the floor can compare against THIS run's
+        // baseline instead of against zero. Without it the floor stays in
+        // ABSOLUTE mode and fails any repo that already had a failing test —
+        // measured: run mttwpmu8ee5b scored 0.00 on both sprints because 31
+        // infra-dependent tests (PostgreSql/SqlServer/Kafka) fail for want of a
+        // database, none of them related to what the run was writing.
+        const { describeBuildMustFix, verifyBaselinePath } = await import("./verify-baseline.js");
+        const floor = await runVerifyFloor({
+          cwd,
+          runId: ctx.runId,
+          baselinePath: verifyBaselinePath(ctx.flowDir, ctx.runId),
+        });
+        const applied = applyVerifyFloor(verifyVerdict, floor);
+        verifyVerdict = applied.verdict;
+        floorDelta = floor.delta;
+        floorChecks = floor.checks;
+        // S5 — a build break the floor could not honestly call pre-existing
+        // (run-introduced or unattributable) must reach the next sprint as a
+        // must-fix item, the same way S3b carries unfinished tasks.
+        if (floor.delta) {
+          const mustFix = describeBuildMustFix(floor.delta);
+          if (mustFix) floorMustFixNoteLocal = mustFix;
+        }
+        if (applied.downgraded) {
+          verifyResult.error = `${verifyResult.error ?? ""}\n\n[verify-floor] ${floor.detail}`;
+          yield {
+            type: "content",
+            content: `\n> [verify-floor] Sprint ${sprintN} verdict downgraded to FAIL — the project's own gates failed (${floor.elapsedMs}ms).\n`,
+          };
+        } else if (applied.upgraded) {
+          // Deliberately NOT written to `verifyResult.error`: that field is the
+          // next sprint's failure feedback, and `parseVerifyResult` maps ANY
+          // non-empty error to ERROR — writing the floor's PASS note there would
+          // undo the upgrade one line later. The adjudicated verdict reaches the
+          // done-gate as `verifyVerdict` instead (see the evaluateDoneGate call).
+          yield {
+            type: "content",
+            content: `\n> [verify-floor] Sprint ${sprintN} verdict upgraded ${verdictBeforeFloor} → PASS — the verify agent emitted no verdict, but the project's own gates passed (${floor.checks.length} command(s), ${floor.elapsedMs}ms).\n`,
+          };
+        } else if (floor.verdict === "pass") {
+          yield {
+            type: "content",
+            content: `\n> [verify-floor] Deterministic gates PASSED (${floor.checks.length} command(s), ${floor.elapsedMs}ms).\n`,
+          };
+        } else {
+          // "unavailable" — surfaced loudly so a PASS with no exit code behind it
+          // is never mistaken for a verified one.
+          yield {
+            type: "content",
+            content: `\n> [verify-floor] No deterministic evidence for sprint ${sprintN}: ${floor.detail}\n`,
+          };
+        }
+      } catch (err) {
+        // A floor that cannot run must not silently read as success. Downgrade to
+        // ERROR so the sprint loop routes it as a failed verification instead of
+        // shipping on an unverified claim, and log per the No Silent Catch rule.
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error(
+          "orchestrator",
+          `[sprint-runner] verify floor threw (sprint ${sprintN}, run ${ctx.runId}): ${message}`,
+          {
+            operation: "runVerifyFloor",
+            runId: ctx.runId,
+            sprintN,
+            stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+          },
+        );
+        // A floor that THREW while confirming a claimed PASS must not read as
+        // success: that claim now rests on nothing. But a floor that threw on an
+        // UNKNOWN verdict has changed nothing — it never had a claim to confirm,
+        // and rewriting UNKNOWN → ERROR here would report the floor's own crash as
+        // a verify-harness failure in this sprint's failure signatures.
+        if (verdictBeforeFloor === "PASS") {
+          verifyVerdict = "ERROR";
+          verifyResult.error = `${verifyResult.error ?? ""}\n\n[verify-floor] floor could not run: ${message}`;
+          yield {
+            type: "content",
+            content: `\n> [verify-floor] Sprint ${sprintN} verdict downgraded to ERROR — the deterministic floor could not run: ${message}\n`,
+          };
+        } else {
+          yield {
+            type: "content",
+            content: `\n> [verify-floor] Sprint ${sprintN}: the deterministic floor could not run (${message}) — verdict left at ${verdictBeforeFloor}.\n`,
+          };
+        }
       }
     }
+
+    return {
+      verifyResult,
+      verifyVerdict,
+      recipeFromVerify,
+      floorDelta,
+      floorChecks,
+      floorMustFixNote: floorMustFixNoteLocal,
+    };
+  }
+
+  const initialVerifyPass = yield* runVerifyAndFloorPass("");
+  let verifyResult = initialVerifyPass.verifyResult;
+  let verifyVerdict = initialVerifyPass.verifyVerdict;
+  let recipeFromVerify = initialVerifyPass.recipeFromVerify;
+  if (initialVerifyPass.floorMustFixNote) floorMustFixNote = initialVerifyPass.floorMustFixNote;
+
+  // ── S4 — bounded verify -> fix -> re-verify loop ─────────────────────────
+  // A FAIL used to go straight to judgment, and the NEXT sprint re-planned from
+  // scratch instead of fixing the break — live run mu54vrme4c87: two sprints,
+  // both `engineering_floor: zero_coverage` (a package downgrade this run made
+  // broke the build; new projects were never registered in the solution), and
+  // neither sprint attempted a fix. This gives THIS sprint a bounded chance to
+  // fix what the floor just found — skipping the user's own pre-existing
+  // breakage — before judgment ever sees the failure. Opt out with
+  // MUONROI_IDEAL_VERIFY_FIX_ROUNDS=0.
+  const verifyFixStartedAtIso = new Date().toISOString();
+  const verifyFixOpenTasks =
+    planArtifact && planArtifact.source !== "none"
+      ? planArtifact.tasks.filter((t) => t.status !== "done").map((t) => `[${t.id}] ${t.title}`)
+      : [];
+  let verifyFixRecord: SprintVerifyFixRecord | undefined;
+  try {
+    const fixLoop = yield* runVerifyFixLoop({
+      sprintN,
+      planSynthesis,
+      openTasks: verifyFixOpenTasks,
+      fixModelId: ctx.sessionModelId,
+      runIsolatedTask: ctx.runIsolatedTask,
+      initial: {
+        verifyResult,
+        verifyVerdict,
+        recipeFromVerify,
+        floorDelta: initialVerifyPass.floorDelta,
+        floorChecks: initialVerifyPass.floorChecks,
+        floorMustFixNote: initialVerifyPass.floorMustFixNote,
+      },
+      runVerifyPass: (roundLabel) => runVerifyAndFloorPass(roundLabel),
+      // S4 fix — this was previously never wired, so nothing could stop the
+      // loop in production. `ctx.abortSignal` is the run's real abort signal
+      // (`this.abortController.signal`, threaded from `orchestrator.ts`
+      // through `DriverContext` — see `product-loop/types.ts`), the SAME
+      // controller that already gates `ctx.runIsolatedTask`.
+      abortSignal: ctx.abortSignal,
+      onRoundStart: (_round) => {
+        // The fixer edits code — the same class of work as the sprint's main
+        // implementation stage. No new harness stage kind was added for this;
+        // "implementation" is the existing value that fits.
+        try {
+          const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+            | { emitEvent: (e: unknown) => void }
+            | undefined;
+          _ar?.emitEvent({
+            t: "event",
+            kind: "sprint-stage",
+            sprintIndex: sprintN,
+            stage: "implementation",
+            runId: ctx.runId,
+          });
+        } catch {
+          /* best-effort */
+        }
+        // `round` has no field on SprintStagePayload — the per-round detail is
+        // already visible via the `[verify-fix] Round N: …` transcript chunks
+        // this loop yields, so nothing is lost by not threading it through here.
+        logUIInteraction(ctx.sessionId, {
+          subtype: "sprint_stage",
+          data: { sprintIndex: sprintN, stage: "implementation", runId: ctx.runId },
+        });
+      },
+    });
+    verifyResult = fixLoop.final.verifyResult;
+    verifyVerdict = fixLoop.final.verifyVerdict;
+    recipeFromVerify = fixLoop.final.recipeFromVerify;
+    if (fixLoop.final.floorMustFixNote) floorMustFixNote = fixLoop.final.floorMustFixNote;
+    verifyFixRecord = {
+      version: 1,
+      sprintN,
+      runId: ctx.runId,
+      enabled: fixLoop.enabled,
+      triggered: fixLoop.triggered,
+      skippedReason: fixLoop.skippedReason,
+      rounds: fixLoop.rounds,
+      stopReason: fixLoop.stopReason,
+      fixModelId: ctx.sessionModelId,
+      // Re-running the S3b per-task reviewer costs another LLM call, so the fix
+      // loop does not re-run it — task status still reflects the pre-fix
+      // review. Recorded so the decision is auditable, not silently skipped.
+      taskStatusRefresh: {
+        ran: false,
+        reason:
+          "re-running the plan-adherence per-task reviewer costs another LLM call; skipped — task status reflects the pre-fix review only",
+      },
+      startedAt: verifyFixStartedAtIso,
+      finishedAt: new Date().toISOString(),
+    };
+    await writeSprintVerifyFix(ctx.flowDir, ctx.runId, verifyFixRecord);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[sprint-runner] verify-fix loop failed (sprint ${sprintN}): ${message}`, {
+      stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+    });
+    verifyFixRecord = {
+      version: 1,
+      sprintN,
+      runId: ctx.runId,
+      enabled: true,
+      triggered: false,
+      rounds: [],
+      stopReason: "error",
+      fixModelId: ctx.sessionModelId,
+      startedAt: verifyFixStartedAtIso,
+      finishedAt: new Date().toISOString(),
+      errorMessage: message,
+    };
+    await writeSprintVerifyFix(ctx.flowDir, ctx.runId, verifyFixRecord);
   }
 
   // Tier 3 — self-verify gate. Only fires when recipe PASSED and the sprint
@@ -2996,11 +3149,18 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     });
     const verifyReport =
       (verifyResult.error?.trim() ? verifyResult.error : (verifyResult.output ?? "")).trim() || "(no verify output)";
+    // S4 — only when the verify-fix loop actually ran something: with it
+    // disabled or never triggered, this report stays byte-identical to before
+    // S4 (no addendum line for a loop that never acted).
+    const verifyFixNote =
+      verifyFixRecord?.enabled && verifyFixRecord.triggered
+        ? `\nVerify-fix: ${verifyFixRecord.rounds.length} round(s), stopReason=${verifyFixRecord.stopReason}\n`
+        : "";
     await writeSprintVerify(
       ctx.flowDir,
       ctx.runId,
       sprintN,
-      `# Sprint ${sprintN} verify — ${verifyVerdict} (score ${verdict.score.toFixed(2)})\n\n\`\`\`\n${verifyReport.slice(0, 8000)}\n\`\`\`\n`,
+      `# Sprint ${sprintN} verify — ${verifyVerdict} (score ${verdict.score.toFixed(2)})\n${verifyFixNote}\n\`\`\`\n${verifyReport.slice(0, 8000)}\n\`\`\`\n`,
     );
   } catch {
     /* non-critical — sprint artifacts are a review surface, never derail the loop */

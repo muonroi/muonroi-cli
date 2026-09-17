@@ -222,6 +222,17 @@ export interface DriverContext {
    * user's literal text; this rides a separate channel.
    */
   conversationContext?: string;
+  /**
+   * S4 — the run's real abort signal: `this.abortController.signal` from
+   * `Orchestrator.runProductLoopV1` (`orchestrator.ts`), the SAME controller
+   * that already gates `ctx.runIsolatedTask` calls (merged internally via
+   * `combineAbortSignals`) and the top-level `/ideal` generator's own
+   * `for await` teardown. Optional because legacy/test drivers omit it, in
+   * which case anything gated on it (the S4 verify-fix loop) simply never
+   * observes an abort through this channel — it still tears down normally
+   * when the generator chain itself is torn down by the consumer.
+   */
+  abortSignal?: AbortSignal;
 }
 
 export interface DriverResult {

@@ -10,7 +10,12 @@ import { boundTaskText, type SprintPlanTask } from "./sprint-plan-artifact.js";
  * rejects; we convert it into a failure ToolResult so the existing `.success`
  * paths handle it (review → leave gate; fix → stop the loop) instead of hanging.
  */
-async function runIsolatedGuarded(
+/**
+ * Exported so other bounded reviewer/fixer loops (S4's `verify-fix-loop.ts`)
+ * reuse this exact wall-clock-backstopped shape instead of a second copy that
+ * could drift out of sync with the deadline handling.
+ */
+export async function runIsolatedGuarded(
   run: (req: TaskRequest) => Promise<ToolResult>,
   req: TaskRequest,
   label: string,

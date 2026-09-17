@@ -11,14 +11,17 @@ import {
   readSprintAdherence,
   readSprintOutcomes,
   readSprintPlanArtifact,
+  readSprintVerifyFix,
   renderResumeDigest,
   type SprintAdherenceRecord,
+  type SprintVerifyFixRecord,
   writeContextDoc,
   writeResearchDoc,
   writeSprintAdherence,
   writeSprintOutcome,
   writeSprintPlanArtifact,
   writeSprintVerify,
+  writeSprintVerifyFix,
 } from "../run-artifacts.js";
 
 describe("run-artifacts", () => {
@@ -285,6 +288,91 @@ describe("run-artifacts", () => {
           "orchestrator",
           expect.stringContaining("[sprint-plan]"),
           expect.objectContaining({ runId, sprintN: 8 }),
+        );
+      } finally {
+        errSpy.mockRestore();
+        await fs.rm(path.join(runDir, "sprints"), { force: true });
+      }
+    });
+  });
+
+  describe("sprint verify-fix — sprints/<n>-verify-fix.json", () => {
+    function fullRecord(): SprintVerifyFixRecord {
+      return {
+        version: 1,
+        sprintN: 4,
+        runId,
+        enabled: true,
+        triggered: true,
+        rounds: [
+          {
+            round: 1,
+            failureKeyBefore: "engineering_floor:build_run_introduced:error NU1107",
+            fixerRan: true,
+            fixerSuccess: true,
+            fixerSummary: "reverted the package downgrade",
+            verifyVerdictAfter: "PASS",
+            failureKeyAfter: "engineering_floor:build_run_introduced:error NU1107",
+          },
+        ],
+        stopReason: "pass",
+        fixModelId: "cheap-flash",
+        taskStatusRefresh: {
+          ran: false,
+          reason: "re-running the plan-adherence per-task reviewer costs another LLM call",
+        },
+        startedAt: "2026-09-17T00:00:00.000Z",
+        finishedAt: "2026-09-17T00:01:00.000Z",
+      };
+    }
+
+    it("round-trip: the reader returns exactly what the writer wrote", async () => {
+      const record = fullRecord();
+      const wrote = await writeSprintVerifyFix(flowDir, runId, record);
+      expect(wrote).toBe(true);
+
+      const readBack = await readSprintVerifyFix(flowDir, runId, 4);
+      expect(readBack).toEqual(record);
+    });
+
+    it("round-trips a disabled record", async () => {
+      const record: SprintVerifyFixRecord = {
+        version: 1,
+        sprintN: 6,
+        runId,
+        enabled: false,
+        triggered: false,
+        rounds: [],
+        stopReason: "disabled",
+        startedAt: "2026-09-17T00:00:00.000Z",
+        finishedAt: "2026-09-17T00:00:01.000Z",
+      };
+      await writeSprintVerifyFix(flowDir, runId, record);
+      const readBack = await readSprintVerifyFix(flowDir, runId, 6);
+      expect(readBack).toEqual(record);
+      expect(readBack?.fixModelId).toBeUndefined();
+    });
+
+    it("readSprintVerifyFix returns null when the file is absent", async () => {
+      expect(await readSprintVerifyFix(flowDir, runId, 99)).toBeNull();
+    });
+
+    it("a store write failure is logged and returns false without throwing", async () => {
+      // Same real-I/O-error technique as the adherence/plan-artifact stores above.
+      const runDir = path.join(flowDir, "runs", runId);
+      await fs.mkdir(runDir, { recursive: true });
+      await fs.writeFile(path.join(runDir, "sprints"), "not a directory", "utf8");
+
+      const errSpy = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+      try {
+        const record = fullRecord();
+        record.sprintN = 9;
+        const wrote = await writeSprintVerifyFix(flowDir, runId, record);
+        expect(wrote).toBe(false);
+        expect(errSpy).toHaveBeenCalledWith(
+          "orchestrator",
+          expect.stringContaining("[verify-fix]"),
+          expect.objectContaining({ runId, sprintN: 9 }),
         );
       } finally {
         errSpy.mockRestore();
