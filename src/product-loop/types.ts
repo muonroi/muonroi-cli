@@ -614,6 +614,22 @@ export interface Backlog {
 
 export type SprintStatus = "planned" | "active" | "done" | "abandoned";
 
+/**
+ * S1 — the done-gate verdict recorded once a sprint has finished executing.
+ * `status: "done"` on `Sprint` means "ran to completion" (win or lose);
+ * `verdict.pass` is the win/lose bit. Mirrors `flow/run-artifacts.ts`
+ * `SprintOutcome`, which is the authoritative record `sprint-runner.ts`
+ * already writes per sprint — this is the same shape, kept intentionally
+ * parallel rather than re-derived, so the two never disagree.
+ */
+export interface SprintVerdictRecord {
+  pass: boolean;
+  score?: number;
+  verify?: string;
+  failedCondition?: string;
+  reason?: string;
+}
+
 export interface Sprint {
   id: string; // "sprint-1", "sprint-2", ...
   number: number; // 1, 2, 3
@@ -622,6 +638,8 @@ export interface Sprint {
   status: SprintStatus;
   startedAtUtc?: string;
   endedAtUtc?: string;
+  /** Present once the sprint has finished (see `SprintVerdictRecord`). */
+  verdict?: SprintVerdictRecord;
 }
 
 export interface SprintPlan {

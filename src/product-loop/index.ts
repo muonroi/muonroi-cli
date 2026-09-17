@@ -34,6 +34,7 @@ import { applySprintAssignments, planSprints } from "./sprint-planner.js";
 import { createSprintProgressTracker } from "./sprint-progress.js";
 import { runSprint } from "./sprint-runner.js";
 import { readSprintPlan, setActiveSprint, writeSprintPlan } from "./sprint-store.js";
+import { runSprintTracked } from "./sprint-tracking.js";
 import type { ImplementationPlanArtifact, IterationState, ProductSpec, RoleSlot } from "./types.js";
 import { enforceUndebatedCriteriaGate, undebatedHaltDetail } from "./undebated-criteria-gate.js";
 
@@ -1272,7 +1273,11 @@ async function* drainSprints(args: {
     sprintsRun++;
     if (runIdSink) runIdSink.sprintsRun = sprintsRun;
     try {
-      const sprintGen = runSprint({
+      // S1: runSprintTracked wraps runSprint verbatim (every yielded chunk,
+      // including halt, is forwarded unchanged) and registers the sprint in
+      // sprint-plan.json + moves tasks.json statuses around it — see
+      // sprint-tracking.ts.
+      const sprintGen = runSprintTracked({
         sprintN,
         ctx,
         productSpec,
@@ -1643,7 +1648,11 @@ async function* runPhasesPath(args: {
     // drainSprints path. Without this the phase-orchestrated loop dropped the
     // feedback-routing focus between sprints.
     const prevSprint = sprintHistory[sprintHistory.length - 1];
-    const inner = runSprint({
+    // S1: runSprintTracked wraps runSprint verbatim (every yielded chunk,
+    // including halt, is forwarded unchanged) and registers the sprint in
+    // sprint-plan.json + moves tasks.json statuses around it — see
+    // sprint-tracking.ts. Shared with the legacy drainSprints call site above.
+    const inner = runSprintTracked({
       sprintN: sc.sprintN,
       ctx,
       productSpec,
