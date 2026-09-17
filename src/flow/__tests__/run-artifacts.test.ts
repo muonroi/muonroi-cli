@@ -1,15 +1,19 @@
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { logger } from "../../utils/logger.js";
 import {
   parseResumeDigest,
   type ResumeDigest,
   readRunDoc,
+  readSprintAdherence,
   readSprintOutcomes,
   renderResumeDigest,
+  type SprintAdherenceRecord,
   writeContextDoc,
   writeResearchDoc,
+  writeSprintAdherence,
   writeSprintOutcome,
   writeSprintVerify,
 } from "../run-artifacts.js";
@@ -128,6 +132,96 @@ describe("run-artifacts", () => {
 
     it("returns [] when no sprints dir exists", async () => {
       expect(await readSprintOutcomes(flowDir, runId)).toEqual([]);
+    });
+  });
+
+  describe("sprint adherence — sprints/<n>-adherence.json", () => {
+    function fullRecord(): SprintAdherenceRecord {
+      return {
+        version: 1,
+        sprintN: 3,
+        runId,
+        enabled: true,
+        rounds: [
+          {
+            round: 1,
+            reviewerApproved: false,
+            deviations: ["[native.ts] wrong LSP op → FIX: call manager.waitForDiagnostics"],
+            fixRan: true,
+            fixOutcome: { success: true, summary: "applied the fix" },
+          },
+          {
+            round: 2,
+            reviewerApproved: true,
+            deviations: [],
+            fixRan: false,
+          },
+        ],
+        finalVerdict: true,
+        residualDeviations: [],
+        stopReason: "approved",
+        reviewModelId: "leader-pro",
+        fixModelId: "cheap-flash",
+        startedAt: "2026-07-12T00:00:00.000Z",
+        finishedAt: "2026-07-12T00:01:00.000Z",
+      };
+    }
+
+    it("round-trip: the reader returns exactly what the writer wrote", async () => {
+      const record = fullRecord();
+      const wrote = await writeSprintAdherence(flowDir, runId, record);
+      expect(wrote).toBe(true);
+
+      const readBack = await readSprintAdherence(flowDir, runId, 3);
+      expect(readBack).toEqual(record);
+    });
+
+    it("round-trips an error-stop record, including the optional errorMessage field", async () => {
+      const record: SprintAdherenceRecord = {
+        version: 1,
+        sprintN: 5,
+        runId,
+        enabled: true,
+        rounds: [],
+        finalVerdict: false,
+        residualDeviations: [],
+        stopReason: "error",
+        startedAt: "2026-07-12T00:00:00.000Z",
+        finishedAt: "2026-07-12T00:00:05.000Z",
+        errorMessage: "isolated task deadline exceeded",
+      };
+      await writeSprintAdherence(flowDir, runId, record);
+      const readBack = await readSprintAdherence(flowDir, runId, 5);
+      expect(readBack).toEqual(record);
+      expect(readBack?.reviewModelId).toBeUndefined();
+    });
+
+    it("readSprintAdherence returns null when the file is absent", async () => {
+      expect(await readSprintAdherence(flowDir, runId, 99)).toBeNull();
+    });
+
+    it("a store write failure is logged and returns false without throwing", async () => {
+      // Collide the sprints dir path with a plain file so fs.mkdir(..., {recursive:true})
+      // fails with a real I/O error (ENOTDIR/EEXIST) instead of a mocked one.
+      const runDir = path.join(flowDir, "runs", runId);
+      await fs.mkdir(runDir, { recursive: true });
+      await fs.writeFile(path.join(runDir, "sprints"), "not a directory", "utf8");
+
+      const errSpy = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+      try {
+        const record = fullRecord();
+        record.sprintN = 7;
+        const wrote = await writeSprintAdherence(flowDir, runId, record);
+        expect(wrote).toBe(false);
+        expect(errSpy).toHaveBeenCalledWith(
+          "orchestrator",
+          expect.stringContaining("[adherence]"),
+          expect.objectContaining({ runId, sprintN: 7 }),
+        );
+      } finally {
+        errSpy.mockRestore();
+        await fs.rm(path.join(runDir, "sprints"), { force: true });
+      }
     });
   });
 });

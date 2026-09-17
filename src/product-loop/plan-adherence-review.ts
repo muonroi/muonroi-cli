@@ -31,15 +31,77 @@ async function runIsolatedGuarded(
  * LSP op, stub tools) with nothing to notice.
  */
 
+/**
+ * Bound for how the review process stopped — the S2 sprint artifact
+ * (`sprints/<n>-adherence.json`, `src/flow/run-artifacts.ts`) reuses this same
+ * set of values, plus "disabled" for the caller's own env opt-out, which this
+ * function never produces itself.
+ *
+ * `"no_verdict"` / `"no_diff"` / `"empty_plan"` are distinct from `"approved"`
+ * even though all four leave `adherent: true` — a human (or a report) reading
+ * `stopReason` must be able to tell "the reviewer looked and signed off" apart
+ * from "nothing was actually reviewed". `adherent` stays the caller-visible
+ * pass/fail signal (unchanged); `stopReason` is the audit trail explaining WHY.
+ */
+export type AdherenceStopReason =
+  | "approved"
+  | "no_progress"
+  | "round_cap"
+  | "error"
+  | "no_verdict"
+  | "no_diff"
+  | "empty_plan";
+
+/**
+ * Per-round record of what the reviewer found and what the fixer did about it.
+ * No raw diff is carried here — only the reviewer's own bounded summary text —
+ * so a persisted record of many rounds stays small.
+ */
+export interface AdherenceRoundRecord {
+  round: number;
+  /** True only when the reviewer's own verdict for this round was "adherent". */
+  reviewerApproved: boolean;
+  /** Bounded deviation strings the reviewer reported this round. */
+  deviations: string[];
+  /** Whether a fix task was dispatched after this round's review. */
+  fixRan: boolean;
+  /** Present only when `fixRan` is true. */
+  fixOutcome?: { success: boolean; summary: string };
+}
+
 export interface AdherenceVerdict {
   rounds: number;
   adherent: boolean;
   deviations: string[];
+  /** Per-round detail additive to the legacy `{rounds, adherent, deviations}` shape. */
+  roundRecords: AdherenceRoundRecord[];
+  /** Why the loop stopped, for the persisted sprint artifact. */
+  stopReason: AdherenceStopReason;
 }
 
 interface ReviewJson {
   adherent?: boolean;
   deviations?: Array<{ where?: string; issue?: string; fix?: string } | string>;
+}
+
+const MAX_DEVIATION_CHARS = 400;
+const MAX_FIX_SUMMARY_CHARS = 600;
+
+/** Bound a piece of free text to `max` chars so persisted records stay small. */
+function bound(text: string, max: number): string {
+  const t = text.trim();
+  return t.length > max ? `${t.slice(0, max)}…` : t;
+}
+
+/**
+ * Bound each deviation string for a PERSISTED record. Exported so
+ * `sprint-runner.ts`'s `buildAdherenceRecord` can apply the same rule to
+ * `SprintAdherenceRecord.residualDeviations` — that field is a separate copy
+ * for the artifact; `AdherenceVerdict.deviations` (which feeds
+ * `iter.nextFocus`) is never bounded, so next-sprint behaviour is unaffected.
+ */
+export function boundDeviations(devs: string[]): string[] {
+  return devs.map((d) => bound(d, MAX_DEVIATION_CHARS));
 }
 
 function currentDiff(cwd: string): string {
@@ -99,13 +161,14 @@ export async function* runPlanAdherenceReview(args: {
       ? Math.floor(args.maxRounds)
       : Number.POSITIVE_INFINITY;
   const plan = args.planSynthesis.trim();
-  if (!plan) return { rounds: 0, adherent: true, deviations: [] };
+  const roundRecords: AdherenceRoundRecord[] = [];
+  if (!plan) return { rounds: 0, adherent: true, deviations: [], roundRecords, stopReason: "empty_plan" };
   const getDiff = args.diffProvider ?? currentDiff;
 
   let diff = getDiff(args.cwd);
   if (!diff) {
     yield { type: "content", content: `\n> [adherence] No diff to review for sprint ${args.sprintN}; skipping.\n` };
-    return { rounds: 0, adherent: true, deviations: [] };
+    return { rounds: 0, adherent: true, deviations: [], roundRecords, stopReason: "no_diff" };
   }
 
   let lastDeviations: string[] = [];
@@ -139,7 +202,8 @@ export async function* runPlanAdherenceReview(args: {
         type: "content",
         content: `\n> [adherence] Reviewer produced no parseable verdict (round ${round}); leaving verify+criteria as the gate.\n`,
       };
-      return { rounds: round, adherent: true, deviations: [] };
+      roundRecords.push({ round, reviewerApproved: false, deviations: [], fixRan: false });
+      return { rounds: round, adherent: true, deviations: [], roundRecords, stopReason: "no_verdict" };
     }
 
     lastDeviations = normalizeDeviations(parsed.deviations);
@@ -149,7 +213,8 @@ export async function* runPlanAdherenceReview(args: {
         type: "content",
         content: `\n> [adherence] Round ${round}: reviewer (${args.reviewModelId}) confirms the implementation follows the plan.\n`,
       };
-      return { rounds: round, adherent: true, deviations: [] };
+      roundRecords.push({ round, reviewerApproved: true, deviations: [], fixRan: false });
+      return { rounds: round, adherent: true, deviations: [], roundRecords, stopReason: "approved" };
     }
 
     yield {
@@ -167,7 +232,8 @@ export async function* runPlanAdherenceReview(args: {
         type: "content",
         content: `\n> [adherence] Round ${round}: no progress — the last fix left the same deviation(s) behind; leaving them for the verify+criteria gate.\n`,
       };
-      return { rounds: round, adherent: false, deviations: lastDeviations };
+      roundRecords.push({ round, reviewerApproved: false, deviations: boundDeviations(lastDeviations), fixRan: false });
+      return { rounds: round, adherent: false, deviations: lastDeviations, roundRecords, stopReason: "no_progress" };
     }
     previousDeviationKey = deviationKey;
 
@@ -176,7 +242,8 @@ export async function* runPlanAdherenceReview(args: {
         type: "content",
         content: `\n> [adherence] Max rounds reached; deviations remain for the verify+criteria gate to catch.\n`,
       };
-      return { rounds: round, adherent: false, deviations: lastDeviations };
+      roundRecords.push({ round, reviewerApproved: false, deviations: boundDeviations(lastDeviations), fixRan: false });
+      return { rounds: round, adherent: false, deviations: lastDeviations, roundRecords, stopReason: "round_cap" };
     }
 
     // Hand the fix to the lower-tier agent.
@@ -201,12 +268,23 @@ export async function* runPlanAdherenceReview(args: {
       },
       `adherence-fix-s${args.sprintN}-r${round}`,
     );
+    const fixSummary = bound(
+      fix.success ? (fix.output ?? "").trim() || "applied" : (fix.error ?? "fix failed"),
+      MAX_FIX_SUMMARY_CHARS,
+    );
+    roundRecords.push({
+      round,
+      reviewerApproved: false,
+      deviations: boundDeviations(lastDeviations),
+      fixRan: true,
+      fixOutcome: { success: fix.success, summary: fixSummary },
+    });
     if (!fix.success) {
       yield {
         type: "content",
         content: `\n> [adherence] Fix task failed (round ${round}): ${fix.error ?? "unknown"}; stopping the loop.\n`,
       };
-      return { rounds: round, adherent: false, deviations: lastDeviations };
+      return { rounds: round, adherent: false, deviations: lastDeviations, roundRecords, stopReason: "error" };
     }
 
     // Re-read the diff for the next review round.
@@ -214,5 +292,11 @@ export async function* runPlanAdherenceReview(args: {
   }
 
   // Reached only when an explicit, finite `maxRounds` was exhausted.
-  return { rounds: Number.isFinite(maxRounds) ? maxRounds : 0, adherent: false, deviations: lastDeviations };
+  return {
+    rounds: Number.isFinite(maxRounds) ? maxRounds : 0,
+    adherent: false,
+    deviations: lastDeviations,
+    roundRecords,
+    stopReason: "round_cap",
+  };
 }

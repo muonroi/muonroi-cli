@@ -33,7 +33,13 @@ import type { CouncilLLM, CouncilStats } from "../council/types.js";
 import { beginRecallNagSuppression, RECALL_NAG_SENTINEL } from "../ee/recall-ledger.js";
 import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
-import { renderResumeDigest, writeSprintOutcome, writeSprintVerify } from "../flow/run-artifacts.js";
+import {
+  renderResumeDigest,
+  type SprintAdherenceRecord,
+  writeSprintAdherence,
+  writeSprintOutcome,
+  writeSprintVerify,
+} from "../flow/run-artifacts.js";
 import { isContextRailEnabled } from "../gsd/flags.js";
 import { SPRINT_EXECUTION_MARKER } from "../pil/layer6-output.js";
 import { detectProviderForModel } from "../providers/runtime.js";
@@ -65,7 +71,8 @@ import { idealTrace } from "./ideal-trace.js";
 import { formatLayoutConvention, scanLayoutConvention } from "./layout-convention.js";
 import { type CollectedNestedTurn, collectNestedTurn, forwardNestedTurn } from "./nested-turn.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
-import { runPlanAdherenceReview } from "./plan-adherence-review.js";
+import type { AdherenceVerdict } from "./plan-adherence-review.js";
+import { boundDeviations, runPlanAdherenceReview } from "./plan-adherence-review.js";
 import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snapshot.js";
 import { appendRoleMemory } from "./role-memory.js";
 import { readRunSpendUsd } from "./run-spend.js";
@@ -1316,6 +1323,94 @@ export function getImplRecheckEnabled(): boolean {
   return process.env.MUONROI_SPRINT_IMPL_RECHECK !== "0";
 }
 
+/**
+ * Build the `sprints/<n>-adherence.json` record for a plan-adherence review
+ * that ran to completion (approved, no-progress stop, or round-cap stop).
+ * Pure — kept separate from the write so it is unit-testable without a real
+ * filesystem (see `product-loop/__tests__/plan-adherence-artifact.test.ts`).
+ */
+export function buildAdherenceRecord(args: {
+  sprintN: number;
+  runId: string;
+  reviewModelId: string;
+  fixModelId: string;
+  verdict: AdherenceVerdict;
+  startedAt: string;
+  finishedAt?: string;
+}): SprintAdherenceRecord {
+  return {
+    version: 1,
+    sprintN: args.sprintN,
+    runId: args.runId,
+    enabled: true,
+    rounds: args.verdict.roundRecords,
+    finalVerdict: args.verdict.adherent,
+    // Bounded for the PERSISTED record only — `args.verdict.deviations` itself
+    // (which the caller folds into `iter.nextFocus`) is left untouched, so
+    // next-sprint behaviour never sees a truncated deviation.
+    residualDeviations: boundDeviations(args.verdict.deviations),
+    stopReason: args.verdict.stopReason,
+    reviewModelId: args.reviewModelId,
+    fixModelId: args.fixModelId,
+    startedAt: args.startedAt,
+    finishedAt: args.finishedAt ?? new Date().toISOString(),
+  };
+}
+
+/**
+ * Build the adherence record for a sprint that never ran the review — either
+ * `MUONROI_IDEAL_ADHERENCE_REVIEW=0`, no isolated-task capability on this
+ * ctx, or an empty plan synthesis. `finalVerdict: true` mirrors the review
+ * function's own behaviour when it has nothing to check (vacuously adherent);
+ * `enabled: false` is what distinguishes this from an actual approval.
+ */
+export function buildDisabledAdherenceRecord(args: {
+  sprintN: number;
+  runId: string;
+  startedAt?: string;
+}): SprintAdherenceRecord {
+  const now = new Date().toISOString();
+  return {
+    version: 1,
+    sprintN: args.sprintN,
+    runId: args.runId,
+    enabled: false,
+    rounds: [],
+    finalVerdict: true,
+    residualDeviations: [],
+    stopReason: "disabled",
+    startedAt: args.startedAt ?? now,
+    finishedAt: now,
+  };
+}
+
+/**
+ * Build the adherence record for a sprint where the review threw before
+ * producing a verdict. The review was attempted (`enabled: true`) but its
+ * outcome is unknown, so `finalVerdict: false` and `residualDeviations: []`
+ * — nothing to fold into the next sprint's focus, only the error to surface.
+ */
+export function buildErrorAdherenceRecord(args: {
+  sprintN: number;
+  runId: string;
+  startedAt: string;
+  error: unknown;
+}): SprintAdherenceRecord {
+  return {
+    version: 1,
+    sprintN: args.sprintN,
+    runId: args.runId,
+    enabled: true,
+    rounds: [],
+    finalVerdict: false,
+    residualDeviations: [],
+    stopReason: "error",
+    startedAt: args.startedAt,
+    finishedAt: new Date().toISOString(),
+    errorMessage: args.error instanceof Error ? args.error.message : String(args.error),
+  };
+}
+
 export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChunk, IterationState, unknown> {
   const { sprintN, ctx, productSpec, roleAssignments, history, carryOver, phaseScope } = args;
   const runDir = path.join(ctx.flowDir, "runs", ctx.runId);
@@ -2051,6 +2146,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   if (ctx.runIsolatedTask && planSynthesis.trim() && process.env.MUONROI_IDEAL_ADHERENCE_REVIEW !== "0") {
     const adhPhaseId = `sprint-${sprintN}-adherence`;
     const adhStartedAt = Date.now();
+    const adhStartedAtIso = new Date(adhStartedAt).toISOString();
     yield phaseStart({
       phaseId: adhPhaseId,
       kind: "sprint_stage",
@@ -2081,8 +2177,25 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         deviations: verdict.deviations.length,
       });
       if (!verdict.adherent) residualPlanDeviations = verdict.deviations;
+      await writeSprintAdherence(
+        ctx.flowDir,
+        ctx.runId,
+        buildAdherenceRecord({
+          sprintN,
+          runId: ctx.runId,
+          reviewModelId,
+          fixModelId: ctx.sessionModelId,
+          verdict,
+          startedAt: adhStartedAtIso,
+        }),
+      );
     } catch (err) {
       console.error(`[sprint-runner] plan-adherence review failed (sprint ${sprintN}): ${(err as Error).message}`);
+      await writeSprintAdherence(
+        ctx.flowDir,
+        ctx.runId,
+        buildErrorAdherenceRecord({ sprintN, runId: ctx.runId, startedAt: adhStartedAtIso, error: err }),
+      );
     } finally {
       yield phaseDone({
         phaseId: adhPhaseId,
@@ -2091,6 +2204,8 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         startedAt: adhStartedAt,
       });
     }
+  } else {
+    await writeSprintAdherence(ctx.flowDir, ctx.runId, buildDisabledAdherenceRecord({ sprintN, runId: ctx.runId }));
   }
 
   // ── Step 5: Verify stage ──────────────────────────────────────────────────

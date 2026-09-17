@@ -14,7 +14,9 @@
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { atomicWriteJSON, atomicWriteText } from "../storage/atomic-io.js";
+import type { AdherenceRoundRecord, AdherenceStopReason } from "../product-loop/plan-adherence-review.js";
+import { atomicReadJSON, atomicWriteJSON, atomicWriteText } from "../storage/atomic-io.js";
+import { logger } from "../utils/logger.js";
 
 // ─── Resume Digest ──────────────────────────────────────────────────────────
 
@@ -281,4 +283,108 @@ export async function readSprintOutcomes(flowDir: string, runId: string): Promis
   }
   outcomes.sort((a, b) => a.sprintN - b.sprintN);
   return outcomes;
+}
+
+// ─── sprints/<n>-adherence.json ─────────────────────────────────────────────
+
+/**
+ * Why the plan-adherence review loop (`src/product-loop/plan-adherence-review.ts`)
+ * stopped for a sprint. Superset of that module's own `AdherenceStopReason`:
+ * `"disabled"` is set here, by the caller, when `MUONROI_IDEAL_ADHERENCE_REVIEW=0`
+ * skipped the review outright — the review function itself never produces it.
+ */
+export type SprintAdherenceStopReason = AdherenceStopReason | "disabled";
+
+/**
+ * `sprints/<n>-adherence.json` — persists what the plan-adherence review found
+ * and fixed, which previously lived only in-memory (`plan-adherence-review.ts`
+ * yielded `StreamChunk`s to the transcript and returned an `AdherenceVerdict`
+ * nothing wrote down). Written unconditionally, even when the review is
+ * disabled or throws, so its absence is never ambiguous — a missing file next
+ * to a run's other sprint artifacts means the write itself failed, not that
+ * the review didn't run.
+ */
+export interface SprintAdherenceRecord {
+  version: 1;
+  sprintN: number;
+  runId: string;
+  /** False when `MUONROI_IDEAL_ADHERENCE_REVIEW=0` skipped the review outright. */
+  enabled: boolean;
+  rounds: AdherenceRoundRecord[];
+  finalVerdict: boolean;
+  residualDeviations: string[];
+  stopReason: SprintAdherenceStopReason;
+  /** The reviewer model id as actually used for this run — never a hardcoded literal. */
+  reviewModelId?: string;
+  /** The fixer model id as actually used for this run — never a hardcoded literal. */
+  fixModelId?: string;
+  startedAt: string;
+  finishedAt: string;
+  /** Present only when `stopReason` is `"error"` — the caught exception's message. */
+  errorMessage?: string;
+}
+
+/** `sprints/<n>-adherence.json` — beside `<n>-outcome.json` and `<n>-verify.md`. */
+export function sprintAdherencePath(flowDir: string, runId: string, sprintN: number): string {
+  return path.join(sprintsDir(flowDir, runId), `${sprintN}-adherence.json`);
+}
+
+/**
+ * Persist a sprint's plan-adherence review record. Best-effort and never
+ * throws: a write failure is logged with context (No Silent Catch) and the
+ * sprint loop continues — losing this audit trail must never break `/ideal`.
+ */
+export async function writeSprintAdherence(
+  flowDir: string,
+  runId: string,
+  record: SprintAdherenceRecord,
+): Promise<boolean> {
+  try {
+    const dir = sprintsDir(flowDir, runId);
+    await fs.mkdir(dir, { recursive: true });
+    await atomicWriteJSON(sprintAdherencePath(flowDir, runId, record.sprintN), record);
+    return true;
+  } catch (err) {
+    logger.error(
+      "orchestrator",
+      "[adherence] could not persist the plan-adherence review record — its findings are not auditable",
+      {
+        flowDir,
+        runId,
+        sprintN: record.sprintN,
+        stopReason: record.stopReason,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      },
+    );
+    return false;
+  }
+}
+
+/**
+ * Read a sprint's plan-adherence record. Null when absent or unparseable.
+ *
+ * @testonly No shipped entry point reads this back yet — S2's scope is
+ * persisting the record for a human/agent to inspect the JSON file directly
+ * (see `docs`/`sprints/<n>-adherence.json`), not a `/ideal review`-style
+ * consumer. Kept in this file, next to `writeSprintAdherence`, so a future
+ * reporting surface has a ready round-trip to build on without duplicating
+ * the read path or its error handling.
+ */
+export async function readSprintAdherence(
+  flowDir: string,
+  runId: string,
+  sprintN: number,
+): Promise<SprintAdherenceRecord | null> {
+  try {
+    return await atomicReadJSON<SprintAdherenceRecord>(sprintAdherencePath(flowDir, runId, sprintN));
+  } catch (err) {
+    logger.error("orchestrator", "[adherence] could not parse the plan-adherence review record", {
+      flowDir,
+      runId,
+      sprintN,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
