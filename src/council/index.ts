@@ -2347,6 +2347,10 @@ export async function* runCouncil(
         // P7 optimization: skip re-synthesis when action items already exist.
         const existingActionItems = pickActionItemsFromOutcome(outcome);
         if (existingActionItems.length >= 3) {
+          // S3a: carry the raw action-item objects out to sprint-runner.ts via the
+          // by-reference stats object BEFORE synthesizePlanFromActionItems flattens
+          // them below — see CouncilStats.structuredActionItems.
+          stats.structuredActionItems = existingActionItems;
           const synthesizedPlan = synthesizePlanFromActionItems(existingActionItems);
           plan = synthesizedPlan;
           // Mirror plan onto the outcome so downstream persistence sees it.

@@ -34,10 +34,12 @@ import { beginRecallNagSuppression, RECALL_NAG_SENTINEL } from "../ee/recall-led
 import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import {
+  readSprintPlanArtifact,
   renderResumeDigest,
   type SprintAdherenceRecord,
   writeSprintAdherence,
   writeSprintOutcome,
+  writeSprintPlanArtifact,
   writeSprintVerify,
 } from "../flow/run-artifacts.js";
 import { isContextRailEnabled } from "../gsd/flags.js";
@@ -73,10 +75,20 @@ import { type CollectedNestedTurn, collectNestedTurn, forwardNestedTurn } from "
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
 import type { AdherenceVerdict } from "./plan-adherence-review.js";
 import { boundDeviations, runPlanAdherenceReview } from "./plan-adherence-review.js";
+
+// Re-exported so existing callers that import extractPlanTargetPaths from this
+// file (its pre-S3a home) keep working unchanged — the implementation moved to
+// plan-target-paths.ts (a leaf module) to share it with sprint-plan-artifact.ts
+// without a circular import; behaviour is byte-identical.
+export { extractPlanTargetPaths } from "./plan-target-paths.js";
+
+import { extractPlanTargetPaths } from "./plan-target-paths.js";
 import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snapshot.js";
 import { appendRoleMemory } from "./role-memory.js";
 import { readRunSpendUsd } from "./run-spend.js";
 import { describeVerdictFailure } from "./run-verdict.js";
+import { buildSprintPlanArtifact, computePlanHash } from "./sprint-plan-artifact.js";
+import { upsertSprint } from "./sprint-store.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
 import { loadVerifyFailureSignatures, recordVerifyFailureAndMaybePush } from "./verify-failure-tracking.js";
 import { parseVerifyResult, VERIFY_PASS_MARKER } from "./verify-result.js";
@@ -1211,28 +1223,6 @@ export async function persistSprintPlan(planPath: string, synthesis: string): Pr
 }
 
 /**
- * Extract repo-relative target file paths a sprint plan names (src/…, packages/…,
- * tests/…). Deduped, capped. Used by Wave 3 (existing targets → continue) and 4A
- * (missing targets → completeness re-check). Never throws.
- */
-export function extractPlanTargetPaths(planSynthesis: string, cap = 40): string[] {
-  try {
-    const tokens = new Set<string>();
-    const re = /\b((?:src|packages|tests|scripts|lib|app|apps)\/[\w./@-]+\.[a-z]{1,5})\b/gi;
-    let m: RegExpExecArray | null = re.exec(planSynthesis);
-    while (m !== null) {
-      tokens.add(m[1]!.replace(/\\/g, "/"));
-      if (tokens.size >= cap) break;
-      m = re.exec(planSynthesis);
-    }
-    return [...tokens];
-  } catch (err) {
-    console.error(`[sprint-runner] extractPlanTargetPaths failed: ${(err as Error).message}`);
-    return [];
-  }
-}
-
-/**
  * Wave 3: plan-named target file paths that ALREADY EXIST on disk, so the impl
  * turn continues them rather than re-scaffolding in a new location. Empty on a
  * greenfield sprint (files don't exist yet) → no injection.
@@ -1674,6 +1664,13 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // run4 src/engine/), so the impl turn re-scaffolded instead of continuing.
   const planPath = sprintPlanPath(runDir, sprintN);
   let planSynthesis = await readPersistedSprintPlan(planPath);
+  // S3a: hoisted so the criteria-seeding block below can read
+  // `planCouncilStats.structuredActionItems` after this if/else closes. Stays
+  // undefined on the "reused persisted plan" branch — the fast path's raw
+  // action-item objects only ever exist in-memory during the run that
+  // produced them; a resumed sprint instead prefers a previously persisted
+  // `sprints/<n>-plan.json`, see below.
+  let planCouncilStats: CouncilStats | undefined;
   if (planSynthesis) {
     idealTrace("sprint.planCouncil.reused", { runId: ctx.runId, sprintN, planSynthesisLen: planSynthesis.length });
     yield {
@@ -1687,7 +1684,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     // collapses every bail path AND a genuinely empty synthesis to a bare
     // `null`, which is not enough to tell "no reachable provider" apart from
     // "synthesis ran and came back empty" below.
-    const planCouncilStats: CouncilStats = { calls: 0, startMs: Date.now(), phases: [] };
+    planCouncilStats = { calls: 0, startMs: Date.now(), phases: [] };
     const planGen = runCouncil(
       councilTopic,
       sessionModelId,
@@ -1826,6 +1823,57 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     }
   } catch {
     /* non-critical — a missing criteria seed degrades to the prior empty-criteria behavior */
+  }
+
+  // S3a — persist the sprint's structured OUTCOME + task plan as
+  // `sprints/<n>-plan.json`, right here at the criteria-seeding point where
+  // `planSynthesis` is finally known. Observability/structure only: this
+  // block only READS `planSynthesis` and `planCouncilStats` — it never
+  // mutates either, so the implementation prompt built below from
+  // `planSynthesis` is unaffected (S3b will make the impl turn consume these
+  // tasks). Best-effort: a failure here is logged and the sprint continues.
+  try {
+    // A resumed sprint prefers a plan artifact persisted by the run that
+    // first planned this sprint — that copy still carries the fast path's
+    // real `dependsOn` (from the in-memory side-channel), which a fresh
+    // rebuild from only the persisted TEXT could not recover (the flattened
+    // prose loses `depends_on`, see sprint-plan-artifact.ts). Only rebuild
+    // when nothing was persisted yet, OR when what's persisted no longer
+    // matches the CURRENT planSynthesis (planHash mismatch) — a stale
+    // artifact from a different plan text is worse than none, since S3b will
+    // drive implementation off these tasks.
+    let planArtifact = await readSprintPlanArtifact(ctx.flowDir, ctx.runId, sprintN);
+    const currentPlanHash = computePlanHash(planSynthesis ?? "");
+    if (planArtifact && planArtifact.planHash !== currentPlanHash) {
+      logger.debug("orchestrator", "[sprint-plan] persisted plan artifact is stale — rebuilding", {
+        runId: ctx.runId,
+        sprintN,
+        persistedHash: planArtifact.planHash,
+        currentHash: currentPlanHash,
+      });
+      planArtifact = null;
+    }
+    if (!planArtifact) {
+      planArtifact = buildSprintPlanArtifact({
+        sprintN,
+        runId: ctx.runId,
+        planSynthesis: planSynthesis ?? "",
+        structuredActionItems: planCouncilStats?.structuredActionItems,
+        sprintFocus: carryOver?.focus,
+      });
+      await writeSprintPlanArtifact(ctx.flowDir, ctx.runId, planArtifact);
+    }
+    // Replace the S1 placeholder goal in sprint-plan.json now that the real
+    // one is known. `upsertSprint` merges by field, so this never disturbs
+    // status/itemIds/timestamps `markSprintStarted` already set for this
+    // sprint. Never writes an invented goal.
+    if (planArtifact.outcome.goal.trim()) {
+      await upsertSprint(ctx.flowDir, ctx.runId, sprintN, { goal: planArtifact.outcome.goal });
+    }
+  } catch (err) {
+    console.error(
+      `[sprint-runner] sprint plan artifact build/persist failed for sprint ${sprintN} (run ${ctx.runId}): ${(err as Error).message}`,
+    );
   }
 
   // P4-C: close the planning phase row before opening implementation.

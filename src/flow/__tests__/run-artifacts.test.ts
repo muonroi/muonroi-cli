@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SprintPlanArtifact } from "../../product-loop/sprint-plan-artifact.js";
 import { logger } from "../../utils/logger.js";
 import {
   parseResumeDigest,
@@ -9,12 +10,14 @@ import {
   readRunDoc,
   readSprintAdherence,
   readSprintOutcomes,
+  readSprintPlanArtifact,
   renderResumeDigest,
   type SprintAdherenceRecord,
   writeContextDoc,
   writeResearchDoc,
   writeSprintAdherence,
   writeSprintOutcome,
+  writeSprintPlanArtifact,
   writeSprintVerify,
 } from "../run-artifacts.js";
 
@@ -217,6 +220,71 @@ describe("run-artifacts", () => {
           "orchestrator",
           expect.stringContaining("[adherence]"),
           expect.objectContaining({ runId, sprintN: 7 }),
+        );
+      } finally {
+        errSpy.mockRestore();
+        await fs.rm(path.join(runDir, "sprints"), { force: true });
+      }
+    });
+  });
+
+  describe("sprint plan artifact — sprints/<n>-plan.json", () => {
+    function fullArtifact(): SprintPlanArtifact {
+      return {
+        version: 1,
+        sprintN: 1,
+        runId,
+        planHash: "deadbeef".repeat(8),
+        source: "structured",
+        outcome: { goal: "ship the widget analyzer", acceptance: ["warnings show in Visual Studio"] },
+        tasks: [
+          {
+            id: "step1",
+            title: "set up the project",
+            doneCriterion: "builds",
+            dependsOn: [],
+            targetFiles: ["src/Acme.sln"],
+            targetDirs: ["src/Acme.Widgets"],
+            owner: "Eng",
+            estimate: "2h",
+            priority: "high",
+            status: "pending",
+          },
+        ],
+        notes: [],
+      };
+    }
+
+    it("round-trip: the reader returns exactly what the writer wrote", async () => {
+      const artifact = fullArtifact();
+      const wrote = await writeSprintPlanArtifact(flowDir, runId, artifact);
+      expect(wrote).toBe(true);
+
+      const readBack = await readSprintPlanArtifact(flowDir, runId, 1);
+      expect(readBack).toEqual(artifact);
+    });
+
+    it("readSprintPlanArtifact returns null when the file is absent", async () => {
+      expect(await readSprintPlanArtifact(flowDir, runId, 99)).toBeNull();
+    });
+
+    it("a store write failure is logged and returns false without throwing", async () => {
+      // Collide the sprints dir path with a plain file so fs.mkdir(..., {recursive:true})
+      // fails with a real I/O error, mirroring the adherence-store test above.
+      const runDir = path.join(flowDir, "runs", runId);
+      await fs.mkdir(runDir, { recursive: true });
+      await fs.writeFile(path.join(runDir, "sprints"), "not a directory", "utf8");
+
+      const errSpy = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+      try {
+        const artifact = fullArtifact();
+        artifact.sprintN = 8;
+        const wrote = await writeSprintPlanArtifact(flowDir, runId, artifact);
+        expect(wrote).toBe(false);
+        expect(errSpy).toHaveBeenCalledWith(
+          "orchestrator",
+          expect.stringContaining("[sprint-plan]"),
+          expect.objectContaining({ runId, sprintN: 8 }),
         );
       } finally {
         errSpy.mockRestore();

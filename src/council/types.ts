@@ -710,6 +710,18 @@ export interface CouncilStats {
     kind: "no-reachable-participants" | "no-openings" | "aborted" | "empty-synthesis";
     detail: string;
   };
+  /**
+   * S3a — the raw action-item objects (`{step, owner_lens, time_estimate,
+   * depends_on, acceptance_criteria}` or plain strings) produced under
+   * `RunCouncilOptions.sprintPlanningMode`, threaded back through this stats
+   * object (same by-reference pattern as `bailReason`) BEFORE the fast path's
+   * `synthesizePlanFromActionItems` flattens them into `planSynthesis` prose.
+   * `sprint-runner.ts` passes these into `buildSprintPlanArtifact`
+   * (`sprint-plan-artifact.ts`) so `sprints/<n>-plan.json` keeps real structure
+   * (ids, dependsOn) the flattened text loses. Set only when sprintPlanningMode
+   * is set; unset in every other call shape.
+   */
+  structuredActionItems?: unknown[];
 }
 
 // ── LLM abstraction ──────────────────────────────────────────────────────────

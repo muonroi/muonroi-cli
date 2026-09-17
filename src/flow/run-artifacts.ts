@@ -15,6 +15,7 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import type { AdherenceRoundRecord, AdherenceStopReason } from "../product-loop/plan-adherence-review.js";
+import type { SprintPlanArtifact } from "../product-loop/sprint-plan-artifact.js";
 import { atomicReadJSON, atomicWriteJSON, atomicWriteText } from "../storage/atomic-io.js";
 import { logger } from "../utils/logger.js";
 
@@ -380,6 +381,67 @@ export async function readSprintAdherence(
     return await atomicReadJSON<SprintAdherenceRecord>(sprintAdherencePath(flowDir, runId, sprintN));
   } catch (err) {
     logger.error("orchestrator", "[adherence] could not parse the plan-adherence review record", {
+      flowDir,
+      runId,
+      sprintN,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+// ─── sprints/<n>-plan.json ───────────────────────────────────────────────────
+
+/**
+ * S3a — `sprints/<n>-plan.json`: one explicit OUTCOME (goal + acceptance) and N
+ * structured task plans per sprint, built by
+ * `product-loop/sprint-plan-artifact.ts`'s `buildSprintPlanArtifact`. Beside
+ * `<n>-outcome.json`, `<n>-verify.md` and `<n>-adherence.json`.
+ *
+ * `tasks.json` (typed-artifacts.ts) remains the cross-sprint backlog; this file
+ * is the per-sprint task TRUTH — what the plan for THIS sprint actually named.
+ */
+export function sprintPlanArtifactPath(flowDir: string, runId: string, sprintN: number): string {
+  return path.join(sprintsDir(flowDir, runId), `${sprintN}-plan.json`);
+}
+
+/**
+ * Persist a sprint's structured plan artifact. Best-effort and never throws: a
+ * write failure is logged with context (No Silent Catch) and the sprint loop
+ * continues — losing this observability artifact must never break `/ideal`.
+ */
+export async function writeSprintPlanArtifact(
+  flowDir: string,
+  runId: string,
+  artifact: SprintPlanArtifact,
+): Promise<boolean> {
+  try {
+    const dir = sprintsDir(flowDir, runId);
+    await fs.mkdir(dir, { recursive: true });
+    await atomicWriteJSON(sprintPlanArtifactPath(flowDir, runId, artifact.sprintN), artifact);
+    return true;
+  } catch (err) {
+    logger.error("orchestrator", "[sprint-plan] could not persist the structured sprint plan artifact", {
+      flowDir,
+      runId,
+      sprintN: artifact.sprintN,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+    });
+    return false;
+  }
+}
+
+/** Read a sprint's structured plan artifact. Null when absent or unparseable. */
+export async function readSprintPlanArtifact(
+  flowDir: string,
+  runId: string,
+  sprintN: number,
+): Promise<SprintPlanArtifact | null> {
+  try {
+    return await atomicReadJSON<SprintPlanArtifact>(sprintPlanArtifactPath(flowDir, runId, sprintN));
+  } catch (err) {
+    logger.error("orchestrator", "[sprint-plan] could not parse the structured sprint plan artifact", {
       flowDir,
       runId,
       sprintN,

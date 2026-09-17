@@ -18,7 +18,12 @@ import type { Criterion, ProductSpec } from "./types.js";
  * markdown continue to work; new callers prefer JSON.
  *
  * Files in runs/<id>/:
- *   tasks.json     - actionable units derived from MVP + phase2 + sprint plans
+ *   tasks.json     - actionable units derived from MVP + phase2 + sprint plans.
+ *                    Cross-sprint BACKLOG only — coarse status bookkeeping
+ *                    (pending/in_progress/done/blocked). Per-sprint task TRUTH
+ *                    (what THIS sprint's plan actually named, with ids,
+ *                    dependsOn, doneCriterion, targetFiles) lives in
+ *                    `sprints/<n>-plan.json` (S3a, sprint-plan-artifact.ts).
  *   decisions.json - architectural / framework / scope decisions surfaced
  *                    during research + scoping
  *   risks.json     - risks with likelihood, impact, mitigation, owner
