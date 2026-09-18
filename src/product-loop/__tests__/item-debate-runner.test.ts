@@ -3,11 +3,12 @@
  * `combineSignals`, independent of the full `sprint-runner.ts` wiring
  * (`sprint-runner-item-debate.test.ts` covers that seam).
  *
- * Focus: the deadline/abort handling this module owns directly — a call
- * already in flight when the deadline fires cannot be cancelled (`createProductLlm`
- * drops the signal; see the comment at the ruling-call site in
- * `item-debate-runner.ts`), so this module's OWN responsibility is to stop
- * issuing NEW calls once the budget is gone, and to never start work at all
+ * Focus: the deadline/abort handling this module owns directly. Since D3
+ * (`createProductLlm` now forwards its `signal` param instead of dropping it
+ * — see the comment at the ruling-call site in `item-debate-runner.ts`), a
+ * call already in flight when the deadline fires CAN be cancelled through the
+ * underlying provider call; this module's OWN responsibility is unchanged —
+ * stop issuing NEW calls once the budget is gone, and never start work at all
  * against a signal that is already dead.
  */
 
@@ -205,6 +206,57 @@ describe("runItemDebate", () => {
     // The deadline stopped the loop from ever ASKING for a ruling — this is
     // not "the model declined", it is "no call was made at all".
     expect(generate).not.toHaveBeenCalled();
+  });
+
+  it("D3: an aborted ruling call surfaces as an honest no_verdict, not a thrown error", async () => {
+    // Regression guard for the fix documented at the ruling-call site: once
+    // `createProductLlm.generate` forwards its signal, a ruling call can now
+    // actually reject with an AbortError (Esc, or the item-debate's own
+    // deadline firing mid-call). `requestItemRuling`'s own catch (item-
+    // debate-runner.ts) must still absorb that into `leaderRuling: "no_verdict"`
+    // rather than letting it escape and crash the whole sprint.
+    const generate = vi.fn(async () => {
+      throw new DOMException("Aborted", "AbortError");
+    });
+    const args = baseArgs({ llm: { generate, research: vi.fn(async () => "") } });
+
+    (runCouncil as any).mockImplementation(async function* (
+      _topic: string,
+      _sessionModelId: string,
+      _messages: unknown[],
+      _runId: string,
+      _llm: unknown,
+      _respondToQuestion: unknown,
+      _respondToPreflight: unknown,
+      _processMessageFn: unknown,
+      options: { perRoundFocus?: readonly ItemDebateFocus[] } | undefined,
+    ) {
+      yield {
+        type: "council_round",
+        councilRound: {
+          round: 1,
+          state: "done",
+          itemId: options?.perRoundFocus?.[0]?.id,
+          participants: ["Engineer"],
+          pairCount: 1,
+          emergent: false,
+        },
+      };
+      return "debate synthesis";
+    });
+
+    const result = await drain(runItemDebate(args));
+
+    expect(result.triggered).toBe(true);
+    expect(result.stopReason).toBe("completed");
+    expect(result.items.length).toBeGreaterThan(0);
+    for (const item of result.items) {
+      expect(item.leaderRuling).toBe("no_verdict");
+      expect(item.changeKind).toBe("none");
+    }
+    // The call WAS attempted this time (unlike the deadline-trip test above) —
+    // it just failed, and failed honestly.
+    expect(generate).toHaveBeenCalled();
   });
 
   it("MUONROI_IDEAL_ITEM_DEBATE=0: never calls runCouncil at all", async () => {

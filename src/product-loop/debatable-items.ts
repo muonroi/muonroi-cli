@@ -37,12 +37,44 @@
  *                             not merely pending" below.
  *   undebated-criterion       a pinned criterion no panelist argued at all —
  *                             delegates to `findUndebatedCriteria` (the F8
- *                             gate's own signal; not reimplemented here).
- *   leader-deferred-criterion a criterion the leader marked `deferred` —
- *                             settleable only by building, per R4a.
+ *                             gate's own signal; not reimplemented here). When
+ *                             the SAME row is also leader-`deferred`, that
+ *                             fact rides along as a bonus in the reason text
+ *                             — see "leader-deferred-criterion is a bonus,
+ *                             never a standalone trigger" below.
  *   risky-task                a task naming more than `RISKY_TASK_TARGET_
  *                             THRESHOLD` combined files+dirs — more surface
  *                             area for something to go wrong unexamined.
+ *
+ * ── leader-deferred-criterion is a bonus, never a standalone trigger (D4) ──
+ *
+ * `CouncilStanceRow.deferred` is not a "the panel didn't get to this" flag —
+ * it is the leader's own structural judgment that the criterion "cannot be
+ * satisfied by DEBATING at all — it is only closable by work that happens
+ * AFTER the debate (landing the code, running the tests, observing the
+ * changed behaviour)" (`LeaderEvaluation.criteriaStatus[].deferred`,
+ * council/types.ts). `DebateState.finalCriteriaDeferred`'s own doc says the
+ * same thing from the other side: such a criterion "must never drive 'extend
+ * N more rounds'" because "more debate can never close a criterion that
+ * requires a mutation" (session 811336618ee0 spent ~$0.05 and two rounds
+ * proving this live — the count stayed 2/4). The F8 gate
+ * (undebated-criteria-gate.ts) already names the correct remedy for a
+ * criterion nobody has a resolution path for: route it to a human via
+ * `narrow`/`accept`/`council`, never "argue about it more" — arguing is not
+ * one of that gate's three options for a reason.
+ *
+ * A debate ROUND is exactly "argue about it more". Selecting a deferred
+ * criterion for one is asking the debate to do the one thing its own leader
+ * already said cannot close it — so `leader-deferred-criterion` never earns a
+ * standalone debate item. `DebatableSignal` and `SIGNAL_SCORES` keep the name
+ * (persisted historical `sprints/<n>-item-debate.json` records may still carry
+ * it, and it still documents where "deferred" ranks conceptually), but no code
+ * path produces it any more. The only place `deferred` still matters here is
+ * as a reason BONUS on a row that already qualifies via `undebated-criterion`
+ * — zero engagement is independently debatable regardless of what the leader
+ * later judged about it, so noting the leader's deferred call alongside it
+ * costs nothing and loses no information; the item's `signal` still names the
+ * stronger, argument-settleable reason (`undebated-criterion`).
  *
  * ── Never select what a deterministic gate already owns ──
  *
@@ -131,7 +163,8 @@ export interface SelectDebatableItemsInput {
    * CB-1 (whole-run) artifact — `DebateState.finalStanceRows`, persisted to
    * `undebated-criteria.json` and read back via `readUndebatedGateRecord(runDir)` —
    * not a per-sprint one; the sprint planning council does not produce its own.
-   * Absent -> no `undebated-criterion` / `leader-deferred-criterion` item fires. */
+   * Absent -> no `undebated-criterion` item fires (D4: `leader-deferred-criterion`
+   * never fires on its own regardless — see the module doc). */
   stanceRows?: readonly CouncilStanceRow[];
   /** S6 — this sprint's project-registration check, when one ran. */
   structureCheck?: ProjectRegistrationCheckResult;
@@ -210,9 +243,15 @@ export function getDebatableItemsCap(): number {
  *                                     pinned — the exact F8 defect this reuses.
  *   3. unknown-dependency (80)        the plan itself is malformed (points at
  *                                     nothing); worth settling before work starts.
- *   4. leader-deferred-criterion (70) the leader already said "needs building" —
- *                                     lower than genuinely undebated because SOME
- *                                     engagement happened.
+ *   4. leader-deferred-criterion (70) D4: kept only so the ranking table still
+ *                                     documents where a deferred bonus sits
+ *                                     conceptually, and so an older persisted
+ *                                     `sprints/<n>-item-debate.json` record that
+ *                                     still carries this signal name has a score
+ *                                     to look up — no code path produces this
+ *                                     signal any more (see the module doc's
+ *                                     "leader-deferred-criterion is a bonus,
+ *                                     never a standalone trigger").
  *   5. unmet-dependency (60)          normal in-progress state, not a defect —
  *                                     still worth a look if it makes the cap.
  *   6. risky-task (50)                nothing is provably wrong yet, only more
@@ -420,6 +459,14 @@ function criterionCandidates(
     const title = boundTaskText(row.criterion);
 
     if (undebatedIndexes.has(index)) {
+      // D4 — `deferred` rides along as a reason BONUS on the row's real,
+      // argument-settleable signal (undebated) instead of ever earning its
+      // own item; see the module doc's "leader-deferred-criterion is a
+      // bonus, never a standalone trigger" for why.
+      const bonus =
+        row.deferred === true && row.met !== true
+          ? " The leader also marked it settleable only by building, not by further debate."
+          : "";
       out.push({
         key,
         score: SIGNAL_SCORES["undebated-criterion"],
@@ -429,26 +476,17 @@ function criterionCandidates(
           id: criterionId,
           title,
           signal: "undebated-criterion",
-          reason: "No panelist took a position on this criterion during the debate.",
+          reason: `No panelist took a position on this criterion during the debate.${bonus}`,
         },
       });
-      return; // undebated already covers this row; deferred would be redundant.
+      return; // undebated (optionally deferred-annotated) already covers this row.
     }
 
-    if (row.deferred === true && row.met !== true) {
-      out.push({
-        key,
-        score: SIGNAL_SCORES["leader-deferred-criterion"],
-        originalIndex: index,
-        item: {
-          kind: "criterion",
-          id: criterionId,
-          title,
-          signal: "leader-deferred-criterion",
-          reason: "The leader marked this criterion settleable only by building, not by further debate.",
-        },
-      });
-    }
+    // `leader-deferred-criterion` is NOT selected here on its own — see the
+    // module doc. A criterion the leader marked `deferred` but that was
+    // otherwise argued (some panelist took a position) earns no debate item
+    // at all: arguing more cannot settle something the leader already said
+    // only building can settle, and it is not zero-engagement either.
   });
 
   return out;

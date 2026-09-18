@@ -260,10 +260,26 @@ describe("selectDebatableItems", () => {
     expect(selectDebatableItems({ plan: plan([]), stanceRows: rows })).toEqual([]);
   });
 
-  it("selects a leader-deferred criterion", () => {
+  // D4 — `leader-deferred-criterion` used to fire on its own whenever
+  // `row.deferred === true`, treating "the leader said only building can
+  // settle this" as a reason to schedule MORE arguing. The leader's own field
+  // says the opposite (`DebateState.finalCriteriaDeferred`, council/types.ts:
+  // "no number of rounds can move it"), and the F8 gate's three resolutions
+  // for an unsettled criterion (council / narrow / accept) never include
+  // "argue about it more". So a deferred criterion that was actually argued
+  // (some panelist took a position — not undebated) is not debatable at all.
+  it("does NOT select a deferred criterion that was actually argued (deferred alone is not debatable)", () => {
     const criterionText = "Ship the NuGet package";
     const rows: CouncilStanceRow[] = [
       { criterion: criterionText, met: false, stances: { Architect: "+", Skeptic: "-" }, deferred: true },
+    ];
+    expect(selectDebatableItems({ plan: plan([]), stanceRows: rows })).toEqual([]);
+  });
+
+  it("selects a criterion that is BOTH undebated AND leader-deferred, via the stronger undebated signal", () => {
+    const criterionText = "Every project catches the warnings";
+    const rows: CouncilStanceRow[] = [
+      { criterion: criterionText, met: false, stances: { Architect: null, Skeptic: null }, deferred: true },
     ];
     const result = selectDebatableItems({ plan: plan([]), stanceRows: rows });
     expect(result).toEqual([
@@ -271,10 +287,13 @@ describe("selectDebatableItems", () => {
         kind: "criterion",
         id: criterionIdFromText(criterionText),
         title: criterionText,
-        signal: "leader-deferred-criterion",
-        reason: expect.stringContaining("settleable only by building"),
+        // The reason names the STRONGER signal — deferred rides along as a
+        // bonus in the text, never as its own selectionSignal.
+        signal: "undebated-criterion",
+        reason: expect.stringContaining("No panelist"),
       },
     ]);
+    expect(result[0]!.reason).toContain("settleable only by building");
   });
 
   it("does not select a stance-row criterion already marked met in criteria.json", () => {
@@ -342,6 +361,33 @@ describe("selectDebatableItems", () => {
     const result = selectDebatableItems({ plan: plan(tasks), cap: 1 });
     expect(result).toHaveLength(1);
     expect(result[0]!.id).toBe("step1");
+  });
+
+  // D4 — re-measures the stalled-sprint shape from C5's own follow-up
+  // (commit 14a6e4a6): two pending tasks blocked on a task that never ran,
+  // one undebated criterion, one leader-deferred criterion. That commit
+  // already fixed `unmet-dependency` so the two blocked tasks select nothing
+  // here (neither task1 nor the sprint as a whole shows any contested
+  // evidence — this is the sprint's normal not-yet-run shape). What's left to
+  // re-measure is the two criterion rows: BEFORE D4, `leader-deferred-criterion`
+  // fired standalone, so selection was 2 items (undebated + deferred).
+  // AFTER D4, the deferred-only row is dropped — selection is 1 item.
+  it("the stalled-sprint shape (C5 follow-up): deferred-only drops out, selection is the one undebated item", () => {
+    const step1 = task({ id: "step1", title: "Build the analyzer core", dependsOn: [] });
+    const step2 = task({ id: "step2", title: "Wire step1 into the CLI", dependsOn: ["step1"] });
+    const step3 = task({ id: "step3", title: "Add the CLI's help text", dependsOn: ["step1"] });
+    const undebatedText = "Every project catches the warnings";
+    const deferredText = "Ship the NuGet package";
+    const rows: CouncilStanceRow[] = [
+      { criterion: undebatedText, met: false, stances: { Architect: null, Skeptic: null } },
+      { criterion: deferredText, met: false, stances: { Architect: "+", Skeptic: "-" }, deferred: true },
+    ];
+    const result = selectDebatableItems({ plan: plan([step1, step2, step3]), stanceRows: rows });
+
+    // AFTER (this fix): exactly the one undebated criterion.
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ kind: "criterion", signal: "undebated-criterion" });
+    expect(result.some((r) => r.title === deferredText)).toBe(false);
   });
 });
 

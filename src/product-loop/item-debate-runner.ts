@@ -36,8 +36,9 @@
  * `positions` (per-panelist stance) is filled best-effort from the round's
  * own `stanceRows` ONLY when a criterion item's text lines up with one of the
  * debate's pinned success criteria (the common case for an
- * `undebated-criterion` / `leader-deferred-criterion` item, since those trace
- * to the SAME whole-run stance rows C1 read to select them). A task item has
+ * `undebated-criterion` item — the only criterion-kind signal C1 selects on
+ * its own since D4; those trace to the SAME whole-run stance rows C1 read to
+ * select them). A task item has
  * no such correlate, so its `positions` stays empty — an honest reflection of
  * "the panel argued this item's round, but nothing here re-derives per-turn
  * text from the transcript" rather than an invented stance.
@@ -387,17 +388,15 @@ export async function* runItemDebate(
       const round = roundRecords.find((r) => r.itemId === item.id);
       const task = item.kind === "task" ? taskById.get(item.id) : undefined;
       const positions = extractPositions(item, round);
-      // KNOWN LIMITATION, visible here rather than buried in another file:
-      // an ALREADY-IN-FLIGHT ruling call cannot be cancelled. `args.llm` is
-      // `productLlm` (`createProductLlm` in sprint-runner.ts), and that
-      // wrapper's `generate` hardcodes the signal it forwards to the
-      // underlying provider call to `undefined` — it has never threaded a
-      // caller signal through, pre-dating this module. So `signal` below
-      // reaches the provider for NOTHING; it only gates whether the NEXT
-      // ruling call is issued at all (checked explicitly between calls,
-      // right here) — a debate that already ate the whole deadline budget
-      // stops asking for further rulings, but a call already in flight when
-      // the deadline fires runs to completion regardless.
+      // D3 fix: an ALREADY-IN-FLIGHT ruling call IS now cancellable. `args.llm`
+      // is `productLlm` (`createProductLlm` in sprint-runner.ts), and that
+      // wrapper's `generate` now forwards the `signal` it receives straight
+      // through to the underlying provider call instead of hardcoding
+      // `undefined`. So `signal` below both gates whether the NEXT ruling
+      // call is issued (checked explicitly between calls, right here) AND
+      // reaches the provider for the call already in flight — a debate that
+      // eats the whole deadline budget mid-call now has that call itself cut
+      // short, not just every call after it.
       const leaderRulingRaw = signal.aborted
         ? undefined
         : await requestItemRuling({ item, task, round, leaderModelId, llm: args.llm, signal });

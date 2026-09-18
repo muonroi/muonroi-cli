@@ -3700,10 +3700,23 @@ export function detectRoleFromSystem(system: string): string | undefined {
 export function createProductLlm(base: CouncilLLM, runId: string): CouncilLLM {
   return {
     // `onDiagnostics` (7th param) is forwarded so the council candidate-failure
-    // forensics survive this wrapper. `signal` is deliberately NOT touched here:
-    // this wrapper has never forwarded it and adding cancellation would be a
-    // behaviour change, not a diagnostic.
-    async generate(modelId, system, prompt, maxTokens, _onUsage, _signal, onDiagnostics) {
+    // forensics survive this wrapper. `signal` (6th param) is now forwarded too
+    // (D3) — this wrapper used to hardcode `undefined` regardless of what a
+    // caller passed, so an in-flight `generate` call could never be cancelled;
+    // the item-debate ruling call (item-debate-runner.ts's `requestItemRuling`)
+    // is the first caller that passes an explicit per-call signal and needs
+    // Esc/its own deadline to actually reach the provider mid-call, not just
+    // gate whether the NEXT call is issued. An already-aborted signal rejects
+    // BEFORE `base.generate` is ever called (no cost recorded, no retry, no
+    // fallback — mirrors the same guard in orchestrator/retry-stream.ts). A
+    // signal that aborts mid-call rejects through `base.generate`'s own
+    // AbortError, which `classifyStreamError` (retry-classifier.ts) already
+    // classifies as non-transient — this wrapper adds no retry or fallback of
+    // its own either way.
+    async generate(modelId, system, prompt, maxTokens, _onUsage, signal, onDiagnostics) {
+      if (signal?.aborted) {
+        throw new DOMException("Aborted before first attempt", "AbortError");
+      }
       const provider = detectProviderForModel(modelId);
       const estIn = Math.ceil((system.length + prompt.length) / 4);
       const startedAt = Date.now();
@@ -3719,7 +3732,7 @@ export function createProductLlm(base: CouncilLLM, runId: string): CouncilLLM {
         (u) => {
           captured = u;
         },
-        undefined,
+        signal,
         onDiagnostics,
       );
       const actualIn = captured?.inputTokens && captured.inputTokens > 0 ? captured.inputTokens : estIn;
