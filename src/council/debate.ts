@@ -1317,6 +1317,21 @@ export async function* runDebate(
   // still opposing (the conclusion card's Dissent section) — a converged verdict
   // otherwise erases the position the council existed to hear argued.
   let lastStanceRows: CouncilStanceRow[] = [];
+  // C2b fix — a SEPARATE, NEVER-carried deferred projection, refreshed
+  // alongside `lastStanceRows` from the same (pinned, criteriaStatus) pair.
+  // `lastCriteriaDeferred` below carries a prior round's `deferred:true`
+  // forward when a round omits a criterion (continuity for the leader's
+  // prompt, `pinnedUnmet`, the escalation open-lists, and the final
+  // `finalCriteriaDeferred` output — all of which ask "is this criterion
+  // still considered closable only after the debate", where persisting the
+  // flag until explicitly revised is correct). `zeroEngagementCriteria` asks
+  // a DIFFERENT question — "did THIS round's leader grade this criterion
+  // deferred" — and needs an answer that resets to false on omission exactly
+  // like `lastStanceRows`' all-null row does, or a criterion deferred once
+  // would mask every later round's zero-engagement row as "excluded, not a
+  // coverage miss", defeating the undebated-criteria gate F8 built. Fed only
+  // to `zeroEngagementCriteria`'s two call sites below — nowhere else.
+  let lastRoundOwnDeferred: boolean[] = [];
   // Defect (b) — the coverage extension is granted at most once per debate.
   let coverageExtensionUsed = false;
   // S5 — announce this run as the one accepting steering. The UI has no other
@@ -2008,13 +2023,59 @@ export async function* runDebate(
       // Snapshot the met-set as it stood ENTERING this round, before the
       // assignment below overwrites it. This is the round receipt's delta base.
       const prevRoundMet = lastCriteriaMet.slice();
-      const aligned = hasPinned ? alignCriteriaMet(spec.successCriteria, evaluation.criteriaStatus) : [];
-      const alignedDeferred = hasPinned ? alignCriteriaDeferred(spec.successCriteria, evaluation.criteriaStatus) : [];
+      // C2b — thread THIS round's entering state through as `prior` so a
+      // criterion the reply never touches carries forward instead of resetting
+      // (see alignCriteriaField). `lastCriteriaMet`/`lastCriteriaDeferred`/
+      // `lastCriteriaEvidence` still hold the PRIOR round's values here — the
+      // reassignments below happen after these reads. Called through
+      // `alignCriteriaField` directly (not the `alignCriteriaMet` wrapper) so
+      // `metResult.carried` is available for the round-record's observability
+      // field; deferred/evidence share the identical carried set (same
+      // pinned/status pair drives the match), so only `metResult.carried` is
+      // surfaced downstream.
+      const metResult = hasPinned
+        ? alignCriteriaField(
+            spec.successCriteria,
+            evaluation.criteriaStatus,
+            (s) => s?.met === true,
+            lastCriteriaMet.length > 0 ? lastCriteriaMet : undefined,
+          )
+        : undefined;
+      const aligned = metResult ? metResult.values : [];
+      const carriedCriteria = metResult
+        ? metResult.carried.reduce<number[]>((acc, wasCarried, i) => {
+            if (wasCarried) acc.push(i);
+            return acc;
+          }, [])
+        : [];
+      const alignedDeferred = hasPinned
+        ? alignCriteriaDeferred(
+            spec.successCriteria,
+            evaluation.criteriaStatus,
+            lastCriteriaDeferred.length > 0 ? lastCriteriaDeferred : undefined,
+          )
+        : [];
       if (hasPinned) lastCriteriaDeferred = alignedDeferred;
+      // C2b fix — recompute WITHOUT a prior: this is deliberately the same
+      // call `alignCriteriaDeferred` made pre-C2b, so `lastRoundOwnDeferred`
+      // answers "did this round's own reply grade it deferred" and never
+      // inherits an earlier round's carried flag. See the declaration above
+      // for why `zeroEngagementCriteria` needs this instead of `alignedDeferred`.
+      const thisRoundOwnDeferred = hasPinned
+        ? alignCriteriaDeferred(spec.successCriteria, evaluation.criteriaStatus)
+        : [];
+      if (hasPinned) lastRoundOwnDeferred = thisRoundOwnDeferred;
       // B1 — carry the leader's stated REASON per criterion into the next round's
       // prompt, so a verdict can be defended or explicitly revised rather than
-      // silently re-rolled.
-      if (hasPinned) lastCriteriaEvidence = alignCriteriaEvidence(spec.successCriteria, evaluation.criteriaStatus);
+      // silently re-rolled. C2b: also carries forward an omitted criterion's own
+      // prior evidence text (rather than resetting to "") for the same reason.
+      if (hasPinned) {
+        lastCriteriaEvidence = alignCriteriaEvidence(
+          spec.successCriteria,
+          evaluation.criteriaStatus,
+          lastCriteriaEvidence.length > 0 ? lastCriteriaEvidence : undefined,
+        );
+      }
       // Count of pinned criteria still open this round AND still movable by more
       // debate — used by both auto-remedy and the interactive escalation
       // boundaries below. Criteria the leader marked `deferred` are excluded on
@@ -2116,6 +2177,9 @@ export async function* runDebate(
         // what THIS round moved rather than the running total.
         stanceRows: lastStanceRows.length > 0 ? lastStanceRows : undefined,
         prevCriteriaMet: prevRoundMet.length > 0 ? prevRoundMet : undefined,
+        // C2b — which pinned criteria (by index) this round's evaluation did
+        // NOT address, so their status above was carried rather than judged.
+        carriedCriteria: carriedCriteria.length > 0 ? carriedCriteria : undefined,
       });
       nextTopic = evaluation.nextRoundFocus;
 
@@ -2227,7 +2291,9 @@ export async function* runDebate(
         coverageExtensionEnabled() &&
         maxRounds < absoluteMaxRounds()
       ) {
-        const untouched = zeroEngagementCriteria(lastStanceRows, lastCriteriaDeferred);
+        // C2b fix — `lastRoundOwnDeferred`, not the carried `lastCriteriaDeferred`
+        // (see its declaration above): this gate needs THIS round's own verdict.
+        const untouched = zeroEngagementCriteria(lastStanceRows, lastRoundOwnDeferred);
         if (untouched.length > 0) {
           coverageExtensionUsed = true;
           coverageExtendedThisRound = true;
@@ -2525,9 +2591,12 @@ export async function* runDebate(
                 effectiveCeiling,
                 roundsSinceProgress,
                 // Only "exhausted" when the extra round was actually spent AND
-                // the criteria it targeted are still untouched.
+                // the criteria it targeted are still untouched. C2b fix —
+                // `lastRoundOwnDeferred`, not the carried `lastCriteriaDeferred`
+                // (see its declaration above): this gate needs the LAST round's
+                // own verdict, not whichever round first marked it deferred.
                 coverageExhausted:
-                  coverageExtensionUsed && zeroEngagementCriteria(lastStanceRows, lastCriteriaDeferred).length > 0,
+                  coverageExtensionUsed && zeroEngagementCriteria(lastStanceRows, lastRoundOwnDeferred).length > 0,
               });
       yield {
         type: "council_message" as const,
@@ -2906,36 +2975,49 @@ export function extractEvalJson(raw: string): string | null {
  * returning a boolean[] index-aligned to `pinned` (B2/B3). The eval prompt asks
  * for one entry per criterion in order, so index alignment is the primary path;
  * when the model drifts (wrong count/order) we fall back to a case-insensitive
- * substring match either direction, defaulting unmatched criteria to not-met so
- * a hallucinated "all met" never silently marks an untouched criterion done.
+ * substring match either direction. An unmatched criterion carries forward
+ * `priorMet[i]` when a prior verdict exists (C2b — see `alignCriteriaField`);
+ * with no prior (round 1) it defaults to not-met, so a hallucinated "all met"
+ * still never silently marks an untouched criterion done.
  */
-export function alignCriteriaMet(pinned: string[], status: Array<{ criterion?: string; met?: boolean }>): boolean[] {
-  return alignCriteriaField(pinned, status, (s) => s?.met === true);
+export function alignCriteriaMet(
+  pinned: string[],
+  status: Array<{ criterion?: string; met?: boolean }>,
+  priorMet?: readonly boolean[],
+): boolean[] {
+  return alignCriteriaField(pinned, status, (s) => s?.met === true, priorMet).values;
 }
 
 /**
  * Same projection as `alignCriteriaMet`, but for the leader's `deferred` flag —
  * "this criterion is only closable after the debate (code landed / tests run)".
- * Defaults to FALSE on any drift: mis-labelling a debatable criterion as deferred
- * would silently retire it from the debate's goals, which is the worse failure.
+ * An unmatched criterion carries forward `priorDeferred[i]` when a prior exists
+ * (C2b); with no prior it defaults to FALSE, since mis-labelling a debatable
+ * criterion as deferred would silently retire it from the debate's goals, which
+ * is the worse failure.
  */
 export function alignCriteriaDeferred(
   pinned: string[],
   status: Array<{ criterion?: string; deferred?: boolean }>,
+  priorDeferred?: readonly boolean[],
 ): boolean[] {
-  return alignCriteriaField(pinned, status, (s) => s?.deferred === true);
+  return alignCriteriaField(pinned, status, (s) => s?.deferred === true, priorDeferred).values;
 }
 
 /**
- * B1 — same projection, for the leader's per-criterion `evidence` prose. Defaults
- * to "" on drift so a mismatched entry renders "(no reason recorded)" rather than
- * attributing another criterion's reasoning to this one.
+ * B1 — same projection, for the leader's per-criterion `evidence` prose. An
+ * unmatched criterion carries forward `priorEvidence[i]` when a prior exists
+ * (C2b); with no prior it defaults to "" so a mismatched entry renders "(no
+ * reason recorded)" rather than attributing another criterion's reasoning to
+ * this one.
  */
 export function alignCriteriaEvidence(
   pinned: string[],
   status: Array<{ criterion?: string; evidence?: string }>,
+  priorEvidence?: readonly string[],
 ): string[] {
-  return alignCriteriaField(pinned, status, (s) => (typeof s?.evidence === "string" ? s.evidence : ""));
+  return alignCriteriaField(pinned, status, (s) => (typeof s?.evidence === "string" ? s.evidence : ""), priorEvidence)
+    .values;
 }
 
 /**
@@ -2958,21 +3040,51 @@ export function buildPriorVerdicts(
   }));
 }
 
+/**
+ * C2b — carry-forward for a pinned criterion this round's reply never touched.
+ *
+ * When the count matches, index alignment is the primary path and every pinned
+ * criterion is treated as addressed (unchanged from before C2b) — a leader that
+ * reports the right number of entries is assumed to have graded all of them,
+ * even a fresh "not met". Only the substring-fallback branch (count mismatch)
+ * can produce a true omission, and per-round item scoping (`perRoundFocus`)
+ * makes that branch common: a leader asked about item 2 has every reason to
+ * report on item 2 alone.
+ *
+ * On an unmatched criterion: if `prior` holds a value at that index, carry it
+ * forward (mark `carried[i] = true`) instead of resetting to `pick(undefined)`.
+ * This is a plain copy, never a merge — a carried "met" stays whatever it was
+ * (met or unmet) last round, so an unmet criterion can never be upgraded by
+ * carrying, and a criterion the leader DID match this round always takes the
+ * fresh value (carry never overrides a real match). No prior (round 1, or a
+ * caller that omits the argument) behaves exactly as before: `pick(undefined)`.
+ */
 function alignCriteriaField<T extends { criterion?: string }, V>(
   pinned: string[],
   status: T[],
   pick: (s: T | undefined) => V,
-): V[] {
+  prior?: readonly V[],
+): { values: V[]; carried: boolean[] } {
   const aligned = status.length === pinned.length;
-  return pinned.map((crit, i) => {
-    if (aligned) return pick(status[i]);
+  const carried: boolean[] = [];
+  const values = pinned.map((crit, i) => {
+    if (aligned) {
+      carried.push(false);
+      return pick(status[i]);
+    }
     const norm = crit.trim().toLowerCase();
     const hit = status.find((s) => {
       const sc = (s.criterion ?? "").trim().toLowerCase();
       return sc.length > 0 && (sc.includes(norm) || norm.includes(sc));
     });
+    if (!hit && prior && i < prior.length) {
+      carried.push(true);
+      return prior[i];
+    }
+    carried.push(false);
     return pick(hit);
   });
+  return { values, carried };
 }
 
 /**

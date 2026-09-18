@@ -513,24 +513,25 @@ describe("runDebate — anti-ratchet rule holds under per-item scoping (C2)", ()
     }
   });
 
-  it("DOCUMENTS A GAP: if the leader's response omits an untouched criterion instead of echoing it, alignment resets it to not-met/no-evidence — it is NOT retained, and the reset is effectively fabricated", async () => {
+  it("C2b: if the leader's response omits an untouched criterion instead of echoing it, alignment CARRIES its prior status forward instead of resetting it", async () => {
     // `alignCriteriaField` (debate.ts) aligns `criteriaStatus` to the pinned
     // criteria POSITIONALLY when the counts match, and falls back to a
-    // case-insensitive substring match when they don't. Neither path has any
-    // notion of "the previous round's value" — there is no code-level carry-
-    // forward. So when a round's response has FEWER entries than pinned
-    // criteria (e.g. a model that only reports on the item it was told to
-    // focus on), an omitted criterion's fuzzy-match search finds no hit, and
-    // `pick(undefined)` yields `met: false` / `evidence: ""` — a criterion
-    // that was MET last round silently flips to NOT-MET-WITH-NO-EVIDENCE,
-    // which is worse than "not retained": nothing said it regressed either.
+    // case-insensitive substring match when they don't. When a round's
+    // response has FEWER entries than pinned criteria (e.g. a model that only
+    // reports on the item it was told to focus on), an omitted criterion's
+    // fuzzy-match search finds no hit — C2b now carries the PRIOR round's
+    // value forward for that criterion instead of resetting it via
+    // `pick(undefined)`, so a criterion that was MET last round and untouched
+    // this round stays MET, not silently flipped to NOT-MET-WITH-NO-EVIDENCE.
     //
-    // This is PRE-EXISTING behavior of `alignCriteriaField`, not introduced by
-    // C2 — but per-round item-focus scoping makes it materially more likely to
-    // trigger than a whole-plan debate did, because a model narrowed to one
-    // item's focus text is more likely to report only on that item. Flagging
-    // as a known limitation; fixing `alignCriteriaField`'s fallback semantics
-    // is out of C2's scope (engine capability + topic builder only).
+    // This used to be pre-existing behavior of `alignCriteriaField` (see git
+    // history for the prior "DOCUMENTS A GAP" version of this test) — per-
+    // round item-focus scoping made it materially more likely to trigger than
+    // a whole-plan debate did, because a model narrowed to one item's focus
+    // text is more likely to report only on that item. Fixed at
+    // `alignCriteriaField`'s fallback semantics (applies unconditionally, not
+    // only under `perRoundFocus` — the same silent-reset defect exists on any
+    // whole-plan round where the model under-reports).
     const MARKER_A = "GAP_ITEM_A";
     const MARKER_B = "GAP_ITEM_B";
     const TWO_CRITERIA = ["Criterion X: reads are consistent", "Criterion Y: writes cannot corrupt"];
@@ -565,7 +566,7 @@ describe("runDebate — anti-ratchet rule holds under per-item scoping (C2)", ()
     const prevConductor = process.env.MUONROI_LEADER_CONDUCTOR;
     process.env.MUONROI_LEADER_CONDUCTOR = "0";
     try {
-      const { state } = await drain(
+      const { chunks, state } = await drain(
         runDebate(
           baseSpec({ successCriteria: TWO_CRITERIA }),
           baseConfig({
@@ -580,10 +581,127 @@ describe("runDebate — anti-ratchet rule holds under per-item scoping (C2)", ()
 
       expect(state.roundCount).toBe(2);
       // Criterion X was TRUE after round 1 and untouched in round 2's
-      // response — the ideal "retain earlier status" outcome would be
-      // `[true, true]`. What the code actually produces is `[false, true]`:
-      // the omitted criterion is silently reset, not retained.
+      // response — it is now carried forward and stays true, alongside
+      // Criterion Y's freshly-judged true.
+      expect(state.finalCriteriaMet).toEqual([true, true]);
+
+      // Observability: round 2's done record marks criterion 0 (Criterion X)
+      // as carried, not judged, so a reader can tell "still met" apart from
+      // "not looked at".
+      const round2 = roundChunks(chunks).find((r) => r.round === 2 && r.state === "done");
+      expect(round2?.carriedCriteria).toEqual([0]);
+    } finally {
+      if (prevConductor === undefined) delete process.env.MUONROI_LEADER_CONDUCTOR;
+      else process.env.MUONROI_LEADER_CONDUCTOR = prevConductor;
+    }
+  });
+
+  it("C2b: round 1's omission still behaves as before — no prior exists to carry from", async () => {
+    const MARKER_A = "R1_GAP_ITEM_A";
+    const TWO_CRITERIA = ["Criterion X: reads are consistent", "Criterion Y: writes cannot corrupt"];
+    // Round 1 reports ONLY criterion Y — criterion X is omitted from the very
+    // first round, so there is no prior round's value to carry forward.
+    const ROUND1 = JSON.stringify({
+      allCriteriaMet: false,
+      criteriaStatus: [{ criterion: TWO_CRITERIA[1], met: true, evidence: "round1: Y confirmed" }],
+      unresolvedPoints: [],
+      needsResearch: false,
+      shouldContinue: false,
+      reason: "round1",
+    });
+    const captured = makeCapturingLLM((prompt) => {
+      if (prompt.includes(MARKER_A)) return ROUND1;
+      return ROUND1;
+    });
+
+    const prevConductor = process.env.MUONROI_LEADER_CONDUCTOR;
+    process.env.MUONROI_LEADER_CONDUCTOR = "0";
+    try {
+      const { chunks, state } = await drain(
+        runDebate(
+          baseSpec({ successCriteria: TWO_CRITERIA }),
+          baseConfig({ perRoundFocus: [{ id: "item-a", text: MARKER_A }] }),
+          captured.llm,
+        ),
+      );
+
+      expect(state.roundCount).toBe(1);
+      // No prior round exists — criterion X (never mentioned) defaults to
+      // not-met, exactly as before C2b.
       expect(state.finalCriteriaMet).toEqual([false, true]);
+      const round1 = roundChunks(chunks).find((r) => r.round === 1 && r.state === "done");
+      expect(round1?.carriedCriteria).toBeUndefined();
+    } finally {
+      if (prevConductor === undefined) delete process.env.MUONROI_LEADER_CONDUCTOR;
+      else process.env.MUONROI_LEADER_CONDUCTOR = prevConductor;
+    }
+  });
+
+  it("C2b: a criterion the leader explicitly downgrades this round is downgraded, never carried — even while another criterion in the same reply is carried", async () => {
+    const MARKER_A = "DOWNGRADE_ITEM_A";
+    const MARKER_B = "DOWNGRADE_ITEM_B";
+    const THREE = [
+      "Criterion X: reads are consistent",
+      "Criterion Y: writes cannot corrupt",
+      "Criterion Z: invalidation propagates",
+    ];
+    // Round 1: all three graded (count-matched). X and Y met, Z unmet.
+    const ROUND1 = JSON.stringify({
+      allCriteriaMet: false,
+      criteriaStatus: [
+        { criterion: THREE[0], met: true, evidence: "round1: X confirmed" },
+        { criterion: THREE[1], met: true, evidence: "round1: Y confirmed" },
+        { criterion: THREE[2], met: false, evidence: "round1: Z not yet argued" },
+      ],
+      unresolvedPoints: [],
+      needsResearch: false,
+      shouldContinue: true,
+      reason: "round1",
+    });
+    // Round 2: reports ONLY criterion X, explicitly regressed (a real
+    // downgrade, matched by substring) — Y and Z are omitted entirely.
+    const ROUND2 = JSON.stringify({
+      allCriteriaMet: false,
+      criteriaStatus: [{ criterion: THREE[0], met: false, evidence: "round2: X regressed under load" }],
+      unresolvedPoints: [],
+      needsResearch: false,
+      shouldContinue: false,
+      reason: "round2",
+    });
+    const captured = makeCapturingLLM((prompt) => {
+      if (prompt.includes(MARKER_A)) return ROUND1;
+      if (prompt.includes(MARKER_B)) return ROUND2;
+      return ROUND1;
+    });
+
+    const prevConductor = process.env.MUONROI_LEADER_CONDUCTOR;
+    process.env.MUONROI_LEADER_CONDUCTOR = "0";
+    try {
+      const { chunks, state } = await drain(
+        runDebate(
+          baseSpec({ successCriteria: THREE }),
+          baseConfig({
+            perRoundFocus: [
+              { id: "item-a", text: MARKER_A },
+              { id: "item-b", text: MARKER_B },
+            ],
+          }),
+          captured.llm,
+        ),
+      );
+
+      expect(state.roundCount).toBe(2);
+      // X: matched this round, leader explicitly regressed it -> fresh
+      //    verdict (false) wins, never the carried true.
+      // Y: omitted, was met -> carried forward as true (not reset, not
+      //    upgraded further — a plain copy).
+      // Z: omitted, was unmet -> carried forward as false (never upgraded by
+      //    carrying).
+      expect(state.finalCriteriaMet).toEqual([false, true, false]);
+
+      const round2 = roundChunks(chunks).find((r) => r.round === 2 && r.state === "done");
+      // Y and Z (indices 1 and 2) were carried; X (index 0) was judged fresh.
+      expect(round2?.carriedCriteria).toEqual([1, 2]);
     } finally {
       if (prevConductor === undefined) delete process.env.MUONROI_LEADER_CONDUCTOR;
       else process.env.MUONROI_LEADER_CONDUCTOR = prevConductor;

@@ -195,3 +195,137 @@ describe("runDebate coverage extension (defect (b) wiring)", () => {
     expect(state.roundCount).toBe(1);
   });
 });
+
+// ── C2b regression guard ─────────────────────────────────────────────────────
+//
+// C2b (criteria carry-forward across rounds) made `alignCriteriaDeferred` carry
+// a prior round's `deferred: true` forward when a later round's reply omits the
+// criterion — correct for the leader's prompt, `pinnedUnmet`, the escalation
+// open-lists, and `finalCriteriaDeferred` (all asking "is this still considered
+// closable only after the debate", where persisting until explicitly revised is
+// right). It is WRONG for `zeroEngagementCriteria`: that gate excludes a
+// criterion on `deferred[i] === true` to mean "the WHOLE PANEL structurally
+// cannot reach it, a round aimed at it would buy nothing" (see its docstring in
+// debate.ts) — a meaning that has to be re-earned every round a criterion goes
+// completely untouched, not inherited from an earlier round's mark. A criterion
+// marked deferred once and then never mentioned again would otherwise mask
+// every later round's all-null stance row as "excluded, not a coverage miss",
+// silently reopening exactly the coverage hole `zeroEngagementCriteria` (defect
+// (b) / F8, see the file header) was built to close.
+//
+// This suite drives the REAL `runDebate` loop (the only seam that can fail on
+// the pre-fix code — `zeroEngagementCriteria` itself never changed; only what
+// `runDebate` threads into it did) so it simultaneously (a) proves the
+// regression against the actual call sites and (b) pins that the coverage-
+// extension gate still fires end to end in this exact scenario.
+describe("runDebate coverage extension — C2b regression guard (a round-1 `deferred` mark must not suppress a later round's zero-engagement gate)", () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    for (const k of ["MUONROI_COUNCIL_COVERAGE_EXTEND", "MUONROI_LEADER_CONDUCTOR", "MUONROI_COUNCIL_ESCALATE"]) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k] as string;
+    }
+  });
+
+  function makeTwoRoundConfig(): CouncilConfig {
+    return {
+      topic: "chuẩn hoá thư viện",
+      conversationContext: "",
+      leaderModelId: "leader-model",
+      participants: [
+        { role: "architect", model: "m1", position: "", stance: { name: "Architect", lens: "design" } },
+        { role: "verify", model: "m2", position: "", stance: { name: "Skeptic", lens: "risk" } },
+      ] as unknown as CouncilParticipant[],
+      debatePlan: {
+        intentSummary: "x",
+        stances: [
+          { name: "Architect", lens: "design" },
+          { name: "Skeptic", lens: "risk" },
+        ],
+        outputShape: { kind: "decision", sections: [{ key: "rec", heading: "Rec", shape: "list" }], guardrails: [] },
+        plannedRounds: 2,
+      },
+      researchSkipOverride: true,
+      runId: "coverage-ext-deferred-carry-test",
+    } as unknown as CouncilConfig;
+  }
+
+  /**
+   * Round 1: criterion A argued and met; criterion B explicitly marked
+   * `deferred: true` with every seat null (a genuine "closable only after the
+   * debate" call). Round 2: the leader's reply reports ONLY A — B is omitted
+   * entirely (not re-echoed as deferred, not re-graded at all), so B's round-2
+   * stance row is all-null via `buildStanceRows`' own omission default. Nothing
+   * in round 2 says B is STILL deferred; the leader simply never mentioned it.
+   */
+  function makeTwoRoundLLM(): CouncilLLM {
+    const round1Eval = JSON.stringify({
+      allCriteriaMet: false,
+      criteriaStatus: [
+        {
+          criterion: "Rule 2 ships with a validated threshold",
+          met: true,
+          evidence: "both seats argued it",
+          stances: { Architect: "+", Skeptic: "+" },
+        },
+        {
+          criterion: "NuGet packaging is versioned",
+          met: false,
+          deferred: true,
+          evidence: "closable only once the packaging code lands",
+          stances: { Architect: null, Skeptic: null },
+        },
+      ],
+      unresolvedPoints: [],
+      needsResearch: false,
+      shouldContinue: true,
+      reason: "round 1",
+    });
+    // B omitted entirely — only A is reported.
+    const round2Eval = JSON.stringify({
+      allCriteriaMet: false,
+      criteriaStatus: [
+        {
+          criterion: "Rule 2 ships with a validated threshold",
+          met: true,
+          evidence: "still holds",
+          stances: { Architect: "+", Skeptic: "+" },
+        },
+      ],
+      unresolvedPoints: [],
+      needsResearch: false,
+      shouldContinue: false,
+      reason: "round 2 — stopping",
+      extendRounds: 0,
+    });
+    let evalCalls = 0;
+    return {
+      generate: async (_m: string, system: string) => {
+        if (!system.includes("evaluating whether")) return "text";
+        evalCalls += 1;
+        return evalCalls === 1 ? round1Eval : round2Eval;
+      },
+      debate: async () => ({ text: "A debate turn.", toolCalls: [] }),
+      research: async () => "findings",
+    } as unknown as CouncilLLM;
+  }
+
+  it("still reports B as zero-engagement in round 2 and grants the coverage-extension round, even though round 1 marked B deferred", async () => {
+    delete process.env.MUONROI_COUNCIL_COVERAGE_EXTEND;
+    delete process.env.MUONROI_LEADER_CONDUCTOR;
+    const { chunks, state } = await drain(runDebate(makeSpec(), makeTwoRoundConfig(), makeTwoRoundLLM()));
+
+    // PRE-FIX: `runDebate` fed `zeroEngagementCriteria` the CARRIED deferred
+    // array (round 1's `deferred: true` persisted into round 2 because B was
+    // never re-mentioned), so B was excluded and this list came back empty —
+    // no grant, `state.roundCount` stayed 2. This is the assertion that failed
+    // on the pre-fix code.
+    const lines = grantLines(chunks);
+    expect(lines).toHaveLength(1);
+    expect(String(lines[0]?.content)).toContain("NuGet packaging is versioned");
+    // Planned 2 rounds; round 2 would otherwise end the debate — the coverage
+    // miss buys exactly one more (defect (b) / F8's end-to-end behavior,
+    // unbroken by the C2b carry-forward fix).
+    expect(state.roundCount).toBe(3);
+  });
+});

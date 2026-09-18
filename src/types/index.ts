@@ -520,6 +520,17 @@ export interface CouncilRoundRecord {
    * Absent on round 1 (nothing was met going in).
    */
   prevCriteriaMet?: boolean[];
+  /**
+   * C2b — indices into the pinned criteria list (`ClarifiedSpec.successCriteria`)
+   * that this round's leader evaluation did NOT address. Their status/evidence
+   * in this round's aggregate (`criteriaMet`, `stanceRows`) was carried forward
+   * unchanged from the prior round rather than freshly judged — see
+   * `alignCriteriaField` in `src/council/debate.ts`. Lets a reader tell "still
+   * met" apart from "not looked at" instead of both looking identical. Absent
+   * when no criterion needed carrying this round (every pinned criterion had a
+   * match, or this is round 1 — no prior to carry from).
+   */
+  carriedCriteria?: number[];
 }
 
 /**
