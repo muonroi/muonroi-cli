@@ -32,6 +32,7 @@
 
 import type { StreamChunk, TaskRequest, ToolResult, VerifyRecipe } from "../types/index.js";
 import { runIsolatedGuarded } from "./plan-adherence-review.js";
+import { hasProjectRegistrationViolations, type ProjectRegistrationCheckResult } from "./project-registration-check.js";
 import { boundTaskText } from "./sprint-plan-artifact.js";
 import { extractErrorSet, type FloorDelta } from "./verify-baseline.js";
 import type { FloorCheck } from "./verify-floor.js";
@@ -105,6 +106,15 @@ export interface VerifyPassOutcome {
   floorDelta?: FloorDelta;
   floorChecks?: FloorCheck[];
   floorMustFixNote?: string;
+  /**
+   * S6 — `project-registration-check.ts`'s result for this pass: whether a
+   * newly created project manifest is registered in its ecosystem's solution/
+   * workspace index. Independent of `floorDelta` — a repo's own build/test
+   * gates can PASS while a new project sits outside the solution entirely
+   * (invisible to `dotnet test`, not a build/test failure at all). See
+   * `computeVerifyFixTrigger`'s `structureCheck` handling below.
+   */
+  structureCheck?: ProjectRegistrationCheckResult;
 }
 
 /**
@@ -145,6 +155,43 @@ function verifyVerdictErrorSet(verifyOutput: string, floorChecks: FloorCheck[] |
 }
 
 /**
+ * S6 — the sorted, deduplicated manifest paths behind every GENUINE violation
+ * (`solutionFile` set — never an ambiguous/parse-failure entry, which carries
+ * no actionable path). This IS the identity's `errorSet` for a registration
+ * violation: registering 1 of 2 unregistered projects removes one path from
+ * this set, so `computeFailureKey` sees a different key and correctly reads
+ * that as PROGRESS rather than "the same failure recurred" — the acceptance
+ * review's blocker #2 (an empty `errorSet` made partial registration
+ * indistinguishable from no progress at all).
+ */
+function structureManifestErrorSet(structureCheck: ProjectRegistrationCheckResult | undefined): string[] {
+  if (!structureCheck) return [];
+  const paths = structureCheck.ecosystems
+    .filter((e) => e.status === "violations")
+    .flatMap((e) => e.unregistered.filter((u) => u.solutionFile).map((u) => u.manifest));
+  return [...new Set(paths)].sort();
+}
+
+/**
+ * S6 — fold a registration violation into an ALREADY-COMPUTED identity rather
+ * than replacing it, so a build failure and a registration violation that
+ * coexist both stay visible in the key: `reason` gets a deterministic
+ * `+project_not_registered` suffix and `errorSet` becomes the union of the
+ * base identity's own errors and the unregistered manifest paths. Either side
+ * changing (a build error fixed, or one more project registered) changes the
+ * combined key, so neither side's progress can mask the other's — the
+ * acceptance review's blocker #2, the coexistence case.
+ */
+function withStructureViolation(base: FailureIdentity, structureManifests: readonly string[]): FailureIdentity {
+  if (structureManifests.length === 0) return base;
+  return {
+    failedCondition: base.failedCondition,
+    reason: `${base.reason}+project_not_registered`,
+    errorSet: [...new Set([...base.errorSet, ...structureManifests])].sort(),
+  };
+}
+
+/**
  * Derive the failure's identity from what Step 5's routine already computed —
  * never from free-form text. Build failures with no baseline confirmation of
  * "already broken" (`buildAlreadyBroken === false`) are treated as this run's
@@ -158,43 +205,91 @@ export function deriveFailureIdentity(input: {
   recipe: VerifyRecipe | null;
   /** Required for the `verify_verdict` fallback's errorSet extraction. */
   verifyOutput: string;
+  /** S6 — see `VerifyPassOutcome.structureCheck`. */
+  structureCheck?: ProjectRegistrationCheckResult;
 }): FailureIdentity {
-  const { verifyVerdict, floorDelta, floorChecks, recipe, verifyOutput } = input;
+  const { verifyVerdict, floorDelta, floorChecks, recipe, verifyOutput, structureCheck } = input;
+  const structureManifests = structureManifestErrorSet(structureCheck);
+  const structureViolated = structureManifests.length > 0;
 
-  if (floorDelta?.verdict === "fail") {
+  // A build failure the floor could only call pre-existing is not this run's
+  // doing (see computeVerifyFixTrigger's own skip rule for the pure case) —
+  // it must never be blended into the identity, or fixing an UNRELATED
+  // registration violation would look like it also touched a build break
+  // nobody asked this run to fix. `computeVerifyFixTrigger` only reaches this
+  // function for a pre-existing-only build when `structureViolated` is ALSO
+  // true (its own skip already covers the pure pre-existing case), so falling
+  // through to the plain structure/verify_verdict branches below is correct
+  // here, not merely defensive.
+  const buildExcused =
+    floorDelta?.verdict === "fail" &&
+    floorDelta.failureKind === "build-failed" &&
+    floorDelta.buildAlreadyBroken === true &&
+    floorDelta.buildAttribution === "pre-existing";
+
+  if (floorDelta?.verdict === "fail" && !buildExcused) {
     switch (floorDelta.failureKind) {
       case "build-failed": {
         const reason =
           floorDelta.buildAlreadyBroken === true && floorDelta.buildAttribution === "unattributable"
             ? "build_unattributable"
             : "build_run_introduced";
-        return {
-          failedCondition: "engineering_floor",
-          reason,
-          errorSet: buildFailureErrorSet(floorDelta, floorChecks),
-        };
+        return withStructureViolation(
+          { failedCondition: "engineering_floor", reason, errorSet: buildFailureErrorSet(floorDelta, floorChecks) },
+          structureManifests,
+        );
       }
       case "no-tests-executed":
-        return { failedCondition: "engineering_floor", reason: "no_tests_executed", errorSet: [] };
+        return withStructureViolation(
+          { failedCondition: "engineering_floor", reason: "no_tests_executed", errorSet: [] },
+          structureManifests,
+        );
       case "test-regression":
-        return {
-          failedCondition: "engineering_floor",
-          reason: "test_regression",
-          errorSet: [...floorDelta.newlyFailing].sort(),
-        };
+        return withStructureViolation(
+          {
+            failedCondition: "engineering_floor",
+            reason: "test_regression",
+            errorSet: [...floorDelta.newlyFailing].sort(),
+          },
+          structureManifests,
+        );
       case "test-unattributable":
-        return { failedCondition: "engineering_floor", reason: "test_unattributable", errorSet: [] };
+        return withStructureViolation(
+          { failedCondition: "engineering_floor", reason: "test_unattributable", errorSet: [] },
+          structureManifests,
+        );
       case "test-absolute-no-baseline":
-        return {
-          failedCondition: "engineering_floor",
-          reason: "test_absolute_no_baseline",
-          errorSet: [...floorDelta.newlyFailing].sort(),
-        };
+        return withStructureViolation(
+          {
+            failedCondition: "engineering_floor",
+            reason: "test_absolute_no_baseline",
+            errorSet: [...floorDelta.newlyFailing].sort(),
+          },
+          structureManifests,
+        );
       case "infra":
-        return { failedCondition: "engineering_floor", reason: "infra", errorSet: [] };
+        return withStructureViolation(
+          { failedCondition: "engineering_floor", reason: "infra", errorSet: [] },
+          structureManifests,
+        );
       default:
-        return { failedCondition: "engineering_floor", reason: "unknown", errorSet: [] };
+        return withStructureViolation(
+          { failedCondition: "engineering_floor", reason: "unknown", errorSet: [] },
+          structureManifests,
+        );
     }
+  }
+
+  // S6 — a new project not registered in its solution is a deterministic,
+  // unambiguous fact independent of the floor's own verdict (the floor can
+  // PASS while the new project's tests never ran at all — that is exactly
+  // what "not registered" means). Checked before the zero_coverage/verify_
+  // verdict fallbacks below because it is usually their ROOT CAUSE in the
+  // exact scenario this module closes (an unregistered project's tests never
+  // run at all, which IS zero coverage) — the more specific, actionable
+  // signal wins rather than being silently absorbed into a generic one.
+  if (structureViolated) {
+    return { failedCondition: "engineering_floor", reason: "project_not_registered", errorSet: structureManifests };
   }
 
   const hasTests = (recipe?.testCommands?.length ?? 0) > 0;
@@ -254,8 +349,19 @@ export function computeVerifyFixTrigger(input: {
   floorChecks?: FloorCheck[];
   recipe: VerifyRecipe | null;
   verifyOutput: string;
+  /** S6 — see `VerifyPassOutcome.structureCheck`. Triggers the loop even when the floor passed. */
+  structureCheck?: ProjectRegistrationCheckResult;
 }): VerifyFixTriggerResult {
-  const { verifyVerdict, floorDelta, recipe, verifyOutput } = input;
+  const { verifyVerdict, floorDelta, recipe, verifyOutput, structureCheck } = input;
+
+  // S6 — checked first and unconditionally: a violation here is actionable and
+  // deterministic on its own, so it must trigger the loop even when the floor
+  // PASSED and the recipe reports coverage (the very scenario this closes —
+  // run mu54vrme4c87, both sprints scored `zero_coverage` and neither sprint
+  // ever attempted a fix).
+  if (hasProjectRegistrationViolations(structureCheck)) {
+    return { shouldRun: true, identity: deriveFailureIdentity(input) };
+  }
 
   if (floorDelta?.verdict === "fail" && floorDelta.failureKind === "build-failed") {
     if (floorDelta.buildAlreadyBroken === true && floorDelta.buildAttribution === "pre-existing") {
@@ -454,6 +560,7 @@ export async function* runVerifyFixLoop(
     floorChecks: cur.floorChecks,
     recipe: cur.recipeFromVerify,
     verifyOutput: verifyOutputOf(cur.verifyResult),
+    structureCheck: cur.structureCheck,
   });
 
   if (limit <= 0) {
@@ -519,6 +626,7 @@ export async function* runVerifyFixLoop(
       floorChecks: cur.floorChecks,
       recipe: cur.recipeFromVerify,
       verifyOutput: verifyOutputOf(cur.verifyResult),
+      structureCheck: cur.structureCheck,
     });
     const keyBefore = computeFailureKey(identityBefore);
 
@@ -641,6 +749,7 @@ export async function* runVerifyFixLoop(
       floorChecks: cur.floorChecks,
       recipe: cur.recipeFromVerify,
       verifyOutput: verifyOutputOf(cur.verifyResult),
+      structureCheck: cur.structureCheck,
     });
     const keyAfter = computeFailureKey(identityAfter);
     // A `verify_verdict` identity with an empty errorSet produces the SAME key
@@ -666,6 +775,7 @@ export async function* runVerifyFixLoop(
       floorChecks: cur.floorChecks,
       recipe: cur.recipeFromVerify,
       verifyOutput: verifyOutputOf(cur.verifyResult),
+      structureCheck: cur.structureCheck,
     });
     if (!stillTriggered.shouldRun) {
       yield { type: "content", content: `\n> [verify-fix] Round ${round}: re-verify passed.\n` };

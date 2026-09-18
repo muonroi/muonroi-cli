@@ -15,6 +15,7 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import type { AdherenceRoundRecord, AdherenceStopReason } from "../product-loop/plan-adherence-review.js";
+import type { ProjectRegistrationCheckResult } from "../product-loop/project-registration-check.js";
 import type { SprintPlanArtifact } from "../product-loop/sprint-plan-artifact.js";
 import type {
   VerifyFixRoundRecord,
@@ -548,6 +549,85 @@ export async function readSprintVerifyFix(
     return await atomicReadJSON<SprintVerifyFixRecord>(sprintVerifyFixPath(flowDir, runId, sprintN));
   } catch (err) {
     logger.error("orchestrator", "[verify-fix] could not parse the verify-fix loop record", {
+      flowDir,
+      runId,
+      sprintN,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+// ─── sprints/<n>-structure.json ─────────────────────────────────────────────
+
+/**
+ * S6 — `sprints/<n>-structure.json`: what `product-loop/project-registration-
+ * check.ts` found when it checked whether this sprint's newly created project
+ * manifests are registered in their ecosystem's solution/workspace index.
+ *
+ * Kept SEPARATE from `<n>-verify-fix.json` on purpose: that file's schema is
+ * owned by the S4 verify -> fix -> re-verify loop's own bookkeeping (rounds,
+ * stopReason, taskStatusRefresh); folding a second, independently-evolving
+ * concern into it would couple two artifacts that should stay separately
+ * inspectable and testable. `<n>-adherence.json` already sits beside
+ * `<n>-verify-fix.json` for the same reason — one focused artifact per
+ * concern, not one growing blob.
+ */
+export function sprintStructurePath(flowDir: string, runId: string, sprintN: number): string {
+  return path.join(sprintsDir(flowDir, runId), `${sprintN}-structure.json`);
+}
+
+/**
+ * Persist a sprint's project-registration check result. Best-effort and never
+ * throws: a write failure is logged with context (No Silent Catch) and the
+ * sprint loop continues — losing this audit trail must never break `/ideal`.
+ */
+export async function writeSprintStructure(
+  flowDir: string,
+  runId: string,
+  sprintN: number,
+  result: ProjectRegistrationCheckResult,
+): Promise<boolean> {
+  try {
+    const dir = sprintsDir(flowDir, runId);
+    await fs.mkdir(dir, { recursive: true });
+    await atomicWriteJSON(sprintStructurePath(flowDir, runId, sprintN), result);
+    return true;
+  } catch (err) {
+    logger.error(
+      "orchestrator",
+      "[project-registration] could not persist the project-registration check record — its findings are not auditable",
+      {
+        flowDir,
+        runId,
+        sprintN,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      },
+    );
+    return false;
+  }
+}
+
+/**
+ * Read a sprint's project-registration check record. Null when absent or
+ * unparseable.
+ *
+ * @testonly No shipped entry point reads this back yet — same status as
+ * `readSprintVerifyFix` above: S6's scope is persisting the record for a
+ * human/agent to inspect the JSON file directly. Kept next to
+ * `writeSprintStructure` so a future reporting surface has a ready round-trip
+ * to build on without duplicating the read path.
+ */
+export async function readSprintStructure(
+  flowDir: string,
+  runId: string,
+  sprintN: number,
+): Promise<ProjectRegistrationCheckResult | null> {
+  try {
+    return await atomicReadJSON<ProjectRegistrationCheckResult>(sprintStructurePath(flowDir, runId, sprintN));
+  } catch (err) {
+    logger.error("orchestrator", "[project-registration] could not parse the project-registration check record", {
       flowDir,
       runId,
       sprintN,

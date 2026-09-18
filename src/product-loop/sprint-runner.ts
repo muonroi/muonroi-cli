@@ -2275,6 +2275,10 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // pre-existing (run-introduced or unattributable, see describeBuildMustFix in
   // verify-baseline.ts) carries into the next sprint's focus the same way.
   let floorMustFixNote: string | undefined;
+  // S6 — the final project-registration-check result for this sprint (the
+  // last verify+floor pass the S4 loop reached), used to write
+  // `sprints/<n>-structure.json` and a note in `sprints/<n>-verify.md`.
+  let structureCheckFinal: import("./project-registration-check.js").ProjectRegistrationCheckResult | undefined;
   // Only pass tasks into a task-aware review when the artifact actually named
   // some (`source !== "none"`) — an empty/absent array falls the review back
   // to the legacy plan-text-only path, unchanged.
@@ -2471,6 +2475,10 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     let floorDelta: FloorDelta | undefined;
     let floorChecks: FloorCheck[] | undefined;
     let floorMustFixNoteLocal: string | undefined;
+    // S6 — set inside the project-registration check below; carried into the
+    // returned VerifyPassOutcome so the verify-fix loop can trigger on it even
+    // when the floor (above) passed.
+    let structureCheckResult: import("./project-registration-check.js").ProjectRegistrationCheckResult | undefined;
     if (verifyVerdict === "PASS" || verifyVerdict === "UNKNOWN") {
       const verdictBeforeFloor = verifyVerdict;
       try {
@@ -2563,10 +2571,87 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       }
     }
 
+    // ── S6 — project registration check ──────────────────────────────────
+    // Runs UNCONDITIONALLY — every path through this routine, not just
+    // `verifyVerdict === "PASS" || "UNKNOWN"` and not gated on the floor
+    // above. This was the acceptance-review's blocker #1: in run
+    // `mu54vrme4c87` SPRINT 1 was itself a FAIL, which is exactly the case
+    // this check exists for — a check nested inside the PASS/UNKNOWN branch
+    // never ran for it. The check is a `git status`/`git diff` + a few file
+    // reads (no build, no test), so paying for it on a FAIL/ERROR/skip-verify
+    // pass costs nothing material, and skip-verify in particular is the ONE
+    // path where NOTHING else validated the tree — the structural fact is
+    // more worth knowing there, not less. It never rewrites `verifyVerdict`
+    // or `floorDelta` (done-gate math and the floor's own pass/fail stay
+    // exactly as computed above); it only adds a must-fix note the verify-fix
+    // loop can act on, the same way `describeBuildMustFix` does for a
+    // run-introduced build break.
+    try {
+      const { checkProjectRegistration, formatProjectRegistrationMustFix, hasProjectRegistrationViolations } =
+        await import("./project-registration-check.js");
+      const { verifyBaselinePath: baselinePathOf } = await import("./verify-baseline.js");
+      const baselinePath = baselinePathOf(ctx.flowDir, ctx.runId);
+      let baselineRaw: string | null;
+      try {
+        baselineRaw = await readFile(baselinePath, "utf8");
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        baselineRaw = null;
+        // ENOENT (no baseline captured yet, e.g. baseline capture disabled or
+        // this is the very first pass before it was written) is the expected
+        // steady-state case for a fair share of runs — logging it at error
+        // level would be noise on every such sprint. Anything else (EACCES,
+        // a transient FS error, …) is unexpected and gets logged.
+        if (code === "ENOENT") {
+          logger.debug(
+            "orchestrator",
+            `[project-registration] no baseline at ${baselinePath} — using git status fallback`,
+            { operation: "checkProjectRegistration", sprintN, runId: ctx.runId },
+          );
+        } else {
+          console.error(
+            `[sprint-runner] could not read verify-baseline.json for structure check (sprint ${sprintN}, run ${ctx.runId}): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      const parsedBaseline = baselineRaw
+        ? ((): import("./verify-baseline.js").VerifyBaseline | null => {
+            try {
+              return JSON.parse(baselineRaw) as import("./verify-baseline.js").VerifyBaseline;
+            } catch (err) {
+              console.error(
+                `[sprint-runner] verify-baseline.json parse failed for structure check (sprint ${sprintN}, run ${ctx.runId}): ${err instanceof Error ? err.message : String(err)}`,
+              );
+              return null;
+            }
+          })()
+        : null;
+      structureCheckResult = await checkProjectRegistration({ cwd, baseline: parsedBaseline });
+      if (hasProjectRegistrationViolations(structureCheckResult)) {
+        const structureMustFix = formatProjectRegistrationMustFix(structureCheckResult);
+        if (structureMustFix) {
+          floorMustFixNoteLocal = floorMustFixNoteLocal
+            ? `${floorMustFixNoteLocal}\n${structureMustFix}`
+            : structureMustFix;
+        }
+        yield {
+          type: "content",
+          content: `\n> [project-registration] Sprint ${sprintN}: a new project is not registered in its solution.\n${structureMustFix ?? ""}\n`,
+        };
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[sprint-runner] project-registration check failed (sprint ${sprintN}, run ${ctx.runId}): ${message}`,
+        { stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined },
+      );
+    }
+
     return {
       verifyResult,
       verifyVerdict,
       recipeFromVerify,
+      structureCheck: structureCheckResult,
       floorDelta,
       floorChecks,
       floorMustFixNote: floorMustFixNoteLocal,
@@ -2578,6 +2663,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   let verifyVerdict = initialVerifyPass.verifyVerdict;
   let recipeFromVerify = initialVerifyPass.recipeFromVerify;
   if (initialVerifyPass.floorMustFixNote) floorMustFixNote = initialVerifyPass.floorMustFixNote;
+  if (initialVerifyPass.structureCheck) structureCheckFinal = initialVerifyPass.structureCheck;
 
   // ── S4 — bounded verify -> fix -> re-verify loop ─────────────────────────
   // A FAIL used to go straight to judgment, and the NEXT sprint re-planned from
@@ -2608,6 +2694,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         floorDelta: initialVerifyPass.floorDelta,
         floorChecks: initialVerifyPass.floorChecks,
         floorMustFixNote: initialVerifyPass.floorMustFixNote,
+        structureCheck: initialVerifyPass.structureCheck,
       },
       runVerifyPass: (roundLabel) => runVerifyAndFloorPass(roundLabel),
       // S4 fix — this was previously never wired, so nothing could stop the
@@ -2647,6 +2734,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     verifyVerdict = fixLoop.final.verifyVerdict;
     recipeFromVerify = fixLoop.final.recipeFromVerify;
     if (fixLoop.final.floorMustFixNote) floorMustFixNote = fixLoop.final.floorMustFixNote;
+    if (fixLoop.final.structureCheck) structureCheckFinal = fixLoop.final.structureCheck;
     verifyFixRecord = {
       version: 1,
       sprintN,
@@ -2688,6 +2776,26 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       errorMessage: message,
     };
     await writeSprintVerifyFix(ctx.flowDir, ctx.runId, verifyFixRecord);
+  }
+
+  // S6 — persist the project-registration check's final result as its own
+  // small artifact (`sprints/<n>-structure.json`), separate from
+  // `<n>-verify-fix.json`: that file's schema (SprintVerifyFixRecord) is owned
+  // by the S4 loop's own bookkeeping (rounds/stopReason/taskStatusRefresh), and
+  // folding a second, independently-evolving concern into it would couple two
+  // artifacts that should stay separately inspectable and testable — the same
+  // reasoning that already gives plan-adherence its own `<n>-adherence.json`
+  // beside it. Best-effort: a write failure is logged and never derails the
+  // sprint, same discipline as every other sprint artifact write.
+  if (structureCheckFinal) {
+    try {
+      const { writeSprintStructure } = await import("../flow/run-artifacts.js");
+      await writeSprintStructure(ctx.flowDir, ctx.runId, sprintN, structureCheckFinal);
+    } catch (err) {
+      console.error(
+        `[sprint-runner] could not persist the project-registration check record (sprint ${sprintN}, run ${ctx.runId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   // Tier 3 — self-verify gate. Only fires when recipe PASSED and the sprint
@@ -3156,11 +3264,24 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       verifyFixRecord?.enabled && verifyFixRecord.triggered
         ? `\nVerify-fix: ${verifyFixRecord.rounds.length} round(s), stopReason=${verifyFixRecord.stopReason}\n`
         : "";
+    // S6 — a project-registration note, only when there is something to say
+    // (see formatProjectRegistrationNote); a sprint that added no new project
+    // manifest keeps this file byte-identical to before S6.
+    let structureNote = "";
+    try {
+      const { formatProjectRegistrationNote } = await import("./project-registration-check.js");
+      const note = formatProjectRegistrationNote(structureCheckFinal);
+      if (note) structureNote = `\n${note}\n`;
+    } catch (err) {
+      console.error(
+        `[sprint-runner] could not format the project-registration note (sprint ${sprintN}, run ${ctx.runId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     await writeSprintVerify(
       ctx.flowDir,
       ctx.runId,
       sprintN,
-      `# Sprint ${sprintN} verify — ${verifyVerdict} (score ${verdict.score.toFixed(2)})\n${verifyFixNote}\n\`\`\`\n${verifyReport.slice(0, 8000)}\n\`\`\`\n`,
+      `# Sprint ${sprintN} verify — ${verifyVerdict} (score ${verdict.score.toFixed(2)})\n${verifyFixNote}${structureNote}\n\`\`\`\n${verifyReport.slice(0, 8000)}\n\`\`\`\n`,
     );
   } catch {
     /* non-critical — sprint artifacts are a review surface, never derail the loop */
