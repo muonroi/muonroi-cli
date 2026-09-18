@@ -5,6 +5,7 @@
 // invariants hold without running a real LLM turn. The full streaming
 // behaviour is covered by tests/harness/cost-leak-{f1,g1,b4,c3}.spec.ts.
 
+import { getEventListeners } from "node:events";
 import type { ModelMessage } from "ai";
 import { beforeAll, describe, expect, it } from "vitest";
 import { registerTestProviderFactories } from "../../__test-helpers__/catalog-fixtures.js";
@@ -295,5 +296,153 @@ describe("MessageProcessor — DI surface invariants", () => {
     // that the optional observer param does not throw at construction
     // / iteration setup.
     void observer;
+  });
+});
+
+// A1 — abort-controller ownership.
+//
+// `_buildMessageProcessorDeps()` (orchestrator.ts ~4058-4062) wires
+// `getAbortController`/`setAbortController` to ONE shared field
+// (`Agent.abortController`) — exactly what `Agent.abort()` (orchestrator.ts
+// ~995, `this.abortController?.abort()`) reads. `run()` used to always create
+// a brand-new AbortController on every call and unconditionally null it out
+// in its `finally` on completion, regardless of who "owns" the run. That
+// orphans a signal a caller captured earlier (e.g. `runProductLoopV1`'s S4
+// signal, orchestrator.ts ~2627-2631) the moment ANY nested `processMessage`
+// call completes — for example sprint-runner Step 4b's completeness re-check
+// calling `ctx.processMessageFn` (sprint-runner.ts ~2212-2240). After that,
+// Esc is a permanent no-op for the rest of the `/ideal` run.
+//
+// `makeControllerHolder()` below models that ONE shared field precisely —
+// both `getAbortController`/`setAbortController` read/write the same local
+// variable, just like the real wiring.
+describe("MessageProcessor — abort-controller ownership (A1)", () => {
+  beforeAll(async () => {
+    await loadCatalog();
+    registerTestProviderFactories();
+  });
+
+  function makeControllerHolder() {
+    let ctrl: AbortController | null = null;
+    return {
+      getAbortController: () => ctrl,
+      setAbortController: (c: AbortController | null) => {
+        ctrl = c;
+      },
+    };
+  }
+
+  function makeFastNestedDeps(
+    holder: ReturnType<typeof makeControllerHolder>,
+    onBatchTurn?: () => void | Promise<void>,
+  ) {
+    return makeDeps({
+      getAbortController: holder.getAbortController,
+      setAbortController: holder.setAbortController,
+      batchApi: true,
+      processMessageBatchTurn: async function* () {
+        await onBatchTurn?.();
+        yield { type: "done" };
+      },
+    });
+  }
+
+  it("BUG REPRO: an owner's captured signal survives a completed nested processMessage call, and a later abort() fires it", async () => {
+    const holder = makeControllerHolder();
+
+    // Owner takes the signal — mirrors `runProductLoopV1`'s
+    // `ownsController = !this.abortController` guard (orchestrator.ts:2627-2631).
+    const ownsController = !holder.getAbortController();
+    expect(ownsController).toBe(true);
+    holder.setAbortController(new AbortController());
+    const ownerSignal = holder.getAbortController()!.signal;
+    expect(ownerSignal.aborted).toBe(false);
+
+    // A nested processMessage call — e.g. sprint-runner Step 4b's
+    // completeness re-check calling `ctx.processMessageFn` — runs and
+    // completes, sharing the SAME holder `_buildMessageProcessorDeps()` would.
+    const processor = new MessageProcessor(makeFastNestedDeps(holder));
+    for await (const _c of processor.run("nested turn", undefined)) {
+      /* drain */
+    }
+
+    // Owner calls abort() the way `Agent.abort()` does (Esc key).
+    holder.getAbortController()?.abort();
+
+    // The owner's ORIGINAL captured signal must fire.
+    expect(ownerSignal.aborted).toBe(true);
+  });
+
+  it("Esc during a plain chat turn still aborts (top-level / owning call)", async () => {
+    const holder = makeControllerHolder();
+    const processor = new MessageProcessor(makeFastNestedDeps(holder));
+    const iter = processor.run("hi", undefined);
+
+    // Advance to the first yielded chunk — the controller must already exist
+    // by then, and the turn must still be in flight (not yet in `finally`).
+    await iter.next();
+    const signal = holder.getAbortController()?.signal;
+    expect(signal).toBeDefined();
+
+    holder.getAbortController()?.abort();
+    expect(signal?.aborted).toBe(true);
+
+    for await (const _c of iter) {
+      /* drain remainder so the generator's finally block runs cleanly */
+    }
+  });
+
+  it("Esc during a nested call aborts both the owner and the nested run (same signal object, not a copy)", async () => {
+    const holder = makeControllerHolder();
+    holder.setAbortController(new AbortController());
+    const ownerController = holder.getAbortController()!;
+
+    let observedInsideNested: boolean | undefined;
+    const deps = makeFastNestedDeps(holder, () => {
+      // Simulate Esc firing WHILE the nested call is in flight.
+      ownerController.abort();
+      observedInsideNested = deps.getAbortController()?.signal.aborted;
+    });
+    const processor = new MessageProcessor(deps);
+    for await (const _c of processor.run("nested turn", undefined)) {
+      /* drain */
+    }
+
+    expect(observedInsideNested).toBe(true);
+    expect(ownerController.signal.aborted).toBe(true);
+  });
+
+  it("the nested call completing does not abort the owner, nor clear the owner's controller", async () => {
+    const holder = makeControllerHolder();
+    holder.setAbortController(new AbortController());
+    const ownerController = holder.getAbortController()!;
+
+    const processor = new MessageProcessor(makeFastNestedDeps(holder));
+    for await (const _c of processor.run("nested turn", undefined)) {
+      /* drain */
+    }
+
+    expect(ownerController.signal.aborted).toBe(false);
+    // The owner's controller must still be the SAME live object — a nested
+    // call must never null it out from under the still-running owner.
+    expect(holder.getAbortController()).toBe(ownerController);
+  });
+
+  it("no listener leak: many completed nested calls leave 0 'abort' listeners on the owner's long-lived signal", async () => {
+    const holder = makeControllerHolder();
+    holder.setAbortController(new AbortController());
+    const ownerController = holder.getAbortController()!;
+
+    for (let i = 0; i < 25; i++) {
+      const processor = new MessageProcessor(makeFastNestedDeps(holder));
+      for await (const _c of processor.run(`nested turn ${i}`, undefined)) {
+        /* drain */
+      }
+    }
+
+    // Each nested run() attaches (and must detach) its own P0 "aborter"
+    // listener on the owner's shared signal — 25 completed nested calls must
+    // leave 0 behind, not 25.
+    expect(getEventListeners(ownerController.signal, "abort").length).toBe(0);
   });
 });

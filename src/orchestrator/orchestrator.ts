@@ -4508,6 +4508,25 @@ export class Agent {
     return null;
   }
 
+  // A1 audit (2026-09-18): this method unconditionally creates AND unconditionally
+  // nulls `this.abortController` — the same defect class fixed in
+  // message-processor.ts's `run()` and tool-engine.ts's `executeToolEngine()`
+  // (both now guard on an `ownsController` flag so a nested call never
+  // replaces/clears an owner's controller). It is left AS-IS here because,
+  // verified by a repo-wide search, `runVerify(` has ZERO call sites anywhere
+  // in this repository outside its own definition — the `/verify` slash name
+  // is reserved in src/ui/app.tsx's command list but nothing dispatches to
+  // this method, and both the sprint-runner verify stage
+  // (`runVerifyWithWatchdog` → `runVerifyOrchestration` directly, its OWN local
+  // `AbortController`) and the `/verify` CLI path go straight to
+  // `runVerifyOrchestration` without ever going through `Agent.runVerify()`.
+  // `continueAsCouncil`'s regression test (src/scaffold/__tests__/continue-as-council.spec.ts)
+  // independently confirms this method was deliberately severed from that
+  // caller to avoid re-entering CB-3. INVARIANT: if this method is ever wired
+  // up as a nested call under an owned run (e.g. called from within
+  // `runProductLoopV1`/`processMessage`), it MUST adopt the same
+  // `ownsController` guard used in message-processor.ts/tool-engine.ts before
+  // that wiring ships — otherwise it will orphan the owner's abort signal.
   async runVerify(onProgress?: (detail: string) => void, abortSignal?: AbortSignal): Promise<ToolResult> {
     this.abortController = new AbortController();
     const signal = abortSignal ?? this.abortController.signal;

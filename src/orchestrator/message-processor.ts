@@ -552,24 +552,41 @@ export class MessageProcessor {
     images?: Array<{ path: string; mediaType: string; base64: string }>,
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const deps = this.deps;
-    // TUI-04: prefer the external AbortContext (from SIGINT handler) so that
-    // Ctrl+C mid-tool-call triggers a single, unified abort across all I/O.
-    // If no external context, fall back to creating a local AbortController.
-    if (deps.externalAbortContext) {
-      // Wrap the external signal in a local controller so existing cleanup
-      // paths (setAbortController(null)) still work without side-effects.
-      const ctrl = new AbortController();
-      deps.setAbortController(ctrl);
-      // Forward external abort to the local controller.
-      deps.externalAbortContext.signal.addEventListener(
-        "abort",
-        () => {
-          deps.getAbortController()?.abort(deps.externalAbortContext?.reason());
-        },
-        { once: true },
-      );
-    } else {
-      deps.setAbortController(new AbortController());
+    // A1 fix: mirror the existing `ownsController` pattern (orchestrator.ts
+    // runCouncilV2 ~2353, runProductLoopV1 ~2627). If `deps.getAbortController()`
+    // already holds a controller, this `run()` call is NESTED inside an
+    // already-owned run — e.g. sprint-runner Step 4b's completeness re-check
+    // calling `ctx.processMessageFn`, which resolves to `Agent.processMessage`
+    // → `new MessageProcessor(...).run()`. Pre-fix, this branch unconditionally
+    // created a brand-new AbortController and overwrote the owner's, then the
+    // `finally` below nulled it out on completion regardless of ownership —
+    // orphaning the owner's captured signal so a later `abort()` (Esc) became
+    // a permanent no-op for the rest of the run. Reusing the owner's controller
+    // verbatim means aborting the owner also aborts this nested call (same
+    // signal object, no extra wiring needed), and this call's own completion
+    // never touches the owner's controller.
+    const existingController = deps.getAbortController();
+    const ownsController = !existingController;
+    if (ownsController) {
+      // TUI-04: prefer the external AbortContext (from SIGINT handler) so that
+      // Ctrl+C mid-tool-call triggers a single, unified abort across all I/O.
+      // If no external context, fall back to creating a local AbortController.
+      if (deps.externalAbortContext) {
+        // Wrap the external signal in a local controller so existing cleanup
+        // paths (setAbortController(null)) still work without side-effects.
+        const ctrl = new AbortController();
+        deps.setAbortController(ctrl);
+        // Forward external abort to the local controller.
+        deps.externalAbortContext.signal.addEventListener(
+          "abort",
+          () => {
+            deps.getAbortController()?.abort(deps.externalAbortContext?.reason());
+          },
+          { once: true },
+        );
+      } else {
+        deps.setAbortController(new AbortController());
+      }
     }
     const signal = deps.getAbortController()!.signal;
     deps.emitSubagentStatus(null);
@@ -623,54 +640,58 @@ export class MessageProcessor {
     }
 
     // P0 native observation: AbortSignal → fire user-veto for any in-flight
-    // batch tools that had warnings. Listener attaches here and self-removes
-    // after fire so it can't double-fire on later aborts in the same turn.
-    {
-      const aborter = () => {
-        try {
-          // P1 Item 3 wiring: mark current phase aborted so the next setPhase
-          // call drains an "abandoned" outcome.
-          phaseTracker.markAborted(
-            deps.getAbortController()?.signal.reason ? String(deps.getAbortController()!.signal.reason) : undefined,
-          );
-        } catch {
-          /* fail-open */
-        }
-        try {
-          const det = getMistakeDetector();
-          const events = det.detectAbort(
-            deps.getAbortController()?.signal.reason ? String(deps.getAbortController()!.signal.reason) : undefined,
-          );
-          if (events.length === 0) return;
-          const cwd = deps.bash.getCwd();
-          const tenantId = getTenantIdForVeto();
-          void buildScopeForVeto({ cwd })
-            .then(async (scope) => {
-              const { getDefaultEEClient } = await import("../ee/intercept.js");
-              for (const ev of events) {
-                void getDefaultEEClient()
-                  .posttool({
-                    toolName: ev.toolName,
-                    toolInput: ev.toolInput,
-                    outcome: { success: false, mistakeKind: ev.kind, evidence: ev.evidence },
-                    cwd,
-                    tenantId,
-                    scope,
-                  })
-                  .catch(() => {
-                    /* fire-and-forget */
-                  });
-              }
-            })
-            .catch(() => {
-              /* fire-and-forget */
-            });
-        } catch {
-          /* fail-open */
-        }
-      };
-      signal.addEventListener("abort", aborter, { once: true });
-    }
+    // batch tools that had warnings. Listener self-removes after fire so it
+    // can't double-fire on later aborts in the same turn. A1: `aborter` is
+    // declared at function scope (not block-scoped) and explicitly removed in
+    // the `finally` below — needed because `signal` may now be the OWNER's
+    // long-lived controller (nested-call reuse, see above), and without this
+    // cleanup every nested `processMessage` call would leak one more listener
+    // onto that shared, long-lived signal instead of onto its own short-lived,
+    // GC'd controller.
+    const aborter = () => {
+      try {
+        // P1 Item 3 wiring: mark current phase aborted so the next setPhase
+        // call drains an "abandoned" outcome.
+        phaseTracker.markAborted(
+          deps.getAbortController()?.signal.reason ? String(deps.getAbortController()!.signal.reason) : undefined,
+        );
+      } catch {
+        /* fail-open */
+      }
+      try {
+        const det = getMistakeDetector();
+        const events = det.detectAbort(
+          deps.getAbortController()?.signal.reason ? String(deps.getAbortController()!.signal.reason) : undefined,
+        );
+        if (events.length === 0) return;
+        const cwd = deps.bash.getCwd();
+        const tenantId = getTenantIdForVeto();
+        void buildScopeForVeto({ cwd })
+          .then(async (scope) => {
+            const { getDefaultEEClient } = await import("../ee/intercept.js");
+            for (const ev of events) {
+              void getDefaultEEClient()
+                .posttool({
+                  toolName: ev.toolName,
+                  toolInput: ev.toolInput,
+                  outcome: { success: false, mistakeKind: ev.kind, evidence: ev.evidence },
+                  cwd,
+                  tenantId,
+                  scope,
+                })
+                .catch(() => {
+                  /* fire-and-forget */
+                });
+            }
+          })
+          .catch(() => {
+            /* fire-and-forget */
+          });
+      } catch {
+        /* fail-open */
+      }
+    };
+    signal.addEventListener("abort", aborter, { once: true });
 
     // Phase 4 Plan 04 (4B) — parse `--budget-rounds N` flag BEFORE PIL so the
     // flag never reaches the model and never biases intent classification.
@@ -1431,6 +1452,7 @@ export class MessageProcessor {
     try {
       yield* executeToolEngine({
         deps,
+        ownsController,
         stepRouterPhase,
         phase2Runtime,
         runtime,
@@ -1476,7 +1498,14 @@ export class MessageProcessor {
         isChitchat,
       });
     } finally {
-      if (deps.getAbortController()?.signal === signal) {
+      // A1: always detach the P0 aborter — see the declaration site above for
+      // why this is mandatory now that `signal` can be a long-lived, reused
+      // owner signal rather than always a fresh, GC-eligible one.
+      signal.removeEventListener("abort", aborter);
+      // A1: only the call that OWNS the controller may clear it. A nested
+      // call (ownsController === false) reused the owner's controller and
+      // must never null it out from under the still-running owner.
+      if (ownsController && deps.getAbortController()?.signal === signal) {
         deps.setAbortController(null);
       }
       // Meter the C3 same-turn re-serve cost — the dedup deliberately re-bills

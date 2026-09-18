@@ -663,6 +663,11 @@ export interface ToolEngineArgs {
 export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<StreamChunk, void, unknown> {
   let {
     deps,
+    // A1: threaded from message-processor.ts's `run()` — true only when THIS
+    // call created/owns `deps`'s AbortController. A nested call (e.g. sprint-
+    // runner Step 4b's completeness re-check) reuses the owner's controller
+    // and must never null it out here — see the batchApi branch below.
+    ownsController,
     stepRouterPhase,
     phase2Runtime,
     runtime,
@@ -978,7 +983,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         signal,
       });
     } finally {
-      if (deps.getAbortController()?.signal === signal) {
+      // A1: only the call that OWNS the controller may clear it — mirrors the
+      // guard in message-processor.ts's `run()` finally. Without this, a
+      // nested processMessage call on the batchApi path (e.g. sprint-runner
+      // Step 4b) nulled the owner's controller here, before control ever
+      // returned to run()'s own (already ownsController-guarded) finally.
+      if (ownsController && deps.getAbortController()?.signal === signal) {
         deps.setAbortController(null);
       }
     }
