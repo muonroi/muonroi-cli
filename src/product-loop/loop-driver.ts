@@ -18,7 +18,8 @@ import { getDefaultEEClient } from "../ee/intercept.js";
 import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import { ensureRunScoped } from "../flow/hierarchy.js";
-import { renderResumeDigest, writeContextDoc, writeResearchDoc } from "../flow/run-artifacts.js";
+import { renderResumeDigest, writeContextDoc, writeResearchDoc, writeSpecLayoutCheck } from "../flow/run-artifacts.js";
+import { DEFAULT_TOKEN_BUDGET, truncateToBudget } from "../pil/budget.js";
 import { logInteraction } from "../storage/index.js";
 import type { CouncilInfoCard, StreamChunk } from "../types/index.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
@@ -28,9 +29,11 @@ import { type DiscoveryResult, discoverProject } from "./discover.js";
 import { formatProjectContextForPrompt } from "./discovery-context-format.js";
 import { readProjectContext } from "./discovery-persistence.js";
 import { clarifiedSpecFromContext, runGatherPhase } from "./gather.js";
+import { formatLayoutConvention, type LayoutConvention, scanLayoutConvention } from "./layout-convention.js";
 import { recordPhaseEnd, recordPhaseStart } from "./phase-budget.js";
 import { additionalPrefills, auditAsContextBlock, auditRepo, type RepoAudit } from "./repo-audit.js";
 import { SEED_DIMENSIONS } from "./seed-questions.js";
+import { checkSpecLayout } from "./spec-layout-check.js";
 import { deriveTasksFromSpec, writeTasks } from "./typed-artifacts.js";
 import type { DriverContext, DriverResult, ProductSpec, ProductStatusCardData, Stage } from "./types.js";
 import { enforceUndebatedCriteriaGate, undebatedHaltDetail } from "./undebated-criteria-gate.js";
@@ -1098,13 +1101,38 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           },
         } as StreamChunk;
 
+        // S7 — ground the spec in the repo's OWN observed layout, the same
+        // evidence sprint-runner.ts already gives the per-sprint planner
+        // (scanLayoutConvention, ~sprint-runner.ts:1677). Prompt text alone
+        // is not enough by itself (see spec-layout-check.ts for the
+        // deterministic post-check below), but the spec was being synthesized
+        // BLIND to this evidence at all — on a .NET repo whose real convention
+        // is `src/src/<Name>` + `src/tests/<Name>.Tests`, a spec proposing
+        // `src/<Name>` matches neither observed root.
+        // ADDITION ONLY, and only when a convention was actually observed:
+        // when `layoutConvention` is null the block below is "" and
+        // `synthesisPrompt` is byte-identical to before this change (pinned
+        // by scoping-layout-convention.test.ts).
+        let layoutConvention: LayoutConvention | null = null;
+        try {
+          layoutConvention = await scanLayoutConvention(ctx.cwd);
+        } catch (err) {
+          console.error(
+            `[loop-driver] layout-convention scan failed for "${ctx.cwd}": ${err instanceof Error ? err.message : String(err)}`,
+            err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+          );
+        }
+        const layoutConventionBlock = layoutConvention
+          ? `${truncateToBudget(formatLayoutConvention(layoutConvention), DEFAULT_TOKEN_BUDGET)}\nfolderStructure MUST follow this observed convention, not an invented path. If a solution/workspace index is listed above, a new project MUST be registered in it.`
+          : "";
+
         // Synthesize ProductSpec
         const synthesisPrompt = `Synthesize a ProductSpec JSON based on the following:
 Idea: ${ctx.idea}
 Clarified Spec: ${JSON.stringify(clarifiedSpec)}
 Debate Summary: ${resolvedDebateSummary || debateState.runningSummary}
 Research Findings: ${debateState.researchFindings ?? "N/A"}
-
+${layoutConventionBlock}
 Output ONLY a JSON object matching this interface:
 interface ProductSpec {
   idea: string;
@@ -1231,6 +1259,36 @@ interface ProductSpec {
 
         productSpec = parsedSpec.spec;
         productSpec.createdAt = new Date();
+
+        // S7 — deterministic post-check on the EMITTED spec. Prompt text
+        // alone already failed on this exact bug class (see spec-layout-
+        // check.ts), so validate the model's actual
+        // `folderStructure` against the same `layoutConvention` used to build
+        // the prompt above, rather than trusting the model followed it.
+        // Report-only against the spec text itself — roadmap.md is never
+        // rewritten. On "mismatch" the finding is persisted next to the spec
+        // (spec-layout-check.json) so sprint-runner.ts can fold a correction
+        // line into the per-sprint planner's context.
+        try {
+          const specLayoutResult = checkSpecLayout(productSpec.folderStructure, layoutConvention);
+          if (specLayoutResult.status === "mismatch") {
+            console.error(
+              `[loop-driver] spec-layout-check: folderStructure mismatched the observed layout convention (run ${ctx.runId})`,
+              specLayoutResult.findings,
+            );
+          }
+          logLoopEvent(ctx, "spec_layout_check", {
+            phase: "scoping",
+            status: specLayoutResult.status,
+            findingsCount: specLayoutResult.findings.length,
+          });
+          await writeSpecLayoutCheck(ctx.flowDir, ctx.runId, specLayoutResult);
+        } catch (err) {
+          console.error(
+            `[loop-driver] spec-layout-check failed for run ${ctx.runId}: ${err instanceof Error ? err.message : String(err)}`,
+            err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+          );
+        }
 
         // Write ProductSpec to roadmap.md (human-readable surface).
         const roadmapMap = (await readArtifact(runDir, "roadmap.md")) ?? { preamble: "", sections: new Map() };

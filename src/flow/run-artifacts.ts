@@ -16,6 +16,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import type { AdherenceRoundRecord, AdherenceStopReason } from "../product-loop/plan-adherence-review.js";
 import type { ProjectRegistrationCheckResult } from "../product-loop/project-registration-check.js";
+import type { SpecLayoutCheckResult } from "../product-loop/spec-layout-check.js";
 import type { SprintPlanArtifact } from "../product-loop/sprint-plan-artifact.js";
 import type {
   VerifyFixRoundRecord,
@@ -631,6 +632,78 @@ export async function readSprintStructure(
       flowDir,
       runId,
       sprintN,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+// ─── spec-layout-check.json ─────────────────────────────────────────────────
+
+/**
+ * S7 — `spec-layout-check.json`: what `product-loop/spec-layout-check.ts`
+ * found when it checked the scoping-synthesized ProductSpec's `folderStructure`
+ * against the repo's observed layout convention.
+ *
+ * Lives next to `roadmap.md` (both are per-RUN, not per-sprint — the spec is
+ * synthesized once at CB-1 scoping) rather than under `sprints/`, and as its
+ * own file rather than a `roadmap.md` section: `roadmap.md` is the
+ * human-readable surface for the spec itself, and folding a second,
+ * independently-evolving machine-readable concern into it would require
+ * re-parsing prose to recover a structured value that already exists in
+ * memory at write time — the same "own file per concern" reasoning that keeps
+ * `<n>-structure.json` (S6) separate from `<n>-verify-fix.json`.
+ */
+export function specLayoutCheckPath(flowDir: string, runId: string): string {
+  return path.join(runDirOf(flowDir, runId), "spec-layout-check.json");
+}
+
+/**
+ * Persist the scoping-time spec-layout check result. Best-effort and never
+ * throws: a write failure is logged with context (No Silent Catch) and
+ * scoping continues — losing this audit trail must never block `/ideal`.
+ */
+export async function writeSpecLayoutCheck(
+  flowDir: string,
+  runId: string,
+  result: SpecLayoutCheckResult,
+): Promise<boolean> {
+  try {
+    const dir = runDirOf(flowDir, runId);
+    await fs.mkdir(dir, { recursive: true });
+    await atomicWriteJSON(specLayoutCheckPath(flowDir, runId), result);
+    return true;
+  } catch (err) {
+    logger.error(
+      "orchestrator",
+      "[spec-layout-check] could not persist the spec-layout check record — its findings are not auditable",
+      {
+        flowDir,
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      },
+    );
+    return false;
+  }
+}
+
+/**
+ * Read the spec-layout check record. Null when absent (the common case — most
+ * runs never hit `"mismatch"`) or unparseable. Consumed by `sprint-runner.ts`
+ * to append a correction line to the per-sprint planning council's context
+ * when the scoping spec mismatched the repo's observed layout.
+ */
+export async function readSpecLayoutCheck(flowDir: string, runId: string): Promise<SpecLayoutCheckResult | null> {
+  try {
+    // atomicReadJSON already resolves a missing file to null (the expected
+    // steady state — most runs never hit "mismatch") without throwing, so
+    // anything caught here is a real problem (EACCES, a parse failure).
+    return await atomicReadJSON<SpecLayoutCheckResult>(specLayoutCheckPath(flowDir, runId));
+  } catch (err) {
+    logger.error("orchestrator", "[spec-layout-check] could not parse the spec-layout check record", {
+      flowDir,
+      runId,
       error: err instanceof Error ? err.message : String(err),
     });
     return null;

@@ -2,12 +2,14 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SpecLayoutCheckResult } from "../../product-loop/spec-layout-check.js";
 import type { SprintPlanArtifact } from "../../product-loop/sprint-plan-artifact.js";
 import { logger } from "../../utils/logger.js";
 import {
   parseResumeDigest,
   type ResumeDigest,
   readRunDoc,
+  readSpecLayoutCheck,
   readSprintAdherence,
   readSprintOutcomes,
   readSprintPlanArtifact,
@@ -17,6 +19,7 @@ import {
   type SprintVerifyFixRecord,
   writeContextDoc,
   writeResearchDoc,
+  writeSpecLayoutCheck,
   writeSprintAdherence,
   writeSprintOutcome,
   writeSprintPlanArtifact,
@@ -377,6 +380,77 @@ describe("run-artifacts", () => {
       } finally {
         errSpy.mockRestore();
         await fs.rm(path.join(runDir, "sprints"), { force: true });
+      }
+    });
+  });
+
+  describe("spec-layout-check — spec-layout-check.json (S7)", () => {
+    function mismatchResult(): SpecLayoutCheckResult {
+      return {
+        status: "mismatch",
+        findings: [{ path: "src/Acme.CodeStandards", expectedRoot: "src/src", kind: "project" }],
+      };
+    }
+
+    it("round-trip: the reader returns exactly what the writer wrote", async () => {
+      const result = mismatchResult();
+      const wrote = await writeSpecLayoutCheck(flowDir, runId, result);
+      expect(wrote).toBe(true);
+
+      const readBack = await readSpecLayoutCheck(flowDir, runId);
+      expect(readBack).toEqual(result);
+    });
+
+    it("round-trips an ok status with no findings", async () => {
+      const result: SpecLayoutCheckResult = { status: "ok", findings: [] };
+      await writeSpecLayoutCheck(flowDir, runId, result);
+      const readBack = await readSpecLayoutCheck(flowDir, runId);
+      expect(readBack).toEqual(result);
+    });
+
+    it("readSpecLayoutCheck returns null when the file is absent", async () => {
+      expect(await readSpecLayoutCheck(flowDir, runId)).toBeNull();
+    });
+
+    it("a write failure is logged and returns false without throwing", async () => {
+      // Same real-I/O-error technique as the verify-fix store above, mirrored:
+      // put a DIRECTORY where the writer expects to rename a FILE into place.
+      const runDir = path.join(flowDir, "runs", runId);
+      await fs.mkdir(runDir, { recursive: true });
+      await fs.mkdir(path.join(runDir, "spec-layout-check.json"), { recursive: true });
+
+      const errSpy = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+      try {
+        const wrote = await writeSpecLayoutCheck(flowDir, runId, mismatchResult());
+        expect(wrote).toBe(false);
+        expect(errSpy).toHaveBeenCalledWith(
+          "orchestrator",
+          expect.stringContaining("[spec-layout-check]"),
+          expect.objectContaining({ runId }),
+        );
+      } finally {
+        errSpy.mockRestore();
+        await fs.rm(path.join(runDir, "spec-layout-check.json"), { recursive: true, force: true });
+      }
+    });
+
+    it("a read failure (unparseable JSON) is logged and returns null without throwing", async () => {
+      const runDir = path.join(flowDir, "runs", runId);
+      await fs.mkdir(runDir, { recursive: true });
+      await fs.writeFile(path.join(runDir, "spec-layout-check.json"), "{not json", "utf8");
+
+      const errSpy = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+      try {
+        const readBack = await readSpecLayoutCheck(flowDir, runId);
+        expect(readBack).toBeNull();
+        expect(errSpy).toHaveBeenCalledWith(
+          "orchestrator",
+          expect.stringContaining("[spec-layout-check]"),
+          expect.objectContaining({ runId }),
+        );
+      } finally {
+        errSpy.mockRestore();
+        await fs.rm(path.join(runDir, "spec-layout-check.json"), { force: true });
       }
     });
   });

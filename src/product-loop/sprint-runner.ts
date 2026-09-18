@@ -1683,6 +1683,27 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     );
   }
 
+  // S7 — a correction line when the scoping-synthesized spec's
+  // folderStructure mismatched the repo's observed layout convention. The
+  // check itself ran once, at CB-1 scoping (spec-layout-check.ts), against
+  // the ProductSpec text; it is read back here rather than re-derived so this
+  // never drifts from what scoping actually recorded. Best-effort: absence
+  // (the common case — most runs never hit "mismatch") or a read failure
+  // contributes nothing to the planner's context.
+  let specLayoutCorrection = "";
+  try {
+    const { readSpecLayoutCheck } = await import("../flow/run-artifacts.js");
+    const { formatSpecLayoutCorrection } = await import("./spec-layout-check.js");
+    const specLayoutResult = await readSpecLayoutCheck(ctx.flowDir, ctx.runId);
+    const correction = specLayoutResult ? formatSpecLayoutCorrection(specLayoutResult) : null;
+    if (correction) specLayoutCorrection = `\n${correction}\n`;
+  } catch (err) {
+    console.error(
+      `[sprint-runner] spec-layout-check read failed for run "${ctx.runId}": ${(err as Error)?.message}`,
+      (err as Error)?.stack?.split("\n").slice(0, 3),
+    );
+  }
+
   const councilTopic =
     `Plan sprint ${sprintN} for product: ${productSpec.idea}\n\n` +
     `Persona: ${productSpec.persona}\n` +
@@ -1691,6 +1712,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     `IO contract: ${productSpec.ioContract}\n` +
     `Folder structure: ${productSpec.folderStructure}\n` +
     layoutContext +
+    specLayoutCorrection +
     `${carryOverContext}${focusContext}${assumptionContext}${projectContextStr}${backlogAnchor}\n` +
     `Goal: produce concrete edits and verifications that move the criteria toward "met".`;
 
