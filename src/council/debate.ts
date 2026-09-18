@@ -1219,6 +1219,33 @@ export async function* runDebate(
     kindCapped,
   } = resolveDebateRoundBudget(planKind, debatePlan?.plannedRounds);
   let maxRounds = plannedMaxRounds;
+  // C2 — per-round item scoping (CouncilConfig.perRoundFocus). Resolved right
+  // after the normal round-budget resolution and BEFORE anything below reads
+  // `maxRounds`, so the no-override path (field absent, or every entry
+  // filtered out) never touches it: `perRoundFocus.length` stays 0 and every
+  // line below this block runs byte-identical to today. An entry whose text
+  // is empty/whitespace-only is dropped here (skipped, with a status note
+  // below) rather than sent as an empty-focus round.
+  const rawPerRoundFocus = config.perRoundFocus ?? [];
+  const skippedFocusIds: string[] = [];
+  const perRoundFocus = rawPerRoundFocus.filter((f) => {
+    if (f.text.trim().length > 0) return true;
+    skippedFocusIds.push(f.id);
+    return false;
+  });
+  // More items than this debate's round ceiling allows: argue the first
+  // `effectiveCeiling` items and drop the rest (with a status note below)
+  // rather than silently ignore the ceiling this debate otherwise enforces.
+  const perRoundFocusTruncated = perRoundFocus.length > effectiveCeiling;
+  // roundEmergent below reads this instead of `plannedMaxRounds` so a scoped
+  // debate's own rounds are never misreported as "beyond the planned budget"
+  // — only a round past the scoped item list (e.g. a leader-granted
+  // extension) counts as emergent, same as the unscoped meaning of the flag.
+  let effectivePlannedRounds = plannedMaxRounds;
+  if (perRoundFocus.length > 0) {
+    maxRounds = Math.min(perRoundFocus.length, effectiveCeiling);
+    effectivePlannedRounds = maxRounds;
+  }
   const ceilingNote = kindCapped
     ? ` (hard ceiling ${effectiveCeiling} for ${planKind})`
     : Number.isFinite(absoluteMaxRounds())
@@ -1244,6 +1271,20 @@ export async function* runDebate(
           : undefined,
     },
   };
+  if (skippedFocusIds.length > 0) {
+    yield {
+      type: "content",
+      content: `\n> Skipping empty-focus item${skippedFocusIds.length === 1 ? "" : "s"} (${skippedFocusIds.join(", ")}) — no text to argue.\n`,
+    };
+  }
+  if (perRoundFocusTruncated) {
+    yield {
+      type: "content",
+      content:
+        `\n> ${perRoundFocus.length} items selected but this debate's round ceiling allows only ${maxRounds} — ` +
+        `arguing the first ${maxRounds}.\n`,
+    };
+  }
 
   // Pairs that fail twice in a row are dropped from subsequent rounds so the
   // remaining participants don't keep retrying a broken model and inflating
@@ -1425,8 +1466,13 @@ export async function* runDebate(
     // slot + sigil by that key, so any divergence would paint a matrix column in
     // a different color from the speaker bar it refers to.
     const stanceRoster = active.map((p) => p.stance?.name ?? p.role);
-    const roundEmergent = round > plannedMaxRounds;
+    const roundEmergent = round > effectivePlannedRounds;
     const roundTopic = nextTopic;
+    // C2 — this round's item scoping, when the debate was scoped
+    // (CouncilConfig.perRoundFocus). undefined once every entry has already
+    // been argued (e.g. the leader extended past the scoped rounds) — those
+    // rounds fall back to arguing the whole plan, same as an unscoped debate.
+    const roundItemFocus = perRoundFocus[round - 1];
     const roundRec = (
       state: "running" | "done",
       patch: Partial<import("../types/index.js").CouncilRoundRecord> = {},
@@ -1436,6 +1482,7 @@ export async function* runDebate(
         round,
         state,
         topic: roundTopic,
+        itemId: roundItemFocus?.id,
         participants: roundParticipants,
         pairCount: pairs.length,
         // Each surviving pair exchanges twice (a→b, then b→a), so this is the
@@ -1523,6 +1570,7 @@ export async function* runDebate(
                   partnerPosition: b.position,
                   spec,
                   language: debateLanguage,
+                  focus: roundItemFocus?.text,
                 });
                 const aTraces: string[] = [];
                 const aResult = await debateWithRetry(
@@ -1559,6 +1607,7 @@ export async function* runDebate(
                   partnerPosition: aResponse,
                   spec,
                   language: debateLanguage,
+                  focus: roundItemFocus?.text,
                 });
                 const bTraces: string[] = [];
                 const bResult = await debateWithRetry(
@@ -1603,6 +1652,7 @@ export async function* runDebate(
                   language: debateLanguage,
                   steering: steerBlock || undefined,
                   leaderDirective: leaderDirectiveBlock || undefined,
+                  focus: roundItemFocus?.text,
                 });
                 const aTraces: string[] = [];
                 const aResult = await debateWithRetry(
@@ -1643,6 +1693,7 @@ export async function* runDebate(
                   language: debateLanguage,
                   steering: steerBlock || undefined,
                   leaderDirective: leaderDirectiveBlock || undefined,
+                  focus: roundItemFocus?.text,
                 });
                 const bTraces: string[] = [];
                 const bResult = await debateWithRetry(
@@ -1898,6 +1949,7 @@ export async function* runDebate(
       stanceRoster,
       (usage, modelUsed) => panelLedger.recordUsage(LEADER_LEDGER_ROLE, modelUsed, usage, `evaluate r${round}`),
       priorVerdicts,
+      roundItemFocus?.text,
     );
     panelLedger.recordTurn(LEADER_LEDGER_ROLE, leaderModelId);
     // Eval robustness: the leader's cost-tier eval model can be on a flaky proxy
@@ -1935,6 +1987,7 @@ export async function* runDebate(
             stanceRoster,
             (usage, modelUsed) => panelLedger.recordUsage(LEADER_LEDGER_ROLE, modelUsed, usage, `evaluate r${round}`),
             priorVerdicts,
+            roundItemFocus?.text,
           );
           if (evaluation) break;
         }
@@ -2715,6 +2768,12 @@ async function* evaluateDebate(
    * regress once the supporting exchange scrolled out of view.
    */
   priorVerdicts?: readonly LeaderPriorVerdict[],
+  /**
+   * C2 — this round's item-scoped focus text (`CouncilConfig.perRoundFocus`),
+   * when the debate was scoped to argue one item per round. Threaded straight
+   * to `buildLeaderEvaluationPrompt`'s own `focus` field.
+   */
+  itemFocusText?: string,
 ): AsyncGenerator<StreamChunk, LeaderEvaluation | null, unknown> {
   try {
     const { system, prompt } = buildLeaderEvaluationPrompt({
@@ -2724,6 +2783,7 @@ async function* evaluateDebate(
       language: debateLanguage,
       participants: participantRoles,
       priorVerdicts,
+      focus: itemFocusText,
     });
     const modelId = modelOverride ?? pickCouncilTaskModel("evaluate_round", leaderModelId, costAware);
     const raw = yield* tracedGenerate(llm, {

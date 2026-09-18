@@ -550,6 +550,25 @@ export type PostDebateActionId =
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
+/**
+ * C2 — one round's item-scoped focus (`CouncilConfig.perRoundFocus`). A
+ * caller normally builds `text` with `buildItemDebateTopic`
+ * (item-debate-topic.ts) from a C1-selected `DebatableItem`
+ * (product-loop/debatable-items.ts), but `runDebate` only needs this shape —
+ * it never imports the topic builder or the selector itself.
+ */
+export interface ItemDebateFocus {
+  /** Attributes the round record (`CouncilRoundRecord.itemId`) back to the
+   * selecting item — typically a `DebatableItem.id`. */
+  id: string;
+  /**
+   * The round's focus text, already bounded by the caller. Empty/whitespace-
+   * only → `runDebate` skips this entry (with a status note) rather than
+   * send an empty-focus round.
+   */
+  text: string;
+}
+
 export interface CouncilConfig {
   topic: string;
   conversationContext: string;
@@ -661,6 +680,28 @@ export interface CouncilConfig {
    * Optional: headless/direct callers/tests omit it and openings run unchanged.
    */
   stanceRecall?: (roles: string[], query: string) => Promise<Map<string, string>>;
+  /**
+   * C2 — per-round item scoping: let one debate argue ONE item per round
+   * instead of the whole plan every round, so per-item argument costs roughly
+   * one debate, not N debates. When set and non-empty (after `runDebate`
+   * drops any entry whose `text` is empty/whitespace-only — skipped with a
+   * status note, never sent as an empty prompt), round N argues
+   * `perRoundFocus[N-1]`'s text INSTEAD OF `debatePlan.plannedRounds`: the
+   * round count becomes this list's length, capped at the same round
+   * ceiling `resolveDebateRoundBudget` would otherwise apply (documented +
+   * tested at the cap). The debate's SHARED topic (`spec.problemStatement`)
+   * still appears in every prompt exactly as it does today — a per-round
+   * focus narrows what that round additionally argues, it never replaces or
+   * hides the plan. A round beyond this list's length (e.g. a leader-granted
+   * extension past every item) falls back to arguing the whole plan, same as
+   * an unscoped debate. Absent, or present but empty/entirely-empty-text →
+   * every prompt, round count and yield is byte-identical to the no-override
+   * path.
+   * @testonly — no production consumer yet; wired into a real `/ideal`
+   * sprint by a later slice, not C2 (see debatable-items.ts module doc for
+   * the same pattern).
+   */
+  perRoundFocus?: readonly ItemDebateFocus[];
 }
 
 // ── Persisted Council Memory ─────────────────────────────────────────────────

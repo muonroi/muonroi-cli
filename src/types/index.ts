@@ -465,6 +465,14 @@ export interface CouncilRoundRecord {
   state: "running" | "done";
   /** This round's focus, carried from the prior round's `nextRoundFocus`. */
   topic?: string;
+  /**
+   * C2 — the C1-selected item id this round argued (`DebatableItem.id`),
+   * when the debate was scoped to argue one item per round
+   * (`CouncilConfig.perRoundFocus`). Absent on an unscoped, whole-plan round,
+   * or on a round beyond the scoped item list (a leader-granted extension
+   * past every item falls back to arguing the whole plan).
+   */
+  itemId?: string;
   /** Role labels of the participants active this round. */
   participants: string[];
   /** Number of debate pairs exchanged this round. */

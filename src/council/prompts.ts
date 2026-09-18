@@ -460,6 +460,17 @@ export function buildResponsePrompt(ctx: {
   spec: ClarifiedSpec;
   /** Feature B — resolved council debate language (undefined → English). */
   language?: string;
+  /**
+   * C2 — this round's item-scoped focus text (see `CouncilConfig.perRoundFocus`
+   * / `buildItemDebateTopic`), when the debate was scoped to argue one item
+   * per round. Lives in the `prompt` tail, never `system` — round 1 only
+   * calls this builder once per pair, so there is no cache-prefix concern,
+   * but keeping the placement consistent with `buildFollowupPrompt` means a
+   * caller never has to remember which builder is cache-sensitive. Omitted →
+   * `prompt` is byte-identical to today (the shared topic in `system` above
+   * is unaffected either way).
+   */
+  focus?: string;
 }): { system: string; prompt: string } {
   const me = personaOf(ctx.speakerRole, ctx.speakerStance);
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
@@ -486,6 +497,7 @@ export function buildResponsePrompt(ctx: {
       `or any numeric counter referring to the discussion round in your output. ` +
       `The orchestrator already prints round headers above your response.`,
     prompt:
+      (ctx.focus ? `## This round's item focus\n${ctx.focus}\n\n` : "") +
       `Their analysis (${them.label}):\n${ctx.partnerPosition}\n\n` +
       `Your own analysis for context:\n${ctx.speakerPosition}`,
   };
@@ -529,6 +541,14 @@ export function buildFollowupPrompt(ctx: {
    * from the leader's.
    */
   leaderDirective?: string;
+  /**
+   * C2 — this round's item-scoped focus text (see `CouncilConfig.perRoundFocus`
+   * / `buildItemDebateTopic`), when the debate was scoped to argue one item
+   * per round. Tail-only, same reason as `steering`/`leaderDirective`: it
+   * changes every round and would otherwise bust the cacheable `system`
+   * prefix. Omitted → `prompt` is byte-identical to today.
+   */
+  focus?: string;
 }): { system: string; prompt: string } {
   const me = personaOf(ctx.speakerRole, ctx.speakerStance);
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
@@ -580,6 +600,7 @@ export function buildFollowupPrompt(ctx: {
       // partner's argument.
       (ctx.steering ? `${ctx.steering}\n\n` : "") +
       (ctx.leaderDirective ? `## Leader directive for this round\n${ctx.leaderDirective}\n\n` : "") +
+      (ctx.focus ? `## This round's item focus\n${ctx.focus}\n\n` : "") +
       (ctx.runningSummary ? `## Discussion State So Far\n${ctx.runningSummary}\n\n` : "") +
       (ctx.speakerLastPosition ? `Your previous position:\n${ctx.speakerLastPosition}\n\n` : "") +
       `Their latest (${them.label}):\n${ctx.partnerPosition}`,
@@ -644,6 +665,14 @@ export function buildLeaderEvaluationPrompt(ctx: {
    * legacy schema exactly as it was.
    */
   participants?: readonly string[];
+  /**
+   * C2 — this round's item-scoped focus text (see `CouncilConfig.perRoundFocus`
+   * / `buildItemDebateTopic`), when the debate was scoped to argue one item
+   * per round. Tail-only, same cache-prefix-stability reason as
+   * `priorVerdicts`/`exchangeLogs` below. Omitted → `prompt` is byte-identical
+   * to today.
+   */
+  focus?: string;
 }): {
   system: string;
   prompt: string;
@@ -735,6 +764,7 @@ export function buildLeaderEvaluationPrompt(ctx: {
     // stay byte-identical from round to round or the provider prompt cache misses
     // on every leader evaluation (the single largest non-panel cost of a run).
     prompt:
+      (ctx.focus ? `## This round's item focus\n${ctx.focus}\n\n` : "") +
       renderPriorVerdictBlock(ctx.round, ctx.priorVerdicts ?? []) +
       `## Debate (Round ${ctx.round})\n${ctx.exchangeLogs}`,
   };
