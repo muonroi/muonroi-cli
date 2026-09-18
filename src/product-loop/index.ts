@@ -1466,14 +1466,21 @@ async function* drainSprints(args: {
       };
     }
 
-    // Build continue-feedback for next iteration. The DoneVerdict is not
-    // surfaced from sprint-runner directly, but the iteration state encodes
-    // enough — derive a synthetic verdict from criteria counts.
+    // Build continue-feedback for next iteration. Prefer the detailed focus
+    // sprint-runner already built (`iter.nextFocus` — verify detail + cause,
+    // S5/S6 must-fix items, residual plan deviations, S3b unfinished tasks;
+    // see sprint-runner.ts Step 9) so the next sprint is not blind to WHY the
+    // previous one failed. Only fall back to the bare summary string when
+    // nextFocus is absent or empty — parity with the phase-orchestrated path
+    // (`carryOver: prevSprint?.nextFocus ? { focus: prevSprint.nextFocus } :
+    // undefined` above), which already threads nextFocus correctly.
     carryOver = {
       focus:
-        iter.lastVerifyResult === "PASS"
-          ? `improve criteria coverage: met=${iter.criteriaMet}, partial=${iter.criteriaPartial}, unmet=${iter.criteriaUnmet}`
-          : `fix verify failures (last result: ${iter.lastVerifyResult})`,
+        iter.nextFocus && iter.nextFocus.trim().length > 0
+          ? iter.nextFocus
+          : iter.lastVerifyResult === "PASS"
+            ? `improve criteria coverage: met=${iter.criteriaMet}, partial=${iter.criteriaPartial}, unmet=${iter.criteriaUnmet}`
+            : `fix verify failures (last result: ${iter.lastVerifyResult})`,
     };
 
     // The replacement for the removed sprint ceiling: sprints that stop moving the
