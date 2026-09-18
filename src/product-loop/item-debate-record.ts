@@ -25,8 +25,7 @@
  * `AdherenceRoundRecord` (this module's sibling shape) living in
  * `plan-adherence-review.ts` while its wrapper lives in run-artifacts.ts.
  *
- * @testonly — no production consumer yet; wired into a real per-item debate
- * by a later slice (see debatable-items.ts module doc for the same pattern).
+ * C5 — production caller: `product-loop/item-debate-runner.ts`.
  */
 
 import type { DebatableItem, DebatableItemKind, DebatableSignal } from "./debatable-items.js";
@@ -44,7 +43,6 @@ const ITEM_DEBATE_CHANGE_KINDS: readonly ItemDebateChangeKind[] = ["none", "crit
  * leader ruling, proposed-change text) — same order of magnitude as
  * `MAX_TASK_TEXT_CHARS` (sprint-plan-artifact.ts) and `MAX_DEVIATION_CHARS`
  * (plan-adherence-review.ts): enough to be useful, never a raw transcript.
- * @testonly — no production consumer yet; see module doc.
  */
 export const MAX_ITEM_DEBATE_TEXT_CHARS = 300;
 
@@ -52,7 +50,6 @@ export const MAX_ITEM_DEBATE_TEXT_CHARS = 300;
  * Per-speaker position bound — tighter than the record's other free text:
  * this is a ONE-LINE stance summary a caller derived from a turn, not a
  * quoted argument.
- * @testonly — no production consumer yet; see module doc.
  */
 export const MAX_POSITION_CHARS = 160;
 
@@ -60,7 +57,6 @@ export const MAX_POSITION_CHARS = 160;
  * At most this many per-speaker positions are kept. A debate panel is small
  * (2-4 seats plus a leader), so this is a safety bound against a caller
  * passing a whole transcript's worth of turns, not a realistic ceiling.
- * @testonly — no production consumer yet; see module doc.
  */
 export const MAX_POSITIONS = 8;
 
@@ -218,8 +214,6 @@ function parseLeaderRuling(raw: string | undefined): ParsedLeaderRuling {
  * plus the raw per-speaker positions and the leader's raw ruling text a
  * caller already has. Pure, deterministic, never throws — see module doc
  * for the parse-failure discipline.
- *
- * @testonly — no production consumer yet; see module doc.
  */
 export function buildSprintItemDebateItem(input: BuildSprintItemDebateItemInput): SprintItemDebateItemRecord {
   const { item, positions, leaderRulingRaw } = input;

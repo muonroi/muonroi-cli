@@ -697,9 +697,9 @@ export interface CouncilConfig {
    * an unscoped debate. Absent, or present but empty/entirely-empty-text →
    * every prompt, round count and yield is byte-identical to the no-override
    * path.
-   * @testonly — no production consumer yet; wired into a real `/ideal`
-   * sprint by a later slice, not C2 (see debatable-items.ts module doc for
-   * the same pattern).
+   *
+   * C5 — production caller: `product-loop/item-debate-runner.ts`, forwarded
+   * through `RunCouncilOptions.perRoundFocus` (`council/index.ts`).
    */
   perRoundFocus?: readonly ItemDebateFocus[];
 }

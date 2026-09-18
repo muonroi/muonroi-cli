@@ -37,8 +37,10 @@ import {
   readSprintPlanArtifact,
   renderResumeDigest,
   type SprintAdherenceRecord,
+  type SprintItemDebateRecord,
   type SprintVerifyFixRecord,
   writeSprintAdherence,
+  writeSprintItemDebate,
   writeSprintOutcome,
   writeSprintPlanArtifact,
   writeSprintVerify,
@@ -48,7 +50,7 @@ import { isContextRailEnabled } from "../gsd/flags.js";
 import { SPRINT_EXECUTION_MARKER } from "../pil/layer6-output.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { logInteraction, logUIInteraction } from "../storage/index.js";
-import type { StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
+import type { CouncilStanceRow, StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
 import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
@@ -72,6 +74,8 @@ import { evaluateDoneGate } from "./done-gate.js";
 import type { ContinueFeedback } from "./feedback-routing.js";
 import { buildContinueFeedback } from "./feedback-routing.js";
 import { idealTrace } from "./ideal-trace.js";
+import { applyItemDebateToPlanArtifact } from "./item-debate-apply.js";
+import { runItemDebate } from "./item-debate-runner.js";
 import { formatLayoutConvention, scanLayoutConvention } from "./layout-convention.js";
 import { type CollectedNestedTurn, collectNestedTurn, forwardNestedTurn } from "./nested-turn.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
@@ -97,6 +101,7 @@ import {
 } from "./sprint-plan-artifact.js";
 import { upsertSprint } from "./sprint-store.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
+import { readUndebatedGateRecord } from "./undebated-criteria-gate.js";
 import type { FloorDelta } from "./verify-baseline.js";
 import { loadVerifyFailureSignatures, recordVerifyFailureAndMaybePush } from "./verify-failure-tracking.js";
 import { runVerifyFixLoop, type VerifyPassOutcome } from "./verify-fix-loop.js";
@@ -3481,6 +3486,100 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     };
   }
 
+  // ── C5 — per-item debate: argue only the few plan items worth arguing ────
+  // Runs AFTER S4 (verify-fix, above) and after this sprint's verdict/outcome/
+  // criteria counts are already computed and durably written (Step 6-8 above,
+  // all before this line) — everything below reads `planArtifact` /
+  // `currentCriteria` / `verifyFixRecord` / `structureCheckFinal` but never
+  // touches `verdict`, `iter.score*`, `iter.criteria*`, or re-invokes
+  // `evaluateDoneGate` / `writeSprintOutcome`. A ruling can therefore only
+  // change the PLAN (this sprint's `<n>-plan.json`, folded in by C4) and the
+  // carry-over focus for the NEXT sprint — this sprint's own sealed verdict
+  // and outcome file are structurally out of reach from this point on.
+  //
+  // `planArtifact` null (no structured plan — `source: "none"`, e.g. this
+  // sprint's planSynthesis was pure unparsed prose) means C1 has no tasks to
+  // select from either way, so the block is skipped outright: no record, no
+  // model call, same as a disabled feature.
+  if (planArtifact) {
+    const itemDebateStartedAtIso = new Date().toISOString();
+    let itemDebateStanceRows: CouncilStanceRow[] | undefined;
+    try {
+      const undebatedRecord = await readUndebatedGateRecord(runDir);
+      itemDebateStanceRows = undebatedRecord?.stanceRows;
+    } catch (err) {
+      console.error(
+        `[sprint-runner] could not read undebated-criteria stance rows for item-debate (sprint ${sprintN}, run ${ctx.runId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    const itemDebateResult = yield* runItemDebate({
+      plan: planArtifact,
+      criteria: currentCriteria,
+      stanceRows: itemDebateStanceRows,
+      structureCheck: structureCheckFinal,
+      verifyFix: verifyFixRecord ? { triggered: verifyFixRecord.triggered } : undefined,
+      councilTopic,
+      sessionModelId: ctx.sessionModelId,
+      runId: ctx.runId,
+      cwd,
+      runDir,
+      llm: productLlm,
+      respondToQuestion: ctx.respondToQuestion,
+      respondToPreflight: ctx.respondToPreflight,
+      processMessageFn: ctx.processMessageFn ?? noopProcess,
+      abortSignal: ctx.abortSignal,
+    });
+
+    // `stopReason === "disabled"` means MUONROI_IDEAL_ITEM_DEBATE=0 — no
+    // record is written at all so a disabled sprint stays byte-identical to
+    // one that never had this feature (see item-debate-runner.ts doc).
+    if (itemDebateResult.stopReason !== "disabled") {
+      const itemDebateRecord: SprintItemDebateRecord = {
+        version: 1,
+        sprintN,
+        runId: ctx.runId,
+        enabled: itemDebateResult.triggered,
+        items: itemDebateResult.items,
+        stopReason: itemDebateResult.stopReason,
+        ...(itemDebateResult.leaderModelId ? { leaderModelId: itemDebateResult.leaderModelId } : {}),
+        startedAt: itemDebateStartedAtIso,
+        finishedAt: new Date().toISOString(),
+        ...(itemDebateResult.errorMessage ? { errorMessage: itemDebateResult.errorMessage } : {}),
+      };
+      await writeSprintItemDebate(ctx.flowDir, ctx.runId, itemDebateRecord);
+
+      if (itemDebateResult.triggered && itemDebateResult.items.length > 0) {
+        try {
+          const applied = applyItemDebateToPlanArtifact(planArtifact, itemDebateRecord);
+          const persisted = await writeSprintPlanArtifact(ctx.flowDir, ctx.runId, applied.artifact);
+          if (persisted) planArtifact = applied.artifact;
+          const changedLines = applied.changes
+            .filter((c) => c.changeKind !== "none" && c.ok)
+            .map((c) => `[${c.itemId}] ${c.detail}`);
+          const argued = itemDebateResult.items.map((it) => it.taskId ?? it.criterionId ?? "?").join(", ");
+          const summary =
+            `Argued ${itemDebateResult.items.length} item(s) (${argued})` +
+            (changedLines.length > 0 ? ` — changed: ${changedLines.join("; ")}.` : " — no plan change.");
+          yield { type: "content", content: `\n> [item-debate] ${summary}\n` };
+          if (changedLines.length > 0) {
+            const note = `\n\nItem-debate rulings for next sprint:\n${changedLines.map((l) => `- ${l}`).join("\n")}`;
+            iter.nextFocus = `${iter.nextFocus ?? ""}${note}`;
+          }
+        } catch (err) {
+          console.error(
+            `[sprint-runner] applying the item-debate ruling failed (sprint ${sprintN}, run ${ctx.runId}): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      } else if (itemDebateResult.stopReason === "error") {
+        yield {
+          type: "content",
+          content: `\n> [item-debate] Sprint ${sprintN}'s per-item debate did not complete: ${itemDebateResult.errorMessage ?? "unknown error"}.\n`,
+        };
+      }
+    }
+  }
+
   return iter;
 }
 
@@ -3568,11 +3667,25 @@ function buildVerifyAgent(ctx: DriverContext, cwd: string): VerifyAgentLike {
  * cost report break out PO/Customer/moderator/leader spend without changing
  * the CouncilLLM signature. Unknown → undefined (entry still tagged callsite).
  */
-function detectRoleFromSystem(system: string): string | undefined {
+/**
+ * Exported so `detectRoleFromSystem(ITEM_RULING_SYSTEM_PROMPT)` can be pinned
+ * by a test — a mismatch here means item-debate ruling calls silently fall
+ * back to `role: undefined` in `usage forensics`, indistinguishable from
+ * every other unlabeled call (measured: this happened until the branch below
+ * was added, since `ITEM_RULING_SYSTEM_PROMPT` never matched any existing
+ * check).
+ */
+export function detectRoleFromSystem(system: string): string | undefined {
   const s = system.toLowerCase();
   if (s.startsWith("you are the product owner")) return "po";
   if (s.startsWith("you are the customer")) return "customer";
   if (s.startsWith("you are the debate moderator")) return "moderator";
+  // C5 — item-debate-runner.ts's per-item ruling call. Checked before the
+  // generic "leader"+"council" pair below: that prompt says "leader" but
+  // never "council", so it would fall through to `judge`/undefined without
+  // this branch, and `usage forensics` could not separate its cost from
+  // every other unlabeled call.
+  if (s.startsWith("you are the leader of a product-engineering debate panel")) return "item-debate-ruling";
   if (s.includes("leader") && s.includes("council")) return "leader";
   if (s.includes("judge")) return "judge";
   return undefined;

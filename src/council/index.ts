@@ -57,6 +57,7 @@ import type {
   EnhancedCouncilOutcome,
   IntentKind,
   IsolatedTaskRunner,
+  ItemDebateFocus,
   PhaseOutcomeEnvelope,
   PreflightResponder,
   QuestionResponder,
@@ -316,6 +317,15 @@ export interface RunCouncilOptions {
    * derivation below); undefined falls through to self-classify.
    */
   externalTopic?: boolean;
+  /**
+   * C5 — per-item debate scoping, forwarded verbatim onto
+   * `CouncilConfig.perRoundFocus` (see `debate.ts`): when set and non-empty,
+   * round N argues `perRoundFocus[N-1]` instead of the whole plan every
+   * round. Set by `product-loop/item-debate-runner.ts` (C5); absent for
+   * every other caller (sprint planning, `/council`, agent-convened runs),
+   * which keeps their debates byte-identical to before this field existed.
+   */
+  perRoundFocus?: readonly ItemDebateFocus[];
 }
 
 export type PostDebateAction = "save_exit" | "implement" | "refine" | "ask_followup" | "retry_synthesis";
@@ -1525,6 +1535,10 @@ export async function* runCouncil(
       // Agent-convened run — auto-accept escalation (no blocking card) since the
       // council runs autonomously mid-agent-turn with no interactive user.
       autoAcceptEscalation: options?.suppressPreDebateCards,
+      // C5 — per-item debate scoping (see RunCouncilOptions.perRoundFocus doc).
+      // Absent for every caller except item-debate-runner.ts, so this line is
+      // a no-op (undefined) for every other call site.
+      perRoundFocus: options?.perRoundFocus,
     },
     llm,
   );

@@ -722,9 +722,11 @@ export async function readSpecLayoutCheck(flowDir: string, runId: string): Promi
  * a missing file next to a run's other sprint artifacts means the WRITE
  * failed, never that the item debate didn't run.
  *
- * @testonly — no production consumer yet; wired into a real per-item debate
- * by a later slice (see `product-loop/debatable-items.ts` module doc for the
- * same pattern).
+ * C5 — production caller: `sprint-runner.ts`, built from
+ * `product-loop/item-debate-runner.ts`'s result. Written whenever the
+ * `MUONROI_IDEAL_ITEM_DEBATE` feature is on (C1 selected something or not);
+ * skipped outright — no write at all — only when the feature flag itself is
+ * off, so a disabled run stays byte-identical to before this feature existed.
  */
 export interface SprintItemDebateRecord {
   version: 1;
@@ -758,8 +760,6 @@ export function sprintItemDebatePath(flowDir: string, runId: string, sprintN: nu
  * Persist a sprint's per-item debate record. Best-effort and never throws: a
  * write failure is logged with context (No Silent Catch) and the sprint loop
  * continues — losing this audit trail must never break `/ideal`.
- *
- * @testonly — no production consumer yet; see module doc above.
  */
 export async function writeSprintItemDebate(
   flowDir: string,

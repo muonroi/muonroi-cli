@@ -17,8 +17,7 @@
  * hand (the common case — C1 selects FROM `plan.tasks`) fold those in too;
  * omitting it still produces a usable, if thinner, focus text.
  *
- * @testonly — no production consumer yet; wired into a real `/ideal` sprint
- * by a later slice (see debatable-items.ts module doc for the same pattern).
+ * C5 — production caller: `product-loop/item-debate-runner.ts`.
  */
 
 import type { DebatableItem } from "../product-loop/debatable-items.js";
@@ -49,9 +48,6 @@ export interface ItemDebateTopicContext {
  * `boundTaskText` — the same cap `sprint-plan-artifact.ts` uses for prompt-
  * embedded task text) so one runaway title/reason/criterion can't blow the
  * round prompt's budget.
- *
- * @testonly — no production consumer yet; wired into a real `/ideal` sprint
- * by a later slice (see this module's header doc).
  */
 export function buildItemDebateTopic(item: DebatableItem, context: ItemDebateTopicContext = {}): string {
   const lines: string[] = [`[${item.id}] ${boundTaskText(item.title)}`];
@@ -73,9 +69,6 @@ export function buildItemDebateTopic(item: DebatableItem, context: ItemDebateTop
  * `CouncilConfig.perRoundFocus` expects, pulling `doneCriterion`/
  * `targetFiles`/`targetDirs` straight off its source `task` so a caller
  * walking a sprint plan's tasks doesn't have to re-destructure them.
- *
- * @testonly — no production consumer yet; wired into a real `/ideal` sprint
- * by a later slice (see this module's header doc).
  */
 export function buildItemDebateFocus(item: DebatableItem, task?: SprintPlanTask): ItemDebateFocus {
   return {

@@ -149,10 +149,40 @@ describe("selectDebatableItems", () => {
     ]);
   });
 
-  it("selects a task with an unmet dependency", () => {
+  it("does NOT select a merely-pending unmet dependency in a sprint where nothing progressed", () => {
+    // Real-run defect: this is the NORMAL shape of an in-progress sprint —
+    // arguing "step2 depends on step1 and step1 has not run" settles nothing.
+    // Neither task carries any evidence (no deviation, no touchedTargets) and
+    // nothing in the plan is done/dropped — nothing here is contested.
     const dep = task({ id: "step1", title: "Step one" });
     const dependent = task({ id: "step2", title: "Step two", dependsOn: ["step1"] });
     const result = selectDebatableItems({ plan: plan([dep, dependent]) });
+    expect(result).toEqual([]);
+  });
+
+  it("selects an unmet dependency when the dependency itself has a reviewer deviation", () => {
+    const dep = task({ id: "step1", title: "Step one", deviation: "half-implemented, build still fails" });
+    const dependent = task({ id: "step2", title: "Step two", dependsOn: ["step1"] });
+    const result = selectDebatableItems({ plan: plan([dep, dependent]), cap: 5 });
+    // step1 ALSO independently fires task-deviation (score 100, unrelated to
+    // this test) — assert step2's unmet-dependency item is present rather
+    // than the whole array, so this test stays about ONE signal.
+    expect(result).toContainEqual({
+      kind: "task",
+      id: "step2",
+      title: "Step two",
+      signal: "unmet-dependency",
+      reason: expect.stringContaining("step1"),
+    });
+  });
+
+  it("selects an unmet dependency when the dependency was reviewed and touchedTargets is false", () => {
+    // Still "pending" (not claimed done), but the S3b reviewer already looked
+    // and found the diff never touched its declared targets — concrete
+    // negative evidence, not silence.
+    const reviewedButUntouched = task({ id: "step1", title: "Step one", touchedTargets: false });
+    const dependent = task({ id: "step2", title: "Step two", dependsOn: ["step1"] });
+    const result = selectDebatableItems({ plan: plan([reviewedButUntouched, dependent]) });
     expect(result).toEqual([
       {
         kind: "task",
@@ -160,6 +190,24 @@ describe("selectDebatableItems", () => {
         title: "Step two",
         signal: "unmet-dependency",
         reason: expect.stringContaining("step1"),
+      },
+    ]);
+  });
+
+  it("selects an unmet dependency when the sprint otherwise shows real progress", () => {
+    // step1 is unrelated but DONE — the sprint moved. step3's block on the
+    // still-pending, evidence-free step2 is now a meaningful signal.
+    const moved = task({ id: "step1", title: "Unrelated finished task", status: "done" });
+    const dep = task({ id: "step2", title: "Step two" });
+    const dependent = task({ id: "step3", title: "Step three", dependsOn: ["step2"] });
+    const result = selectDebatableItems({ plan: plan([moved, dep, dependent]) });
+    expect(result).toEqual([
+      {
+        kind: "task",
+        id: "step3",
+        title: "Step three",
+        signal: "unmet-dependency",
+        reason: expect.stringContaining("step2"),
       },
     ]);
   });

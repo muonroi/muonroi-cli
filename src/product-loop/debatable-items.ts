@@ -13,8 +13,10 @@
  * read (mirroring `getNoProgressSprintLimit` in sprint-progress.ts — the cap
  * resolution is impure, `selectDebatableItems` itself is not: for any fixed
  * `cap` value its output is a function of its arguments alone). No model
- * calls, no clock, no randomness. Wiring this into an actual sprint run is
- * C5's job, not this module's.
+ * calls, no clock, no randomness.
+ *
+ * C5 — production caller: `product-loop/item-debate-runner.ts`, invoked from
+ * `sprint-runner.ts` after the S4 verify-fix loop.
  *
  * ── Signals (each produces at most one item per task/criterion; see the
  *    SIGNAL_SCORES table below for how they rank against each other) ──
@@ -30,7 +32,9 @@
  *   unknown-dependency        a task's `dependsOn` names an id absent from
  *                             this plan's own task list.
  *   unmet-dependency          a task's `dependsOn` names a real task that is
- *                             not yet `"done"`.
+ *                             not yet `"done"`, AND that state is actually
+ *                             contested — see "unmet-dependency: contested,
+ *                             not merely pending" below.
  *   undebated-criterion       a pinned criterion no panelist argued at all —
  *                             delegates to `findUndebatedCriteria` (the F8
  *                             gate's own signal; not reimplemented here).
@@ -53,6 +57,23 @@
  * one task whose deviation happens to name it. Every other signal (vague
  * criteria, dependency shape, undebated/deferred criteria, risk) is untouched
  * by this rule; those are never things a deterministic gate could fix anyway.
+ *
+ * ── unmet-dependency: contested, not merely pending ──
+ *
+ * Measured on a real sprint 1: `unmet-dependency` fired on every pending task
+ * whose `dependsOn` named a task that had not run yet — which is the NORMAL
+ * shape of a sprint where nothing has progressed. "step2 depends on step1 and
+ * step1 has not run" settles nothing and still costs a debate round. The
+ * signal now fires only when the blocked state is actually CONTESTED —
+ * `isContestedDependency` (the dependency task itself carries a reviewer
+ * deviation, or was reviewed and `touchedTargets === false` — concrete
+ * negative evidence it was attempted and failed, not silence) — or when
+ * `sprintMadeProgress` is true (some task in this plan actually moved: done,
+ * dropped, touched, or reviewed with a deviation). A dependency that is
+ * merely `"pending"` with no evidence, on a sprint where nothing moved at
+ * all, is not debatable — there is nothing yet to argue about.
+ * `unknown-dependency` is untouched: a dangling id is a defect in the plan
+ * itself, contested by construction.
  */
 
 import type { CouncilStanceRow } from "../types/index.js";
@@ -127,7 +148,7 @@ export interface SelectDebatableItemsInput {
  * correctly" (21 chars, matches nothing) must always be flagged; "dotnet test
  * src/X.Tests passes with 0 failures" (48 chars, matches "dotnet"/"test"/"passes")
  * must never be, at ANY length.
- * @testonly — no production consumer yet; wired in by C5 (see module doc). */
+ */
 export const VAGUE_CRITERION_MIN_CHARS = 25;
 
 /**
@@ -142,7 +163,7 @@ const VERIFIABLE_CRITERION_PATTERN =
 
 /** True when `text` is empty, or short with nothing checkable in it — see
  * `VAGUE_CRITERION_MIN_CHARS` / `VERIFIABLE_CRITERION_PATTERN` for the exact rule.
- * @testonly — no production consumer yet; wired in by C5 (see module doc). */
+ */
 export function isVagueCriterion(text: string): boolean {
   const t = (text ?? "").trim();
   if (!t) return true;
@@ -155,20 +176,19 @@ export function isVagueCriterion(text: string): boolean {
  * least one pass of scrutiny. Chosen to sit above a normal single-file/single-dir
  * task and below a plan-wide refactor, which is exactly the kind of task this
  * signal exists to catch.
- * @testonly — no production consumer yet; wired in by C5 (see module doc). */
+ */
 export const RISKY_TASK_TARGET_THRESHOLD = 5;
 
 /** Consecutive-non-improvement-style cap: how many items `selectDebatableItems`
  * returns at most. Debating 10 tasks costs ~220 model calls; the whole point of
  * selection is to keep that number small.
- * @testonly — no production consumer yet; wired in by C5 (see module doc). */
+ */
 export const DEFAULT_DEBATABLE_ITEMS_CAP = 3;
 
 /**
  * `MUONROI_IDEAL_DEBATABLE_ITEMS_CAP` (integer >= 1) overrides the default.
  * Validated identically to `getNoProgressSprintLimit` (sprint-progress.ts): an
  * invalid value is logged and ignored rather than silently coerced or thrown.
- * @testonly — no production consumer yet; wired in by C5 (see module doc).
  */
 export function getDebatableItemsCap(): number {
   const raw = process.env.MUONROI_IDEAL_DEBATABLE_ITEMS_CAP;
@@ -234,9 +254,42 @@ function taskStatusById(tasks: readonly SprintPlanTask[]): Map<string, SprintPla
   return m;
 }
 
+function taskById(tasks: readonly SprintPlanTask[]): Map<string, SprintPlanTask> {
+  const m = new Map<string, SprintPlanTask>();
+  for (const t of tasks) m.set(t.id, t);
+  return m;
+}
+
+/** True when `dep` itself gives a concrete reason to argue about it — see the
+ * module doc's "unmet-dependency: contested, not merely pending". `dep`
+ * absent (an unknown id) is never contested here — that case is
+ * `unknown-dependency`'s job, not this one's. A dependency can be `"pending"`
+ * AND already reviewed: `touchedTargets === false` means the S3b reviewer
+ * looked and found the diff never touched its declared targets — concrete
+ * negative evidence that it was attempted and failed, not silence. */
+function isContestedDependency(dep: SprintPlanTask | undefined): boolean {
+  if (!dep) return false;
+  if (dep.deviation?.trim()) return true;
+  if (dep.touchedTargets === false) return true;
+  return false;
+}
+
+/** True when THIS PLAN shows evidence that work actually happened this
+ * sprint — not merely that a plan was written. See the module doc's
+ * "unmet-dependency: contested, not merely pending". */
+function sprintMadeProgress(tasks: readonly SprintPlanTask[]): boolean {
+  return tasks.some(
+    (t) => t.status === "done" || t.status === "dropped" || t.touchedTargets === true || Boolean(t.deviation?.trim()),
+  );
+}
+
 function taskCandidates(plan: SprintPlanArtifact, suppressDeviation: boolean): Candidate[] {
   const out: Candidate[] = [];
   const statusById = taskStatusById(plan.tasks);
+  const byId = taskById(plan.tasks);
+  // Plan-level, computed once — see the module doc's "unmet-dependency:
+  // contested, not merely pending".
+  const progressed = sprintMadeProgress(plan.tasks);
 
   plan.tasks.forEach((task, index) => {
     const key = `task:${task.id}`;
@@ -279,18 +332,30 @@ function taskCandidates(plan: SprintPlanArtifact, suppressDeviation: boolean): C
           },
         });
       } else if (unmet.length > 0) {
-        out.push({
-          key,
-          score: SIGNAL_SCORES["unmet-dependency"],
-          originalIndex: index,
-          item: {
-            kind: "task",
-            id: task.id,
-            title,
-            signal: "unmet-dependency",
-            reason: `Task ${task.id} depends on ${unmet.map((d) => `"${d}"`).join(", ")}, which ${unmet.length > 1 ? "are" : "is"} not yet done.`,
-          },
-        });
+        // Contested, not merely pending — see the module doc's
+        // "unmet-dependency: contested, not merely pending". Either a named
+        // dependency itself gives a concrete reason to argue, or the sprint
+        // as a whole shows real movement (so a chain still stuck despite
+        // that movement is a meaningful signal, not the sprint's normal
+        // in-progress shape).
+        const contestedDep = unmet.find((dep) => isContestedDependency(byId.get(dep)));
+        if (contestedDep || progressed) {
+          const reasonSuffix = contestedDep
+            ? ` — "${contestedDep}" is contested (a reviewer deviation, or a "done" claim the diff-touch evidence contradicts).`
+            : " — this sprint otherwise shows real progress, so a chain still stuck here is worth a look.";
+          out.push({
+            key,
+            score: SIGNAL_SCORES["unmet-dependency"],
+            originalIndex: index,
+            item: {
+              kind: "task",
+              id: task.id,
+              title,
+              signal: "unmet-dependency",
+              reason: `Task ${task.id} depends on ${unmet.map((d) => `"${d}"`).join(", ")}, which ${unmet.length > 1 ? "are" : "is"} not yet done${reasonSuffix}`,
+            },
+          });
+        }
       }
 
       // risky-task — more combined targets than the documented threshold.
@@ -397,8 +462,7 @@ function criterionCandidates(
  * the same result, in the same order. The common, healthy-sprint case returns
  * `[]` — nothing here is a defect until a signal actually fires.
  *
- * @testonly — no production consumer yet; wired into an actual sprint run by
- * C5, not this slice (see module doc).
+ * C5 — production caller: `product-loop/item-debate-runner.ts`.
  */
 export function selectDebatableItems(input: SelectDebatableItemsInput): DebatableItem[] {
   const { plan, criteria, stanceRows, structureCheck, verifyFix, cap } = input;

@@ -20,8 +20,8 @@
  * category of change task-status updates already are, and those don't touch
  * it either.
  *
- * @testonly — no production consumer yet; wired into a real per-item debate
- * by a later slice (see `debatable-items.ts` module doc for the same pattern).
+ * C5 — production caller: `sprint-runner.ts`, applying the record
+ * `product-loop/item-debate-runner.ts` returns.
  */
 
 import type { SprintItemDebateRecord } from "../flow/run-artifacts.js";
@@ -302,8 +302,6 @@ function applyOneItem(tasks: readonly SprintPlanTask[], item: SprintItemDebateIt
  * A task whose `status` is `"done"` is never touched by any changeKind.
  * `artifact.outcome.goal` and `artifact.planHash` are never touched either
  * (see module doc for `planHash`).
- *
- * @testonly — no production consumer yet; see module doc.
  */
 export function applyItemDebateToPlanArtifact(
   artifact: SprintPlanArtifact,
