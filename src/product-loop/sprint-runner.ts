@@ -2427,6 +2427,27 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   yield { type: "content", content: `\n## Sprint ${sprintN} — Verification\n` };
 
   /**
+   * D2 — the deterministic floor ALONE (`runVerifyFloor`), with no verify
+   * sub-agent call. Factored out of `runVerifyAndFloorPass` so its full pass
+   * (below) and the cheap verify-fix re-check (`runFloorRecheck`, wired into
+   * `runVerifyFixLoop` further down) share ONE floor invocation — the same
+   * `cwd`/`runId`/`baselinePath` call site, never a duplicated copy. May
+   * throw (same as `runVerifyFloor` itself); each caller applies its own
+   * handling for that — the full pass downgrades a claimed PASS to ERROR
+   * (unchanged, see the try/catch below), the cheap re-check treats a throw
+   * as inconclusive and falls back to a full pass.
+   */
+  async function runDeterministicFloorOnly(): Promise<import("./verify-floor.js").VerifyFloorResult> {
+    const { runVerifyFloor } = await import("./verify-floor.js");
+    const { verifyBaselinePath } = await import("./verify-baseline.js");
+    return runVerifyFloor({
+      cwd,
+      runId: ctx.runId,
+      baselinePath: verifyBaselinePath(ctx.flowDir, ctx.runId),
+    });
+  }
+
+  /**
    * S4 — the verify-agent + deterministic-floor pass, extracted into ONE
    * reusable routine so a verify-fix re-verify round (below) runs through the
    * EXACT same code path as the sprint's first verification — never a forked
@@ -2529,19 +2550,17 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     if (verifyVerdict === "PASS" || verifyVerdict === "UNKNOWN") {
       const verdictBeforeFloor = verifyVerdict;
       try {
-        const { applyVerifyFloor, runVerifyFloor } = await import("./verify-floor.js");
+        const { applyVerifyFloor } = await import("./verify-floor.js");
         // Thread the run identity so the floor can compare against THIS run's
         // baseline instead of against zero. Without it the floor stays in
         // ABSOLUTE mode and fails any repo that already had a failing test —
         // measured: run mttwpmu8ee5b scored 0.00 on both sprints because 31
         // infra-dependent tests (PostgreSql/SqlServer/Kafka) fail for want of a
         // database, none of them related to what the run was writing.
-        const { describeBuildMustFix, verifyBaselinePath } = await import("./verify-baseline.js");
-        const floor = await runVerifyFloor({
-          cwd,
-          runId: ctx.runId,
-          baselinePath: verifyBaselinePath(ctx.flowDir, ctx.runId),
-        });
+        const { describeBuildMustFix } = await import("./verify-baseline.js");
+        // D2 — reuses `runDeterministicFloorOnly` so this full pass and the
+        // verify-fix loop's cheap re-check run through the SAME floor call.
+        const floor = await runDeterministicFloorOnly();
         const applied = applyVerifyFloor(verifyVerdict, floor);
         verifyVerdict = applied.verdict;
         floorDelta = floor.delta;
@@ -2744,6 +2763,42 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         structureCheck: initialVerifyPass.structureCheck,
       },
       runVerifyPass: (roundLabel) => runVerifyAndFloorPass(roundLabel),
+      // D2 — the cheap deterministic re-check: reuses `runDeterministicFloorOnly`,
+      // the SAME floor call `runVerifyAndFloorPass` above uses, so a round that
+      // is still failing deterministically never pays for another verify
+      // sub-agent turn. A throw here is inconclusive, not a failure to
+      // propagate — the loop falls back to a full pass for that round.
+      runFloorRecheck: async (roundLabel) => {
+        try {
+          const floor = await runDeterministicFloorOnly();
+          let floorMustFixNoteLocal: string | undefined;
+          if (floor.delta) {
+            const { describeBuildMustFix } = await import("./verify-baseline.js");
+            const mustFix = describeBuildMustFix(floor.delta);
+            if (mustFix) floorMustFixNoteLocal = mustFix;
+          }
+          return {
+            ranOk: floor.verdict !== "unavailable",
+            floorDelta: floor.delta,
+            floorChecks: floor.checks,
+            floorMustFixNote: floorMustFixNoteLocal,
+          };
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          logger.error(
+            "orchestrator",
+            `[sprint-runner] verify-fix cheap floor re-check threw (sprint ${sprintN}, run ${ctx.runId}, ${roundLabel}): ${message}`,
+            {
+              operation: "runFloorRecheck",
+              runId: ctx.runId,
+              sprintN,
+              roundLabel,
+              stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+            },
+          );
+          return { ranOk: false };
+        }
+      },
       // S4 fix — this was previously never wired, so nothing could stop the
       // loop in production. `ctx.abortSignal` is the run's real abort signal
       // (`this.abortController.signal`, threaded from `orchestrator.ts`

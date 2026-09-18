@@ -28,6 +28,30 @@
  * (`sprint-runner.ts`) hands in a `runVerifyPass` callback that is the EXACT
  * same generator Step 5 calls for the sprint's first verification, so a
  * re-verify round runs through one code path, never a fork.
+ *
+ * ## D2 — a cheap deterministic re-check before paying for another full pass
+ *
+ * A full pass is a verify sub-agent turn (model calls) PLUS the deterministic
+ * floor (real build and test commands) — measured live, about 2.5 minutes,
+ * with an 87-second build. Most rounds after the first fail again on the SAME
+ * deterministic evidence (the build is still broken, or the same tests still
+ * fail): paying for the model turn to learn that is waste.
+ *
+ * When the round's failure is one the deterministic floor alone can speak to
+ * (`isCheapRecheckEligible` — a build break or test regression the floor
+ * itself found, never a plain model-narrated `verify_verdict` failure or
+ * `zero_coverage`/`project_not_registered`, which need more than build/test
+ * exit codes to judge), the loop re-runs ONLY the caller's `runFloorRecheck`
+ * callback after the fixer — the SAME floor invocation `runVerifyPass` itself
+ * uses (see `runDeterministicFloorOnly` in `sprint-runner.ts`), never a forked
+ * copy. Still failing the same deterministic way → the round is recorded as
+ * `passKind: "cheap"` and the verify sub-agent is never dispatched that round.
+ * The floor now passing → falls through to a full pass exactly as before, so
+ * the loop's FINAL result always comes from a full pass (or an earlier one,
+ * with an honest `passKind: "cheap"` record for the rounds that didn't).
+ * `runFloorRecheck` is optional and MUONROI_IDEAL_VERIFY_FIX_CHEAP_RECHECK=0
+ * disables it — either way, every round runs a full pass, byte-identical to
+ * pre-D2 behaviour.
  */
 
 import type { StreamChunk, TaskRequest, ToolResult, VerifyRecipe } from "../types/index.js";
@@ -91,6 +115,63 @@ export function getVerifyFixDeadlineMs(): number {
     `[verify-fix-loop] ignoring MUONROI_IDEAL_VERIFY_FIX_DEADLINE_MS=${JSON.stringify(raw)} (needs a positive integer ms); using ${DEFAULT_VERIFY_FIX_DEADLINE_MS}`,
   );
   return DEFAULT_VERIFY_FIX_DEADLINE_MS;
+}
+
+/**
+ * D2 — `MUONROI_IDEAL_VERIFY_FIX_CHEAP_RECHECK=0` restores today's
+ * always-full behaviour byte-identically: every round runs the complete
+ * verify pass (verify sub-agent turn + floor), same as before this feature
+ * existed. Default ON, mirroring the other verify-fix env gates' "on unless
+ * explicitly disabled" convention.
+ */
+export function isCheapRecheckEnabled(): boolean {
+  const raw = process.env.MUONROI_IDEAL_VERIFY_FIX_CHEAP_RECHECK;
+  return raw !== "0";
+}
+
+/**
+ * D2 — the failure reasons the deterministic floor ALONE can re-confirm or
+ * refute: a build break or test failure the floor itself attributed. Every
+ * other reason needs more than the floor's exit codes to judge —
+ * `zero_coverage` needs the verify sub-agent's own recipe/coverage read,
+ * `project_not_registered` needs the structure check (not run by the cheap
+ * recheck), and a plain `verify_verdict` failure IS the sub-agent's own
+ * narration, which by definition only the sub-agent can re-confirm. A
+ * combined identity (`withStructureViolation`'s `+project_not_registered`
+ * suffix) is deliberately excluded too — an exact-string match, not a prefix
+ * check, so a build fix that leaves a registration violation unresolved
+ * still gets a full pass to re-evaluate the whole picture.
+ */
+const CHEAP_RECHECK_REASONS: ReadonlySet<string> = new Set([
+  "build_run_introduced",
+  "build_unattributable",
+  "test_regression",
+  "test_unattributable",
+  "test_absolute_no_baseline",
+  "no_tests_executed",
+]);
+
+/** D2 — see `CHEAP_RECHECK_REASONS`. */
+export function isCheapRecheckEligible(identity: FailureIdentity): boolean {
+  return identity.failedCondition === "engineering_floor" && CHEAP_RECHECK_REASONS.has(identity.reason);
+}
+
+/**
+ * D2 — one deterministic-floor-only re-check, run before paying for a full
+ * verify pass. Deliberately a plain `Promise`, not a generator: unlike
+ * `runVerifyPass` it has no sub-agent phase to stream progress chunks for,
+ * only the floor's own (already-logged) command output.
+ */
+export interface FloorRecheckOutcome {
+  /**
+   * False when the floor itself produced no evidence this round (spawn
+   * failure, or genuinely no commands to run) — treated as inconclusive, so
+   * the loop falls through to a full pass rather than guessing.
+   */
+  ranOk: boolean;
+  floorDelta?: FloorDelta;
+  floorChecks?: FloorCheck[];
+  floorMustFixNote?: string;
 }
 
 /**
@@ -475,6 +556,23 @@ export interface VerifyFixRoundRecord {
    * round — only the undecidable case is worth recording.
    */
   noProgressUndecidable?: boolean;
+  /**
+   * D2 — `"cheap"` when this round only re-ran the deterministic floor (no
+   * verify sub-agent turn); `"full"` when the complete verify pass ran
+   * (today's only behaviour pre-D2, and still the default for every path
+   * that isn't the new cheap branch — an error/abort/deadline round never
+   * attempted the cheap path either, so it is recorded `"full"` too).
+   * Optional so an older on-disk record (written before this field existed)
+   * still round-trips unchanged.
+   */
+  passKind?: "cheap" | "full";
+  /**
+   * D2 — wall-clock ms this round's fixer dispatch plus its re-check (cheap
+   * floor-only, or the full verify pass) took, measured with the loop's own
+   * `nowFn` (real `Date.now` in production, injectable in tests). Optional
+   * for the same round-trip reason as `passKind`.
+   */
+  roundElapsedMs?: number;
 }
 
 export interface VerifyFixLoopResult {
@@ -531,6 +629,15 @@ export interface RunVerifyFixLoopArgs {
    * `ctx`/`__muonroiAgentRuntime`.
    */
   onRoundStart?: (round: number) => void;
+  /**
+   * D2 — the cheap deterministic re-check, run after the fixer and BEFORE
+   * `runVerifyPass` when `isCheapRecheckEligible` says the round's failure is
+   * one the floor alone can speak to. The caller (`sprint-runner.ts`) wires
+   * this to the SAME floor invocation `runVerifyPass` uses internally
+   * (`runDeterministicFloorOnly`) — one function, two callers, never a
+   * forked copy. Absent → every round runs a full pass, today's behaviour.
+   */
+  runFloorRecheck?: (roundLabel: string) => Promise<FloorRecheckOutcome>;
 }
 
 /**
@@ -620,6 +727,11 @@ export async function* runVerifyFixLoop(
       break;
     }
 
+    // D2 — measures the whole round (fixer dispatch + its re-check, cheap or
+    // full), using the loop's own `nowFn` so tests can inject a clock the
+    // same way `deadlineExceeded` already does.
+    const roundClockStart = now();
+
     const identityBefore = deriveFailureIdentity({
       verifyVerdict: cur.verifyVerdict,
       floorDelta: cur.floorDelta,
@@ -676,6 +788,8 @@ export async function* runVerifyFixLoop(
         fixerSummary: bound(message, MAX_SUMMARY_CHARS),
         verifyVerdictAfter: cur.verifyVerdict,
         failureKeyAfter: keyBefore,
+        passKind: "full",
+        roundElapsedMs: now() - roundClockStart,
       });
       stopReason = "error";
       break;
@@ -698,6 +812,8 @@ export async function* runVerifyFixLoop(
         ),
         verifyVerdictAfter: cur.verifyVerdict,
         failureKeyAfter: keyBefore,
+        passKind: "full",
+        roundElapsedMs: now() - roundClockStart,
       });
       stopReason = reason;
       break;
@@ -716,9 +832,96 @@ export async function* runVerifyFixLoop(
         fixerSummary: bound(fixResult.error ?? "fix failed", MAX_SUMMARY_CHARS),
         verifyVerdictAfter: cur.verifyVerdict,
         failureKeyAfter: keyBefore,
+        passKind: "full",
+        roundElapsedMs: now() - roundClockStart,
       });
       stopReason = "error";
       break;
+    }
+
+    // D2 — a cheap deterministic re-check, run BEFORE paying for a full
+    // verify pass, but only when this round's failure is one the floor alone
+    // can speak to (see `isCheapRecheckEligible`). `runFloorRecheck` reuses
+    // the SAME floor invocation `runVerifyPass` calls internally — see
+    // `runDeterministicFloorOnly` in `sprint-runner.ts` — so this never forks
+    // the floor logic; it only decides whether to also pay for a sub-agent
+    // turn this round.
+    const runFloorRecheck = args.runFloorRecheck;
+    const cheapRecheckEligible =
+      isCheapRecheckEnabled() && runFloorRecheck !== undefined && isCheapRecheckEligible(identityBefore);
+    if (cheapRecheckEligible && runFloorRecheck !== undefined) {
+      let cheap: FloorRecheckOutcome | undefined;
+      try {
+        cheap = await runFloorRecheck(`fix-r${round}-recheck`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[verify-fix-loop] cheap floor re-check threw (sprint ${args.sprintN}, round ${round}): ${message}`,
+          { stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined },
+        );
+        cheap = undefined;
+      }
+
+      if (cheap?.ranOk) {
+        const cheapIdentity = deriveFailureIdentity({
+          verifyVerdict: cur.verifyVerdict,
+          floorDelta: cheap.floorDelta,
+          floorChecks: cheap.floorChecks,
+          recipe: cur.recipeFromVerify,
+          verifyOutput: verifyOutputOf(cur.verifyResult),
+          structureCheck: cur.structureCheck,
+        });
+        if (cheapIdentity.failedCondition === "engineering_floor") {
+          // Still failing the exact same deterministic way (or a different
+          // one) — fold the fresh floor evidence into `cur` so the NEXT
+          // round's prompt and identity are grounded in what actually just
+          // ran, without fabricating a verify sub-agent verdict this round
+          // never asked for.
+          cur = {
+            ...cur,
+            floorDelta: cheap.floorDelta,
+            floorChecks: cheap.floorChecks,
+            floorMustFixNote: cheap.floorMustFixNote ?? cur.floorMustFixNote,
+          };
+          const cheapKey = computeFailureKey(cheapIdentity);
+          rounds.push({
+            round,
+            failureKeyBefore: keyBefore,
+            fixerRan: true,
+            fixerSuccess: true,
+            fixerSummary: bound(fixResult.output?.trim() || "applied", MAX_SUMMARY_CHARS),
+            verifyVerdictAfter: cur.verifyVerdict,
+            failureKeyAfter: cheapKey,
+            passKind: "cheap",
+            roundElapsedMs: now() - roundClockStart,
+          });
+          yield {
+            type: "content",
+            content: `\n> [verify-fix] Round ${round}: cheap re-check — the deterministic floor still fails; skipping the verify sub-agent turn this round.\n`,
+          };
+
+          if (cheapKey === previousKey) {
+            yield {
+              type: "content",
+              content: `\n> [verify-fix] Round ${round}: no progress — the same failure persists; stopping.\n`,
+            };
+            stopReason = "no_progress";
+            break;
+          }
+          previousKey = cheapKey;
+
+          if (round === limit) {
+            yield { type: "content", content: `\n> [verify-fix] Round ${round}: round cap reached; stopping.\n` };
+            stopReason = "round_cap";
+          }
+          continue;
+        }
+        // The floor now passes — fall through to the full pass below so the
+        // sub-agent gets to confirm the whole picture (coverage, structure,
+        // its own opinion), exactly as before D2.
+      }
+      // `cheap === undefined` or `!cheap.ranOk` — inconclusive; fall through
+      // to the full pass rather than guessing from stale evidence.
     }
 
     let next: VerifyPassOutcome;
@@ -737,6 +940,8 @@ export async function* runVerifyFixLoop(
         fixerSummary: bound(fixResult.output?.trim() || "applied", MAX_SUMMARY_CHARS),
         verifyVerdictAfter: cur.verifyVerdict,
         failureKeyAfter: keyBefore,
+        passKind: "full",
+        roundElapsedMs: now() - roundClockStart,
       });
       stopReason = "error";
       break;
@@ -767,6 +972,8 @@ export async function* runVerifyFixLoop(
       verifyVerdictAfter: cur.verifyVerdict,
       failureKeyAfter: keyAfter,
       ...(undecidable ? { noProgressUndecidable: true } : {}),
+      passKind: "full",
+      roundElapsedMs: now() - roundClockStart,
     });
 
     const stillTriggered = computeVerifyFixTrigger({
