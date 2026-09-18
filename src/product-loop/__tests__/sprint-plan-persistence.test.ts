@@ -139,6 +139,33 @@ describe("computeMissingPlanTargets (4A completeness re-check)", () => {
     expect(existing).toEqual(["src/here.ts"]);
     expect(missing).toEqual(["src/gone.ts"]);
   });
+
+  // D1 — computeMissingPlanTargets is deliberately files-only, both before
+  // and after the classification fix. Pinning the ACTUAL, deliberate
+  // behaviour rather than assuming: a bare directory target (dotted or not,
+  // e.g. a .NET test project `src/X.Tests`) never appears in `missing`,
+  // whether it exists on disk or not.
+  //
+  // This was measured, not assumed: wiring `extractPlanTargetDirs` into
+  // this function (tried while building D1) made ANY bare directory named
+  // merely as scope context anywhere in a plan's prose — never intended as
+  // a literal "this empty directory must exist" deliverable — count as
+  // missing whenever the impl turn hadn't separately created it, firing an
+  // unwanted extra completeness-recheck turn on real, previously-passing
+  // sprints (caught by `sprint-plan-artifact-integration.test.ts`'s "appends
+  // the S3b task checklist" case). That is exactly the false-positive
+  // failure mode this function's own docs warn about, so directory targets
+  // are intentionally left out of this specific re-check — see the doc
+  // comment on `computeMissingPlanTargets` in sprint-runner.ts.
+  it("D1: a directory target (e.g. a .NET test project) never appears in the completeness re-check, present or absent", async () => {
+    const plan = "Create the test project under src/X.Tests for this sprint.";
+    const missingAbsent = await computeMissingPlanTargets(plan, cwd);
+    expect(missingAbsent).not.toContain("src/X.Tests");
+
+    await fs.mkdir(path.join(cwd, "src/X.Tests"), { recursive: true });
+    const missingPresent = await computeMissingPlanTargets(plan, cwd);
+    expect(missingPresent).not.toContain("src/X.Tests");
+  });
 });
 
 describe("extractDeferredTargetPaths / deferral-aware re-check (regression: run mrq8mesr0389)", () => {
@@ -183,6 +210,16 @@ describe("extractDeferredTargetPaths / deferral-aware re-check (regression: run 
   it("returns [] deferred paths when the plan has no deferral markers", () => {
     const plan = "Implement src/a.ts and src/b.ts and tests/c.test.ts this sprint.";
     expect(extractDeferredTargetPaths(plan)).toEqual([]);
+  });
+
+  // D1 — extractDeferredTargetPaths stays files-only too (see the D1 note on
+  // computeMissingPlanTargets in sprint-runner.ts for why): a bare DIRECTORY
+  // target is never marked deferred, because it is never a candidate target
+  // for this function's caller (computeMissingPlanTargets) in the first
+  // place — there is nothing for "deferred" to exempt it from.
+  it("D1: a bare DIRECTORY target is never marked deferred (extractDeferredTargetPaths stays files-only)", () => {
+    const plan = "Scaffold src/X.Tests this sprint. [DEFERRED: post-MVP, phase 2 only]";
+    expect(extractDeferredTargetPaths(plan)).not.toContain("src/X.Tests");
   });
 });
 

@@ -351,6 +351,37 @@ describe("runPlanAdherenceReview — task-aware (args.tasks)", () => {
     expect(verdict.taskVerdicts?.[0]?.touchedTargets).toBe(false);
   });
 
+  it("a diff path inside a target DIRECTORY counts as touched (D1: dir targets, not just files)", async () => {
+    const tasks = [task({ id: "step1", title: "scaffold the test project", targetDirs: ["src/Acme.Widgets.Tests"] })];
+    // The diff never touches "src/Acme.Widgets.Tests" verbatim, only a FILE
+    // underneath that directory — this must still count as touched.
+    const nestedDiff = () => "diff --git a/src/Acme.Widgets.Tests/Foo.cs b/src/Acme.Widgets.Tests/Foo.cs\n+// new\n";
+    const runIsolatedTask = async (req: TaskRequest): Promise<ToolResult> => {
+      if (req.description.includes("review")) {
+        return {
+          success: true,
+          output: JSON.stringify({ tasks: [{ taskId: "step1", done: true, evidence: "project scaffolded" }] }),
+        };
+      }
+      return { success: true, output: "n/a" };
+    };
+
+    const verdict = await drain(
+      runPlanAdherenceReview({
+        sprintN: 5,
+        planSynthesis: "plan",
+        cwd: "/tmp",
+        reviewModelId: "leader-pro",
+        fixModelId: "cheap-flash",
+        runIsolatedTask,
+        diffProvider: nestedDiff,
+        tasks,
+      }),
+    );
+
+    expect(verdict.taskVerdicts?.[0]?.touchedTargets).toBe(true);
+  });
+
   it("a task with no declared targets gives touchedTargets: null, regardless of done", async () => {
     const tasks = [task({ id: "step1", title: "manually verify in the IDE" })];
     const runIsolatedTask = async (req: TaskRequest): Promise<ToolResult> => {

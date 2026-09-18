@@ -1265,6 +1265,11 @@ const DEFERRAL_MARKER_RE =
  * marker onto shared enumeration lines (e.g. a `folderStructure` string listing
  * several files at once) and wrongly defers files named beside a deferred one.
  *
+ * Only checks FILE tokens (`extractPlanTargetPaths`), same as before D1 —
+ * see the module doc on `computeMissingPlanTargets` below for why this
+ * deliberately stays files-only rather than also walking
+ * `extractPlanTargetDirs`.
+ *
  * Best-effort and deliberately conservative: the completeness re-check is a soft
  * nudge (a re-check miss never fails the sprint), so over-excluding a genuinely
  * needed file just defers its detection to the verify gate — far cheaper than the
@@ -1295,10 +1300,30 @@ export function extractDeferredTargetPaths(planSynthesis: string, window = 1): s
 }
 
 /**
- * 4A: plan-named target file paths that STILL DO NOT EXIST after the impl turn —
- * i.e. action items the implementer left unaddressed. Drives the post-impl
- * completeness re-check (spend an extra turn ONLY when there is proven-incomplete
- * work, unlike an unconditional reviewer pass). Empty ⇒ every named target landed.
+ * 4A: plan-named target FILE paths that STILL DO NOT EXIST after the impl
+ * turn — i.e. action items the implementer left unaddressed. Drives the
+ * post-impl completeness re-check (spend an extra turn ONLY when there is
+ * proven-incomplete work, unlike an unconditional reviewer pass). Empty ⇒
+ * every named target landed.
+ *
+ * D1 note — deliberately stays files-only, NOT extended to
+ * `extractPlanTargetDirs`, even though `extractPlanTargetPaths` no longer
+ * misclassifies a dotted directory (e.g. `src/Acme.Widgets.Tests`) as a
+ * file. Measured while building D1: wiring `extractPlanTargetDirs` in here
+ * made ANY bare directory mentioned ANYWHERE in the plan's prose — including
+ * a directory named only as scope context, e.g. "set up src/Acme.Widgets",
+ * never meant as a literal "this empty directory must exist" deliverable —
+ * count as a missing target whenever the mocked/real impl turn hadn't
+ * separately created it, firing an unwanted extra completeness-recheck turn
+ * every time (regression caught by
+ * `sprint-plan-artifact-integration.test.ts`'s existing "appends the S3b
+ * task checklist" case). That is exactly the false-positive failure mode
+ * this function's own docs warn about (a spurious re-check can spawn a
+ * plan-CONTRADICTING repair turn), so a bare directory target — dotted or
+ * not — is left out of this specific re-check on purpose. A dotted directory
+ * genuinely worth verifying still gets checked at the verify gate, and
+ * `sprint-plan-artifact.ts`'s `targetDirs` / S3b's `touchedTargets` still
+ * track it for observability.
  *
  * Paths the plan explicitly DEFERRED (post-MVP / phase 2) are excluded — the
  * re-check must not force-create files the plan asked NOT to build this sprint.
