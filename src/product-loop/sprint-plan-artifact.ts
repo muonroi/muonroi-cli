@@ -51,8 +51,26 @@ export interface SprintPlanTask {
    * verdict says so (`applyTaskVerdictsToPlanArtifact` in sprint-runner.ts).
    * Diff-touch of `targetFiles`/`targetDirs` is supplementary evidence only —
    * see `touchedTargets` — and never flips this by itself.
+   *
+   * C4 — `"dropped"` is set only by `applyItemDebateToPlanArtifact`
+   * (`product-loop/item-debate-apply.ts`) when a per-item debate's leader
+   * ruled `changeKind: "drop"`. History is kept (the task object stays in
+   * `tasks`, with `droppedReason` explaining how) rather than deleting the
+   * entry — downstream readers that must not act on a dropped task
+   * (`buildTaskChecklistBlock` below, `taskAwareReviewPrompt` /
+   * `normalizeTaskVerdicts` in plan-adherence-review.ts) filter it out
+   * themselves; nothing here removes it from `tasks`.
    */
-  status: "pending" | "done";
+  status: "pending" | "done" | "dropped";
+  /**
+   * C4 — present only when `status === "dropped"`: the leader's bounded
+   * reason the task was dropped, carried from the item-debate ruling. Never
+   * set for any other status.
+   * @testonly — no production consumer yet; wired into a real `/ideal`
+   * sprint by a later slice (see debatable-items.ts module doc for the same
+   * pattern).
+   */
+  droppedReason?: string;
   /** S3b — the reviewer's own evidence for the current `status`. Absent until
    * the task-aware plan-adherence review has run at least once. Never invented. */
   evidence?: string;
@@ -447,8 +465,14 @@ export function topologicallyOrderTasks(tasks: SprintPlanTask[]): TopologicalTas
  * cannot blow the prompt budget.
  */
 export function buildTaskChecklistBlock(tasks: SprintPlanTask[]): { block: string; notes: string[] } {
-  if (tasks.length === 0) return { block: "", notes: [] };
-  const { order, notes } = topologicallyOrderTasks(tasks);
+  // C4 — a dropped task (`applyItemDebateToPlanArtifact`) is history, not
+  // work: it never appears in the implementation checklist. Any other task's
+  // `dependsOn` still naming it is handled by `topologicallyOrderTasks`'s
+  // existing "unknown dependency" tolerance (the edge is dropped + noted),
+  // exactly as it already does for any id absent from this set.
+  const activeTasks = tasks.filter((t) => t.status !== "dropped");
+  if (activeTasks.length === 0) return { block: "", notes: [] };
+  const { order, notes } = topologicallyOrderTasks(activeTasks);
   const lines = order.map((t, i) => {
     const targets = [...t.targetFiles, ...t.targetDirs];
     const title = boundTaskText(t.title);

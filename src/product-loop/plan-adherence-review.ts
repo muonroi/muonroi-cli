@@ -211,7 +211,10 @@ function baseReviewPrompt(plan: string, diff: string): string {
  * legacy prompt back.
  */
 function taskAwareReviewPrompt(plan: string, diff: string, tasks: SprintPlanTask[]): string {
+  // C4 — a dropped task (`applyItemDebateToPlanArtifact`) is out of scope for
+  // this sprint's work; never ask the reviewer to grade it.
   const taskList = tasks
+    .filter((t) => t.status !== "dropped")
     .map((t) => {
       const title = boundTaskText(t.title);
       const doneSuffix = t.doneCriterion ? ` (done when: ${boundTaskText(t.doneCriterion)})` : "";
@@ -261,20 +264,25 @@ function normalizeTaskVerdicts(parsed: ReviewJson | null, tasks: SprintPlanTask[
       if (taskId) byId.set(taskId, raw);
     }
   }
-  return tasks.map((t) => {
-    const raw = byId.get(t.id);
-    const done = raw?.done === true;
-    const evidence = typeof raw?.evidence === "string" ? raw.evidence.trim() : "";
-    const deviation = typeof raw?.deviation === "string" ? raw.deviation.trim() : "";
-    return {
-      taskId: t.id,
-      title: t.title,
-      done,
-      evidence: evidence || (raw ? "" : "reviewer gave no verdict for this task — treated as not done"),
-      ...(deviation ? { deviation } : {}),
-      touchedTargets: computeTouchedTargets(t, diff),
-    };
-  });
+  // C4 — a dropped task was never in the reviewer's prompt (see
+  // `taskAwareReviewPrompt`); mirror that here so it never gets a fabricated
+  // verdict, and `computeTouchedTargets` (below) is never even asked about it.
+  return tasks
+    .filter((t) => t.status !== "dropped")
+    .map((t) => {
+      const raw = byId.get(t.id);
+      const done = raw?.done === true;
+      const evidence = typeof raw?.evidence === "string" ? raw.evidence.trim() : "";
+      const deviation = typeof raw?.deviation === "string" ? raw.deviation.trim() : "";
+      return {
+        taskId: t.id,
+        title: t.title,
+        done,
+        evidence: evidence || (raw ? "" : "reviewer gave no verdict for this task — treated as not done"),
+        ...(deviation ? { deviation } : {}),
+        touchedTargets: computeTouchedTargets(t, diff),
+      };
+    });
 }
 
 /** One-line deviation summary for a not-done task, for `lastDeviations` (the
@@ -393,7 +401,10 @@ export async function* runPlanAdherenceReview(args: {
         };
       }
       generalDeviations = normalizeDeviations(parsed?.deviations);
-      notDoneTasks = tasks.filter((t) => !taskVerdicts!.find((v) => v.taskId === t.id)?.done);
+      // C4 — a dropped task never gets a verdict (`normalizeTaskVerdicts`
+      // above filters it out too), so it must never show up as "not done"
+      // here either; skip it the same way.
+      notDoneTasks = tasks.filter((t) => t.status !== "dropped" && !taskVerdicts!.find((v) => v.taskId === t.id)?.done);
       const notDoneTaskLines = notDoneTasks.map((t) =>
         taskDeviationLine(t, taskVerdicts!.find((v) => v.taskId === t.id)!),
       );

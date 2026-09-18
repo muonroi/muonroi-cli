@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SprintItemDebateItemRecord } from "../../product-loop/item-debate-record.js";
 import type { SpecLayoutCheckResult } from "../../product-loop/spec-layout-check.js";
 import type { SprintPlanArtifact } from "../../product-loop/sprint-plan-artifact.js";
 import { logger } from "../../utils/logger.js";
@@ -11,16 +12,19 @@ import {
   readRunDoc,
   readSpecLayoutCheck,
   readSprintAdherence,
+  readSprintItemDebate,
   readSprintOutcomes,
   readSprintPlanArtifact,
   readSprintVerifyFix,
   renderResumeDigest,
   type SprintAdherenceRecord,
+  type SprintItemDebateRecord,
   type SprintVerifyFixRecord,
   writeContextDoc,
   writeResearchDoc,
   writeSpecLayoutCheck,
   writeSprintAdherence,
+  writeSprintItemDebate,
   writeSprintOutcome,
   writeSprintPlanArtifact,
   writeSprintVerify,
@@ -451,6 +455,115 @@ describe("run-artifacts", () => {
       } finally {
         errSpy.mockRestore();
         await fs.rm(path.join(runDir, "spec-layout-check.json"), { force: true });
+      }
+    });
+  });
+
+  describe("sprint item debate — sprints/<n>-item-debate.json (C3)", () => {
+    function item(overrides: Partial<SprintItemDebateItemRecord> = {}): SprintItemDebateItemRecord {
+      return {
+        kind: "task",
+        taskId: "step3",
+        title: "Implement the rate limiter",
+        selectionSignal: "vague-criterion",
+        selectionReason: "Task step3 has no done criterion at all.",
+        positions: [
+          { role: "engineer", stance: "supports tightening the criterion" },
+          { role: "skeptic", stance: "wants a concrete test command named" },
+        ],
+        leaderRuling: "The criterion is too vague; tighten it.",
+        changeKind: "criterion",
+        proposedChange: { criterionText: "dotnet test src/Sample.Tests passes with 0 failures" },
+        ...overrides,
+      };
+    }
+
+    function fullRecord(): SprintItemDebateRecord {
+      return {
+        version: 1,
+        sprintN: 4,
+        runId,
+        enabled: true,
+        items: [item(), item({ taskId: "step5", kind: "task", changeKind: "none", proposedChange: undefined })],
+        stopReason: "completed",
+        leaderModelId: "leader-pro",
+        panelModelIds: ["panelist-a", "panelist-b"],
+        startedAt: "2026-08-01T00:00:00.000Z",
+        finishedAt: "2026-08-01T00:02:00.000Z",
+      };
+    }
+
+    it("round-trip: the reader returns exactly what the writer wrote", async () => {
+      const record = fullRecord();
+      const wrote = await writeSprintItemDebate(flowDir, runId, record);
+      expect(wrote).toBe(true);
+
+      const readBack = await readSprintItemDebate(flowDir, runId, 4);
+      expect(readBack).toEqual(record);
+    });
+
+    it("round-trips a disabled record with no items", async () => {
+      const record: SprintItemDebateRecord = {
+        version: 1,
+        sprintN: 6,
+        runId,
+        enabled: false,
+        items: [],
+        stopReason: "disabled",
+        startedAt: "2026-08-01T00:00:00.000Z",
+        finishedAt: "2026-08-01T00:00:00.000Z",
+      };
+      await writeSprintItemDebate(flowDir, runId, record);
+      const readBack = await readSprintItemDebate(flowDir, runId, 6);
+      expect(readBack).toEqual(record);
+      expect(readBack?.leaderModelId).toBeUndefined();
+    });
+
+    it("readSprintItemDebate returns null when the file is absent", async () => {
+      expect(await readSprintItemDebate(flowDir, runId, 99)).toBeNull();
+    });
+
+    it("a store write failure is logged and returns false without throwing", async () => {
+      // Same real-I/O-error technique as the adherence store above: collide
+      // the sprints dir path with a plain file so fs.mkdir(recursive:true)
+      // fails with a real ENOTDIR instead of a mocked one.
+      const runDir = path.join(flowDir, "runs", runId);
+      await fs.mkdir(runDir, { recursive: true });
+      await fs.writeFile(path.join(runDir, "sprints"), "not a directory", "utf8");
+
+      const errSpy = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+      try {
+        const record = fullRecord();
+        record.sprintN = 8;
+        const wrote = await writeSprintItemDebate(flowDir, runId, record);
+        expect(wrote).toBe(false);
+        expect(errSpy).toHaveBeenCalledWith(
+          "orchestrator",
+          expect.stringContaining("[item-debate]"),
+          expect.objectContaining({ runId, sprintN: 8 }),
+        );
+      } finally {
+        errSpy.mockRestore();
+        await fs.rm(path.join(runDir, "sprints"), { force: true });
+      }
+    });
+
+    it("a read failure (unparseable JSON) is logged and returns null without throwing", async () => {
+      const dir = path.join(flowDir, "runs", runId, "sprints");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, "9-item-debate.json"), "{not json", "utf8");
+
+      const errSpy = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+      try {
+        const readBack = await readSprintItemDebate(flowDir, runId, 9);
+        expect(readBack).toBeNull();
+        expect(errSpy).toHaveBeenCalledWith(
+          "orchestrator",
+          expect.stringContaining("[item-debate]"),
+          expect.objectContaining({ runId, sprintN: 9 }),
+        );
+      } finally {
+        errSpy.mockRestore();
       }
     });
   });

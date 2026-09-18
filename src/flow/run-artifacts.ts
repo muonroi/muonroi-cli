@@ -14,6 +14,7 @@
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import type { SprintItemDebateItemRecord } from "../product-loop/item-debate-record.js";
 import type { AdherenceRoundRecord, AdherenceStopReason } from "../product-loop/plan-adherence-review.js";
 import type { ProjectRegistrationCheckResult } from "../product-loop/project-registration-check.js";
 import type { SpecLayoutCheckResult } from "../product-loop/spec-layout-check.js";
@@ -704,6 +705,106 @@ export async function readSpecLayoutCheck(flowDir: string, runId: string): Promi
     logger.error("orchestrator", "[spec-layout-check] could not parse the spec-layout check record", {
       flowDir,
       runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+// ─── sprints/<n>-item-debate.json ───────────────────────────────────────────
+
+/**
+ * C3 — `sprints/<n>-item-debate.json`: what a per-item debate round
+ * (C2, `council/item-debate-topic.ts`) argued and ruled for each C1-selected
+ * `DebatableItem` (`product-loop/debatable-items.ts`) this sprint. Beside
+ * `<n>-plan.json`, `<n>-adherence.json` and the other sprint artifacts —
+ * same "always written, never silent" discipline as `SprintAdherenceRecord`:
+ * a missing file next to a run's other sprint artifacts means the WRITE
+ * failed, never that the item debate didn't run.
+ *
+ * @testonly — no production consumer yet; wired into a real per-item debate
+ * by a later slice (see `product-loop/debatable-items.ts` module doc for the
+ * same pattern).
+ */
+export interface SprintItemDebateRecord {
+  version: 1;
+  sprintN: number;
+  runId: string;
+  /** False when the per-item debate was skipped outright (feature off, or
+   * C1's `selectDebatableItems` returned nothing to argue). */
+  enabled: boolean;
+  items: SprintItemDebateItemRecord[];
+  /** Why the per-item debate loop stopped. `"no_items"` — C1 selected
+   * nothing this sprint (the common, healthy case). `"disabled"` — the
+   * feature was off. `"completed"` — every selected item got a round.
+   * `"error"` — the loop threw before finishing. */
+  stopReason: "no_items" | "disabled" | "completed" | "error";
+  /** The leader model id as actually used for this run — never a hardcoded literal. */
+  leaderModelId?: string;
+  /** The panel model ids as actually used for this run — never hardcoded literals. */
+  panelModelIds?: string[];
+  startedAt: string;
+  finishedAt: string;
+  /** Present only when `stopReason` is `"error"` — the caught exception's message. */
+  errorMessage?: string;
+}
+
+/** `sprints/<n>-item-debate.json` — beside `<n>-plan.json` and the other sprint artifacts. */
+export function sprintItemDebatePath(flowDir: string, runId: string, sprintN: number): string {
+  return path.join(sprintsDir(flowDir, runId), `${sprintN}-item-debate.json`);
+}
+
+/**
+ * Persist a sprint's per-item debate record. Best-effort and never throws: a
+ * write failure is logged with context (No Silent Catch) and the sprint loop
+ * continues — losing this audit trail must never break `/ideal`.
+ *
+ * @testonly — no production consumer yet; see module doc above.
+ */
+export async function writeSprintItemDebate(
+  flowDir: string,
+  runId: string,
+  record: SprintItemDebateRecord,
+): Promise<boolean> {
+  try {
+    const dir = sprintsDir(flowDir, runId);
+    await fs.mkdir(dir, { recursive: true });
+    await atomicWriteJSON(sprintItemDebatePath(flowDir, runId, record.sprintN), record);
+    return true;
+  } catch (err) {
+    logger.error(
+      "orchestrator",
+      "[item-debate] could not persist the per-item debate record — its findings are not auditable",
+      {
+        flowDir,
+        runId,
+        sprintN: record.sprintN,
+        stopReason: record.stopReason,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      },
+    );
+    return false;
+  }
+}
+
+/**
+ * Read a sprint's per-item debate record. Null when absent or unparseable.
+ *
+ * @testonly — no production consumer yet; see module doc above.
+ */
+export async function readSprintItemDebate(
+  flowDir: string,
+  runId: string,
+  sprintN: number,
+): Promise<SprintItemDebateRecord | null> {
+  try {
+    return await atomicReadJSON<SprintItemDebateRecord>(sprintItemDebatePath(flowDir, runId, sprintN));
+  } catch (err) {
+    logger.error("orchestrator", "[item-debate] could not parse the per-item debate record", {
+      flowDir,
+      runId,
+      sprintN,
       error: err instanceof Error ? err.message : String(err),
     });
     return null;

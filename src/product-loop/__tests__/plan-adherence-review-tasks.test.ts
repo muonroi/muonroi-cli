@@ -588,4 +588,43 @@ describe("runPlanAdherenceReview — task-aware (args.tasks)", () => {
     // A bounded, truncated form (300 chars + ellipsis) IS present.
     expect(capturedPrompt).toContain(`${"T".repeat(300)}…`);
   });
+
+  // C4 — a task an item-debate ruling dropped (`applyItemDebateToPlanArtifact`,
+  // `item-debate-apply.ts`) must never be asked about here: not in the
+  // reviewer's prompt, and never given a fabricated verdict.
+  it("skips a dropped task in the reviewer prompt and the resulting verdicts", async () => {
+    const tasks = [
+      task({ id: "step1", title: "Create project" }),
+      task({ id: "step3", title: "This scope was dropped", status: "dropped", droppedReason: "duplicate of step1" }),
+    ];
+    let capturedPrompt = "";
+    const runIsolatedTask = vi.fn(async (req: TaskRequest): Promise<ToolResult> => {
+      if (req.description.includes("review")) {
+        capturedPrompt = req.prompt;
+        return {
+          success: true,
+          output: JSON.stringify({ adherent: true, tasks: [{ taskId: "step1", done: true, evidence: "done" }] }),
+        };
+      }
+      return { success: true, output: "n/a" };
+    });
+
+    const verdict = await drain(
+      runPlanAdherenceReview({
+        sprintN: 43,
+        planSynthesis: "plan",
+        cwd: "/tmp",
+        reviewModelId: "leader-pro",
+        fixModelId: "cheap-flash",
+        runIsolatedTask,
+        diffProvider: okDiff,
+        tasks,
+      }),
+    );
+
+    expect(capturedPrompt).not.toContain("This scope was dropped");
+    expect(capturedPrompt).not.toContain("step3");
+    expect(verdict.taskVerdicts?.find((v) => v.taskId === "step3")).toBeUndefined();
+    expect(verdict.adherent).toBe(true);
+  });
 });
