@@ -1385,7 +1385,10 @@ export async function* runDebate(
     // with the best synthesis so far) without emitting the card. Mirrors the
     // "empty/failed answer → accept" fallback runEscalationPrompt already uses.
     if (config.autoAcceptEscalation) {
-      escalation = { action: "accept" };
+      // D6 — `auto: true` records that NO card was shown, so a persisted
+      // artifact can say honestly "auto-accepted" instead of implying a
+      // human made this choice.
+      escalation = { action: "accept", auto: true };
       return "stop";
     }
     const dec = yield* runEscalationPrompt({

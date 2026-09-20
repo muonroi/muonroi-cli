@@ -749,6 +749,16 @@ export interface SprintItemDebateRecord {
   finishedAt: string;
   /** Present only when `stopReason` is `"error"` — the caught exception's message. */
   errorMessage?: string;
+  /**
+   * D6 — present only when the scoped debate hit a stop-with-unmet boundary
+   * (pinned criteria still open when the debate stopped or ran out of round
+   * budget). `auto: true` means the run resolved it itself (no card was
+   * shown, since `sprintPlanningMode` makes `autoAcceptEscalation` true for
+   * this whole feature) rather than a human choosing an option — recorded
+   * here so a stalled-looking sprint is explainable from this artifact alone,
+   * without anyone having to guess whether a card was silently skipped.
+   */
+  escalation?: { action: "extend" | "accept" | "rescope"; grantedRounds?: number; auto?: boolean };
 }
 
 /** `sprints/<n>-item-debate.json` — beside `<n>-plan.json` and the other sprint artifacts. */

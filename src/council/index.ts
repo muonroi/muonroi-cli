@@ -1534,7 +1534,25 @@ export async function* runCouncil(
       respondToQuestion,
       // Agent-convened run — auto-accept escalation (no blocking card) since the
       // council runs autonomously mid-agent-turn with no interactive user.
-      autoAcceptEscalation: options?.suppressPreDebateCards,
+      // D6 fix: also OR in `sprintPlanningMode` — every other askcard gate in
+      // this file (willShowLaunchCard, the preflight autoApprove, the whole
+      // post-debate branch tree) already treats sprintPlanningMode as "no
+      // human is present", but this one line didn't. Both sprintPlanningMode
+      // callers (`sprint-runner.ts` for sprint planning, `item-debate-runner.ts`
+      // for the per-item debate) use `skipClarification: true`, so BOTH get the
+      // same single degenerate pinned criterion from `buildSpecFromTopic`
+      // (clarifier.ts) — `"Address the topic: <topic>"` — never zero criteria.
+      // Sprint planning's debate argues that actual topic directly each round,
+      // so the leader typically judges it met by round 1-2, well under the
+      // round ceiling. The item debate is what actually reaches the
+      // stop-with-unmet boundary: `perRoundFocus` (C2) scopes each round to
+      // argue ONE selected plan item, never the whole topic, so the leader's
+      // per-round evaluation of that same degenerate criterion can stay unmet
+      // for the debate's entire (short, per-item-capped) round budget. That is
+      // what hung an unattended `/ideal` run on the mid-debate escalation card
+      // for 38h (run mu75rurpf9ec / session f52d9bfc50a2, "1 criterion still
+      // unmet").
+      autoAcceptEscalation: options?.suppressPreDebateCards === true || options?.sprintPlanningMode === true,
       // C5 — per-item debate scoping (see RunCouncilOptions.perRoundFocus doc).
       // Absent for every caller except item-debate-runner.ts, so this line is
       // a no-op (undefined) for every other call site.
@@ -1552,6 +1570,15 @@ export async function* runCouncil(
   } while (!debateResult.done);
   const debateState = debateResult.value;
   stats.phases.push({ name: "debate", durationMs: Date.now() - debateStart });
+  // D6 — thread the debate's own escalation outcome (if any) back through the
+  // shared stats object, same by-reference pattern as `bailReason` /
+  // `structuredActionItems` above: `runCouncil` returns only a `string | null`,
+  // so a caller like item-debate-runner.ts (which reads `itemDebateCouncilStats`
+  // for `stats.calls` already) has no other way to see whether the debate
+  // stopped with criteria unmet and how that stop was resolved.
+  if (debateState.escalation) {
+    stats.escalation = debateState.escalation;
+  }
 
   // Store debate transcript as individual message — strip failed/empty turns
   // so future context loads don't carry noise. The failure metadata still

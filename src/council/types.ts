@@ -211,13 +211,27 @@ export interface DebateState {
    */
   finalCriteriaDeferred?: boolean[];
   /**
-   * B4 interactive escalation outcome. Set only when the user was prompted at a
-   * stop-with-unmet boundary and chose an action: `extend` granted extra rounds
-   * past the ceiling, `accept` proceeded with criteria open, `rescope` asked to
-   * narrow the scope. Undefined when no escalation fired (auto-resolved, headless,
-   * or all criteria met). Lets synthesis/caller react to a user-driven partial stop.
+   * B4 interactive escalation outcome. Set when the debate hit a stop-with-unmet
+   * boundary and the outcome was resolved, either by the user (`respondToQuestion`
+   * prompted, and they chose an action: `extend` granted extra rounds past the
+   * ceiling, `accept` proceeded with criteria open, `rescope` asked to narrow the
+   * scope) or automatically (`RunCouncilOptions.autoAcceptEscalation` — no human
+   * is present, see `auto` below). Undefined when the boundary was never reached
+   * (all criteria met, or no criteria pinned). Lets synthesis/caller react to a
+   * partial stop.
    */
-  escalation?: { action: "extend" | "accept" | "rescope"; grantedRounds?: number };
+  escalation?: {
+    action: "extend" | "accept" | "rescope";
+    grantedRounds?: number;
+    /**
+     * D6 — true when this resolution was the automatic
+     * `autoAcceptEscalation` path (no `respondToQuestion` card was shown),
+     * false/undefined when a human actually answered the card. Lets a
+     * persisted record (`sprints/<n>-item-debate.json`) say honestly that
+     * the stop was auto-accepted rather than leaving the reader to guess.
+     */
+    auto?: boolean;
+  };
   /**
    * S8 — the run receipt inputs the post-debate card reports back ("2 rounds ·
    * 14 turns · 3/4 criteria met · $0.19 · 4m12s"). Measured by the debate loop;
@@ -645,6 +659,14 @@ export interface CouncilConfig {
    * the condition, and the same flag was being reused for four unrelated
    * suppressions. The condition is "no human is present to answer a blocking
    * card before the debate concludes".
+   *
+   * D6: also fed from `RunCouncilOptions.sprintPlanningMode` — that flag is
+   * the SAME "no human is present" condition for `/ideal`'s sprint-internal
+   * councils (sprint-planning in sprint-runner.ts, the per-item debate in
+   * item-debate-runner.ts), and every other askcard-gating site in
+   * council/index.ts already ORs it with `suppressPreDebateCards`. This one
+   * didn't, which let a sprintPlanningMode debate with pinned success
+   * criteria open the mid-debate escalation card and block an unattended run.
    */
   autoAcceptEscalation?: boolean;
   /**
@@ -763,6 +785,17 @@ export interface CouncilStats {
    * is set; unset in every other call shape.
    */
   structuredActionItems?: unknown[];
+  /**
+   * D6 — the debate's own `DebateState.escalation` (see that field's doc),
+   * threaded back through this by-reference stats object the same way
+   * `bailReason` / `structuredActionItems` already are, so a caller that never
+   * sees the internal `DebateState` (item-debate-runner.ts calls `runCouncil`,
+   * which returns only a `string | null`) can still tell whether the debate
+   * stopped with unmet pinned criteria and how that stop was resolved. Set
+   * only when the debate actually reached an escalation boundary; absent when
+   * every pinned criterion was met or the debate had none pinned.
+   */
+  escalation?: { action: "extend" | "accept" | "rescope"; grantedRounds?: number; auto?: boolean };
 }
 
 // ── LLM abstraction ──────────────────────────────────────────────────────────

@@ -162,6 +162,18 @@ export interface ItemDebateRunResult {
    * never ran (`disabled` / `no_items` / a failure before `runCouncil` was
    * called). */
   debateCalls?: number;
+  /**
+   * D6 — the scoped debate's own escalation outcome, read from
+   * `itemDebateCouncilStats.escalation` (see `CouncilStats.escalation` doc).
+   * Absent when the debate never hit a stop-with-unmet boundary (the common,
+   * healthy case). Present with `auto: true` whenever this item debate hit
+   * the boundary — `sprintPlanningMode` makes `autoAcceptEscalation` true
+   * unconditionally (D6 fix), so no card can open here and every occurrence
+   * of this field on an item debate is, by construction, auto-accepted. The
+   * caller (`sprint-runner.ts`) persists this onto `sprints/<n>-item-debate.json`
+   * so a stalled-looking sprint is explainable from the artifact alone.
+   */
+  escalation?: { action: "extend" | "accept" | "rescope"; grantedRounds?: number; auto?: boolean };
 }
 
 const DISABLED_RESULT: ItemDebateRunResult = {
@@ -411,6 +423,7 @@ export async function* runItemDebate(
       selected,
       leaderModelId,
       debateCalls: itemDebateCouncilStats.calls,
+      escalation: itemDebateCouncilStats.escalation,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

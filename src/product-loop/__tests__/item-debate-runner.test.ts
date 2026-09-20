@@ -267,4 +267,55 @@ describe("runItemDebate", () => {
     expect(result.enabled).toBe(false);
     expect(result.stopReason).toBe("disabled");
   });
+
+  it("D6: never calls respondToQuestion, resolves automatically, and surfaces the debate's escalation on the result", async () => {
+    // Regression guard for the 38h stall (run mu75rurpf9ec / session
+    // f52d9bfc50a2): the scoped debate hit its progress limit with a pinned
+    // criterion still unmet. With the council/index.ts fix,
+    // `sprintPlanningMode: true` makes `autoAcceptEscalation: true`, so the
+    // REAL `runCouncil` never calls `respondToQuestion` and instead threads
+    // the auto-resolved outcome back through the shared `councilStats.escalation`
+    // (by-reference, same pattern as `stats.calls`) — this test simulates
+    // exactly that side effect and proves `runItemDebate` carries it onto its
+    // own result untouched, so `sprint-runner.ts` can persist it honestly.
+    const respondToQuestion = vi.fn(async () => "escalate_extend");
+    const args = baseArgs({ respondToQuestion });
+
+    (runCouncil as any).mockImplementation(async function* (
+      _topic: string,
+      _sessionModelId: string,
+      _messages: unknown[],
+      _runId: string,
+      _llm: unknown,
+      _respondToQuestion: unknown,
+      _respondToPreflight: unknown,
+      _processMessageFn: unknown,
+      options: { perRoundFocus?: readonly ItemDebateFocus[]; councilStats?: { escalation?: unknown } } | undefined,
+    ) {
+      yield {
+        type: "council_round",
+        councilRound: {
+          round: 1,
+          state: "done",
+          itemId: options?.perRoundFocus?.[0]?.id,
+          participants: ["Engineer"],
+          pairCount: 1,
+          emergent: false,
+        },
+      };
+      // The REAL runCouncil threads this onto the shared stats object
+      // (council/index.ts, D6 fix) — never by calling respondToQuestion.
+      if (options?.councilStats) {
+        options.councilStats.escalation = { action: "accept", auto: true };
+      }
+      return "debate synthesis";
+    });
+
+    const result = await drain(runItemDebate(args));
+
+    expect(respondToQuestion).not.toHaveBeenCalled();
+    expect(result.triggered).toBe(true);
+    expect(result.stopReason).toBe("completed");
+    expect(result.escalation).toEqual({ action: "accept", auto: true });
+  });
 });

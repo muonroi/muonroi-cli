@@ -3546,6 +3546,12 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         startedAt: itemDebateStartedAtIso,
         finishedAt: new Date().toISOString(),
         ...(itemDebateResult.errorMessage ? { errorMessage: itemDebateResult.errorMessage } : {}),
+        // D6 — record the debate's own escalation outcome honestly: whenever
+        // this fires for an item debate it is `auto: true` by construction
+        // (sprintPlanningMode forces autoAcceptEscalation), so the artifact
+        // itself explains a stalled-looking item without anyone guessing
+        // whether an askcard was silently skipped.
+        ...(itemDebateResult.escalation ? { escalation: itemDebateResult.escalation } : {}),
       };
       await writeSprintItemDebate(ctx.flowDir, ctx.runId, itemDebateRecord);
 

@@ -50,9 +50,9 @@
  * directory tree is treated as intentionally standalone and is never flagged.
  */
 
-import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { createGitSpawnBudget, type GitSpawnBudget, runGitSpawn } from "../utils/git-spawn.js";
 import { logger } from "../utils/logger.js";
 import {
   BUILD_OUTPUT_DIRS,
@@ -105,45 +105,27 @@ export interface ProjectRegistrationCheckResult {
   error?: string;
 }
 
-// ─── git plumbing — mirrors verify-floor.ts's runGit, kept local so this ──────
-// module never depends on verify-floor.ts (verify-floor already depends on
-// verify-baseline.ts; this module must not create a cycle back into it).
+// ─── git plumbing ──────────────────────────────────────────────────────────
+// D7: the actual spawn + retry + logging now lives in the shared
+// `utils/git-spawn.ts` (`runGitSpawn`), which this module and
+// `verify-floor.ts` both import — it lives in `src/utils/`, not
+// `verify-floor.ts`, so this module still never depends on `verify-floor.ts`
+// (verify-floor already depends on `verify-baseline.ts`; this module must
+// not create a cycle back into it). This wrapper only maps the shared
+// result back to this module's own `{ok:true,stdout}|{ok:false,error}`
+// contract so every existing caller in this file is unaffected. `budget` is
+// optional and forwarded as-is: `computeAddedFilesSinceBaseline` makes two
+// sequential calls sharing one `GitSpawnBudget` so that whole computation is
+// capped at one total elapsed budget, not two.
 
-function runGit(args: string[], cwd: string, op: string): { ok: true; stdout: string } | { ok: false; error: string } {
-  let res: import("node:child_process").SpawnSyncReturns<string>;
-  try {
-    res = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 15_000 });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.warn(
-      "orchestrator",
-      `[project-registration-check] ${op}: git ${args.join(" ")} threw in ${cwd}: ${message}`,
-      {
-        operation: op,
-        cwd,
-        args,
-      },
-    );
-    return { ok: false, error: message };
-  }
-  if (res.error) {
-    logger.warn(
-      "orchestrator",
-      `[project-registration-check] ${op}: git ${args.join(" ")} failed to spawn in ${cwd}: ${res.error.message}`,
-      { operation: op, cwd, args },
-    );
-    return { ok: false, error: res.error.message };
-  }
-  if (res.status !== 0) {
-    const stderrTail = (res.stderr ?? "").trim().slice(0, 500);
-    logger.warn(
-      "orchestrator",
-      `[project-registration-check] ${op}: git ${args.join(" ")} exited ${res.status} in ${cwd}: ${stderrTail}`,
-      { operation: op, cwd, args, status: res.status },
-    );
-    return { ok: false, error: `git ${args.join(" ")} exited ${res.status}: ${stderrTail}` };
-  }
-  return { ok: true, stdout: res.stdout ?? "" };
+function runGit(
+  args: string[],
+  cwd: string,
+  op: string,
+  budget?: GitSpawnBudget,
+): { ok: true; stdout: string } | { ok: false; error: string } {
+  const result = runGitSpawn(args, cwd, op, "project-registration-check", budget);
+  return result.ok ? { ok: true, stdout: result.stdout } : { ok: false, error: result.error ?? "git spawn failed" };
 }
 
 /** Parse `git status --porcelain` lines into repo-relative paths (rename keeps the NEW side). */
@@ -226,18 +208,23 @@ function isUnderBuildOutputDir(relPosixPath: string): boolean {
  * never be able to push a genuine new project manifest past the slice cutoff
  * and make it invisible to this check. Filtering first means the bound only
  * ever discards EXCESS manifests, never a real one buried under noise.
+ *
+ * D7 (acceptance-review fix): the up-to-2 sequential git calls below share
+ * ONE `GitSpawnBudget` (`createGitSpawnBudget()`, default 60s total) so the
+ * whole computation is capped at one total elapsed budget, not two.
  */
 export async function computeAddedFilesSinceBaseline(
   cwd: string,
   baseline: VerifyBaseline | null,
 ): Promise<AddedFilesResult> {
+  const budget = createGitSpawnBudget();
   // `-uall` is load-bearing: plain `--porcelain` reports an entirely-untracked
   // DIRECTORY as one line ("?? src/"), never the file inside it — which would
   // make a brand-new project manifest invisible to this exact check. This
   // repository's own `parseDirtyPaths` (verify-floor.ts) does not need `-uall`
   // because it only cares THAT the tree is dirty, never which files inside an
   // untracked directory moved.
-  const statusRes = runGit(["status", "--porcelain", "-uall"], cwd, "computeAddedFilesSinceBaseline");
+  const statusRes = runGit(["status", "--porcelain", "-uall"], cwd, "computeAddedFilesSinceBaseline", budget);
   if (!statusRes.ok) {
     return { files: [], source: "git-status-fallback", error: statusRes.error };
   }
@@ -255,6 +242,7 @@ export async function computeAddedFilesSinceBaseline(
       ["diff", "--name-status", "-M", "-C", baseline.gitCommit],
       cwd,
       "computeAddedFilesSinceBaseline",
+      budget,
     );
     if (diffRes.ok) {
       for (const p of parseAddedFromDiff(diffRes.stdout)) statusPaths.add(p);

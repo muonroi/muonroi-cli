@@ -50,9 +50,10 @@
  * `verify-baseline.ts`.
  */
 
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import type { VerifyRecipe } from "../types/index.js";
+import { createGitSpawnBudget, type GitSpawnBudget, runGitSpawn } from "../utils/git-spawn.js";
 import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { logger } from "../utils/logger.js";
 import { inferVerifyProjectProfile } from "../verify/recipes.js";
@@ -473,36 +474,18 @@ export async function runFloorCommand(
  * tell "git isn't there" from "git failed" from "this really has no commits".
  * Every failure branch below now logs the exit code / spawn error / stderr
  * tail, per the repo's No Silent Catch rule.
+ *
+ * D7: the actual spawn + retry + logging now lives in the shared
+ * `utils/git-spawn.ts` (`runGitSpawn`) — this wrapper only maps that result
+ * back to this module's `string | null` contract so every existing caller in
+ * this file is unaffected. `budget` is optional and forwarded as-is: a caller
+ * making SEVERAL sequential calls (`readGitIdentity`) passes one shared
+ * `GitSpawnBudget` so the whole sequence is capped at one total elapsed
+ * budget instead of each call getting its own fresh one.
  */
-function runGit(args: string[], cwd: string, op: string): string | null {
-  let res: import("node:child_process").SpawnSyncReturns<string>;
-  try {
-    res = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 15_000 });
-  } catch (err) {
-    logger.warn(
-      "orchestrator",
-      `[verify-floor] ${op}: git ${args.join(" ")} threw in ${cwd}: ${err instanceof Error ? err.message : String(err)}`,
-      { operation: op, cwd, args },
-    );
-    return null;
-  }
-  if (res.error) {
-    logger.warn(
-      "orchestrator",
-      `[verify-floor] ${op}: git ${args.join(" ")} failed to spawn in ${cwd}: ${res.error.message}`,
-      { operation: op, cwd, args },
-    );
-    return null;
-  }
-  if (res.status !== 0) {
-    logger.warn(
-      "orchestrator",
-      `[verify-floor] ${op}: git ${args.join(" ")} exited ${res.status} in ${cwd}: ${(res.stderr ?? "").trim().slice(0, 500)}`,
-      { operation: op, cwd, args, status: res.status },
-    );
-    return null;
-  }
-  return (res.stdout ?? "").trim();
+function runGit(args: string[], cwd: string, op: string, budget?: GitSpawnBudget): string | null {
+  const result = runGitSpawn(args, cwd, op, "verify-floor", budget);
+  return result.ok ? result.stdout.trim() : null;
 }
 
 /** Parse `git status --porcelain` lines into plain paths, newest-safe for renames (`old -> new` keeps `new`). */
@@ -526,6 +509,12 @@ function parseDirtyPaths(statusOutput: string): string[] {
  * one captured on a different branch. Best-effort: a non-git directory is a
  * legitimate working tree, so failure yields nulls rather than throwing (but,
  * per `runGit`, never silently — see the doc comment there).
+ *
+ * D7 (acceptance-review fix): this makes up to 4 sequential git calls. They
+ * now share ONE `GitSpawnBudget` (`createGitSpawnBudget()`, default 60s
+ * total) so the WHOLE identity read is capped at one total elapsed budget —
+ * without this, 4 calls each retrying up to 3 attempts at a per-attempt
+ * timeout could have blocked this (single, TUI-driving) thread for minutes.
  */
 export function readGitIdentity(cwd: string): {
   commit: string | null;
@@ -536,16 +525,17 @@ export function readGitIdentity(cwd: string): {
   /** sha256 of `git diff HEAD`. Null on a clean tree or when the diff could not be read. */
   dirtyDiffHash: string | null;
 } {
-  const commit = runGit(["rev-parse", "HEAD"], cwd, "readGitIdentity");
-  const branch = runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd, "readGitIdentity");
-  const status = runGit(["status", "--porcelain"], cwd, "readGitIdentity");
+  const budget = createGitSpawnBudget();
+  const commit = runGit(["rev-parse", "HEAD"], cwd, "readGitIdentity", budget);
+  const branch = runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd, "readGitIdentity", budget);
+  const status = runGit(["status", "--porcelain"], cwd, "readGitIdentity", budget);
   if (status === null) {
     return { commit, branch, dirty: null, dirtyFiles: null, dirtyDiffHash: null };
   }
   const dirty = status.length > 0;
   const dirtyFiles = parseDirtyPaths(status);
   // Only pay for the (potentially large) diff when there is one to hash.
-  const diffText = dirty ? runGit(["diff", "HEAD"], cwd, "readGitIdentity") : null;
+  const diffText = dirty ? runGit(["diff", "HEAD"], cwd, "readGitIdentity", budget) : null;
   const dirtyDiffHash = diffText && diffText.length > 0 ? sha256Hex(diffText) : null;
   return { commit, branch, dirty, dirtyFiles, dirtyDiffHash };
 }
