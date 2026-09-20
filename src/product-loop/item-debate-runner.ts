@@ -26,11 +26,12 @@
  * shape, and teaching the whole debate engine that vocabulary is out of this
  * slice's scope. So after the scoped debate completes, this module makes ONE
  * additional leader-tier call PER SELECTED ITEM (bounded — at most
- * `DEFAULT_DEBATABLE_ITEMS_CAP`, same cap C1 already enforces), grounded in
- * that item's own round record, asking the leader to rule in C3's schema.
- * This is still "the leader's raw reply text for this item's round" per
- * `item-debate-record.ts`'s module doc — it is simply obtained as an
- * explicit follow-up rather than free text mined out of the debate
+ * `DEFAULT_DEBATABLE_ITEMS_CAP`, same cap C1 already enforces; D8 — up to a
+ * SECOND call when the first reply could not be parsed, see `requestItemRuling`),
+ * grounded in that item's own round record, asking the leader to rule in
+ * C3's schema. This is still "the leader's raw reply text for this item's
+ * round" per `item-debate-record.ts`'s module doc — it is simply obtained as
+ * an explicit follow-up rather than free text mined out of the debate
  * transcript, which the debate has no way to express in this schema today.
  *
  * `positions` (per-panelist stance) is filled best-effort from the round's
@@ -54,6 +55,7 @@ import { criterionIdFromText } from "./criteria-seed.js";
 import { type DebatableItem, type SelectDebatableItemsInput, selectDebatableItems } from "./debatable-items.js";
 import {
   buildSprintItemDebateItem,
+  parseLeaderRuling,
   type RawItemDebatePosition,
   type SprintItemDebateItemRecord,
 } from "./item-debate-record.js";
@@ -79,10 +81,26 @@ export function isItemDebateEnabled(): boolean {
  * call), mirroring `getVerifyFixDeadlineMs` (`verify-fix-loop.ts`). Smaller
  * than S4's 30-minute default: this loop is bounded to at most
  * `DEFAULT_DEBATABLE_ITEMS_CAP` rounds by construction (`perRoundFocus`
- * length), so it never needs S4's build-loop-sized budget — 10 minutes is
- * still generous headroom against a slow provider.
+ * length), so it never needs S4's build-loop-sized budget.
+ *
+ * D8-followup — RAISED from 600_000ms (10 min) to 900_000ms (15 min).
+ * Evidence: live run `mu75rurpf9ec` sprint 1's item debate spanned
+ * `startedAt`..`finishedAt` = 600_168ms — the OLD 600_000ms total, consumed
+ * ENTIRELY by the scoped council debate alone (3 rounds, `DEFAULT_
+ * DEBATABLE_ITEMS_CAP` items), leaving the per-item ruling loop's `signal`
+ * already aborted before a single `requestItemRuling` call fired: 100%
+ * `no_verdict` across both sprints was budget exhaustion, not a parse or
+ * model-output problem. A 600s total cannot be split into a debate share
+ * PLUS a real ruling reserve (see `getItemDebateRulingReserveMs` below)
+ * without shrinking the debate below the exact amount it is already known
+ * to need — 900s keeps the debate's own share (`900_000 -
+ * getItemDebateRulingReserveMs(...)`, 720_000ms at the default 3-item cap)
+ * STRICTLY LARGER than the old 600_000ms total, so the debate is never
+ * worse off than before this change, while still carving out a genuine
+ * reserve. 900s remains well under S4's 30-minute (1_800_000ms) budget, so
+ * "smaller than S4" still holds.
  */
-export const DEFAULT_ITEM_DEBATE_DEADLINE_MS = 600_000;
+export const DEFAULT_ITEM_DEBATE_DEADLINE_MS = 900_000;
 
 /**
  * Reads and validates `MUONROI_IDEAL_ITEM_DEBATE_DEADLINE_MS`: unset/blank
@@ -99,6 +117,65 @@ export function getItemDebateDeadlineMs(): number {
     `[item-debate-runner] ignoring MUONROI_IDEAL_ITEM_DEBATE_DEADLINE_MS=${JSON.stringify(raw)} (needs a positive integer ms); using ${DEFAULT_ITEM_DEBATE_DEADLINE_MS}`,
   );
   return DEFAULT_ITEM_DEBATE_DEADLINE_MS;
+}
+
+/**
+ * D8-followup — per-item estimate (ms) for how long ONE leader ruling call
+ * needs, used to size the reserve `getItemDebateRulingReserveMs` carves out
+ * of the total BEFORE the scoped debate starts. The completion is short
+ * (`ITEM_RULING_MAX_OUTPUT_TOKENS` = 600 tokens, system+prompt both bounded
+ * text), so 60s is generous headroom for typical provider latency. A retry
+ * (D8) draws from the SAME shared reserve pool rather than doubling this
+ * per-item number — an item that needed its retry simply leaves less of the
+ * pool for the items after it, the same shared-deadline trade-off every
+ * multi-item budget in this codebase already accepts.
+ */
+export const DEFAULT_ITEM_RULING_RESERVE_PER_ITEM_MS = 60_000;
+
+/**
+ * D8-followup — the reserve can never claim more than this fraction of the
+ * TOTAL budget, so an operator-raised `MUONROI_IDEAL_DEBATABLE_ITEMS_CAP`
+ * cannot starve the scoped debate of nearly all its time (e.g. a cap of 20
+ * items would otherwise ask for a 1_200_000ms reserve alone). At the default
+ * 3-item cap and 900_000ms total this ceiling (270_000ms) does not bind —
+ * the per-item estimate (180_000ms) is smaller — it only matters as a
+ * backstop for a large override.
+ */
+export const MAX_ITEM_DEBATE_RULING_RESERVE_FRACTION = 0.3;
+
+/**
+ * D8-followup — the wall-clock reserve carved out of `totalMs` for the
+ * per-item ruling calls, computed BEFORE the scoped debate starts so the
+ * debate is given a SMALLER share (`totalMs - reserveMs`) up front rather
+ * than whatever happens to be left over when it returns (see `runItemDebate`
+ * — the debate's own deadline signal and the rulings' deadline signal are
+ * built from this split and are otherwise INDEPENDENT of each other; the
+ * debate cannot "eat" the reserve by running long, because the rulings'
+ * signal is tied to the same fixed `totalMs` from the same start time, not
+ * to "however much time the debate leaves").
+ *
+ * `MUONROI_IDEAL_ITEM_DEBATE_RULING_RESERVE_MS`, when set, is used VERBATIM
+ * (ignoring `itemCount`/`totalMs` entirely) — an explicit human override
+ * always wins. Unset/blank computes `min(itemCount *
+ * DEFAULT_ITEM_RULING_RESERVE_PER_ITEM_MS, totalMs *
+ * MAX_ITEM_DEBATE_RULING_RESERVE_FRACTION)`. An invalid override (non-numeric,
+ * negative, non-integer) is logged and falls back to the computed default —
+ * same discipline as every other env getter in this module. `0` is a valid,
+ * meaningful override ("no reserve — restore the pre-split single-deadline
+ * behaviour").
+ */
+export function getItemDebateRulingReserveMs(itemCount: number, totalMs: number): number {
+  const raw = process.env.MUONROI_IDEAL_ITEM_DEBATE_RULING_RESERVE_MS;
+  if (raw !== undefined && raw.trim() !== "") {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0 && Number.isInteger(n)) return n;
+    console.error(
+      `[item-debate-runner] ignoring MUONROI_IDEAL_ITEM_DEBATE_RULING_RESERVE_MS=${JSON.stringify(raw)} (needs an integer >= 0); using the computed default`,
+    );
+  }
+  const perItemTotal = itemCount * DEFAULT_ITEM_RULING_RESERVE_PER_ITEM_MS;
+  const fractionCap = Math.floor(totalMs * MAX_ITEM_DEBATE_RULING_RESERVE_FRACTION);
+  return Math.min(perItemTotal, fractionCap);
 }
 
 /**
@@ -214,16 +291,50 @@ function extractPositions(item: DebatableItem, round: CouncilRoundRecord | undef
  * `role: undefined` in `usage forensics`, invisible next to every other
  * stage's cost).
  */
+/**
+ * D8 — REWRITTEN from its original one-shot form. Live run `mu75rurpf9ec`
+ * recorded `leaderRuling: "no_verdict"` for every item in both sprints on the
+ * old prompt; the raw reply was never stored (see `item-debate-record.ts`'s
+ * D8 module doc), so this codebase cannot prove the OLD prompt itself was the
+ * cause rather than the deadline exhausting before any call was even made
+ * (see `runItemDebate`'s deadline-skip path, and the timing evidence in the
+ * D8 report: sprint 1's whole debate took exactly the item-debate deadline).
+ * It is rewritten anyway because it is demonstrably not producing rulings and
+ * the exception this codebase makes for it applies regardless of which cause
+ * turns out to dominate: the ORIGINAL form asked a model to fill a 5-branch
+ * change vocabulary in the same breath as its most common answer ("none", no
+ * structural edit) — a small/fast model is more likely to pad even a "none"
+ * reply with an unwanted "change" object, or wrap it in explanatory prose,
+ * when the schema's complexity is front-loaded before the simple case. This
+ * version leads with the minimal "none" shape (the common case), states the
+ * no-prose rule as its own sentence, and defers the four `change` shapes to
+ * only when they are actually needed.
+ */
 export const ITEM_RULING_SYSTEM_PROMPT =
   "You are the leader of a product-engineering debate panel, ruling on ONE plan item the panel just argued. " +
-  "Reply with a SINGLE JSON object and nothing else: " +
-  '{"ruling": "<one-sentence verdict>", "changeKind": "none"|"criterion"|"dependency"|"split"|"drop", "change": {...}}. ' +
-  'changeKind "criterion" requires change.criterionText (the task\'s new done criterion). ' +
-  'changeKind "dependency" requires change.dependsOnId (a task id this task must now depend on). ' +
-  'changeKind "split" requires change.splitTitles (an array of >= 2 short titles for the replacement tasks). ' +
-  'changeKind "drop" requires change.note (why the task should be dropped). ' +
-  'Use "none" when the debate concluded the plan needs no structural change for this item — never invent an edit ' +
-  "the debate itself did not settle.";
+  "Reply with exactly one JSON object and nothing else — no prose, no code fences, before or after it. " +
+  'Minimum shape: {"ruling": "<one-sentence verdict>", "changeKind": "none"}. ' +
+  'Example when the debate settled no structural change: {"ruling": "the criterion is fine as written", "changeKind": "none"}. ' +
+  'Only when the panel actually agreed on a concrete plan edit, set "changeKind" to one of ' +
+  '"criterion"|"dependency"|"split"|"drop" and add a "change" object: ' +
+  '"criterion" needs change.criterionText (the task\'s new done criterion); ' +
+  '"dependency" needs change.dependsOnId (a task id this task must now depend on); ' +
+  '"split" needs change.splitTitles (an array of >= 2 short titles for the replacement tasks); ' +
+  '"drop" needs change.note (why the task should be dropped). ' +
+  'Use "none" whenever the debate did not settle a concrete edit — never invent one.';
+
+/**
+ * D8 — the single retry, fired only when the first reply could not be turned
+ * into a ruling (never when the call itself failed/aborted — retrying a
+ * broken call is not "the reply didn't parse"). Short and maximally
+ * explicit: names the exact keys and gives a one-line example, on the theory
+ * that a model whose first reply drifted from the fuller prompt is more
+ * likely to comply with a shorter, harder-to-misread one.
+ */
+export const ITEM_RULING_RETRY_SYSTEM_PROMPT =
+  "Your previous reply could not be read as JSON. Reply again with ONLY one JSON object — no prose, no code fences, " +
+  'nothing before or after it. Required keys: "ruling" (a one-sentence string) and "changeKind" (one of ' +
+  '"none"|"criterion"|"dependency"|"split"|"drop"). Example: {"ruling": "the criterion is fine as written", "changeKind": "none"}.';
 
 const ITEM_RULING_MAX_OUTPUT_TOKENS = 600;
 
@@ -246,10 +357,30 @@ function buildItemRulingPrompt(
   return lines.join("\n");
 }
 
+/** D8 — the retry prompt reuses the same item context (so the model does not
+ * need to re-derive what it is ruling on) and appends one explicit reminder;
+ * paired with `ITEM_RULING_RETRY_SYSTEM_PROMPT` as the system message. */
+function buildItemRulingRetryPrompt(
+  item: DebatableItem,
+  task: SprintPlanTask | undefined,
+  round: CouncilRoundRecord | undefined,
+): string {
+  return `${buildItemRulingPrompt(item, task, round)}\n\nReply with ONLY the JSON object this time — nothing before or after it.`;
+}
+
+/** Outcome of one ruling call attempt: the raw reply text on success, or a
+ * bounded error message when the call itself failed/aborted before
+ * returning anything to parse. Exactly one of the two is set. */
+interface ItemRulingCallOutcome {
+  raw?: string;
+  error?: string;
+}
+
 /** One leader-tier ruling call for `item`. Never throws: a call failure logs
- * (No Silent Catch) and returns undefined, which `buildSprintItemDebateItem`
- * already treats as `leaderRuling: "no_verdict"` / `changeKind: "none"` —
- * never a silent approve. */
+ * (No Silent Catch) and returns `{error}`, which the caller threads onto
+ * `buildSprintItemDebateItem` as `rulingCallError` — `leaderRuling:
+ * "no_verdict"` / `changeKind: "none"`, never a silent approve, but now with
+ * a recorded reason instead of a bare absence. */
 async function requestItemRuling(args: {
   item: DebatableItem;
   task: SprintPlanTask | undefined;
@@ -257,23 +388,26 @@ async function requestItemRuling(args: {
   leaderModelId: string;
   llm: Pick<CouncilLLM, "generate">;
   signal: AbortSignal;
-}): Promise<string | undefined> {
-  const { item, task, round, leaderModelId, llm, signal } = args;
+  /** D8 — true for the one retry attempt: swaps in the shorter, harder-to-misread prompt. */
+  isRetry?: boolean;
+}): Promise<ItemRulingCallOutcome> {
+  const { item, task, round, leaderModelId, llm, signal, isRetry } = args;
+  const system = isRetry ? ITEM_RULING_RETRY_SYSTEM_PROMPT : ITEM_RULING_SYSTEM_PROMPT;
+  const prompt = isRetry ? buildItemRulingRetryPrompt(item, task, round) : buildItemRulingPrompt(item, task, round);
   try {
-    return await llm.generate(
-      leaderModelId,
-      ITEM_RULING_SYSTEM_PROMPT,
-      buildItemRulingPrompt(item, task, round),
-      ITEM_RULING_MAX_OUTPUT_TOKENS,
-      undefined,
-      signal,
-    );
+    const raw = await llm.generate(leaderModelId, system, prompt, ITEM_RULING_MAX_OUTPUT_TOKENS, undefined, signal);
+    return { raw };
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
     console.error(
-      `[item-debate-runner] leader ruling call failed for item "${item.id}": ${err instanceof Error ? err.message : String(err)}`,
-      { itemId: item.id, stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined },
+      `[item-debate-runner] leader ruling call failed for item "${item.id}"${isRetry ? " (retry)" : ""}: ${message}`,
+      {
+        itemId: item.id,
+        isRetry: Boolean(isRetry),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      },
     );
-    return undefined;
+    return { error: message };
   }
 }
 
@@ -322,14 +456,44 @@ export async function* runItemDebate(
     return { enabled: true, triggered: false, stopReason: "error", items: [], selected, errorMessage: message };
   }
 
-  const deadlineSignal = AbortSignal.timeout(getItemDebateDeadlineMs());
-  const signal = combineSignals(args.abortSignal, deadlineSignal);
+  // D8-followup — split the total into a debate share and a ruling reserve
+  // BEFORE the debate starts, rather than letting the debate spend whatever
+  // it wants and hoping something is left over (the exact failure mu75rurpf9ec
+  // hit: the debate consumed the entire 600_000ms total, so the ruling loop's
+  // signal was already aborted before a single call fired). `itemCount` is
+  // known now (`selected.length`), so the reserve is sized up front.
+  const totalMs = getItemDebateDeadlineMs();
+  const rulingReserveMs = getItemDebateRulingReserveMs(selected.length, totalMs);
+  const debateShareMs = Math.max(0, totalMs - rulingReserveMs);
+
+  // The debate's OWN, smaller deadline — enforced independently of the
+  // rulings' deadline below. Combined with `overallDeadlineSignal` too (a
+  // pure backstop: `debateShareMs <= totalMs` always holds by construction,
+  // so this can only matter if that invariant is ever violated by a future
+  // change) so the debate can never itself exceed the total either.
+  const overallDeadlineSignal = AbortSignal.timeout(totalMs);
+  const debateDeadlineSignal = AbortSignal.timeout(debateShareMs);
+  const debateSignal = combineSignals(combineSignals(args.abortSignal, debateDeadlineSignal), overallDeadlineSignal);
+
+  // The rulings' deadline is tied ONLY to `overallDeadlineSignal` (+ the
+  // caller's own abort) — NEVER to the debate's smaller share. This is the
+  // enforcement: however long the debate actually takes (on time, early, or
+  // — if `runCouncil`'s own abort handling lags — running past its share),
+  // the rulings always get whatever remains of the SAME fixed `totalMs`
+  // window, never less than "total minus actual debate time" and never
+  // reduced further just because the debate was allotted a smaller nominal
+  // share. The debate cannot "eat" the reserve: it has no channel to extend
+  // `overallDeadlineSignal`, only to consume time before it fires.
+  const rulingSignal = combineSignals(args.abortSignal, overallDeadlineSignal);
 
   // Honest skip: a caller signal that is ALREADY aborted (e.g. the run's own
   // abort fired before this sprint reached C5) must not pay for a debate call
   // it can never use. Checked once, up front — never silently proceed and
   // let `runCouncil` discover the abort on its own first internal check.
-  if (signal.aborted) {
+  // (Neither timeout signal can be pre-aborted at creation time, so checking
+  // the caller's own signal here is equivalent to checking either combined
+  // signal, without needing to pick one arbitrarily.)
+  if (args.abortSignal?.aborted) {
     const message = "item debate skipped: the signal was already aborted before it could start";
     console.error(`[item-debate-runner] ${message} (run ${args.runId})`);
     return {
@@ -374,7 +538,7 @@ export async function* runItemDebate(
         skipResearch: true,
         sprintPlanningMode: true,
         perRoundFocus,
-        signal,
+        signal: debateSignal,
         councilStats: itemDebateCouncilStats,
         // The TUI Context Rail (when active) already renders the leader/panel
         // roster from the structured `council_meta` patch — same reasoning as
@@ -400,19 +564,79 @@ export async function* runItemDebate(
       const round = roundRecords.find((r) => r.itemId === item.id);
       const task = item.kind === "task" ? taskById.get(item.id) : undefined;
       const positions = extractPositions(item, round);
-      // D3 fix: an ALREADY-IN-FLIGHT ruling call IS now cancellable. `args.llm`
-      // is `productLlm` (`createProductLlm` in sprint-runner.ts), and that
-      // wrapper's `generate` now forwards the `signal` it receives straight
-      // through to the underlying provider call instead of hardcoding
-      // `undefined`. So `signal` below both gates whether the NEXT ruling
-      // call is issued (checked explicitly between calls, right here) AND
-      // reaches the provider for the call already in flight — a debate that
-      // eats the whole deadline budget mid-call now has that call itself cut
-      // short, not just every call after it.
-      const leaderRulingRaw = signal.aborted
-        ? undefined
-        : await requestItemRuling({ item, task, round, leaderModelId, llm: args.llm, signal });
-      items.push(buildSprintItemDebateItem({ item, positions, leaderRulingRaw }));
+
+      let raw: string | undefined;
+      let callError: string | undefined;
+      let skipReason: string | undefined;
+      let attempts = 0;
+
+      // D3 fix (kept): an ALREADY-IN-FLIGHT ruling call IS cancellable —
+      // `args.llm` (`productLlm`, sprint-runner.ts) forwards `signal` straight
+      // to the provider call instead of hardcoding `undefined`. So
+      // `rulingSignal` below both gates whether the NEXT ruling call is
+      // issued (checked explicitly between calls) AND reaches the provider
+      // for the call already in flight. `rulingSignal` is deliberately NOT
+      // `debateSignal` — see the D8-followup comment above where both are
+      // built: the rulings get the RESERVE, protected from the debate's own
+      // (smaller, independently-enforced) share.
+      if (rulingSignal.aborted) {
+        // D8 — an honest, RECORDED reason: no call was ever attempted for
+        // this item because the ruling reserve was already gone by the time
+        // this item's turn came up — either the debate ran long enough to
+        // eat into it, or an earlier item's own call(s) exhausted it.
+        skipReason = "no ruling call was attempted: the item debate's ruling reserve was already exhausted";
+      } else {
+        attempts = 1;
+        const first = await requestItemRuling({
+          item,
+          task,
+          round,
+          leaderModelId,
+          llm: args.llm,
+          signal: rulingSignal,
+        });
+        raw = first.raw;
+        callError = first.error;
+
+        // D8 — retry exactly once, and only when a reply WAS obtained but
+        // could not be turned into a ruling (never for a call that itself
+        // failed/aborted — retrying a broken call is a different problem).
+        // Bounded by the same ruling reserve as every other call in this
+        // loop, so a retry never spends budget the reserve has already
+        // withdrawn.
+        if (raw !== undefined && parseLeaderRuling(raw).failedAt && !rulingSignal.aborted) {
+          attempts = 2;
+          const retry = await requestItemRuling({
+            item,
+            task,
+            round,
+            leaderModelId,
+            llm: args.llm,
+            signal: rulingSignal,
+            isRetry: true,
+          });
+          if (retry.raw !== undefined) {
+            raw = retry.raw;
+            callError = undefined;
+          } else {
+            // The retry call itself failed — keep the first attempt's raw
+            // text (still useful as a diagnostic tail) but surface the
+            // retry's own failure for forensics.
+            callError = retry.error;
+          }
+        }
+      }
+
+      items.push(
+        buildSprintItemDebateItem({
+          item,
+          positions,
+          leaderRulingRaw: raw,
+          rulingAttempts: attempts,
+          rulingCallError: callError,
+          rulingSkipReason: skipReason,
+        }),
+      );
     }
 
     return {

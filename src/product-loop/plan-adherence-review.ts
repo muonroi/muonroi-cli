@@ -11,19 +11,106 @@ import { boundTaskText, type SprintPlanTask } from "./sprint-plan-artifact.js";
  * paths handle it (review → leave gate; fix → stop the loop) instead of hanging.
  */
 /**
+ * D9 — what an `IsolatedGuardObservation` captures about a timed-out call: how
+ * many per-tool activity notifications the child sent before the deadline
+ * fired, when the last one landed, and — new here — a bounded snippet of what
+ * that last activity actually WAS. Live run `mu75rurpf9ec` (sprint 1's
+ * verify-fix round 1) recorded only `"verify-fix-s1-r1 exceeded 900000ms
+ * deadline (timeout)"`: elapsed time and nothing else, so "the fixer was
+ * still working on something" and "the fixer wedged immediately" were the
+ * same observation. `ctx.runIsolatedTask`'s `opts.onActivity` already carries
+ * a `detail` string per tool call (`product-loop/types.ts`) — this is the
+ * SAME per-tool activity signal `withIsolatedImplDeadline` uses for the
+ * implementation stage (`sprint-runner.ts`), just also keeping the detail
+ * text itself instead of only a count and a timestamp.
+ */
+export interface IsolatedGuardObservation {
+  /** Sub-agent activity notifications seen before the call settled. */
+  events: number;
+  /** `Date.now()` of the most recent one, or null when none ever arrived. */
+  lastEventAtMs: number | null;
+  /** Bounded (`MAX_ISOLATED_GUARD_DETAIL_CHARS`) text of the most recent
+   * activity detail seen — e.g. the last tool call the child reported. */
+  lastDetail?: string;
+}
+
+const MAX_ISOLATED_GUARD_DETAIL_CHARS = 200;
+
+/** Bounded, human-readable summary of what an `IsolatedGuardObservation` saw
+ * — appended to a timeout's error message so a round record's free-text
+ * summary field (e.g. `VerifyFixRoundRecord.fixerSummary`) carries WHY, not
+ * only how long, a call took. */
+function describeIsolatedGuardObservation(observation: IsolatedGuardObservation): string {
+  if (observation.events === 0 || observation.lastEventAtMs === null) {
+    return "observed 0 sub-agent activity events before the timeout";
+  }
+  const sinceLastMs = Math.max(0, Date.now() - observation.lastEventAtMs);
+  const base =
+    `observed ${observation.events} sub-agent activity event(s), the last ${(sinceLastMs / 1000).toFixed(1)}s ` +
+    `before the timeout (at ${new Date(observation.lastEventAtMs).toISOString()})`;
+  return observation.lastDetail ? `${base} — last activity: ${observation.lastDetail}` : base;
+}
+
+/**
  * Exported so other bounded reviewer/fixer loops (S4's `verify-fix-loop.ts`)
  * reuse this exact wall-clock-backstopped shape instead of a second copy that
  * could drift out of sync with the deadline handling.
+ *
+ * D9 — `guardOpts` is entirely optional and additive: a caller that omits it
+ * (both existing call sites in this file) gets byte-identical behaviour to
+ * before this change — same deadline source, same abort-signal-less race, no
+ * `opts` object passed to `run` at all. A caller that DOES supply
+ * `guardOpts.observation` gets its per-tool activity recorded as the call
+ * runs, and — only on a timeout — that observation folded into the returned
+ * `ToolResult.error`, so a caller need not change how it reads the result to
+ * benefit.
  */
 export async function runIsolatedGuarded(
-  run: (req: TaskRequest) => Promise<ToolResult>,
+  run: (
+    req: TaskRequest,
+    opts?: { abortSignal?: AbortSignal; onActivity?: (detail: string) => void },
+  ) => Promise<ToolResult>,
   req: TaskRequest,
   label: string,
+  guardOpts?: {
+    /** Overrides `getIsolatedTaskDeadlineMs()` for this call — e.g. the
+     * verify-fix fixer's own smaller budget (`getVerifyFixFixerDeadlineMs`,
+     * `verify-fix-loop.ts`). */
+    deadlineMs?: number;
+    /** Forwarded to `run` as `opts.abortSignal` and to `withDeadlineRace` so
+     * a user-level abort can shorten the race, same as `run`'s own signal. */
+    abortSignal?: AbortSignal;
+    /** Filled in as the underlying task reports per-tool activity. Read
+     * this AFTER the call settles — including on a timeout — to explain WHY,
+     * not just how long, a call took. */
+    observation?: IsolatedGuardObservation;
+  },
 ): Promise<ToolResult> {
+  const observation = guardOpts?.observation;
+  const runOpts =
+    guardOpts?.abortSignal || observation
+      ? {
+          abortSignal: guardOpts?.abortSignal,
+          onActivity: observation
+            ? (detail: string) => {
+                observation.events += 1;
+                observation.lastEventAtMs = Date.now();
+                if (detail?.trim()) observation.lastDetail = boundTaskText(detail, MAX_ISOLATED_GUARD_DETAIL_CHARS);
+              }
+            : undefined,
+        }
+      : undefined;
   try {
-    return await withDeadlineRace(() => run(req), getIsolatedTaskDeadlineMs(), label);
+    return await withDeadlineRace(
+      () => run(req, runOpts),
+      guardOpts?.deadlineMs ?? getIsolatedTaskDeadlineMs(),
+      label,
+      guardOpts?.abortSignal,
+    );
   } catch (err) {
-    return { success: false, output: "", error: err instanceof Error ? err.message : String(err) };
+    const baseMessage = err instanceof Error ? err.message : String(err);
+    const message = observation ? `${baseMessage}; ${describeIsolatedGuardObservation(observation)}` : baseMessage;
+    return { success: false, output: "", error: message };
   }
 }
 

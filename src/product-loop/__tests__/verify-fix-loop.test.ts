@@ -5,10 +5,12 @@ import {
   computeFailureKey,
   computeVerifyFixTrigger,
   DEFAULT_VERIFY_FIX_DEADLINE_MS,
+  DEFAULT_VERIFY_FIX_FIXER_DEADLINE_MS,
   DEFAULT_VERIFY_FIX_ROUNDS,
   deriveFailureIdentity,
   type FloorRecheckOutcome,
   getVerifyFixDeadlineMs,
+  getVerifyFixFixerDeadlineMs,
   getVerifyFixRoundLimit,
   isCheapRecheckEligible,
   isCheapRecheckEnabled,
@@ -1043,5 +1045,161 @@ describe("runVerifyFixLoop — total-elapsed deadline", () => {
     expect(result.rounds).toEqual([]);
     expect(verifyPassCalls).toBe(0);
     expect(fixerCalls).toBe(0);
+  });
+});
+
+/**
+ * D9 — the fixer's own dedicated (smaller) deadline, and the observation it
+ * now carries into a timeout's `fixerSummary`.
+ *
+ * Evidence this section pins: live run `mu75rurpf9ec` sprint 1's round 1
+ * spent the FULL generic 900_000ms isolated-task ceiling
+ * (`sprints/1-verify-fix.json`: `roundElapsedMs: 900009`) and that alone
+ * equalled the loop's whole measured lifetime (`startedAt`..`finishedAt` =
+ * 900011ms) — the loop never reached a re-verify pass or a second round.
+ */
+describe("getVerifyFixFixerDeadlineMs", () => {
+  const ORIGINAL = process.env.MUONROI_IDEAL_VERIFY_FIX_FIXER_MS;
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.MUONROI_IDEAL_VERIFY_FIX_FIXER_MS;
+    else process.env.MUONROI_IDEAL_VERIFY_FIX_FIXER_MS = ORIGINAL;
+  });
+
+  it("returns the default when unset", () => {
+    delete process.env.MUONROI_IDEAL_VERIFY_FIX_FIXER_MS;
+    expect(getVerifyFixFixerDeadlineMs()).toBe(DEFAULT_VERIFY_FIX_FIXER_DEADLINE_MS);
+  });
+
+  it("honours a valid override", () => {
+    process.env.MUONROI_IDEAL_VERIFY_FIX_FIXER_MS = "12345";
+    expect(getVerifyFixFixerDeadlineMs()).toBe(12345);
+  });
+
+  it("ignores an invalid override and logs why", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.MUONROI_IDEAL_VERIFY_FIX_FIXER_MS = "not-a-number";
+    expect(getVerifyFixFixerDeadlineMs()).toBe(DEFAULT_VERIFY_FIX_FIXER_DEADLINE_MS);
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
+
+  it("is strictly smaller than the loop's own default total deadline, and smaller than the generic 900_000ms isolated-task ceiling", () => {
+    // The whole point (see module doc on getVerifyFixFixerDeadlineMs): 2
+    // default rounds at the generic ceiling alone would equal or exceed the
+    // loop's total budget, leaving no room for either re-verify pass.
+    expect(DEFAULT_VERIFY_FIX_FIXER_DEADLINE_MS).toBeLessThan(900_000);
+    expect(DEFAULT_VERIFY_FIX_FIXER_DEADLINE_MS * 2).toBeLessThan(DEFAULT_VERIFY_FIX_DEADLINE_MS);
+  });
+});
+
+describe("runVerifyFixLoop — D9 the fixer's dedicated deadline + observation", () => {
+  it("a fixer that never settles is cut at the DEDICATED (smaller) fixer deadline, not the generic 900_000ms isolated-task ceiling", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      return outcome({ verifyVerdict: "PASS" });
+    }
+    const runIsolatedTask = () => new Promise<ToolResult>(() => {}); // never settles
+
+    const start = Date.now();
+    const result = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        maxRounds: 2,
+        maxFixerMs: 10,
+      }),
+    );
+    const elapsed = Date.now() - start;
+
+    expect(result.stopReason).toBe("error");
+    expect(result.rounds).toHaveLength(1);
+    expect(result.rounds[0].fixerSuccess).toBe(false);
+    expect(result.rounds[0].fixerSummary).toContain("exceeded 10ms deadline");
+    // Proves the SMALL override actually fired rather than the 900s default.
+    expect(elapsed).toBeLessThan(5_000);
+  });
+
+  it("a timed-out fixer's summary carries the last observed activity, not only elapsed time", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      return outcome({ verifyVerdict: "PASS" });
+    }
+    const runIsolatedTask = (_req: TaskRequest, opts?: { onActivity?: (detail: string) => void }) => {
+      opts?.onActivity?.("editing src/widget.ts");
+      return new Promise<ToolResult>(() => {});
+    };
+
+    const result = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        maxRounds: 2,
+        maxFixerMs: 10,
+      }),
+    );
+
+    expect(result.rounds[0].fixerSummary).toContain("observed 1 sub-agent activity event(s)");
+    expect(result.rounds[0].fixerSummary).toContain("last activity: editing src/widget.ts");
+  });
+
+  it("a timed-out round is counted honestly — the loop stops with stopReason error rather than silently retrying, even with rounds left in the cap", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    let verifyPassCalls = 0;
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      verifyPassCalls++;
+      return outcome({ verifyVerdict: "PASS" });
+    }
+    const runIsolatedTask = () => new Promise<ToolResult>(() => {});
+
+    const result = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        maxRounds: 5, // plenty of rounds left in the cap
+        maxFixerMs: 10,
+      }),
+    );
+
+    expect(result.rounds).toHaveLength(1);
+    expect(result.stopReason).toBe("error");
+    expect(verifyPassCalls).toBe(0); // the re-verify never ran after a failed fixer
+  });
+
+  it("the loop's OWN total deadline still bounds everything even with an absurdly large per-fixer override in play", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.A"]) });
+    const round1 = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.B"]) });
+    let round1ReVerifyDone = false;
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      round1ReVerifyDone = true;
+      return round1;
+    }
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "tried a fix" });
+    const nowFn = () => (round1ReVerifyDone ? 100_000 : 0);
+
+    const result = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        maxRounds: 5,
+        maxTotalMs: 10_000,
+        maxFixerMs: 999_999_999, // must not shadow or replace the outer total
+        nowFn,
+      }),
+    );
+
+    expect(result.stopReason).toBe("deadline");
+    expect(result.rounds).toHaveLength(1);
   });
 });

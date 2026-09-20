@@ -55,7 +55,7 @@
  */
 
 import type { StreamChunk, TaskRequest, ToolResult, VerifyRecipe } from "../types/index.js";
-import { runIsolatedGuarded } from "./plan-adherence-review.js";
+import { type IsolatedGuardObservation, runIsolatedGuarded } from "./plan-adherence-review.js";
 import { hasProjectRegistrationViolations, type ProjectRegistrationCheckResult } from "./project-registration-check.js";
 import { boundTaskText } from "./sprint-plan-artifact.js";
 import { extractErrorSet, type FloorDelta } from "./verify-baseline.js";
@@ -115,6 +115,57 @@ export function getVerifyFixDeadlineMs(): number {
     `[verify-fix-loop] ignoring MUONROI_IDEAL_VERIFY_FIX_DEADLINE_MS=${JSON.stringify(raw)} (needs a positive integer ms); using ${DEFAULT_VERIFY_FIX_DEADLINE_MS}`,
   );
   return DEFAULT_VERIFY_FIX_DEADLINE_MS;
+}
+
+/**
+ * D9 — a dedicated wall-clock budget for the fixer's OWN isolated-task call,
+ * smaller than the generic `getIsolatedTaskDeadlineMs()` (15 min /
+ * 900_000ms) every OTHER isolated task in this codebase shares.
+ *
+ * Evidence (live run `mu75rurpf9ec`, sprint 1): `sprints/1-verify-fix.json`
+ * round 1 recorded `roundElapsedMs: 900009` and `fixerSummary: "verify-fix-
+ * s1-r1 exceeded 900000ms deadline (timeout)"` — the fixer spent the FULL
+ * generic ceiling doing nothing this loop could observe. The loop's own
+ * `startedAt`/`finishedAt` timestamps span exactly 900011ms, meaning that
+ * single call was the ENTIRE measured lifetime of the loop: it never reached
+ * a re-verify pass, let alone `getVerifyFixRoundLimit()`'s second round. A
+ * bounded "verify -> fix -> re-verify" loop whose round cap a single stuck
+ * fixer call can silently override is not the loop this module documents
+ * itself as being.
+ *
+ * `plan-adherence-review.ts`'s reviewer/fixer loop shares the SAME generic
+ * ceiling per call but has NO total-elapsed deadline of its own (see that
+ * module's doc) — bounded only by its round cap, so a slow call there merely
+ * costs wall time, never blows through an outer promise. This loop is
+ * different: it already promises callers a fixed TOTAL window
+ * (`getVerifyFixDeadlineMs()`, default 1_800_000ms/30min) covering EVERY
+ * round's fixer call plus its re-verify pass. At the generic 900_000ms
+ * ceiling, the default `getVerifyFixRoundLimit()` of 2 rounds could spend the
+ * loop's ENTIRE total budget on fixer calls alone (2 x 900_000ms =
+ * 1_800_000ms) with zero ms left for either re-verify pass — exactly the
+ * failure mode measured above. The fixer needs its own, smaller number here.
+ *
+ * Default 600_000ms (10 min): at 2 default rounds that reserves at most
+ * 1_200_000ms of the 1_800_000ms total for fixer calls, leaving >= 600_000ms
+ * for the interleaved re-verify passes — >= 4x the ~150_000ms/2.5min a full
+ * verify+floor pass measures per this module's own doc (the D2 section
+ * above), so a legitimately full-length pass is never starved by this
+ * choice. Override with `MUONROI_IDEAL_VERIFY_FIX_FIXER_MS`; unset/blank
+ * falls back to the default silently, an invalid value (non-numeric,
+ * non-positive, non-integer) is logged and still falls back — same
+ * discipline as `getVerifyFixDeadlineMs`.
+ */
+export const DEFAULT_VERIFY_FIX_FIXER_DEADLINE_MS = 600_000;
+
+export function getVerifyFixFixerDeadlineMs(): number {
+  const raw = process.env.MUONROI_IDEAL_VERIFY_FIX_FIXER_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_VERIFY_FIX_FIXER_DEADLINE_MS;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0 && Number.isInteger(n)) return n;
+  console.error(
+    `[verify-fix-loop] ignoring MUONROI_IDEAL_VERIFY_FIX_FIXER_MS=${JSON.stringify(raw)} (needs a positive integer ms); using ${DEFAULT_VERIFY_FIX_FIXER_DEADLINE_MS}`,
+  );
+  return DEFAULT_VERIFY_FIX_FIXER_DEADLINE_MS;
 }
 
 /**
@@ -608,6 +659,9 @@ export interface RunVerifyFixLoopArgs {
   maxRounds?: number;
   /** Test-only override for `getVerifyFixDeadlineMs()`. */
   maxTotalMs?: number;
+  /** D9 — test-only override for `getVerifyFixFixerDeadlineMs()`, the
+   * fixer's own dedicated (smaller) per-call budget. */
+  maxFixerMs?: number;
   /** Test-only clock injection. Defaults to `Date.now`. */
   nowFn?: () => number;
   /**
@@ -656,6 +710,10 @@ export async function* runVerifyFixLoop(
 ): AsyncGenerator<StreamChunk, VerifyFixLoopResult, unknown> {
   const limit = typeof args.maxRounds === "number" ? args.maxRounds : getVerifyFixRoundLimit();
   const deadlineMs = typeof args.maxTotalMs === "number" ? args.maxTotalMs : getVerifyFixDeadlineMs();
+  // D9 — the fixer's own dedicated (smaller) per-call budget; see
+  // `getVerifyFixFixerDeadlineMs`'s doc for why the generic isolated-task
+  // ceiling is wrong for THIS call site specifically.
+  const fixerDeadlineMs = typeof args.maxFixerMs === "number" ? args.maxFixerMs : getVerifyFixFixerDeadlineMs();
   const now = args.nowFn ?? Date.now;
   const loopStartedAt = now();
   const deadlineExceeded = (): boolean => now() - loopStartedAt >= deadlineMs;
@@ -755,6 +813,10 @@ export async function* runVerifyFixLoop(
       content: `\n> [verify-fix] Round ${round}: dispatching a fix for sprint ${args.sprintN} (${identityBefore.reason})…\n`,
     };
 
+    // D9 — filled in as the fixer's isolated task reports per-tool activity;
+    // read AFTER the call settles so a timeout's error message can say WHAT
+    // was last observed, not only how long the call ran.
+    const fixObservation: IsolatedGuardObservation = { events: 0, lastEventAtMs: null };
     let fixResult: ToolResult;
     try {
       fixResult = await runIsolatedGuarded(
@@ -774,6 +836,7 @@ export async function* runVerifyFixLoop(
           modelId: args.fixModelId,
         },
         `verify-fix-s${args.sprintN}-r${round}`,
+        { deadlineMs: fixerDeadlineMs, abortSignal: args.abortSignal, observation: fixObservation },
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
