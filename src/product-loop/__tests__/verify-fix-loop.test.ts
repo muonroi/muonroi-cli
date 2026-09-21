@@ -1203,3 +1203,167 @@ describe("runVerifyFixLoop — D9 the fixer's dedicated deadline + observation",
     expect(result.rounds).toHaveLength(1);
   });
 });
+
+describe("runVerifyFixLoop — D12 re-check after a fixer timeout", () => {
+  /** The exact shape `withDeadlineRace` stamps on a timeout, as
+   * `runIsolatedGuarded` returns it via `ToolResult.error` (never a throw). */
+  const timeoutError =
+    "verify-fix-s1-r1 exceeded 600000ms deadline (timeout); observed 12 sub-agent activity event(s), " +
+    "the last 0.3s before the timeout";
+
+  it("a timed-out fixer still triggers the D2 cheap floor re-check instead of stopping outright", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(outcome({ verifyVerdict: "PASS" }));
+    const { fn: runFloorRecheck, calls: recheckCalls } = sequenceFloorRecheck({
+      ranOk: true,
+      floorDelta: testRegressionFloor(["MyTests.Foo"]),
+    });
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: false, error: timeoutError });
+
+    await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 2 }),
+    );
+
+    expect(recheckCalls).toHaveLength(1);
+    expect(recheckCalls[0]).toBe("fix-r1-timeout-recheck");
+    expect(verifyCalls).toHaveLength(0); // no full pass paid for on a timed-out round
+  });
+
+  it("a re-check showing a CHANGED failure lets the loop continue to another round, and the round records both the timeout and the re-check", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const fixed = outcome({ verifyVerdict: "PASS" });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(fixed);
+    // Round 1's post-timeout recheck sees a DIFFERENT failing test (progress).
+    // Round 2 still goes through D2's own pre-existing cheap-recheck (its
+    // failure is still `engineering_floor`-eligible) before paying for a full
+    // pass, so a second outcome reporting the floor now clean lets it fall
+    // through to `runVerifyPass` exactly as D2 already does outside a timeout.
+    const { fn: runFloorRecheck } = sequenceFloorRecheck(
+      { ranOk: true, floorDelta: testRegressionFloor(["MyTests.Bar"]) },
+      { ranOk: true, floorDelta: passingFloor },
+    );
+    let attempt = 0;
+    const runIsolatedTask = async (): Promise<ToolResult> => {
+      attempt++;
+      if (attempt === 1) return { success: false, error: timeoutError };
+      return { success: true, output: "applied a fix" };
+    };
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 2 }),
+    );
+
+    expect(result.rounds).toHaveLength(2);
+    // The round keeps its timeout reason...
+    expect(result.rounds[0].fixerSuccess).toBe(false);
+    expect(result.rounds[0].fixerSummary).toContain("exceeded 600000ms deadline");
+    // ...AND gains the re-check's outcome.
+    expect(result.rounds[0].passKind).toBe("cheap");
+    expect(result.rounds[0].failureKeyAfter).toContain("MyTests.Bar");
+    expect(result.stopReason).toBe("pass");
+    expect(verifyCalls).toHaveLength(1); // only round 2 pays for a full pass
+  });
+
+  it("a re-check showing the SAME failure stops as no_progress, not error", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(outcome({ verifyVerdict: "PASS" }));
+    const { fn: runFloorRecheck } = sequenceFloorRecheck({
+      ranOk: true,
+      floorDelta: testRegressionFloor(["MyTests.Foo"]), // identical failure
+    });
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: false, error: timeoutError });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 5 }),
+    );
+
+    expect(result.stopReason).toBe("no_progress");
+    expect(result.rounds).toHaveLength(1);
+    expect(result.rounds[0].fixerSuccess).toBe(false);
+    expect(verifyCalls).toHaveLength(0);
+  });
+
+  it("a spent total budget skips the re-check even when the fixer reports a timeout", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(outcome({ verifyVerdict: "PASS" }));
+    const { fn: runFloorRecheck, calls: recheckCalls } = sequenceFloorRecheck({
+      ranOk: true,
+      floorDelta: passingFloor,
+    });
+    let fixerSettled = false;
+    const runIsolatedTask = async (): Promise<ToolResult> => {
+      fixerSettled = true;
+      return { success: false, error: timeoutError };
+    };
+    const nowFn = () => (fixerSettled ? 999_000 : 0);
+
+    const result = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        runFloorRecheck,
+        maxRounds: 5,
+        maxTotalMs: 10_000,
+        nowFn,
+      }),
+    );
+
+    expect(result.stopReason).toBe("deadline");
+    expect(recheckCalls).toHaveLength(0);
+    expect(verifyCalls).toHaveLength(0);
+  });
+
+  it("a timeout on a failure the cheap path is NOT eligible for (zero_coverage) stops as error, never attempting a recheck", async () => {
+    const initial = outcome({
+      verifyVerdict: "PASS",
+      recipeFromVerify: recipe({ testCommands: ["dotnet test"], coverage: 0 }),
+    });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(outcome({ verifyVerdict: "PASS" }));
+    const { fn: runFloorRecheck, calls: recheckCalls } = sequenceFloorRecheck({
+      ranOk: true,
+      floorDelta: passingFloor,
+    });
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: false, error: timeoutError });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 2 }),
+    );
+
+    expect(result.stopReason).toBe("error");
+    expect(recheckCalls).toHaveLength(0);
+    expect(verifyCalls).toHaveLength(0);
+  });
+
+  it("no runFloorRecheck provided: a timeout stops as error exactly as before D12", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(outcome({ verifyVerdict: "PASS" }));
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: false, error: timeoutError });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, maxRounds: 5 }),
+    );
+
+    expect(result.stopReason).toBe("error");
+    expect(verifyCalls).toHaveLength(0);
+  });
+
+  it("a plain (non-timeout) fixer failure never triggers the post-timeout recheck", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(outcome({ verifyVerdict: "PASS" }));
+    const { fn: runFloorRecheck, calls: recheckCalls } = sequenceFloorRecheck({
+      ranOk: true,
+      floorDelta: testRegressionFloor(["MyTests.Bar"]),
+    });
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: false, error: "the isolated task crashed" });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 2 }),
+    );
+
+    expect(result.stopReason).toBe("error");
+    expect(recheckCalls).toHaveLength(0);
+    expect(verifyCalls).toHaveLength(0);
+  });
+});

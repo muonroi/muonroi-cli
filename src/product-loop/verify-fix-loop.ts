@@ -52,6 +52,28 @@
  * `runFloorRecheck` is optional and MUONROI_IDEAL_VERIFY_FIX_CHEAP_RECHECK=0
  * disables it — either way, every round runs a full pass, byte-identical to
  * pre-D2 behaviour.
+ *
+ * ## D12 — a timed-out fixer's work is not thrown away
+ *
+ * A fixer edits files in place; `withDeadlineRace` (`utils/llm-deadline.ts`)
+ * never cancels the underlying call on a timeout, it only stops AWAITING it —
+ * so whatever the fixer already wrote to disk before the deadline fired is
+ * still there. Before this, a timeout was terminal: the round was recorded
+ * `fixerSuccess: false` and the loop stopped with `stopReason: "error"`
+ * without ever looking at whether those partial edits changed anything (live
+ * evidence: run `muauw6u93e1c`, sprint 1 round 1 timed out after 60 sub-agent
+ * activity events and stopped outright; sprint 2's round 1 cheap re-check had
+ * already found the real cause before round 2 timed out the same way). Now a
+ * TIMED-OUT fixer gets the SAME D2 cheap re-check (same eligibility rule, same
+ * `runFloorRecheck` callback, never a full pass — this round already spent
+ * its fixer budget) before the loop decides to continue on a changed failure,
+ * stop on `no_progress` for the same one, or stop on the round cap. The
+ * round's record keeps BOTH facts: `fixerSuccess: false` / `fixerSummary`
+ * still the timeout message, and `failureKeyAfter` / `passKind: "cheap"` from
+ * the re-check — never a fabricated `fixerSuccess: true`. Ineligible for the
+ * cheap path (e.g. `zero_coverage`), no `runFloorRecheck`, an inconclusive
+ * re-check, or the total deadline already spent all fall through to the
+ * pre-D12 timeout-stop, unchanged.
  */
 
 import type { StreamChunk, TaskRequest, ToolResult, VerifyRecipe } from "../types/index.js";
@@ -545,10 +567,38 @@ function verifyOutputOf(tr: ToolResult): string {
 }
 
 /**
+ * D12 — the exact shape `withDeadlineRace` (`utils/llm-deadline.ts`) stamps on
+ * a timeout: `` `${label} exceeded ${deadlineMs}ms deadline (timeout)` ``.
+ * `runIsolatedGuarded` (`plan-adherence-review.ts`) catches that rejection and
+ * returns it as `ToolResult.error` rather than throwing, so a fixer round's
+ * `!fixResult.success` branch is where a timeout is actually observed — never
+ * a thrown error. Matched by pattern, not a plain `.includes("timeout")`,
+ * so a fixer that legitimately reports failure with the word "timeout" in its
+ * own prose (e.g. describing a flaky test) is not mistaken for this specific,
+ * structured deadline message.
+ */
+const FIXER_DEADLINE_TIMEOUT_PATTERN = /exceeded \d+ms deadline \(timeout\)/;
+
+/** D12 — see `FIXER_DEADLINE_TIMEOUT_PATTERN`. */
+export function isFixerTimeoutFailure(error: string | undefined): boolean {
+  return typeof error === "string" && FIXER_DEADLINE_TIMEOUT_PATTERN.test(error);
+}
+
+/**
  * The fixer's prompt. New text — no existing prompt in the codebase is
  * reworded to build this. Bounded: a verify tail, the floor's must-fix note
  * (carries the attribution sentence from `describeBuildMustFix`), the failure's
  * own error set, the sprint's still-open tasks, and the approved plan.
+ *
+ * D12 — added (not reworded) one line asking for small increments and an
+ * early stop once a concrete fix is applied. Evidence: both observed live
+ * timeouts (run `muauw6u93e1c`, sprints 1 and 2) ran their FULL fixer
+ * deadline with dozens of activity events (60, then 48) and no completion —
+ * sprint 2's own cheap re-check right before the second timeout had already
+ * found the real cause ("the class is internal but used from the test
+ * assembly, needs InternalsVisibleTo"), yet the following round still ran out
+ * the clock instead of applying that one fix and stopping. Nothing here
+ * changes what the fixer is asked to FIX, only how it is asked to work.
  */
 export function buildFixPrompt(args: {
   sprintN: number;
@@ -569,6 +619,8 @@ export function buildFixPrompt(args: {
   return (
     `Sprint ${args.sprintN}'s verification FAILED (fix round ${args.round}). Fix the underlying problem by ` +
     `editing the code — do not narrate or re-plan.\n\n` +
+    `Work in small, concrete edits. As soon as you have applied a complete fix for the ` +
+    `failure below, STOP — do not keep exploring, refactoring, or making further changes.\n\n` +
     `=== FAILURE ===\n` +
     `Condition: ${args.identity.failedCondition}\n` +
     `Reason: ${args.identity.reason}\n` +
@@ -690,6 +742,10 @@ export interface RunVerifyFixLoopArgs {
    * this to the SAME floor invocation `runVerifyPass` uses internally
    * (`runDeterministicFloorOnly`) — one function, two callers, never a
    * forked copy. Absent → every round runs a full pass, today's behaviour.
+   *
+   * D12 — also the callback a fixer TIMEOUT re-checks with, before giving up
+   * on the round. Same eligibility rule, same callback, same "absent → no
+   * change from before D12/D2" fallback.
    */
   runFloorRecheck?: (roundLabel: string) => Promise<FloorRecheckOutcome>;
 }
@@ -883,6 +939,112 @@ export async function* runVerifyFixLoop(
     }
 
     if (!fixResult.success) {
+      const fixerSummary = bound(fixResult.error ?? "fix failed", MAX_SUMMARY_CHARS);
+
+      // D12 — a fixer edits files in place: `withDeadlineRace` (`utils/
+      // llm-deadline.ts`) never cancels the underlying call on a timeout, it
+      // only stops AWAITING it, so whatever the fixer already wrote to disk
+      // before the deadline fired is still there. Treating every timeout as a
+      // dead end throws that work away without ever looking at it. Re-run the
+      // SAME cheap deterministic floor re-check D2 already uses (never a full
+      // pass — this round already spent its fixer budget) so the loop can see
+      // whether the timeout's partial edits actually changed the failure
+      // before deciding to continue, stop on no-progress, or stop on the
+      // round cap. Gated exactly like D2's own cheap path (same eligibility,
+      // same enable flag, same `runFloorRecheck` callback) plus a fresh
+      // deadline check, since this round already spent time waiting on the
+      // fixer.
+      const timedOut = isFixerTimeoutFailure(fixResult.error);
+      const runFloorRecheck = args.runFloorRecheck;
+      const canRecheckAfterTimeout =
+        timedOut &&
+        isCheapRecheckEnabled() &&
+        runFloorRecheck !== undefined &&
+        isCheapRecheckEligible(identityBefore) &&
+        !deadlineExceeded();
+
+      if (canRecheckAfterTimeout && runFloorRecheck !== undefined) {
+        yield {
+          type: "content",
+          content: `\n> [verify-fix] Round ${round}: fixer timed out; re-checking the deterministic floor before deciding.\n`,
+        };
+        let cheap: FloorRecheckOutcome | undefined;
+        try {
+          cheap = await runFloorRecheck(`fix-r${round}-timeout-recheck`);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(
+            `[verify-fix-loop] post-timeout floor re-check threw (sprint ${args.sprintN}, round ${round}): ${message}`,
+            { stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined },
+          );
+          cheap = undefined;
+        }
+
+        if (cheap?.ranOk) {
+          const cheapIdentity = deriveFailureIdentity({
+            verifyVerdict: cur.verifyVerdict,
+            floorDelta: cheap.floorDelta,
+            floorChecks: cheap.floorChecks,
+            recipe: cur.recipeFromVerify,
+            verifyOutput: verifyOutputOf(cur.verifyResult),
+            structureCheck: cur.structureCheck,
+          });
+          if (cheapIdentity.failedCondition === "engineering_floor") {
+            cur = {
+              ...cur,
+              floorDelta: cheap.floorDelta,
+              floorChecks: cheap.floorChecks,
+              floorMustFixNote: cheap.floorMustFixNote ?? cur.floorMustFixNote,
+            };
+            const cheapKey = computeFailureKey(cheapIdentity);
+            // D12 — the round keeps its timeout reason (`fixerSuccess: false`,
+            // `fixerSummary` still the timeout message) AND gains the
+            // re-check's outcome (`failureKeyAfter`, `passKind: "cheap"`), so
+            // a reader can see "timed out, but the failure changed/did not
+            // change" instead of a bare failed round.
+            rounds.push({
+              round,
+              failureKeyBefore: keyBefore,
+              fixerRan: true,
+              fixerSuccess: false,
+              fixerSummary,
+              verifyVerdictAfter: cur.verifyVerdict,
+              failureKeyAfter: cheapKey,
+              passKind: "cheap",
+              roundElapsedMs: now() - roundClockStart,
+            });
+            yield {
+              type: "content",
+              content: `\n> [verify-fix] Round ${round}: cheap re-check after the timeout — the deterministic floor still fails; skipping the verify sub-agent turn this round.\n`,
+            };
+
+            if (cheapKey === previousKey) {
+              yield {
+                type: "content",
+                content: `\n> [verify-fix] Round ${round}: no progress after the timeout — the same failure persists; stopping.\n`,
+              };
+              stopReason = "no_progress";
+              break;
+            }
+            previousKey = cheapKey;
+
+            if (round === limit) {
+              yield { type: "content", content: `\n> [verify-fix] Round ${round}: round cap reached; stopping.\n` };
+              stopReason = "round_cap";
+            }
+            continue;
+          }
+          // The floor no longer fails deterministically even though the fixer
+          // itself reported a timeout — inconclusive from the cheap path
+          // alone (only a full pass can confirm coverage/structure/the whole
+          // picture, and this round already spent its fixer budget on the
+          // timeout), so fall through to the ordinary timeout-stop below
+          // rather than fabricating a pass.
+        }
+        // `cheap === undefined` or `!cheap.ranOk` — inconclusive; fall through
+        // to the ordinary timeout-stop below rather than guessing.
+      }
+
       yield {
         type: "content",
         content: `\n> [verify-fix] Round ${round}: fix task failed: ${fixResult.error ?? "unknown"}; stopping.\n`,
@@ -892,7 +1054,7 @@ export async function* runVerifyFixLoop(
         failureKeyBefore: keyBefore,
         fixerRan: true,
         fixerSuccess: false,
-        fixerSummary: bound(fixResult.error ?? "fix failed", MAX_SUMMARY_CHARS),
+        fixerSummary,
         verifyVerdictAfter: cur.verifyVerdict,
         failureKeyAfter: keyBefore,
         passKind: "full",

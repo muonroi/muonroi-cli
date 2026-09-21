@@ -25,6 +25,9 @@
  * signal is a worse failure than the ceiling.
  */
 
+import type { ChildProcess } from "node:child_process";
+import * as childProcessModule from "node:child_process";
+import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { councilLlmTimeoutMs } from "../../council/llm.js";
 import { getCouncilContinuationWatchdogMs } from "../../orchestrator/council-continuation-budget.js";
@@ -49,6 +52,18 @@ const runVerifyOrchestrationMock = vi.hoisted(() => vi.fn());
 vi.mock("../../verify/orchestrator.js", () => ({
   runVerifyOrchestration: runVerifyOrchestrationMock,
 }));
+
+// D11 — wraps the REAL `spawn` by default (every call still spawns a real OS
+// process, byte-identical to before this mock existed) so only the one test
+// that opts in with `mockReturnValueOnce` gets a fake child; every other test
+// in this file that spawns a real command (MUTE, "outside /ideal") is
+// unaffected. Named-export spying (`vi.spyOn`) cannot patch an ESM module
+// namespace ("Module namespace is not configurable in ESM") — `vi.mock` is
+// the supported way to make one export swappable per-call.
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
 
 const REQUEST: TaskRequest = { agent: "general", description: "Sprint 3 implementation", prompt: "do it" };
 
@@ -423,12 +438,47 @@ describe("verify floor per-command budget", () => {
     return inIdeal ? runInIdealScope(invoke) : invoke();
   }
 
+  // D11 — this test used to spawn a real child and race its first stdout byte
+  // against a 200ms real-wall-clock silence budget: on a loaded Windows
+  // machine, OS process-spawn + `cmd.exe` wrapping latency (shell:true) can
+  // itself exceed 200ms before the child ever gets a chance to print, timing
+  // the gate out even though the re-arm logic under test is correct (measured:
+  // failed once in three runs on this machine; another agent then saw 5/5
+  // pass — a genuine spawn-latency race, not a logic bug). The claim under
+  // test — the silence timer re-arms on every data event, so a continuously-
+  // printing command outlives its nominal budget — is about `runFloorCommand`'s
+  // OWN re-arm logic, not about real OS process scheduling, so it can be
+  // proven deterministically: stub `spawn` with a fake child and drive it on
+  // fake timers, so the only clock in play is the virtual one this test
+  // itself advances. The MUTE and "outside /ideal" cases below stay on real
+  // child processes — they need genuine process-kill behaviour, which a stub
+  // cannot exercise, and neither races a tight window (an already-doomed
+  // command's silence timer only needs to outlast it, never a data event).
   it("inside /ideal a command that keeps printing outlives the budget", async () => {
-    const r = await run(CHATTY, 200, true);
-    expect(r.timedOut).toBe(false);
-    expect(r.exitCode).toBe(0);
-    expect(r.elapsedMs).toBeGreaterThan(200);
-  }, 15_000);
+    vi.useFakeTimers();
+    const stdout = new EventEmitter();
+    const stderr = new EventEmitter();
+    const fakeChild = new EventEmitter() as unknown as ChildProcess;
+    Object.assign(fakeChild, { stdout, stderr, kill: vi.fn() });
+    const spawnMock = vi.mocked(childProcessModule.spawn);
+    spawnMock.mockReturnValueOnce(fakeChild);
+    try {
+      const p = runInIdealScope(() => runFloorCommand("build", "irrelevant", process.cwd(), 200));
+      // Emit data every 20ms of VIRTUAL time for 700ms total — mirrors CHATTY's
+      // real cadence, deterministically instead of via an OS process.
+      for (let elapsed = 0; elapsed < 700; elapsed += 20) {
+        await vi.advanceTimersByTimeAsync(20);
+        stdout.emit("data", ".");
+      }
+      fakeChild.emit("close", 0);
+      const r = await p;
+      expect(r.timedOut).toBe(false);
+      expect(r.exitCode).toBe(0);
+      expect(r.elapsedMs).toBeGreaterThan(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("inside /ideal a command that prints NOTHING is still killed at the silence budget", async () => {
     const r = await run(MUTE, 200, true);
