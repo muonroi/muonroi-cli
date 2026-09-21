@@ -25,6 +25,17 @@
  *     action-item objects are carried out-of-band via
  *     `CouncilStats.structuredActionItems` (see council/types.ts) BEFORE they
  *     get flattened, and passed into `buildSprintPlanArtifact` here.
+ *
+ * D5 — the fast-path side-channel does not guarantee the `{step, owner_lens,
+ * time_estimate, depends_on, acceptance_criteria}` shape either: a SECOND live
+ * run (`muauw6u93e1c`) produced `structuredActionItems` shaped `{key, value}`
+ * instead (an index string and the actual work description). Neither
+ * `o.step` nor any known criterion/dependency key matched, so the title
+ * became the raw `JSON.stringify(o)` blob and `doneCriterion` came out empty
+ * for all 6 tasks. `buildTaskFromRawItem` below is therefore alias-based and
+ * case-insensitive rather than hardcoded to one key name, with an explicit
+ * "exactly one long string field" fallback for shapes like `{key, value}`
+ * that match none of the known aliases at all.
  */
 
 import { createHash } from "node:crypto";
@@ -164,8 +175,80 @@ function normalizeDependsOn(raw: unknown): string[] {
   return [];
 }
 
-/** Build one SprintPlanTask from a raw action-item (string or object), 1-indexed. */
-function buildTaskFromRawItem(raw: unknown, idx: number): SprintPlanTask {
+// ─── D5 — shape-tolerant action-item field resolution ───────────────────────
+//
+// A council-produced action-item object's key names vary across live runs
+// (see the module doc above): `step` vs `value`, `acceptance_criteria` vs
+// `done_when`, `depends_on` vs `deps`, sometimes different casing entirely.
+// Rather than a single hardcoded key per field, each field has an alias list,
+// matched case-insensitively, first match wins.
+
+const DESCRIPTION_ALIASES = ["step", "task", "title", "description", "action", "value", "text", "item"];
+const CRITERION_ALIASES = [
+  "acceptance_criteria",
+  "acceptancecriteria",
+  "done_when",
+  "criterion",
+  "donecriterion",
+  "acceptance",
+];
+const DEPENDS_ON_ALIASES = ["depends_on", "dependson", "deps", "blocked_by", "dependencies", "after"];
+
+/** A string field is only treated as a stand-in task description (the
+ * `{key, value}` fallback below) once it clears this length — short values
+ * like an index ("1") or an id are never mistaken for the work description. */
+const LONG_STRING_MIN_CHARS = 20;
+
+/** Case-insensitive key -> value map, first occurrence wins on a duplicate
+ * (case-folded) key. Never throws. */
+function lowerKeyMap(o: Record<string, unknown>): Map<string, { key: string; value: unknown }> {
+  const m = new Map<string, { key: string; value: unknown }>();
+  for (const [key, value] of Object.entries(o)) {
+    const lk = key.toLowerCase();
+    if (!m.has(lk)) m.set(lk, { key, value });
+  }
+  return m;
+}
+
+/** First alias present in `km` and not already in `used` — marks it used so a
+ * later field never reuses the same source key. Returns the ORIGINAL (not
+ * lowercased) key name alongside the value, for diagnostics. */
+function pickAlias(
+  km: Map<string, { key: string; value: unknown }>,
+  aliases: string[],
+  used: Set<string>,
+): { key: string; value: unknown } | undefined {
+  for (const alias of aliases) {
+    const lk = alias.toLowerCase();
+    if (used.has(lk)) continue;
+    const hit = km.get(lk);
+    if (hit === undefined) continue;
+    used.add(lk);
+    return hit;
+  }
+  return undefined;
+}
+
+/** A string field's plain text, trimmed; "" for anything else (never throws,
+ * never stringifies a non-string). */
+function asTrimmedString(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+
+/** Up to the first sentence-ending punctuation or line break, capped at
+ * `maxLen` — used to derive a title from a criterion/description when no
+ * dedicated title field exists, instead of stringifying the whole object. */
+function firstClause(text: string, maxLen = 160): string {
+  const t = text.trim();
+  const m = t.match(/^[^.!?\n]+[.!?]?/);
+  const clause = (m ? m[0] : t).trim();
+  return clause.length > maxLen ? `${clause.slice(0, maxLen)}…` : clause;
+}
+
+/** Build one SprintPlanTask from a raw action-item (string or object),
+ * 1-indexed. `notes` collects per-task diagnostics (never fabricates a value
+ * to avoid a note — an empty `doneCriterion` and a note are both honest). */
+function buildTaskFromRawItem(raw: unknown, idx: number, notes: string[]): SprintPlanTask {
   const id = `step${idx + 1}`;
   if (typeof raw === "string") {
     const { files, dirs } = extractTargetsFromText(raw);
@@ -181,18 +264,72 @@ function buildTaskFromRawItem(raw: unknown, idx: number): SprintPlanTask {
   }
   if (raw && typeof raw === "object") {
     const o = raw as Record<string, unknown>;
-    const step = typeof o.step === "string" ? o.step : "";
-    const title = step || JSON.stringify(o).slice(0, 200);
-    const doneCriterionRaw = o.acceptance_criteria ?? o.acceptanceCriteria;
+    const km = lowerKeyMap(o);
+    const used = new Set<string>();
+
+    const criterionHit = pickAlias(km, CRITERION_ALIASES, used);
+    const criterionRaw = criterionHit?.value;
     const doneCriterion =
-      typeof doneCriterionRaw === "string"
-        ? doneCriterionRaw
-        : Array.isArray(doneCriterionRaw)
-          ? doneCriterionRaw.filter((x) => typeof x === "string").join("; ")
+      typeof criterionRaw === "string"
+        ? criterionRaw.trim()
+        : Array.isArray(criterionRaw)
+          ? criterionRaw.filter((x) => typeof x === "string").join("; ")
           : "";
+    if (!doneCriterion) {
+      notes.push(
+        `Task ${id}: no recognizable acceptance-criterion field (keys: ${Object.keys(o).join(", ") || "(none)"}) — doneCriterion left empty.`,
+      );
+    }
+
+    const dependsOnHit = pickAlias(km, DEPENDS_ON_ALIASES, used);
+    const dependsOn = normalizeDependsOn(dependsOnHit?.value);
+
+    // Owner/estimate keep their original single-key lookup — not part of the
+    // D5 defect (title/criterion/dependencies), and neither field feeds a
+    // downstream gate the way doneCriterion/dependsOn do.
     const owner = typeof o.owner_lens === "string" ? o.owner_lens : undefined;
     const estimate = typeof o.time_estimate === "string" ? o.time_estimate : undefined;
-    const dependsOn = normalizeDependsOn(o.depends_on);
+
+    const descriptionHit = pickAlias(km, DESCRIPTION_ALIASES, used);
+    let description = asTrimmedString(descriptionHit?.value);
+    let usedFallbackField: string | undefined;
+    if (!description) {
+      // No known description key matched. When the object has EXACTLY ONE
+      // remaining long string field, that is the work description (e.g.
+      // `{key: "1", value: "<the actual task text>"}` — "key" is too short to
+      // qualify, "value" is not a recognized alias but is the only long
+      // string left).
+      const longStringEntries = Object.entries(o).filter(([k, v]) => {
+        if (used.has(k.toLowerCase())) return false;
+        return typeof v === "string" && v.trim().length >= LONG_STRING_MIN_CHARS;
+      });
+      if (longStringEntries.length === 1) {
+        const [key, value] = longStringEntries[0]!;
+        description = (value as string).trim();
+        usedFallbackField = key;
+      }
+    }
+
+    let title: string;
+    if (description) {
+      title = description;
+    } else if (doneCriterion) {
+      title = firstClause(doneCriterion);
+    } else {
+      title = `Untitled task ${id} (no recognizable description or criterion field)`;
+    }
+
+    if (usedFallbackField) {
+      notes.push(
+        `Task ${id}: description sourced from field "${usedFallbackField}" — no recognized description key ` +
+          `(tried: ${DESCRIPTION_ALIASES.join(", ")}) matched this item's shape.`,
+      );
+    } else if (!description && !doneCriterion) {
+      notes.push(
+        `Task ${id}: no recognizable description or criterion field at all (keys: ${Object.keys(o).join(", ") || "(none)"}) — title is a placeholder.`,
+      );
+    }
+
     const { files: targetFiles, dirs: targetDirs } = extractTargetsFromText(
       `${title} ${doneCriterion} ${JSON.stringify(o)}`,
     );
@@ -253,10 +390,36 @@ function parseProseTasks(planSynthesis: string): SprintPlanTask[] {
   return tasks;
 }
 
+/** The raw item's own key set, as a diagnostic label — `"{key1, key2}"` for
+ * an object, or its JS type for anything else. Sorted so the same shape
+ * always renders the same label regardless of key order in the source. */
+function describeItemShape(raw: unknown): string {
+  if (raw && typeof raw === "object")
+    return Object.keys(raw as object)
+      .sort()
+      .join(", ");
+  return typeof raw;
+}
+
+/** D5 — record which raw action-item shape(s) this plan actually used, so a
+ * future mismatch (a third shape from a future run) is diagnosable from the
+ * artifact's own notes instead of requiring a fresh live-run forensics pass. */
+function noteDetectedShapes(items: unknown[], notes: string[]): void {
+  const counts = new Map<string, number>();
+  for (const raw of items) {
+    const shape = describeItemShape(raw);
+    counts.set(shape, (counts.get(shape) ?? 0) + 1);
+  }
+  for (const [shape, count] of counts) {
+    notes.push(`Action-item shape detected: {${shape}} (${count} task${count === 1 ? "" : "s"}).`);
+  }
+}
+
 /** Build the task list from raw action-item objects/strings, plus a note about
  * any `dependsOn` reference that does not match a known task id in this set. */
 function buildTasksFromRawItems(items: unknown[], notes: string[]): SprintPlanTask[] {
-  const tasks = items.map((raw, idx) => buildTaskFromRawItem(raw, idx));
+  noteDetectedShapes(items, notes);
+  const tasks = items.map((raw, idx) => buildTaskFromRawItem(raw, idx, notes));
   const knownIds = new Set(tasks.map((t) => t.id));
   for (const t of tasks) {
     for (const dep of t.dependsOn) {
@@ -284,6 +447,20 @@ export interface BuildSprintPlanArtifactArgs {
   /** Real, non-invented fallback for `outcome.goal` when the plan carries no summary
    * (e.g. `carryOver?.focus`). Never fabricated by this module. */
   sprintFocus?: string;
+  /**
+   * D5 — a further real, non-invented fallback for `outcome.goal`, tried after
+   * `sprintFocus`: a short description of this sprint's active backlog item
+   * (e.g. its `title`/`description`, joined by the caller). Only reached when
+   * the plan carries no summary AND no `sprintFocus` was given.
+   */
+  backlogFocus?: string;
+  /**
+   * D5 — a real, non-invented fallback for `outcome.acceptance` when the plan
+   * text itself yields none: this sprint's own rows from `criteria.json`
+   * (`readCriteriaSnapshot`, filtered to `sprint === sprintN`), passed by the
+   * caller.
+   */
+  criteriaFallback?: string[];
 }
 
 /**
@@ -291,7 +468,7 @@ export interface BuildSprintPlanArtifactArgs {
  * malformed plan degrades to a lesser `source`, never an exception.
  */
 export function buildSprintPlanArtifact(args: BuildSprintPlanArtifactArgs): SprintPlanArtifact {
-  const { sprintN, runId, planSynthesis, structuredActionItems, sprintFocus } = args;
+  const { sprintN, runId, planSynthesis, structuredActionItems, sprintFocus, backlogFocus, criteriaFallback } = args;
   const notes: string[] = [];
   const planHash = computePlanHash(planSynthesis ?? "");
 
@@ -304,18 +481,37 @@ export function buildSprintPlanArtifact(args: BuildSprintPlanArtifactArgs): Spri
   } catch (err) {
     console.error(`[sprint-plan-artifact] acceptance extraction failed: ${(err as Error).message}`);
   }
+  // D5 — the fast path can produce a plan whose own text carries no
+  // acceptance criteria at all (run `muauw6u93e1c`: `acceptance: []`). Fall
+  // back to this sprint's own criteria.json rows before leaving it empty —
+  // an honest, already-seeded source, never invented here.
+  if (acceptance.length === 0 && criteriaFallback && criteriaFallback.length > 0) {
+    acceptance = criteriaFallback;
+    notes.push(
+      `Acceptance criteria sourced from ${criteriaFallback.length} criteria.json row(s) for sprint ${sprintN} (the plan text itself carried none).`,
+    );
+  }
 
   const jsonBlock = parsePlanJsonBlock(planSynthesis ?? "");
 
-  // Goal: plan's own summary, else the given sprint focus, else empty + a note.
+  // Goal: plan's own summary, else the given sprint focus, else the active
+  // backlog item's own description, else empty + a note. Every fallback step
+  // records WHY it was reached, so a future gap is diagnosable rather than
+  // silently degrading to an empty goal.
   let goal = "";
   const summaryRaw = jsonBlock?.summary;
   if (typeof summaryRaw === "string" && summaryRaw.trim()) {
     goal = summaryRaw.trim();
   } else if (sprintFocus?.trim()) {
     goal = sprintFocus.trim();
+    notes.push("Goal sourced from the carried-over sprint focus (the plan text itself carried no summary).");
+  } else if (backlogFocus?.trim()) {
+    goal = backlogFocus.trim();
+    notes.push("Goal sourced from the active backlog item (no plan summary and no sprint focus were available).");
   } else {
-    notes.push("No goal available: the plan carried no summary and no sprint focus was provided.");
+    notes.push(
+      "No goal available: the plan carried no summary and no sprint focus was provided; no backlog item was available either.",
+    );
   }
 
   // Structured items: prefer the side-channel (fast path, pre-flatten), else the

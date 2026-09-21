@@ -137,13 +137,13 @@
  *   is called.
  */
 
-import { spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import type { CouncilGenerateDiagnostics, CouncilLLM } from "../council/types.js";
 import { sprintsDir } from "../flow/run-artifacts.js";
 import { atomicWriteJSON } from "../storage/atomic-io.js";
+import { createGitSpawnBudget, runGitSpawn } from "../utils/git-spawn.js";
 import { logger } from "../utils/logger.js";
 import type { VerifyVerdict } from "./verify-result.js";
 
@@ -180,6 +180,14 @@ const GOAL_BUDGET = 6_000;
 const GIT_TIMEOUT_MS = 20_000;
 
 const GIT_MAX_BUFFER = 32 * 1024 * 1024;
+
+/**
+ * D10 — git's own message for "this commit has no parent" (a repo's first
+ * commit; there is no `HEAD~1`). The ONLY failure text on the `HEAD~1..HEAD`
+ * fallback that still means "no-diff" rather than "diff-unreadable" — see
+ * `readChangeDiff`.
+ */
+const MISSING_HEAD_TILDE_1_RE = /unknown revision or path not in the working tree/i;
 
 /**
  * How many untracked files are rendered before the read stops.
@@ -315,26 +323,20 @@ function git(
    */
   okStatuses: readonly number[] = [0],
 ): { ok: boolean; stdout: string; detail: string } {
-  try {
-    const r = spawnSync("git", args, {
-      cwd,
-      encoding: "utf8",
-      timeout: GIT_TIMEOUT_MS,
-      maxBuffer: GIT_MAX_BUFFER,
-    });
-    if (r.error) return { ok: false, stdout: "", detail: r.error.message };
-    if (r.status === null || !okStatuses.includes(r.status)) {
-      const stderr = (r.stderr ?? "").trim().split("\n")[0] ?? "";
-      return {
-        ok: false,
-        stdout: "",
-        detail: `git ${args.join(" ")} exited ${r.status}${stderr ? `: ${stderr}` : ""}`,
-      };
-    }
-    return { ok: true, stdout: r.stdout ?? "", detail: "" };
-  } catch (err) {
-    return { ok: false, stdout: "", detail: err instanceof Error ? err.message : String(err) };
-  }
+  // D10 — moved onto the shared, resilient spawn helper (retry on a spawn-level
+  // failure such as `ETIMEDOUT` on a loaded machine) instead of a bare
+  // `spawnSync` with no retry. A fresh per-call budget of `GIT_TIMEOUT_MS`
+  // keeps this "per-command wall clock" (the doc comment above it), not a
+  // budget shared across the several `git()` calls one `readChangeDiff` makes.
+  const res = runGitSpawn(
+    args,
+    cwd,
+    args[0] ?? "git",
+    "goal-contradiction-gate",
+    createGitSpawnBudget(GIT_TIMEOUT_MS),
+    { okStatuses, maxBuffer: GIT_MAX_BUFFER },
+  );
+  return { ok: res.ok, stdout: res.stdout, detail: res.error ?? "" };
 }
 
 /** Options for {@link readChangeDiff}. */
@@ -480,7 +482,30 @@ export function readChangeDiff(cwd: string, opts: ChangeDiffOptions = {}): DiffR
   if (committed.ok && committed.stdout.trim()) {
     return { ok: true, diff: committed.stdout, origin: "last-commit" };
   }
-  return { ok: false, reason: "no-diff", detail: committed.ok ? "no changes since HEAD" : committed.detail };
+  // D10 — a FAILED `git diff HEAD~1 HEAD` is not automatically proof nothing
+  // changed. It genuinely is, though, in the one case git itself reports
+  // deterministically: there IS no `HEAD~1` (this is the repo's first
+  // commit) — combined with the working-tree + untracked reads above already
+  // having proven empty, "no prior commit to compare against" honestly means
+  // "nothing changed". Any OTHER failure here (a spawn-level `ETIMEDOUT`, a
+  // repo that stopped being readable mid-run, …) is NOT that — it is "we
+  // cannot tell", which was previously collapsed into the same "no-diff" by a
+  // bare ternary and must not be.
+  if (!committed.ok) {
+    if (MISSING_HEAD_TILDE_1_RE.test(committed.detail)) {
+      return { ok: false, reason: "no-diff", detail: "no changes since HEAD (first commit, no HEAD~1)" };
+    }
+    logger.warn(
+      "orchestrator",
+      "[goal-gate] could not read the last-commit diff fallback — gate skipped for this change",
+      {
+        cwd,
+        detail: committed.detail,
+      },
+    );
+    return { ok: false, reason: "diff-unreadable", detail: committed.detail };
+  }
+  return { ok: false, reason: "no-diff", detail: "no changes since HEAD" };
 }
 
 /**

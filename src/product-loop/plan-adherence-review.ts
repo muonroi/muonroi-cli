@@ -1,6 +1,7 @@
-import { spawnSync } from "node:child_process";
 import type { StreamChunk, TaskRequest, ToolResult } from "../types/index.js";
+import { runGitSpawn } from "../utils/git-spawn.js";
 import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
+import { logger } from "../utils/logger.js";
 import { boundTaskText, type SprintPlanTask } from "./sprint-plan-artifact.js";
 
 /**
@@ -135,6 +136,13 @@ export async function runIsolatedGuarded(
  * `stopReason` must be able to tell "the reviewer looked and signed off" apart
  * from "nothing was actually reviewed". `adherent` stays the caller-visible
  * pass/fail signal (unchanged); `stopReason` is the audit trail explaining WHY.
+ *
+ * D10 — `"diff_unavailable"` is distinct from `"no_diff"`: `no_diff` means
+ * `git diff HEAD` was read and came back genuinely empty (nothing changed);
+ * `diff_unavailable` means the `git` spawn itself failed (a loaded machine's
+ * `ETIMEDOUT`, measured live in run `muauw6u93e1c`) so NOTHING is known about
+ * the diff either way. Collapsing the two lost a real review round silently —
+ * see `currentDiffResult` below.
  */
 export type AdherenceStopReason =
   | "approved"
@@ -143,6 +151,7 @@ export type AdherenceStopReason =
   | "error"
   | "no_verdict"
   | "no_diff"
+  | "diff_unavailable"
   | "empty_plan";
 
 /**
@@ -235,18 +244,27 @@ export function boundDeviations(devs: string[]): string[] {
   return devs.map((d) => bound(d, MAX_DEVIATION_CHARS));
 }
 
-function currentDiff(cwd: string): string {
-  try {
-    const r = spawnSync("git", ["diff", "HEAD"], {
+/**
+ * D10 — the default (non-test) diff source. Distinguishes a `git diff HEAD`
+ * spawn FAILURE (`unavailable: true`, e.g. `ETIMEDOUT` on a loaded machine)
+ * from a genuinely empty diff (`unavailable: false, diff: ""`) — the two were
+ * previously collapsed into the same `""` by a silent catch, which made
+ * `runPlanAdherenceReview` report `stopReason: "no_diff"` (rounds: 0) for a
+ * run whose working tree plainly had pending changes (run `muauw6u93e1c`).
+ */
+function currentDiffResult(cwd: string): { diff: string; unavailable: boolean } {
+  const res = runGitSpawn(["diff", "HEAD"], cwd, "currentDiff", "plan-adherence-review", undefined, {
+    maxBuffer: 20 * 1024 * 1024,
+  });
+  if (!res.ok) {
+    logger.warn("orchestrator", `[plan-adherence-review] currentDiff: git diff HEAD failed in ${cwd}: ${res.error}`, {
       cwd,
-      encoding: "utf8",
-      timeout: 20000,
-      maxBuffer: 20 * 1024 * 1024,
+      error: res.error,
+      attempts: res.attempts,
     });
-    return (r.stdout ?? "").trim();
-  } catch {
-    return "";
+    return { diff: "", unavailable: true };
   }
+  return { diff: res.stdout.trim(), unavailable: false };
 }
 
 function parseReview(output: string): ReviewJson | null {
@@ -411,12 +429,32 @@ export async function* runPlanAdherenceReview(args: {
   const plan = args.planSynthesis.trim();
   const roundRecords: AdherenceRoundRecord[] = [];
   if (!plan) return { rounds: 0, adherent: true, deviations: [], roundRecords, stopReason: "empty_plan" };
-  const getDiff = args.diffProvider ?? currentDiff;
   const tasks = args.tasks?.length ? args.tasks : undefined;
   const taskMode = !!tasks;
 
-  let diff = getDiff(args.cwd);
+  // D10 — `args.diffProvider` (test-only injection) keeps its exact prior
+  // contract: a plain string, "" meaning "no diff", never a spawn failure.
+  // The REAL default path goes through `currentDiffResult` so a git spawn
+  // failure is never silently reported as an empty diff. Shared by both the
+  // initial read below and the per-round re-read after a fix is applied.
+  const readDiff = (): { diff: string; unavailable: boolean } =>
+    args.diffProvider ? { diff: args.diffProvider(args.cwd), unavailable: false } : currentDiffResult(args.cwd);
+
+  let diff: string;
+  let diffUnavailable: boolean;
+  {
+    const res = readDiff();
+    diff = res.diff;
+    diffUnavailable = res.unavailable;
+  }
   if (!diff) {
+    if (diffUnavailable) {
+      yield {
+        type: "content",
+        content: `\n> [adherence] Could not read the git diff for sprint ${args.sprintN} (git spawn failed); skipping this round, sprint continues.\n`,
+      };
+      return { rounds: 0, adherent: true, deviations: [], roundRecords, stopReason: "diff_unavailable" };
+    }
     yield { type: "content", content: `\n> [adherence] No diff to review for sprint ${args.sprintN}; skipping.\n` };
     return { rounds: 0, adherent: true, deviations: [], roundRecords, stopReason: "no_diff" };
   }
@@ -643,8 +681,13 @@ export async function* runPlanAdherenceReview(args: {
       };
     }
 
-    // Re-read the diff for the next review round.
-    diff = getDiff(args.cwd);
+    // Re-read the diff for the next review round. A spawn failure here
+    // degrades the same way it always has (an empty diff for this round's
+    // prompt) — the D10 fix's scope is the INITIAL read, whose "nothing to
+    // review" is what a resumed/next sprint's stopReason records; a mid-loop
+    // re-read failure is comparatively rare (the loop only reaches here after
+    // at least one successful git spawn) and does not change `stopReason`.
+    diff = readDiff().diff;
   }
 
   // Reached only when an explicit, finite `maxRounds` was exhausted.

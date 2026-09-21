@@ -180,6 +180,154 @@ describe("buildSprintPlanArtifact", () => {
     });
   });
 
+  describe("D5 — shape tolerance (a second live shape, run muauw6u93e1c)", () => {
+    // Live evidence: run muauw6u93e1c's fast-path structuredActionItems were
+    // shaped `{key, value}` — an index string and the actual work
+    // description — matching NO known alias for description/criterion/deps.
+    // Before D5 this made `title` the raw JSON.stringify blob and left
+    // `doneCriterion` empty with no explanation.
+    const keyValueItems = [
+      { key: "1", value: "Add the packaging property to the project file at the first property group" },
+      { key: "2", value: "Run the build to confirm the package is produced automatically" },
+      { key: "3", value: "Run the packaging script to produce the package into the local feed directory" },
+    ];
+
+    it("never lets a JSON blob become the title — uses the sole long string field instead", () => {
+      const artifact = buildSprintPlanArtifact({
+        sprintN: 1,
+        runId: "run-muauw6u93e1c",
+        planSynthesis: "irrelevant prose",
+        structuredActionItems: keyValueItems,
+      });
+
+      expect(artifact.source).toBe("structured");
+      expect(artifact.tasks).toHaveLength(3);
+      expect(artifact.tasks[0]!.title).toBe(
+        "Add the packaging property to the project file at the first property group",
+      );
+      expect(artifact.tasks[0]!.title).not.toContain("{");
+      expect(artifact.tasks[0]!.title).not.toContain('"key"');
+    });
+
+    it("leaves doneCriterion empty AND records a note naming the shape when no criterion field matches", () => {
+      const artifact = buildSprintPlanArtifact({
+        sprintN: 1,
+        runId: "run-muauw6u93e1c",
+        planSynthesis: "irrelevant prose",
+        structuredActionItems: keyValueItems,
+      });
+
+      expect(artifact.tasks[0]!.doneCriterion).toBe("");
+      expect(artifact.notes.some((n) => n.includes("step1") && n.toLowerCase().includes("criterion"))).toBe(true);
+    });
+
+    it("records which raw shape was detected, for future diagnosability", () => {
+      const artifact = buildSprintPlanArtifact({
+        sprintN: 1,
+        runId: "run-muauw6u93e1c",
+        planSynthesis: "irrelevant prose",
+        structuredActionItems: keyValueItems,
+      });
+
+      expect(
+        artifact.notes.some(
+          (n) => n.includes("Action-item shape detected") && n.includes("key") && n.includes("value"),
+        ),
+      ).toBe(true);
+    });
+
+    it("matches known aliases case-insensitively (Step/Acceptance_Criteria/DependsOn)", () => {
+      const items = [
+        { Step: "do the first thing", Acceptance_Criteria: "it builds", DependsOn: [] },
+        { Step: "do the second thing", Acceptance_Criteria: "it passes", DependsOn: ["step1"] },
+      ];
+      const artifact = buildSprintPlanArtifact({
+        sprintN: 1,
+        runId: "run-case",
+        planSynthesis: "irrelevant",
+        structuredActionItems: items,
+      });
+
+      expect(artifact.tasks[0]!.title).toBe("do the first thing");
+      expect(artifact.tasks[0]!.doneCriterion).toBe("it builds");
+      expect(artifact.tasks[1]!.dependsOn).toEqual(["step1"]);
+    });
+
+    it("derives a title from the criterion's first clause when there is a criterion but no description field", () => {
+      const items = [{ acceptance_criteria: "The endpoint returns 200. Extra detail follows here." }];
+      const artifact = buildSprintPlanArtifact({
+        sprintN: 1,
+        runId: "run-criterion-title",
+        planSynthesis: "irrelevant",
+        structuredActionItems: items,
+      });
+
+      expect(artifact.tasks[0]!.title).toBe("The endpoint returns 200.");
+      expect(artifact.tasks[0]!.title).not.toContain("{");
+    });
+
+    it("a short single string field (an id, not a description) does not trigger the sole-long-string fallback", () => {
+      const items = [{ id: "abc123" }];
+      const artifact = buildSprintPlanArtifact({
+        sprintN: 1,
+        runId: "run-short-string",
+        planSynthesis: "irrelevant",
+        structuredActionItems: items,
+      });
+
+      expect(artifact.tasks[0]!.title).not.toBe("abc123");
+      expect(artifact.tasks[0]!.title).not.toContain("{");
+    });
+  });
+
+  describe("D5 — goal/acceptance fallback beyond sprintFocus", () => {
+    it("falls back to the active backlog item's own text when there is no summary and no sprintFocus", () => {
+      const planSynthesis = "Sprint plan locked (1 steps):\n- [high] do the thing — accept: it works";
+      const artifact = buildSprintPlanArtifact({
+        sprintN: 1,
+        runId: "run-backlog-goal",
+        planSynthesis,
+        backlogFocus: "Ship the CodeStandards NuGet package — the analyzer must warn in the IDE",
+      });
+
+      expect(artifact.outcome.goal).toBe("Ship the CodeStandards NuGet package — the analyzer must warn in the IDE");
+      expect(artifact.notes.some((n) => n.toLowerCase().includes("backlog item"))).toBe(true);
+    });
+
+    it("prefers sprintFocus over backlogFocus when both are given", () => {
+      const artifact = buildSprintPlanArtifact({
+        sprintN: 1,
+        runId: "run-precedence",
+        planSynthesis: "",
+        sprintFocus: "the carried-over focus",
+        backlogFocus: "the backlog item text",
+      });
+
+      expect(artifact.outcome.goal).toBe("the carried-over focus");
+    });
+
+    it("falls back to criteria.json rows when the plan text yields no acceptance criteria", () => {
+      const planSynthesis = "Sprint plan locked (1 steps):\n- [high] do the thing";
+      const artifact = buildSprintPlanArtifact({
+        sprintN: 1,
+        runId: "run-criteria-fallback",
+        planSynthesis,
+        criteriaFallback: ["The package builds successfully", "Visual Studio shows the warning"],
+      });
+
+      expect(artifact.outcome.acceptance).toEqual([
+        "The package builds successfully",
+        "Visual Studio shows the warning",
+      ]);
+      expect(artifact.notes.some((n) => n.includes("criteria.json"))).toBe(true);
+    });
+
+    it("never invents acceptance criteria when there is no fallback either", () => {
+      const artifact = buildSprintPlanArtifact({ sprintN: 1, runId: "run-no-acceptance", planSynthesis: "" });
+      expect(artifact.outcome.acceptance).toEqual([]);
+    });
+  });
+
   describe("text fallback", () => {
     it("prose-only input (fast path flattened with no side-channel) gives text-derived", () => {
       // This is exactly sprint-2-plan.md's shape from the live evidence: no JSON

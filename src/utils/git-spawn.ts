@@ -56,6 +56,25 @@ export interface GitSpawnResult {
 }
 
 /**
+ * D10 — per-call overrides, additive to the original 4/5-arg contract so the
+ * two pre-existing callers (`readGitIdentity`, `computeAddedFilesSinceBaseline`)
+ * never pass this and stay byte-identical.
+ */
+export interface GitSpawnOptions {
+  /**
+   * Exit codes treated as a real (non-retried) SUCCESS rather than a failure —
+   * default `[0]`. A `diff --no-index` caller needs `[0, 1]` (exit 1 means
+   * "these differ", the only outcome that ever happens when one side is
+   * `/dev/null`) — see `goal-contradiction-gate.ts`.
+   */
+  okStatuses?: readonly number[];
+  /** `spawnSync`'s `maxBuffer` override. Omitted -> Node's own default
+   * (1 MiB), same as before this option existed. A full `git diff HEAD` can
+   * exceed that, so diff-reading callers pass a larger explicit value. */
+  maxBuffer?: number;
+}
+
+/**
  * A shared elapsed-time budget for one logical operation that may issue
  * several sequential `runGitSpawn` calls. Immutable once created — there is
  * no "extend"; a spent budget stays spent for every call that shares it.
@@ -184,6 +203,8 @@ function sleepSyncMs(ms: number): void {
  * created once via `createGitSpawnBudget()` when making SEVERAL sequential
  * calls for one logical operation, so they share one total cap instead of
  * each getting its own.
+ *
+ * `options` (D10) is optional and additive — see `GitSpawnOptions`.
  */
 export function runGitSpawn(
   args: string[],
@@ -191,10 +212,12 @@ export function runGitSpawn(
   op: string,
   logTag: string,
   budget?: GitSpawnBudget,
+  options?: GitSpawnOptions,
 ): GitSpawnResult {
   const activeBudget = budget ?? createGitSpawnBudget();
   const perAttemptCeiling = getGitSpawnTimeoutMs();
   const totalAttempts = MAX_RETRIES + 1;
+  const okStatuses = options?.okStatuses ?? [0];
 
   for (let attempt = 1; attempt <= totalAttempts; attempt++) {
     const remainingBeforeAttempt = activeBudget.deadlineAt - Date.now();
@@ -215,7 +238,7 @@ export function runGitSpawn(
 
     let res: import("node:child_process").SpawnSyncReturns<string>;
     try {
-      res = spawnSync("git", args, { cwd, encoding: "utf8", timeout });
+      res = spawnSync("git", args, { cwd, encoding: "utf8", timeout, maxBuffer: options?.maxBuffer });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const code = (err as NodeJS.ErrnoException)?.code;
@@ -257,7 +280,7 @@ export function runGitSpawn(
       return { ok: false, stdout: "", stderr: "", error: res.error.message, attempts: attempt };
     }
 
-    if (res.status !== 0) {
+    if (res.status === null || !okStatuses.includes(res.status)) {
       const stderrTail = (res.stderr ?? "").trim().slice(0, 500);
       const error = `git ${args.join(" ")} exited ${res.status}: ${stderrTail}`;
       logger.warn(

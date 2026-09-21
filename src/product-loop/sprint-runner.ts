@@ -51,6 +51,7 @@ import { SPRINT_EXECUTION_MARKER } from "../pil/layer6-output.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { logInteraction, logUIInteraction } from "../storage/index.js";
 import type { CouncilStanceRow, StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
+import { runGitSpawn } from "../utils/git-spawn.js";
 import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
@@ -100,6 +101,7 @@ import {
   type SprintPlanArtifact,
 } from "./sprint-plan-artifact.js";
 import { upsertSprint } from "./sprint-store.js";
+import { readCriteriaSnapshot } from "./typed-artifacts.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
 import { readUndebatedGateRecord } from "./undebated-criteria-gate.js";
 import type { FloorDelta } from "./verify-baseline.js";
@@ -1442,6 +1444,33 @@ export function buildErrorAdherenceRecord(args: {
 }
 
 /**
+ * D10 — the judge's diff summary source. Moved off a bare `spawnSync` (whose
+ * spawn-level failures, e.g. `ETIMEDOUT`, set `.error` on the result rather
+ * than throwing — so the surrounding try/catch never caught them and an
+ * empty `stdout` was reported to the judge as `"(no diff detected)"`,
+ * indistinguishable from a genuinely clean diff) onto the shared, resilient
+ * `runGitSpawn` helper, whose `ok: false` is never confused with a real empty
+ * diff. Pure wrapper around one git call — exported for direct unit testing
+ * (mocking `runGitSpawn`) without driving the whole sprint generator.
+ */
+export function buildJudgeDiffSummary(cwd: string, sprintN: number, runId: string): string {
+  const statResult = runGitSpawn(["diff", "--stat", "HEAD"], cwd, "judgeDiffSummary", "sprint-runner");
+  if (!statResult.ok) {
+    logger.warn(
+      "orchestrator",
+      `[sprint-runner] judge diff --stat failed for sprint ${sprintN} (run ${runId}): ${statResult.error}`,
+      {
+        runId,
+        sprintN,
+        error: statResult.error,
+      },
+    );
+    return "(diff unavailable)";
+  }
+  return statResult.stdout.slice(0, 4000) || "(no diff detected)";
+}
+
+/**
  * S3b — fold the plan-adherence reviewer's per-task verdicts into a
  * `SprintPlanArtifact`: `status` flips to "done" ONLY when the matching
  * `TaskVerdict.done` is true (never from diff-touch alone); `evidence`,
@@ -1959,12 +1988,49 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       planArtifact = null;
     }
     if (!planArtifact) {
+      // D5 — real, non-invented fallbacks for the artifact's `outcome.goal` /
+      // `outcome.acceptance` when the fast-path plan text carries neither
+      // (run `muauw6u93e1c`: both empty). Best-effort: a read failure here
+      // just means the corresponding fallback stays undefined — the builder
+      // itself never invents either field.
+      let backlogFocus: string | undefined;
+      try {
+        const backlogForFallback = await readBacklog(ctx.flowDir, ctx.runId);
+        const sprintKey = `sprint-${sprintN}`;
+        const activeForFallback = backlogForFallback?.items.find(
+          (item) => item.status === "in_sprint" && item.assigned_sprint === sprintKey,
+        );
+        if (activeForFallback) {
+          backlogFocus = [activeForFallback.title, activeForFallback.description]
+            .map((s) => s?.trim())
+            .filter((s): s is string => !!s)
+            .join(" — ");
+        }
+      } catch (err) {
+        console.error(
+          `[sprint-runner] backlog read for plan-artifact goal fallback failed for sprint ${sprintN} (run ${ctx.runId}): ${(err as Error).message}`,
+        );
+      }
+
+      let criteriaFallback: string[] | undefined;
+      try {
+        const criteriaSnapshot = await readCriteriaSnapshot(ctx.flowDir, ctx.runId);
+        const sprintRows = criteriaSnapshot.filter((c) => c.sprint === sprintN).map((c) => c.id);
+        if (sprintRows.length > 0) criteriaFallback = sprintRows;
+      } catch (err) {
+        console.error(
+          `[sprint-runner] criteria.json read for plan-artifact acceptance fallback failed for sprint ${sprintN} (run ${ctx.runId}): ${(err as Error).message}`,
+        );
+      }
+
       planArtifact = buildSprintPlanArtifact({
         sprintN,
         runId: ctx.runId,
         planSynthesis: planSynthesis ?? "",
         structuredActionItems: planCouncilStats?.structuredActionItems,
         sprintFocus: carryOver?.focus,
+        backlogFocus,
+        criteriaFallback,
       });
       await writeSprintPlanArtifact(ctx.flowDir, ctx.runId, planArtifact);
     }
@@ -3171,14 +3237,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   try {
     const judgeModelId =
       roleAssignments.get("Reviewer")?.modelId ?? roleAssignments.get("PO")?.modelId ?? ctx.sessionModelId;
-    let diffSummary = "";
-    try {
-      const { spawnSync } = await import("node:child_process");
-      const stat = spawnSync("git", ["diff", "--stat", "HEAD"], { cwd, encoding: "utf8", timeout: 15000 });
-      diffSummary = (stat.stdout ?? "").slice(0, 4000) || "(no diff detected)";
-    } catch {
-      diffSummary = "(diff unavailable)";
-    }
+    const diffSummary = buildJudgeDiffSummary(cwd, sprintN, ctx.runId);
     const verifyOutputForJudge = (verifyResult.error?.trim() ? verifyResult.error : (verifyResult.output ?? "")).trim();
     const { judged, total } = await judgeCriteriaAgainstVerify({
       flowDir: ctx.flowDir,
