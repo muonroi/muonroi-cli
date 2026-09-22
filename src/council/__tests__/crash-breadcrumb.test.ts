@@ -18,9 +18,13 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../utils/logger.js", () => ({
-  logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
-}));
+vi.mock("../../utils/logger.js", async () => {
+  const actual = await vi.importActual<typeof import("../../utils/logger.js")>("../../utils/logger.js");
+  return {
+    ...actual,
+    logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
+  };
+});
 
 import { logger } from "../../utils/logger.js";
 import {
@@ -91,6 +95,59 @@ describe("breadcrumb()", () => {
     // caller-supplied fields survive verbatim
     expect(rec.phase).toBe("synthesis");
     expect(rec.attempt).toBe(1);
+  });
+
+  // Same defect class as src/utils/logger.ts: a bare JSON.stringify would
+  // collapse an Error placed in `extra` to "{}" (message/stack are
+  // non-enumerable). No current caller does this, but the writer bypasses
+  // the logger entirely, so it needs its own guard.
+  it("serializes an Error placed in extra instead of collapsing it to '{}'", () => {
+    breadcrumb("council.candidate.failed", { error: new Error("candidate boom") });
+    const rec = readLines()[0] as unknown as { error: { message: string; stack?: string[] } };
+    expect(rec.error.message).toBe("candidate boom");
+    expect(Array.isArray(rec.error.stack)).toBe(true);
+  });
+
+  // Security follow-up (post-review): serializeError alone is UNREDACTED — a
+  // secret embedded in an Error's message/stack/own-properties would persist
+  // verbatim to the plaintext council-breadcrumbs.jsonl file on disk.
+  // breadcrumb() must go through serializeErrorRedacted, not serializeError.
+  describe("secret redaction", () => {
+    it("redacts an sk- key, a bearer token, and an Authorization header embedded in message/stack", () => {
+      const fakeKey = `sk-proj${"ABCDEF1234567890abcdef1234567890"}`;
+      const fakeToken = `eyJhbGciOiJIUzI1NiJ9${".fakepayload.fakesignature1234567890"}`;
+      const err = new Error(`auth failed with key ${fakeKey} — Authorization: Bearer ${fakeToken}`);
+      err.stack = `Error: auth failed with key ${fakeKey}\n    at doAuth (Authorization: Bearer ${fakeToken})`;
+
+      breadcrumb("council.candidate.failed", { error: err });
+
+      const raw = fs.readFileSync(filePath, "utf8");
+      expect(raw).not.toContain(fakeKey);
+      expect(raw).not.toContain(fakeToken);
+      const rec = readLines()[0] as unknown as { error: { message: string; stack: string[] } };
+      expect(rec.error.message).toContain("[REDACTED");
+      expect(rec.error.stack.join("\n")).toContain("[REDACTED");
+    });
+
+    it("redacts an Error subclass's token/apiKey/password own properties", () => {
+      class SdkError extends Error {
+        apiKey: string;
+        constructor(message: string, apiKey: string) {
+          super(message);
+          this.name = "SdkError";
+          this.apiKey = apiKey;
+        }
+      }
+      const fakeKey = `sk-proj${"ABCDEF1234567890abcdef1234567890"}`;
+      const err = new SdkError("sdk call failed", fakeKey);
+
+      breadcrumb("council.candidate.failed", { error: err });
+
+      const raw = fs.readFileSync(filePath, "utf8");
+      expect(raw).not.toContain(fakeKey);
+      const rec = readLines()[0] as unknown as { error: { apiKey: string } };
+      expect(rec.error.apiKey).toBe("[REDACTED]");
+    });
   });
 
   it("stamps the session id once set", () => {

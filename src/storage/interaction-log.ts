@@ -5,6 +5,7 @@
  * All calls are fail-open — logging never breaks the main flow.
  */
 
+import { serializeErrorRedacted } from "../utils/logger.js";
 import { getDatabase } from "./db.js";
 
 export type InteractionEventType =
@@ -123,7 +124,16 @@ export function logInteraction(
 ): void {
   try {
     const db = getDatabase();
-    const metadataJson = metadata?.data ? JSON.stringify(metadata.data) : null;
+    // Same defect class as src/utils/logger.ts: an Error nested in `data`
+    // serializes to "{}" via a bare JSON.stringify (message/stack are
+    // non-enumerable). This sink bypasses the logger entirely, so it needs
+    // its own guard — reuse the shared serializer rather than re-deriving it.
+    // MUST be the REDACTED form: an Error's message or an SDK error's own
+    // property (e.g. `apiKey`) can carry a real secret, and this row is
+    // persisted verbatim to ~/.muonroi-cli/muonroi.db.
+    const metadataJson = metadata?.data
+      ? JSON.stringify(metadata.data, (_key, value) => (value instanceof Error ? serializeErrorRedacted(value) : value))
+      : null;
     db.prepare(
       `INSERT INTO interaction_logs (session_id, event_type, event_subtype, model, duration_ms, input_tokens, output_tokens, metadata_json, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,

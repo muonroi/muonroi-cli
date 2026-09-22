@@ -38,44 +38,160 @@ export function isLogLevelEnabled(level: LogLevel): boolean {
 
 /**
  * Redacts common patterns of API keys and credential strings from log messages.
+ *
+ * The `Authorization:` / `Bearer` patterns exist because an Error's `message`
+ * (or a stack frame) can carry a credential verbatim — e.g. an HTTP client
+ * error whose message embeds the request header it failed on. The
+ * provider-key patterns above only catch OUR OWN key shapes (sk-/xai-/
+ * AIzaSy...); a raw bearer token or an `Authorization:` header value has no
+ * fixed prefix, so it is matched generically instead.
  */
 export function redactSecrets(str: string): string {
   return str
     .replace(/\bsk-[A-Za-z0-9-_]{20,}\b/g, "[REDACTED_API_KEY]")
     .replace(/\bxai-[A-Za-z0-9-_]{20,}\b/g, "[REDACTED_API_KEY]")
-    .replace(/\bAIzaSy[A-Za-z0-9-_]{30,}\b/g, "[REDACTED_API_KEY]");
+    .replace(/\bAIzaSy[A-Za-z0-9-_]{30,}\b/g, "[REDACTED_API_KEY]")
+    .replace(/\bAuthorization:\s*(?:Bearer\s+)?[A-Za-z0-9\-._~+/=]+/gi, "Authorization: [REDACTED]")
+    .replace(/\bBearer\s+[A-Za-z0-9\-._~+/=]{8,}/gi, "Bearer [REDACTED]");
+}
+
+// ── Error serialization ─────────────────────────────────────────────────────
+//
+// Root cause of the "logged error carries no message" defect: `message` and
+// `stack` are non-enumerable on a real Error, so `JSON.stringify(new
+// Error("x"))` is `"{}"`. Every logger call that passes `{ error: err }` (or
+// nests an Error anywhere in its data) silently lost the cause once it hit
+// appendToFile/formatConsole's JSON.stringify. Fixed once, here, so no
+// individual call site needs to remember to extract `.message` by hand.
+
+/** First N stack lines kept per Error — enough to locate the throw site without unbounded log growth. */
+const MAX_ERROR_STACK_LINES = 5;
+/** Bounds `cause` chains and `AggregateError.errors` so a cyclic or deep chain can't blow up the log line. */
+const MAX_ERROR_CHAIN_DEPTH = 3;
+/** Cap on how many `AggregateError.errors` entries are serialized. */
+const MAX_AGGREGATE_ERRORS = 10;
+
+export interface SerializedError {
+  name: string;
+  message: string;
+  stack?: string[];
+  cause?: SerializedError | unknown;
+  errors?: unknown[];
+  [extraOwnProp: string]: unknown;
 }
 
 /**
- * Recursively redacts sensitive fields from context objects.
+ * Serializes an `Error` (including subclasses with extra own properties like
+ * `code`/`status`, and `AggregateError`) into a plain object that survives
+ * `JSON.stringify` intact. Bounded and never throws — a malformed `cause`
+ * chain or `errors` array degrades gracefully rather than recursing forever.
+ *
+ * ⚠️ UNREDACTED. `message`, `stack`, and any extra own property are copied
+ * VERBATIM — an auth error's message or an SDK error's `apiKey` property can
+ * carry a real secret straight through. This is an internal building block
+ * for {@link redactObject} (which redacts its output before returning it)
+ * and for structural unit tests. Do NOT call this directly from anything
+ * that persists its result (a log line, a DB row, a file) — call
+ * {@link serializeErrorRedacted} instead, or pass the Error through
+ * {@link redactObject}.
  */
-export function redactObject(obj: unknown): unknown {
+export function serializeError(err: Error, depth = 0): SerializedError {
+  const out: SerializedError = {
+    name: err.name,
+    message: err.message,
+  };
+  if (typeof err.stack === "string") {
+    out.stack = err.stack.split("\n").slice(0, MAX_ERROR_STACK_LINES);
+  }
+  // Extra own enumerable properties a subclass attaches (e.g. `code`, `status`).
+  for (const key of Object.keys(err)) {
+    if (key === "name" || key === "message" || key === "stack") continue;
+    out[key] = (err as unknown as Record<string, unknown>)[key];
+  }
+  if (depth < MAX_ERROR_CHAIN_DEPTH) {
+    const cause = (err as unknown as { cause?: unknown }).cause;
+    if (cause instanceof Error) {
+      out.cause = serializeError(cause, depth + 1);
+    } else if (cause !== undefined) {
+      out.cause = cause;
+    }
+    const aggErrors = (err as unknown as { errors?: unknown }).errors;
+    if (Array.isArray(aggErrors)) {
+      out.errors = aggErrors
+        .slice(0, MAX_AGGREGATE_ERRORS)
+        .map((e) => (e instanceof Error ? serializeError(e, depth + 1) : e));
+    }
+  }
+  return out;
+}
+
+/**
+ * Recursively redacts sensitive fields from context objects. Any `Error`
+ * found at any depth — top-level `{ error: err }` or nested inside another
+ * object/array — is serialized via {@link serializeError} first, so
+ * `message`/`stack` reach the written log line instead of `{}`. Cycles are
+ * tracked via the current ancestor chain (not a global seen-set) so a value
+ * referenced twice from different branches is not mistaken for a cycle.
+ */
+export function redactObject(obj: unknown, _ancestors: Set<object> = new Set()): unknown {
   if (obj === null || obj === undefined) return obj;
+  if (obj instanceof Error) {
+    return redactObject(serializeError(obj), _ancestors);
+  }
   if (typeof obj === "string") {
     return redactSecrets(obj);
   }
   if (Array.isArray(obj)) {
-    return obj.map(redactObject);
+    if (_ancestors.has(obj)) return "[Circular]";
+    _ancestors.add(obj);
+    try {
+      return obj.map((v) => redactObject(v, _ancestors));
+    } finally {
+      _ancestors.delete(obj);
+    }
   }
   if (typeof obj === "object") {
-    const res: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(obj)) {
-      const lowerK = k.toLowerCase();
-      if (
-        lowerK.includes("key") ||
-        lowerK.includes("secret") ||
-        lowerK.includes("token") ||
-        lowerK.includes("password") ||
-        lowerK.includes("auth")
-      ) {
-        res[k] = "[REDACTED]";
-      } else {
-        res[k] = redactObject(v);
+    if (_ancestors.has(obj)) return "[Circular]";
+    _ancestors.add(obj);
+    try {
+      const res: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(obj)) {
+        const lowerK = k.toLowerCase();
+        if (
+          lowerK.includes("key") ||
+          lowerK.includes("secret") ||
+          lowerK.includes("token") ||
+          lowerK.includes("password") ||
+          lowerK.includes("auth")
+        ) {
+          res[k] = "[REDACTED]";
+        } else {
+          res[k] = redactObject(v, _ancestors);
+        }
       }
+      return res;
+    } finally {
+      _ancestors.delete(obj);
     }
-    return res;
   }
   return obj;
+}
+
+/**
+ * The ONE sanctioned way to persist an Error outside the logger's own
+ * appendToFile/formatConsole path (e.g. `interaction_logs.metadata_json`,
+ * `council-breadcrumbs.jsonl`). Structurally identical to {@link
+ * serializeError}, but redacted the same way `logger.warn/error` redacts
+ * its own data: `redactSecrets` runs over `message` and every stack line,
+ * and any property whose KEY looks sensitive (`key`/`secret`/`token`/
+ * `password`/`auth`, case-insensitive — e.g. an SDK error's `apiKey`
+ * property) is replaced with `"[REDACTED]"` rather than copied verbatim.
+ * Sinks that bypass the logger MUST call this (not {@link serializeError})
+ * so a secret embedded in an error's message or own properties cannot reach
+ * disk in plain text.
+ */
+export function serializeErrorRedacted(err: Error): SerializedError {
+  return redactObject(serializeError(err)) as SerializedError;
 }
 
 /**

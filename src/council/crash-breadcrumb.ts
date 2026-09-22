@@ -72,7 +72,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { logger } from "../utils/logger.js";
+import { logger, serializeErrorRedacted } from "../utils/logger.js";
 
 /** Wall-clock at module load — the origin for every `tMs` field. */
 const PROCESS_START_MS = Date.now();
@@ -227,7 +227,14 @@ export function breadcrumb(marker: string, extra?: Record<string, unknown>): voi
       mem: readMemory(),
       ...(extra ?? {}),
     };
-    line = `${JSON.stringify(record)}\n`;
+    // Same defect class as src/utils/logger.ts: an Error placed in `extra`
+    // would serialize to "{}" (message/stack are non-enumerable). No current
+    // caller does that, but this writer bypasses the logger entirely, so
+    // guard it with the same shared serializer rather than trusting callers.
+    // MUST be the REDACTED form: an Error's message or own property can carry
+    // a real secret, and this line is appended verbatim to a plaintext file
+    // on disk (~/.muonroi-cli/council-breadcrumbs.jsonl).
+    line = `${JSON.stringify(record, (_key, value) => (value instanceof Error ? serializeErrorRedacted(value) : value))}\n`;
   } catch (err) {
     logger.error("orchestrator", "[crash-breadcrumb] failed to serialize breadcrumb", {
       marker,
