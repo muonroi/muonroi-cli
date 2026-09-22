@@ -192,4 +192,64 @@ describe("Agent class", { timeout: 30_000 }, () => {
     });
     expect(agent.getModel()).toBe("claude-sonnet-4-6-20250514");
   });
+
+  it("startNewSession resets the reactive-escalation tool-chars counter", async () => {
+    // Session 697419024ec8: a brand-new session (no turn of its own yet)
+    // logged "Reactive escalation to sub-session (prior turn tool-heavy)"
+    // with prevTurnToolChars=621952 — the EXACT value left over from a prior,
+    // unrelated session (1e9db4d68da0) that ran earlier in the same
+    // long-lived Agent instance (`startNewSession()` reused the process
+    // instead of constructing a fresh one). `_lastTurnToolChars` is a
+    // per-session signal (see `shouldReactivelyEscalate` in orchestrator.ts);
+    // it must not survive a session switch.
+    const { Agent } = await importAgentModule();
+    const agent = new Agent(undefined, undefined, undefined, undefined, {
+      persistSession: false,
+    });
+    // Simulate the state a prior session's tool-heavy turn left behind.
+    (agent as unknown as { _lastTurnToolChars: number })._lastTurnToolChars = 621952;
+    agent.startNewSession();
+    expect((agent as unknown as { _lastTurnToolChars: number })._lastTurnToolChars).toBe(0);
+  });
+
+  it("startNewSession resets the cold-first-turn ordinal (sibling leak, same root cause)", async () => {
+    // `_turnLoadOrdinal` gates `coldFirstTurn: self._turnLoadOrdinal === 1`
+    // (orchestrator.ts ~4157) — the code's own evidence for "is this turn 1
+    // of this session". Same leak shape as `_lastTurnToolChars`: a process
+    // serving several sessions must not carry the ordinal from a prior
+    // session into a new one, or every session after the first undercounts
+    // its own cold first turn.
+    const { Agent } = await importAgentModule();
+    const agent = new Agent(undefined, undefined, undefined, undefined, {
+      persistSession: false,
+    });
+    (agent as unknown as { _turnLoadOrdinal: number })._turnLoadOrdinal = 7;
+    agent.startNewSession();
+    expect((agent as unknown as { _turnLoadOrdinal: number })._turnLoadOrdinal).toBe(0);
+  });
+
+  it("startNewSession clears session-scoped EE warning/guidance accumulators (same leak shape)", async () => {
+    // `_priorWarningIdsInSession` / `_sessionEEGuidance` are explicitly
+    // named and documented as per-session (see their field docs in
+    // orchestrator.ts): "warning IDs surfaced earlier in this session", and
+    // `_sessionEEGuidance` is injected into EVERY turn's prompt as
+    // "[EE Session Guidance — avoid these patterns...]"
+    // (message-processor.ts). Found while auditing for siblings of the
+    // `_lastTurnToolChars` / `_turnLoadOrdinal` leak — left unreset, a
+    // brand-new session's first turn would see stale warnings/guidance
+    // carried over from an unrelated prior session.
+    const { Agent } = await importAgentModule();
+    const agent = new Agent(undefined, undefined, undefined, undefined, {
+      persistSession: false,
+    });
+    const stale = agent as unknown as {
+      _priorWarningIdsInSession: Set<string>;
+      _sessionEEGuidance: Map<string, unknown>;
+    };
+    stale._priorWarningIdsInSession.add("stale-warning-id");
+    stale._sessionEEGuidance.set("stale-guidance-id", { toolName: "bash", message: "m", why: "w", confidence: 0.9 });
+    agent.startNewSession();
+    expect(stale._priorWarningIdsInSession.size).toBe(0);
+    expect(stale._sessionEEGuidance.size).toBe(0);
+  });
 });

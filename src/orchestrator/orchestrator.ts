@@ -1,6 +1,7 @@
 // Multi-provider wired — runtime dispatch via providers/runtime.ts.
 
 import type { ModelMessage, ToolSet } from "ai";
+import { breadcrumb, getLastBreadcrumb } from "../council/crash-breadcrumb.js";
 import { extractSession } from "../ee/extract-session.js";
 import {
   bootstrapEEClient,
@@ -1117,6 +1118,31 @@ export class Agent {
     this._compactionStats = { count: 0, totalSaved: 0 };
     this._lastCompactionTokensAfter = null;
     this._pinnedSeqs.clear();
+    // Reactive-escalation counter (see `shouldReactivelyEscalate` /
+    // "Reactive escalation to sub-session" above) is scoped to ONE session's
+    // prior turn, not the process. Without this reset, session
+    // 697419024ec8 — a BRAND NEW session with no turn of its own yet —
+    // logged `prevTurnToolChars: 621952`, the exact value left over from a
+    // PRIOR session (1e9db4d68da0) that ran in the same long-lived Agent
+    // instance, and reactively spawned a sub-session it never needed.
+    this._lastTurnToolChars = 0;
+    // Same leak shape, sibling field: the cold-first-turn ordinal (see its
+    // field doc above) gates `coldFirstTurn: self._turnLoadOrdinal === 1` at
+    // the top-level-tool-load report site — the code's own evidence for "is
+    // this the session's first turn". Left unreset, a process serving several
+    // sessions undercounts cold-first-turns for every session after the
+    // first (ordinal keeps climbing from the PRIOR session instead of
+    // restarting at 0).
+    this._turnLoadOrdinal = 0;
+    // Same shape again: both are explicitly SESSION-scoped accumulators (see
+    // their field docs — "surfaced earlier in THIS session" / per-session EE
+    // guidance) injected into every turn's prompt
+    // ("[EE Session Guidance — avoid these patterns...]" in
+    // message-processor.ts). Left unreset, a brand-new session's first turn
+    // would see stale warning ids / guidance carried over from an unrelated
+    // prior session in the same long-lived Agent instance.
+    this._priorWarningIdsInSession.clear();
+    this._sessionEEGuidance.clear();
 
     if (!this.sessionStore) {
       this.messages = [];
@@ -3531,6 +3557,7 @@ export class Agent {
     logger.debug("orchestrator", "Checking silent session rotation threshold", { currentChars, threshold });
 
     // 1. Run classifier to decide execution route
+    breadcrumb("pre-stream.subSessionClassify.start", { sessionId: this.session?.id });
     let routeAction: import("../pil/llm-classify.js").SubSessionAction = "DIRECT_ANSWER";
     const isMockMode =
       process.argv.includes("--mock-llm") ||
@@ -3565,6 +3592,7 @@ export class Agent {
         logger.error("orchestrator", "Routing classification failed, falling back to DIRECT_ANSWER", { error: err });
       }
     }
+    breadcrumb("pre-stream.subSessionClassify.end", { sessionId: this.session?.id, routeAction });
 
     // Reactive escalation — override a DIRECT_ANSWER route (the router's blind
     // spot on read-heavy analysis, and its silent-degrade to DIRECT on classify
@@ -3664,6 +3692,7 @@ export class Agent {
     if (routeAction === "SPAWN_SUB_SESSION" && this.session && this.sessionStore) {
       yield { type: "toast", toastLevel: "info", content: "Đang khởi tạo sub-session ngầm để xử lý tác vụ..." };
       parentSessionId = this.session.id;
+      breadcrumb("pre-stream.subSessionSpawn.start", { sessionId: parentSessionId });
       try {
         const { loadLatestCompaction, getNextMessageSequence, appendCompaction } = await import(
           "../storage/transcript.js"
@@ -3771,6 +3800,7 @@ export class Agent {
       } catch (err) {
         logger.error("orchestrator", "Forking child sub-session failed, falling back to main session", { error: err });
       }
+      breadcrumb("pre-stream.subSessionSpawn.end", { sessionId: subSessionId ?? parentSessionId });
     }
 
     let processor = new MessageProcessor(this._buildMessageProcessorDeps());
@@ -3849,11 +3879,34 @@ export class Agent {
               //   3. an `error` chunk, not a toast — the UI folds `error` content
               //      into the transcript, while a toast auto-dismisses.
               const stallMessage = `Turn ended by watchdog: ${stallErr.message}`;
+              // Attribute the hang to the last pre-stream phase that STARTED
+              // without a matching `.end` breadcrumb — see the `preStreamPhase`
+              // helper in message-processor.ts and the coarse
+              // "pre-stream.toolEngine" pair in tool-engine.ts. Best-effort:
+              // `getLastBreadcrumb()` is process-global (not scoped to THIS
+              // turn), so a concurrent nested run's breadcrumb can shadow it —
+              // still far better than the prior "no evidence at all" state
+              // (session 1e9db4d68da0: a watchdog kill with zero
+              // interaction_logs / call_accounting rows anywhere in the
+              // 120s window).
+              let lastOpenPhase: string | null = null;
+              try {
+                const last = getLastBreadcrumb();
+                if (last && typeof last.marker === "string" && last.marker.endsWith(".start")) {
+                  const withoutSuffix = last.marker.slice(0, -".start".length);
+                  const prefix = "pre-stream.";
+                  lastOpenPhase = withoutSuffix.startsWith(prefix) ? withoutSuffix.slice(prefix.length) : withoutSuffix;
+                }
+              } catch (breadcrumbErr) {
+                logger.error("orchestrator", "watchdog lastPhase lookup failed", {
+                  error: (breadcrumbErr as Error)?.message,
+                });
+              }
               if (this.session) {
                 try {
                   logInteraction(this.session.id, "error", {
                     eventSubtype: "watchdog",
-                    data: { message: stallMessage.slice(0, 200), kind: stallErr.kind },
+                    data: { message: stallMessage.slice(0, 200), kind: stallErr.kind, lastPhase: lastOpenPhase },
                   });
                 } catch (logErr) {
                   logger.error("orchestrator", "watchdog error-log failed", { error: logErr });

@@ -80,8 +80,13 @@ export async function proposeCompaction(
 
     return parsed;
   } catch (err) {
-    // Proposer failure is non-fatal — caller falls back to heuristic or no-compact
-    logger.warn("orchestrator", "Proposer failure", { error: err });
+    // Proposer failure is non-fatal — caller falls back to heuristic or no-compact.
+    // Error instances serialize to "{}" via JSON.stringify (message/stack are
+    // non-enumerable), so the logger's appendToFile/formatConsole JSON.stringify
+    // path silently dropped the cause. Record message + a short stack head instead.
+    const errMessage = err instanceof Error ? err.message : String(err);
+    const errStack = err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined;
+    logger.warn("orchestrator", "Proposer failure", { error: errMessage, stack: errStack });
     return null;
   }
 }

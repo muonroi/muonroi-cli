@@ -72,7 +72,7 @@ import type {
  * refreshes the stored OAuth bearer token. Only the expected missing-key case
  * is swallowed; unexpected errors propagate.
  */
-async function ensureCouncilFactory(providerId: ProviderId): Promise<void> {
+async function ensureCouncilFactoryUnbounded(providerId: ProviderId): Promise<void> {
   let apiKey: string | undefined;
   try {
     apiKey = await loadKeyForProvider(providerId);
@@ -80,7 +80,61 @@ async function ensureCouncilFactory(providerId: ProviderId): Promise<void> {
     if (!(err instanceof ProviderKeyMissingError)) throw err;
     // OAuth-only provider — createProviderFactoryAsync injects the bearer token.
   }
+  // Note: when the caller (ensureCouncilFactory below) times this call out via
+  // withDeadlineRace, THIS promise is not cancelled — it keeps running (see
+  // withDeadlineRace's own doc in utils/llm-deadline.ts) and can still reach
+  // `providerFactoryRegistry.set(providerId, factory)` (providers/runtime.ts
+  // createProviderFactory) after the caller has already failed/moved on. That
+  // write is a plain Map.set keyed by providerId and is idempotent — it just
+  // overwrites the entry with a freshly-built factory for the same provider —
+  // so a late write here changes no behavior and needs no cancellation.
   await createProviderFactoryAsync(providerId, apiKey ? { apiKey } : {});
+}
+
+/**
+ * Wall-clock backstop for {@link ensureCouncilFactoryUnbounded}: credential
+ * resolution (keychain read + `createProviderFactoryAsync`, which for an
+ * OAuth-capable provider also does a token refresh network call gated by a
+ * mutex) ran with NO bound at all — ahead of, and separate from, the deadline
+ * signal `generate()`/`debate()`/`research()` combine further down via
+ * `withTimeoutSignal`. A stuck refresh or a held mutex therefore hung the
+ * ENTIRE call regardless of the caller's own deadline: e.g. the GSD
+ * complexity-assessor's `AbortSignal.timeout(PIL_GATE_DEADLINE_MS=2500)`
+ * never even started ticking while this awaited.
+ *
+ * CONFIRMED live (session 697419024ec8, 2026-09-22): the assessor's leader
+ * call (`stage=council`, model=step-3.7-flash, 656 est input tokens — a
+ * small, ordinary prompt) took 64.5s wall clock end-to-end despite the
+ * caller passing a 2500ms `AbortSignal.timeout`. That is consistent with
+ * this credential-resolution gap consuming most of the time BEFORE the
+ * caller's deadline signal was even combined — a small-prompt call has no
+ * other plausible source of tens of seconds of latency. The sibling session
+ * 1e9db4d68da0 hit the same phase and, instead of merely running long, never
+ * returned at all: the top-level 120s turn watchdog fired with zero
+ * interaction_logs / call_accounting rows anywhere in the pre-stream window.
+ * `MUONROI_COUNCIL_FACTORY_TIMEOUT_MS` overrides; clamped 1s..60s.
+ */
+export function getCouncilFactoryDeadlineMs(): number {
+  const raw = Number(process.env.MUONROI_COUNCIL_FACTORY_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw >= 1_000 && raw <= 60_000) return raw;
+  return 10_000;
+}
+
+async function ensureCouncilFactory(providerId: ProviderId): Promise<void> {
+  // Durable phase breadcrumb: distinguishes "credential resolution is slow/
+  // hung" from "the actual model call is slow/hung" the next time this fires
+  // — see the CONFIRMED evidence above. A `.start` with no matching `.end`
+  // in `~/.muonroi-cli/council-breadcrumbs.jsonl` pins the hang to THIS gap.
+  breadcrumb("pre-stream.ensureCouncilFactory.start", { providerId });
+  try {
+    await withDeadlineRace(
+      () => ensureCouncilFactoryUnbounded(providerId),
+      getCouncilFactoryDeadlineMs(),
+      `ensureCouncilFactory(${providerId})`,
+    );
+  } finally {
+    breadcrumb("pre-stream.ensureCouncilFactory.end", { providerId });
+  }
 }
 
 // ── Debug logging (off unless MUONROI_COUNCIL_DEBUG_LOG points at a writable file) ──

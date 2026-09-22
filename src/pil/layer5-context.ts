@@ -76,10 +76,34 @@ async function fetchFlowState(cwd: string, budget: number): Promise<string> {
   }
 }
 
+// `fs.readdir(..., {recursive:true})` has no built-in bound: on a large `src`
+// tree (or a slow/network-mounted filesystem) it can run far longer than the
+// rest of the PIL pipeline's per-layer budgets, and unlike every other network
+// call in this file it carries no AbortSignal at all. Race it against a timeout
+// the same way discovery.ts already bounds `scanProjectContext` (500ms
+// Promise.race). `MUONROI_PIL_RECENT_FILES_TIMEOUT_MS` overrides; clamped
+// 100ms..5000ms. The scan itself is not cancelled on timeout (same caveat as
+// the discovery.ts precedent) — this only stops it from blocking the turn.
+function recentFilesScanTimeoutMs(): number {
+  const raw = Number(process.env.MUONROI_PIL_RECENT_FILES_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw >= 100 && raw <= 5000) return raw;
+  return 800;
+}
+
 async function fetchRecentFiles(cwd: string, budget: number): Promise<string> {
+  const srcDir = path.join(cwd, "src");
   try {
-    const srcDir = path.join(cwd, "src");
-    const entries = await fs.readdir(srcDir, { recursive: true, withFileTypes: true });
+    const timeoutMs = recentFilesScanTimeoutMs();
+    const entries = await Promise.race([
+      fs.readdir(srcDir, { recursive: true, withFileTypes: true }),
+      new Promise<never>((_, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error(`fetchRecentFiles: fs.readdir(${srcDir}) exceeded ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+        (timer as unknown as { unref?: () => void }).unref?.();
+      }),
+    ]);
     const tsFiles: Array<{ name: string; mtime: number }> = [];
     for (const e of entries) {
       if (!e.isFile()) continue;
@@ -93,7 +117,12 @@ async function fetchRecentFiles(cwd: string, budget: number): Promise<string> {
     const top = tsFiles.slice(0, 10).map((f) => f.name);
     if (top.length === 0) return "";
     return truncateToBudget(`[recent-files: ${top.join(", ")}]`, budget);
-  } catch {
+  } catch (err) {
+    // No Silent Catch: this used to be a bare `catch { return ""; }` — a
+    // timeout or a real fs error here was indistinguishable from "no src/ dir".
+    console.error(
+      `[pil/layer5] fetchRecentFiles failed or timed out on ${srcDir}: ${(err as Error)?.message ?? String(err)}`,
+    );
     return "";
   }
 }

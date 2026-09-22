@@ -51,6 +51,7 @@
 //   - reasoning-strip (provider quirk)       — turnCaps.sanitizeHistory
 
 import { type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
+import { breadcrumb } from "../council/crash-breadcrumb.js";
 import { getEffectiveCouncilRoleCount } from "../council/leader.js";
 import { recordArtifact } from "../ee/artifact-cache.js";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
@@ -712,6 +713,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     _pilEnrichmentDeltaSnapshot,
     isChitchat,
   } = args;
+
+  // Coarse pre-stream breadcrumb: everything from here to the matching
+  // `.end` right before `pingTurnProgress()` below (MCP tool acquisition,
+  // tool-set wrapping, system-prompt/providerOptions assembly, capability
+  // sanitization) runs with no per-phase timing of its own — see the
+  // `msSinceTurnStart` comment at the streamText call site. If the top-level
+  // turn watchdog fires and the last breadcrumb is this `.start` with no
+  // matching `.end`, the hang is somewhere in tool-engine's own setup rather
+  // than in message-processor.ts's earlier pre-stream phases.
+  breadcrumb("pre-stream.toolEngine.start", { sessionId: deps.session?.id });
 
   // Put all extracted code here:
   // Auto-recover budget for "cap" (tool-round ceiling) halts: compact
@@ -2025,6 +2036,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // started (session 1096fc59144c). One ping buys one more idle window; a
         // setup phase that issues no request at all still fires. See
         // turn-progress.ts.
+        // Matching `.end` for the coarse "pre-stream.toolEngine" breadcrumb
+        // opened at executeToolEngine's entry — everything above this line on
+        // attempt 1 is tool-engine's own pre-stream setup.
+        breadcrumb("pre-stream.toolEngine.end", {
+          sessionId: deps.session?.id,
+          msSinceTurnStart: Date.now() - turnStartMs,
+        });
         pingTurnProgress();
         // Silent-hang guard: abort the stream (and surface a toast in the
         // catch below) if the provider sends no chunk for too long. Re-armed

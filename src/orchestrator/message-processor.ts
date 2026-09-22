@@ -51,6 +51,7 @@
 //   - reasoning-strip (provider quirk)       — turnCaps.sanitizeHistory
 
 import { generateText, type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
+import { breadcrumb } from "../council/crash-breadcrumb.js";
 import { recordArtifact } from "../ee/artifact-cache.js";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
 import { routeFeedback, routeModel } from "../ee/bridge.js";
@@ -280,6 +281,41 @@ import type { TurnRunnerDepsBase } from "./turn-runner-deps.js";
  * guidance entries it stays informed until new entries arrive.
  */
 const _injectedGuidanceSha = new Map<string, string>();
+
+/**
+ * Durable phase breadcrumb for the pre-stream path (everything in `run()`
+ * before the first provider request — see `turn-progress.ts`'s
+ * `pingTurnProgress`, which only fires once `executeToolEngine` is about to
+ * call `streamText`). Nothing in this window emits a chunk, so the top-level
+ * turn watchdog's 120s idle budget covers it as one opaque block: session
+ * 1e9db4d68da0 hit exactly this — a watchdog kill with ZERO interaction_logs
+ * / call_accounting rows anywhere in the window, so no evidence said WHICH
+ * pre-stream await hung.
+ *
+ * Writes a `pre-stream.<name>.start` / `pre-stream.<name>.end` pair via the
+ * existing crash-breadcrumb trail (`~/.muonroi-cli/council-breadcrumbs.jsonl`,
+ * sync `fs.appendFileSync` — survives a watchdog abort because it is written
+ * BEFORE `fn()` settles, not after). If a phase hangs, the last line in the
+ * file is its `.start` with no matching `.end` — the orchestrator's watchdog
+ * catch reads exactly that (see `getLastBreadcrumb()` in orchestrator.ts) to
+ * attribute the hang to a phase name in the `error` interaction_log row.
+ */
+export function preStreamPhase<T>(name: string, sessionId: string | undefined, fn: () => Promise<T>): Promise<T> {
+  breadcrumb(`pre-stream.${name}.start`, { sessionId });
+  return fn().then(
+    (v) => {
+      breadcrumb(`pre-stream.${name}.end`, { sessionId });
+      return v;
+    },
+    (err) => {
+      breadcrumb(`pre-stream.${name}.end`, {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    },
+  );
+}
 
 /**
  * Dependency surface the MessageProcessor needs to reach back into Agent
@@ -705,11 +741,17 @@ export class MessageProcessor {
     deps.setTurnUserGoalExcerpt(userMessage.slice(0, 200));
     deps.setTurnAssistantReasoning("");
 
+    const _sessionIdForBreadcrumbs = deps.session?.id;
+
     // Ensure flow run is ready before processing (fail-open).
-    await deps.flowReady?.catch(() => {});
+    await preStreamPhase(
+      "flowReady",
+      _sessionIdForBreadcrumbs,
+      () => deps.flowReady?.catch(() => {}) ?? Promise.resolve(),
+    );
 
     // Upgrade to OAuth-backed provider on first turn if tokens are available.
-    await deps.initOAuthProvider().catch(() => {});
+    await preStreamPhase("initOAuthProvider", _sessionIdForBreadcrumbs, () => deps.initOAuthProvider().catch(() => {}));
 
     if (!deps.getSessionStartHookFired()) {
       deps.setSessionStartHookFired(true);
@@ -720,7 +762,9 @@ export class MessageProcessor {
         session_id: deps.session?.id,
         cwd: deps.bash.getCwd(),
       };
-      await deps.fireHook(sessionStartInput, signal).catch(() => {});
+      await preStreamPhase("sessionStartHook", _sessionIdForBreadcrumbs, () =>
+        deps.fireHook(sessionStartInput, signal).catch(() => {}),
+      );
     }
 
     const promptInput: UserPromptSubmitHookInput = {
@@ -729,9 +773,13 @@ export class MessageProcessor {
       session_id: deps.session?.id,
       cwd: deps.bash.getCwd(),
     };
-    await deps.fireHook(promptInput, signal).catch(() => {});
+    await preStreamPhase("userPromptSubmitHook", _sessionIdForBreadcrumbs, () =>
+      deps.fireHook(promptInput, signal).catch(() => {}),
+    );
 
-    await deps.consumeBackgroundNotifications();
+    await preStreamPhase("consumeBackgroundNotifications", _sessionIdForBreadcrumbs, () =>
+      deps.consumeBackgroundNotifications(),
+    );
 
     const _debugOn = isDebugEnabled();
     const _debugSteps: PipelineStep[] = [];
@@ -739,6 +787,12 @@ export class MessageProcessor {
 
     // PIL: enrich prompt before pushing to messages (D-01, D-03, D-04)
     // Promise.race timeout of 200ms is inside runPipeline — fail-open guaranteed
+    // NOTE this guarantee is NOT unconditional: runPipeline() takes the
+    // Promise.race path only when discovery is off or non-interactive; the
+    // live interactive-discovery path (the default) awaits runLayers()
+    // directly with no outer race — see pil/pipeline.ts runPipeline(). This
+    // phase's own breadcrumb pair is the backstop for that gap.
+    breadcrumb("pre-stream.pilPrep.start", { sessionId: _sessionIdForBreadcrumbs });
     const prepGen = prepareTurnContext(deps, userMessage, _budgetOverride);
     let prepResult: import("./preprocessor.js").PreprocessorResult | undefined;
     while (true) {
@@ -749,6 +803,7 @@ export class MessageProcessor {
       }
       yield res.value as StreamChunk;
     }
+    breadcrumb("pre-stream.pilPrep.end", { sessionId: _sessionIdForBreadcrumbs });
     const { pilCtx, _stepCeiling, _pilStart, _naturalCeiling, _ceilingTaskType, _ceilingSize } = prepResult!;
 
     const cwd = deps.bash.getCwd();
@@ -766,6 +821,7 @@ export class MessageProcessor {
         }
       })
     ) {
+      breadcrumb("pre-stream.gsdGate.start", { sessionId: _sessionIdForBreadcrumbs });
       try {
         const sessionModel = deps.session?.model ?? "unknown";
         let depth: "quick" | "standard" | "heavy" = pilCtx.modelDepthTier ?? pilCtx.complexityTier ?? "standard";
@@ -835,6 +891,7 @@ export class MessageProcessor {
       } catch (err) {
         console.error(`[gsd-loop-host] turn sync failed: ${(err as Error).message}`);
       }
+      breadcrumb("pre-stream.gsdGate.end", { sessionId: _sessionIdForBreadcrumbs });
     }
 
     // Track whether forced-finalize is needed (set by stopWhen when the
@@ -908,6 +965,7 @@ export class MessageProcessor {
     }
 
     // Interaction log: PIL classification
+    breadcrumb("pre-stream.pilInteractionLog.start", { sessionId: _sessionIdForBreadcrumbs });
     try {
       if (deps.session) {
         const pilDurationMs = Date.now() - _pilStart;
@@ -948,6 +1006,7 @@ export class MessageProcessor {
     } catch {
       /* fail-open */
     }
+    breadcrumb("pre-stream.pilInteractionLog.end", { sessionId: _sessionIdForBreadcrumbs });
 
     // ROUTE-11: Per-turn model routing via decide() — picks cheapest capable model
     const turnStartMs = Date.now();
@@ -960,6 +1019,7 @@ export class MessageProcessor {
     const turnHasImages = (images?.length ?? 0) > 0;
     let visionUnavailableNotice: string | null = null;
     const _routeStart = Date.now();
+    breadcrumb("pre-stream.routerDecide.start", { sessionId: _sessionIdForBreadcrumbs });
     try {
       const { decide } = await import("../router/decide.js");
       const compactionMsg = deps.messages.find(
@@ -1036,8 +1096,10 @@ export class MessageProcessor {
         taskHash = eeRoute?.taskHash ?? null;
       }
     }
+    breadcrumb("pre-stream.routerDecide.end", { sessionId: _sessionIdForBreadcrumbs });
 
     if (needsVisionProxy(turnModelId) && (turnHasImages || historyHasImages)) {
+      breadcrumb("pre-stream.visionPlan.start", { sessionId: _sessionIdForBreadcrumbs });
       const imageCount = turnHasImages ? images!.length : 1;
       const plan = await planImageHandlingForTextOnlyModel({
         primaryModelId: turnModelId,
@@ -1053,6 +1115,7 @@ export class MessageProcessor {
       } else if (plan.strategy === "unavailable") {
         visionUnavailableNotice = plan.notice;
       }
+      breadcrumb("pre-stream.visionPlan.end", { sessionId: _sessionIdForBreadcrumbs });
     }
 
     // Interaction log: model routing
@@ -1081,6 +1144,7 @@ export class MessageProcessor {
     }
 
     // Re-detect provider if router picked a model from a different provider
+    breadcrumb("pre-stream.providerRedetect.start", { sessionId: _sessionIdForBreadcrumbs });
     const turnProviderId = detectProviderForModel(turnModelId);
     let turnProvider: LegacyProvider;
     if (turnProviderId !== deps.providerId) {
@@ -1122,6 +1186,7 @@ export class MessageProcessor {
     } else {
       turnProvider = deps.requireProvider();
     }
+    breadcrumb("pre-stream.providerRedetect.end", { sessionId: _sessionIdForBreadcrumbs });
 
     // E4: prepend one-shot cwd note when setCwd() changed the working directory
     // mid-session. Clears after injection so only the first subsequent turn sees it.
@@ -1158,6 +1223,7 @@ export class MessageProcessor {
     // text-only provider (e.g. DeepSeek) fails with "unknown variant
     // `image_url`" once history contains an image from a prior turn.
     if (needsVisionProxy(turnModelId) && (turnHasImages || historyHasImages)) {
+      breadcrumb("pre-stream.visionProxy.start", { sessionId: _sessionIdForBreadcrumbs });
       const stripImagesFromMessages = (msgs: ModelMessage[]): ModelMessage[] =>
         msgs.map((m) => {
           if (!Array.isArray(m.content)) return m;
@@ -1231,6 +1297,7 @@ export class MessageProcessor {
           }
         }
       }
+      breadcrumb("pre-stream.visionProxy.end", { sessionId: _sessionIdForBreadcrumbs });
     }
 
     deps.messages.push(userModelMessage);
@@ -1390,13 +1457,15 @@ export class MessageProcessor {
     let stepRouterCfg = getStepRouterConfig();
     if (!stepRouterCfg.enabled) {
       const pilCtxForSamr = pilCtx; // captured at line 649
-      const eeGuidance = await eeSamrGuidance({
-        userMessage,
-        taskType: pilCtxForSamr.taskType,
-        taskConfidence: pilCtxForSamr.confidence,
-        complexitySize: pilCtxForSamr.complexitySize?.size,
-        taskComplexity: (pilCtxForSamr as { _intentTrace?: { complexity?: string } })._intentTrace?.complexity,
-      });
+      const eeGuidance = await preStreamPhase("samrGuidance", _sessionIdForBreadcrumbs, () =>
+        eeSamrGuidance({
+          userMessage,
+          taskType: pilCtxForSamr.taskType,
+          taskConfidence: pilCtxForSamr.confidence,
+          complexitySize: pilCtxForSamr.complexitySize?.size,
+          taskComplexity: (pilCtxForSamr as { _intentTrace?: { complexity?: string } })._intentTrace?.complexity,
+        }),
+      );
       if (eeGuidance.overrideConfig) {
         stepRouterCfg = eeGuidance.overrideConfig;
         _debugSteps.push({
