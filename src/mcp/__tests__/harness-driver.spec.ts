@@ -91,7 +91,12 @@ describe("harness-driver capabilities", () => {
     // stay inside a catalog-declared provider limit. Pinned by name — without it
     // a deliberate hold and a hang are the same silence to a driver.
     expect(eventKinds).toContain("rate-limit-wait");
-    expect(eventKinds.length).toBe(26);
+    // 26 → 27 when askcard-withdrawn was added: the counterpart to askcard-open
+    // for a waiter that gave up before an answer arrived (timeout/abort/error).
+    // Pinned by name — without it a card a driver saw open but that the run
+    // stopped listening to looks identical to one still genuinely pending.
+    expect(eventKinds).toContain("askcard-withdrawn");
+    expect(eventKinds.length).toBe(27);
   });
 
   it("advertises the role vocabulary and the custom-role prefix", () => {

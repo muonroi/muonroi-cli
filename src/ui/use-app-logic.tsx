@@ -4199,6 +4199,38 @@ export function useAppLogic(props: AppLogicProps) {
                   });
                 }
                 break;
+              case "council_question_withdrawn":
+                // The waiter that opened a card gave up before an answer
+                // arrived (timeout/abort/error). Withdraw it the instant this
+                // arrives — never leave a card on screen that looks live while
+                // nothing is listening behind it (session 697419024ec8: a card
+                // sat 46 minutes past its own timeout and a late answer
+                // vanished with no trace once it finally came in).
+                if (chunk.councilQuestionWithdrawn) {
+                  const cqw = chunk.councilQuestionWithdrawn;
+                  if (pendingCouncilQuestionRef.current?.questionId === cqw.questionId) {
+                    setPendingCouncilQuestionSync(null);
+                    setCouncilCardStateSync(null);
+                    clearInterCardHeartbeat();
+                  }
+                  applyLocalAssistantDelta(`\n  ⚠ ${cqw.notice}\n`);
+                  try {
+                    agentRuntime?.emitEvent({
+                      t: "event",
+                      kind: "askcard-withdrawn",
+                      questionId: cqw.questionId,
+                      reason: cqw.reason,
+                      notice: cqw.notice,
+                    });
+                  } catch {
+                    /* best-effort */
+                  }
+                  logUIInteraction(agent.getSessionId() ?? undefined, {
+                    subtype: "askcard_withdrawn",
+                    data: { questionId: cqw.questionId, reason: cqw.reason, notice: cqw.notice },
+                  });
+                }
+                break;
               case "council_preflight":
                 if (chunk.councilPreflight) {
                   applyLocalAssistantDelta(chunk.content || "");
@@ -5117,6 +5149,39 @@ export function useAppLogic(props: AppLogicProps) {
                       },
                     });
                   }
+                  if (chunk.type === "council_question_withdrawn" && chunk.councilQuestionWithdrawn) {
+                    const cqw2 = chunk.councilQuestionWithdrawn;
+                    if (pendingCouncilQuestionRef.current?.questionId === cqw2.questionId) {
+                      setPendingCouncilQuestionSync(null);
+                      setCouncilCardStateSync(null);
+                      clearInterCardHeartbeat();
+                    }
+                    setMessages((prev) => {
+                      const last = prev[prev.length - 1];
+                      if (last?.type === "assistant") {
+                        return [
+                          ...prev.slice(0, -1),
+                          { ...last, content: `${last.content ?? ""}\n  ⚠ ${cqw2.notice}\n` },
+                        ];
+                      }
+                      return [...prev, buildAssistantEntry(`\n  ⚠ ${cqw2.notice}\n`)];
+                    });
+                    try {
+                      agentRuntime?.emitEvent({
+                        t: "event",
+                        kind: "askcard-withdrawn",
+                        questionId: cqw2.questionId,
+                        reason: cqw2.reason,
+                        notice: cqw2.notice,
+                      });
+                    } catch {
+                      /* best-effort */
+                    }
+                    logUIInteraction(agent.getSessionId() ?? undefined, {
+                      subtype: "askcard_withdrawn",
+                      data: { questionId: cqw2.questionId, reason: cqw2.reason, notice: cqw2.notice },
+                    });
+                  }
                   if (chunk.type === "council_preflight" && chunk.councilPreflight) {
                     setPendingCouncilPreflight(chunk.councilPreflight);
                     setPreflightCardStateSync(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
@@ -5426,6 +5491,39 @@ export function useAppLogic(props: AppLogicProps) {
                         optionLabels: cq3.options?.map((o) => o.label),
                         recommendedLabel: cq3.options?.[cq3.defaultIndex ?? 0]?.label,
                       },
+                    });
+                  }
+                  if (chunk.type === "council_question_withdrawn" && chunk.councilQuestionWithdrawn) {
+                    const cqw3 = chunk.councilQuestionWithdrawn;
+                    if (pendingCouncilQuestionRef.current?.questionId === cqw3.questionId) {
+                      setPendingCouncilQuestionSync(null);
+                      setCouncilCardStateSync(null);
+                      clearInterCardHeartbeat();
+                    }
+                    setMessages((prev) => {
+                      const last = prev[prev.length - 1];
+                      if (last?.type === "assistant") {
+                        return [
+                          ...prev.slice(0, -1),
+                          { ...last, content: `${last.content ?? ""}\n  ⚠ ${cqw3.notice}\n` },
+                        ];
+                      }
+                      return [...prev, buildAssistantEntry(`\n  ⚠ ${cqw3.notice}\n`)];
+                    });
+                    try {
+                      agentRuntime?.emitEvent({
+                        t: "event",
+                        kind: "askcard-withdrawn",
+                        questionId: cqw3.questionId,
+                        reason: cqw3.reason,
+                        notice: cqw3.notice,
+                      });
+                    } catch {
+                      /* best-effort */
+                    }
+                    logUIInteraction(agent.getSessionId() ?? undefined, {
+                      subtype: "askcard_withdrawn",
+                      data: { questionId: cqw3.questionId, reason: cqw3.reason, notice: cqw3.notice },
                     });
                   }
                   if (chunk.type === "council_preflight" && chunk.councilPreflight) {
@@ -6865,7 +6963,28 @@ export function useAppLogic(props: AppLogicProps) {
               ans.kind === "choice" || ans.kind === "freetext" ? cardOptions[cardIdx]?.label : undefined;
             setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
-            agent.respondToCouncilQuestion(qid, ans.text, pendingQuestion.question);
+            const respondResult = agent.respondToCouncilQuestion(qid, ans.text, pendingQuestion.question);
+            if (respondResult?.stale) {
+              // A race: the backend already withdrew this question (timeout,
+              // abort, or the run ending) before this keypress reached it —
+              // the card should already be gone by the time this can happen
+              // (the council_question_withdrawn handler clears it), so this is
+              // defense-in-depth, not the normal path. Never apply it silently
+              // (session 697419024ec8 measured exactly this vanishing): tell
+              // the user, log it distinctly, and stop before any of the
+              // normal echo/heartbeat/askcard-answered bookkeeping runs.
+              pushToast("warn", "This question was already withdrawn — your answer was not applied.");
+              logUIInteraction(agent.getSessionId() ?? undefined, {
+                subtype: "askcard_answered_stale",
+                data: {
+                  questionId: qid,
+                  answerKind: ans.kind ?? "choice",
+                  answerText: ans.text,
+                  reason: respondResult.staleReason,
+                },
+              });
+              return;
+            }
             // Suppress the transcript echo for no-op "Skip — leave as-is" choices:
             // they contribute nothing, and a post-debate refine over N sections
             // produces N blank "· Skip" user rows (transcript garbage — see the
@@ -6969,7 +7088,28 @@ export function useAppLogic(props: AppLogicProps) {
             // "answered via card" (QuestionResponder.wasAnsweredByCard), so a
             // dismissed card now leaves NO transcript trace instead of the old
             // blank "  ↳ " line — intended: nothing was actually answered.
-            agent.respondToCouncilQuestion(qid, COUNCIL_ANSWER_DISMISSED, pendingQuestion.question);
+            const dismissResult = agent.respondToCouncilQuestion(
+              qid,
+              COUNCIL_ANSWER_DISMISSED,
+              pendingQuestion.question,
+            );
+            if (dismissResult?.stale) {
+              // The question was already withdrawn before this dismissal reached
+              // the backend — a no-op either way, but still recorded distinctly
+              // rather than folded into a normal askcard_cancel row (No Silent
+              // Catch: a stale gesture must be diagnosable, not indistinguishable
+              // from an ordinary dismissal).
+              logUIInteraction(agent.getSessionId() ?? undefined, {
+                subtype: "askcard_answered_stale",
+                data: {
+                  questionId: qid,
+                  answerKind: "dismiss",
+                  answerText: COUNCIL_ANSWER_DISMISSED,
+                  reason: dismissResult.staleReason,
+                },
+              });
+              return;
+            }
             // Task 2.4 — emit askcard-cancel harness event (agent-mode only).
             try {
               agentRuntime?.emitEvent({
@@ -8416,7 +8556,23 @@ export function useAppLogic(props: AppLogicProps) {
       const qid = pendingCouncilQuestion.questionId;
       setPendingCouncilQuestionSync(null);
       setCouncilCardStateSync(null);
-      agent.respondToCouncilQuestion(qid, message.trim(), pendingCouncilQuestion.question);
+      const freetextResult = agent.respondToCouncilQuestion(qid, message.trim(), pendingCouncilQuestion.question);
+      if (freetextResult?.stale) {
+        // Same race as the card-driven answer path: the question was already
+        // withdrawn before this legacy free-text answer reached the backend.
+        // Never apply it silently — tell the user and record it distinctly.
+        pushToast("warn", "This question was already withdrawn — your answer was not applied.");
+        logUIInteraction(agent.getSessionId() ?? undefined, {
+          subtype: "askcard_answered_stale",
+          data: {
+            questionId: qid,
+            answerKind: "freetext",
+            answerText: message.trim(),
+            reason: freetextResult.staleReason,
+          },
+        });
+        return;
+      }
       // U1 — same paired question+answer record as the card-driven answer
       // path above (this is the legacy fallback where the user typed the
       // answer into the main composer instead of the card).
@@ -8475,6 +8631,7 @@ export function useAppLogic(props: AppLogicProps) {
     clearLiveTurnUi,
     handleCommand,
     processMessage,
+    pushToast,
     replacePasteBlocks,
     scrollToBottom,
     scrollToBottomForced,

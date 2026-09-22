@@ -2314,8 +2314,12 @@ export class Agent {
   // hooks used by orchestrator.agent.test.ts).
   // ========================================================================
 
-  respondToCouncilQuestion(questionId: string, answer: string, questionText?: string): void {
-    this.councilManager.respondToQuestion(questionId, answer, questionText);
+  respondToCouncilQuestion(
+    questionId: string,
+    answer: string,
+    questionText?: string,
+  ): import("./council-manager.js").RespondToQuestionResult {
+    return this.councilManager.respondToQuestion(questionId, answer, questionText);
   }
 
   respondToCouncilPreflight(preflightId: string, approved: boolean): void {

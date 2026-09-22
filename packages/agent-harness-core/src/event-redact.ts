@@ -118,6 +118,11 @@ const ALLOWED_FIELDS: Record<EventKind, Record<string, FieldSpec>> = {
   "askcard-cancel": {
     questionId: "pass",
   },
+  "askcard-withdrawn": {
+    questionId: "pass",
+    reason: "pass",
+    notice: 300, // cap to 300 chars, then scrub — same treatment as askcard-open.question
+  },
   "sprint-stage": {
     sprintIndex: "pass",
     stage: "pass",

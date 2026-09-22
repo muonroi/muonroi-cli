@@ -317,8 +317,10 @@ export async function* runUndebatedCriteriaGate(opts: {
   respondToQuestion: QuestionResponder;
   /** Deadline before the unattended default applies. 0 = do not wait at all. */
   timeoutMs: number;
+  /** For the timeout withdrawal notice's `/ideal resume <runId>` — omit to name no runId. */
+  runId?: string;
 }): AsyncGenerator<StreamChunk, UndebatedGateDecision, unknown> {
-  const { undebated, respondToQuestion, timeoutMs } = opts;
+  const { undebated, respondToQuestion, timeoutMs, runId } = opts;
   const card = buildUndebatedQuestion(undebated);
   const questionId = randomUUID();
 
@@ -340,6 +342,29 @@ export async function* runUndebatedCriteriaGate(opts: {
   const answer = await awaitAnswer(respondToQuestion, questionId, timeoutMs);
 
   if (answer === null) {
+    // Withdraw the card BEFORE anything else. A human who is mid-read when the
+    // deadline lands must not keep seeing a card that looks live while nothing
+    // is listening behind it any more — session 697419024ec8 measured exactly
+    // this: the card sat on screen 46 more minutes after this timeout, and the
+    // late answer the user gave then vanished with no trace once it arrived.
+    // `withdraw` also removes the dangling resolver so that late answer is
+    // reported as stale instead of silently swallowed (council-manager.ts).
+    respondToQuestion.withdraw?.(questionId, "timeout");
+    const minutes = Math.max(1, Math.round(timeoutMs / 60000));
+    const resumeCmd = runId ? `/ideal resume ${runId}` : "/ideal resume";
+    yield {
+      type: "council_question_withdrawn",
+      content:
+        `the run stopped because this was not answered within ${minutes} minute${minutes === 1 ? "" : "s"}; ` +
+        `\`${resumeCmd}\` will ask again`,
+      councilQuestionWithdrawn: {
+        questionId,
+        reason: "timeout",
+        notice:
+          `The run stopped because this was not answered within ${minutes} minute${minutes === 1 ? "" : "s"}; ` +
+          `\`${resumeCmd}\` will ask again.`,
+      },
+    } as StreamChunk;
     // Unattended. Nothing is persisted for a timeout, so — unlike the attended
     // halt below — the question is still genuinely open and the next resume
     // asks it. Say that, or the two identical-looking stops teach the user that
@@ -717,6 +742,7 @@ export async function* enforceUndebatedCriteriaGate(opts: {
     undebated,
     respondToQuestion: opts.respondToQuestion,
     timeoutMs,
+    runId: path.basename(opts.runDir),
   });
   audit({
     stage: "gate-resolved",

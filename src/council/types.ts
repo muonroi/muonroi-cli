@@ -933,5 +933,26 @@ export interface CouncilLLM {
  */
 export type QuestionResponder = ((questionId: string) => Promise<string>) & {
   wasAnsweredByCard?: (questionId: string) => boolean;
+  /**
+   * Withdrawal — the counterpart to a waiter GIVING UP on `questionId` before
+   * an answer arrived (deadline elapsed, the run aborted, or an error tore the
+   * turn down). Optional so every existing test mock and every non-UI-wired
+   * responder keeps compiling: undefined means "no withdrawal channel", the
+   * pre-existing behaviour.
+   *
+   * When present (see `CouncilManager.createQuestionResponder`), calling this
+   * does two things atomically: it removes any resolver still registered for
+   * `questionId` (so a LATE answer can no longer silently resolve a promise
+   * nobody is listening to any more — see `respondToQuestion`'s stale-answer
+   * branch), and it records `questionId` as withdrawn so that late answer is
+   * reported instead of swallowed.
+   *
+   * A caller that withdraws a question is responsible for ALSO telling the UI,
+   * by yielding a `council_question_withdrawn` StreamChunk (see
+   * `src/product-loop/undebated-criteria-gate.ts`'s timeout branch for the
+   * canonical example) — this method alone only fixes the backend leak, it
+   * does not touch anything already rendered on screen.
+   */
+  withdraw?: (questionId: string, reason: string) => void;
 };
 export type PreflightResponder = (preflightId: string) => Promise<boolean>;

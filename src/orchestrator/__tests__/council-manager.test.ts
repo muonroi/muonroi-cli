@@ -99,6 +99,117 @@ describe("CouncilManager — question resolver lifecycle", () => {
     m.respondToQuestion("qid-3", "second");
     await expect(stalled).resolves.toBe("second");
   });
+
+  it("respondToQuestion reports applied:true when a live resolver consumes the answer", async () => {
+    const m = new CouncilManager(makeDeps());
+    const promise = m.createQuestionResponder()("qid-applied");
+    const result = m.respondToQuestion("qid-applied", "answer");
+    expect(result).toEqual({ applied: true, stale: false });
+    await expect(promise).resolves.toBe("answer");
+  });
+
+  it("respondToQuestion reports applied:false, stale:false for a headless early-answer buffer", () => {
+    const m = new CouncilManager(makeDeps());
+    const result = m.respondToQuestion("qid-buffer", "early");
+    expect(result).toEqual({ applied: false, stale: false });
+  });
+});
+
+// Session 697419024ec8 (2026-09-22) — a gate's timeout left its resolver
+// registered forever. 46 minutes later a late answer arrived, found the
+// resolver still there, resolved a promise nobody was listening to any more,
+// and vanished with no interaction_logs row and no debug.log line. Fixed by
+// `withdrawQuestion`: it removes the resolver and records the withdrawal so a
+// later `respondToQuestion` call reports it as stale instead of silently
+// applying (or silently buffering) it.
+describe("CouncilManager — withdrawal and stale answers (session 697419024ec8)", () => {
+  it("withdrawQuestion removes the pending resolver so it never resolves again", async () => {
+    const m = new CouncilManager(makeDeps());
+    const pending = m.createQuestionResponder()("qid-w1");
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+
+    m.withdrawQuestion("qid-w1", "timeout");
+    // The dangling promise must never resolve — there is no answer to give it.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(settled).toBe(false);
+  });
+
+  it("a late answer to a withdrawn question is reported stale, not applied", () => {
+    const m = new CouncilManager(makeDeps());
+    void m.createQuestionResponder()("qid-w2");
+    m.withdrawQuestion("qid-w2", "timeout");
+
+    const result = m.respondToQuestion("qid-w2", "late-answer");
+    expect(result).toEqual({ applied: false, stale: true, staleReason: "timeout" });
+  });
+
+  it("a stale answer is never buffered for a future responder to drain", async () => {
+    const m = new CouncilManager(makeDeps());
+    m.withdrawQuestion("qid-w3", "timeout");
+    m.respondToQuestion("qid-w3", "late-answer");
+
+    // If the answer had fallen into the headless buffer, a FUTURE responder
+    // for the same id (ids are UUIDs so reuse is not expected, but the
+    // contract must hold regardless) would incorrectly resolve to it.
+    const responder = m.createQuestionResponder();
+    const pending = responder("qid-w3");
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(settled).toBe(false);
+  });
+
+  it("a stale answer never marks wasAnsweredByCard, even when questionText is passed", () => {
+    const m = new CouncilManager(makeDeps());
+    void m.createQuestionResponder()("qid-w4");
+    m.withdrawQuestion("qid-w4", "timeout");
+
+    m.respondToQuestion("qid-w4", "late-answer", "What should we do?");
+    const responder = m.createQuestionResponder();
+    expect(responder.wasAnsweredByCard?.("qid-w4")).toBe(false);
+  });
+
+  it("withdraw is exposed on the responder created by createQuestionResponder", async () => {
+    const m = new CouncilManager(makeDeps());
+    const responder = m.createQuestionResponder();
+    const pending = responder("qid-w5");
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+
+    expect(typeof responder.withdraw).toBe("function");
+    responder.withdraw?.("qid-w5", "aborted");
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(settled).toBe(false);
+    expect(m.respondToQuestion("qid-w5", "too-late")).toEqual({
+      applied: false,
+      stale: true,
+      staleReason: "aborted",
+    });
+  });
+
+  it("a normal answer BEFORE any withdrawal is completely unaffected", async () => {
+    const m = new CouncilManager(makeDeps());
+    const pending = m.createQuestionResponder()("qid-w6");
+    const result = m.respondToQuestion("qid-w6", "on-time-answer");
+    expect(result).toEqual({ applied: true, stale: false });
+    await expect(pending).resolves.toBe("on-time-answer");
+  });
+
+  it("_withdrawnQuestionIds is bounded (defense-in-depth, mirrors MAX_CARD_ANSWERED_IDS)", () => {
+    const m = new CouncilManager(makeDeps());
+    for (let i = 0; i < 250; i++) {
+      m.withdrawQuestion(`qid-bulk-${i}`, "timeout");
+    }
+    expect(m._withdrawnCountForTests()).toBeLessThanOrEqual(200);
+  });
 });
 
 // Regression — session d22397a9e47d (2026-07-29). A council askcard blocks the

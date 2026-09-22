@@ -251,6 +251,21 @@ export type LiveEvent =
       kind: "askcard-cancel";
       questionId: string;
     }
+  // The counterpart to askcard-open: the waiter that opened `questionId` gave
+  // up before an answer arrived (deadline elapsed, the run aborted, or an
+  // error tore the turn down). Without this, a driver watching only
+  // askcard-open cannot tell "still waiting for a human" apart from "nobody
+  // is listening any more" — the exact ambiguity a real run sat inside for
+  // 46 minutes (session 697419024ec8) before a late answer vanished with no
+  // trace. `notice` mirrors the text rendered in place of the withdrawn card.
+  | {
+      t: "event";
+      kind: "askcard-withdrawn";
+      questionId: string;
+      /** Stable machine code naming why the waiter stopped waiting. */
+      reason: string;
+      notice: string;
+    }
   | {
       t: "event";
       kind: "sprint-stage";
@@ -557,6 +572,7 @@ export const LIVE_EVENT_KINDS = [
   "askcard-open",
   "askcard-answered",
   "askcard-cancel",
+  "askcard-withdrawn",
   "sprint-stage",
   "sprint-halt",
   "run-finished",

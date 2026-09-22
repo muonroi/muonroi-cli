@@ -32,6 +32,7 @@ export const LIFECYCLE_PRESET: ReadonlySet<EventKind> = new Set<EventKind>([
   "askcard-open",
   "askcard-answered",
   "askcard-cancel",
+  "askcard-withdrawn",
   "sprint-stage",
   "sprint-halt",
   // The terminal event of a /ideal run (success included). Dropping it from the

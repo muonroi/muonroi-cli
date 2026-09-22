@@ -320,6 +320,26 @@ export interface CouncilQuestionData {
   questionTotal?: number;
 }
 
+/**
+ * A previously-opened `council_question` that its waiter has GIVEN UP on —
+ * the deadline elapsed, the run aborted, or an error tore the turn down
+ * before an answer arrived. The UI must withdraw the matching card the
+ * instant this arrives (never leave it on screen looking live when nothing
+ * is listening any more) and show `notice` in its place.
+ *
+ * See `undebated-criteria-gate.ts`'s timeout branch for the canonical
+ * producer and `use-app-logic.tsx`'s `council_question` chunk handlers for
+ * the consumer.
+ */
+export interface CouncilQuestionWithdrawnData {
+  /** The `CouncilQuestionData.questionId` this withdraws. */
+  questionId: string;
+  /** Stable machine code naming why the waiter stopped waiting. */
+  reason: "timeout" | "aborted" | "run_ended" | "error";
+  /** Human-readable text to show in place of the withdrawn card. */
+  notice: string;
+}
+
 export type CouncilStatusPhase =
   | "clarify"
   | "panel_select"
@@ -671,6 +691,13 @@ export interface StreamChunk {
     | "tool_result"
     | "tool_approval_request"
     | "council_question"
+    /**
+     * The counterpart to `council_question`: the waiter that opened it gave up
+     * before an answer arrived. Carries `councilQuestionWithdrawn`. The UI must
+     * clear the matching pending card (if still showing) and render `notice` in
+     * its place — never leave a card on screen once nothing is listening.
+     */
+    | "council_question_withdrawn"
     | "council_preflight"
     | "council_status"
     | "council_phase"
@@ -709,6 +736,8 @@ export interface StreamChunk {
   isAuthError?: boolean;
   structuredResponse?: StructuredResponse;
   councilQuestion?: CouncilQuestionData;
+  /** Populated when type === "council_question_withdrawn". */
+  councilQuestionWithdrawn?: CouncilQuestionWithdrawnData;
   councilPreflight?: CouncilPreflightData;
   councilStatus?: CouncilStatusData;
   councilPhase?: CouncilPhaseEvent;

@@ -223,6 +223,121 @@ describe("runUndebatedCriteriaGate — the askcard", () => {
 });
 
 /**
+ * Session 697419024ec8 (2026-09-22) — the card stayed on screen for 46 minutes
+ * after the gate's own timeout resolved the run to a halt. Nothing ever told
+ * the UI the question was no longer being awaited, so the user believed they
+ * were still answering it; the late answer they gave then vanished with no
+ * trace. Fixed generically: on timeout the gate withdraws the questionId
+ * (removing the dangling resolver) AND yields a `council_question_withdrawn`
+ * chunk carrying the notice the UI must show in the card's place.
+ */
+describe("runUndebatedCriteriaGate — withdrawal on timeout (session 697419024ec8)", () => {
+  const undebated = [{ index: 0, criterion: NUGET }];
+
+  it("calls respondToQuestion.withdraw with reason 'timeout' when nobody answers", async () => {
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {})) as unknown as QuestionResponder;
+    const withdraw = vi.fn();
+    neverAnswers.withdraw = withdraw;
+    await drain(runUndebatedCriteriaGate({ undebated, respondToQuestion: neverAnswers, timeoutMs: 20 }));
+    expect(withdraw).toHaveBeenCalledTimes(1);
+    const [qid, reason] = withdraw.mock.calls[0]!;
+    expect(typeof qid).toBe("string");
+    expect(reason).toBe("timeout");
+  });
+
+  it("does NOT call withdraw when a real answer arrives before the deadline", async () => {
+    const withdraw = vi.fn();
+    const responder = vi.fn().mockResolvedValue(UNDEBATED_OPTION_ACCEPT) as unknown as QuestionResponder;
+    responder.withdraw = withdraw;
+    await drain(runUndebatedCriteriaGate({ undebated, respondToQuestion: responder, timeoutMs: 5_000 }));
+    expect(withdraw).not.toHaveBeenCalled();
+  });
+
+  it("yields a council_question_withdrawn chunk naming the SAME questionId as the card", async () => {
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+    const { chunks } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: neverAnswers, timeoutMs: 20 }),
+    );
+    const card = chunks.find((c) => c.type === "council_question");
+    const withdrawnChunk = chunks.find((c) => c.type === "council_question_withdrawn");
+    expect(card?.councilQuestion?.questionId).toBeDefined();
+    expect(withdrawnChunk?.councilQuestionWithdrawn?.questionId).toBe(card?.councilQuestion?.questionId);
+    expect(withdrawnChunk?.councilQuestionWithdrawn?.reason).toBe("timeout");
+  });
+
+  it("the withdrawn notice names the deadline and that resume will ask again", async () => {
+    // Real 60s of setTimeout would make this test itself time out — fake timers
+    // let the gate's internal deadline elapse instantly while still exercising
+    // the exact Math.round(timeoutMs / 60000) formatting the notice text uses.
+    vi.useFakeTimers();
+    try {
+      const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+      const gen = runUndebatedCriteriaGate({
+        undebated,
+        respondToQuestion: neverAnswers,
+        timeoutMs: 60_000,
+        runId: "run-abc123",
+      });
+      const chunks: StreamChunk[] = [];
+      let done = false;
+      let decision: UndebatedGateDecision | undefined;
+      // Drain up to the point the generator awaits the setTimeout, then fire it.
+      const stepPromise = (async () => {
+        while (!done) {
+          const step = await gen.next();
+          if (step.done) {
+            done = true;
+            decision = step.value as UndebatedGateDecision;
+          } else {
+            chunks.push(step.value as StreamChunk);
+          }
+        }
+      })();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await stepPromise;
+      expect(decision).toMatchObject({ unattended: true });
+      const notice = chunks.find((c) => c.type === "council_question_withdrawn")?.councilQuestionWithdrawn?.notice;
+      expect(notice).toBeDefined();
+      expect(notice).toMatch(/not answered within 1 minute/i);
+      expect(notice).toContain("/ideal resume run-abc123");
+      expect(notice?.toLowerCase()).toMatch(/ask again/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("omitting runId still produces a valid notice naming the bare resume command", async () => {
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+    const { chunks } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: neverAnswers, timeoutMs: 20 }),
+    );
+    const notice = chunks.find((c) => c.type === "council_question_withdrawn")?.councilQuestionWithdrawn?.notice;
+    expect(notice).toContain("/ideal resume");
+    expect(notice).not.toContain("/ideal resume undefined");
+  });
+
+  it("the existing 'No answer within' content echo is UNCHANGED — only ADDED to, not reworded", async () => {
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+    const { chunks } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: neverAnswers, timeoutMs: 20 }),
+    );
+    const text = chunks
+      .filter((c) => c.type === "content")
+      .map((c) => c.content ?? "")
+      .join("");
+    expect(text).toContain("No answer within");
+    expect(text).toContain("/ideal resume will ask this again");
+  });
+
+  it("withdraw is safe to omit — a plain mock with no withdraw method does not throw", async () => {
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+    await expect(
+      drain(runUndebatedCriteriaGate({ undebated, respondToQuestion: neverAnswers, timeoutMs: 20 })),
+    ).resolves.toBeDefined();
+  });
+});
+
+/**
  * U1 — this card reuses `phase: "post-debate"` to ride the same UI renderer
  * as the post-debate card, so it fired the SAME duplicate-echo defect
  * (project_askcard_transcript_qa_pairing) as the original U1 slice: the

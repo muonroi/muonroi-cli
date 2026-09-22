@@ -30,6 +30,7 @@ import type { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import type { AgentMode, StreamChunk } from "../types/index";
 import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
+import { logger } from "../utils/logger.js";
 import { isProviderDisabled, type ModelRole } from "../utils/settings";
 import { COUNCIL_COLOR_BG, COUNCIL_COLOR_RESET, COUNCIL_ROLE_COLORS, type CouncilOutcome } from "./agent-options";
 import { extractUserContent, getCompactionSummaryText, isCompactionSummaryMessage } from "./compaction";
@@ -43,6 +44,31 @@ import { createNoProgressStopWhen } from "./no-progress-guard.js";
  * test can drive the eviction path deterministically without a magic number.
  */
 export const MAX_CARD_ANSWERED_IDS = 200;
+
+/**
+ * Defense-in-depth bound on `_withdrawnQuestionIds`, mirroring
+ * {@link MAX_CARD_ANSWERED_IDS}. A withdrawn id is only ever ADDED (on
+ * timeout/abort/error) and never explicitly drained the way an answered id
+ * is, so without a bound a long-running process that withdraws many cards
+ * would grow this set forever. Generous for the same reason: realistically
+ * tens of withdrawn cards per run, not hundreds.
+ */
+export const MAX_WITHDRAWN_QUESTION_IDS = 200;
+
+/** Result of `CouncilManager.respondToQuestion` — what actually happened to the answer. */
+export interface RespondToQuestionResult {
+  /** True iff a live resolver consumed the answer this call (the normal path). */
+  applied: boolean;
+  /**
+   * True iff `questionId` was already WITHDRAWN (its waiter gave up — timeout,
+   * abort, or the run ending) before this answer arrived. The answer was
+   * logged and NOT applied to anything; callers must show the user a notice
+   * rather than treating this as a normal accepted answer.
+   */
+  stale: boolean;
+  /** Present when `stale` — the withdrawal reason recorded by `withdrawQuestion`. */
+  staleReason?: string;
+}
 
 /**
  * Dependency callbacks the CouncilManager needs to reach back into Agent state
@@ -118,6 +144,18 @@ export class CouncilManager {
    * this set unbounded across a long-running process.
    */
   private _cardAnsweredQuestionIds = new Set<string>();
+  /**
+   * questionIds whose waiter has GIVEN UP (timeout, abort, or the run
+   * ending) before an answer arrived — see `withdrawQuestion`. Once a
+   * questionId lands here, a LATE `respondToQuestion` call for it is
+   * reported as stale (logged, not applied) instead of either resolving a
+   * dangling promise nobody is listening to (the session 697419024ec8 defect:
+   * an answer that arrived 46 minutes after the gate timed out vanished with
+   * no trace) or silently buffering into `_bufferedQuestionAnswers` forever.
+   * Bounded the same way as `_cardAnsweredQuestionIds` — see
+   * `MAX_WITHDRAWN_QUESTION_IDS`.
+   */
+  private _withdrawnQuestionIds = new Map<string, { reason: string; at: number }>();
   /** One-shot watchdog-pause releasers for cards currently awaiting a human. */
   private _pauseReleasers = new Set<() => void>();
   /** Council telemetry — counts API calls and tracks debate start time. */
@@ -155,7 +193,7 @@ export class CouncilManager {
   }
 
   // ---- Public responder API (delegated from Agent.respondToCouncilQuestion etc) ----
-  respondToQuestion(questionId: string, answer: string, questionText?: string): void {
+  respondToQuestion(questionId: string, answer: string, questionText?: string): RespondToQuestionResult {
     if (process.env.MUONROI_DEBUG_LEADER === "1") {
       process.stderr.write(
         `[responder] respondToCouncilQuestion: ${JSON.stringify({
@@ -165,6 +203,21 @@ export class CouncilManager {
           pendingResolverCount: this._questionResolvers.size,
         })}\n`,
       );
+    }
+    // Stale-answer check FIRST, before anything else touches state: a
+    // withdrawn questionId must never mark `_cardAnsweredQuestionIds`, never
+    // resolve a resolver (there is none left — `withdrawQuestion` removed
+    // it), and never fall into the headless-buffer branch. See the JSDoc on
+    // `_withdrawnQuestionIds`.
+    const withdrawn = this._withdrawnQuestionIds.get(questionId);
+    if (withdrawn) {
+      logger.warn("orchestrator", "[council-manager] stale council answer — question no longer awaited", {
+        questionId,
+        withdrawnReason: withdrawn.reason,
+        withdrawnAgoMs: Date.now() - withdrawn.at,
+        answerPreview: answer.slice(0, 80),
+      });
+      return { applied: false, stale: true, staleReason: withdrawn.reason };
     }
     // U1 — record BEFORE resolving/buffering so `wasAnsweredByCard` sees it
     // regardless of which branch below fires. Only the interactive UI card
@@ -192,11 +245,12 @@ export class CouncilManager {
           })
           .catch(() => {});
       }
-    } else {
-      // Headless auto-answer: response arrived before the generator registered
-      // its resolver. Buffer it; `createQuestionResponder` will drain it.
-      this._bufferedQuestionAnswers.set(questionId, answer);
+      return { applied: true, stale: false };
     }
+    // Headless auto-answer: response arrived before the generator registered
+    // its resolver. Buffer it; `createQuestionResponder` will drain it.
+    this._bufferedQuestionAnswers.set(questionId, answer);
+    return { applied: false, stale: false };
   }
 
   /**
@@ -218,6 +272,32 @@ export class CouncilManager {
    */
   _cardAnsweredCountForTests(): number {
     return this._cardAnsweredQuestionIds.size;
+  }
+
+  /**
+   * A waiter gave up on `questionId` before an answer arrived — deadline
+   * elapsed, the run aborted, or an error tore the turn down. Removes any
+   * resolver still registered (so a LATE answer can no longer silently
+   * resolve a promise nobody is listening to any more) and records the
+   * withdrawal so `respondToQuestion` reports that late answer as stale
+   * instead of swallowing it. See the JSDoc on `_withdrawnQuestionIds`.
+   *
+   * Does NOT release the interactive-pause watchdog hold — that is handled
+   * uniformly by `releasePendingWaits()` in the council run's `finally`
+   * (orchestrator.ts), which fires once the whole turn ends, not per-card.
+   */
+  withdrawQuestion(questionId: string, reason: string): void {
+    this._questionResolvers.delete(questionId);
+    if (this._withdrawnQuestionIds.size >= MAX_WITHDRAWN_QUESTION_IDS) {
+      const oldestKey = this._withdrawnQuestionIds.keys().next().value;
+      if (oldestKey !== undefined) this._withdrawnQuestionIds.delete(oldestKey);
+    }
+    this._withdrawnQuestionIds.set(questionId, { reason, at: Date.now() });
+  }
+
+  /** Test-only. Asserts `_withdrawnQuestionIds` obeys its bound. */
+  _withdrawnCountForTests(): number {
+    return this._withdrawnQuestionIds.size;
   }
 
   respondToPreflight(preflightId: string, approved: boolean): void {
@@ -267,6 +347,9 @@ export class CouncilManager {
     // this questionId was answered via the interactive card. See the JSDoc on
     // `QuestionResponder.wasAnsweredByCard` in council/types.ts.
     responder.wasAnsweredByCard = (questionId: string) => this.wasAnsweredByCard(questionId);
+    // Withdrawal — see the JSDoc on `QuestionResponder.withdraw` in
+    // council/types.ts and `withdrawQuestion` above.
+    responder.withdraw = (questionId: string, reason: string) => this.withdrawQuestion(questionId, reason);
     return responder;
   }
 
