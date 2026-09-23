@@ -4,8 +4,14 @@
  * `permission-mode.ts`'s `appendAudit` passes `meta: { context: event.context }`
  * verbatim, and `context.command` is the raw shell command the MODEL proposed. On
  * every yolo / permission override, an `export DEEPSEEK_API_KEY=…` or a
- * `curl -H "x-api-key: …"` was persisted here in plain text — despite the
- * security docs describing this audit trail as carrying a "redacted cmd".
+ * `curl -H "x-api-key: …"` was persisted here in plain text.
+ *
+ * Worth naming because the security notes in CLAUDE.md describe these audit
+ * events as reaching the decision log with a "redacted cmd". No such redaction
+ * existed anywhere in `src/` — the only thing the sandbox redacts is its
+ * effective net/mounts (`pil/native-capabilities-workbook.ts:100`). The doc
+ * promised a control that was never implemented, which is precisely the kind of
+ * gap a written claim hides.
  *
  * `homeOverride` keeps the write inside a temp dir; the user's real
  * `~/.muonroi-cli` is never touched. Credentials are assembled AT RUNTIME so
