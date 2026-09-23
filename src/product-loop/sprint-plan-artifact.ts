@@ -259,11 +259,13 @@ const SPACELESS_SCRIPT_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakan
  * whitespace; any real sentence contains several. */
 const PROSE_WORD_RE = /^\p{L}{2,}$/u;
 
-/** Why this KEY can never be the work description, or null when it can. */
+/** Why this KEY can never be the work description, or null when it can. The
+ * reason never embeds the key itself — both the note and the declined-task
+ * placeholder title name the field separately. */
 function nonDescriptionKeyReason(key: string): string | null {
   const lk = key.toLowerCase();
-  if (NON_DESCRIPTION_KEYS.has(lk)) return `"${key}" names this task's owner/estimate, not the work to do`;
-  if (IDENTIFIER_KEY_RE.test(key) || IDENTIFIER_KEY_RE.test(lk)) return `"${key}" names an identifier, not the work`;
+  if (NON_DESCRIPTION_KEYS.has(lk)) return "it names this task's owner/estimate, not the work to do";
+  if (IDENTIFIER_KEY_RE.test(key) || IDENTIFIER_KEY_RE.test(lk)) return "it names an identifier, not the work";
   return null;
 }
 
@@ -288,6 +290,31 @@ function identifierValueReason(value: string): string | null {
     return "its value contains no plain word — it reads as a list of identifiers, not a work description";
   }
   return null;
+}
+
+/** Cap for a key name or a decline reason echoed into a task TITLE. The title
+ * flows into the implementation checklist block the model reads, so a long key
+ * or reason must not blow the prompt budget on its own. (`boundTaskText`
+ * bounds the assembled title again at `MAX_TASK_TEXT_CHARS`.) */
+const MAX_PLACEHOLDER_PART_CHARS = 60;
+
+function boundPlaceholderPart(text: string): string {
+  const t = text.trim();
+  return t.length > MAX_PLACEHOLDER_PART_CHARS ? `${t.slice(0, MAX_PLACEHOLDER_PART_CHARS)}…` : t;
+}
+
+/**
+ * D6 — the placeholder title for a task whose description fallback DECLINED a
+ * candidate. The generic "no recognizable description or criterion field"
+ * wording is false here: a field WAS recognized as a candidate and rejected on
+ * purpose, and the title is what a human reads first in the artifact and what
+ * the checklist block shows the model. Saying one thing while the note beside
+ * it says another is the exact failure this slice exists to remove.
+ */
+function declinedPlaceholderTitle(id: string, declined: Array<{ key: string; reason: string }>): string {
+  const first = declined[0]!;
+  const more = declined.length > 1 ? `; +${declined.length - 1} more declined` : "";
+  return `Untitled task ${id} (candidate field "${boundPlaceholderPart(first.key)}" declined: ${boundPlaceholderPart(first.reason)}${more})`;
 }
 
 /** Case-insensitive key -> value map, first occurrence wins on a duplicate
@@ -441,11 +468,17 @@ function buildTaskFromRawItem(raw: unknown, idx: number, notes: string[]): Sprin
       }
     }
 
+    // D6 — each placeholder states what ACTUALLY happened. The generic wording
+    // is kept only for the case it is still true of: nothing usable was there.
     let title: string;
     if (description) {
       title = description;
     } else if (doneCriterion) {
       title = firstClause(doneCriterion);
+    } else if (ambiguousKeys.length > 0) {
+      title = `Untitled task ${id} (${ambiguousKeys.length} candidate fields, none adopted: picking one would be a guess)`;
+    } else if (declined.length > 0) {
+      title = declinedPlaceholderTitle(id, declined);
     } else {
       title = `Untitled task ${id} (no recognizable description or criterion field)`;
     }
@@ -471,7 +504,10 @@ function buildTaskFromRawItem(raw: unknown, idx: number, notes: string[]): Sprin
       }
       if (doneCriterion) {
         notes.push(`Task ${id}: no recognizable description field — title derived from the acceptance criterion.`);
-      } else {
+      } else if (declined.length === 0 && ambiguousKeys.length === 0) {
+        // Only claim "nothing recognizable" when that is true. When a
+        // candidate was declined the reason is already one note per field
+        // above, and the placeholder title itself names the declined field.
         notes.push(
           `Task ${id}: no recognizable description or criterion field at all (keys: ${Object.keys(o).join(", ") || "(none)"}) — title is a placeholder.`,
         );

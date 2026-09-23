@@ -11,7 +11,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildSprintPlanArtifact } from "../sprint-plan-artifact.js";
+import { buildSprintPlanArtifact, buildTaskChecklistBlock } from "../sprint-plan-artifact.js";
 
 const FIXTURES_DIR = join(__dirname, "fixtures");
 const STRUCTURED_FIXTURE = readFileSync(join(FIXTURES_DIR, "sprint-plan-structured.md"), "utf8");
@@ -405,6 +405,74 @@ describe("buildSprintPlanArtifact", () => {
       const artifact = build({ n: 1, run_id: "run mu54vrme4c87 sprint two" });
       expect(artifact.tasks[0]!.title).toContain("Untitled task step1");
       expect(artifact.notes.some((n) => n.includes('"run_id"') && n.includes("identifier"))).toBe(true);
+    });
+
+    describe("the placeholder title states what actually happened", () => {
+      // A declined candidate is NOT "no recognizable description field" — a
+      // field WAS recognized and deliberately rejected. The title is the first
+      // thing a human reads in the artifact and is what the checklist block
+      // shows the model, so it must not contradict the note beside it.
+      it("names the declined field and its reason, and drops the false generic wording", () => {
+        const title = build({ ref: 1, correlation_id: "550e8400-e29b-41d4-a716-446655440000" }).tasks[0]!.title;
+        expect(title).toContain('candidate field "correlation_id" declined');
+        expect(title).toContain("identifier");
+        expect(title).not.toContain("no recognizable description or criterion field");
+      });
+
+      it("names a declined field that was declined for being already consumed", () => {
+        const title = build({ step_id: 3, owner_lens: "the platform team lead responsible for auth" }).tasks[0]!.title;
+        expect(title).toContain('candidate field "owner_lens" declined');
+        expect(title).toContain("owner");
+        expect(title).not.toContain("no recognizable description or criterion field");
+      });
+
+      it("keeps the generic wording when there genuinely was nothing to recognize", () => {
+        const artifact = build({ n: 1, priority: "high" });
+        expect(artifact.tasks[0]!.title).toBe("Untitled task step1 (no recognizable description or criterion field)");
+        expect(artifact.notes.some((n) => n.includes("step1") && n.includes("title is a placeholder"))).toBe(true);
+      });
+
+      it("never claims 'nothing recognizable' in the notes once a candidate was declined", () => {
+        const artifact = build({ ref: 1, correlation_id: "550e8400-e29b-41d4-a716-446655440000" });
+        expect(artifact.notes.some((n) => n.includes("no recognizable description or criterion field at all"))).toBe(
+          false,
+        );
+      });
+
+      it("says how many other candidates were declined without listing them all", () => {
+        const title = build({
+          correlation_id: "550e8400-e29b-41d4-a716-446655440000",
+          digest_value: "a3f9c2e18b4d7f6019283746abcdef0123456789",
+          owner: "the platform team lead responsible for billing",
+        }).tasks[0]!.title;
+        expect(title).toContain("declined");
+        expect(title).toContain("+2 more declined");
+      });
+
+      it("states the ambiguity instead of claiming nothing was recognized", () => {
+        const title = build({
+          work_summary: "Add InternalsVisibleTo so the test project compiles",
+          rationale: "The test project cannot see the internal symbols it asserts on",
+        }).tasks[0]!.title;
+        expect(title).toContain("2 candidate fields, none adopted");
+        expect(title).not.toContain("no recognizable description or criterion field");
+      });
+
+      it("bounds a runaway key and reason so the checklist text cannot blow up", () => {
+        const longKey = `${"k".repeat(400)}_id`;
+        const title = build({ n: 1, [longKey]: "550e8400-e29b-41d4-a716-446655440000" }).tasks[0]!.title;
+        expect(title).toContain("declined");
+        expect(title.length).toBeLessThan(200);
+        expect(title).toContain("…");
+      });
+
+      it("the bounded placeholder survives the checklist block's own bound", () => {
+        const longKey = `${"k".repeat(400)}_id`;
+        const artifact = build({ n: 1, [longKey]: "550e8400-e29b-41d4-a716-446655440000" });
+        const { block } = buildTaskChecklistBlock(artifact.tasks);
+        expect(block).toContain("declined");
+        expect(block.length).toBeLessThan(500);
+      });
     });
 
     it("rejects an owner/estimate SYNONYM key the direct lookups do not consume", () => {
