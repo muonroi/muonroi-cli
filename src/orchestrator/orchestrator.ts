@@ -183,6 +183,7 @@ import { beginInteractivePause, endInteractivePause, isInteractivePaused } from 
 import { MessageProcessor, type MessageProcessorDeps } from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
 import { createNoProgressGuard } from "./no-progress-guard.js";
+import { estimateProjectSizeAt, type ProjectSize } from "./project-size.js";
 import { buildSystemPrompt, HARD_MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS } from "./prompts";
 import { getReactiveDelegationThresholdChars, shouldReactivelyEscalate } from "./reactive-delegation.js";
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
@@ -4380,27 +4381,28 @@ export class Agent {
     return parts.length > 0 ? parts.join(" | ") : null;
   }
 
-  private _estimateProjectSize(): "small" | "medium" | "large" | null {
+  /**
+   * How much source code is in this working tree, as a ROUTING input — the bucket
+   * reaches the EE router's classify prompt as `project=<size>` via
+   * `message-processor.ts` → `decide(...)`.
+   *
+   * The walk itself lives in `project-size.ts`, which owns the full rationale: the
+   * predicate used to be an inline extension regex with no `.cs`, so
+   * `tcis-libraries/src` (1717 `.cs`) was reported `small`. It now asks
+   * `language-registry.ts`.
+   */
+  private _estimateProjectSize(): ProjectSize | null {
     try {
-      const fs = require("fs");
-      const path = require("path");
-      const cwd = this.bash.getCwd();
-      const srcDir = path.join(cwd, "src");
-      if (!fs.existsSync(srcDir)) return null;
-      let count = 0;
-      const walk = (dir: string) => {
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-          if (entry.name === "node_modules" || entry.name === ".git") continue;
-          if (entry.isDirectory()) walk(path.join(dir, entry.name));
-          else if (/\.(ts|tsx|js|jsx|py|go|rs)$/.test(entry.name)) count++;
-          if (count > 200) return;
-        }
-      };
-      walk(srcDir);
-      if (count <= 20) return "small";
-      if (count <= 100) return "medium";
-      return "large";
-    } catch {
+      return estimateProjectSizeAt(this.bash.getCwd());
+    } catch (err) {
+      // No Silent Catch: this used to be a bare `catch { return null; }`, so an
+      // unreadable directory produced the same null as "there is no src/" and the
+      // router simply got no size signal with nothing anywhere saying why.
+      logger.warn("orchestrator", "[orchestrator] project-size estimate failed — routing gets no size signal", {
+        operation: "_estimateProjectSize",
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
       return null;
     }
   }
