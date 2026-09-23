@@ -77,26 +77,20 @@ const REAL_CRITERION_IDS = [
 ];
 
 /**
- * The commit `verify-baseline.json` recorded for this run (`gitCommit`), plus the
- * file:line `1-verify.md` names verbatim ("Line 53: `argList` is used before
- * declaration").
+ * A REAL C# citation: the path is one of the `diffFiles` entries in
+ * `sprints/1-goal-gate.json`, and line 53 is the one `1-verify.md` names verbatim
+ * ("Line 53: `argList` is used before declaration").
  *
- * The sha is what carries this past condition #2 — `evidenceLooksValid`
- * (`reality-anchor.ts:22`) recognises `.ts|.tsx|.js|.py|.go|.rs|.java` file:line
- * and has NO `.cs`, so a C# citation alone never validates. That is a separate
- * defect, left alone here on purpose; it is not what zeroed this run.
+ * This is deliberately a BARE `.cs:line` with no commit sha beside it. Until
+ * `evidenceLooksValid` learned the .NET extensions, this exact string failed
+ * done-gate condition #2 (`evidence_regex`) — the next link in the same chain,
+ * one step past the engineering floor. See `evidence-extensions.test.ts`.
  */
-const REAL_BASELINE_COMMIT = "e4da0705637fdce927ac1fa799b541dc4d2f9580";
+const REAL_CS_CITATION = "src/src/TCIS.CodeStandards/Analyzers/TCIS0002_LineBreakStyleAnalyzer.cs:53";
 
 function realCriteria(status: Criterion["status"]): Criterion[] {
   return REAL_CRITERION_IDS.map((id) =>
-    status === "unmet"
-      ? { id, status }
-      : {
-          id,
-          status,
-          evidence: `${REAL_BASELINE_COMMIT} src/src/TCIS.CodeStandards/Analyzers/TCIS0002_LineBreakStyleAnalyzer.cs:53`,
-        },
+    status === "unmet" ? { id, status } : { id, status, evidence: REAL_CS_CITATION },
   );
 }
 
@@ -162,10 +156,10 @@ describe("engineering floor — unmeasured coverage is not zero coverage (run mu
     expect(verdict.reason).toBe("no_test_commands");
   });
 
-  it("still blocks on a MEASURED zero — 0 keeps meaning 'measured, and it is zero'", async () => {
+  it("still blocks on a MEASURED zero — a figure the floor parsed from real test output", async () => {
     const verdict = await evaluateDoneGate(
       ctxFor({
-        recipe: { ...REAL_DOTNET_RECIPE, coverage: 0 },
+        recipe: { ...REAL_DOTNET_RECIPE, coverage: 0, coverageSource: "measured" },
         criteria: realCriteria("met"),
       }),
     );
@@ -173,6 +167,56 @@ describe("engineering floor — unmeasured coverage is not zero coverage (run mu
     expect(verdict.pass).toBe(false);
     expect(verdict.failedCondition).toBe("engineering_floor");
     expect(verdict.reason).toBe("zero_coverage");
+  });
+
+  it("does NOT block on a MODEL-ASSERTED zero — that is a filled-in box, not a finding", async () => {
+    // The recorded recipe had no `coverage` key AT ALL, which is what an honest
+    // model does with a field it cannot fill. So a 0 appearing there is likelier a
+    // formatting artifact than a measurement, and a silent per-sprint score of 0
+    // that repeats forever is the very failure being removed — no second door.
+    const verdict = await evaluateDoneGate(
+      ctxFor({
+        recipe: { ...REAL_DOTNET_RECIPE, coverage: 0, coverageSource: "model-asserted" },
+        criteria: realCriteria("met"),
+      }),
+    );
+
+    expect(verdict.reason).not.toBe("zero_coverage");
+    expect(verdict.failedCondition).toBeUndefined();
+    expect(verdict.pass).toBe(true);
+  });
+
+  it("does NOT block on an UNSTAMPED zero — unknown provenance cannot prove measurement", async () => {
+    const verdict = await evaluateDoneGate(
+      ctxFor({
+        recipe: { ...REAL_DOTNET_RECIPE, coverage: 0 },
+        criteria: realCriteria("met"),
+      }),
+    );
+
+    expect(verdict.reason).not.toBe("zero_coverage");
+    expect(verdict.pass).toBe(true);
+  });
+
+  it("an asserted zero never overrides the still-mandatory terms of the floor", async () => {
+    // The risk accepted by not blocking on an asserted zero is bounded: tests must
+    // still exist and verify must still be PASS.
+    const noTests = await evaluateDoneGate(
+      ctxFor({
+        recipe: { ...REAL_DOTNET_RECIPE, testCommands: [], coverage: 0, coverageSource: "model-asserted" },
+        criteria: realCriteria("met"),
+      }),
+    );
+    expect(noTests.reason).toBe("no_test_commands");
+
+    const verifyFailed = await evaluateDoneGate(
+      ctxFor({
+        recipe: { ...REAL_DOTNET_RECIPE, coverage: 0, coverageSource: "model-asserted" },
+        verifyVerdict: "FAIL",
+        criteria: realCriteria("met"),
+      }),
+    );
+    expect(verifyFailed.reason).toBe("verify_FAIL");
   });
 
   it("still blocks when there is no recipe at all", async () => {
@@ -184,27 +228,85 @@ describe("engineering floor — unmeasured coverage is not zero coverage (run mu
   });
 });
 
-describe("CB-3 and the done-gate read VerifyRecipe.coverage with the SAME meaning", () => {
-  // The chosen semantics, stated once: a `number` is a MEASUREMENT, and
-  // absent/null is NO MEASUREMENT. Only a measurement of zero blocks.
-  const cases: Array<{ label: string; recipe: VerifyRecipe; blocks: boolean }> = [
-    { label: "coverage absent (the recorded case)", recipe: REAL_DOTNET_RECIPE, blocks: false },
-    { label: "coverage null", recipe: { ...REAL_DOTNET_RECIPE, coverage: null }, blocks: false },
-    { label: "coverage undefined", recipe: { ...REAL_DOTNET_RECIPE, coverage: undefined }, blocks: false },
-    { label: "coverage measured 0", recipe: { ...REAL_DOTNET_RECIPE, coverage: 0 }, blocks: true },
-    { label: "coverage measured 0.42", recipe: { ...REAL_DOTNET_RECIPE, coverage: 0.42 }, blocks: false },
+describe("CB-3 and the done-gate: shared CLASSIFICATION, divergent POLICY on a zero", () => {
+  /**
+   * One table, both callers, every provenance. `cb3` and `doneGate` differ on
+   * exactly one row — an UNVERIFIED zero — and that difference is intentional:
+   *
+   *  - CB-3's consequence is a loud sprint-1 halt with a recovery card the user
+   *    answers, so an asserted zero costs one visible prompt. It also keeps CB-3's
+   *    halt set byte-identical to the pre-`classifyCoverage` `=== 0` rule.
+   *  - the done-gate's consequence is a silent per-sprint score of 0 that repeats
+   *    forever, so only a figure the verify floor actually measured may cause it.
+   *
+   * If a future change makes these two columns identical, that is a regression in
+   * one direction or the other — not a tidy-up.
+   */
+  const cases: Array<{ label: string; recipe: VerifyRecipe; cb3: boolean; doneGate: boolean }> = [
+    { label: "coverage absent (the recorded case)", recipe: REAL_DOTNET_RECIPE, cb3: false, doneGate: false },
+    { label: "coverage null", recipe: { ...REAL_DOTNET_RECIPE, coverage: null }, cb3: false, doneGate: false },
+    {
+      label: "coverage undefined",
+      recipe: { ...REAL_DOTNET_RECIPE, coverage: undefined },
+      cb3: false,
+      doneGate: false,
+    },
+    {
+      label: "zero, MEASURED by the floor",
+      recipe: { ...REAL_DOTNET_RECIPE, coverage: 0, coverageSource: "measured" },
+      cb3: true,
+      doneGate: true,
+    },
+    {
+      label: "zero, MODEL-ASSERTED — the divergent row",
+      recipe: { ...REAL_DOTNET_RECIPE, coverage: 0, coverageSource: "model-asserted" },
+      cb3: true,
+      doneGate: false,
+    },
+    {
+      label: "zero, provenance UNSTAMPED — also divergent",
+      recipe: { ...REAL_DOTNET_RECIPE, coverage: 0 },
+      cb3: true,
+      doneGate: false,
+    },
+    {
+      label: "0.42, measured",
+      recipe: { ...REAL_DOTNET_RECIPE, coverage: 0.42, coverageSource: "measured" },
+      cb3: false,
+      doneGate: false,
+    },
   ];
 
-  for (const { label, recipe, blocks } of cases) {
-    it(`${label} → CB-3 halt=${blocks}, done-gate zero_coverage=${blocks}`, async () => {
-      const cb3 = CB3_verifyBlank(1, recipe);
-      expect(cb3.halt).toBe(blocks);
-      if (blocks) expect(cb3.reason).toBe("zero_coverage");
+  for (const { label, recipe, cb3, doneGate } of cases) {
+    it(`${label} → CB-3 halt=${cb3}, done-gate zero_coverage=${doneGate}`, async () => {
+      const breaker = CB3_verifyBlank(1, recipe);
+      expect(breaker.halt).toBe(cb3);
+      if (cb3) expect(breaker.reason).toBe("zero_coverage");
 
       const verdict = await evaluateDoneGate(ctxFor({ recipe, criteria: realCriteria("met") }));
-      expect(verdict.reason === "zero_coverage").toBe(blocks);
+      expect(verdict.reason === "zero_coverage").toBe(doneGate);
     });
   }
+
+  it("CB-3's halt set is byte-identical to the pre-classifyCoverage `coverage === 0` rule", () => {
+    // Includes the no-test-commands shape, which the old rule halted on because it
+    // never looked at `testCommands` — hence `classifyCoverage`'s field ordering.
+    const legacyRule = (r: VerifyRecipe): boolean => r.coverage === 0;
+    const shapes: VerifyRecipe[] = [
+      REAL_DOTNET_RECIPE,
+      { ...REAL_DOTNET_RECIPE, coverage: null },
+      { ...REAL_DOTNET_RECIPE, coverage: undefined },
+      { ...REAL_DOTNET_RECIPE, coverage: 0 },
+      { ...REAL_DOTNET_RECIPE, coverage: 0, coverageSource: "model-asserted" },
+      { ...REAL_DOTNET_RECIPE, coverage: 0, coverageSource: "measured" },
+      { ...REAL_DOTNET_RECIPE, coverage: 0.001 },
+      { ...REAL_DOTNET_RECIPE, testCommands: [], coverage: 0 },
+      { ...REAL_DOTNET_RECIPE, testCommands: [], coverage: 0.5 },
+    ];
+    for (const shape of shapes) {
+      expect(CB3_verifyBlank(1, shape).halt).toBe(legacyRule(shape));
+    }
+  });
 
   it("CB-3 still halts sprint 1 on a null recipe", () => {
     expect(CB3_verifyBlank(1, null)).toEqual({ halt: true, reason: "no_recipe" });

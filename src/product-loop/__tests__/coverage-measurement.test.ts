@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VerifyRecipe } from "../../types/index.js";
-import { classifyCoverage, isMeasuredZeroCoverage } from "../coverage-signal.js";
+import { classifyCoverage, isClaimedZeroCoverage, isVerifiedZeroCoverage } from "../coverage-signal.js";
 import { type FloorCheck, foldMeasuredCoverage, resolveFloorEcosystem, runVerifyFloor } from "../verify-floor.js";
 
 function recipe(over: Partial<VerifyRecipe> = {}): VerifyRecipe {
@@ -50,9 +50,27 @@ describe("classifyCoverage — the three states", () => {
     expect(classifyCoverage(recipe({ coverage: undefined }))).toEqual({ state: "unmeasured" });
   });
 
-  it("a real figure → measured, carrying the value", () => {
-    expect(classifyCoverage(recipe({ coverage: 0.675 }))).toEqual({ state: "measured", value: 0.675 });
-    expect(classifyCoverage(recipe({ coverage: 0 }))).toEqual({ state: "measured", value: 0 });
+  it("a real figure → measured, carrying the value and its provenance", () => {
+    expect(classifyCoverage(recipe({ coverage: 0.675, coverageSource: "measured" }))).toEqual({
+      state: "measured",
+      value: 0.675,
+      source: "measured",
+    });
+    expect(classifyCoverage(recipe({ coverage: 0, coverageSource: "model-asserted" }))).toEqual({
+      state: "measured",
+      value: 0,
+      source: "model-asserted",
+    });
+  });
+
+  it("an unstamped figure has provenance 'unknown' — it cannot prove it was measured", () => {
+    // Records persisted before `coverageSource` existed land here.
+    expect(classifyCoverage(recipe({ coverage: 0 }))).toEqual({ state: "measured", value: 0, source: "unknown" });
+    expect(classifyCoverage(recipe({ coverage: 0.9, coverageSource: null }))).toEqual({
+      state: "measured",
+      value: 0.9,
+      source: "unknown",
+    });
   });
 
   it("no recipe, or no command and no figure → tests-absent", () => {
@@ -64,8 +82,14 @@ describe("classifyCoverage — the three states", () => {
   it("classifies a present figure BEFORE the missing-command check", () => {
     // Load-bearing ordering: CB-3's old rule was `recipe.coverage === 0`, with no
     // reference to test commands at all, so this input halted it and must still.
-    expect(classifyCoverage(recipe({ testCommands: [], coverage: 0 }))).toEqual({ state: "measured", value: 0 });
-    expect(classifyCoverage(recipe({ testCommands: [], coverage: 0.5 }))).toEqual({ state: "measured", value: 0.5 });
+    expect(classifyCoverage(recipe({ testCommands: [], coverage: 0 }))).toMatchObject({
+      state: "measured",
+      value: 0,
+    });
+    expect(classifyCoverage(recipe({ testCommands: [], coverage: 0.5 }))).toMatchObject({
+      state: "measured",
+      value: 0.5,
+    });
   });
 
   it("a non-finite number is not a measurement", () => {
@@ -74,19 +98,54 @@ describe("classifyCoverage — the three states", () => {
   });
 });
 
-describe("isMeasuredZeroCoverage — only a measurement can claim zero", () => {
-  it("is true only for a measured value at or below zero", () => {
-    expect(isMeasuredZeroCoverage({ state: "measured", value: 0 })).toBe(true);
-    expect(isMeasuredZeroCoverage({ state: "measured", value: -1 })).toBe(true);
-    expect(isMeasuredZeroCoverage({ state: "measured", value: 0.01 })).toBe(false);
+describe("isVerifiedZeroCoverage — only a MEASURED zero (the done-gate's policy)", () => {
+  it("is true only for a zero stamped as measured", () => {
+    expect(isVerifiedZeroCoverage({ state: "measured", value: 0, source: "measured" })).toBe(true);
+    expect(isVerifiedZeroCoverage({ state: "measured", value: -1, source: "measured" })).toBe(true);
+    expect(isVerifiedZeroCoverage({ state: "measured", value: 0.01, source: "measured" })).toBe(false);
+  });
+
+  it("is FALSE for a model-asserted zero — a model filling in a box is not a measurement", () => {
+    expect(isVerifiedZeroCoverage({ state: "measured", value: 0, source: "model-asserted" })).toBe(false);
+  });
+
+  it("is FALSE for an unstamped zero — unknown provenance cannot prove measurement", () => {
+    expect(isVerifiedZeroCoverage({ state: "measured", value: 0, source: "unknown" })).toBe(false);
   });
 
   it("is false for unmeasured — the coercion this module deletes", () => {
-    expect(isMeasuredZeroCoverage({ state: "unmeasured" })).toBe(false);
+    expect(isVerifiedZeroCoverage({ state: "unmeasured" })).toBe(false);
   });
 
   it("is false for tests-absent, which callers report under their own reason", () => {
-    expect(isMeasuredZeroCoverage({ state: "tests-absent" })).toBe(false);
+    expect(isVerifiedZeroCoverage({ state: "tests-absent" })).toBe(false);
+  });
+});
+
+describe("isClaimedZeroCoverage — any zero (CB-3's policy)", () => {
+  it("is true for a zero of ANY provenance", () => {
+    expect(isClaimedZeroCoverage({ state: "measured", value: 0, source: "measured" })).toBe(true);
+    expect(isClaimedZeroCoverage({ state: "measured", value: 0, source: "model-asserted" })).toBe(true);
+    expect(isClaimedZeroCoverage({ state: "measured", value: 0, source: "unknown" })).toBe(true);
+  });
+
+  it("is false for a non-zero figure, unmeasured, and tests-absent", () => {
+    expect(isClaimedZeroCoverage({ state: "measured", value: 0.001, source: "unknown" })).toBe(false);
+    expect(isClaimedZeroCoverage({ state: "unmeasured" })).toBe(false);
+    expect(isClaimedZeroCoverage({ state: "tests-absent" })).toBe(false);
+  });
+
+  it("differs from isVerifiedZeroCoverage on exactly one input class: an unverified zero", () => {
+    // The whole divergence, in one assertion. Same classification, different
+    // policy — CB-3 halts loudly and answerably; the done-gate would fail
+    // silently and forever, so it declines.
+    const asserted = classifyCoverage(recipe({ coverage: 0, coverageSource: "model-asserted" }));
+    expect(isClaimedZeroCoverage(asserted)).toBe(true);
+    expect(isVerifiedZeroCoverage(asserted)).toBe(false);
+
+    const measured = classifyCoverage(recipe({ coverage: 0, coverageSource: "measured" }));
+    expect(isClaimedZeroCoverage(measured)).toBe(true);
+    expect(isVerifiedZeroCoverage(measured)).toBe(true);
   });
 });
 
@@ -179,7 +238,11 @@ describe("runVerifyFloor — coverage comes from the project's own test output",
     });
 
     expect(res.measuredCoverage).toBe(0);
-    expect(isMeasuredZeroCoverage(classifyCoverage(recipe({ coverage: res.measuredCoverage })))).toBe(true);
+    // And once sprint-runner stamps it, THIS zero is the kind that fails the
+    // done-gate's floor — it came from the project's own test output.
+    const stamped = classifyCoverage(recipe({ coverage: res.measuredCoverage, coverageSource: "measured" }));
+    expect(isVerifiedZeroCoverage(stamped)).toBe(true);
+    expect(isClaimedZeroCoverage(stamped)).toBe(true);
   });
 
   it("does not attempt a measurement when no test command runs", async () => {

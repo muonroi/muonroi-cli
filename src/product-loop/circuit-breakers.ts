@@ -1,5 +1,5 @@
 import type { VerifyRecipe } from "../types/index.js";
-import { classifyCoverage, isMeasuredZeroCoverage } from "./coverage-signal.js";
+import { classifyCoverage, isClaimedZeroCoverage } from "./coverage-signal.js";
 
 /*
  * Circuit breakers for the sprint loop.
@@ -54,6 +54,21 @@ export function CB2_oscillation(
  *    CB-3 before still halts it, and no input that passed now halts. The change
  *    is entirely on the done-gate's side, which is where the bug was.
  *
+ * ## DIVERGENCE FROM THE DONE-GATE on an ASSERTED zero — deliberate
+ *
+ * This breaker uses `isClaimedZeroCoverage`, so a zero halts it whatever its
+ * provenance. The done-gate uses `isVerifiedZeroCoverage`, so only a zero the
+ * verify floor actually MEASURED fails its engineering floor; a model-asserted
+ * zero is treated there as unmeasured.
+ *
+ * The classification is shared — the meaning of the field must not drift — but
+ * the policy is not, because the consequence differs in VISIBILITY. A wrong halt
+ * here costs ONE loud sprint-1 prompt with a recovery card the user answers; a
+ * wrong done-gate failure costs a silent score of 0 that repeats every sprint
+ * forever, which is the defect being removed. Erring toward the answerable
+ * failure is the whole reason the split exists — and it keeps this halt set
+ * byte-identical to the pre-`classifyCoverage` behaviour.
+ *
  * Deliberately NOT changed: a NON-null recipe declaring zero test commands and no
  * figure is `tests-absent`, and CB-3 still does not halt on it. Halting there
  * would newly stop runs that complete today (`detectFallbackRecipe` yields
@@ -73,7 +88,7 @@ export function CB3_verifyBlank(
     return { halt: true, reason: "no_recipe" };
   }
 
-  if (isMeasuredZeroCoverage(classifyCoverage(recipe))) {
+  if (isClaimedZeroCoverage(classifyCoverage(recipe))) {
     return { halt: true, reason: "zero_coverage" };
   }
 

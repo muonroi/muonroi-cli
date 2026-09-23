@@ -1,7 +1,7 @@
 import { runPreflight } from "../council/preflight.js";
 import { logger } from "../utils/logger.js";
 import { blockingAssumptions, readLedger } from "./assumption-ledger.js";
-import { classifyCoverage, isMeasuredZeroCoverage } from "./coverage-signal.js";
+import { classifyCoverage, isVerifiedZeroCoverage } from "./coverage-signal.js";
 import { evidenceLooksValid } from "./reality-anchor.js";
 import type { Criterion, DoneGateContext, DoneVerdict } from "./types.js";
 import { parseVerifyResult } from "./verify-result.js";
@@ -28,9 +28,21 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
   // over 12,710 diff chars, and still `score: 0` / `reason: "zero_coverage"` on
   // both sprints. `classifyCoverage` now names the three states apart and
   // `circuit-breakers.ts` reads the SAME function, so the two cannot drift again.
+  //
+  // DIVERGENCE FROM CB-3, deliberate: this gate uses `isVerifiedZeroCoverage`, so
+  // only a zero the verify FLOOR actually measured can fail it. A model-asserted
+  // zero is treated exactly like "unmeasured" here. CB-3 uses the broader
+  // `isClaimedZeroCoverage` and still halts on an asserted zero. The classification
+  // is shared; the policy is not, because the consequences differ in VISIBILITY:
+  // this gate's consequence is a silent per-sprint score of 0 that repeats
+  // forever, so a hallucinated number must never be able to cause it; CB-3's is a
+  // loud sprint-1 halt with a recovery card the user can answer. What is still
+  // required either way: non-empty `testCommands` AND a PASS verdict — so "tests
+  // exist and passed" remains mandatory, and a suite that passes while genuinely
+  // covering nothing is caught downstream by criteria and evidence, loudly.
   const hasTests = (ctx.recipe?.testCommands?.length ?? 0) > 0;
   const coverage = classifyCoverage(ctx.recipe);
-  const coverageIsZero = isMeasuredZeroCoverage(coverage);
+  const coverageIsZero = isVerifiedZeroCoverage(coverage);
   // Prefer the caller's ALREADY-ADJUDICATED verdict over re-parsing the raw
   // ToolResult. Re-parsing here sees only the verify sub-agent's narration, so
   // it is blind to the deterministic verify floor that runs after it in
@@ -53,17 +65,33 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
     return { pass: false, failedCondition: "engineering_floor", reason, score };
   }
 
-  // The floor opened without a coverage figure behind it. That is the correct
-  // outcome — an unmeasured suite is not an uncovered one — but a condition that
-  // passed for want of evidence must not look identical to one that passed on
-  // evidence, which is the same defect class this whole module keeps closing
-  // (see condition #6's catch below). Recorded, never blocking.
+  // The floor opened without a MEASUREMENT behind its coverage term. That is the
+  // correct outcome — an unmeasured suite is not an uncovered one — but a
+  // condition that passed for want of evidence must not look identical to one
+  // that passed on evidence, which is the same defect class this whole module
+  // keeps closing (see condition #6's catch below). Recorded, never blocking.
+  //
+  // The second branch is the one that would otherwise be invisible: a figure WAS
+  // present and this gate declined to act on a zero because nothing proved it was
+  // measured. Silently discarding a number is exactly how a gate stops being
+  // auditable, so it is named in the log with its provenance.
   if (coverage.state === "unmeasured") {
     logger.info("orchestrator", "[done-gate] engineering floor passed with NO coverage measurement", {
       runId: ctx.runId,
       ecosystem: ctx.recipe?.ecosystem,
       testCommands: ctx.recipe?.testCommands?.length ?? 0,
     });
+  } else if (coverage.state === "measured" && coverage.value <= 0) {
+    logger.info(
+      "orchestrator",
+      `[done-gate] a ZERO coverage figure was present but its provenance is "${coverage.source}", not "measured" — not treated as a floor failure`,
+      {
+        runId: ctx.runId,
+        ecosystem: ctx.recipe?.ecosystem,
+        coverage: coverage.value,
+        coverageSource: coverage.source,
+      },
+    );
   }
 
   // 2. Evidence regex
