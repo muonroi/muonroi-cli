@@ -81,7 +81,28 @@ export async function writeExperienceConfig(
   }
   const merged = { ...existing, ...patch };
   await fs.mkdir(path.dirname(p), { recursive: true, mode: 0o700 });
-  await fs.writeFile(p, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+  // This file holds `serverAuthToken` (and `server.authToken`) in PLAINTEXT — it
+  // is a credential at rest, so it must not be world-readable. The directory was
+  // already created 0o700, but the FILE was written with no mode and landed at
+  // the umask default (0644 on POSIX): readable by every other local user, and
+  // carried verbatim into any backup of $HOME.
+  await fs.writeFile(p, `${JSON.stringify(merged, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  // `mode` on writeFile applies ONLY when the file is created. A config.json that
+  // the EE installer or an older build already left at 0644 would otherwise stay
+  // at 0644 forever, so tighten it on every write rather than only at create.
+  //
+  // Best-effort by design: the write above is the operation the caller asked for
+  // and has already succeeded, so a chmod failure (a Windows filesystem that does
+  // not model POSIX bits, an exotic mount) must not turn a successful setup into
+  // a thrown error. It is logged, never swallowed — an unenforced permission on a
+  // token file is exactly what the operator needs to hear about.
+  try {
+    await fs.chmod(p, 0o600);
+  } catch (err) {
+    console.error(
+      `[ee/auth] writeExperienceConfig could not restrict ${p} to 0600 — the EE auth token may be readable by other local users: ${(err as Error)?.message}`,
+    );
+  }
 }
 
 /** Where the EE config lives, for display in setup/status output. */

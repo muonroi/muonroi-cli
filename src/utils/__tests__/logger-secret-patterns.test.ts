@@ -89,12 +89,62 @@ describe("redactSecrets — NAME_API_KEY=value assignments", () => {
     expect(redactSecrets(`DB_PASSWORD=${v}`)).toBe("DB_PASSWORD=[REDACTED]");
   });
 
+  // The pattern's whole justification is that a MODEL-PROPOSED shell command
+  // reaches the decision log verbatim. Such a command uses lowercase CLI flags
+  // (`--api-key=`, `--token=`) at least as often as an uppercase env assignment,
+  // and `access_token=` is the standard URL/form shape — so an uppercase-only
+  // name class does not cover its own stated threat.
+  it("covers lowercase names, hyphenated names and CLI flag forms", () => {
+    const v = fakeOpaqueKey();
+    // The leading `--` sits OUTSIDE the match (a hyphen is a non-word char, so
+    // \b lands right after it), which is what keeps the flag name readable.
+    expect(redactSecrets(`muonroi-cli --api-key=${v}`)).toBe("muonroi-cli --api-key=[REDACTED]");
+    expect(redactSecrets(`--token=${v}`)).toBe("--token=[REDACTED]");
+    expect(redactSecrets(`access_token=${v}`)).toBe("access_token=[REDACTED]");
+    expect(redactSecrets(`deepseek_api_key=${v}`)).toBe("deepseek_api_key=[REDACTED]");
+    expect(redactSecrets(`apikey=${v}`)).toBe("apikey=[REDACTED]");
+  });
+
   it("does NOT redact token COUNT settings — the trailing S is the guard", () => {
     // Over-redacting a config value is how the original `{}` defect happened:
     // it destroyed the diagnostic instead of the secret.
     expect(redactSecrets("MUONROI_GATE_THROW_MAX_TOKENS=100000")).toBe("MUONROI_GATE_THROW_MAX_TOKENS=100000");
     expect(redactSecrets("maxOutputTokens=4096")).toBe("maxOutputTokens=4096");
     expect(redactSecrets("input_tokens=31702 output_tokens=884")).toBe("input_tokens=31702 output_tokens=884");
+  });
+
+  it("does not eat the Bearer marker the earlier pattern left as context", () => {
+    // Pattern INTERACTION, caught by an existing spec
+    // (interaction-log-error-serialization.test.ts) when the name class was
+    // broadened: the `Bearer` pass runs first and turns `token=Bearer <jwt>` into
+    // `token=Bearer [REDACTED]`. A naive assignment pattern then treats the
+    // literal word `Bearer` as the value and blanks it too, producing
+    // `token=[REDACTED] [REDACTED]` — throwing away which credential scheme was
+    // involved. `(?:Bearer\s+)?` belongs in the NAME group, not the value.
+    const jwt = fakeJwt();
+    expect(redactSecrets(`token=Bearer ${jwt}`)).toBe("token=Bearer [REDACTED]");
+    expect(redactSecrets(`access_token=Bearer ${jwt}`)).toBe("access_token=Bearer [REDACTED]");
+  });
+
+  it("is idempotent — redacting already-redacted text changes nothing", () => {
+    // Several sinks redact a line that may already have passed through
+    // `redactSecrets` upstream (console → stderr-mirror). A second pass must be
+    // a no-op, not a cascade of nested placeholders.
+    const once = redactSecrets(`export HF_TOKEN=${fakeOpaqueKey()} && curl -H "x-api-key: ${fakeOpaqueKey()}"`);
+    expect(redactSecrets(once)).toBe(once);
+    expect(redactSecrets("token=Bearer [REDACTED]")).toBe("token=Bearer [REDACTED]");
+  });
+
+  it("keeps the count guard intact once the name class is case-insensitive", () => {
+    // The guard is STRUCTURAL, not case-based: the alternative `TOKEN` must be
+    // followed by `\s*=`, and every count field has an `S` in between. Case and
+    // hyphenation cannot weaken that — pinned here so nobody has to re-derive it.
+    expect(redactSecrets("max_tokens=4096")).toBe("max_tokens=4096");
+    expect(redactSecrets("input_tokens=1200 output_tokens=87")).toBe("input_tokens=1200 output_tokens=87");
+    expect(redactSecrets("--max-tokens=4096")).toBe("--max-tokens=4096");
+    expect(redactSecrets("prompt_cache_hit_tokens=31702")).toBe("prompt_cache_hit_tokens=31702");
+    // Not an assignment at all — no `=` after the name.
+    expect(redactSecrets("access-token-count=5")).toBe("access-token-count=5");
   });
 
   it("preserves a surrounding quote pair so a JSON line stays parseable", () => {
@@ -107,5 +157,26 @@ describe("redactSecrets — NAME_API_KEY=value assignments", () => {
     const reparsed = JSON.parse(out) as { kind: string; meta: { command: string } };
     expect(reparsed.kind).toBe("yolo-override");
     expect(reparsed.meta.command).toBe("export HF_TOKEN=[REDACTED]");
+  });
+
+  it("a case-insensitive name class does not move where the value class stops", () => {
+    // The risk in broadening the NAME is that the VALUE class silently changes
+    // with it and starts swallowing a closing quote. It must not: a
+    // comma-separated value stops at the comma-free run, and the row still parses.
+    const v = fakeOpaqueKey();
+    const line = JSON.stringify({
+      cmd: `muonroi-cli --api-key=${v} --model=deepseek-v4-flash`,
+      url: `https://h/cb?access_token=${v}&state=xyz`,
+      note: `tried access_token=${v}, then --token=${v}`,
+    });
+
+    const out = redactSecrets(line);
+
+    expect(out).not.toContain(v);
+    const reparsed = JSON.parse(out) as { cmd: string; url: string; note: string };
+    // Everything after the redacted span survives — nothing was over-consumed.
+    expect(reparsed.cmd).toBe("muonroi-cli --api-key=[REDACTED] --model=deepseek-v4-flash");
+    expect(reparsed.url).toBe("https://h/cb?access_token=[REDACTED]");
+    expect(reparsed.note).toBe("tried access_token=[REDACTED] then --token=[REDACTED]");
   });
 });

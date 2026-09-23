@@ -74,16 +74,43 @@ export function redactSecrets(str: string): string {
       // optional quote makes this work on both `x-api-key: v` (plain stderr
       // text) and `"x-api-key":"v"` (a serialized JSON line).
       .replace(/\b(x-api-key"?\s*:\s*"?)[A-Za-z0-9\-._~+/=]+/gi, "$1[REDACTED]")
-      // `NAME_API_KEY=value` / `NAME_TOKEN=value` assignments — the shape a
-      // MODEL-PROPOSED shell command takes (`export DEEPSEEK_API_KEY=…`,
-      // `curl -H "x-api-key: …"`), which the permission-mode audit persists
-      // verbatim into the decision log. The NAME is deliberately kept so the
-      // diagnostic still says WHICH credential the command touched.
+      // `api_key=value` / `--token=value` assignments — the shape a
+      // MODEL-PROPOSED command takes (`export DEEPSEEK_API_KEY=…`,
+      // `muonroi-cli --api-key=…`, an OAuth callback's `access_token=…`), which
+      // the permission-mode audit persists verbatim into the decision log. The
+      // NAME is deliberately kept so the diagnostic still says WHICH credential
+      // the command touched.
       //
-      // The trailing `S` in `MAX_TOKENS` / `INPUT_TOKENS` is what keeps count
-      // fields out of this: `TOKEN` must be followed by `\s*=`, so
-      // `MAX_TOKENS=4096` cannot match at any position.
-      .replace(/\b([A-Z0-9_]*(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD)\s*=\s*['"]?)[^\s"'\\]+/g, "$1[REDACTED]")
+      // Case-INSENSITIVE and hyphen-tolerant on purpose. A proposed command uses
+      // lowercase CLI flags (`--api-key=`, `--token=`) at least as often as an
+      // uppercase env assignment, and `access_token=` is the standard URL/form
+      // spelling — an uppercase-only class did not cover this pattern's OWN
+      // stated threat. A leading `--` needs no special case: `-` is a non-word
+      // character, so `\b` lands after it and the flag name stays readable.
+      //
+      // The count-field guard is STRUCTURAL, not case-based, so broadening the
+      // case cannot weaken it: the `TOKEN` alternative must be followed by
+      // `\s*=`, and every count field has an `S` in between, so `MAX_TOKENS=`,
+      // `max_tokens=`, `--max-tokens=` and `prompt_cache_hit_tokens=` cannot
+      // match at any position. Pinned in logger-secret-patterns.test.ts.
+      //
+      // The name prefix is bounded at 64 chars (env var and flag names are far
+      // shorter). An unbounded `*` over this now-much-larger character class
+      // would retry at every offset of a long base64 run — e.g. wire-debug's
+      // 4000-char `responseBody` — making the pass quadratic for no benefit.
+      //
+      // `(?:Bearer\s+)?` is captured into group 1 rather than consumed as the
+      // value, symmetric with the `Authorization:` pattern above. By the time
+      // this runs, the `Bearer` pattern has already turned `token=Bearer <jwt>`
+      // into `token=Bearer [REDACTED]`; without this the assignment pattern would
+      // treat the literal word `Bearer` as the value and blank it too, yielding
+      // `token=[REDACTED] [REDACTED]` and throwing away the marker that says
+      // WHICH credential scheme was involved. Pinned by
+      // interaction-log-error-serialization.test.ts.
+      .replace(
+        /\b([A-Za-z0-9_-]{0,64}(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD)\s*=\s*['"]?(?:Bearer\s+)?)[^\s"'\\]+/gi,
+        "$1[REDACTED]",
+      )
   );
 }
 

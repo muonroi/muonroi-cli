@@ -20,10 +20,10 @@
  *   - interaction_logs (heartbeat rows with event_type="reporter")
  */
 
-import type { ChatClient } from "../chat/types.js";
+import type { ChatClient, ChatMessage } from "../chat/types.js";
 import type { CouncilLLM } from "../council/types.js";
 import { getDatabase } from "../storage/db.js";
-import { buildUnauthorizedReply, checkStakeholder } from "./acl-check.js";
+import { type AclCheckResult, buildUnauthorizedReply, checkStakeholder } from "./acl-check.js";
 import {
   handleFreeformQuery,
   handleItemQuery,
@@ -55,6 +55,14 @@ export interface ReporterDepsExt {
 
 const HEARTBEAT_EVERY_N_POLLS = 12; // ~60s at default 5s poll interval
 
+// The heartbeat write is best-effort, but a swallowed failure made "the reporter
+// is dead" and "the reporter is alive and its DB is broken" the same observation
+// from outside — the heartbeat row is the ONLY liveness signal this process
+// emits. Log the FIRST failure with context, then stay quiet: this fires every
+// ~60s for the life of a long reporter run, so an unconditional log would bury
+// the real output of a persistently-broken DB.
+let _heartbeatFailureLogged = false;
+
 function emitHeartbeat(runId: string): void {
   try {
     const db = getDatabase();
@@ -62,8 +70,14 @@ function emitHeartbeat(runId: string): void {
       `INSERT INTO interaction_logs (session_id, event_type, event_subtype, metadata_json, created_at)
        VALUES (?, 'reporter', 'heartbeat', '{}', ?)`,
     ).run(runId, new Date().toISOString());
-  } catch {
-    // Best-effort — never crash the reporter over a heartbeat write failure.
+  } catch (err) {
+    // Never crash the reporter over a heartbeat write failure.
+    if (!_heartbeatFailureLogged) {
+      _heartbeatFailureLogged = true;
+      console.error(
+        `[reporter] heartbeat insert failed for run ${runId} — liveness rows are not being written (further errors suppressed this process): ${(err as Error)?.message}`,
+      );
+    }
   }
 }
 
@@ -119,7 +133,7 @@ export async function runReporter(deps: ReporterDepsExt, config: ReporterRuntime
     }
 
     // Fetch new messages
-    let messages;
+    let messages: ChatMessage[];
     try {
       messages = await chat.getChannelMessages(channelId, {
         afterId: lastSeenId,
@@ -144,7 +158,7 @@ export async function runReporter(deps: ReporterDepsExt, config: ReporterRuntime
       lastSeenId = msg.id;
 
       // ACL check
-      let aclResult;
+      let aclResult: AclCheckResult;
       try {
         aclResult = await checkStakeholder(productSlug, msg.author.id);
       } catch {
