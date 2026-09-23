@@ -16,6 +16,7 @@ import { createInterface } from "readline";
 //   - bun --compile virtual fs not resolving readFileSync paths
 //   - Stripping package.json from published files list
 import { PACKAGE_DESCRIPTION, PACKAGE_VERSION } from "./generated/version.js";
+import { appendCrashLog } from "./utils/crash-log.js";
 import { formatRejection } from "./utils/format-rejection.js";
 import { installStderrMirror, restoreStderrMirror, setStderrMirrorFailureSink } from "./utils/stderr-mirror.js";
 
@@ -96,26 +97,11 @@ export function setTuiActive(active: boolean): void {
   }
 }
 
-export function appendCrashLog(label: string, msg: string): void {
-  try {
-    const fs = require("fs");
-    const dir = require("path").join(require("os").homedir(), ".muonroi-cli");
-    // On a genuinely fresh HOME the directory does not exist yet, and
-    // appendFileSync throws ENOENT — which the old bare catch swallowed, so the
-    // FIRST crash a new user or agent ever hits was the one crash that left no
-    // record at all. Measured 2026-09-09: `muonroi-cli mcp-driver` under a fresh
-    // HOME printed `Unhandled rejection: {}` and wrote no crash.log.
-    fs.mkdirSync(dir, { recursive: true });
-    fs.appendFileSync(require("path").join(dir, "crash.log"), `[${new Date().toISOString()}] ${label}: ${msg}\n`);
-  } catch (err) {
-    // crash.log is best-effort diagnostics; the logger itself must never throw.
-    // But it must not be silent either (No Silent Catch) — a lost crash record
-    // is exactly the case where the operator needs to know why.
-    if (!_tuiActive) {
-      console.error(`[index] appendCrashLog failed (${label}): ${(err as Error)?.message ?? String(err)}`);
-    }
-  }
-}
+// Moved to src/utils/crash-log.ts so the sink can be covered by a test that
+// reads the written bytes back — importing THIS file runs `program.parse()`.
+// Re-exported so existing importers (src/ui/app.tsx, src/ui/slash/export.ts)
+// keep resolving it from here.
+export { appendCrashLog };
 
 /**
  * Arm the event-loop freeze diagnostics for this TUI session.

@@ -45,6 +45,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { redactSecrets } from "./logger.js";
 
 const BASENAME = "tui-stderr.log";
 
@@ -112,7 +113,18 @@ function appendMirror(text: string): void {
   try {
     const target = stderrMirrorPath();
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    const line = `[${new Date().toISOString()}] ${text}`;
+    // Redact the DURABLE copy only. The tee forwards `chunk` untouched further
+    // down (see installStderrMirror), so the terminal still receives
+    // byte-identical output — the safety property this whole module rests on.
+    //
+    // `console.*` output arrives here already scrubbed, because
+    // `redactor.installGlobalPatches()` (src/index.ts:7) wraps the console
+    // methods. But this tee sits on `process.stderr.write`, and everything that
+    // reaches that function WITHOUT going through console bypasses that patch
+    // entirely — `withVisibleRetry`'s fallback line, a dependency writing to
+    // stderr directly, a formatted rejection. Those are the writes that were
+    // landing in a 1 MB durable file unfiltered.
+    const line = `[${new Date().toISOString()}] ${redactSecrets(text)}`;
     fs.appendFileSync(target, line, "utf8");
     bytesWritten += Buffer.byteLength(line, "utf8");
     if (bytesWritten >= MAX_MIRROR_BYTES) {

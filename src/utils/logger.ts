@@ -45,14 +45,46 @@ export function isLogLevelEnabled(level: LogLevel): boolean {
  * provider-key patterns above only catch OUR OWN key shapes (sk-/xai-/
  * AIzaSy...); a raw bearer token or an `Authorization:` header value has no
  * fixed prefix, so it is matched generically instead.
+ *
+ * ⚠️ EVERY replacement here MUST be safe to run over an already-JSON-encoded
+ * string. Several sinks redact the SERIALIZED line (one regex pass over the
+ * whole JSON) and are then parsed back — `readDecisionLog`, and every
+ * `metadata_json` consumer. A value class that can swallow the closing `"` (or
+ * a `\` escape) would turn a redaction into a corrupt row. So each value class
+ * excludes `"`, `'` and `\`, and an opening quote is captured and re-emitted
+ * rather than consumed.
  */
 export function redactSecrets(str: string): string {
-  return str
-    .replace(/\bsk-[A-Za-z0-9-_]{20,}\b/g, "[REDACTED_API_KEY]")
-    .replace(/\bxai-[A-Za-z0-9-_]{20,}\b/g, "[REDACTED_API_KEY]")
-    .replace(/\bAIzaSy[A-Za-z0-9-_]{30,}\b/g, "[REDACTED_API_KEY]")
-    .replace(/\bAuthorization:\s*(?:Bearer\s+)?[A-Za-z0-9\-._~+/=]+/gi, "Authorization: [REDACTED]")
-    .replace(/\bBearer\s+[A-Za-z0-9\-._~+/=]{8,}/gi, "Bearer [REDACTED]");
+  return (
+    str
+      .replace(/\bsk-[A-Za-z0-9-_]{20,}\b/g, "[REDACTED_API_KEY]")
+      .replace(/\bxai-[A-Za-z0-9-_]{20,}\b/g, "[REDACTED_API_KEY]")
+      .replace(/\bAIzaSy[A-Za-z0-9-_]{30,}\b/g, "[REDACTED_API_KEY]")
+      .replace(/\bAuthorization:\s*(?:Bearer\s+)?[A-Za-z0-9\-._~+/=]+/gi, "Authorization: [REDACTED]")
+      .replace(/\bBearer\s+[A-Za-z0-9\-._~+/=]{8,}/gi, "Bearer [REDACTED]")
+      // JWT triple-segment shape. OAuth access/refresh/id tokens are JWTs
+      // (`src/providers/auth/token-store.ts` enrolls all three), and a bearer
+      // token only carries its `Bearer ` prefix ON THE WIRE — once it is inside
+      // an error message, an HTTP response body, or a decoded stderr line it
+      // appears BARE, where the `Bearer` pattern above never sees it.
+      .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "[REDACTED_JWT]")
+      // `x-api-key` is Anthropic's header name — NOT `Authorization` — so the
+      // header pattern above misses it completely, and the value only trips the
+      // `sk-` pattern when the provider happens to use that prefix. The
+      // optional quote makes this work on both `x-api-key: v` (plain stderr
+      // text) and `"x-api-key":"v"` (a serialized JSON line).
+      .replace(/\b(x-api-key"?\s*:\s*"?)[A-Za-z0-9\-._~+/=]+/gi, "$1[REDACTED]")
+      // `NAME_API_KEY=value` / `NAME_TOKEN=value` assignments — the shape a
+      // MODEL-PROPOSED shell command takes (`export DEEPSEEK_API_KEY=…`,
+      // `curl -H "x-api-key: …"`), which the permission-mode audit persists
+      // verbatim into the decision log. The NAME is deliberately kept so the
+      // diagnostic still says WHICH credential the command touched.
+      //
+      // The trailing `S` in `MAX_TOKENS` / `INPUT_TOKENS` is what keeps count
+      // fields out of this: `TOKEN` must be followed by `\s*=`, so
+      // `MAX_TOKENS=4096` cannot match at any position.
+      .replace(/\b([A-Z0-9_]*(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD)\s*=\s*['"]?)[^\s"'\\]+/g, "$1[REDACTED]")
+  );
 }
 
 // ── Error serialization ─────────────────────────────────────────────────────

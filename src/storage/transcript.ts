@@ -2,7 +2,7 @@ import type { ModelMessage } from "ai";
 import { getCompactionSummaryText } from "../orchestrator/compaction";
 import { getResponseTaskType, isResponseTool } from "../pil/response-tools";
 import type { ChatEntry, ToolCall, ToolResult } from "../types/index";
-import { logger } from "../utils/logger.js";
+import { logger, redactSecrets } from "../utils/logger.js";
 import { getDatabase, type SQLiteDatabase, withTransaction } from "./db";
 import { extractToolResultFromOutput, getOutputKind, isOutputSuccess } from "./tool-results";
 import { buildEffectiveTranscript, type LoadedTranscriptState, type PersistedCompaction } from "./transcript-view";
@@ -706,9 +706,24 @@ export function markToolCallErrored(sessionId: string, toolCallId: string, error
         SET status = 'errored', completed_at = ?, args_json = COALESCE(args_json, ?)
         WHERE session_id = ? AND tool_call_id = ?
       `)
-      .run(now, JSON.stringify({ error: errorMessage.slice(0, 500) }), sessionId, toolCallId);
-  } catch {
-    /* fail-open */
+      // `errorMessage` is a caught error's `.message` copied verbatim
+      // (src/orchestrator/tool-engine.ts:3305-3310) and this row is persisted to
+      // ~/.muonroi-cli/muonroi.db, so it needs the same treatment
+      // `logInteraction` already gives the twin `tool_result` row it writes a
+      // few lines later at tool-engine.ts:3373. An MCP tool or a fetch-style
+      // tool that fails auth throws with the header or key in its message.
+      //
+      // Unlike `message_json` / a real `args_json`, this value is NOT functional
+      // state: the COALESCE only fills the column when the write-ahead never
+      // recorded the true arguments, making it a pure post-mortem breadcrumb.
+      // Redacting it therefore cannot change what the model is re-served.
+      .run(now, JSON.stringify({ error: redactSecrets(errorMessage).slice(0, 500) }), sessionId, toolCallId);
+  } catch (err) {
+    // Fail-open (this runs in the orchestrator hot path), but not silent.
+    logger.error("storage", `[transcript] markToolCallErrored failed: ${(err as Error)?.message}`, {
+      sessionId,
+      toolCallId,
+    });
   }
 }
 

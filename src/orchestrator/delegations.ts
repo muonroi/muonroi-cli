@@ -4,6 +4,7 @@ import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
 import type { DelegationRun, DelegationStatus, TaskRequest, ToolResult } from "../types/index";
+import { redactSecrets } from "../utils/logger.js";
 import type { SandboxMode, SandboxSettings } from "../utils/settings";
 
 const ID_ADJECTIVES = ["brisk", "calm", "clever", "eager", "gentle", "keen", "lively", "nimble", "quiet", "steady"];
@@ -260,14 +261,26 @@ export async function completeDelegation(jobPath: string, output: string, fallba
 
 export async function failDelegation(jobPath: string, error: string, output = ""): Promise<void> {
   const record = await loadDelegation(jobPath);
+  // `error` is a caught failure's text from the delegated run. It reaches TWO
+  // durable artifacts — the job JSON (`record.error`, via writeRecord) and the
+  // rendered `.md` (`renderOutput`'s `**Error:**` line + the body fallback) —
+  // so it is redacted ONCE here, before either is built.
+  //
+  // Scoped deliberately to `error` alone. `record.prompt`, `record.description`
+  // and `output` are the delegation's functional payload: the record is read
+  // back by `loadDelegation` and the `.md` IS the deliverable. Scrubbing those
+  // would corrupt a delegation whose legitimate job was to produce a config or
+  // a credential-adjacent snippet. A caught error message is the only field
+  // here that is pure diagnostics.
+  const safeError = redactSecrets(error);
   record.status = "error";
   record.completedAt = new Date().toISOString();
-  record.error = error;
-  record.title = record.title || createTitle(output || error, record.description);
-  record.summary = createSummary(output || error);
+  record.error = safeError;
+  record.title = record.title || createTitle(output || safeError, record.description);
+  record.summary = createSummary(output || safeError);
 
   await fs.mkdir(path.dirname(record.outputPath), { recursive: true });
-  await fs.writeFile(record.outputPath, renderOutput(record, output || `Error: ${error}`), "utf8");
+  await fs.writeFile(record.outputPath, renderOutput(record, output || `Error: ${safeError}`), "utf8");
   await writeRecord(jobPath, record);
 }
 

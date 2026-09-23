@@ -25,7 +25,7 @@ import type {
   VerifyFixStopReason,
 } from "../product-loop/verify-fix-loop.js";
 import { atomicReadJSON, atomicWriteJSON, atomicWriteText } from "../storage/atomic-io.js";
-import { logger } from "../utils/logger.js";
+import { logger, redactSecrets } from "../utils/logger.js";
 
 // ─── Resume Digest ──────────────────────────────────────────────────────────
 
@@ -333,6 +333,23 @@ export interface SprintAdherenceRecord {
   errorMessage?: string;
 }
 
+/**
+ * Scrub the ONE field these three audit records copy verbatim off a caught
+ * exception (`errorMessage`, populated by sprint-runner /
+ * item-debate-runner from `err.message`). A `dotnet restore` or npm failure
+ * routinely embeds a private feed URL with inline credentials, and the record is
+ * persisted to `.muonroi-flow/runs/<runId>/sprints/*.json` — a file that gets
+ * committed or shared far more readily than `~/.muonroi-cli`.
+ *
+ * Deliberately narrow. Everything ELSE in these records (`rounds`,
+ * `residualDeviations`, `items`) is model-authored review content that later
+ * stages and `/ideal review` read back as functional input, so it is left alone.
+ */
+function withRedactedErrorMessage<T extends { errorMessage?: string }>(record: T): T {
+  if (record.errorMessage === undefined) return record;
+  return { ...record, errorMessage: redactSecrets(record.errorMessage) };
+}
+
 /** `sprints/<n>-adherence.json` — beside `<n>-outcome.json` and `<n>-verify.md`. */
 export function sprintAdherencePath(flowDir: string, runId: string, sprintN: number): string {
   return path.join(sprintsDir(flowDir, runId), `${sprintN}-adherence.json`);
@@ -351,7 +368,7 @@ export async function writeSprintAdherence(
   try {
     const dir = sprintsDir(flowDir, runId);
     await fs.mkdir(dir, { recursive: true });
-    await atomicWriteJSON(sprintAdherencePath(flowDir, runId, record.sprintN), record);
+    await atomicWriteJSON(sprintAdherencePath(flowDir, runId, record.sprintN), withRedactedErrorMessage(record));
     return true;
   } catch (err) {
     logger.error(
@@ -514,7 +531,7 @@ export async function writeSprintVerifyFix(
   try {
     const dir = sprintsDir(flowDir, runId);
     await fs.mkdir(dir, { recursive: true });
-    await atomicWriteJSON(sprintVerifyFixPath(flowDir, runId, record.sprintN), record);
+    await atomicWriteJSON(sprintVerifyFixPath(flowDir, runId, record.sprintN), withRedactedErrorMessage(record));
     return true;
   } catch (err) {
     logger.error(
@@ -779,7 +796,7 @@ export async function writeSprintItemDebate(
   try {
     const dir = sprintsDir(flowDir, runId);
     await fs.mkdir(dir, { recursive: true });
-    await atomicWriteJSON(sprintItemDebatePath(flowDir, runId, record.sprintN), record);
+    await atomicWriteJSON(sprintItemDebatePath(flowDir, runId, record.sprintN), withRedactedErrorMessage(record));
     return true;
   } catch (err) {
     logger.error(
