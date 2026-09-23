@@ -1364,6 +1364,17 @@ export async function* runCouncil(
   let launchRounds = debatePlan.plannedRounds ?? 3;
   let launchParticipants = active;
   let launchCostAware = costAware;
+  // Debt 3 reachability audit: the `respondToQuestion` await inside this block
+  // (~line 1420) has no deadline, but `willShowLaunchCard` already excludes
+  // every unattended caller: /ideal's sprint-internal `runCouncil` calls pass
+  // `sprintPlanningMode: true` (product-loop/item-debate-runner.ts:539,
+  // product-loop/sprint-runner.ts:1841), and every agent-convened council
+  // (`convene_council`, the runDebate tool, tool-engine.ts:1172/3940) sets
+  // `suppressPreDebateCards: true`. /ideal's own initial (CB-1) debate never
+  // reaches this module at all — it calls `runDebate` directly, and the launch
+  // card lives only inside `runCouncil`. Only the interactive `/council` slash
+  // command and the CLI-heuristic auto-council (tool-engine.ts:915) leave the
+  // card live, and both run with a human at the composer — correct to wait.
   if (willShowLaunchCard(sessionId, options?.suppressPreDebateCards, options?.sprintPlanningMode, userAborted())) {
     const proposedKind = coerceIntentKind(debatePlan.outputShape.kind);
     // Amendment A2 — the card is rendered in a loop so "Edit topic or outcome"

@@ -123,6 +123,20 @@ export async function* runPreflight(
     },
   };
 
+  // Debt 3 reachability audit: this wait has no deadline, but it is NOT
+  // reachable from an unattended run today. `options?.autoApprove` already
+  // short-circuits above (line ~89) for every caller that has no human to
+  // answer: /ideal's sprint-internal `runCouncil` calls set
+  // `autoApprovePreflight: true` (product-loop/item-debate-runner.ts:537,
+  // product-loop/sprint-runner.ts:1835), and every agent-convened council
+  // (`convene_council`, the runDebate tool) sets `suppressPreDebateCards: true`,
+  // which council/index.ts:1188 also folds into `autoApprove`. /ideal's own
+  // initial (CB-1) debate calls `runDebate` directly and never calls this
+  // module at all — `runPreflight` only runs inside `runCouncil`
+  // (council/index.ts:1179). What remains live is the interactive `/council`
+  // slash command and the CLI-heuristic auto-council (tool-engine.ts:915),
+  // both of which fire with a human at the composer — a present human waiting
+  // indefinitely is correct behaviour, not the bug this audit looked for.
   const approved = await respondToPreflight(preflightId);
 
   emitPreflightHarnessEvent({

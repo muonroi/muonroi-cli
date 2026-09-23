@@ -1374,6 +1374,21 @@ export async function* runDebate(
   // loop's round budget via closure; returns whether the debate should keep
   // going. Caller must have already checked the gate (responder wired, flag on,
   // not yet escalated, criteria unmet).
+  //
+  // Debt 3 reachability audit: `runEscalationPrompt`'s `respondToQuestion`
+  // await (below) has no deadline, but it is not reachable from an unattended
+  // run. Every call site is gated on `config.respondToQuestion &&` before this
+  // function is even entered (see the three call sites in this file); /ideal's
+  // sprint-internal `runCouncil` calls set `sprintPlanningMode: true`, which
+  // council/index.ts:1555 folds into `autoAcceptEscalation` — the `if` right
+  // below short-circuits before ever calling the responder. /ideal's own
+  // initial (CB-1) debate and the discovery-council-runner call `runDebate`
+  // directly and never set `config.respondToQuestion` at all, so the
+  // `config.respondToQuestion &&` gate at every call site is false and this
+  // function never runs. Agent-convened councils set `suppressPreDebateCards:
+  // true`, which also feeds `autoAcceptEscalation`. Only the interactive
+  // `/council` slash command and the CLI-heuristic auto-council leave this
+  // live, both with a human present — correct to wait.
   async function* escalateStop(
     stuck: boolean,
     pinnedUnmet: number,

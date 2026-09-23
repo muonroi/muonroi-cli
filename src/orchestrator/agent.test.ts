@@ -252,4 +252,90 @@ describe("Agent class", { timeout: 30_000 }, () => {
     expect(stale._priorWarningIdsInSession.size).toBe(0);
     expect(stale._sessionEEGuidance.size).toBe(0);
   });
+
+  it("startNewSession resets CrossTurnDedup (state accumulated in session A is absent for session B)", async () => {
+    // CrossTurnDedup's own module doc says "One CrossTurnDedup instance lives
+    // on the Orchestrator for the lifetime of the session", but nothing
+    // enforced that: the cache, hit/insert/reserve counters, and turn ordinal
+    // all survived `startNewSession()` on this long-lived Agent instance.
+    // Concretely: session A reads a large file, session B (a brand-new,
+    // unrelated session in the same process) re-reads the identical bytes and
+    // either gets stubbed as "already seen" against an anchor session B never
+    // produced, or — since the anchor is provably unreachable in session B's
+    // empty message history — is silently re-served and the dedup's own
+    // `dedup` interaction-log entry (message-processor.ts) reports hits/chars
+    // that belong to session A under session B's session id, corrupting the
+    // per-session cost-leak attribution the class exists to make falsifiable.
+    const { Agent } = await importAgentModule();
+    const agent = new Agent(undefined, undefined, undefined, undefined, {
+      persistSession: false,
+    });
+    const stale = agent as unknown as {
+      _crossTurnDedup: {
+        maybeDedup(toolName: string, served: string, hashSource?: string): string | null;
+        beginTurn(): void;
+        getStats(): { hits: number; inserts: number; size: number };
+      } | null;
+    };
+    const dedup = stale._crossTurnDedup;
+    expect(dedup).not.toBeNull();
+    // Session A: seed the cache with a large (>=500 char) tool output.
+    dedup?.beginTurn();
+    const sessionAContent = "x".repeat(1000);
+    dedup?.maybeDedup("read_file", sessionAContent);
+    expect(dedup?.getStats().inserts).toBe(1);
+    expect(dedup?.getStats().size).toBe(1);
+
+    agent.startNewSession();
+
+    // Session B: the cache from session A must be gone, and re-encountering
+    // the identical content is a fresh insert, not a cross-session "dup".
+    expect(dedup?.getStats().size).toBe(0);
+    expect(dedup?.getStats().inserts).toBe(0);
+    expect(dedup?.getStats().hits).toBe(0);
+    dedup?.beginTurn();
+    const stub = dedup?.maybeDedup("read_file", sessionAContent);
+    expect(stub).toBeNull(); // fresh insert in session B, not a dedup hit against session A's entry
+    expect(dedup?.getStats().inserts).toBe(1);
+    expect(dedup?.getStats().hits).toBe(0);
+  });
+
+  it("startNewSession resets ReadPathBudget (per-session read cap, same leak shape)", async () => {
+    // read-path-budget.ts documents itself as a "per session" / "session-
+    // lifetime budget object" ("Caps `read_file` style tool calls at N per
+    // (toolName, normalizedPath) per session"), but like CrossTurnDedup it was
+    // never reset on a session switch — a brand-new session could start
+    // already over the cap for a path it has never itself read.
+    const prevEnv = process.env.MUONROI_MAX_READS_PER_PATH;
+    process.env.MUONROI_MAX_READS_PER_PATH = "1";
+    try {
+      const { Agent } = await importAgentModule();
+      const agent = new Agent(undefined, undefined, undefined, undefined, {
+        persistSession: false,
+      });
+      const stale = agent as unknown as {
+        _readBudget: {
+          checkAndIncrement(toolName: string, path: string): string | null;
+          getStats(): { capExceededHits: number; trackedPaths: number };
+        } | null;
+      };
+      const budget = stale._readBudget;
+      expect(budget).not.toBeNull();
+      // Session A: exhaust the cap (N=1) for one path.
+      expect(budget?.checkAndIncrement("read_file", "/tmp/a.ts")).toBeNull();
+      expect(budget?.checkAndIncrement("read_file", "/tmp/a.ts")).not.toBeNull(); // over cap
+      expect(budget?.getStats().trackedPaths).toBe(1);
+      expect(budget?.getStats().capExceededHits).toBe(1);
+
+      agent.startNewSession();
+
+      // Session B: the same path must not start pre-exhausted.
+      expect(budget?.getStats().trackedPaths).toBe(0);
+      expect(budget?.getStats().capExceededHits).toBe(0);
+      expect(budget?.checkAndIncrement("read_file", "/tmp/a.ts")).toBeNull();
+    } finally {
+      if (prevEnv === undefined) delete process.env.MUONROI_MAX_READS_PER_PATH;
+      else process.env.MUONROI_MAX_READS_PER_PATH = prevEnv;
+    }
+  });
 });

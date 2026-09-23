@@ -11,6 +11,121 @@ import { buildClarificationPrompt, buildReadinessJudgePrompt, buildSpecSynthesis
 import { decideInternetFirst } from "./research-mode.js";
 import type { ClarifiedSpec, CouncilLLM, QuestionResponder } from "./types.js";
 
+/**
+ * Debt 3 — `runClarification`'s per-question `respondToQuestion` await (below)
+ * used to wait forever, like every other card waiter except the undebated-
+ * criteria gate (`product-loop/undebated-criteria-gate.ts`). This one IS
+ * reachable unattended: `/ideal`'s default gather phase
+ * (`product-loop/gather.ts` `runAgentDrivenGather`) calls `runClarification`
+ * DIRECTLY with the orchestrator's unconditional question responder
+ * (`orchestrator.ts` `respondToQuestion: this.councilManager.createQuestionResponder()`,
+ * wired for every `/ideal` run whether or not a human is watching) — it does
+ * NOT go through `council/index.ts`'s `skipClarification` gate, which only
+ * protects that module's OWN internal clarifier call. A fresh (non-resume)
+ * `/ideal` run launched unattended (e.g. a scheduled/cron run) that needs to
+ * ask even one clarifying question would hang here with no deadline.
+ *
+ * Same default and validation shape as
+ * `product-loop/undebated-criteria-gate.ts`'s `UNDEBATED_GATE_DEFAULT_TIMEOUT_MS`
+ * / `resolveUndebatedGateTimeoutMs` (generous on purpose — a human legitimately
+ * takes minutes to answer an attended clarify card) and
+ * `product-loop/sprint-progress.ts`'s `getNoProgressSprintLimit` (env override,
+ * validated, falls back to the default on anything invalid rather than
+ * silently misbehaving).
+ */
+export const CLARIFIER_ASK_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** `MUONROI_CLARIFIER_ASK_TIMEOUT_MS` (integer >= 0; 0 = do not wait at all) overrides the default. */
+export function resolveClarifierAskTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.MUONROI_CLARIFIER_ASK_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === "") return CLARIFIER_ASK_DEFAULT_TIMEOUT_MS;
+  const n = Number.parseInt(raw, 10);
+  if (Number.isFinite(n) && n >= 0) return n;
+  console.error(
+    `[council/clarifier] ignoring MUONROI_CLARIFIER_ASK_TIMEOUT_MS=${JSON.stringify(raw)} (needs an integer >= 0); using ${CLARIFIER_ASK_DEFAULT_TIMEOUT_MS}`,
+  );
+  return CLARIFIER_ASK_DEFAULT_TIMEOUT_MS;
+}
+
+/**
+ * Thrown when a clarify question's deadline expires with nobody answering.
+ * Matches the undebated-criteria gate's reasoning: a run with nobody watching
+ * must not silently invent an answer and keep going — that is how a spec gets
+ * built on a guess nobody actually gave. It must stop loudly instead, the same
+ * way `enforceUndebatedCriteriaGate` stops the run rather than defaulting to
+ * "accept". The caller (`gather.ts` -> `loop-driver.ts`) already propagates an
+ * uncaught `runClarification` error into a `run-finished{outcome:"threw"}` —
+ * an observable halt, not a process crash — so throwing here is the safe path,
+ * not a missing catch.
+ */
+export class ClarifierAskTimeoutError extends Error {
+  constructor(
+    public readonly questionId: string,
+    timeoutMs: number,
+  ) {
+    super(`Clarify question ${questionId} was not answered within ${Math.round(timeoutMs / 1000)}s — halting.`);
+    this.name = "ClarifierAskTimeoutError";
+  }
+}
+
+/**
+ * Bounded wait for a clarify answer. Mirrors
+ * `undebated-criteria-gate.ts`'s `awaitAnswer`: races the responder against a
+ * deadline, and returns null on expiry (immediately when `timeoutMs <= 0` —
+ * same "0 = do not wait at all" convention, the setting for CI where nobody
+ * will ever answer). Never lets the pending promise crash the process — it is
+ * drained in the background so a LATE answer is recorded as stale instead of
+ * resolving a nobody-is-listening promise.
+ */
+async function awaitClarifyAnswer(
+  respondToQuestion: QuestionResponder,
+  questionId: string,
+  timeoutMs: number,
+): Promise<string | null> {
+  if (timeoutMs <= 0) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const TIMED_OUT = Symbol("clarifier-ask-timeout");
+  try {
+    const answered = respondToQuestion(questionId);
+    const expired = new Promise<typeof TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+    });
+    const winner = await Promise.race([answered, expired]);
+    if (winner === TIMED_OUT) {
+      // No cancel channel on QuestionResponder — drain the dangling promise in
+      // the background so a LATE real answer is recorded as stale (via
+      // wasAnsweredByCard) instead of vanishing without a trace, same as
+      // undebated-criteria-gate.ts's awaitAnswer. A late REJECTION is only
+      // logged (debug) — the run has already stopped by the time it arrives,
+      // there is nothing left to recover.
+      void answered
+        .then(() => {
+          respondToQuestion.wasAnsweredByCard?.(questionId);
+        })
+        .catch((err) => {
+          logger.debug("orchestrator", "[clarifier] late responder rejection after ask-timeout", {
+            questionId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      return null;
+    }
+    return winner;
+  } catch (err) {
+    // A broken responder channel must not crash or hang the run — but it must
+    // never be silent either (No Silent Catch). Treat it the same as a
+    // timeout: the caller withdraws the card and halts.
+    logger.error("orchestrator", "[clarifier] question responder failed — halting", {
+      questionId,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+    });
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** P5: Hard cap on clarification rounds regardless of judge verdict. */
 export const MAX_CLARIFY_ROUNDS = 12;
 
@@ -632,7 +747,28 @@ export async function* runClarification(
         },
       };
 
-      const answer = await respondToQuestion(questionId);
+      const askTimeoutMs = resolveClarifierAskTimeoutMs();
+      const answered = await awaitClarifyAnswer(respondToQuestion, questionId, askTimeoutMs);
+      if (answered === null) {
+        // Debt 3 — no deadline used to exist here at all (see
+        // CLARIFIER_ASK_DEFAULT_TIMEOUT_MS's doc). Withdraw the card so a human
+        // who arrives late never sees a card that looks live while nothing is
+        // listening behind it any more, then stop the run rather than inventing
+        // an answer — same reasoning as `enforceUndebatedCriteriaGate`.
+        respondToQuestion.withdraw?.(questionId, "timeout");
+        const minutes = Math.max(1, Math.round(askTimeoutMs / 60000));
+        yield {
+          type: "council_question_withdrawn",
+          content: `the clarify question was not answered within ${minutes} minute${minutes === 1 ? "" : "s"}; the run stopped`,
+          councilQuestionWithdrawn: {
+            questionId,
+            reason: "timeout",
+            notice: `The clarify question was not answered within ${minutes} minute${minutes === 1 ? "" : "s"}; the run stopped.`,
+          },
+        } as StreamChunk;
+        throw new ClarifierAskTimeoutError(questionId, askTimeoutMs);
+      }
+      const answer = answered;
       allQA.push({ id: q.id, question: q.question, answer });
       clarifyHistory.push({ question: q.question, answer, ts: new Date().toISOString() });
       // U1 — the interactive askcard UI already rendered ONE transcript record

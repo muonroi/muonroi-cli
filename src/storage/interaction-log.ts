@@ -5,7 +5,7 @@
  * All calls are fail-open — logging never breaks the main flow.
  */
 
-import { serializeErrorRedacted } from "../utils/logger.js";
+import { redactSecrets, serializeErrorRedacted } from "../utils/logger.js";
 import { getDatabase } from "./db.js";
 
 export type InteractionEventType =
@@ -131,8 +131,25 @@ export function logInteraction(
     // MUST be the REDACTED form: an Error's message or an SDK error's own
     // property (e.g. `apiKey`) can carry a real secret, and this row is
     // persisted verbatim to ~/.muonroi-cli/muonroi.db.
+    //
+    // A plain string anywhere in `data` (a caller's message field, an
+    // argsPreview, a tool-output preview, an echoed prompt) got NO redaction
+    // at all until now — only an Error nested inside `data` was covered. The
+    // JSON.stringify replacer already visits every value in the object graph
+    // (arrays, nested objects, and their leaves) as it serializes, so running
+    // `redactSecrets` over each string leaf here is a recursive, single-pass,
+    // bounded-by-the-object's-own-structure redaction — no separate deep-walk
+    // is needed and no extra pass over the data is added. Deliberately reuses
+    // `redactSecrets` (span-level regex replace), NOT `redactObject`'s
+    // key-name-based whole-field blanking — a `message` or `note` field must
+    // keep its non-secret content readable for forensics; only the
+    // secret-shaped span inside it is replaced.
     const metadataJson = metadata?.data
-      ? JSON.stringify(metadata.data, (_key, value) => (value instanceof Error ? serializeErrorRedacted(value) : value))
+      ? JSON.stringify(metadata.data, (_key, value) => {
+          if (value instanceof Error) return serializeErrorRedacted(value);
+          if (typeof value === "string") return redactSecrets(value);
+          return value;
+        })
       : null;
     db.prepare(
       `INSERT INTO interaction_logs (session_id, event_type, event_subtype, model, duration_ms, input_tokens, output_tokens, metadata_json, created_at)

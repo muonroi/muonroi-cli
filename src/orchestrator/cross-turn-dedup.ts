@@ -187,7 +187,16 @@ export class CrossTurnDedup {
     };
   }
 
-  /** Test-only / reset helper. */
+  /**
+   * Drop every cached entry and zero every counter. Called by
+   * `Agent.startNewSession()` so a session boundary is also a dedup-cache
+   * boundary — without it, a brand-new session's dedup stats (logged tagged
+   * with the NEW session id) would carry hits/reserves/content accumulated by
+   * an unrelated PRIOR session sharing the same long-lived Agent instance,
+   * which corrupts the per-session cost-leak attribution this class exists to
+   * make falsifiable (see message-processor.ts's `dedup` interaction log).
+   * Also used directly by tests.
+   */
   public clear(): void {
     this.cache.clear();
     this.hits = 0;

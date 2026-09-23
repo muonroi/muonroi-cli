@@ -1143,6 +1143,18 @@ export class Agent {
     // prior session in the same long-lived Agent instance.
     this._priorWarningIdsInSession.clear();
     this._sessionEEGuidance.clear();
+    // Same shape again: CrossTurnDedup's own module doc says "One CrossTurnDedup
+    // instance lives on the Orchestrator for the lifetime of the session", but
+    // nothing enforced that — the cache, hit/stub counters, and turn ordinal all
+    // survived a session boundary on this long-lived Agent instance. Left
+    // unreset, a brand-new session's dedup stats (logged tagged with the NEW
+    // session id in message-processor.ts) would carry hits/content from an
+    // unrelated prior session, corrupting the per-session cost-leak attribution
+    // the class exists to make falsifiable. ReadPathBudget documents the same
+    // "per session" / "session-lifetime budget object" contract for the same
+    // reason (re-read cap keyed by path) and had the identical gap.
+    this._crossTurnDedup?.clear();
+    this._readBudget?.clear();
 
     if (!this.sessionStore) {
       this.messages = [];

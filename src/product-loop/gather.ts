@@ -7,6 +7,7 @@ import { runClarification } from "../council/clarifier.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
 import type { ClarifiedSpec, CouncilLLM, QuestionResponder } from "../council/types.js";
 import type { StreamChunk } from "../types/index.js";
+import { logger } from "../utils/logger.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
 import { detectExistingProject } from "./discovery-detection.js";
 import {
@@ -77,13 +78,92 @@ function buildDiscoveryDebateRunner(_deps?: any): CouncilDebateRunner {
 }
 
 /**
+ * Debt 3 — the legacy fixed-question interview path below (`buildLiveTuiAsk`,
+ * active only when `MUONROI_IDEAL_AGENT_INTERVIEW=0` opts out of the default
+ * agent-driven gather; see `runGatherPhase`) used to wait for
+ * `respondToQuestion` forever, same as `runClarification` did before Debt 3
+ * (`council/clarifier.ts`). It IS reachable unattended: opting out of the
+ * agent-driven interview says nothing about whether a human is present, and
+ * `runGatherPhase` is driven by the same unconditional
+ * `respondToQuestion: this.councilManager.createQuestionResponder()`
+ * (orchestrator.ts) as every other `/ideal` phase. Same default/validation
+ * shape and reasoning as `council/clarifier.ts`'s
+ * `CLARIFIER_ASK_DEFAULT_TIMEOUT_MS` / `resolveClarifierAskTimeoutMs`.
+ */
+export const GATHER_ASK_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** `MUONROI_GATHER_ASK_TIMEOUT_MS` (integer >= 0; 0 = do not wait at all) overrides the default. */
+export function resolveGatherAskTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.MUONROI_GATHER_ASK_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === "") return GATHER_ASK_DEFAULT_TIMEOUT_MS;
+  const n = Number.parseInt(raw, 10);
+  if (Number.isFinite(n) && n >= 0) return n;
+  console.error(
+    `[gather] ignoring MUONROI_GATHER_ASK_TIMEOUT_MS=${JSON.stringify(raw)} (needs an integer >= 0); using ${GATHER_ASK_DEFAULT_TIMEOUT_MS}`,
+  );
+  return GATHER_ASK_DEFAULT_TIMEOUT_MS;
+}
+
+/** Thrown when a legacy-interview question's deadline expires with nobody answering. Same reasoning as `ClarifierAskTimeoutError`. */
+export class GatherAskTimeoutError extends Error {
+  constructor(
+    public readonly questionId: string,
+    timeoutMs: number,
+  ) {
+    super(`Gather question ${questionId} was not answered within ${Math.round(timeoutMs / 1000)}s — halting.`);
+    this.name = "GatherAskTimeoutError";
+  }
+}
+
+/** Bounded wait for a gather answer. Mirrors `council/clarifier.ts`'s `awaitClarifyAnswer`. */
+async function awaitGatherAnswer(
+  respondToQuestion: QuestionResponder,
+  questionId: string,
+  timeoutMs: number,
+): Promise<string | null> {
+  if (timeoutMs <= 0) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const TIMED_OUT = Symbol("gather-ask-timeout");
+  try {
+    const answered = respondToQuestion(questionId);
+    const expired = new Promise<typeof TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+    });
+    const winner = await Promise.race([answered, expired]);
+    if (winner === TIMED_OUT) {
+      void answered
+        .then(() => {
+          respondToQuestion.wasAnsweredByCard?.(questionId);
+        })
+        .catch((err) => {
+          logger.debug("orchestrator", "[gather] late responder rejection after ask-timeout", {
+            questionId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      return null;
+    }
+    return winner;
+  } catch (err) {
+    logger.error("orchestrator", "[gather] question responder failed — halting", {
+      questionId,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+    });
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * Translate gather's `tuiAsk(label, options)` contract onto the council askcard
  * machinery. Each call emits a `council_question` chunk that the UI renders as
  * an interactive card, then awaits the resolver for the user's chosen value.
  * Info messages (empty options) are emitted as a plain content chunk so they
  * don't block.
  */
-function buildLiveTuiAsk(
+export function buildLiveTuiAsk(
   emit: (chunk: StreamChunk) => void,
   respondToQuestion: QuestionResponder,
 ): (label: string, options?: string[]) => Promise<string> {
@@ -118,7 +198,26 @@ function buildLiveTuiAsk(
     if (_dbg) {
       process.stderr.write(`[tuiask] await-start: ${JSON.stringify({ questionId })}\n`);
     }
-    const result = await respondToQuestion(questionId);
+    const askTimeoutMs = resolveGatherAskTimeoutMs();
+    const result = await awaitGatherAnswer(respondToQuestion, questionId, askTimeoutMs);
+    if (result === null) {
+      // Debt 3 — withdraw the card so a late-arriving human never sees a card
+      // that looks live while nothing is listening, then halt rather than
+      // inventing an answer (same reasoning as `enforceUndebatedCriteriaGate`
+      // and `council/clarifier.ts`'s `ClarifierAskTimeoutError`).
+      respondToQuestion.withdraw?.(questionId, "timeout");
+      const minutes = Math.max(1, Math.round(askTimeoutMs / 60000));
+      emit({
+        type: "council_question_withdrawn",
+        content: `the gather question was not answered within ${minutes} minute${minutes === 1 ? "" : "s"}; the run stopped`,
+        councilQuestionWithdrawn: {
+          questionId,
+          reason: "timeout",
+          notice: `The gather question was not answered within ${minutes} minute${minutes === 1 ? "" : "s"}; the run stopped.`,
+        },
+      } as StreamChunk);
+      throw new GatherAskTimeoutError(questionId, askTimeoutMs);
+    }
     // U1 — this card is answered directly (no `runClarification` in between),
     // so nothing else will ever consume `wasAnsweredByCard` for this
     // questionId, and it never echoes the answer either way. Drain it here so

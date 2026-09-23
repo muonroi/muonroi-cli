@@ -127,7 +127,14 @@ export class ReadPathBudget {
     };
   }
 
-  /** Test-only. */
+  /**
+   * Drop every tracked path and zero every counter. Called by
+   * `Agent.startNewSession()` so the budget genuinely is the "per session"
+   * object its own module doc promises — without it, a brand-new session
+   * inherits read counts from an unrelated PRIOR session sharing the same
+   * long-lived Agent instance, and can start already over the cap for a path
+   * it has never itself read. Also used directly by tests.
+   */
   public clear(): void {
     this.counts.clear();
     this.capExceededHits = 0;

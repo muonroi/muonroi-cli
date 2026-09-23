@@ -45,17 +45,38 @@ describe("logInteraction — error serialization", () => {
     expect(JSON.parse(metadataJson)).toEqual({ path: "hot-path", complexity: "low" });
   });
 
-  // Scope note (deliberately NOT fixed here — see PR discussion): logInteraction
-  // has NEVER redacted plain string `data` fields, before or after this change.
-  // Only the Error branch added by this fix is redacted. A caller that passes a
-  // raw secret as a plain string (not inside an Error) still persists it
-  // verbatim today. Pinned so this gap stays visible rather than silently
-  // assumed-fixed by the Error-redaction work above.
-  it("does NOT redact a secret-shaped plain string — pre-existing, out of scope for this fix", () => {
+  // Was: "does NOT redact a secret-shaped plain string — pre-existing, out of
+  // scope for this fix". Deliberately changed (not just extended) — logInteraction
+  // now runs every plain string in `data` through the same `redactSecrets` the
+  // logger uses, recursively via the JSON.stringify replacer, so a secret-shaped
+  // span anywhere in `data` (not just inside an Error) is redacted. Only the
+  // secret-shaped SPAN is replaced — the surrounding text (forensic context)
+  // survives, unlike a whole-field blank.
+  it("redacts a secret-shaped plain string anywhere in data (span only, not the whole field)", () => {
     const fakeKey = `sk-proj${"ABCDEF1234567890abcdef1234567890"}`;
     logInteraction("sess-5", "error", { data: { note: `leaked key: ${fakeKey}` } });
     const metadataJson = runMock.mock.calls[0][7] as string;
-    expect(metadataJson).toContain(fakeKey);
+    expect(metadataJson).not.toContain(fakeKey);
+    const parsed = JSON.parse(metadataJson) as { note: string };
+    expect(parsed.note).toBe("leaked key: [REDACTED_API_KEY]");
+  });
+
+  it("redacts a secret-shaped string nested inside an array and a nested object in data", () => {
+    const fakeKey = `xai-${"ABCDEF1234567890abcdef1234567890"}`;
+    const fakeToken = `Bearer ${"eyJhbGciOiJIUzI1NiJ9.fakepayload.fakesignature1234567890"}`;
+    logInteraction("sess-6", "tool_call", {
+      data: {
+        argsPreview: [`safe arg`, `token=${fakeToken}`],
+        nested: { outputPreview: `resp key ${fakeKey} end` },
+      },
+    });
+    const metadataJson = runMock.mock.calls[0][7] as string;
+    expect(metadataJson).not.toContain(fakeKey);
+    expect(metadataJson).not.toContain(fakeToken);
+    const parsed = JSON.parse(metadataJson) as { argsPreview: string[]; nested: { outputPreview: string } };
+    expect(parsed.argsPreview[0]).toBe("safe arg");
+    expect(parsed.argsPreview[1]).toBe("token=Bearer [REDACTED]");
+    expect(parsed.nested.outputPreview).toBe("resp key [REDACTED_API_KEY] end");
   });
 
   // Security follow-up (post-review): serializeError alone is UNREDACTED —
