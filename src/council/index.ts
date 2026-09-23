@@ -10,7 +10,8 @@ import { planningArtifact } from "../gsd/paths.js";
 import type { PerspectiveVerdict } from "../gsd/plan-council.js";
 import { advancePhase, canExecute, readState, setStateField } from "../gsd/workflow-engine.js";
 import { runPipeline } from "../pil/pipeline.js";
-import type { PipelineContext, TaskType } from "../pil/types.js";
+import { turnWantsImplementation as turnWantsImplementationSignal } from "../pil/turn-intent.js";
+import type { PipelineContext } from "../pil/types.js";
 import { idealTrace } from "../product-loop/ideal-trace.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { appendSystemMessage, logInteraction } from "../storage/index.js";
@@ -1928,22 +1929,11 @@ export async function* runCouncil(
       // call site beyond the council's own locked `runKind`. `pilCtx` (set
       // earlier in this function from `runPipeline`) carries the PIL
       // classification of THIS turn's raw message, independent of when the
-      // debate's launch card locked its shape:
-      //   - pilCtx.intentKind: "task" | "chitchat" | null — coding intent present
-      //   - pilCtx.deliverableKind: "answer" | "code" | "report" | null — "code"
-      //     means create/edit files, the most direct implementation signal
-      //   - pilCtx.taskType: TaskType | null — "generate"/"build"/"refactor"/
-      //     "debug" are code-producing; "analyze"/"documentation"/"plan"/
-      //     "general" are not
-      // A turn is treated as wanting implementation only when it has coding
-      // intent AND (the model named "code" as the deliverable OR the task type
-      // is one of the code-producing kinds) — requiring both intentKind and one
-      // of the two stronger signals avoids a lone borderline taskType flipping
-      // the recommendation on its own.
-      const IMPLEMENTATION_TASK_TYPES = new Set<TaskType>(["generate", "build", "refactor", "debug"]);
-      const turnWantsImplementation =
-        pilCtx?.intentKind === "task" &&
-        (pilCtx?.deliverableKind === "code" || (!!pilCtx?.taskType && IMPLEMENTATION_TASK_TYPES.has(pilCtx.taskType)));
+      // debate's launch card locked its shape. Shared with
+      // src/orchestrator/settled-synthesis-gate.ts's suppression gate so the
+      // two can never disagree about what counts as implementation-shaped —
+      // see pil/turn-intent.ts for the full rule.
+      const turnWantsImplementation = turnWantsImplementationSignal(pilCtx);
 
       // Recommendation surfaced to the user as the default action. The
       // implementation_plan-vs-decision/evaluation split lives in

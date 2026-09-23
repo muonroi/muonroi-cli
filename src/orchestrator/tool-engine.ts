@@ -97,6 +97,7 @@ import {
 } from "../pil/index.js";
 import { isMetaAnalysisPrompt, isPlanExecution } from "../pil/layer6-output.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
+import { turnWantsImplementation } from "../pil/turn-intent.js";
 import { mentionsEcosystemScope } from "../playbook/directives.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
@@ -232,6 +233,7 @@ import {
   recordCompaction,
   recordElision,
 } from "./session-experience.js";
+import { applySettledSynthesisGate } from "./settled-synthesis-gate.js";
 import { attemptStallRescue, pushStallToolResult, type StallToolResult } from "./stall-rescue.js";
 import {
   createStallWatchdog,
@@ -816,10 +818,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // depth + task shape, so its verdict is the more intelligent router. Fall back to
   // the heuristic when the assessor didn't run (gsdAutoCouncil undefined).
   const assessorAutoCouncil = (pilCtx as { gsdAutoCouncil?: boolean }).gsdAutoCouncil;
-  const heavyTier =
-    typeof assessorAutoCouncil === "boolean"
-      ? assessorAutoCouncil
-      : (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
+  // Distinguishes a REAL assessor verdict from the raw complexityTier=="heavy"
+  // heuristic fallback below — both collapse into the same `heavyTier` boolean,
+  // so without this flag a decision-log reader cannot tell "the leader-tier
+  // assessor reasoned about this and said heavy" from "the fast classifier's
+  // own complexityTier happened to read heavy and the assessor never ran".
+  const assessorFired = typeof assessorAutoCouncil === "boolean";
+  const heavyTier = assessorFired
+    ? (assessorAutoCouncil as boolean)
+    : (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
   const autoCouncilConfidence = getAutoCouncilConfidence();
   const autoCouncilMinRoles = getAutoCouncilMinRoles();
   const sessionModelIsReasoning = isReasoningModel(deps.modelId);
@@ -836,7 +843,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // Skip reasoning-model skip for heavy/complex tasks — they benefit from
   // multi-role diversity even when the session model already does extended thinking.
   const shouldSkipForReasoning = sessionModelIsReasoning && skipReasoningSetting && !heavyTier;
-  const shouldAutoCouncil =
+  let shouldAutoCouncil =
     !deps.councilManager.isContinuation &&
     isAutoCouncilEnabled() &&
     configuredRoleCount >= autoCouncilMinRoles &&
@@ -846,7 +853,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // Always log the auto-council decision (taken or skipped) with the gate
   // values that decided it. Lets reports answer "why did this turn cost
   // $0.30?" and "is the confidence floor tuned wrong for my prompts?".
-  const autoCouncilSkipReason = (() => {
+  const preSettledGateReason = (() => {
     if (deps.councilManager.isContinuation) return "continuation-turn";
     if (!isAutoCouncilEnabled()) return "feature-disabled";
     if (configuredRoleCount < autoCouncilMinRoles)
@@ -864,6 +871,34 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     }
     return "taken";
   })();
+
+  // Settled-synthesis override (session 115a59c9bb9e -> child 49f6b8c1d8d6):
+  // only applies to the heavy-tier-ONLY trigger (never an explicit plan|analyze
+  // debate request) and only when a code-authored [Council Memory] record in
+  // THIS session's own DB parent chain already settles this turn. See
+  // settled-synthesis-gate.ts / council/prior-synthesis.ts for the evidence rule.
+  const heavyTierOnly = heavyTier && !taskTypeMatch;
+  // Shared with council/index.ts's post-debate recommendation
+  // (pil/turn-intent.ts) — the two can never disagree about what counts as
+  // an implementation-shaped turn. Only computed when it could matter.
+  const turnImplementationSignal = heavyTierOnly ? turnWantsImplementation(pilCtx) : false;
+  const settledSynthesisGate =
+    shouldAutoCouncil && heavyTierOnly
+      ? applySettledSynthesisGate({
+          wouldConvene: true,
+          heavyTierOnly: true,
+          turnWantsImplementation: turnImplementationSignal,
+          topic: resolveCouncilTopic(userMessage, deps.messages as Array<{ role?: string }>),
+          sessionId: deps.session?.id ?? null,
+        })
+      : { suppressed: false, evidence: { found: false } };
+  if (settledSynthesisGate.suppressed) {
+    shouldAutoCouncil = false;
+  }
+  const autoCouncilSkipReason = settledSynthesisGate.suppressed
+    ? (settledSynthesisGate.reason ?? "settled-prior-synthesis")
+    : preSettledGateReason;
+
   appendDecisionLog({
     ts: Date.now(),
     sessionId: deps.session?.id ?? null,
@@ -874,17 +909,34 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       taskType: pilCtx.taskType ?? null,
       confidence: pilCtx.confidence,
       complexityTier: (pilCtx as { complexityTier?: string | null }).complexityTier ?? null,
+      modelDepthTier: (pilCtx as { modelDepthTier?: string | null }).modelDepthTier ?? null,
       complexityScore: _complexityFromTrace ?? null,
       complexityGatePassed: _complexityGatePassed,
       configuredRoleCount,
       autoCouncilConfidence,
       autoCouncilMinRoles,
       heavyTier,
+      // Distinguishes "leader-tier assessor reasoned heavy" from "heuristic
+      // complexityTier fallback read heavy, assessor never ran" — task #1's gap.
+      assessorFired,
       sessionModelIsReasoning,
       skipReasoningSetting,
       isContinuation: deps.councilManager.isContinuation,
+      // Whether prior settled context existed for this topic, and what was
+      // found — the observability this decision previously had no way to answer.
+      // turnWantsImplementation + priorSynthesisSimilarity are the two facts
+      // the suppression decision is actually made from — similarity is
+      // informational only (never a veto; see prior-synthesis.ts module doc).
+      heavyTierOnly,
+      turnWantsImplementation: turnImplementationSignal,
+      priorSynthesisFound: settledSynthesisGate.evidence.found,
+      priorSynthesisTopic: settledSynthesisGate.evidence.recordTopic ?? null,
+      priorSynthesisSimilarity: settledSynthesisGate.evidence.similarity ?? null,
+      suppressedForSettledSynthesis: settledSynthesisGate.suppressed,
     },
-  }).catch(() => undefined);
+  }).catch((err) => {
+    console.error(`[tool-engine] auto-council decision-log append failed: ${(err as Error)?.message}`);
+  });
 
   if (shouldAutoCouncil) {
     const reason = heavyTier
