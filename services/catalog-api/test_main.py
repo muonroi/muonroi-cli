@@ -311,6 +311,7 @@ def test_real_catalog_serves_every_stepfun_model_with_billing_and_limits(monkeyp
         "step-3.5-flash",
         "step-3.5-flash-2603",
         "step-3.7-flash",
+        "step-5-preview",
         "stepaudio-2.5-chat",
         "stepaudio-2.5-realtime",
         "stepaudio-2.5-tts",

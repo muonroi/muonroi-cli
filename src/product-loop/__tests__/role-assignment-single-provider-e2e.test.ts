@@ -4,8 +4,8 @@
  *
  * Measured config (~/.muonroi-cli/user-settings.json): defaultProvider is the
  * one provider whose catalog mixes text and media rows; every other provider is
- * in disabledProviders. Inventory is therefore that provider alone: 9 rows, of
- * which 3 serve text.
+ * in disabledProviders. Inventory is therefore that provider alone: 10 rows
+ * (stepfun, after step-5-preview was added 2026-09-23), of which 4 serve text.
  *
  * Before the reuse fix this produced `{"kind":"refuse",
  * "reason":"single_provider_too_few"}` -> `resolveRoleAssignments` Map(0) ->
@@ -93,8 +93,17 @@ describe("single-provider user — the real config, end to end", () => {
       "echo_chamber: PO and Customer are the identical model",
     ).toBe(false);
 
-    // Same provider + different tier is the 3-round shape the function documents.
+    // Same provider is required by this fixture (single-provider user).
     expect(po!.provider).toBe(customer!.provider);
-    expect(po!.tier).not.toBe(customer!.tier);
+    // Tier diversity is NOT a hard contract — role-registry.ts documents two
+    // supported same-provider shapes: different-tier (3 rounds) and
+    // same-tier/different-model (5 rounds). Which one comes out depends on how
+    // many premium-tier text models the provider's catalog carries. Stepfun
+    // measured 1 (step-3.7-flash) until step-5-preview was added 2026-09-23,
+    // which made 2 premium-tier stepfun text models available, so PO and
+    // Customer now both land on premium (step-3.7-flash, step-5-preview) —
+    // the same-tier/different-model shape. The hard invariant, asserted above
+    // via echo_chamber, is that PO and Customer are never the identical model.
+    expect(po!.modelId).not.toBe(customer!.modelId);
   });
 });

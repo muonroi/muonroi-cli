@@ -1,7 +1,7 @@
 {
-  "version": "2.18",
-  "updated_at": "2026-08-18",
-  "description": "Local fallback catalog: anthropic + deepseek + zai + opencode-go + xai + stepfun. routing.council multi-provider debate; routing.vision_proxy Z.ai/xai backend for text-only models (deepseek etc.). provider_policies.peak_hour from vendor docs. Anthropic rows verified against platform.claude.com/docs/en/about-claude/pricing and /models/overview on 2026-07-29. StepFun model contracts, pricing, and V0 limits verified against platform.stepfun.ai documentation on 2026-08-18. Other pricing APPROXIMATE.",
+  "version": "2.19",
+  "updated_at": "2026-09-23",
+  "description": "Local fallback catalog: anthropic + deepseek + zai + opencode-go + xai + stepfun. routing.council multi-provider debate; routing.vision_proxy Z.ai/xai backend for text-only models (deepseek etc.). provider_policies.peak_hour from vendor docs. Anthropic rows verified against platform.claude.com/docs/en/about-claude/pricing and /models/overview on 2026-07-29. StepFun model contracts, pricing, and V0 limits verified against platform.stepfun.ai documentation on 2026-08-18, plus step-5-preview added and re-verified against platform.stepfun.ai documentation on 2026-09-23. Other pricing APPROXIMATE.",
   "models": [
     {
       "id": "deepseek-v4-flash",
@@ -121,6 +121,31 @@
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "StepFun's multimodal reasoning model with documented tool calling, 256K context, and image/video understanding. The documented maximum output-token limit is not published.",
+      "supports_vision": true,
+      "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
+      "native_web_research": false,
+      "web_research_kind": null
+    },
+    {
+      "id": "step-5-preview",
+      "name": "Step 5 Preview (StepFun)",
+      "provider": "stepfun",
+      "tier": "premium",
+      "context_window": 1000000,
+      "max_output_tokens": 64000,
+      "input_price_per_million": 1.0,
+      "output_price_per_million": 2.7,
+      "cached_input_price_per_million": 0.05,
+      "rate_limits": { "concurrency": 5, "requests_per_minute": 10, "tokens_per_minute": 5000000 },
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": true,
+      "default_reasoning_effort": "medium",
+      "description": "StepFun's flagship agentic model, released 2026-09-20 (600B-total/27B-active sparse MoE; weights due 2026-10-15). 1M-token context, documented tool calling, JSON Schema output, prompt caching, text/image/video input (video not representable in this catalog's modality enum). Configurable reasoning effort low/medium/high; no documented default, so 'medium' is used conservatively. Catalog default premium route for stepfun stays step-3.7-flash (unchanged) — this entry is addressable by id but not auto-selected. Verified against platform.stepfun.ai documentation on 2026-09-23.",
       "supports_vision": true,
       "roles": ["leader", "implement", "verify", "research"],
       "modalities": {

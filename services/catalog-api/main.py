@@ -273,6 +273,16 @@ KNOWN_PRICING: dict[str, dict[str, float | None]] = {
     "opencode/deepseek-v4-flash": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
     "opencode/mimo-v2.5": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
     "opencode/mimo-v2.5-pro": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    # StepFun (api.stepfun.ai) — this service has NO live pricing fetcher for
+    # stepfun (only _fetch_deepseek_pricing exists, and even that only
+    # validates the DeepSeek model list rather than setting prices), and none
+    # of the other 8 stepfun catalog rows carry a KNOWN_PRICING entry either —
+    # their price is served straight from src/models/catalog.json with no
+    # overlay. This row is therefore NOT load-bearing today: it duplicates the
+    # catalog.json numbers rather than backstopping a missing live source.
+    # Verified against platform.stepfun.ai/docs/en/guides/models/step-5-preview
+    # and platform.stepfun.ai/docs/en/guides/pricing/details on 2026-09-23.
+    "step-5-preview": {"input": 1.0, "output": 2.7, "cachedInput": 0.05, "cacheWrite": None},
 }
 
 
