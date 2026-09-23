@@ -113,7 +113,25 @@ export interface VerifyRecipe {
   smokeTarget?: string;
   evidence: string[];
   notes: string[];
+  /**
+   * Test coverage as a 0..1 fraction.
+   *
+   * THREE-STATE, and the states are not interchangeable — see
+   * `src/product-loop/coverage-signal.ts`, which is the only place this field's
+   * meaning is defined:
+   *  - a number  → MEASURED. `<= 0` is a truthful "nothing is covered" and
+   *                blocks the engineering floor.
+   *  - null/absent → NOT MEASURED. Blocks nothing; reading it as 0 is the bug
+   *                that scored every .NET `/ideal` sprint 0 (run muauw6u93e1c).
+   */
   coverage?: number | null;
+  /**
+   * Where `coverage` came from. `"measured"` = parsed from the project's own test
+   * output by the deterministic verify floor; `"model-asserted"` = a number the
+   * verify sub-agent wrote into its recipe JSON. A measurement overwrites an
+   * assertion (see sprint-runner's floor merge). Absent on legacy records.
+   */
+  coverageSource?: "measured" | "model-asserted" | null;
 }
 
 export interface VerifyEnvironmentManifest {

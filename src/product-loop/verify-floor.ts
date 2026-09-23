@@ -56,6 +56,7 @@ import type { VerifyRecipe } from "../types/index.js";
 import { createGitSpawnBudget, type GitSpawnBudget, runGitSpawn } from "../utils/git-spawn.js";
 import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { logger } from "../utils/logger.js";
+import { extractCoverageFromOutput } from "../verify/coverage-parsers.js";
 import { inferVerifyProjectProfile } from "../verify/recipes.js";
 import { parseFailingTestIds, type TestRunnerFormat } from "./test-failure-parse.js";
 import {
@@ -146,6 +147,17 @@ export interface FloorCheck {
    * when empty; used to attribute a build failure that was ALSO red at baseline.
    */
   errorSet?: string[];
+  /**
+   * Test coverage parsed from this command's FULL output (test commands only).
+   *
+   * `null`/absent means NOT MEASURED — the runner printed no coverage summary,
+   * which is the normal case (`dotnet test` without `/p:CollectCoverage=true`
+   * prints none at all). It is never 0 for that: downstream, 0 means "measured,
+   * and nothing is covered" and blocks the engineering floor. Parsed from the
+   * full output for the same reason `failingTests` is — `outputTail` truncates,
+   * and a clipped-away summary would read as "not measured".
+   */
+  coverage?: number | null;
 }
 
 export interface VerifyFloorResult {
@@ -162,6 +174,24 @@ export interface VerifyFloorResult {
    * failed, and what was tolerated. Absent only when verdict === "unavailable".
    */
   delta?: FloorDelta;
+  /**
+   * Coverage this run actually MEASURED from the project's own test output, or
+   * null when nothing measurable was printed.
+   *
+   * This is the only non-model source of the number: `VerifyRecipe.coverage` is
+   * otherwise whatever the verify sub-agent hand-wrote into its recipe JSON
+   * (`normalizeVerifyRecipe`, src/verify/recipes.ts). `sprint-runner.ts`
+   * overwrites the asserted figure with this one before the done-gate reads it,
+   * so a measurement always beats an assertion.
+   *
+   * When several test commands each report a figure they cover disjoint
+   * assemblies/packages and no arithmetic combines them honestly, so this is the
+   * MAXIMUM of the non-null ones. That is the principled choice for the only
+   * question the gates ask of it: a maximum of 0 means EVERY command that
+   * measured measured zero, which is the sole condition under which "nothing is
+   * covered" is a truthful claim.
+   */
+  measuredCoverage: number | null;
 }
 
 export interface RunVerifyFloorOpts {
@@ -301,6 +331,48 @@ export function resolveFloorCommands(cwd: string): { build: string[]; test: stri
   }
 }
 
+/**
+ * The project's ecosystem, from the same disk probe `resolveFloorCommands` uses
+ * — never from the model's recipe, for the same anti-gaming reason.
+ *
+ * Only ever used to pick a coverage grammar. Returns null when the probe fails,
+ * and the floor then measures no coverage rather than guessing a grammar; that
+ * is an honest "unmeasured", which blocks nothing.
+ */
+export function resolveFloorEcosystem(cwd: string): string | null {
+  try {
+    const ecosystem = inferVerifyProjectProfile(cwd).recipe.ecosystem;
+    return typeof ecosystem === "string" && ecosystem.trim() ? ecosystem.trim() : null;
+  } catch (err) {
+    logger.warn(
+      "orchestrator",
+      `[verify-floor] ecosystem discovery failed for cwd=${cwd} — coverage will not be measured this run`,
+      {
+        operation: "resolveFloorEcosystem",
+        cwd,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      },
+    );
+    return null;
+  }
+}
+
+/**
+ * Fold the per-command coverage figures into the one number the gates read.
+ *
+ * Returns null when NOTHING measured — never 0, because 0 means "measured, and
+ * nothing is covered" and blocks the engineering floor. See
+ * `VerifyFloorResult.measuredCoverage` for why the fold is a maximum.
+ */
+export function foldMeasuredCoverage(checks: FloorCheck[]): number | null {
+  const measured = checks
+    .map((c) => c.coverage)
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  if (measured.length === 0) return null;
+  return Math.max(...measured);
+}
+
 function tail(s: string): string {
   if (s.length <= OUTPUT_TAIL_CHARS) return s;
   return `…(truncated ${s.length - OUTPUT_TAIL_CHARS} chars)…\n${s.slice(-OUTPUT_TAIL_CHARS)}`;
@@ -329,6 +401,13 @@ export async function runFloorCommand(
   command: string,
   cwd: string,
   timeoutMs: number,
+  /**
+   * The project's ecosystem, used ONLY to pick a coverage grammar for a test
+   * command's output. Optional: omitted, coverage is simply not measured, which
+   * is a state the gates handle (see `FloorCheck.coverage`) — it never changes
+   * the verdict.
+   */
+  ecosystem?: string,
 ): Promise<FloorCheck> {
   const started = Date.now();
   let stdout = "";
@@ -425,6 +504,36 @@ export async function runFloorCommand(
   // truncated tail — a clipped-away error code would look "not present" and be
   // silently attributed away.
   const errorSet = kind === "build" ? extractErrorSet(combined) : undefined;
+  // Same reason again — the FULL output, before `tail()`. A coverage summary is
+  // printed LAST by every runner here, so on a chatty suite the tail is where it
+  // would survive; but a suite that prints a lot AFTER it (coverlet's per-module
+  // table, a threshold warning) would push it out, and a clipped-away summary
+  // reads as "not measured", which silently un-measures a measured run.
+  //
+  // THE ONLY NON-MODEL SOURCE of this number. `extractCoverageFromOutput` has
+  // existed, unit-tested, since the coverage field was introduced and had zero
+  // production call sites — verified by repo-wide search at 97ff484e: the only
+  // non-test references were the import and re-export in `src/verify/recipes.ts`
+  // lines 5 and 7. Nothing measured coverage anywhere; the field was only ever a
+  // number a model chose to type.
+  let coverage: number | null = null;
+  if (kind === "test" && ecosystem) {
+    try {
+      coverage = extractCoverageFromOutput(combined, ecosystem);
+    } catch (err) {
+      // A parser throwing must not fail the gate — coverage is not what the
+      // floor adjudicates. Recorded as unmeasured, and never silently.
+      logger.warn("orchestrator", `[verify-floor] coverage parse failed for "${command}" (ecosystem=${ecosystem})`, {
+        operation: "runFloorCommand",
+        cwd,
+        command,
+        ecosystem,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
+      coverage = null;
+    }
+  }
 
   if (!ok) {
     const why = spawnError
@@ -454,6 +563,7 @@ export async function runFloorCommand(
     failingTests: parsed.ids,
     formats: parsed.formats,
     errorSet,
+    coverage,
   };
 }
 
@@ -708,6 +818,7 @@ export async function runVerifyFloor(opts: RunVerifyFloorOpts): Promise<VerifyFl
       checks: [],
       commandsDiscovered: { build: [], test: [] },
       elapsedMs: Date.now() - started,
+      measuredCoverage: null,
     };
     logger.warn(
       "orchestrator",
@@ -732,6 +843,7 @@ export async function runVerifyFloor(opts: RunVerifyFloorOpts): Promise<VerifyFl
       checks: [],
       commandsDiscovered,
       elapsedMs: Date.now() - started,
+      measuredCoverage: null,
     };
     logger.warn(
       "orchestrator",
@@ -753,10 +865,14 @@ export async function runVerifyFloor(opts: RunVerifyFloorOpts): Promise<VerifyFl
     gitBranch: git.branch,
   });
 
+  // Resolved once, only when a test command will actually run — it is a second
+  // disk probe and it feeds nothing but the coverage grammar.
+  const ecosystem = testCommands.length > 0 ? (resolveFloorEcosystem(opts.cwd) ?? undefined) : undefined;
+
   const checks: FloorCheck[] = [];
   for (const { kind, command } of planned) {
     opts.onProgress?.({ phase: "start", kind, command, index: checks.length, total: planned.length });
-    const check = await runFloorCommand(kind, command, opts.cwd, timeoutMs);
+    const check = await runFloorCommand(kind, command, opts.cwd, timeoutMs, ecosystem);
     checks.push(check);
     opts.onProgress?.({
       phase: "done",
@@ -781,13 +897,22 @@ export async function runVerifyFloor(opts: RunVerifyFloorOpts): Promise<VerifyFl
     ? computeChangedFilesSinceBaseline(opts.cwd, loaded.baseline)
     : null;
   const delta = computeFloorDelta(checks, loaded, changedFilesSinceBaseline);
+  const measuredCoverage = foldMeasuredCoverage(checks);
   const base = {
     verdict: delta.verdict as FloorVerdict,
     checks,
     commandsDiscovered,
     elapsedMs: Date.now() - started,
     delta,
+    measuredCoverage,
   };
+  logger.info(
+    "orchestrator",
+    measuredCoverage === null
+      ? "[verify-floor] no coverage figure in the test output — coverage is UNMEASURED for this sprint (this does not block the engineering floor)"
+      : `[verify-floor] measured coverage ${(measuredCoverage * 100).toFixed(1)}% from the project's own test output`,
+    { operation: "runVerifyFloor", cwd: opts.cwd, ecosystem: ecosystem ?? null, measuredCoverage },
+  );
   if (delta.verdict === "fail") {
     logger.error(
       "orchestrator",

@@ -2590,7 +2590,10 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       startedAt: verifyStartedAt,
     });
     let verifyVerdict = parseVerifyResult(verifyResult);
-    const recipeFromVerify =
+    // `let`, not `const`: the deterministic floor below MEASURES coverage from the
+    // project's own test output, and that measurement replaces whatever number the
+    // verify sub-agent asserted here (see the merge after applyVerifyFloor).
+    let recipeFromVerify =
       (verifyResult as ToolResult & { verifyRecipe?: VerifyRecipe | null }).verifyRecipe ?? verifyRecipe;
 
     // ── Deterministic verify FLOOR ───────────────────────────────────────────
@@ -2636,6 +2639,22 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         verifyVerdict = applied.verdict;
         floorDelta = floor.delta;
         floorChecks = floor.checks;
+        // A MEASUREMENT BEATS AN ASSERTION. `recipeFromVerify.coverage` is
+        // otherwise a number the verify sub-agent typed into its own recipe JSON
+        // (`normalizeVerifyRecipe`), which is the only thing the done-gate's
+        // coverage condition has ever had to read. The floor just ran the
+        // project's OWN test commands and parsed their real output, so when it
+        // produced a figure that figure wins here, stamped `"measured"` so the
+        // sprint's recipe says which it is. When it measured nothing the recipe is
+        // left exactly as it was — overwriting an asserted number with null would
+        // discard information, and null is not "zero" anyway.
+        if (floor.measuredCoverage !== null && recipeFromVerify) {
+          recipeFromVerify = {
+            ...recipeFromVerify,
+            coverage: floor.measuredCoverage,
+            coverageSource: "measured",
+          };
+        }
         // S5 — a build break the floor could not honestly call pre-existing
         // (run-introduced or unattributable) must reach the next sprint as a
         // must-fix item, the same way S3b carries unfinished tasks.

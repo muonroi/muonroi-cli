@@ -544,7 +544,14 @@ export function normalizeVerifyRecipe(value: unknown): VerifyRecipe | null {
     smokeTarget: typeof raw.smokeTarget === "string" && raw.smokeTarget.trim() ? raw.smokeTarget.trim() : undefined,
     evidence: asStrings(raw.evidence),
     notes: asStrings(raw.notes),
+    // The ONLY producer of this field in the whole pipeline, and it is a number
+    // the MODEL chose to type into its recipe JSON — so it is stamped as an
+    // assertion, not a measurement. `null` here means "the model said nothing",
+    // which is NOT the same as zero; the distinction is enforced in
+    // `src/product-loop/coverage-signal.ts`. The deterministic verify floor
+    // overwrites both fields when it actually measures coverage.
     coverage: typeof raw.coverage === "number" ? raw.coverage : null,
+    coverageSource: typeof raw.coverage === "number" ? "model-asserted" : null,
   };
 }
 

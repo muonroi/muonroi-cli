@@ -1,6 +1,7 @@
 import { runPreflight } from "../council/preflight.js";
 import { logger } from "../utils/logger.js";
 import { blockingAssumptions, readLedger } from "./assumption-ledger.js";
+import { classifyCoverage, isMeasuredZeroCoverage } from "./coverage-signal.js";
 import { evidenceLooksValid } from "./reality-anchor.js";
 import type { Criterion, DoneGateContext, DoneVerdict } from "./types.js";
 import { parseVerifyResult } from "./verify-result.js";
@@ -14,9 +15,22 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
   const score = calculateScore(ctx.criteria);
 
   // 1. Engineering floor
-  // floor = recipe !== null && testCommands.length > 0 && coverage > 0 && lastVerify === "PASS"
+  // floor = recipe !== null && testCommands.length > 0 && coverage is not a
+  //         MEASURED zero && lastVerify === "PASS"
+  //
+  // The coverage term used to be `(ctx.recipe?.coverage ?? 0) > 0`, which read
+  // "nobody measured coverage" as "coverage is zero". Since the only producer of
+  // the number is a figure the verify sub-agent hand-writes into its recipe JSON
+  // (`normalizeVerifyRecipe`, src/verify/recipes.ts), that coercion made this
+  // condition unsatisfiable on every repo where the model does not emit one —
+  // including every .NET repo. Condition 1 short-circuits, so nothing below ever
+  // ran: run `muauw6u93e1c` recorded `verify: "PASS"`, a goal-gate `"aligned"`
+  // over 12,710 diff chars, and still `score: 0` / `reason: "zero_coverage"` on
+  // both sprints. `classifyCoverage` now names the three states apart and
+  // `circuit-breakers.ts` reads the SAME function, so the two cannot drift again.
   const hasTests = (ctx.recipe?.testCommands?.length ?? 0) > 0;
-  const hasCoverage = (ctx.recipe?.coverage ?? 0) > 0;
+  const coverage = classifyCoverage(ctx.recipe);
+  const coverageIsZero = isMeasuredZeroCoverage(coverage);
   // Prefer the caller's ALREADY-ADJUDICATED verdict over re-parsing the raw
   // ToolResult. Re-parsing here sees only the verify sub-agent's narration, so
   // it is blind to the deterministic verify floor that runs after it in
@@ -27,16 +41,29 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
   const verifyVerdict = ctx.verifyVerdict ?? (ctx.lastVerify ? parseVerifyResult(ctx.lastVerify) : undefined);
   const verifyPassed = verifyVerdict === "PASS";
 
-  const floorPassed = ctx.recipe !== null && hasTests && hasCoverage && verifyPassed;
+  const floorPassed = ctx.recipe !== null && hasTests && !coverageIsZero && verifyPassed;
 
   if (!floorPassed) {
     let reason = "unknown";
     if (!ctx.recipe) reason = "no_recipe";
     else if (!hasTests) reason = "no_test_commands";
-    else if (!hasCoverage) reason = "zero_coverage";
+    else if (coverageIsZero) reason = "zero_coverage";
     else if (!verifyPassed) reason = "verify_FAIL";
 
     return { pass: false, failedCondition: "engineering_floor", reason, score };
+  }
+
+  // The floor opened without a coverage figure behind it. That is the correct
+  // outcome — an unmeasured suite is not an uncovered one — but a condition that
+  // passed for want of evidence must not look identical to one that passed on
+  // evidence, which is the same defect class this whole module keeps closing
+  // (see condition #6's catch below). Recorded, never blocking.
+  if (coverage.state === "unmeasured") {
+    logger.info("orchestrator", "[done-gate] engineering floor passed with NO coverage measurement", {
+      runId: ctx.runId,
+      ecosystem: ctx.recipe?.ecosystem,
+      testCommands: ctx.recipe?.testCommands?.length ?? 0,
+    });
   }
 
   // 2. Evidence regex

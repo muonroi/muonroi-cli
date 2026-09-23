@@ -36,6 +36,10 @@ function floorResult(verdict: VerifyFloorResult["verdict"]): VerifyFloorResult {
     commandsDiscovered: { build: [], test: [] },
     elapsedMs: 1,
     detail: `floor ${verdict}`,
+    // Coverage is measured, not asserted, and this fixture runs no command — so
+    // "not measured", which is null and never 0. `applyVerifyFloor` does not read
+    // it; `sprint-runner` does, when merging a measurement into the recipe.
+    measuredCoverage: null,
   };
 }
 
