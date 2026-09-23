@@ -65,11 +65,26 @@ if [ -n "$BUILD_MATCH" ]; then
   if bun build --compile ./src/index.ts --outfile "$OUT" >"$LOG" 2>&1; then
     rm -f "$OUT" "$OUT.exe" "$LOG"
   else
-    echo "[pre-push] binary build FAILED — a static import does not resolve."
-    echo "[pre-push] This breaks ci-matrix build-smoke even when tsc + vitest are green:"
+    # Not every non-zero exit is an unresolved import. `bun build --compile`
+    # first BUNDLES (which is what resolves the import graph) and only then
+    # copies the ~139MB bun executable into a temp file. A failure in that
+    # second step is an environment problem — a full disk, an unwritable temp
+    # dir — and blaming it on "the import path" once cost a whole session of
+    # hunting an import that was never broken while D: sat at 100% full.
+    # `bundle N modules` in the log means every static import DID resolve.
     cat "$LOG"
+    if grep -qE 'bundle[[:space:]]+[0-9]+[[:space:]]+modules' "$LOG" \
+      || grep -qE 'ENOSPC|No space left|Failed to get temp file path' "$LOG"; then
+      echo "[pre-push] binary build FAILED — but the bundle resolved, so this is NOT an import error."
+      echo "[pre-push] Look at the environment: free disk space and the temp dir."
+      echo "[pre-push]   df -h /c /d        # outfile was: $OUT"
+      echo "[pre-push]   TMPDIR=${TMPDIR:-<unset>}"
+    else
+      echo "[pre-push] binary build FAILED — a static import does not resolve."
+      echo "[pre-push] This breaks ci-matrix build-smoke even when tsc + vitest are green."
+      echo "[pre-push] fix the import path, or skip with: git push --no-verify"
+    fi
     rm -f "$OUT" "$OUT.exe" "$LOG"
-    echo "[pre-push] fix the import path, or skip with: git push --no-verify"
     exit 1
   fi
 fi
