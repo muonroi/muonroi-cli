@@ -271,8 +271,7 @@ export function findPytestTargets(root: string): PytestTarget[] {
  * own installCommands already use.
  */
 export function buildPytestCommand(target: PytestTarget): string {
-  const python = target.pythonBin ? toPosixPath(target.pythonBin) : "python";
-  const run = `${python} -m pytest`;
+  const run = `${quoteInterpreter(target.pythonBin)} -m pytest`;
   return target.dir ? `cd ${toPosixPath(target.dir)} && ${run}` : run;
 }
 
@@ -282,9 +281,29 @@ export function buildPytestCommand(target: PytestTarget): string {
  * lands in the SAME interpreter the test command will run.
  */
 export function buildPytestInstallCommand(target: PytestTarget): string {
-  const python = target.pythonBin ? toPosixPath(target.pythonBin) : "python";
-  const install = `${python} -m pip install pytest`;
+  const install = `${quoteInterpreter(target.pythonBin)} -m pip install pytest`;
   return target.dir ? `cd ${toPosixPath(target.dir)} && ${install}` : install;
+}
+
+/**
+ * A relative interpreter path must be QUOTED, or cmd.exe never launches it.
+ *
+ * Measured through the floor's own `spawn(command, {shell: true})` on Windows:
+ *
+ *   cd backend && .venv/Scripts/python.exe --version
+ *     → '.venv' is not recognized as an internal or external command   exit 1
+ *   cd backend && ".venv/Scripts/python.exe" --version
+ *     → Python 3.14.5                                                  exit 0
+ *
+ * cmd.exe splits the unquoted token at the first `/` and reads `/Scripts` as a
+ * flag. Quoting fixes it and is portable — POSIX `sh` treats the quotes the same
+ * way — so forward slashes are kept for the Debian sandbox's benefit.
+ * `./.venv/...` does NOT work (measured: `'.' is not recognized`).
+ *
+ * The bare ambient `python` is left unquoted: it is a PATH lookup, not a path.
+ */
+function quoteInterpreter(pythonBin: string | null): string {
+  return pythonBin ? `"${toPosixPath(pythonBin)}"` : "python";
 }
 
 /**

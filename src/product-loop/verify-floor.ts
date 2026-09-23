@@ -76,7 +76,13 @@ import {
   verifyBaselinePath,
   writeVerifyBaseline,
 } from "./verify-baseline.js";
-import { detectNoTestsExecuted, type NoTestsSignal, type VerifyVerdict } from "./verify-result.js";
+import {
+  detectGateCouldNotRun,
+  detectNoTestsExecuted,
+  type GateCouldNotRunSignal,
+  type NoTestsSignal,
+  type VerifyVerdict,
+} from "./verify-result.js";
 
 /** Per-command wall-clock budget. Mirrors the verify watchdog's 10-minute default. */
 const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
@@ -133,6 +139,13 @@ export interface FloorCheck {
   elapsedMs: number;
   /** Set when a test command ran but executed zero tests (see detectNoTestsExecuted). */
   noTests?: NoTestsSignal;
+  /**
+   * Set when the command never got to run the thing it was meant to run — a
+   * missing launcher, module or script (see `detectGateCouldNotRun`). Computed
+   * for BOTH tiers: a build gate whose compiler is absent is an un-runnable
+   * gate, not a broken build.
+   */
+  couldNotRun?: GateCouldNotRunSignal;
   /**
    * Failing test identities parsed from this command's FULL output — computed
    * here, before `outputTail` truncates, because a clipped list would make the
@@ -496,6 +509,11 @@ export async function runFloorCommand(
 
   const combined = `${stdout}${stderr}`;
   const noTests = kind === "test" ? (detectNoTestsExecuted(combined) ?? undefined) : undefined;
+  // Only meaningful for a command that FAILED: a green run's output cannot be
+  // telling us the gate never started, and classifying a passing command would
+  // be reading tea leaves.
+  const failed = Boolean(spawnError) || timedOut || exitCode !== 0;
+  const couldNotRun = failed ? (detectGateCouldNotRun(combined) ?? undefined) : undefined;
   const ok = !spawnError && !timedOut && exitCode === 0 && !noTests;
   // Parse the FULL output — `outputTail` below is truncated, and a truncated
   // failure list would make the clipped-away tests look newly-failing next run.
@@ -540,9 +558,11 @@ export async function runFloorCommand(
       ? `spawn-error: ${spawnError}`
       : timedOut
         ? `timed out after ${timeoutMs}ms`
-        : noTests
-          ? `zero tests executed (${noTests.kind}): ${noTests.evidence}`
-          : `exit ${String(exitCode)}`;
+        : couldNotRun
+          ? `could not run (${couldNotRun.kind}): ${couldNotRun.evidence}`
+          : noTests
+            ? `zero tests executed (${noTests.kind}): ${noTests.evidence}`
+            : `exit ${String(exitCode)}`;
     logger.warn("orchestrator", `[verify-floor] ${kind} gate FAILED — "${command}" in ${cwd}: ${why}`, {
       operation: "runFloorCommand",
       cwd,
@@ -560,6 +580,7 @@ export async function runFloorCommand(
     outputTail: tail(combined),
     elapsedMs: Date.now() - started,
     noTests,
+    couldNotRun,
     failingTests: parsed.ids,
     formats: parsed.formats,
     errorSet,
@@ -711,6 +732,11 @@ function headline(delta: FloorDelta): string {
       return "the test gate failed and there is no baseline to compare it against.";
     case "no-tests-executed":
       return "a test command executed ZERO tests. Absence of evidence is not evidence of correctness.";
+    case "gate-could-not-run":
+      // Names the ENVIRONMENT as the cause, and says what to do about it. The
+      // per-command line below quotes the exact evidence, so the fix loop is
+      // pointed at the missing dependency instead of at the project's tests.
+      return "a gate command could not RUN — its launcher, module or script is missing, so it never reached the code. This is an environment problem, NOT a test or build failure: install the missing dependency (or declare it in the project's manifest) and re-run. The floor stays closed because an un-runnable gate produces no evidence.";
     case "infra":
       return "a gate command could not be run to completion (spawn error or timeout), so it produced no evidence.";
     default:
@@ -744,9 +770,11 @@ function formatFloorDetail(result: Omit<VerifyFloorResult, "detail">, testsSkipp
         ? `SPAWN-ERROR (${c.spawnError})`
         : c.timedOut
           ? "TIMEOUT"
-          : c.noTests
-            ? `NO-TESTS-EXECUTED (${c.noTests.kind}: ${c.noTests.evidence})`
-            : `EXIT ${String(c.exitCode)}`;
+          : c.couldNotRun
+            ? `COULD-NOT-RUN (${c.couldNotRun.kind}: ${c.couldNotRun.evidence})`
+            : c.noTests
+              ? `NO-TESTS-EXECUTED (${c.noTests.kind}: ${c.noTests.evidence})`
+              : `EXIT ${String(c.exitCode)}`;
     return `- [${c.kind}] \`${c.command}\` → ${status}${tolerated} (${c.elapsedMs}ms)`;
   });
 

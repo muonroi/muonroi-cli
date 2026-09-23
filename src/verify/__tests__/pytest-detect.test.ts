@@ -191,6 +191,24 @@ describe("findPytestTargets — pytest's own marker set", () => {
     expect(target?.pythonBin).toBe(path.join(".venv", "Scripts", "python.exe"));
   });
 
+  it("QUOTES the interpreter so cmd.exe does not read it as flags", () => {
+    // Measured through the floor's real spawn(shell:true) on Windows: an
+    // UNQUOTED relative path with forward slashes does not launch at all —
+    //   cd backend && .venv/Scripts/python.exe --version
+    //   → '.venv' is not recognized as an internal or external command   exit 1
+    // Quoted, the same path runs (exit 0, "Python 3.14.5"), and quoting is
+    // portable to POSIX sh. A gate command that cannot start is exactly the
+    // failure this detector exists to avoid.
+    const cwd = makeTempDir("muonroi-pytest-quote-");
+    write(cwd, "backend/conftest.py", "");
+    write(cwd, "backend/requirements.txt", "");
+    write(cwd, "backend/.venv/Scripts/python.exe", "");
+
+    const cmd = inferVerifyProjectProfile(cwd).recipe.testCommands.find((c) => c.includes("pytest"));
+
+    expect(cmd).toBe('cd backend && ".venv/Scripts/python.exe" -m pytest');
+  });
+
   it("falls back to the ambient interpreter when no venv exists", () => {
     const cwd = makeTempDir("muonroi-pytest-novenv-");
     write(cwd, "pytest.ini", "[pytest]\n");

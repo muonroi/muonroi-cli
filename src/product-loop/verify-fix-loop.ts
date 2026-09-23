@@ -421,6 +421,15 @@ export function deriveFailureIdentity(input: {
           },
           structureManifests,
         );
+      // An un-runnable gate is an ENVIRONMENT fact, so it gets its own reason
+      // rather than falling to `unknown`. Routing it to a test/build reason
+      // would send the fix loop after code that is fine — the same
+      // misattribution the `gate-could-not-run` kind exists to end.
+      case "gate-could-not-run":
+        return withStructureViolation(
+          { failedCondition: "engineering_floor", reason: "gate_could_not_run", errorSet: [] },
+          structureManifests,
+        );
       case "infra":
         return withStructureViolation(
           { failedCondition: "engineering_floor", reason: "infra", errorSet: [] },
@@ -531,6 +540,16 @@ export function computeVerifyFixTrigger(input: {
       case "test-absolute-no-baseline":
       case "no-tests-executed":
         return { shouldRun: true, identity: deriveFailureIdentity(input) };
+      // Stated explicitly rather than left to `default`: a gate that could not
+      // RUN is an environment fact, and the floor deliberately does not install
+      // anything (verify-floor.ts "What is deliberately NOT run"), so a code
+      // fixer cannot close it — spending a fix round here is the churn that
+      // burned $1.405 for zero progress on run muc2joffe506. The cause still
+      // reaches the next sprint as the `gate_could_not_run` carry-over reason,
+      // where the implementation turn CAN declare the missing dependency in the
+      // project's manifest.
+      case "gate-could-not-run":
+        return { shouldRun: false, skippedReason: "not_actionable" };
       default:
         // "infra" (spawn error / timeout) — no evidence a code fixer can act on.
         break;

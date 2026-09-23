@@ -31,6 +31,103 @@ export interface NoTestsSignal {
 }
 
 /**
+ * Why a gate command could not be RUN at all — as opposed to having run and
+ * reported a failure.
+ *
+ * - `launcher_missing`    — the shell could not find the program. Nothing ran.
+ * - `dependency_missing`  — the runtime started but the test tool / module it
+ *                           needs is not installed.
+ * - `script_missing`      — the package manager has no such script.
+ *
+ * "Could not run the tests" and "the tests failed" are different facts, and the
+ * floor used to have one bucket for both: a missing runner exits non-zero and
+ * names no failing test, so it was reported as an unattributable TEST failure,
+ * which blames the project's code for a broken environment and sends the
+ * verify-fix loop after tests that are fine.
+ *
+ * This is not hypothetical. The floor deliberately never runs `installCommands`
+ * (verify-floor.ts "What is deliberately NOT run"), and it executes cold before
+ * any sprint via `captureVerifyFloorBaseline`.
+ *
+ * Every pattern below is a string MEASURED on a real failure, not an invented
+ * shape — the measurements are quoted per-pattern.
+ */
+export interface GateCouldNotRunSignal {
+  kind: "launcher_missing" | "dependency_missing" | "script_missing";
+  /** The line that proved it, quoted in the failure reason shown to a human. */
+  evidence: string;
+}
+
+/**
+ * Ordered most-specific-first. Each entry's comment is the verbatim output it
+ * was built from.
+ */
+const COULD_NOT_RUN_PATTERNS: ReadonlyArray<{ kind: GateCouldNotRunSignal["kind"]; re: RegExp }> = [
+  // cmd.exe, measured through the floor's own spawn(shell:true):
+  //   '.venv' is not recognized as an internal or external command,
+  {
+    kind: "launcher_missing",
+    re: /'[^'\n]+' is not recognized as an internal or external command[^\n]*/,
+  },
+  // POSIX sh, measured: `sh: line 1: definitely-not-a-real-cmd: command not found`
+  { kind: "launcher_missing", re: /^[^\n]*\bcommand not found\b[^\n]*/m },
+  // Windows, when the file exists but is not executable.
+  { kind: "launcher_missing", re: /\bis not recognized as the name of a cmdlet\b[^\n]*/ },
+  // npm, measured: `npm error Missing script: "test"`
+  { kind: "script_missing", re: /\bMissing script:\s*"[^"\n]*"[^\n]*/ },
+  { kind: "script_missing", re: /\bno such script\b[^\n]*/i },
+  // `python -m pytest` with no pytest, measured verbatim (Python 3.14.5):
+  //   C:\...\.venv\Scripts\python.exe: No module named pytest
+  // NOTE the `-m` form prints NO "ModuleNotFoundError" prefix — matching only
+  // that name would have missed the exact case this was written for.
+  { kind: "dependency_missing", re: /\bNo module named\s+'?[\w.]+'?[^\n]*/ },
+  // The import form of the same fact.
+  { kind: "dependency_missing", re: /\bModuleNotFoundError\b[^\n]*/ },
+  // node, measured: `Error: Cannot find module 'vitest-not-real'`
+  { kind: "dependency_missing", re: /\bCannot find module\b[^\n]*/ },
+  { kind: "dependency_missing", re: /\bCannot find package\b[^\n]*/ },
+  { kind: "dependency_missing", re: /\bImportError\b[^\n]*/ },
+];
+
+/**
+ * Evidence that a test run genuinely EXECUTED and reported results. When present,
+ * the command ran — so a module-not-found line in its output belongs to one test
+ * file, not to the gate, and must not be laundered into "the gate could not run".
+ *
+ * This is the guard that stops the classifier stealing a real test failure.
+ */
+const RAN_AND_REPORTED_PATTERNS: RegExp[] = [
+  /^\s*Tests\s+\d+\s+(?:failed|passed)[^\n]*/m, // vitest summary
+  /\b\d+\s+(?:passed|failed),\s*\d+\s+(?:passed|failed)\b/, // pytest / generic
+  /\b\d+\s+(?:failed|passed)\s+in\s+[\d.]+\s?s\b/, // pytest summary
+  /^\s*Tests:\s+\d+\s+(?:failed|passed)[^\n]*/m, // jest
+  /\bFailed:\s*\d+,\s*Passed:\s*\d+\b/, // dotnet vstest
+  /^\s*\d+\s+(?:passing|failing)\b/m, // mocha
+  /\b(?:ok|FAIL)\s+[\w./-]+\s+[\d.]+s\b/, // go test
+];
+
+/**
+ * Detects that a gate command never got to run the thing it was supposed to run.
+ *
+ * Returns null when the output shows the runner actually executed and reported
+ * results, and null when no could-not-run evidence is present at all (callers
+ * must not read null as "it ran fine" — only as "no such evidence found").
+ */
+export function detectGateCouldNotRun(output: string): GateCouldNotRunSignal | null {
+  if (!output) return null;
+
+  // A suite that reported a pass/fail tally DID run. Anything alarming in its
+  // output is about the code under test, not about the gate.
+  if (RAN_AND_REPORTED_PATTERNS.some((re) => re.test(output))) return null;
+
+  for (const { kind, re } of COULD_NOT_RUN_PATTERNS) {
+    const match = output.match(re)?.[0];
+    if (match) return { kind, evidence: match.trim() };
+  }
+  return null;
+}
+
+/**
  * Patterns that only appear in real test-runner output, anchored tightly enough
  * that model prose ("there were no tests for this module before") does not
  * match. Ordered load-error-first so a broken import is reported as such even

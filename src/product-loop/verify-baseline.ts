@@ -180,6 +180,14 @@ export type FloorFailureKind =
   | "test-unattributable"
   | "test-absolute-no-baseline"
   | "no-tests-executed"
+  /**
+   * The gate never got to run the thing it was meant to run — missing launcher,
+   * module or script (see `detectGateCouldNotRun`). Distinct from every kind
+   * above because it is a statement about the ENVIRONMENT, not about the code:
+   * reporting it as a test failure blames the project's tests for a missing
+   * dependency and sends the verify-fix loop after code that is fine.
+   */
+  | "gate-could-not-run"
   | "infra";
 
 /**
@@ -195,6 +203,11 @@ export interface FloorCheckLike {
   timedOut: boolean;
   spawnError?: string;
   noTests?: { kind: string; evidence: string };
+  /**
+   * Set when the command could not RUN (missing launcher / module / script), as
+   * classified by `detectGateCouldNotRun` in verify-floor.runFloorCommand.
+   */
+  couldNotRun?: { kind: string; evidence: string };
   /** Parsed from the command's FULL output by verify-floor.runFloorCommand. */
   failingTests?: string[];
   formats?: TestRunnerFormat[];
@@ -391,7 +404,10 @@ function baselineRejectReason(
 export function isToleratedTestFailure(c: FloorCheckLike, baseline: VerifyBaseline | null): boolean {
   if (c.ok) return true;
   if (c.kind !== "test") return false;
-  if (c.spawnError || c.timedOut || c.noTests) return false;
+  // A gate that could not RUN produced no evidence about the code, so no
+  // baseline can excuse it — even though `failingTests` being empty already
+  // stops it below, stating it here keeps the two guards from drifting.
+  if (c.spawnError || c.timedOut || c.noTests || c.couldNotRun) return false;
   if (!baseline) return false;
   const ids = c.failingTests ?? [];
   if (ids.length === 0) return false;
@@ -593,6 +609,23 @@ export function computeFloorDelta(
 
     if (c.spawnError || c.timedOut) {
       return { ...base, verdict: "fail", failureKind: "infra", failedCommand: c.command, preExisting, fixed };
+    }
+
+    // BEFORE the build and test branches, and for both tiers. A gate whose
+    // launcher, module or script is absent said nothing about the code: naming
+    // it `build-failed` would accuse this run of breaking a build it never
+    // compiled, and naming it a test failure would accuse the project's tests of
+    // a missing dependency. Still `verdict: "fail"` — an un-runnable gate has no
+    // evidence, so it must never open the floor — only the CAUSE changes.
+    if (c.couldNotRun) {
+      return {
+        ...base,
+        verdict: "fail",
+        failureKind: "gate-could-not-run",
+        failedCommand: c.command,
+        preExisting,
+        fixed,
+      };
     }
 
     if (c.kind === "build") {
