@@ -36,6 +36,18 @@
  * case-insensitive rather than hardcoded to one key name, with an explicit
  * "exactly one long string field" fallback for shapes like `{key, value}`
  * that match none of the known aliases at all.
+ *
+ * D6 — that fallback adopted the sole long string WHATEVER it was, so a task
+ * could be titled with an owner note, a UUID, or a time estimate (reproduced
+ * against b70db771: `{step_id, owner_lens}` -> "the platform team lead
+ * responsible for auth"; `{ref, correlation_id}` -> the raw UUID;
+ * `{n, time_estimate}` -> "about three and a half working days"). Two causes,
+ * both fixed below: `owner_lens`/`time_estimate` were read by DIRECT key
+ * access so they never entered the `used` set, and the 20-char floor admits a
+ * pure identifier (a UUID is 36 chars). The floor is unchanged — raising it
+ * would reject a real short imperative — and the fallback now filters by KEY
+ * (`nonDescriptionKeyReason`) and by VALUE SHAPE (`identifierValueReason`)
+ * instead, declining WITH a per-field reason in `notes` rather than silently.
  */
 
 import { createHash } from "node:crypto";
@@ -193,11 +205,90 @@ const CRITERION_ALIASES = [
   "acceptance",
 ];
 const DEPENDS_ON_ALIASES = ["depends_on", "dependson", "deps", "blocked_by", "dependencies", "after"];
+/** D6 — `owner_lens`/`time_estimate` used to be read by DIRECT key access, so
+ * they never entered the `used` set and stayed eligible as "the sole long
+ * string" for the description fallback below (measured: an owner note and a
+ * time estimate each became a task `title`). They now go through `pickAlias`
+ * like every other field — same single key each, so extraction is unchanged
+ * apart from becoming case-insensitive like the rest of the function. */
+const OWNER_ALIASES = ["owner_lens"];
+const ESTIMATE_ALIASES = ["time_estimate"];
 
 /** A string field is only treated as a stand-in task description (the
  * `{key, value}` fallback below) once it clears this length — short values
  * like an index ("1") or an id are never mistaken for the work description. */
 const LONG_STRING_MIN_CHARS = 20;
+
+// ─── D6 — the fallback adopts a WORK DESCRIPTION, not any long string ────────
+//
+// The "sole remaining long string" fallback earns its place on the `{key,
+// value}` shape, but before D6 it adopted whatever single long string was
+// left, so `{step_id, owner_lens}` titled the task with an owner note,
+// `{ref, correlation_id}` with a UUID, and `{n, time_estimate}` with a time
+// estimate. The floor is NOT the lever — raising it would reject a real short
+// imperative like "Fix the failing InternalsVisibleTo test" (39 chars) while
+// still admitting a 36-char UUID. Two cheap structural filters instead.
+
+/** Keys that name a field this function already extracts under a different
+ * name, or an identifier reference — never the work description, whatever
+ * their value looks like. Deliberately tiny: each entry is either a plain
+ * synonym of `owner_lens`/`time_estimate` (whose measured values are PROSE, so
+ * the shape rule below provably cannot reject them) or an id key. Nothing
+ * speculative — a key like `rationale` or `notes` still qualifies, because
+ * real prose about the work is a better title than a placeholder. */
+const NON_DESCRIPTION_KEYS = new Set([
+  "owner", // synonym of the already-consumed `owner_lens`
+  "assignee", // the other common name for the same field
+  "estimate", // synonym of the already-consumed `time_estimate`
+  "eta", // ditto
+  "duration", // ditto
+]);
+
+/** `id`, `run_id`, `correlationId`, `uuid`, `guid` … — an identifier reference
+ * by definition. Measured key `correlation_id` carried a UUID (which the shape
+ * rule also catches), but the key name stays decisive when the encoding is
+ * not, e.g. `run_id: "run mu54vrme4c87 sprint two"`. */
+const IDENTIFIER_KEY_RE = /(^|_)(id|uuid|guid)$|[a-z0-9](Id|Uuid|UUID|Guid|GUID)$/;
+
+/** Scripts written without inter-word spaces. The "must contain whitespace"
+ * half of the shape rule below would otherwise reject every CJK description
+ * outright, which is a false reject, not an identifier. */
+const SPACELESS_SCRIPT_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+/** A prose word: an all-letter token of 2+ characters ("Fix", "the", "compiles",
+ * "Sửa"). A UUID/hex/base64 blob contains no such token once split on
+ * whitespace; any real sentence contains several. */
+const PROSE_WORD_RE = /^\p{L}{2,}$/u;
+
+/** Why this KEY can never be the work description, or null when it can. */
+function nonDescriptionKeyReason(key: string): string | null {
+  const lk = key.toLowerCase();
+  if (NON_DESCRIPTION_KEYS.has(lk)) return `"${key}" names this task's owner/estimate, not the work to do`;
+  if (IDENTIFIER_KEY_RE.test(key) || IDENTIFIER_KEY_RE.test(lk)) return `"${key}" names an identifier, not the work`;
+  return null;
+}
+
+/**
+ * D6 shape rule — why this VALUE is structurally an identifier rather than
+ * prose, or null when it reads as prose. Two conditions, both about shape, so
+ * a short real task ("Fix the failing InternalsVisibleTo test") always passes
+ * and a long identifier never does:
+ *   1. it contains no whitespace at all — a single token is a uuid, hash,
+ *      path, slug or timestamp, never an instruction;
+ *   2. no whitespace-separated token is a plain word — an identifier list
+ *      ("550e8400-… 660e8400-…") has whitespace but no prose in it.
+ * Text in a space-less script (CJK) is exempt from both — see SPACELESS_SCRIPT_RE.
+ */
+function identifierValueReason(value: string): string | null {
+  if (SPACELESS_SCRIPT_RE.test(value)) return null;
+  if (!/\s/.test(value)) {
+    return "its value is a single token with no whitespace — an identifier (uuid/hash/path/slug), not a work description";
+  }
+  const tokens = value.split(/\s+/);
+  if (!tokens.some((t) => PROSE_WORD_RE.test(t))) {
+    return "its value contains no plain word — it reads as a list of identifiers, not a work description";
+  }
+  return null;
+}
 
 /** Case-insensitive key -> value map, first occurrence wins on a duplicate
  * (case-folded) key. Never throws. */
@@ -267,7 +358,16 @@ function buildTaskFromRawItem(raw: unknown, idx: number, notes: string[]): Sprin
     const km = lowerKeyMap(o);
     const used = new Set<string>();
 
-    const criterionHit = pickAlias(km, CRITERION_ALIASES, used);
+    // D6 — which field consumed which key, so the description fallback can say
+    // WHY a long string it saw was not reused, instead of silently skipping it.
+    const consumedBy = new Map<string, string>();
+    const consume = (aliases: string[], label: string) => {
+      const hit = pickAlias(km, aliases, used);
+      if (hit) consumedBy.set(hit.key.toLowerCase(), label);
+      return hit;
+    };
+
+    const criterionHit = consume(CRITERION_ALIASES, "acceptance criterion");
     const criterionRaw = criterionHit?.value;
     const doneCriterion =
       typeof criterionRaw === "string"
@@ -281,32 +381,63 @@ function buildTaskFromRawItem(raw: unknown, idx: number, notes: string[]): Sprin
       );
     }
 
-    const dependsOnHit = pickAlias(km, DEPENDS_ON_ALIASES, used);
+    const dependsOnHit = consume(DEPENDS_ON_ALIASES, "dependency list");
     const dependsOn = normalizeDependsOn(dependsOnHit?.value);
 
-    // Owner/estimate keep their original single-key lookup — not part of the
-    // D5 defect (title/criterion/dependencies), and neither field feeds a
-    // downstream gate the way doneCriterion/dependsOn do.
-    const owner = typeof o.owner_lens === "string" ? o.owner_lens : undefined;
-    const estimate = typeof o.time_estimate === "string" ? o.time_estimate : undefined;
+    // D6 — owner/estimate go through `pickAlias` like every other field so the
+    // keys they consume are marked `used`. Read by direct key access they were
+    // never marked, and the description fallback below happily adopted them
+    // (measured: an owner note and a time estimate each became the `title`).
+    const ownerHit = consume(OWNER_ALIASES, "owner");
+    const owner = typeof ownerHit?.value === "string" ? ownerHit.value : undefined;
+    const estimateHit = consume(ESTIMATE_ALIASES, "time estimate");
+    const estimate = typeof estimateHit?.value === "string" ? estimateHit.value : undefined;
 
-    const descriptionHit = pickAlias(km, DESCRIPTION_ALIASES, used);
+    const descriptionHit = consume(DESCRIPTION_ALIASES, "description");
     let description = asTrimmedString(descriptionHit?.value);
     let usedFallbackField: string | undefined;
+    /** D6 — long strings the fallback SAW and declined, each with its reason. */
+    const declined: Array<{ key: string; reason: string }> = [];
+    /** D6 — >1 field could each be the description; adopting one would be a guess. */
+    let ambiguousKeys: string[] = [];
     if (!description) {
       // No known description key matched. When the object has EXACTLY ONE
-      // remaining long string field, that is the work description (e.g.
-      // `{key: "1", value: "<the actual task text>"}` — "key" is too short to
-      // qualify, "value" is not a recognized alias but is the only long
-      // string left).
-      const longStringEntries = Object.entries(o).filter(([k, v]) => {
-        if (used.has(k.toLowerCase())) return false;
-        return typeof v === "string" && v.trim().length >= LONG_STRING_MIN_CHARS;
-      });
-      if (longStringEntries.length === 1) {
-        const [key, value] = longStringEntries[0]!;
-        description = (value as string).trim();
-        usedFallbackField = key;
+      // remaining long string field that reads as work (e.g. `{key: "1",
+      // value: "<the actual task text>"}` — "key" is too short to qualify),
+      // that is the description. Anything already consumed by another field,
+      // any key that names an owner/estimate/identifier, and any value that is
+      // structurally an identifier rather than prose is DECLINED WITH A REASON
+      // rather than silently adopted.
+      const candidates: Array<{ key: string; value: string }> = [];
+      for (const [key, rawValue] of Object.entries(o)) {
+        if (typeof rawValue !== "string") continue;
+        const value = rawValue.trim();
+        if (value.length < LONG_STRING_MIN_CHARS) continue;
+        const lk = key.toLowerCase();
+        if (used.has(lk)) {
+          declined.push({
+            key,
+            reason: `it is already consumed as this task's ${consumedBy.get(lk) ?? "other field"}`,
+          });
+          continue;
+        }
+        const keyReason = nonDescriptionKeyReason(key);
+        if (keyReason) {
+          declined.push({ key, reason: keyReason });
+          continue;
+        }
+        const valueReason = identifierValueReason(value);
+        if (valueReason) {
+          declined.push({ key, reason: valueReason });
+          continue;
+        }
+        candidates.push({ key, value });
+      }
+      if (candidates.length === 1) {
+        description = candidates[0]!.value;
+        usedFallbackField = candidates[0]!.key;
+      } else if (candidates.length > 1) {
+        ambiguousKeys = candidates.map((c) => c.key);
       }
     }
 
@@ -324,10 +455,27 @@ function buildTaskFromRawItem(raw: unknown, idx: number, notes: string[]): Sprin
         `Task ${id}: description sourced from field "${usedFallbackField}" — no recognized description key ` +
           `(tried: ${DESCRIPTION_ALIASES.join(", ")}) matched this item's shape.`,
       );
-    } else if (!description && !doneCriterion) {
-      notes.push(
-        `Task ${id}: no recognizable description or criterion field at all (keys: ${Object.keys(o).join(", ") || "(none)"}) — title is a placeholder.`,
-      );
+    } else if (!description) {
+      // D6 — say WHY the title is not this item's own long text. Every
+      // declined candidate is named with its reason, so a wrong exclusion is
+      // diagnosable from the artifact's own notes instead of needing a fresh
+      // live-run forensics pass.
+      for (const d of declined) {
+        notes.push(`Task ${id}: field "${d.key}" was NOT adopted as the description — ${d.reason}.`);
+      }
+      if (ambiguousKeys.length > 0) {
+        notes.push(
+          `Task ${id}: ${ambiguousKeys.length} fields could each be the description (${ambiguousKeys.join(", ")}) — ` +
+            `none adopted, because picking one would be a guess.`,
+        );
+      }
+      if (doneCriterion) {
+        notes.push(`Task ${id}: no recognizable description field — title derived from the acceptance criterion.`);
+      } else {
+        notes.push(
+          `Task ${id}: no recognizable description or criterion field at all (keys: ${Object.keys(o).join(", ") || "(none)"}) — title is a placeholder.`,
+        );
+      }
     }
 
     const { files: targetFiles, dirs: targetDirs } = extractTargetsFromText(

@@ -280,6 +280,141 @@ describe("buildSprintPlanArtifact", () => {
     });
   });
 
+  describe("D6 — the sole-long-string fallback only adopts a real work description", () => {
+    // Reproduced against b70db771's parent: the fallback adopted ANY single
+    // remaining string field of >= 20 chars, so an owner note, a UUID, or a
+    // time estimate each became the task `title`. Two causes: (1) `owner_lens`
+    // / `time_estimate` were read by direct key access, never entered the
+    // `used` set, and stayed eligible as "the sole long string"; (2) the
+    // 20-char floor admits a pure identifier (a UUID is 36 chars).
+    const build = (item: Record<string, unknown>) =>
+      buildSprintPlanArtifact({ sprintN: 1, runId: "r1", planSynthesis: "", structuredActionItems: [item] });
+
+    it("never titles a task with an owner note (owner_lens is consumed, not a description)", () => {
+      const artifact = build({ step_id: 3, owner_lens: "the platform team lead responsible for auth" });
+      expect(artifact.tasks[0]!.title).not.toBe("the platform team lead responsible for auth");
+      expect(artifact.tasks[0]!.title).toContain("Untitled task step1");
+      expect(artifact.tasks[0]!.owner).toBe("the platform team lead responsible for auth");
+    });
+
+    it("never titles a task with a UUID (structurally an identifier, not prose)", () => {
+      const artifact = build({ ref: 1, correlation_id: "550e8400-e29b-41d4-a716-446655440000" });
+      expect(artifact.tasks[0]!.title).not.toBe("550e8400-e29b-41d4-a716-446655440000");
+      expect(artifact.tasks[0]!.title).toContain("Untitled task step1");
+    });
+
+    it("never titles a task with a time estimate (time_estimate is consumed, not a description)", () => {
+      const artifact = build({ n: 2, time_estimate: "about three and a half working days" });
+      expect(artifact.tasks[0]!.title).not.toBe("about three and a half working days");
+      expect(artifact.tasks[0]!.title).toContain("Untitled task step1");
+      expect(artifact.tasks[0]!.estimate).toBe("about three and a half working days");
+    });
+
+    it("still titles the {key, value} shape the fallback exists for (run muauw6u93e1c)", () => {
+      const artifact = build({ key: "1", value: "Add InternalsVisibleTo so the test project compiles" });
+      expect(artifact.tasks[0]!.title).toBe("Add InternalsVisibleTo so the test project compiles");
+    });
+
+    it("still adopts a genuinely unrecognized description key — the fallback's real job", () => {
+      const artifact = build({ idx: "1", work_summary: "Add InternalsVisibleTo so the test project compiles" });
+      expect(artifact.tasks[0]!.title).toBe("Add InternalsVisibleTo so the test project compiles");
+      expect(
+        artifact.notes.some((n) => n.includes("step1") && n.includes('"work_summary"') && n.includes("sourced from")),
+      ).toBe(true);
+    });
+
+    it("keeps a short imperative task description — the rule is about SHAPE, not length", () => {
+      const artifact = build({ idx: "1", work_summary: "Fix the failing InternalsVisibleTo test" });
+      expect(artifact.tasks[0]!.title).toBe("Fix the failing InternalsVisibleTo test");
+    });
+
+    it("records a diagnostic note naming the rejected field and the reason", () => {
+      const artifact = build({ ref: 1, correlation_id: "550e8400-e29b-41d4-a716-446655440000" });
+      const note = artifact.notes.find((n) => n.includes("step1") && n.includes('"correlation_id"'));
+      expect(note).toBeDefined();
+      expect(note).toContain("NOT adopted");
+      expect(note!.toLowerCase()).toMatch(/identifier|single token/);
+    });
+
+    it("records WHY a consumed field was not reused as the description", () => {
+      const artifact = build({ step_id: 3, owner_lens: "the platform team lead responsible for auth" });
+      const note = artifact.notes.find((n) => n.includes("step1") && n.includes('"owner_lens"'));
+      expect(note).toBeDefined();
+      expect(note).toContain("NOT adopted");
+      expect(note).toContain("owner");
+    });
+
+    it("falls to the acceptance criterion, not the identifier, when both are present", () => {
+      const artifact = build({
+        correlation_id: "550e8400-e29b-41d4-a716-446655440000",
+        acceptance_criteria: "The package restores cleanly. Extra detail.",
+      });
+      expect(artifact.tasks[0]!.title).toBe("The package restores cleanly.");
+      expect(artifact.notes.some((n) => n.includes("step1") && n.includes("acceptance criterion"))).toBe(true);
+    });
+
+    describe("shape rule boundaries", () => {
+      const titleOf = (v: string) => build({ idx: "1", work_summary: v }).tasks[0]!.title;
+
+      it("rejects a bare hex blob", () => {
+        expect(titleOf("a3f9c2e18b4d7f6019283746abcdef01")).toContain("Untitled task");
+      });
+
+      it("rejects a base64-ish blob", () => {
+        expect(titleOf("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9")).toContain("Untitled task");
+      });
+
+      it("rejects a bare path (a single token with no whitespace)", () => {
+        expect(titleOf("src/product-loop/sprint-plan-artifact.ts")).toContain("Untitled task");
+      });
+
+      it("rejects an ISO timestamp", () => {
+        expect(titleOf("2026-09-23T14:30:00.000Z")).toContain("Untitled task");
+      });
+
+      it("rejects a whitespace-separated list of identifiers (no prose word at all)", () => {
+        expect(titleOf("550e8400-e29b-41d4-a716-446655440000 660e8400-e29b-41d4-a716-446655440001")).toContain(
+          "Untitled task",
+        );
+      });
+
+      it("accepts prose that merely CONTAINS a path or an identifier", () => {
+        expect(titleOf("Update src/product-loop/sprint-plan-artifact.ts to bound the title")).toBe(
+          "Update src/product-loop/sprint-plan-artifact.ts to bound the title",
+        );
+      });
+
+      it("accepts a space-less script (CJK prose is not an identifier)", () => {
+        const cjk = "修复打包脚本使其能够生成本地源中的程序包文件";
+        expect(titleOf(cjk)).toBe(cjk);
+      });
+
+      it("declines rather than guesses when two fields are both plausible descriptions", () => {
+        const artifact = build({
+          work_summary: "Add InternalsVisibleTo so the test project compiles",
+          rationale: "The test project cannot see the internal symbols it asserts on",
+        });
+        expect(artifact.tasks[0]!.title).toContain("Untitled task step1");
+        expect(artifact.notes.some((n) => n.includes("step1") && n.includes("could each be the description"))).toBe(
+          true,
+        );
+      });
+    });
+
+    it("rejects an id-shaped KEY even when its value reads as prose", () => {
+      const artifact = build({ n: 1, run_id: "run mu54vrme4c87 sprint two" });
+      expect(artifact.tasks[0]!.title).toContain("Untitled task step1");
+      expect(artifact.notes.some((n) => n.includes('"run_id"') && n.includes("identifier"))).toBe(true);
+    });
+
+    it("rejects an owner/estimate SYNONYM key the direct lookups do not consume", () => {
+      const owned = build({ n: 1, assignee: "the platform team lead responsible for billing" });
+      expect(owned.tasks[0]!.title).toContain("Untitled task step1");
+      const estimated = build({ n: 1, eta: "about three and a half working days" });
+      expect(estimated.tasks[0]!.title).toContain("Untitled task step1");
+    });
+  });
+
   describe("D5 — goal/acceptance fallback beyond sprintFocus", () => {
     it("falls back to the active backlog item's own text when there is no summary and no sprintFocus", () => {
       const planSynthesis = "Sprint plan locked (1 steps):\n- [high] do the thing — accept: it works";
