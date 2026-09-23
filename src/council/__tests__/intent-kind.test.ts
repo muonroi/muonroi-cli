@@ -8,7 +8,7 @@
  *
  * These tests pin that contract so a future loosening of the type fails here.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { pickPostDebateRecommendation, postDebateContinuation, resolvePostDebateDefaultIndex } from "../index.js";
 import {
   ANALYSIS_INTENT_KINDS,
@@ -187,51 +187,105 @@ describe("isDefaultEligiblePostDebateAction — Amendment A1 default-eligibility
   });
 });
 
-describe("resolvePostDebateDefaultIndex — the lock must constrain the DEFAULT, not the list (A1, session 947db934b573)", () => {
-  // Live defect this closes: intent locked to "evaluation",
-  // pickPostDebateRecommendation correctly returned save_exit, the leader
-  // ranked "implement" first, and the card defaulted to implement anyway
-  // because the old code set defaultIndex = 0 whenever modelActions existed,
-  // discarding both the lock and `recommendation`.
-  //
-  // Signature note (code review round 1): resolvePostDebateDefaultIndex takes
-  // only (options, intentKind) — no recommendationValue. An earlier version
-  // also tried a recommendation-value lookup and an explicit escape-hatch
-  // lookup as fallback tiers; review proved no input could ever reach either
-  // one with a different answer than the eligible-option lookup already gives
-  // (see the function's doc comment for why), so no test could fail without
-  // them. Removed per YAGNI rather than kept as untestable dead code.
+describe("resolvePostDebateDefaultIndex — the DEFAULT must name the RECOMMENDED option (A2, session 115a59c9bb9e/49f6b8c1d8d6)", () => {
+  // Live defect this closes: pickPostDebateRecommendation computed "refine"
+  // ("Fill in 9 section(s)...") but the card's label read "Save & Exit" —
+  // Amendment A1's resolver picked the first list-order-eligible option
+  // (always ~index 0) with NO knowledge of what was actually recommended.
+  // Amendment A2 looks the recommended VALUE up in `options` directly.
 
-  it("a model ranking with implement at index 0 does NOT produce defaultIndex 0 for any analysis kind — and implement stays present, not filtered", () => {
-    for (const k of ANALYSIS_INTENT_KINDS) {
-      const options = [{ value: "implement" }, { value: "save_exit" }, { value: "continue_session" }];
-      const idx = resolvePostDebateDefaultIndex(options, k);
-
-      expect(idx).not.toBe(0);
-      expect(options[idx].value).not.toBe("implement");
-      // The ruling is "not default", not "not offered" — the option must still
-      // be in the list the resolver was given (resolvePostDebateDefaultIndex
-      // never mutates/filters `options`).
-      expect(options.some((o) => o.value === "implement")).toBe(true);
-    }
+  it("resolves to the option whose value equals the recommended action, regardless of its position in the list", () => {
+    // "refine" sits LAST here — a pure list-order/ranking resolver would never
+    // find it without also being told what to look for.
+    const options = [
+      { value: "save_exit" },
+      { value: "continue_session" },
+      { value: "implement" },
+      { value: "refine" },
+    ];
+    expect(resolvePostDebateDefaultIndex(options, "evaluation", "refine")).toBe(3);
+    expect(resolvePostDebateDefaultIndex(options, "evaluation", "save_exit")).toBe(0);
+    expect(resolvePostDebateDefaultIndex(options, "implementation_plan", "implement")).toBe(2);
   });
 
-  it("for both implementation kinds, implement at index 0 IS the default", () => {
+  it("for both implementation kinds, a recommended 'implement' resolves to wherever it sits", () => {
     for (const k of IMPLEMENTATION_INTENT_KINDS) {
       const options = [{ value: "implement" }, { value: "save_exit" }, { value: "continue_session" }];
-      expect(resolvePostDebateDefaultIndex(options, k)).toBe(0);
+      expect(resolvePostDebateDefaultIndex(options, k, "implement")).toBe(0);
     }
   });
 
-  it("falls back to 0 when every option is ineligible — the only way that happens is a list containing nothing but 'implement' entries", () => {
-    // "implement" is the only action isDefaultEligiblePostDebateAction ever
-    // rejects, so eligibleIndex === -1 requires every entry's value to be
-    // "implement" (any other value would already have matched). This is the
-    // one remaining edge the floor exists for, distinct from the two tests
-    // above (which both have a non-"implement" entry present and eligible).
-    for (const k of ANALYSIS_INTENT_KINDS) {
-      expect(resolvePostDebateDefaultIndex([{ value: "implement" }], k)).toBe(0);
-      expect(resolvePostDebateDefaultIndex([{ value: "implement" }, { value: "implement" }], k)).toBe(0);
+  it("a recommended action missing from the options falls back explicitly (never a silent wrong index) and logs it", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // "implement" is not offered at all here — the fallback must still
+      // return SOME in-bounds index (never throw, never -1) and must log the
+      // mismatch rather than silently mis-defaulting.
+      const options = [{ value: "save_exit" }, { value: "continue_session" }];
+      const idx = resolvePostDebateDefaultIndex(options, "evaluation", "implement");
+      expect(idx).toBeGreaterThanOrEqual(0);
+      expect(idx).toBeLessThan(options.length);
+      expect(errSpy).toHaveBeenCalledTimes(1);
+      expect(errSpy.mock.calls[0][0]).toContain("implement");
+      expect(errSpy.mock.calls[0][0]).toContain("missing from the offered options");
+    } finally {
+      errSpy.mockRestore();
     }
   });
+
+  it("falls back to 0 when every option is ineligible AND the recommended action is absent — a list containing nothing but 'implement' entries under an analysis kind", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      for (const k of ANALYSIS_INTENT_KINDS) {
+        expect(resolvePostDebateDefaultIndex([{ value: "implement" }], k, "save_exit")).toBe(0);
+        expect(resolvePostDebateDefaultIndex([{ value: "implement" }, { value: "implement" }], k, "save_exit")).toBe(0);
+      }
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  // ── Invariant, pinned as a property over every option-list shape index.ts
+  // actually builds (not just one example) — the label, the reason and the
+  // default MUST always describe the SAME option. Since the recommendReason
+  // in index.ts is `baseOptions[defaultIndex]?.description`, this is exactly
+  // "baseOptions[resolvePostDebateDefaultIndex(...)].value === recommendation.value"
+  // whenever the recommended action is present — which it always is here, by
+  // construction of each fixture below (mirrors index.ts's own guarantees:
+  // save_exit/implement/continue_session/refine/retry_synthesis/ask_followup
+  // are unconditionally added before the default is resolved).
+  const OPTION_LIST_SHAPES: Array<{ name: string; options: Array<{ value: string }> }> = [
+    {
+      name: "deterministic fallback set (synthesis ok)",
+      options: [{ value: "save_exit" }, { value: "refine" }, { value: "continue_session" }, { value: "implement" }],
+    },
+    {
+      name: "deterministic fallback set (synthesis failed)",
+      options: [{ value: "retry_synthesis" }, { value: "save_exit" }, { value: "continue_session" }],
+    },
+    {
+      name: "model-first set with implement ranked first",
+      options: [{ value: "implement" }, { value: "continue_session" }, { value: "refine" }, { value: "save_exit" }],
+    },
+    {
+      name: "model-first set with save_exit ranked first",
+      options: [{ value: "save_exit" }, { value: "implement" }, { value: "continue_session" }],
+    },
+  ];
+  const RECOMMENDABLE_VALUES = ["save_exit", "implement", "refine", "retry_synthesis", "continue_session"];
+
+  for (const shape of OPTION_LIST_SHAPES) {
+    for (const recommended of RECOMMENDABLE_VALUES) {
+      if (!shape.options.some((o) => o.value === recommended)) continue;
+      it(`invariant holds — "${shape.name}" recommending "${recommended}"`, () => {
+        for (const k of [...ANALYSIS_INTENT_KINDS, ...IMPLEMENTATION_INTENT_KINDS]) {
+          const idx = resolvePostDebateDefaultIndex(shape.options, k, recommended);
+          // The option the default POINTS AT is the one recommended — so a
+          // caller reading label/description off `options[idx]` can never
+          // disagree with what was recommended.
+          expect(shape.options[idx].value).toBe(recommended);
+        }
+      });
+    }
+  }
 });

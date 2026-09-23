@@ -10,7 +10,7 @@ import { planningArtifact } from "../gsd/paths.js";
 import type { PerspectiveVerdict } from "../gsd/plan-council.js";
 import { advancePhase, canExecute, readState, setStateField } from "../gsd/workflow-engine.js";
 import { runPipeline } from "../pil/pipeline.js";
-import type { PipelineContext } from "../pil/types.js";
+import type { PipelineContext, TaskType } from "../pil/types.js";
 import { idealTrace } from "../product-loop/ideal-trace.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { appendSystemMessage, logInteraction } from "../storage/index.js";
@@ -393,6 +393,20 @@ export function pickPostDebateRecommendation(input: {
    * output-kind heuristics below.
    */
   criteriaUnmet?: number;
+  /**
+   * Session 115a59c9bb9e/49f6b8c1d8d6 — THIS turn's own PIL classification says
+   * the user wants to build (pilCtx.intentKind==="task" AND
+   * (pilCtx.deliverableKind==="code" OR pilCtx.taskType is code-producing)),
+   * independent of what `outputKind` (the council's own locked debate-shape
+   * kind) concluded. `outputKind` can be stale/mis-classified relative to a
+   * later follow-up in the same debate (the launch-card lock is set once, from
+   * the ORIGINAL topic) — the live defect was a turn that literally said "tiến
+   * hành implement" (taskType=generate, intentKind=task) still recommending
+   * "Save & Exit" because the locked kind read as analysis-shape. Optional so
+   * every existing caller/test keeps working unchanged when the signal isn't
+   * available.
+   */
+  turnWantsImplementation?: boolean;
 }): { value: PostDebateAction; reason: string } {
   if (input.synthesisFailed) {
     return {
@@ -407,7 +421,14 @@ export function pickPostDebateRecommendation(input: {
       reason: `${n} success criteri${n === 1 ? "on" : "a"} still unmet — press the council to close ${n === 1 ? "it" : "them"} before treating this as settled.`,
     };
   }
-  if (input.hasEmptySections) {
+  // RULE (evidence: plan-phase.ts runPlannerPhase drafts PLAN.md from the full
+  // synthesis text + exchange transcript, never from outcome.sections) — an
+  // empty structured section can only block "refine" being unnecessary IF this
+  // debate's deliverable actually IS its structured sections; for an
+  // implementation-shape debate (by locked kind OR by this turn's own PIL
+  // signal) it is not, so empty sections never veto recommending implement.
+  const implementationLeaning = isImplementationKind(input.outputKind) || !!input.turnWantsImplementation;
+  if (input.hasEmptySections && !implementationLeaning) {
     return { value: "refine", reason: `Fill in ${input.refinementTopics.length} section(s) the debate left empty.` };
   }
   if (input.confidenceLevel === "low") {
@@ -417,12 +438,19 @@ export function pickPostDebateRecommendation(input: {
     };
   }
   if (!input.hasPlan) {
-    return isImplementationKind(input.outputKind)
-      ? { value: "implement", reason: "Convert the agreed outcome into concrete steps." }
-      : {
-          value: "save_exit",
-          reason: `This was a ${input.outputKind} debate — the synthesis above is the deliverable; save it.`,
-        };
+    if (implementationLeaning) {
+      return {
+        value: "implement",
+        reason:
+          !isImplementationKind(input.outputKind) && input.turnWantsImplementation
+            ? "This turn asked to implement — convert the agreed outcome into concrete steps."
+            : "Convert the agreed outcome into concrete steps.",
+      };
+    }
+    return {
+      value: "save_exit",
+      reason: `This was a ${input.outputKind} debate — the synthesis above is the deliverable; save it.`,
+    };
   }
   return { value: "save_exit", reason: "Outcome looks solid — save and move on." };
 }
@@ -478,35 +506,52 @@ export function resolveRunKind(locked: IntentKind | undefined, synthesis: string
 }
 
 /**
- * Amendment A1 (session 947db934b573) — resolve the post-debate DEFAULT index
- * without ever landing on a default-ineligible option (isDefaultEligiblePostDebateAction)
- * when an eligible one exists elsewhere in the list. Never filters `options` —
- * every entry stays visible; this only picks which one is pre-selected.
+ * Amendment A2 (session 115a59c9bb9e/49f6b8c1d8d6) — resolve the post-debate
+ * DEFAULT index by finding `recommendedAction` (pickPostDebateRecommendation's
+ * own verdict) inside `options`. Never filters `options` — every entry stays
+ * visible; this only picks which one is pre-selected.
  *
- * Returns the first default-eligible option in `options`' own order — this IS
- * the model's own best-first ranking on the model-first path (baseOptions is
- * built straight from outcome.nextActions), and the deterministic build order
- * on the fallback path — or 0 if none is eligible.
+ * This REPLACES Amendment A1's "first default-eligible option in list order"
+ * rule. A1 never looked at what was actually recommended — it just picked the
+ * first option `isDefaultEligiblePostDebateAction` didn't reject, and that
+ * predicate accepts everything except "implement" on an analysis-shape kind.
+ * So in practice A1 almost always resolved to index 0 regardless of the
+ * recommendation, because index 0 (typically "Save & Exit" / "Retry
+ * Synthesis") is essentially always eligible — the exact live defect: the
+ * card's label read "Save & Exit" next to a reason computed for "refine"
+ * ("Fill in 9 section(s)..."), because the label came from this function
+ * (index 0, list order) and the reason came from `recommendation` (a totally
+ * separate computation) — two independent answers about "what's the default"
+ * that had no mechanism keeping them in agreement.
  *
- * That "0 if none is eligible" floor is deliberately NOT a recommendation-value
- * lookup or an explicit save_exit/continue_session search. With the current
- * predicate, isDefaultEligiblePostDebateAction gates ONLY "implement", and only
- * for analysis-shape kinds — so `eligibleIndex === -1` can happen ONLY when
- * every single entry in `options` has value "implement" (any other value is
- * always eligible, so its presence would have already satisfied the findIndex
- * above). In that situation there is no non-"implement" entry anywhere in the
- * list to fall back to, so a recommendation-value or escape-hatch lookup could
- * only ever re-find the same ineligible "implement" entry or come up empty —
- * it cannot produce an answer this floor doesn't already give. An earlier
- * version of this function carried those two extra lookup tiers; code review
- * (2026-08-07) found no input that could make them return anything different
- * from this floor, so no test could fail without them — removed per YAGNI.
- * If isDefaultEligiblePostDebateAction is ever widened to gate more than
- * "implement", that widening is exactly when a recommendation/escape-hatch
- * fallback becomes meaningful again — re-add it there, together with a test
- * that is provably impossible to write against today's narrower predicate.
+ * The invariant this restores: the pre-selected default, its rendered label,
+ * and its rendered reason must always name the SAME option — enforced by
+ * having them all read from `options[resolvePostDebateDefaultIndex(...)]`
+ * rather than from two different computations. See the call site
+ * (`recommendReason`/`recommendLine`) for the other half.
+ *
+ * `recommendedAction` is expected to already be present in `options` — every
+ * value `pickPostDebateRecommendation` can return ("save_exit" | "implement" |
+ * "refine" | "ask_followup" | "retry_synthesis") is unconditionally added to
+ * `options` by the block(s) that build it before this is called (the
+ * canonicalization block, and the hasEmptySections/synthesisFailed additions
+ * in both the model-first and deterministic branches). When it is somehow
+ * still missing — a contract violation, not a normal path — fall back to the
+ * old A1 ranking (first `isDefaultEligiblePostDebateAction`-eligible option)
+ * and log it loudly rather than silently mismatching label and reason again.
  */
-export function resolvePostDebateDefaultIndex(options: Array<{ value: string }>, intentKind: IntentKind): number {
+export function resolvePostDebateDefaultIndex(
+  options: Array<{ value: string }>,
+  intentKind: IntentKind,
+  recommendedAction: string,
+): number {
+  const recommendedIndex = options.findIndex((o) => o.value === recommendedAction);
+  if (recommendedIndex >= 0) return recommendedIndex;
+  console.error(
+    `[council] recommended post-debate action "${recommendedAction}" is missing from the offered options ` +
+      `(${options.map((o) => o.value).join(", ")}) for intent kind "${intentKind}" — falling back to the first ` +
+      `default-eligible option instead of leaving the default unresolved.`,
+  );
   const eligibleIndex = options.findIndex((o) => isDefaultEligiblePostDebateAction(intentKind, o.value));
   return eligibleIndex >= 0 ? eligibleIndex : 0;
 }
@@ -1875,9 +1920,30 @@ export async function* runCouncil(
 
       // The run's authoritative intent kind (launch-card lock wins — see
       // resolveRunKind's doc comment). Reused below by resolvePostDebateDefaultIndex
-      // (Amendment A1) so the default-index resolution reads the same lock the
+      // (Amendment A2) so the fallback ranking reads the same lock the
       // recommendation itself was computed from — a single source, not two.
       const runKind = resolveRunKind(spec.intentKind, synthesisText);
+
+      // Session 115a59c9bb9e/49f6b8c1d8d6 — the intent signal reachable at this
+      // call site beyond the council's own locked `runKind`. `pilCtx` (set
+      // earlier in this function from `runPipeline`) carries the PIL
+      // classification of THIS turn's raw message, independent of when the
+      // debate's launch card locked its shape:
+      //   - pilCtx.intentKind: "task" | "chitchat" | null — coding intent present
+      //   - pilCtx.deliverableKind: "answer" | "code" | "report" | null — "code"
+      //     means create/edit files, the most direct implementation signal
+      //   - pilCtx.taskType: TaskType | null — "generate"/"build"/"refactor"/
+      //     "debug" are code-producing; "analyze"/"documentation"/"plan"/
+      //     "general" are not
+      // A turn is treated as wanting implementation only when it has coding
+      // intent AND (the model named "code" as the deliverable OR the task type
+      // is one of the code-producing kinds) — requiring both intentKind and one
+      // of the two stronger signals avoids a lone borderline taskType flipping
+      // the recommendation on its own.
+      const IMPLEMENTATION_TASK_TYPES = new Set<TaskType>(["generate", "build", "refactor", "debug"]);
+      const turnWantsImplementation =
+        pilCtx?.intentKind === "task" &&
+        (pilCtx?.deliverableKind === "code" || (!!pilCtx?.taskType && IMPLEMENTATION_TASK_TYPES.has(pilCtx.taskType)));
 
       // Recommendation surfaced to the user as the default action. The
       // implementation_plan-vs-decision/evaluation split lives in
@@ -1890,6 +1956,7 @@ export async function* runCouncil(
         hasPlan: !!hasPlan,
         outputKind: runKind,
         criteriaUnmet: inconclusive ? critOutcome.unmetLabels.length : 0,
+        turnWantsImplementation,
       });
 
       const baseOptions: Array<{ label: string; description: string; value: string; kind: "choice" | "freetext" }> = [];
@@ -2014,10 +2081,12 @@ export async function* runCouncil(
         if (!baseOptions.some((o) => o.value === "continue_session")) baseOptions.push({ ...CONTINUE_OPT });
         if (!synthesisFailed && !inconclusive && !baseOptions.some((o) => o.value === "implement")) {
           // Insert at index 1, NOT 0 — the model's own best-first pick (index 0)
-          // stays first in the ranking that resolvePostDebateDefaultIndex reads
-          // below (Amendment A1). We only GUARANTEE the build path is present +
-          // prominent; we don't override the model's judgment that building
-          // wasn't the recommended next move.
+          // stays first. resolvePostDebateDefaultIndex (Amendment A2) no longer
+          // reads list position for its primary answer — it looks up
+          // `recommendation.value` by VALUE — so this insertion position only
+          // affects list-order fallbacks, not the normal default. We only
+          // GUARANTEE the build path is present + prominent; we don't override
+          // the model's judgment that building wasn't the recommended next move.
           baseOptions.splice(1, 0, {
             label: "Start Implementation",
             description: "Load the council conclusion as the spec and build it (plan → change → verify)",
@@ -2098,43 +2167,30 @@ export async function* runCouncil(
         });
       }
 
-      // Amendment A1 (session 947db934b573) — defaultIndex must never select an
-      // action inconsistent with the locked runKind (isDefaultEligiblePostDebateAction),
-      // even though the model orders baseOptions best-first. See
-      // resolvePostDebateDefaultIndex's doc comment for the fallback order.
+      // Amendment A2 (session 115a59c9bb9e/49f6b8c1d8d6) — defaultIndex must
+      // point at the SAME option that `recommendLine`'s label and reason
+      // describe. See resolvePostDebateDefaultIndex's doc comment for why A1's
+      // "first eligible option in list order" rule is gone: it computed the
+      // default independently of `recommendation`, so the two could (and did)
+      // disagree — the card once showed label "Save & Exit" next to a reason
+      // written for "refine".
       //
-      // inconclusive/lowGrounding keep the hardcoded 0 they had before this
-      // amendment: both branches unshift an `ask_followup` option ("Keep
-      // working the N unmet criteria" / "Raise confidence — have the council
-      // cite & verify", built in the two `if` blocks directly above this one)
-      // as the honest default regardless of intent. ask_followup is never
-      // default-ineligible — only "implement" is, and only for analysis-shape
-      // kinds — so that forced index 0 is itself always a legal default under
-      // the new predicate and does not need to route through
-      // resolvePostDebateDefaultIndex. If a future option ever became the
-      // pinned index-0 choice in this branch AND were default-ineligible, this
-      // comment is your signal to re-derive the ordering instead of trusting it.
-      const defaultIndex = inconclusive || lowGrounding ? 0 : resolvePostDebateDefaultIndex(baseOptions, runKind);
-      // recommendReason's TEXT SOURCE (code review round 1): inconclusive/
-      // lowGrounding and the model-first path both PIN the default to an
-      // option index.ts itself constructed/ranked for this exact turn (the
-      // criteria/confidence follow-up, or the model's own best-first pick), so
-      // that option's own `description` is the right explanation — read via
-      // `baseOptions[defaultIndex]`, NOT the literal index 0, since defaultIndex
-      // is no longer necessarily 0 on the model-first path (that's the whole
-      // point of this amendment). The deterministic fallback path has no such
-      // freshly-authored option — its options are a fixed, reusable menu — so
-      // it keeps using `recommendation.reason`, the curated per-recommendation
-      // text pickPostDebateRecommendation already produced. Do not swap the
-      // deterministic branch to `baseOptions[defaultIndex]?.description`: that
-      // trades curated reasoning for generic option copy with no test coverage
-      // for the regression (this was flagged in round 1 review).
-      const recommendReason =
-        inconclusive || lowGrounding
-          ? (baseOptions[defaultIndex]?.description ?? recommendation.reason)
-          : modelActions
-            ? (baseOptions[defaultIndex]?.description ?? recommendation.reason)
-            : recommendation.reason;
+      // inconclusive/lowGrounding keep the hardcoded 0 they had before A1: both
+      // branches unshift a fresh `ask_followup` option ("Keep working the N
+      // unmet criteria" / "Raise confidence — have the council cite & verify",
+      // built in the two `if` blocks directly above this one) as the honest
+      // default regardless of intent, and that option IS index 0 by
+      // construction (unshift), so there is nothing for
+      // resolvePostDebateDefaultIndex to resolve.
+      const defaultIndex =
+        inconclusive || lowGrounding ? 0 : resolvePostDebateDefaultIndex(baseOptions, runKind, recommendation.value);
+      // Single source for BOTH the label (`recommendLine` below) and the
+      // reason: whatever option ended up at `defaultIndex` — never
+      // `recommendation.reason` read independently of it — so the two can
+      // never again name different options. `?? recommendation.reason` is
+      // purely a defensive fallback for the (should-never-happen) case of an
+      // empty `baseOptions`.
+      const recommendReason = baseOptions[defaultIndex]?.description ?? recommendation.reason;
 
       const runReceipt = formatRunReceipt({
         rounds: debateState.roundCount,
@@ -2219,7 +2275,11 @@ export async function* runCouncil(
                 ? `\nDeferred to implementation: ${critOutcome.deferredLabels.join("; ")}`
                 : "") +
               (hasEmptySections ? `\nUnresolved areas: ${refinementTopics.join(", ")}` : "") +
-              `\n→ ${recommendation.reason}`,
+              // Same invariant as `recommendLine` above — this must name the same
+              // option as `defaultIndex`/`recommendReason`, not `recommendation`
+              // directly (which can differ from the resolved default on the
+              // explicit-fallback path in resolvePostDebateDefaultIndex).
+              `\n→ ${recommendReason}`,
             isRequired: false,
             options: baseOptions,
             defaultIndex,
