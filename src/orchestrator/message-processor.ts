@@ -295,10 +295,15 @@ const _injectedGuidanceSha = new Map<string, string>();
  * Writes a `pre-stream.<name>.start` / `pre-stream.<name>.end` pair via the
  * existing crash-breadcrumb trail (`~/.muonroi-cli/council-breadcrumbs.jsonl`,
  * sync `fs.appendFileSync` — survives a watchdog abort because it is written
- * BEFORE `fn()` settles, not after). If a phase hangs, the last line in the
- * file is its `.start` with no matching `.end` — the orchestrator's watchdog
- * catch reads exactly that (see `getLastBreadcrumb()` in orchestrator.ts) to
- * attribute the hang to a phase name in the `error` interaction_log row.
+ * BEFORE `fn()` settles, not after). If a phase hangs, its `.start` has no
+ * matching `.end` — the orchestrator's watchdog catch reads exactly that (see
+ * `getLastOpenPhase(this.session?.id)` in orchestrator.ts) to attribute the
+ * hang to a phase name in the `error` interaction_log row.
+ *
+ * `sessionId` is what makes that attribution safe under nesting: it is stamped
+ * on every line, and the tracker keeps one open-phase set PER SESSION, so a
+ * forked sub-session running its own phases concurrently cannot shadow the
+ * parent's. Always pass the session that OWNS the phase, never a child's.
  */
 export function preStreamPhase<T>(name: string, sessionId: string | undefined, fn: () => Promise<T>): Promise<T> {
   breadcrumb(`pre-stream.${name}.start`, { sessionId });

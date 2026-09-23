@@ -34,9 +34,12 @@ import {
   breadcrumb,
   breadcrumbFilePath,
   getLastBreadcrumb,
+  getLastOpenPhase,
   isBreadcrumbEnabled,
   isHeartbeatArmed,
   MAX_FILE_BYTES,
+  MAX_OPEN_PHASES_PER_SESSION,
+  MAX_TRACKED_SESSIONS,
   setBreadcrumbSession,
 } from "../crash-breadcrumb.js";
 
@@ -180,6 +183,123 @@ describe("breadcrumb()", () => {
   it("is armed by DEFAULT — the whole point is that it is on when the crash recurs", () => {
     delete process.env.MUONROI_COUNCIL_BREADCRUMBS;
     expect(isBreadcrumbEnabled()).toBe(true);
+  });
+});
+
+/**
+ * Per-session tails and open-phase tracking, and the BOUND on both. This module
+ * is loaded in every run and a long-lived process forks a fresh sub-session id
+ * per reactive turn, so an unbounded per-session map is a leak.
+ */
+describe("per-session tails are bounded", () => {
+  it("keeps each session's own tail while the process-global tail follows the last writer", () => {
+    setBreadcrumbSession("sess-A");
+    breadcrumb("pre-stream.routerDecide.start");
+    setBreadcrumbSession("sess-B");
+    breadcrumb("pre-stream.pilPrep.start");
+    breadcrumb("pre-stream.pilPrep.end");
+
+    expect(getLastBreadcrumb()?.marker).toBe("pre-stream.pilPrep.end");
+    expect(getLastBreadcrumb("sess-A")?.marker).toBe("pre-stream.routerDecide.start");
+    expect(getLastOpenPhase("sess-A")).toBe("routerDecide");
+    expect(getLastOpenPhase("sess-B")).toBeNull();
+  });
+
+  it("evicts the LEAST-RECENTLY-written session once the cap is exceeded", () => {
+    setBreadcrumbSession("victim");
+    breadcrumb("pre-stream.gsdGate.start");
+    expect(getLastOpenPhase("victim")).toBe("gsdGate");
+
+    // Flood with exactly MAX_TRACKED_SESSIONS fresh sessions: `victim` is then
+    // the oldest of MAX+1 and is the one dropped.
+    for (let i = 0; i < MAX_TRACKED_SESSIONS; i++) {
+      setBreadcrumbSession(`flood-${i}`);
+      breadcrumb("pre-stream.pilPrep.start");
+    }
+
+    expect(getLastBreadcrumb("victim")).toBeNull();
+    expect(getLastOpenPhase("victim")).toBeNull();
+    // The newest entries survive intact.
+    expect(getLastOpenPhase(`flood-${MAX_TRACKED_SESSIONS - 1}`)).toBe("pilPrep");
+  });
+
+  it("evicting an old session never corrupts a live one's answer", () => {
+    setBreadcrumbSession("live");
+    breadcrumb("pre-stream.subSessionSpawn.start");
+
+    // Every flood session both opens AND closes a phase, so nothing but
+    // bookkeeping pressure reaches the live session.
+    for (let i = 0; i < MAX_TRACKED_SESSIONS * 3; i++) {
+      setBreadcrumbSession(`churn-${i}`);
+      breadcrumb("pre-stream.toolEngine.start");
+      breadcrumb("pre-stream.toolEngine.end");
+      // Keep `live` warm the way a real parent does — it is still writing.
+      setBreadcrumbSession("live");
+      breadcrumb("council.heartbeat", { inFlightCount: 1 });
+    }
+
+    expect(getLastBreadcrumb("live")?.marker).toBe("council.heartbeat");
+    // The heartbeat is not a `.start`/`.end` pair, so it must not disturb the
+    // open phase the watchdog needs.
+    expect(getLastOpenPhase("live")).toBe("subSessionSpawn");
+  });
+
+  it("bounds the open-phase set per session, keeping the most recent starts", () => {
+    setBreadcrumbSession("many-open");
+    for (let i = 0; i < MAX_OPEN_PHASES_PER_SESSION + 5; i++) {
+      breadcrumb(`pre-stream.phase${i}.start`);
+    }
+    // The newest start is the attribution; the oldest were dropped.
+    expect(getLastOpenPhase("many-open")).toBe(`phase${MAX_OPEN_PHASES_PER_SESSION + 4}`);
+    breadcrumb(`pre-stream.phase${MAX_OPEN_PHASES_PER_SESSION + 4}.end`);
+    expect(getLastOpenPhase("many-open")).toBe(`phase${MAX_OPEN_PHASES_PER_SESSION + 3}`);
+  });
+});
+
+describe("open-phase tracking matches the markers real call sites emit", () => {
+  it("closes `council.candidate.start` on `.ok` and on `.failed`, not only on `.end`", () => {
+    // council/llm.ts:1829 opens with `.start` and closes with `.ok` (:1849) or
+    // `.failed` (:1772 via noteFailure) — a tracker that only honours `.end`
+    // would leave every candidate permanently "open" and mis-attribute later.
+    setBreadcrumbSession("cand");
+    breadcrumb("council.candidate.start", { attempt: 1 });
+    expect(getLastOpenPhase("cand")).toBe("council.candidate");
+    breadcrumb("council.candidate.failed", { attempt: 1 });
+    expect(getLastOpenPhase("cand")).toBeNull();
+
+    breadcrumb("council.candidate.start", { attempt: 2 });
+    breadcrumb("council.candidate.ok", { attempt: 2 });
+    expect(getLastOpenPhase("cand")).toBeNull();
+  });
+
+  it("ignores a closer with no matching open start (the `blocked` candidate path)", () => {
+    // llm.ts:1808-1822 calls noteFailure and `continue`s BEFORE any `.start`,
+    // so a `.failed` with nothing open is a real trail shape. It must not
+    // underflow into a negative depth that swallows the next real `.start`.
+    setBreadcrumbSession("blocked");
+    breadcrumb("council.candidate.failed", { reason: "blocked" });
+    expect(getLastOpenPhase("blocked")).toBeNull();
+    breadcrumb("council.candidate.start", { attempt: 2 });
+    expect(getLastOpenPhase("blocked")).toBe("council.candidate");
+  });
+
+  it("keeps a concurrently re-entered phase open until every instance closes", () => {
+    // A debate round runs several candidate chains in parallel under one
+    // session, so the same stem is opened more than once before any closes.
+    setBreadcrumbSession("parallel");
+    breadcrumb("council.candidate.start", { attempt: 1 });
+    breadcrumb("council.candidate.start", { attempt: 2 });
+    breadcrumb("council.candidate.ok", { attempt: 1 });
+    expect(getLastOpenPhase("parallel")).toBe("council.candidate");
+    breadcrumb("council.candidate.failed", { attempt: 2 });
+    expect(getLastOpenPhase("parallel")).toBeNull();
+  });
+
+  it("does not treat a marker with no verb segment as a phase", () => {
+    setBreadcrumbSession("plain");
+    breadcrumb("idle");
+    expect(getLastOpenPhase("plain")).toBeNull();
+    expect(getLastBreadcrumb("plain")?.marker).toBe("idle");
   });
 });
 

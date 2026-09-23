@@ -23,8 +23,9 @@
  *   G2  Three "empty completions" in 5ms — indistinguishable from "we never
  *       called the provider". → attempt START/END breadcrumbs give every
  *       candidate an elapsed time (see `tracedGenerateWithFallback`).
- *   G3  No record the process ended. → `getLastBreadcrumb()` feeds the
- *       `process.on("exit")` / signal records in `src/index.ts`.
+ *   G3  No record the process ended. → `getLastBreadcrumb()` (no argument —
+ *       the process-global tail) feeds the `process.on("exit")` / signal
+ *       records in `src/index.ts`.
  *   G4  A V8/JSC fatal (OOM) bypasses every JS handler. → every line carries
  *       `process.memoryUsage()`. A heap/RSS series that climbs right up to the
  *       last written line is how an OOM is CONFIRMED or EXCLUDED after the
@@ -48,6 +49,17 @@
  *     write failures the writer self-disables for the rest of the process.
  *   - **No model/provider string literals** (Zero Hardcode Rule) — every model
  *     or provider id in a breadcrumb is passed in by the caller.
+ *
+ * PER-SESSION ATTRIBUTION (see {@link getLastOpenPhase})
+ *   The in-memory tail used to be ONE module-level slot, which made "which
+ *   phase hung" process-global: a nested run — a forked sub-session
+ *   (`SPAWN_SUB_SESSION` in `src/orchestrator/orchestrator.ts`) or an `/ideal`
+ *   sprint — writes its own breadcrumbs and overwrites the slot, so the
+ *   parent's watchdog could name a phase the CHILD was in. A wrong attribution
+ *   is worse than none, because the next investigator trusts it.
+ *
+ *   The tail is now kept per session id AND accompanied by the set of phases
+ *   that session has OPEN (a `<stem>.start` with no closer yet).
  *
  * BOUNDING
  *   Single-rollover size cap: when the active file would exceed
@@ -99,6 +111,64 @@ export const DEFAULT_HEARTBEAT_MS = 5_000;
 /** Self-disable after this many consecutive write failures. */
 const MAX_CONSECUTIVE_FAILURES = 3;
 
+/**
+ * How many distinct session ids keep an in-memory tail + open-phase set.
+ *
+ * This module loads in EVERY run and a long-lived process mints a fresh
+ * sub-session id per reactive fork, so the map must be capped or it is a leak
+ * that grows for as long as the CLI is open. 32 is chosen against what the
+ * lookup is FOR: the watchdog only ever asks about a session whose turn just
+ * died, which is by construction one of the most recently written — so the
+ * eviction order (least-recently-written first) can only ever drop a session
+ * nobody will ask about again. Measured headroom: the deepest concurrency this
+ * codebase produces is one main session plus its forked sub-session plus the
+ * council session of the turn in flight (3), so 32 is ~10x the live working
+ * set. Each entry is one record (~0.5-2 KB; a heartbeat record carrying eight
+ * in-flight calls is the large case) plus at most
+ * {@link MAX_OPEN_PHASES_PER_SESSION} small counters, so the ceiling is a few
+ * hundred KB and it is FLAT — it does not grow with uptime.
+ */
+export const MAX_TRACKED_SESSIONS = 32;
+
+/**
+ * How many distinct open phase stems one session retains.
+ *
+ * Measured: this codebase emits 17 distinct `<stem>.start` markers into the
+ * breadcrumb trail (11 static `pre-stream.*` sites, 5 dynamic
+ * `preStreamPhase(name, …)` names, and `council.candidate`), and they nest at
+ * most ~3 deep. 64 is ~4x that, so the cap can only bite if a caller starts
+ * building marker names out of runtime data. When it does bite, the OLDEST
+ * open stem is dropped: attribution reports the most recently started open
+ * phase, so the oldest entry is the one whose loss costs least.
+ */
+export const MAX_OPEN_PHASES_PER_SESSION = 64;
+
+/** Marker suffix that OPENS a phase. Any other suffix on the same stem closes it. */
+const OPEN_SUFFIX = "start";
+
+/** Stripped from an open phase stem before it is reported. */
+const PHASE_PREFIX = "pre-stream.";
+
+/**
+ * Bucket for records that carry no session id at all (the module-level session
+ * was never set, or a call site passed `sessionId: undefined` explicitly).
+ * A `\0` prefix cannot collide with a real session id.
+ */
+const NO_SESSION_KEY = "\u0000no-session";
+
+interface OpenPhase {
+  /** How many times this stem was opened and not yet closed (parallel candidates). */
+  depth: number;
+  /** Write sequence of the most recent `.start` — orders "which open phase is newest". */
+  lastStartSeq: number;
+}
+
+interface SessionTrail {
+  last: BreadcrumbRecord;
+  /** Insertion-ordered by `lastStartSeq` ascending, so the LAST entry is the newest. */
+  open: Map<string, OpenPhase>;
+}
+
 export interface BreadcrumbMemory {
   rss: number;
   heapUsed: number;
@@ -126,6 +196,14 @@ let consecutiveFailures = 0;
 let disabledAfterFailure = false;
 let cachedBytes: number | null = null;
 let lastRecord: BreadcrumbRecord | null = null;
+
+/**
+ * Per-session tails, insertion-ordered by last write so the FIRST key is the
+ * least-recently-written — an LRU with no extra bookkeeping.
+ */
+const trails = new Map<string, SessionTrail>();
+/** Monotonic write counter. Ordering must not depend on `Date.now()` granularity. */
+let writeSeq = 0;
 
 /**
  * Returns true unless the kill switch is set.
@@ -165,9 +243,130 @@ export function setBreadcrumbSession(id: string | undefined): void {
   sessionId = id;
 }
 
-/** The most recent breadcrumb written by this process, or null. */
-export function getLastBreadcrumb(): BreadcrumbRecord | null {
-  return lastRecord;
+function sessionKey(id: string | undefined): string {
+  return typeof id === "string" && id.length > 0 ? id : NO_SESSION_KEY;
+}
+
+/**
+ * The most recent breadcrumb, or null.
+ *
+ * With no argument this is the PROCESS-GLOBAL tail — what the `process.on
+ * ("exit")` / signal records in `src/index.ts` want, since they report on the
+ * process as a whole and no session owns that question.
+ *
+ * With a session id it is that session's own tail, which is what anything
+ * reporting on ONE run must ask for: a nested run writing concurrently moves
+ * the global tail but not this one.
+ */
+export function getLastBreadcrumb(sessionId?: string): BreadcrumbRecord | null {
+  if (sessionId === undefined) return lastRecord;
+  return trails.get(sessionKey(sessionId))?.last ?? null;
+}
+
+/**
+ * The phase this session still has OPEN, most-recently-started first, with the
+ * `pre-stream.` prefix stripped — or null when the session has nothing open (or
+ * is not tracked at all, which is the honest answer to "no evidence").
+ *
+ * WHY NOT "is the session's last record a `.start`".
+ *   That test is right only for a FLAT sequence of phases. Phases nest:
+ *   `pre-stream.toolEngine` brackets the whole stream (tool-engine.ts:727 /
+ *   :2094) while `pre-stream.ensureCouncilFactory` (council/llm.ts:128/:136)
+ *   opens and closes inside it. If the hang lands in the outer phase after the
+ *   inner one finished, the session's last record is the inner `.end` and the
+ *   flat test answers null — it loses a hang it had the evidence to name. So
+ *   what is tracked is the OPEN SET, and the answer is the newest member.
+ *
+ * WHY "any other suffix closes", not just `.end`.
+ *   `council.candidate.start` (llm.ts:1829) is closed by `council.candidate.ok`
+ *   (:1849) or `council.candidate.failed` (:1772), never by `.end`. A tracker
+ *   that only honoured `.end` would hold every candidate open forever and then
+ *   attribute a later hang to a candidate that finished long ago — exactly the
+ *   stale attribution this whole change exists to stop.
+ */
+export function getLastOpenPhase(sessionId?: string): string | null {
+  const trail = trails.get(sessionKey(sessionId));
+  if (!trail || trail.open.size === 0) return null;
+  let newest: string | null = null;
+  let newestSeq = -1;
+  for (const [stem, phase] of trail.open) {
+    if (phase.lastStartSeq > newestSeq) {
+      newestSeq = phase.lastStartSeq;
+      newest = stem;
+    }
+  }
+  if (newest === null) return null;
+  return newest.startsWith(PHASE_PREFIX) ? newest.slice(PHASE_PREFIX.length) : newest;
+}
+
+/**
+ * Fold one written record into its session's tail + open-phase set.
+ * Called only on a SUCCESSFUL append, so in-memory state and the file agree.
+ */
+function noteSessionTrail(record: BreadcrumbRecord): void {
+  try {
+    noteSessionTrailInner(record);
+  } catch (err) {
+    // Bookkeeping must never be mistaken for a WRITE failure (the caller's
+    // catch counts those toward self-disabling the whole trail), and must never
+    // reach the council path. Report it — No Silent Catch.
+    logger.error("orchestrator", "[crash-breadcrumb] per-session trail bookkeeping failed", {
+      marker: record.marker,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+function noteSessionTrailInner(record: BreadcrumbRecord): void {
+  const key = sessionKey(typeof record.sessionId === "string" ? record.sessionId : undefined);
+  const existing = trails.get(key);
+  // Delete-then-set moves the key to the end: insertion order becomes LRU order.
+  if (existing) trails.delete(key);
+  const trail: SessionTrail = existing ?? { last: record, open: new Map<string, OpenPhase>() };
+  trail.last = record;
+  updateOpenPhases(trail.open, record.marker);
+  trails.set(key, trail);
+  while (trails.size > MAX_TRACKED_SESSIONS) {
+    const oldest = trails.keys().next();
+    if (oldest.done) break;
+    trails.delete(oldest.value);
+  }
+}
+
+function updateOpenPhases(open: Map<string, OpenPhase>, marker: string): void {
+  const dot = marker.lastIndexOf(".");
+  // No verb segment (`idle`, `a`) — not a phase marker, nothing to open or close.
+  if (dot <= 0 || dot === marker.length - 1) return;
+  const stem = marker.slice(0, dot);
+  const suffix = marker.slice(dot + 1);
+
+  if (suffix !== OPEN_SUFFIX) {
+    const phase = open.get(stem);
+    // A closer with nothing open is a real trail shape, not a bug: llm.ts's
+    // `blocked` candidate path (:1808-1822) reports a failure and `continue`s
+    // before any `.start`. Ignore it — depth must never go negative, or the
+    // next genuine `.start` would be swallowed.
+    if (!phase) return;
+    phase.depth--;
+    if (phase.depth <= 0) open.delete(stem);
+    return;
+  }
+
+  const phase = open.get(stem);
+  if (phase) {
+    phase.depth++;
+    phase.lastStartSeq = ++writeSeq;
+    // Re-insert so insertion order stays ordered by lastStartSeq.
+    open.delete(stem);
+    open.set(stem, phase);
+  } else {
+    open.set(stem, { depth: 1, lastStartSeq: ++writeSeq });
+  }
+  while (open.size > MAX_OPEN_PHASES_PER_SESSION) {
+    const oldest = open.keys().next();
+    if (oldest.done) break;
+    open.delete(oldest.value);
+  }
 }
 
 function readMemory(): BreadcrumbMemory {
@@ -252,6 +451,7 @@ export function breadcrumb(marker: string, extra?: Record<string, unknown>): voi
     cachedBytes = (cachedBytes ?? 0) + Buffer.byteLength(line, "utf8");
     consecutiveFailures = 0;
     lastRecord = record;
+    noteSessionTrail(record);
   } catch (err) {
     consecutiveFailures++;
     // No Silent Catch: name module + operation + message. Report every failure
@@ -372,6 +572,8 @@ export function __resetBreadcrumbStateForTests(): void {
   disabledAfterFailure = false;
   cachedBytes = null;
   lastRecord = null;
+  trails.clear();
+  writeSeq = 0;
   inFlight.clear();
   stopHeartbeat();
 }

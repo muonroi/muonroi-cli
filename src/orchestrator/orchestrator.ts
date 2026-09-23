@@ -1,7 +1,7 @@
 // Multi-provider wired — runtime dispatch via providers/runtime.ts.
 
 import type { ModelMessage, ToolSet } from "ai";
-import { breadcrumb, getLastBreadcrumb } from "../council/crash-breadcrumb.js";
+import { breadcrumb, getLastOpenPhase } from "../council/crash-breadcrumb.js";
 import { extractSession } from "../ee/extract-session.js";
 import {
   bootstrapEEClient,
@@ -3895,24 +3895,21 @@ export class Agent {
               //   3. an `error` chunk, not a toast — the UI folds `error` content
               //      into the transcript, while a toast auto-dismisses.
               const stallMessage = `Turn ended by watchdog: ${stallErr.message}`;
-              // Attribute the hang to the last pre-stream phase that STARTED
-              // without a matching `.end` breadcrumb — see the `preStreamPhase`
-              // helper in message-processor.ts and the coarse
-              // "pre-stream.toolEngine" pair in tool-engine.ts. Best-effort:
-              // `getLastBreadcrumb()` is process-global (not scoped to THIS
-              // turn), so a concurrent nested run's breadcrumb can shadow it —
+              // Attribute the hang to the phase that STARTED without a closing
+              // breadcrumb — see the `preStreamPhase` helper in
+              // message-processor.ts and the coarse "pre-stream.toolEngine"
+              // pair in tool-engine.ts. Scoped to THIS turn's session id:
+              // `getLastOpenPhase` tracks open phases per session, so a
+              // concurrent nested run (a forked sub-session, an `/ideal`
+              // sprint) can no longer shadow the run that actually hung. A
+              // session with nothing open yields null — the honest answer, and
               // still far better than the prior "no evidence at all" state
               // (session 1e9db4d68da0: a watchdog kill with zero
               // interaction_logs / call_accounting rows anywhere in the
               // 120s window).
               let lastOpenPhase: string | null = null;
               try {
-                const last = getLastBreadcrumb();
-                if (last && typeof last.marker === "string" && last.marker.endsWith(".start")) {
-                  const withoutSuffix = last.marker.slice(0, -".start".length);
-                  const prefix = "pre-stream.";
-                  lastOpenPhase = withoutSuffix.startsWith(prefix) ? withoutSuffix.slice(prefix.length) : withoutSuffix;
-                }
+                lastOpenPhase = getLastOpenPhase(this.session?.id);
               } catch (breadcrumbErr) {
                 logger.error("orchestrator", "watchdog lastPhase lookup failed", {
                   error: (breadcrumbErr as Error)?.message,
