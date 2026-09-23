@@ -3,6 +3,12 @@ import * as path from "path";
 import type { VerifyRecipe } from "../types/index";
 import { mergeSandboxSettings, type SandboxSettings } from "../utils/settings";
 import { extractCoverageFromOutput } from "./coverage-parsers.js";
+import {
+  buildPytestCommand,
+  buildPytestInstallCommand,
+  findPytestTargets,
+  type PytestTarget,
+} from "./pytest-detect.js";
 
 export { extractCoverageFromOutput };
 
@@ -273,13 +279,63 @@ function detectNodeRecipe(_cwd: string, pkg: PackageJsonLike, packageManager: st
   };
 }
 
+/**
+ * What a set of discovered pytest targets contributes to a recipe.
+ *
+ * Kept as one function so the Python branch and the polyglot augmentation below
+ * cannot drift into emitting differently-shaped commands for the same repo.
+ */
+interface PytestContribution {
+  testCommands: string[];
+  installCommands: string[];
+  evidence: string[];
+  notes: string[];
+}
+
+/**
+ * Turn discovered targets into commands.
+ *
+ * A target whose pytest is NOT provably available gets an install command as
+ * well as a note. Emitting the test command alone would be the worse failure:
+ * `python -m pytest` with no pytest installed exits before collecting anything,
+ * so an honest `no_test_commands` floor failure would become a `verify_FAIL`
+ * that blames the project's tests for a missing dependency. qa-platform is
+ * exactly this case — `backend/requirements.txt` does not list pytest and
+ * `backend/.venv` has no pytest in site-packages, yet `backend/conftest.py`
+ * exists and the repo's own `.pytest_cache` proves pytest is what runs here.
+ */
+function contributionFromPytestTargets(targets: PytestTarget[]): PytestContribution {
+  const contribution: PytestContribution = { testCommands: [], installCommands: [], evidence: [], notes: [] };
+  for (const target of targets) {
+    const where = target.dir || "the repository root";
+    contribution.testCommands.push(buildPytestCommand(target));
+    contribution.evidence.push(`Detected pytest in ${where} via ${target.marker}`);
+    if (!target.pytestDeclared) {
+      contribution.installCommands.push(buildPytestInstallCommand(target));
+      contribution.notes.push(
+        `pytest is not declared in a manifest under ${where} and is not installed in a venv there, ` +
+          `so the recipe installs it before running tests. If this project runs its tests another way, ` +
+          `replace the generated pytest command.`,
+      );
+    }
+  }
+  return contribution;
+}
+
 function detectPythonRecipe(cwd: string): VerifyRecipe | null {
   const pyproject = readTextFile(cwd, "pyproject.toml");
   const requirements = readTextFile(cwd, "requirements.txt");
   const managePy = fileExists(cwd, "manage.py");
-  if (!pyproject && !requirements && !managePy && !fileExists(cwd, "setup.py")) {
+  // Root manifests are not the only proof of a Python project: qa-platform keeps
+  // its whole backend (requirements.txt + conftest.py) under `backend/` and has
+  // no Python manifest at the root at all, so a root-only check reported "not a
+  // Python project" and the recipe lost its tests. A discovered pytest target
+  // anywhere in the bounded search is equally good evidence.
+  const pytestTargets = findPytestTargets(cwd);
+  if (!pyproject && !requirements && !managePy && !fileExists(cwd, "setup.py") && pytestTargets.length === 0) {
     return null;
   }
+  const pytest = contributionFromPytestTargets(pytestTargets);
 
   const lower = `${pyproject ?? ""}\n${requirements ?? ""}`.toLowerCase();
   const packageManager = detectPackageManager(cwd);
@@ -301,6 +357,10 @@ function detectPythonRecipe(cwd: string): VerifyRecipe | null {
       bootstrapCommands: [],
       installCommands: [install],
       buildCommands: [],
+      // Left alone deliberately: `manage.py test` is Django's own runner, always
+      // present and always launchable, so there is no gap here for pytest
+      // discovery to fill and no evidence on hand that a Django project wants a
+      // second, competing test command.
       testCommands: ["python manage.py test"],
       startCommand: "python manage.py runserver 0.0.0.0:8000",
       startPort: "8000",
@@ -318,14 +378,14 @@ function detectPythonRecipe(cwd: string): VerifyRecipe | null {
       appLabel: "Python web app",
       shellInitCommands: defaultShellInit(),
       bootstrapCommands: [],
-      installCommands: [install],
+      installCommands: dedupe([install, ...pytest.installCommands]),
       buildCommands: [],
-      testCommands: fileExists(cwd, "tests") ? ["pytest"] : [],
+      testCommands: pytest.testCommands,
       startCommand: `uvicorn ${appModule} --host 0.0.0.0 --port 8000`,
       startPort: "8000",
       smokeKind: "http",
-      evidence: ["Detected Python project", "Detected FastAPI/Uvicorn dependency"],
-      notes: [],
+      evidence: ["Detected Python project", "Detected FastAPI/Uvicorn dependency", ...pytest.evidence],
+      notes: pytest.notes,
     };
   }
 
@@ -335,12 +395,21 @@ function detectPythonRecipe(cwd: string): VerifyRecipe | null {
     appLabel: "Python project",
     shellInitCommands: defaultShellInit(),
     bootstrapCommands: [],
-    installCommands: [install],
+    installCommands: dedupe([install, ...pytest.installCommands]),
     buildCommands: [],
-    testCommands: fileExists(cwd, "tests") ? ["pytest"] : ["python -m unittest discover"],
+    // Was `["python -m unittest discover"]` whenever no root `tests/` existed —
+    // a command emitted for a project with no discoverable tests at all. That is
+    // papering over a genuine absence, and it does not even fail quietly:
+    // measured on this machine (Python 3.14.5) an empty discover run prints
+    // "NO TESTS RAN" and exits 5, so the floor reported `verify_FAIL` — blaming
+    // the project's tests — instead of the truthful `no_test_commands`.
+    // (Before Python 3.12 the same run exits 0, which is worse still: a floor
+    // that PASSES on zero executed tests.) An honest empty list lets the
+    // engineering floor do its job.
+    testCommands: pytest.testCommands,
     smokeKind: "none",
-    evidence: ["Detected Python project"],
-    notes: [],
+    evidence: ["Detected Python project", ...pytest.evidence],
+    notes: pytest.notes,
   };
 }
 
@@ -504,8 +573,41 @@ function detectFallbackRecipe(cwd: string): VerifyRecipe {
   };
 }
 
+/**
+ * A Node recipe that found no test script gets one last look for a sibling
+ * stack's tests before it reports "this project has no tests".
+ *
+ * `inferFallbackRecipe` returns the Node recipe the moment a root `package.json`
+ * exists, so on a polyglot repo the Python detector was never reached. That is
+ * what happened on qa-platform: its root package.json declares a single
+ * `verify` script, so the deterministic profile came back
+ * `{ecosystem:"node", testCommands:[], buildCommands:[]}` — measured against the
+ * real repo — while `backend/conftest.py` sat one directory away.
+ *
+ * `ecosystem` deliberately stays `node`. It keys the bootstrap hints
+ * (`inferBootstrapFromEcosystem`, src/verify/entrypoint.ts:367) and the
+ * node_modules note below, so relabelling a Node repo would break runtime
+ * provisioning to fix test discovery. The known cost is that the coverage
+ * grammar is chosen per-RUN from this one label
+ * (`resolveFloorEcosystem` → `extractCoverageFromOutput`), so pytest-cov output
+ * from a polyglot repo parses as Istanbul and yields null — an honest
+ * "unmeasured", which blocks nothing.
+ */
+function augmentNodeRecipeWithSiblingTests(cwd: string, recipe: VerifyRecipe): VerifyRecipe {
+  if (recipe.testCommands.length > 0) return recipe;
+  const pytest = contributionFromPytestTargets(findPytestTargets(cwd));
+  if (pytest.testCommands.length === 0) return recipe;
+  return {
+    ...recipe,
+    installCommands: dedupe([...recipe.installCommands, ...pytest.installCommands]),
+    testCommands: pytest.testCommands,
+    evidence: dedupe([...recipe.evidence, ...pytest.evidence]),
+    notes: dedupe([...recipe.notes, ...pytest.notes]),
+  };
+}
+
 function inferFallbackRecipe(cwd: string, pkg: PackageJsonLike | null, packageManager: string | null): VerifyRecipe {
-  if (pkg) return detectNodeRecipe(cwd, pkg, packageManager);
+  if (pkg) return augmentNodeRecipeWithSiblingTests(cwd, detectNodeRecipe(cwd, pkg, packageManager));
   return (
     detectPythonRecipe(cwd) ??
     detectGoRecipe(cwd) ??

@@ -157,7 +157,10 @@ describe("verify entrypoint helpers", () => {
     const profile = inferVerifyProjectProfile(dir);
     expect(profile.recipe.ecosystem).toBe("python");
     expect(profile.recipe.installCommands[0]).toContain("pip");
-    expect(profile.recipe.testCommands[0]).toBe("pytest");
+    // Asserts the runner, not the exact argv: the command is now the documented
+    // `python -m pytest` form, which adds the CWD to sys.path (see
+    // src/verify/pytest-detect.ts). The subject here is the recipe's shape.
+    expect(profile.recipe.testCommands[0]).toContain("pytest");
     expect(profile.recipe.smokeKind).toBe("none");
   });
 
@@ -231,7 +234,8 @@ describe("verify entrypoint helpers", () => {
     const profile = inferVerifyProjectProfile(dir);
     // Guard the precondition: this recipe genuinely has no http smoke target.
     expect(profile.recipe.smokeKind).toBe("none");
-    expect(profile.recipe.testCommands[0]).toBe("pytest");
+    // The runner, not the exact argv — see the generic-python-recipe test above.
+    expect(profile.recipe.testCommands[0]).toContain("pytest");
 
     const prompt = buildVerifyTaskPrompt(dir);
 
