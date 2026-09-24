@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
-import type { IterationState, ProductRunManifest } from "./types.js";
+import type { DoneCondition, IterationState, ProductRunManifest } from "./types.js";
 
 /**
  * Write the product manifest to manifest.md.
@@ -29,29 +29,112 @@ export async function writeManifest(flowDir: string, runId: string, m: ProductRu
   await writeArtifact(runDir, "manifest.md", manifestMap);
 }
 
-/**
- * Read the product manifest from manifest.md.
- */
-export async function readManifest(flowDir: string, runId: string): Promise<ProductRunManifest | null> {
-  const runDir = path.join(flowDir, "runs", runId);
-  const manifestMap = await readArtifact(runDir, "manifest.md");
-  const content = manifestMap?.sections.get("Manifest");
-  if (!content?.trim()) return null;
+/** Why a run's `manifest.md` cannot be used as a product-run manifest. */
+export type ManifestDefectCode = "missing_file" | "empty_manifest" | "no_idea" | "read_failed";
 
-  const lines = content.split("\n");
-  const data: any = {};
-  for (const line of lines) {
+export interface ManifestDefect {
+  code: ManifestDefectCode;
+  /** One line naming what was actually found on disk. Safe to show the user. */
+  detail: string;
+}
+
+export interface ManifestInspection {
+  /** Non-null ONLY when the manifest is usable — i.e. it carries an `Idea:`. */
+  manifest: ProductRunManifest | null;
+  /** Non-null exactly when `manifest` is null; never both, never neither. */
+  defect: ManifestDefect | null;
+  /**
+   * Salvaged even from an unusable manifest, so a caller can still say something
+   * TRUE about the run (how old the zombie is) instead of only "missing".
+   */
+  createdAt: Date | null;
+}
+
+/** Split `Key: value` lines into a bag. Unknown keys are ignored by design. */
+function parseManifestFields(content: string): Record<string, string> {
+  const data: Record<string, string> = {};
+  for (const line of content.split("\n")) {
     const idx = line.indexOf(":");
     if (idx === -1) continue;
-    const key = line.slice(0, idx).trim();
-    const val = line.slice(idx + 1).trim();
-    data[key] = val;
+    data[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+  }
+  return data;
+}
+
+function parseDate(raw: string | undefined): Date | null {
+  if (!raw) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * Read `manifest.md` and report EITHER the parsed manifest OR why it is unusable.
+ *
+ * `readManifest` collapses every failure to `null`, which is the right shape for
+ * the ~15 call sites that only need "is this a product run?" — but it is the
+ * wrong shape for any surface that has to TELL the user something. Three live
+ * failures came from that gap: `/ideal status` counted a run it then dropped
+ * silently, `/ideal resume` said "Manifest missing" with no next step, and a
+ * run created-but-never-given-an-idea was indistinguishable from one whose
+ * manifest was lost mid-write.
+ *
+ * The four defect codes are genuinely different states and are kept apart:
+ *  - `missing_file`   — `manifest.md` does not exist (a hand-deleted file)
+ *  - `empty_manifest` — present, `## Manifest` heading, zero fields (14 bytes;
+ *                       the shape `createRun` left behind before it recorded
+ *                       `CreatedAt`, and the shape observed live)
+ *  - `no_idea`        — has fields but no `Idea:` — created, never given one
+ *  - `read_failed`    — the read itself threw (EACCES, EISDIR, …)
+ */
+export async function inspectManifest(flowDir: string, runId: string): Promise<ManifestInspection> {
+  const runDir = path.join(flowDir, "runs", runId);
+
+  let manifestMap: Awaited<ReturnType<typeof readArtifact>>;
+  try {
+    manifestMap = await readArtifact(runDir, "manifest.md");
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    // No Silent Catch: the two `.catch(() => null)` wrappers this replaces are
+    // exactly how a permission/IO fault became an invisible missing row.
+    console.error(`[product-loop] inspectManifest: manifest.md unreadable for run ${runId}: ${message}`);
+    return {
+      manifest: null,
+      defect: { code: "read_failed", detail: `manifest.md could not be read (${message})` },
+      createdAt: null,
+    };
+  }
+
+  if (!manifestMap) {
+    return { manifest: null, defect: { code: "missing_file", detail: "manifest.md does not exist" }, createdAt: null };
+  }
+
+  const content = manifestMap.sections.get("Manifest");
+  if (!content?.trim()) {
+    return {
+      manifest: null,
+      defect: { code: "empty_manifest", detail: "manifest.md has a '## Manifest' heading and no fields" },
+      createdAt: null,
+    };
+  }
+
+  const data = parseManifestFields(content);
+  const createdAt = parseDate(data.CreatedAt);
+
+  // `ProductRunManifest.idea` is typed `string`. Returning a manifest without
+  // one made that type a lie and crashed the first caller to reach for
+  // `m.idea.slice(...)`, so an idea-less manifest is not a manifest.
+  if (!data.Idea?.trim()) {
+    return {
+      manifest: null,
+      defect: { code: "no_idea", detail: "manifest.md records no 'Idea:' — the run was never given one" },
+      createdAt,
+    };
   }
 
   const m: ProductRunManifest = {
     idea: data.Idea,
     doneThreshold: Number.parseFloat(data.DoneThreshold),
-    createdAt: new Date(data.CreatedAt),
+    createdAt: createdAt ?? new Date(data.CreatedAt),
   };
   // A manifest written before `/ideal` lost its limits carries `CapUsd:` and ALWAYS
   // wrote `MaxSprints:` (the old default was 8), so its sprint count cannot be told
@@ -69,12 +152,64 @@ export async function readManifest(flowDir: string, runId: string): Promise<Prod
     m.verdict = {
       pass: data.VerdictPass === "true",
       score: Number.parseFloat(data.VerdictScore),
-      failedCondition: data.VerdictFailedCondition,
+      // Round-trips whatever `writeManifest` wrote. Typing the field bag as
+      // `Record<string, string>` (it was `any`) surfaces that this value is
+      // trusted from disk rather than validated — kept as-is so a manifest from
+      // an older/newer build is not silently dropped on an unknown condition.
+      failedCondition: data.VerdictFailedCondition as DoneCondition | undefined,
       reason: data.VerdictReason,
     };
   }
 
-  return m;
+  return { manifest: m, defect: null, createdAt };
+}
+
+/**
+ * Read the product manifest from manifest.md. `null` means "not a usable
+ * product-run manifest" — use `inspectManifest` when you must say WHY.
+ */
+export async function readManifest(flowDir: string, runId: string): Promise<ProductRunManifest | null> {
+  return (await inspectManifest(flowDir, runId)).manifest;
+}
+
+/**
+ * Point the project's `## Active Run` at `runId` unless a run that IS usable
+ * already holds the slot.
+ *
+ * Measured live: `Orchestrator._initFlow` (src/orchestrator/orchestrator.ts:697)
+ * calls `createRun` + `setActiveRunId` at session boot and never writes a
+ * manifest, so the FIRST chat session in a project parks an idea-less skeleton
+ * in the slot; `_initFlow` then short-circuits on `existing` forever, so nothing
+ * can displace it. In `qa-platform` that left `## Active Run = muc126520fb1`
+ * (14-byte manifest, written 09:00 Sep 22) while the real run `muc2joffe506` ran
+ * through Sep 23 22:00 — and five surfaces read that slot
+ * (`pil/layer5-context`, `orchestrator/flow-resume`, `ui/slash/compact`,
+ * `ui/slash/clear`, `flow/warning-persist`), all of them getting the skeleton.
+ *
+ * This is not new policy: it completes F8 (`flow/hierarchy.ts:495-501`), whose
+ * comment names this exact bug — "`/ideal` never updated `Active Run`, so it
+ * pointed at a stale skeleton run". F8 only wired the write into
+ * `ensureRunScoped`, which fires in the scoping stage alone, so the hot path and
+ * maintain path never reached it (and in `qa-platform` it never fired at all —
+ * there is no `milestones/` directory).
+ *
+ * The takeover is CONDITIONAL so it cannot steal focus from another real run,
+ * and nothing is deleted: the skeleton directory stays exactly where it is.
+ */
+export async function claimActiveRunSlot(flowDir: string, runId: string): Promise<void> {
+  const { getActiveRunId, setActiveRunId } = await import("../flow/run-manager.js");
+  const holder = await getActiveRunId(flowDir);
+  if (holder === runId) return;
+  if (holder) {
+    const held = await inspectManifest(flowDir, holder);
+    // A usable manifest means a real run owns the focus — leave it alone.
+    if (held.manifest) return;
+    console.error(
+      `[product-loop] Active Run was ${holder} (${held.defect?.detail ?? "unusable"}); ` +
+        `repointing it at ${runId}. The ${holder} directory is left untouched.`,
+    );
+  }
+  await setActiveRunId(flowDir, runId);
 }
 
 /**

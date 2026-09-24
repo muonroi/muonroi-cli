@@ -8,7 +8,7 @@ import { routeModel as eeRouteModel } from "../ee/bridge.js";
 import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
 import { readArtifact } from "../flow/artifact-io.js";
 import { parseResumeDigest, readSprintOutcomes } from "../flow/run-artifacts.js";
-import { createRun, loadRun } from "../flow/run-manager.js";
+import { createRun, getActiveRunId, loadRun } from "../flow/run-manager.js";
 import { getTextModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
@@ -19,7 +19,14 @@ import { logInteraction, logUIInteraction } from "../storage/index.js";
 import type { ModelInfo, StreamChunk, VerifyRecipe } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { isProviderDisabled } from "../utils/settings.js";
-import { markIterationCrashed, readIterations, readManifest, writeManifest } from "./artifact-io.js";
+import {
+  claimActiveRunSlot,
+  inspectManifest,
+  markIterationCrashed,
+  readIterations,
+  readManifest,
+  writeManifest,
+} from "./artifact-io.js";
 import { buildBacklog } from "./backlog-builder.js";
 import { readBacklog, writeBacklog } from "./backlog-store.js";
 import { formatCostPreview, previewRunCost } from "./cost-preview.js";
@@ -430,6 +437,14 @@ async function* runHotPath(
     createdAt: new Date(),
   });
 
+  // This run has an idea, so it owns the workspace focus. Conditional: it only
+  // displaces a holder that has NO usable manifest (the session-boot skeleton
+  // from `Orchestrator._initFlow`), never another real run. See
+  // `claimActiveRunSlot` for the measured `qa-platform` case this closes.
+  await claimActiveRunSlot(flowDir, runId).catch((err) => {
+    console.error(`[ideal] could not claim the Active Run pointer for ${runId}: ${(err as Error)?.message}`);
+  });
+
   if (opts.cwd) {
     try {
       const { isGsdNativeEnabled } = await import("../gsd/flags.js");
@@ -739,6 +754,14 @@ async function* runMaintain(
     createdAt: new Date(),
   });
 
+  // This run has an idea, so it owns the workspace focus. Conditional: it only
+  // displaces a holder that has NO usable manifest (the session-boot skeleton
+  // from `Orchestrator._initFlow`), never another real run. See
+  // `claimActiveRunSlot` for the measured `qa-platform` case this closes.
+  await claimActiveRunSlot(flowDir, runId).catch((err) => {
+    console.error(`[ideal] could not claim the Active Run pointer for ${runId}: ${(err as Error)?.message}`);
+  });
+
   yield { type: "content", content: "\n> Mode C: single-task maintenance flow\n" } as StreamChunk;
 
   try {
@@ -928,6 +951,14 @@ async function* runStart(
     doneThreshold: flags.doneThreshold,
     stack: flags.stack,
     createdAt: new Date(),
+  });
+
+  // This run has an idea, so it owns the workspace focus. Conditional: it only
+  // displaces a holder that has NO usable manifest (the session-boot skeleton
+  // from `Orchestrator._initFlow`), never another real run. See
+  // `claimActiveRunSlot` for the measured `qa-platform` case this closes.
+  await claimActiveRunSlot(flowDir, runId).catch((err) => {
+    console.error(`[ideal] could not claim the Active Run pointer for ${runId}: ${(err as Error)?.message}`);
   });
 
   if (opts.cwd) {
@@ -1931,17 +1962,36 @@ async function* runStatus(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
   const runsRoot = path.join(opts.flowDir, "runs");
   let entries: string[] = [];
   try {
-    entries = await fs.readdir(runsRoot);
-  } catch {
+    // Directories only. `readdir` also returns stray files (`.DS_Store`,
+    // `Thumbs.db`), and each one used to inflate the "Active runs (N)" count
+    // with something that can never have a row.
+    entries = (await fs.readdir(runsRoot, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT") {
+      console.error(`[product-loop] status: cannot list ${runsRoot}: ${(err as Error)?.message}`);
+      yield { type: "content", content: `Cannot read ${runsRoot}: ${(err as Error)?.message}\n` } as StreamChunk;
+      return { runId: "", stage: "error", success: false, reason: "runs_dir_unreadable" };
+    }
     yield { type: "content", content: "No runs found.\n" } as StreamChunk;
     return { runId: "", stage: "approved", success: true };
   }
 
   if (opts.runId) {
-    const m = await readManifest(opts.flowDir, opts.runId);
+    const inspection = await inspectManifest(opts.flowDir, opts.runId);
+    const m = inspection.manifest;
     if (!m) {
-      yield { type: "content", content: `Run not found: ${opts.runId}\n` } as StreamChunk;
-      return { runId: opts.runId, stage: "error", success: false, reason: "not_found" };
+      // "Run not found" was said for a run that plainly exists on disk. Name
+      // what was actually wrong, and what can be done instead.
+      const exists = entries.includes(opts.runId);
+      const head = exists
+        ? `Run ${opts.runId} cannot be read: ${inspection.defect?.detail ?? "manifest unusable"}`
+        : `Run not found: ${opts.runId}`;
+      const lines = [head];
+      if (exists && inspection.createdAt) lines.push(`  Created: ${inspection.createdAt.toISOString()}`);
+      lines.push(await describeResumableAlternatives(opts.flowDir, opts.runId));
+      yield { type: "content", content: `${lines.join("\n")}\n` } as StreamChunk;
+      return { runId: opts.runId, stage: "error", success: false, reason: exists ? "manifest_missing" : "not_found" };
     }
     const iters = await readIterations(opts.flowDir, opts.runId);
     const digest = await readResumeDigest(opts.flowDir, opts.runId);
@@ -1981,17 +2031,92 @@ async function* runStatus(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
     return { runId: opts.runId, stage: "approved", success: true };
   }
 
-  const lines: string[] = [`Active runs (${entries.length}):`];
+  // The header used to count `entries` while the loop `continue`d past any run
+  // whose manifest would not parse — so the number promised rows that never
+  // appeared, and the run it dropped was BY DEFINITION the one with a problem
+  // (observed: "Active runs (2):" above a single row, the missing one being the
+  // run the user had just asked about). The count is now DERIVED from the rows,
+  // so the two cannot disagree again, and an unreadable run gets a row that says
+  // what is known about it and why the rest is not.
+  const rows: string[] = [];
   for (const id of entries) {
-    const m = await readManifest(opts.flowDir, id).catch(() => null);
-    const iters = await readIterations(opts.flowDir, id).catch(() => []);
-    if (!m) continue;
-    const digest = await readResumeDigest(opts.flowDir, id).catch(() => null);
+    const inspection = await inspectManifest(opts.flowDir, id);
+    const iters = await readIterations(opts.flowDir, id).catch((err) => {
+      console.error(`[product-loop] status: iterations.md unreadable for run ${id}: ${(err as Error)?.message}`);
+      return [];
+    });
+    const digest = await readResumeDigest(opts.flowDir, id).catch((err) => {
+      console.error(`[product-loop] status: resume digest unreadable for run ${id}: ${(err as Error)?.message}`);
+      return null;
+    });
     const stagePart = digest ? `  stage=${digest.stage}` : "";
-    lines.push(`  ${id}  ${m.idea.slice(0, 60)}  sprints=${iters.length}${stagePart}  aborted=${m.aborted ?? false}`);
+
+    if (!inspection.manifest) {
+      const created = inspection.createdAt ? `  created=${inspection.createdAt.toISOString()}` : "";
+      rows.push(
+        `  ${id}  <unreadable: ${inspection.defect?.detail ?? "manifest unusable"}>` +
+          `  sprints=${iters.length}${stagePart}${created}`,
+      );
+      continue;
+    }
+    const m = inspection.manifest;
+    rows.push(`  ${id}  ${m.idea.slice(0, 60)}  sprints=${iters.length}${stagePart}  aborted=${m.aborted ?? false}`);
   }
+
+  const lines: string[] = [`Active runs (${rows.length}):`, ...rows];
+
+  // The project's `## Active Run` can name a run none of the rows above can be
+  // used for (see `claimActiveRunSlot`). Saying so here is the difference
+  // between a visible zombie and an invisible one.
+  const activeHolder = await getActiveRunId(opts.flowDir).catch((err) => {
+    console.error(`[product-loop] status: cannot read Active Run pointer: ${(err as Error)?.message}`);
+    return null;
+  });
+  if (activeHolder) {
+    const held = await inspectManifest(opts.flowDir, activeHolder);
+    if (!held.manifest) {
+      lines.push(
+        "",
+        `Note: this project's Active Run is ${activeHolder}, which cannot be used ` +
+          `(${held.defect?.detail ?? "manifest unusable"}).`,
+        `  The next /ideal run takes the pointer over; ${activeHolder} is left on disk untouched.`,
+      );
+    }
+  }
+
   yield { type: "content", content: `${lines.join("\n")}\n` } as StreamChunk;
   return { runId: "", stage: "approved", success: true };
+}
+
+/** Does `runs/<runId>/` exist? Distinguishes "wrong id" from "broken run". */
+async function runDirExists(flowDir: string, runId: string): Promise<boolean> {
+  try {
+    return (await fs.stat(path.join(flowDir, "runs", runId))).isDirectory();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      console.error(`[product-loop] runDirExists(${runId}) failed: ${(err as Error)?.message}`);
+    }
+    return false;
+  }
+}
+
+/**
+ * Name which runs the caller CAN resume, for a failure path that has already
+ * enumerated the flow directory and therefore already knows.
+ *
+ * It never picks a run for the user and never redirects: the ids are printed as
+ * ready-to-retype commands. `excludeRunId` drops the run that just failed, so
+ * the answer is never "try the thing that did not work".
+ */
+async function describeResumableAlternatives(flowDir: string, excludeRunId?: string): Promise<string> {
+  const candidates = (await listIncompleteRuns(flowDir)).filter((c) => c.id !== excludeRunId);
+  if (candidates.length === 0) return 'No resumable run in this project — start one with /ideal "<idea>".';
+  const shown = candidates
+    .slice(0, 5)
+    .map((c) => `  /ideal resume ${c.id}   ${c.idea.slice(0, 60)}`)
+    .join("\n");
+  const more = candidates.length > 5 ? `\n  …and ${candidates.length - 5} more (/ideal status)` : "";
+  return `Resumable ${candidates.length === 1 ? "run" : `runs (${candidates.length})`}:\n${shown}${more}`;
 }
 
 /**
@@ -2015,29 +2140,52 @@ async function* runReview(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
     const runsRoot = path.join(opts.flowDir, "runs");
     let entries: string[] = [];
     try {
-      entries = await fs.readdir(runsRoot);
-    } catch {
+      entries = (await fs.readdir(runsRoot, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        console.error(`[product-loop] review: cannot list ${runsRoot}: ${(err as Error)?.message}`);
+      }
       yield { type: "content", content: "No runs to review.\n" } as StreamChunk;
       return { runId: "", stage: "error", success: false, reason: "no_runs" };
     }
     const dated: Array<{ id: string; createdAt: number }> = [];
+    const skipped: string[] = [];
     for (const id of entries) {
-      const m = await readManifest(opts.flowDir, id).catch(() => null);
-      if (!m) continue;
+      const inspection = await inspectManifest(opts.flowDir, id);
+      if (!inspection.manifest) {
+        skipped.push(`  ${id} — ${inspection.defect?.detail ?? "manifest unusable"}`);
+        continue;
+      }
+      const m = inspection.manifest;
       const createdAt = m.createdAt instanceof Date && !Number.isNaN(m.createdAt.getTime()) ? m.createdAt.getTime() : 0;
       dated.push({ id, createdAt });
     }
     if (dated.length === 0) {
-      yield { type: "content", content: "No runs to review.\n" } as StreamChunk;
+      // "No runs to review" said over N run directories is the same lie
+      // `/ideal status` was telling: it hid exactly the runs with a problem.
+      const lines =
+        skipped.length === 0
+          ? ["No runs to review."]
+          : [
+              `No reviewable run — ${skipped.length} run director${skipped.length === 1 ? "y" : "ies"} exist but cannot be read:`,
+              ...skipped,
+            ];
+      yield { type: "content", content: `${lines.join("\n")}\n` } as StreamChunk;
       return { runId: "", stage: "error", success: false, reason: "no_runs" };
     }
     dated.sort((a, b) => b.createdAt - a.createdAt);
     resolvedRunId = dated[0]!.id;
   }
 
-  const manifest = await readManifest(opts.flowDir, resolvedRunId);
+  const reviewInspection = await inspectManifest(opts.flowDir, resolvedRunId);
+  const manifest = reviewInspection.manifest;
   if (!manifest) {
-    yield { type: "content", content: `Run not found: ${resolvedRunId}\n` } as StreamChunk;
+    const detail = reviewInspection.defect;
+    const head =
+      detail?.code === "missing_file" && !(await runDirExists(opts.flowDir, resolvedRunId))
+        ? `Run not found: ${resolvedRunId}`
+        : `Run ${resolvedRunId} cannot be reviewed: ${detail?.detail ?? "manifest unusable"}`;
+    yield { type: "content", content: `${head}\n` } as StreamChunk;
     return { runId: resolvedRunId, stage: "error", success: false, reason: "not_found" };
   }
 
@@ -2134,42 +2282,49 @@ async function* runAbort(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
 }
 
 /**
- * B — Auto-detect the newest resumable run.
+ * Every resumable run, newest first.
  *
- * "Resumable" = a run that has a manifest (early pre-manifest crashes are not
- * replayable) AND is neither aborted nor terminal (`doneAt` is set on done-gate
- * pass / ship / abort). Sorted by manifest `createdAt` descending so a bare
- * `/ideal resume` continues the most recent incomplete run without the user
- * having to remember (or type) the runId.
+ * "Resumable" = a run with a USABLE manifest (one carrying an `Idea:`; a run
+ * that crashed before its idea was written cannot be replayed) AND neither
+ * aborted nor terminal (`doneAt` is set on done-gate pass / ship / abort).
+ * Sorted by manifest `createdAt` descending, so a bare `/ideal resume` continues
+ * the most recent incomplete run without the user having to remember the runId.
+ *
+ * This returns the whole list rather than just the newest because the failure
+ * paths in `runResume` / `runStatus` need to NAME the alternatives, not merely
+ * pick one — see `describeResumableAlternatives`.
  */
-async function findLatestIncompleteRun(flowDir: string): Promise<{ id: string; idea: string } | null> {
+async function listIncompleteRuns(flowDir: string): Promise<Array<{ id: string; idea: string }>> {
   const runsRoot = path.join(flowDir, "runs");
   let entries: string[];
   try {
-    entries = await fs.readdir(runsRoot);
+    entries = (await fs.readdir(runsRoot, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
   } catch (err) {
     // No runs directory yet → nothing to resume. Not an error worth surfacing.
     if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
-      console.error(`[product-loop] findLatestIncompleteRun: readdir failed: ${(err as Error)?.message}`);
+      console.error(`[product-loop] listIncompleteRuns: readdir failed: ${(err as Error)?.message}`);
     }
-    return null;
+    return [];
   }
   const candidates: Array<{ id: string; idea: string; createdAt: number }> = [];
   for (const id of entries) {
     const m = await readManifest(flowDir, id).catch((e) => {
-      console.error(`[product-loop] findLatestIncompleteRun: manifest read failed for ${id}: ${e?.message}`);
+      console.error(`[product-loop] listIncompleteRuns: manifest read failed for ${id}: ${e?.message}`);
       return null;
     });
-    if (!m) continue; // no manifest → not resumable
+    if (!m) continue; // no usable manifest → not resumable
     if (m.aborted) continue; // hard-killed
     if (m.doneAt) continue; // terminal (done / shipped)
     const createdAt = m.createdAt instanceof Date && !Number.isNaN(m.createdAt.getTime()) ? m.createdAt.getTime() : 0;
     candidates.push({ id, idea: m.idea, createdAt });
   }
-  if (candidates.length === 0) return null;
   candidates.sort((a, b) => b.createdAt - a.createdAt);
-  const top = candidates[0]!;
-  return { id: top.id, idea: top.idea };
+  return candidates.map(({ id, idea }) => ({ id, idea }));
+}
+
+/** The newest resumable run, or null. See `listIncompleteRuns` for the rule. */
+async function findLatestIncompleteRun(flowDir: string): Promise<{ id: string; idea: string } | null> {
+  return (await listIncompleteRuns(flowDir))[0] ?? null;
 }
 
 async function* runResume(
@@ -2193,18 +2348,35 @@ async function* runResume(
       content: `Resuming latest incomplete run ${resolvedRunId}: ${latest.idea.slice(0, 60)}\n`,
     } as StreamChunk;
   }
+  // Every one of the three dead ends below is reached AFTER the flow directory
+  // has been enumerated, so each one already knows which runs are resumable.
+  // Saying only "Manifest missing for <id>" threw that away: the user was left
+  // to guess, while the run they wanted sat one line away from being named.
+  // Nothing is auto-selected — the ids are printed for the user to retype.
   const run = await loadRun(opts.flowDir, resolvedRunId);
   if (!run) {
-    yield { type: "content", content: `Run not found: ${resolvedRunId}\n` } as StreamChunk;
+    const hint = await describeResumableAlternatives(opts.flowDir, resolvedRunId);
+    yield { type: "content", content: `Run not found: ${resolvedRunId}\n${hint}\n` } as StreamChunk;
     return { runId: resolvedRunId, stage: "error", success: false, reason: "not_found" };
   }
-  const manifest = await readManifest(opts.flowDir, resolvedRunId);
+  const inspection = await inspectManifest(opts.flowDir, resolvedRunId);
+  const manifest = inspection.manifest;
   if (!manifest) {
-    yield { type: "content", content: `Manifest missing for ${resolvedRunId}\n` } as StreamChunk;
+    const detail = inspection.defect?.detail ?? "manifest unusable";
+    const created = inspection.createdAt ? ` (run directory created ${inspection.createdAt.toISOString()})` : "";
+    const hint = await describeResumableAlternatives(opts.flowDir, resolvedRunId);
+    yield {
+      type: "content",
+      content: `Cannot resume ${resolvedRunId}: ${detail}${created}.\n${hint}\n`,
+    } as StreamChunk;
     return { runId: resolvedRunId, stage: "error", success: false, reason: "manifest_missing" };
   }
   if (manifest.aborted) {
-    yield { type: "content", content: `Run ${resolvedRunId} was aborted; cannot resume.\n` } as StreamChunk;
+    const hint = await describeResumableAlternatives(opts.flowDir, resolvedRunId);
+    yield {
+      type: "content",
+      content: `Run ${resolvedRunId} was aborted; cannot resume.\n${hint}\n`,
+    } as StreamChunk;
     return { runId: resolvedRunId, stage: "halted", success: false, reason: "aborted" };
   }
 

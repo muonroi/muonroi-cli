@@ -41,6 +41,8 @@ vi.mock("../artifact-io.js", () => ({
   readCriteria: vi.fn(async () => []),
   writeManifest: vi.fn(async () => undefined),
   readManifest: vi.fn(async () => null),
+  inspectManifest: vi.fn(async () => ({ manifest: null, defect: null, createdAt: null })),
+  claimActiveRunSlot: vi.fn(async () => undefined),
   markIterationCrashed: vi.fn(async () => undefined),
   readIterations: vi.fn(async () => []),
 }));
