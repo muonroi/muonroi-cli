@@ -1959,6 +1959,12 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       type: "halt",
       reason: cb3.reason ?? "no_recipe",
       detail: cb3Advice.action,
+      // The SAME advice object `detail` was phrased from, so the card's
+      // recommendation is derived from the verdict rather than guessed:
+      // `deriveHaltRecommendation` reads its locus to decide which offered
+      // option performs the fix. A second deriveNextAction call here would be
+      // the parallel rule this avoids.
+      advice: cb3Advice,
       recovery_options: [
         {
           id: "init_new",

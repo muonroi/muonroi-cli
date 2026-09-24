@@ -38,7 +38,10 @@ describe("plan creation → user-halt (ESC) → resume on 'tiếp tục'", () =>
   });
 
   it("select 'Continue as council brainstorm' from halt card", async () => {
-    // Navigate to option 2 (continue_as_council) and enter to proceed into planning flow.
+    // Navigate to option 2 (continue_as_council) and enter to proceed into
+    // planning flow. The card now opens on index 1 (point_to_existing) rather
+    // than index 0 — deriveHaltRecommendation never pre-selects the destructive
+    // init_new — so the second Down clamps at the last index either way.
     driver.press("Down");
     driver.press("Down");
     driver.press("Return");

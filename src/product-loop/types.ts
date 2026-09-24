@@ -548,6 +548,17 @@ export interface HaltChunk {
   runId?: string;
   /** A — the sprint number that broke, for the "Sprint N failed" card title. */
   sprintN?: number;
+  /**
+   * The `deriveNextAction` verdict this halt was phrased from, when the producer
+   * has one. Carried so the card's recommendation is DERIVED rather than
+   * guessed: `deriveHaltRecommendation` (halt-recommendation.ts) reads `locus`
+   * to decide which offered option actually performs the fix, and the card's
+   * pre-selected index, its "recommended" marker and its reason line are all
+   * fields of that one result. Producers that set it MUST pass the same advice
+   * object `detail` was phrased from — a second `deriveNextAction` call with
+   * different inputs would reintroduce exactly the divergence this prevents.
+   */
+  advice?: import("./next-action.js").NextActionAdvice;
   /** Actionable choices. UI renders these as buttons / list items. */
   recovery_options: RecoveryOption[];
 }

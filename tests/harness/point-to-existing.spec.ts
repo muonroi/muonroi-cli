@@ -43,9 +43,11 @@ describe("point-to-existing form E2E", () => {
     expect(card).not.toBeNull();
   });
 
-  it("navigate Down to select 'Point to existing recipe'", async () => {
-    // Default selection is index 0 (init_new). Press Down once to reach index 1.
-    driver.press("Down");
+  it("'Point to existing recipe' is the pre-selected option", async () => {
+    // It used to be index 0 (init_new) and this test pressed Down to reach
+    // index 1. `deriveHaltRecommendation` now pre-selects index 1 outright:
+    // init_new is destructive (it scaffolds into the cwd) and is never the
+    // default. No keypress — the card opens here.
     // Sticky-poll — wait until 3 consecutive snapshots agree that opts[1] is
     // selected. The single-frame check is racy on POSIX because React's
     // useEffect cleanup/re-register cycle can leave items transiently missing

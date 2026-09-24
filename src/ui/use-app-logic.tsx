@@ -51,6 +51,7 @@ import {
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "../orchestrator/safety-askcard.js";
 import { planSafetyAskcard } from "../orchestrator/safety-askcard.js";
 
+import { deriveHaltRecommendation } from "../product-loop/halt-recommendation.js";
 import type { HaltChunk, ProductStatusCardData, RecoveryOption } from "../product-loop/types.js";
 import { getConfiguredProviders, setKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
@@ -1477,11 +1478,25 @@ export function useAppLogic(props: AppLogicProps) {
     hasContent: boolean;
     error?: string;
   } | null>(null);
+  /**
+   * The ONE path that opens the halt recovery card. Both pieces of state move
+   * together here so no site can open the card with a pre-selection of its own:
+   * `deriveHaltRecommendation` decides the index, and `HaltRecoveryCard` renders
+   * the reason from the SAME call on the same chunk, which is what keeps the
+   * marked option and the reason shown for it from drifting apart (they did on
+   * the post-debate card — 109aeef7). Every site used to call
+   * `setHaltSelectedIndex(0)`, and on the CB-3 card index 0 is "Init new
+   * project" — a scaffold, pre-selected on a tree that already exists.
+   */
+  const openHaltCard = useCallback((halt: HaltChunk) => {
+    setActiveHaltCard(halt);
+    setHaltSelectedIndex(deriveHaltRecommendation(halt).index);
+  }, []);
   // TEST SEAM — inject a synthetic halt chunk on boot when --inject-halt is set.
   // This lets harness E2E specs verify the recovery card without a real CB-3 run.
   useEffect(() => {
     if (!startupConfig.injectHalt) return;
-    setActiveHaltCard({
+    openHaltCard({
       type: "halt",
       reason: "no_recipe",
       detail: "Injected by --inject-halt for E2E testing.",
@@ -1503,21 +1518,19 @@ export function useAppLogic(props: AppLogicProps) {
         },
       ],
     });
-    setHaltSelectedIndex(0);
-  }, [startupConfig.injectHalt]);
+  }, [startupConfig.injectHalt, openHaltCard]);
   // TEST SEAM (A) — inject a synthetic sprint-failed recovery card on boot when
   // --inject-halt-sprint is set, so E2E specs can verify the break-recovery card.
   useEffect(() => {
     if (!startupConfig.injectHaltSprint) return;
-    setActiveHaltCard({
+    openHaltCard({
       type: "halt",
       reason: "sprint_failed",
       sprintN: 3,
       detail: "Injected by --inject-halt-sprint for E2E testing.",
       recovery_options: [...SPRINT_FAILED_RECOVERY_OPTIONS],
     });
-    setHaltSelectedIndex(0);
-  }, [startupConfig.injectHaltSprint]);
+  }, [startupConfig.injectHaltSprint, openHaltCard]);
   // Reap completed status rows after their hold window so the row clears.
   useEffect(() => {
     if (councilStatuses.length === 0) return;
@@ -4379,14 +4392,14 @@ export function useAppLogic(props: AppLogicProps) {
                 break;
               case "halt":
                 if (chunk.haltChunk) {
-                  setActiveHaltCard(chunk.haltChunk);
-                  setHaltSelectedIndex(0);
+                  openHaltCard(chunk.haltChunk);
                   logUIInteraction(agent.getSessionId() ?? undefined, {
                     subtype: "halt_card_open",
                     data: {
                       reason: chunk.haltChunk.reason,
                       optionCount: chunk.haltChunk.recovery_options.length,
                       optionIds: chunk.haltChunk.recovery_options.map((o) => o.id),
+                      recommended: deriveHaltRecommendation(chunk.haltChunk).optionId,
                     },
                   });
                 }
@@ -5351,14 +5364,14 @@ export function useAppLogic(props: AppLogicProps) {
                     // emits halt when CB-1 / CB-3 trip (e.g. no verify recipe in
                     // the target directory). Without this branch the chunk was
                     // silently dropped and the TUI looked frozen.
-                    setActiveHaltCard(chunk.haltChunk);
-                    setHaltSelectedIndex(0);
+                    openHaltCard(chunk.haltChunk);
                     logUIInteraction(agent.getSessionId() ?? undefined, {
                       subtype: "halt_card_open",
                       data: {
                         reason: chunk.haltChunk.reason,
                         optionCount: chunk.haltChunk.recovery_options.length,
                         optionIds: chunk.haltChunk.recovery_options.map((o: { id: string }) => o.id),
+                        recommended: deriveHaltRecommendation(chunk.haltChunk).optionId,
                       },
                     });
                   }
@@ -5385,7 +5398,7 @@ export function useAppLogic(props: AppLogicProps) {
                 const brokenSprintN =
                   payload.subcommand === "resume" ? undefined : (lastProductSprintNRef.current ?? undefined);
                 setMessages((prev) => [...prev, buildAssistantEntry(`Product loop error: ${errMsg}`)]);
-                setActiveHaltCard({
+                openHaltCard({
                   type: "halt",
                   reason: "sprint_failed",
                   sprintN: brokenSprintN,
@@ -5393,7 +5406,6 @@ export function useAppLogic(props: AppLogicProps) {
                   detail: `The run broke: ${errMsg}`,
                   recovery_options: SPRINT_FAILED_RECOVERY_OPTIONS,
                 });
-                setHaltSelectedIndex(0);
                 // The screen already shows `errMsg` (above); persist it too — a
                 // halt_card_open row used to carry only {reason, trigger,
                 // sprintN}, so a post-mortem on a run that broke this way had no
@@ -6789,6 +6801,10 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         if (key.name === "return") {
+          // `deriveHaltRecommendation` returns -1 when every offered option is
+          // destructive: nothing is pre-selected, so Enter must not stand in for
+          // a choice the user never made. ↑/↓ moves onto the list first.
+          if (haltSelectedIndex < 0) return;
           const chosen = activeHaltCard.recovery_options[haltSelectedIndex];
           if (chosen) {
             logUIInteraction(agent.getSessionId() ?? undefined, {
