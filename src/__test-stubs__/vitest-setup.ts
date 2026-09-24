@@ -2,6 +2,7 @@
  * Global vitest setup: mock bun:sqlite which is unavailable outside the Bun runtime.
  * Any module that transitively imports db.ts will resolve to this stub.
  */
+import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
 import * as nodePath from "node:path";
 import { vi } from "vitest";
@@ -80,6 +81,55 @@ process.env.MUONROI_FLOOR_BASELINE_DIR ??= nodePath.join(
   nodeOs.tmpdir(),
   `muonroi-test-floor-baselines-${process.pid}`,
 );
+
+// Same reasoning, one level up: pin the WHOLE muonroi home for the suite.
+//
+// ~16 modules resolve their storage root as `MUONROI_CLI_HOME ?? homedir() +
+// "/.muonroi-cli"` — config, session-dir, usage/{ledger,cost-log,decision-log,
+// product-ledger}, pil/budget-log, chat/channel-manager, lsp/npm-cache,
+// storage/usage-cap, product-loop/stakeholder-acl, reporter/auto-fire and the
+// cli/{usage-report,share-cmd,reporter-cmd} commands. Unpinned, every test that
+// touches one of them reads and WRITES the developer's real home.
+//
+// This is not theoretical damage. A test created package directories under the
+// real `~/.muonroi-cli/cache/lsp/` and its cleanup then `rm -rf`'d them, which
+// deleted the user's actual pyright install down to a bin-less `dist/` stump —
+// and the half-finished recursive delete blew the 10s hook budget, so every
+// later run re-broke it (`src/lsp/npm-cache.ts:20-28` records it). Pinning the
+// root makes that entire class impossible instead of fixing it one test file at
+// a time; the per-file `process.env.MUONROI_CLI_HOME = tmpHome` dances (see
+// npm-cache.test.ts:49-53, chat/__tests__/channel-manager.test.ts:27-28,
+// cli/__tests__/share-cmd.test.ts:29-30) keep working and simply override a
+// temp dir with another temp dir.
+//
+// `??=`, matching the pin above: an explicitly exported MUONROI_CLI_HOME still
+// wins, so a developer can still aim the suite somewhere deliberately.
+//
+// LIMIT, deliberately not papered over: this only redirects code that CONSULTS
+// the env var. These resolve `os.homedir()` directly and are NOT pinned —
+//   src/utils/instructions.ts:79      (~/.muonroi-cli/AGENTS.md)
+//   src/tools/schedule.ts:7-8         (schedules/, daemon.pid)
+//   src/utils/stderr-mirror.ts:79     (tui-stderr.log)
+//   src/council/…  breadcrumbFilePath (council-breadcrumbs.jsonl)
+//   src/providers/auth/token-store.ts:21 (has its own MUONROI_AUTH_DIR escape)
+// Their existing tests are safe because each mocks `os.homedir()` per file, and
+// that is also why adding this pin did not change their behaviour — measured,
+// all four stayed green. A NEW test touching one of them without mocking
+// homedir would still reach the real home. `schedule.ts` is the awkward one: its
+// paths are module-level `const`s evaluated at import, so an env var alone could
+// not redirect it even if one were added — the same trap `npm-cache.ts:20-28`
+// records. Converting these to the shared convention is a separate change.
+process.env.MUONROI_CLI_HOME ??= nodePath.join(nodeOs.tmpdir(), `muonroi-test-home-${process.pid}`);
+// Create it: the modules above mkdir their own subpaths, but a bare read of a
+// missing root is a needless difference from a real home that already exists.
+try {
+  nodeFs.mkdirSync(process.env.MUONROI_CLI_HOME, { recursive: true });
+} catch (err) {
+  console.error(
+    `[vitest-setup] could not create the pinned MUONROI_CLI_HOME ${process.env.MUONROI_CLI_HOME}: ` +
+      `${err instanceof Error ? err.message : String(err)} — tests that write there will fail loudly rather than silently reaching the real home`,
+  );
+}
 
 if (typeof Bun === "undefined") {
   vi.mock("bun:sqlite", () => {
