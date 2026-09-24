@@ -1,33 +1,26 @@
 // @ts-nocheck
 //
-// ⚠ A DEFAULT ripgrep SEARCH DOES NOT SEE THIS FILE.
+// WRITE CONTROL BYTES IN THIS FILE AS ESCAPES (`\x00`, `\x1b`, `\x1f`), NEVER RAW.
 //
-// `stripControlBytes` (search it below) writes its character class with RAW control
-// bytes rather than escapes: the source literally contains one 0x00 and one 0x1b.
-// Measured 2026-09-24: exactly 1 NUL byte in the file, so ripgrep classifies it as
-// BINARY and silently drops its matches from any tree-wide search. The search
-// reports zero hits here and looks authoritative.
+// Until 2026-09-24 `stripControlBytes` (below) wrote its character classes with raw
+// bytes: the source literally held one 0x00, one 0x1b, one 0x1f and one 0x7f. A
+// single NUL makes ripgrep classify the whole file as BINARY and SILENTLY drop its
+// matches from any tree-wide search, while still looking authoritative:
 //
-// WHAT IT COST (2026-09-24): a repo-wide search for `setAskUserHandler` returned
-// only the definition in orchestrator.ts, which "proved" the `ask_user` handler was
-// never wired and that every call returned the dismissed sentinel immediately. Both
-// conclusions were false — it is registered at `agent.setAskUserHandler(...)` in
-// this file and opens a real blocking card. Only a DB row that disagreed with the
-// search caught it before a fix was built on the wrong premise.
+//     $ rg --files-with-matches setAskUserHandler src/
+//     src/orchestrator/orchestrator.ts          ← this file was skipped
+//     $ rg -n setAskUserHandler src/ui/use-app-logic.tsx
+//     binary file matches (found "\0" byte around offset 16359)
 //
-// HOW TO SEARCH THIS FILE
-//   - Name it: `rg -n <pattern> src/ui/use-app-logic.tsx` prints "binary file
-//     matches" plus the hits. Or pass `--text` / `-a`. Or just Read it — line
-//     numbers are reliable; only the tree-wide scan skips it.
-//   - Never conclude "no call sites in src/" from a tree-wide search while this
-//     notice stands. Check this file and `src/ui/app.tsx` by name.
+// That cost a wrong conclusion: the tree-wide search "proved" the `ask_user` handler
+// was never wired and that every call returned the dismissed sentinel immediately.
+// Both were false — it is registered at `agent.setAskUserHandler(...)` in this file
+// and opens a real blocking card. Only a DB row that disagreed caught it.
 //
-// THE REAL FIX, deliberately not taken here: rewrite that one character class with
-// escapes (`\x00`, `\x1b`, `\x1f`), which is semantically identical in a JS regex
-// and makes the file plain text again. It was left alone because it sits in the
-// secret-sanitisation path of a watched UI surface (CLAUDE.md "Self-QA workflow"),
-// so it wants a self-verify run rather than a drive-by edit. Take it when you are
-// already running that.
+// The classes are now escapes, which is semantically identical in a JS regex (proved
+// exhaustively over every UTF-16 code unit in
+// `src/ui/__tests__/strip-control-bytes.test.ts`, which also fails if a 0x00 byte
+// reappears anywhere under `src/`), so a default `rg` reads this file again.
 import * as path from "node:path";
 import type { AgentModeRuntime } from "@muonroi/agent-harness-opentui";
 import { Semantic, SemanticProvider, useAgentInputBridge } from "@muonroi/agent-harness-opentui";
@@ -363,9 +356,9 @@ function stripControlBytes(raw: string): string {
   return (
     raw
       // biome-ignore lint/suspicious/noControlCharactersInRegex: strip terminal bracketed-paste guards (ESC[200~ / ESC[201~)
-      .replace(/?\[20[01]~/g, "")
+      .replace(/\x1b?\[20[01]~/g, "")
       // biome-ignore lint/suspicious/noControlCharactersInRegex: strip control bytes + DEL from typed/pasted secrets
-      .replace(/[ -]/g, "")
+      .replace(/[\x00-\x1f\x7f]/g, "")
   );
 }
 
