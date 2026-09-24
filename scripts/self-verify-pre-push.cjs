@@ -88,8 +88,14 @@ if (result.status === 0) {
 if (result.status === 3) {
   log("self-verify INCONCLUSIVE — no scenario failed, but at least one verified NOTHING");
   log("this is not a pass: the gate could not establish that your change works");
+  log("the INCONCLUSIVE line above names the scenario; read its first '·' line for why —");
+  log("  'Child never became ready' = the TUI child did not come up, NOT a defect in your");
+  log("  change (it names the gate it waited on, the budget, the measured wait, whether the");
+  log("  child was alive, and the child's stderr tail). Re-run it directly to confirm:");
+  log(`  bun run src/index.ts self-verify --since ${baseRef} --max 4 --no-emit`);
 } else {
-  log(`self-verify FAILED (exit ${result.status}) — blocking push`);
+  log(`self-verify FAILED (exit ${result.status}) — an expectation was measured and MISSED`);
+  log("the FAIL line above names the scenario and the expectation; this one is in your change");
 }
 log("override with: git push --no-verify");
 exitWith(1);

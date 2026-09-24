@@ -31,6 +31,9 @@ import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidec
 import { spawnAgentTui } from "../agent-harness/test-spawn.js";
 import type { Scenario, ScenarioRun, ScenarioStep } from "./types.js";
 
+/** Cap on the retained stderr tail — enough for a stack trace, not a log dump. */
+const STDERR_TAIL_CHARS = 4_000;
+
 export type OrchestratorOptions = {
   /** Path to muonroi-cli entry file. Default: resolved src/index.ts of this repo. */
   entry?: string;
@@ -102,6 +105,31 @@ async function runOneScenario(
   }
 
   const { proc, inWrite, outRead, cleanup } = spawnResult;
+
+  // The child is spawned with `stdio: ["pipe","pipe","pipe"]` and nothing here
+  // used to read stdout or stderr, so everything it printed while failing was
+  // discarded. Keep a bounded stderr tail — that is where a failing child says
+  // WHY — and drain stdout so the rendered-TUI bytes (measured ~1.4 KB/s at the
+  // prompt, 17.5 KB over a 5 s scenario) do not pile up unread in the pipe.
+  //
+  // Draining is NOT a fix for a wedged child: measured 2026-09-24, a child left
+  // with a completely unread stdout for 150 s (~210 KB) still mounted, still
+  // answered `/agents`, and still reported `exitCode === null`. So the pipe does
+  // not block here; the reason to read it is diagnostic, not liveness.
+  const stderrChunks: string[] = [];
+  let stderrBytes = 0;
+  proc.stderr?.on("data", (d: Buffer | string) => {
+    const text = typeof d === "string" ? d : d.toString("utf8");
+    stderrBytes += text.length;
+    stderrChunks.push(text);
+    // Bounded: keep the TAIL, because the useful line is the last one.
+    while (stderrChunks.length > 1 && stderrChunks.join("").length > STDERR_TAIL_CHARS) stderrChunks.shift();
+  });
+  proc.stdout?.on("data", () => {
+    // Intentionally discarded: this is the rendered TUI, not diagnostics. The
+    // listener exists so the stream is consumed rather than left unread.
+  });
+
   let idleObserved = 0;
   const driver = wireDriver(inWrite, outRead, () => {
     idleObserved++;
@@ -114,24 +142,38 @@ async function runOneScenario(
   // this a dead child's stale tree would satisfy `selectorPresent`.
   let done = false;
   let crashTrace: string | undefined;
+  let childExit: { code: number | null; signal: string | null } | undefined;
   proc.on("exit", (code, signal) => {
+    childExit = { code, signal: signal ?? null };
     if (!done) crashTrace = `child exited early: code=${code} signal=${signal ?? "none"}`;
     driver._closeAllSubscribers();
   });
 
   const syncTimeouts: string[] = [];
+  // Readiness is assumed until a step marked `guard` actually expires, so a
+  // scenario with no guard (smoke-boot) is judged exactly as before.
+  let mounted = true;
+  let mountGuard: ScenarioRun["mountGuard"];
   let errorTrace: string | undefined;
+  let stepIndex = -1;
   try {
     for (const step of scenario.steps) {
-      await runStep(driver, step, scenario.budgetMs, syncTimeouts);
+      stepIndex++;
+      const outcome = await runStep(driver, step, scenario.budgetMs, syncTimeouts);
+      if (step.op === "wait_for" && step.guard === true) {
+        mountGuard = { label: outcome.label ?? "?", timeoutMs: outcome.timeoutMs ?? 0, waitedMs: outcome.waitedMs };
+        if (outcome.expired) mounted = false;
+      }
     }
   } catch (err) {
     errorTrace = err instanceof Error ? err.message : String(err);
-    ctx.log(`[self-qa] ${scenario.id}: step error: ${errorTrace}`);
+    ctx.log(`[self-qa] ${scenario.id}: step error at step ${stepIndex}: ${errorTrace}`);
   }
 
   const finalFrame = driver.snapshot();
   const endedAt = Date.now();
+  const childAlive = proc.exitCode === null && proc.signalCode === null;
+  const stderrTail = stderrChunks.join("").slice(-STDERR_TAIL_CHARS);
   done = true;
   try {
     proc.kill();
@@ -155,6 +197,11 @@ async function runOneScenario(
     errorTrace: crashTrace ?? errorTrace,
     idleObserved,
     syncTimeouts,
+    mounted,
+    ...(mountGuard ? { mountGuard } : {}),
+    childAlive,
+    ...(childExit ? { childExit } : {}),
+    ...(stderrBytes > 0 ? { stderrTail } : {}),
   };
 }
 
@@ -210,40 +257,58 @@ function attachEventCollector(driver: Driver, bus: LiveEvent[]): void {
  * scenario had, and the result was reported as `inconclusive` — which the
  * process exit code then ignored entirely.
  */
+type StepOutcome = {
+  /** True when a `wait_for` gave up instead of resolving. */
+  expired: boolean;
+  /** What it was waiting for, for the failure line. */
+  label?: string;
+  timeoutMs?: number;
+  /** How long it ACTUALLY waited — the number missing from every old report. */
+  waitedMs: number;
+};
+
 async function runStep(
   driver: Driver,
   step: ScenarioStep,
   budgetMs: number,
   syncTimeouts: string[],
-): Promise<void> {
+): Promise<StepOutcome> {
   switch (step.op) {
     case "type":
       driver.type(step.text);
-      return;
+      return { expired: false, waitedMs: 0 };
     case "press":
       driver.press(step.key);
-      return;
+      return { expired: false, waitedMs: 0 };
     case "press_sequence":
       driver.press_sequence(step.keys);
-      return;
+      return { expired: false, waitedMs: 0 };
     case "focus":
       try {
         driver.focus(step.selector);
       } catch (err) {
         syncTimeouts.push(`focus ${step.selector}: ${err instanceof Error ? err.message : String(err)}`);
       }
-      return;
+      return { expired: false, waitedMs: 0 };
     case "wait_for": {
       const timeout = step.timeoutMs ?? Math.min(budgetMs, 5_000);
       const label = step.idle ? "idle" : (step.selector ?? step.event ?? "nothing");
+      const t0 = Date.now();
       try {
         if (step.idle) await driver.wait_for({ idle: true, timeoutMs: timeout });
         else if (step.selector) await driver.wait_for({ selector: step.selector, timeoutMs: timeout });
         else if (step.event) await driver.wait_for({ event: step.event, timeoutMs: timeout });
       } catch (err) {
-        syncTimeouts.push(`wait_for ${label} (${timeout}ms): ${err instanceof Error ? err.message : String(err)}`);
+        const waitedMs = Date.now() - t0;
+        // Report the MEASURED wait next to the budget. Without it, "expired
+        // after its 15000ms timeout" and "gave up 300ms in because the driver
+        // rejected" read identically, and only the first is a timing problem.
+        syncTimeouts.push(
+          `wait_for ${label} (budget ${timeout}ms, waited ${waitedMs}ms): ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return { expired: true, label, timeoutMs: timeout, waitedMs };
       }
-      return;
+      return { expired: false, label, timeoutMs: timeout, waitedMs: Date.now() - t0 };
     }
   }
 }
@@ -260,6 +325,9 @@ function crashedRun(scenario: Scenario, trace: string): ScenarioRun {
     errorTrace: trace,
     idleObserved: 0,
     syncTimeouts: [],
+    // The child never existed, so it was never ready and never alive.
+    mounted: false,
+    childAlive: false,
   };
 }
 
@@ -274,5 +342,8 @@ function timedOutRun(scenario: Scenario): ScenarioRun {
     crashed: false,
     idleObserved: 0,
     syncTimeouts: [],
+    // Never spawned: the batch budget ran out before its turn.
+    mounted: false,
+    childAlive: false,
   };
 }

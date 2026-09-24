@@ -132,7 +132,10 @@ describe("judge", () => {
       version: "0.4.0",
       seq: 1,
       ts: 0,
-      nodes: [{ id: "composer", role: "textbox" }, { id: "status", role: "statusbar" }],
+      nodes: [
+        { id: "composer", role: "textbox" },
+        { id: "status", role: "statusbar" },
+      ],
     };
     const r = judge(makeRun(scn, [], frame));
     expect(r.verdict).toBe("fail");
@@ -214,6 +217,80 @@ describe("judge", () => {
     expect(r.verdict).toBe("fail");
   });
 
+  // The pre-push gate's "failed once, passed on retry" shape.
+  //
+  // When the readiness gate expires the TUI never became driveable, so the
+  // steps after it were dispatched into nothing and `finalFrame` is null. The
+  // committed judge then read `selectorPresent`'s "No final frame captured" as
+  // a definite negative, returned `fail`, and the hook printed "self-verify
+  // FAILED — blocking push" for a transient boot. The honest verdict is
+  // `inconclusive`: nothing about the change was established either way.
+  describe("child never became ready", () => {
+    const notReady = () =>
+      makeRun(
+        baseScenario({
+          steps: [{ op: "wait_for", selector: "role=textbox", timeoutMs: 60_000, guard: true }],
+          expectations: [{ kind: "noErrorToast" }, { kind: "selectorPresent", selector: "id=subagents-modal" }],
+        }),
+        [],
+        null,
+        {
+          mounted: false,
+          mountGuard: { label: "role=textbox", timeoutMs: 60_000, waitedMs: 60_004 },
+          syncTimeouts: ["wait_for role=textbox (budget 60000ms, waited 60004ms): timeout"],
+          childAlive: true,
+        },
+      );
+
+    it("is inconclusive, not fail — the UI expectation was never measurable", () => {
+      expect(judge(notReady()).verdict).toBe("inconclusive");
+    });
+
+    it("names the gate, its budget, the measured wait, and child liveness", () => {
+      const reasons = judge(notReady())
+        .checks.map((c) => c.reason)
+        .join(" | ");
+      expect(reasons).toContain("never became ready");
+      expect(reasons).toContain("role=textbox");
+      expect(reasons).toContain("60000ms");
+      expect(reasons).toContain("60004ms");
+      expect(reasons).toContain("child alive=true");
+    });
+
+    it("still reports WHICH expectation could not be established", () => {
+      const r = judge(notReady());
+      const sel = r.checks.find((c) => c.expectation.kind === "selectorPresent");
+      expect(sel?.passed).toBe(false);
+      expect(sel?.reason).toContain("id=subagents-modal");
+    });
+
+    it("surfaces the child's stderr tail so the next occurrence explains itself", () => {
+      const run = notReady();
+      run.stderrTail = "[provider] boom: ECONNRESET";
+      const reasons = judge(run)
+        .checks.map((c) => c.reason)
+        .join(" | ");
+      expect(reasons).toContain("ECONNRESET");
+    });
+
+    it("a scenario the batch budget never spawned is inconclusive, not fail", () => {
+      // `timedOutRun` in the orchestrator: the batch budget ran out before this
+      // scenario's turn, so no child was ever started. It used to be reported as
+      // a FAILED `selectorPresent` — a red gate for a surface nothing looked at.
+      const scn = baseScenario({ expectations: [{ kind: "selectorPresent", selector: "id=never-driven" }] });
+      const r = judge(makeRun(scn, [], null, { timedOut: true, mounted: false, childAlive: false }));
+      expect(r.verdict).toBe("inconclusive");
+    });
+
+    it("keeps reporting fail when the child DID mount and an expectation missed", () => {
+      // The reclassification must be narrow: a mounted child that fails an
+      // assertion is still a definite negative.
+      const scn = baseScenario({ expectations: [{ kind: "selectorPresent", selector: "id=missing" }] });
+      const r = judge(makeRun(scn, [], { seq: 1, ts: 0, mode: "live", nodes: [] } as unknown as LiveFrame, {}));
+      expect(r.verdict).toBe("fail");
+    });
+  });
+
   it("an expired sync step alone yields inconclusive, not pass", () => {
     const scn = baseScenario({ expectations: [{ kind: "noErrorToast" }] });
     const r = judge(makeRun(scn, [], null, { syncTimeouts: ["wait_for id=x (5000ms): timeout"] }));
@@ -251,9 +328,7 @@ describe("selfVerifyExitCode — the gate contract", () => {
   it("does NOT report success when a scenario verified nothing", () => {
     // The measured hole: 1 passed / 0 failed / 5 inconclusive exited 0.
     expect(selfVerifyExitCode({ total: 6, passed: 1, failed: 0, inconclusive: 5 })).not.toBe(SELF_VERIFY_EXIT.OK);
-    expect(selfVerifyExitCode({ total: 6, passed: 1, failed: 0, inconclusive: 5 })).toBe(
-      SELF_VERIFY_EXIT.INCONCLUSIVE,
-    );
+    expect(selfVerifyExitCode({ total: 6, passed: 1, failed: 0, inconclusive: 5 })).toBe(SELF_VERIFY_EXIT.INCONCLUSIVE);
   });
 
   it("a definite failure outranks an inconclusive", () => {

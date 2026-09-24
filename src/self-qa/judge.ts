@@ -28,6 +28,10 @@ import type { CheckResult, Expectation, JudgeResult, ScenarioRun } from "./types
 
 export function judge(run: ScenarioRun): JudgeResult {
   const durationMs = run.endedAt - run.startedAt;
+  // The child never became driveable: its readiness gate expired. Everything
+  // dispatched afterwards went into a UI that was not on screen, so no UI
+  // expectation was MEASURED — see the `neverReady` handling below.
+  const neverReady = run.mounted === false && !run.crashed;
   // Harness-level context first, so a reader sees WHY before WHAT. These are
   // NOT assertions about the product, so they are excluded from `anyFailed` —
   // a dead child means "unproven", not "the feature is broken".
@@ -36,17 +40,38 @@ export function judge(run: ScenarioRun): JudgeResult {
     harnessChecks.push({
       expectation: { kind: "idleReached" },
       passed: false,
-      reason: `Child process crashed before scenario completed: ${run.errorTrace ?? "unknown"}`,
+      reason: `Child process crashed before scenario completed: ${run.errorTrace ?? "unknown"} (${liveness(run)})`,
+    });
+  } else if (neverReady) {
+    const g = run.mountGuard;
+    harnessChecks.push({
+      expectation: { kind: "idleReached" },
+      passed: false,
+      reason:
+        `Child never became ready: readiness gate '${g?.label ?? "?"}' did not resolve ` +
+        `(budget ${g?.timeoutMs ?? 0}ms, waited ${g?.waitedMs ?? 0}ms); ${liveness(run)}; ` +
+        `scenario elapsed ${durationMs}ms. Nothing after the gate was driven, so the ` +
+        `expectations below are UNPROVEN, not failed.`,
     });
   } else if (run.timedOut) {
     harnessChecks.push({
       expectation: { kind: "idleReached" },
       passed: false,
-      reason: `Scenario exceeded budget of ${run.scenario.budgetMs}ms`,
+      reason: `Scenario exceeded budget of ${run.scenario.budgetMs}ms (elapsed ${durationMs}ms; ${liveness(run)})`,
     });
   }
   for (const t of run.syncTimeouts) {
     harnessChecks.push({ expectation: { kind: "idleReached" }, passed: false, reason: `Sync step expired: ${t}` });
+  }
+  // The child's own words, once, at the end of the harness block. This is the
+  // only place a failing child's stack trace / provider error can surface: the
+  // orchestrator pipes stderr but the report never carried it.
+  if (run.stderrTail && (run.crashed || neverReady || run.timedOut || run.syncTimeouts.length > 0)) {
+    harnessChecks.push({
+      expectation: { kind: "idleReached" },
+      passed: false,
+      reason: `Child stderr tail: ${run.stderrTail.trim()}`,
+    });
   }
 
   // ALWAYS evaluate the scenario's own expectations — even after a crash or a
@@ -55,12 +80,20 @@ export function judge(run: ScenarioRun): JudgeResult {
   const expectationChecks: CheckResult[] = run.scenario.expectations.map((exp) => evaluate(exp, run));
   const checks: CheckResult[] = [...harnessChecks, ...expectationChecks];
 
-  const anyFailed = expectationChecks.some((c) => !c.passed);
-  const unproven = run.crashed || run.timedOut || run.syncTimeouts.length > 0;
-
   // A definite negative outranks "could not establish": if an expectation
   // actually failed we know the answer, and reporting it as inconclusive would
   // understate a real regression.
+  //
+  // The ONE exception is a child that never became ready. A failing check needs
+  // a measurement to be a negative, and there was none: the gate expired, so
+  // `finalFrame` is null and every `selectorPresent` reports "No final frame
+  // captured". Calling that `fail` blamed the developer's change for a
+  // transient boot and produced exactly the pass/fail/pass the gate was
+  // reported for. The checks are still listed — the reader sees WHICH
+  // expectation went unproven — they just do not decide the verdict.
+  const anyFailed = !neverReady && expectationChecks.some((c) => !c.passed);
+  const unproven = run.crashed || neverReady || run.timedOut || run.syncTimeouts.length > 0;
+
   let verdict: JudgeResult["verdict"];
   if (anyFailed) verdict = "fail";
   else if (unproven) verdict = "inconclusive";
@@ -144,10 +177,13 @@ function checkEventAbsent(exp: Expectation, events: LiveEvent[]): CheckResult {
 function checkSelectorPresent(exp: Expectation, frame: LiveFrame | null): CheckResult {
   if (exp.kind !== "selectorPresent") throw new Error("invariant");
   if (!frame) {
+    // Name the selector even here: "No final frame captured" alone left the
+    // reader unable to tell WHICH surface went unverified when a scenario
+    // carried several.
     return {
       expectation: exp,
       passed: false,
-      reason: "No final frame captured — cannot verify selector presence",
+      reason: `No final frame captured — cannot verify selector '${exp.selector}'`,
     };
   }
   const hits = findBySelector(frame, exp.selector);
@@ -216,6 +252,20 @@ function checkIdleReached(exp: Expectation, run: ScenarioRun): CheckResult {
     passed: false,
     reason: `Run finished in ${duration}ms which exceeds idle budget ${budget}ms`,
   };
+}
+
+/**
+ * Was the child still running, and if not how did it end?
+ *
+ * "The gate went red" and "the process it was driving had already died" used to
+ * be indistinguishable in the report. `childAlive` is optional so an older run
+ * (or a hand-built one in a test) reads as "unknown" rather than lying.
+ */
+function liveness(run: ScenarioRun): string {
+  if (run.childAlive === undefined) return "child alive=unknown";
+  if (run.childAlive) return "child alive=true";
+  const exit = run.childExit;
+  return `child alive=false (exit code=${exit?.code ?? "?"} signal=${exit?.signal ?? "none"})`;
 }
 
 function payloadMatches(event: LiveEvent, expected: Record<string, unknown>): boolean {

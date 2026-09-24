@@ -121,9 +121,15 @@ export async function runSelfVerify(opts: SelfVerifyOptions = {}): Promise<SelfV
     `[self-verify] Summary: ${summary.passed}/${summary.total} passed, ` +
       `${summary.failed} failed, ${summary.inconclusive} inconclusive, ${skipped.length} skipped`,
   );
+  // A non-pass must be self-explaining from this output alone: the pre-push hook
+  // runs self-verify with `stdio: "inherit"` and these lines are ALL the
+  // developer sees before "blocking push". So each one carries the scenario, its
+  // measured elapsed time, and — from the judge's harness checks — what the run
+  // was waiting for, how long it actually waited, whether the child was alive,
+  // and the child's own stderr tail.
   for (const r of results) {
     if (r.verdict === "pass") continue;
-    log(`[self-verify]   ${r.verdict.toUpperCase()} ${r.scenarioId}`);
+    log(`[self-verify]   ${r.verdict.toUpperCase()} ${r.scenarioId} (elapsed ${r.durationMs}ms)`);
     for (const c of r.checks) {
       if (!c.passed) log(`[self-verify]     · ${c.expectation.kind}: ${c.reason}`);
     }

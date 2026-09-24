@@ -31,6 +31,18 @@ export type ScenarioStep =
       event?: string;
       idle?: true;
       timeoutMs?: number;
+      /**
+       * Marks this wait as the scenario's READINESS gate: until it resolves the
+       * TUI is not driveable, so nothing after it means anything.
+       *
+       * The judge uses it to separate "the assertion failed" from "the child
+       * never became ready" — see `ScenarioRun.mounted`. It is set on the
+       * planner's `MOUNT_GUARD` only, never inferred from a selector, so a
+       * scenario whose readiness condition IS its assertion (`smoke-boot`
+       * waits for idle and then asserts `idleReached`) keeps reporting a real
+       * negative instead of being excused as un-driveable.
+       */
+      guard?: true;
     };
 
 export type Expectation =
@@ -94,6 +106,49 @@ export type ScenarioRun = {
    * entirely and silently discarded the only assertions it had.
    */
   syncTimeouts: string[];
+
+  /**
+   * Did the scenario's readiness gate (`ScenarioStep.guard`) resolve?
+   *
+   * `false` means the TUI never became driveable, so every step after the gate
+   * was dispatched into a UI that was not there and every UI expectation is
+   * UNPROVEN rather than failed. Absent/`true` = as before.
+   *
+   * This is the misclassification the field exists to close. `judge` ranks "a
+   * definite negative outranks could-not-establish", which is right — but a
+   * `selectorPresent` miss against a UI that never mounted is not a definite
+   * negative, it is the absence of a measurement. Measured on the committed
+   * code: with the mount guard expired, `finalFrame` is `null`,
+   * `checkSelectorPresent` returns "No final frame captured", `anyFailed`
+   * becomes true and the verdict is `fail` → exit 1 → the pre-push hook prints
+   * "self-verify FAILED — blocking push". A transient slow boot was therefore
+   * reported as a regression in the developer's change, and the obvious next
+   * move — push again — "fixed" it. That is how a gate teaches `--no-verify`.
+   */
+  mounted?: boolean;
+
+  /** The readiness gate's description, so the failure line can name it. */
+  mountGuard?: { label: string; timeoutMs: number; waitedMs: number };
+
+  /** Was the child still running when the scenario ended? */
+  childAlive?: boolean;
+
+  /** The child's exit status, when it had already exited. */
+  childExit?: { code: number | null; signal: string | null };
+
+  /**
+   * Tail of the child's stderr.
+   *
+   * The orchestrator spawns with `stdio: ["pipe","pipe","pipe"]` and used to
+   * read NONE of it, so anything the child printed while failing — a stack
+   * trace, a provider error, the `[agent-mode] pre-mount command buffer full`
+   * warning — was discarded. Measured on a healthy run: 819 bytes per child
+   * (mock-model fixture notices + an env-store precedence warning), and 17.5 KB
+   * on stdout in a 5 s scenario / ~1.4 KB/s while merely parked at the prompt.
+   * Capturing the tail is what makes a failure self-explaining; draining also
+   * stops that stream accumulating unread in the OS pipe buffer.
+   */
+  stderrTail?: string;
 };
 
 export type CheckResult = {

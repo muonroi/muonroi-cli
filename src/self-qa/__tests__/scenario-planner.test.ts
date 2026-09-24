@@ -83,5 +83,33 @@ describe("scenario-planner", () => {
       const typeStep = textboxScn?.steps.find((s) => s.op === "type");
       expect(typeStep).toMatchObject({ op: "type" });
     });
+
+    // The wiring that lets the judge say "the child never became ready" instead
+    // of blaming the change under test. Without `guard: true` on the mount wait,
+    // a transient boot failure is reported as a failed assertion — see
+    // ScenarioRun.mounted and judge.ts.
+    it("marks the mount wait as the readiness gate on every driven surface scenario", () => {
+      const scn = planScenarios({
+        diffFilesOverride: [],
+        extraFiles: ["src/ui/agents-modal.tsx"],
+        maxScenarios: 8,
+      }).filter((s) => s.reachable !== false && s.id !== "smoke-boot");
+
+      expect(scn.length).toBeGreaterThan(0);
+      for (const s of scn) {
+        const guards = s.steps.filter((step) => step.op === "wait_for" && step.guard === true);
+        expect(guards, `${s.id} must have exactly one readiness gate`).toHaveLength(1);
+        expect(guards[0]).toMatchObject({ op: "wait_for", selector: "role=textbox" });
+      }
+    });
+
+    // smoke-boot's readiness condition IS its assertion (it waits for idle and
+    // then asserts idleReached), so marking it as a gate would excuse a genuine
+    // "the CLI did not boot" as un-driveable.
+    it("does NOT mark smoke-boot's idle wait as a readiness gate", () => {
+      const smoke = planScenarios({ diffFilesOverride: [], maxScenarios: 4 }).find((s) => s.id === "smoke-boot");
+      expect(smoke).toBeDefined();
+      expect(smoke?.steps.some((step) => step.op === "wait_for" && step.guard === true)).toBe(false);
+    });
   });
 });

@@ -58,7 +58,15 @@ const SCENARIO_BUDGET_MS = 90_000;
  * ready" actually means — `tests/harness/subagents-modal.spec.ts:30` warns
  * that idle can fire on the empty seq=0 frame BEFORE React mounts.
  */
-const MOUNT_GUARD: ScenarioStep = { op: "wait_for", selector: "role=textbox", timeoutMs: MOUNT_TIMEOUT_MS };
+const MOUNT_GUARD: ScenarioStep = {
+  op: "wait_for",
+  selector: "role=textbox",
+  timeoutMs: MOUNT_TIMEOUT_MS,
+  // `guard` is what lets the judge say "the child never became ready" instead of
+  // blaming the change under test for a `selectorPresent` miss against a UI that
+  // never mounted. See ScenarioRun.mounted.
+  guard: true,
+};
 
 /**
  * A `<Semantic id={`row-${i}`}>` is captured by SEMANTIC_RE as the LITERAL
