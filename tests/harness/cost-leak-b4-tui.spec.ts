@@ -19,11 +19,11 @@
  * least one call after round 2.
  */
 
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-
+import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { type CostLeakHarness, exitTuiAndWaitForDump, spawnCostLeakHarness } from "./cost-leak-tui-helpers.js";
 import { loadDumpedRecordings } from "./recording.js";
 
@@ -109,11 +109,7 @@ describe("B4 TUI: top-level compactor reduces cumulative prompt size", () => {
 
   afterAll(() => {
     handle?.cleanup();
-    try {
-      rmSync(payloadDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-    } catch {
-      // ignore
-    }
+    bestEffortRemoveSync(payloadDir, "tests/harness/cost-leak-b4-tui.spec.ts");
   });
 
   it("dumped calls contain the top-level compactor elision marker on a later round", async () => {

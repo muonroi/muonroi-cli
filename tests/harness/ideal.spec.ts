@@ -1,9 +1,10 @@
 import type { ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { spawnHarness } from "./helpers.js";
 
 // Placeholder value used by loadKeyForProvider — must be >= 20 chars so the
@@ -41,11 +42,7 @@ describe("ideal E2E", () => {
   afterAll(() => {
     proc?.kill();
     cleanup?.();
-    try {
-      rmSync(greenfield, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-    } catch {
-      /* best-effort temp cleanup */
-    }
+    bestEffortRemoveSync(greenfield, "tests/harness/ideal.spec.ts");
   });
 
   it("typing /ideal surfaces the slash menu", async () => {

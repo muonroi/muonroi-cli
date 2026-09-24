@@ -32,11 +32,12 @@
  */
 
 import type { ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterEach, describe, expect, it } from "vitest";
+import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { spawnHarness } from "./helpers.js";
 import { loadDumpedRecordings } from "./recording.js";
 
@@ -267,11 +268,7 @@ describe("GSD hard mutation gate — E2E via real TUI tool-execute wrapper", { r
     handle?.cleanup();
     handle = null;
     if (workDir) {
-      try {
-        rmSync(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-      } catch {
-        // ignore — best-effort cleanup
-      }
+      bestEffortRemoveSync(workDir, "tests/harness/gsd-hard-gate.spec.ts");
       workDir = undefined;
     }
   });

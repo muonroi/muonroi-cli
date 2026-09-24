@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { bestEffortRemoveSync } from "../../__test-stubs__/cleanup";
 import { closeDatabase, getDatabase } from "../db";
 import { appendMessages, persistMessageWriteAhead } from "../transcript";
 
@@ -42,11 +43,7 @@ describe("FTS5 transcript integration", () => {
     else delete process.env.USERPROFILE;
 
     // Clean up temp dir
-    try {
-      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-    } catch {
-      // ignore
-    }
+    bestEffortRemoveSync(tmpDir, "src/storage/__tests__/transcript-fts.test.ts");
   });
 
   it("should index messages and tool calls in FTS5 table and support cascading deletes", () => {

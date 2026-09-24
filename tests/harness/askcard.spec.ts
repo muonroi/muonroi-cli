@@ -1,9 +1,10 @@
 import type { ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { spawnHarness } from "./helpers.js";
 
 const MOCK_PROVIDER_KEY = ["test", "mock", "provider", "noop"].join("-");
@@ -44,11 +45,7 @@ describe("askcard E2E", () => {
   afterAll(() => {
     proc?.kill();
     cleanup?.();
-    try {
-      rmSync(greenfield, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-    } catch {
-      /* best-effort temp cleanup */
-    }
+    bestEffortRemoveSync(greenfield, "tests/harness/askcard.spec.ts");
   });
 
   it("composer accepts input on startup", () => {

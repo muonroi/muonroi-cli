@@ -3,7 +3,7 @@
  * sequential stream semantics that downstream cost-leak specs depend on.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,7 +11,7 @@ import { APICallError, type LanguageModelV3StreamPart } from "@ai-sdk/provider";
 import { generateObject, stepCountIs, streamText, tool } from "ai";
 import { afterAll, describe, expect, it } from "vitest";
 import { z } from "zod";
-
+import { bestEffortRemoveSync } from "../../__test-stubs__/cleanup";
 import { humanizeApiError } from "../../orchestrator/error-utils.js";
 import { createMockModel, loadMockModelFromDir, textOnlyStream, toolCallStream } from "../mock-model.js";
 
@@ -166,11 +166,7 @@ describe("loadMockModelFromDir", () => {
   }
   afterAll(() => {
     for (const d of tmpDirs) {
-      try {
-        rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-      } catch {
-        // ignore — best-effort cleanup
-      }
+      bestEffortRemoveSync(d, "src/agent-harness/__tests__/mock-model.spec.ts");
     }
   });
 

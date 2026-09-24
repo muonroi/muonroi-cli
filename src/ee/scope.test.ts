@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-
+import { bestEffortRemove } from "../__test-stubs__/cleanup";
 // We test the module under test after creating it
 import { buildScope, resetScopeCache, sanitizeRemoteUrl, scopeLabel } from "./scope.js";
 
@@ -15,7 +15,7 @@ describe("buildScope", () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {});
+    await bestEffortRemove(tmpDir, "src/ee/scope.test.ts");
   });
 
   it("returns { kind: 'global' } for a directory without .git", async () => {

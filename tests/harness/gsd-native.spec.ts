@@ -1,7 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { spawnHarness } from "./helpers.js";
 
 describe("gsd-native E2E smoke", () => {
@@ -26,11 +27,7 @@ describe("gsd-native E2E smoke", () => {
   afterAll(() => {
     ctx?.cleanup();
     if (greenfield) {
-      try {
-        rmSync(greenfield, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-      } catch {
-        /* best-effort — EBUSY on Windows when child handles linger */
-      }
+      bestEffortRemoveSync(greenfield, "tests/harness/gsd-native.spec.ts");
     }
   });
 

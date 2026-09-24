@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { spawnHarness } from "./helpers";
 
 describe("resume picker collapses conversation trees", () => {
@@ -63,11 +64,7 @@ describe("resume picker collapses conversation trees", () => {
       setTimeout(done, 1000);
     });
 
-    try {
-      fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-    } catch {
-      /* best-effort */
-    }
+    bestEffortRemoveSync(home, "tests/harness/session-picker.spec.ts");
   });
 
   it("shows one collapsed row for the tree, no (untitled)/{} noise", async () => {

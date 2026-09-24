@@ -7,10 +7,11 @@
  */
 
 import { promises as fs } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { bestEffortRemove } from "../../src/__test-stubs__/cleanup";
 import { getSection, parseSections } from "../../src/flow/parser.js";
 import { createRun, getActiveRunId, loadRun, setActiveRunId, updateRunFile } from "../../src/flow/run-manager.js";
 import { ensureFlowDir } from "../../src/flow/scaffold.js";
@@ -26,7 +27,7 @@ async function makeTempDir(prefix: string): Promise<string> {
 
 afterEach(async () => {
   for (const d of tempDirs) {
-    await rm(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {});
+    await bestEffortRemove(d, "tests/integration/kill-restart.test.ts");
   }
   tempDirs = [];
 });

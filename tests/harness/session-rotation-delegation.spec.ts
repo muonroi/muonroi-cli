@@ -1,11 +1,11 @@
 import type { ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-
+import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { spawnHarness } from "./helpers.js";
 
 const requireSync = createRequire(import.meta.url);
@@ -79,11 +79,7 @@ describe.skipIf(!!process.env.CI)("E2E Harness - Sub-Session Delegation & Silent
   });
 
   afterAll(() => {
-    try {
-      rmSync(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-    } catch {
-      // ignore
-    }
+    bestEffortRemoveSync(workDir, "tests/harness/session-rotation-delegation.spec.ts");
   });
 
   it("triggers SPAWN_SUB_SESSION: creates child session linked to parent, and absorbs summary", async () => {

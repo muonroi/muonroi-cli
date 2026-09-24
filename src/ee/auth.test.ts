@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { bestEffortRemove } from "../__test-stubs__/cleanup";
 import { relativizePath, writeExperienceConfig } from "./auth.js";
 
 describe("auth path utilities", () => {
@@ -12,7 +13,7 @@ describe("auth path utilities", () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {});
+    await bestEffortRemove(tmpDir, "src/ee/auth.test.ts");
   });
 
   it("relativizes home path structures and replaces slashes safely", () => {

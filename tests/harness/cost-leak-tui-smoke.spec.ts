@@ -14,12 +14,12 @@
  */
 
 import type { ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-
+import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { spawnHarness } from "./helpers.js";
 import { loadDumpedRecordings } from "./recording.js";
 
@@ -95,11 +95,7 @@ describe("cost-leak TUI smoke — fixture + dump path works end-to-end", () => {
     }
     cleanup?.();
     if (workDir) {
-      try {
-        rmSync(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-      } catch {
-        // ignore
-      }
+      bestEffortRemoveSync(workDir, "tests/harness/cost-leak-tui-smoke.spec.ts");
     }
   });
 

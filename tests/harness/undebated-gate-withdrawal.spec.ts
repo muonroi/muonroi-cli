@@ -37,12 +37,13 @@
  *    whole point: a card whose waiter gave up must not keep looking live.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Driver } from "@muonroi/agent-harness-core/driver";
 import type { LiveEvent } from "@muonroi/agent-harness-core/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { createRun } from "../../src/flow/run-manager.js";
 import { writeManifest } from "../../src/product-loop/artifact-io.js";
 import { writeUndebatedStanceRecord } from "../../src/product-loop/undebated-criteria-gate.js";
@@ -101,11 +102,7 @@ describe("undebated-criteria gate — withdrawal E2E (session 697419024ec8)", ()
   afterAll(() => {
     ctx?.proc?.kill();
     ctx?.cleanup?.();
-    try {
-      rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-    } catch {
-      /* best-effort temp cleanup */
-    }
+    bestEffortRemoveSync(cwd, "tests/harness/undebated-gate-withdrawal.spec.ts");
   });
 
   it("opens the undebated-criteria card, then withdraws it on timeout with a notice", async () => {

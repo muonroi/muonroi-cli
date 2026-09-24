@@ -26,6 +26,7 @@ vi.mock("../../utils/logger.js", async () => {
   };
 });
 
+import { bestEffortRemoveSync } from "../../__test-stubs__/cleanup";
 import { logger } from "../../utils/logger.js";
 import {
   __resetBreadcrumbStateForTests,
@@ -71,11 +72,7 @@ afterEach(() => {
   delete process.env.MUONROI_COUNCIL_BREADCRUMB_FILE;
   delete process.env.MUONROI_COUNCIL_BREADCRUMBS;
   delete process.env.MUONROI_COUNCIL_BREADCRUMB_HEARTBEAT_MS;
-  try {
-    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-  } catch {
-    // Windows can hold a handle briefly; the OS temp dir is disposable anyway.
-  }
+  bestEffortRemoveSync(tmpDir, "src/council/__tests__/crash-breadcrumb.test.ts");
 });
 
 describe("breadcrumb()", () => {

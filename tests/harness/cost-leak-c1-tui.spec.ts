@@ -20,13 +20,13 @@
  */
 
 import type { ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Driver } from "@muonroi/agent-harness-core/driver";
 import type { LiveEvent } from "@muonroi/agent-harness-core/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-
+import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { spawnHarness } from "./helpers.js";
 
 function writeDeepSeekFixture(dir: string): void {
@@ -101,11 +101,7 @@ describe("C1 TUI: DeepSeek cache field split (promptCacheHitTokens -> cacheReadT
     }
     cleanup?.();
     if (workDir) {
-      try {
-        rmSync(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-      } catch {
-        // ignore
-      }
+      bestEffortRemoveSync(workDir, "tests/harness/cost-leak-c1-tui.spec.ts");
     }
   });
 

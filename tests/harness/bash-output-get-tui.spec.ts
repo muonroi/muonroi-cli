@@ -31,11 +31,11 @@
  * the playbook actually steers DeepSeek toward proactive use.
  */
 
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-
+import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { type CostLeakHarness, exitTuiAndWaitForDump, spawnCostLeakHarness } from "./cost-leak-tui-helpers.js";
 import { loadDumpedRecordings } from "./recording.js";
 
@@ -184,11 +184,7 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
   afterAll(() => {
     handle?.cleanup();
     if (workDir) {
-      try {
-        rmSync(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-      } catch {
-        // ignore
-      }
+      bestEffortRemoveSync(workDir, "tests/harness/bash-output-get-tui.spec.ts");
     }
   });
 

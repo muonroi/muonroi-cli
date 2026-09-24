@@ -6,12 +6,13 @@
  */
 
 import type { ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createDriver, type Driver } from "@muonroi/agent-harness-core/driver";
 import type { LiveEvent, LiveFrame, VisualFrame } from "@muonroi/agent-harness-core/protocol";
 import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidechannel";
+import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { type SpawnResult, spawnAgentTui } from "../../src/agent-harness/test-spawn.js";
 
 export type HarnessContext = {
@@ -148,11 +149,7 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
   const cleanup = () => {
     spawnCleanup();
     if (tempHome) {
-      try {
-        rmSync(tempHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-      } catch {
-        /* best-effort */
-      }
+      bestEffortRemoveSync(tempHome, "tests/harness/helpers.ts");
     }
   };
 

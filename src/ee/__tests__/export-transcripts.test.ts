@@ -14,20 +14,17 @@ import { Database } from "bun:sqlite";
 // via `bun test`, not vitest (vitest cannot resolve bun:sqlite's `db.run` API).
 // Excluded from vitest in vitest.config.ts.
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { bestEffortRemoveSync } from "../../__test-stubs__/cleanup";
 
 let tmpHome = "";
 let origUserProfile: string | undefined;
 
 function cleanDb() {
   if (tmpHome) {
-    try {
-      rmSync(tmpHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-    } catch {
-      /* ok */
-    }
+    bestEffortRemoveSync(tmpHome, "src/ee/__tests__/export-transcripts.test.ts");
   }
 }
 

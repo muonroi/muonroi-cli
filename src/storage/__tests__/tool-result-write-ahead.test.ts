@@ -22,6 +22,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { bestEffortRemoveSync } from "../../__test-stubs__/cleanup";
 import { closeDatabase, getDatabase } from "../db";
 import { appendMessages, persistToolCallWriteAhead, persistToolResultWriteAhead } from "../transcript";
 
@@ -53,11 +54,7 @@ describe("tool_results write-ahead", () => {
     else delete process.env.HOME;
     if (originalUserProfile !== undefined) process.env.USERPROFILE = originalUserProfile;
     else delete process.env.USERPROFILE;
-    try {
-      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-    } catch {
-      /* best-effort temp cleanup */
-    }
+    bestEffortRemoveSync(tmpDir, "src/storage/__tests__/tool-result-write-ahead.test.ts");
   });
 
   const status = (): string | undefined =>

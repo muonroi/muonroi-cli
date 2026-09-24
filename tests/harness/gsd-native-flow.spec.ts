@@ -1,7 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { planningArtifact } from "../../src/gsd/paths.js";
 import { type HarnessContext, spawnHarness } from "./helpers.js";
 
@@ -61,11 +62,7 @@ describe("gsd-native greenfield bootstrap", () => {
     // tempHome. The OS reclaims the temp dir later; failure here is not a
     // regression of the behavior under test.
     if (greenfield) {
-      try {
-        rmSync(greenfield, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-      } catch {
-        /* best-effort — EBUSY on Windows when child handles linger */
-      }
+      bestEffortRemoveSync(greenfield, "tests/harness/gsd-native-flow.spec.ts");
     }
   });
 

@@ -11,6 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { bestEffortRemoveSync } from "../__test-stubs__/cleanup";
 import {
   __resetStderrMirrorForTests,
   installStderrMirror,
@@ -49,11 +50,7 @@ afterEach(() => {
   (process.stderr as any).write = realWrite;
   delete process.env.MUONROI_TUI_STDERR_MIRROR_FILE;
   delete process.env.MUONROI_TUI_STDERR_MIRROR;
-  try {
-    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-  } catch {
-    // Disposable OS temp dir; a held handle on Windows is not worth failing on.
-  }
+  bestEffortRemoveSync(tmpDir, "src/utils/stderr-mirror.test.ts");
 });
 
 describe("stderr mirror", () => {
