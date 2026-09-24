@@ -132,7 +132,7 @@ describe("modal focus sweep — exactly one focus node per open modal", () => {
         ctx.proc.kill();
         ctx.cleanup();
         try {
-          rmSync(home, { recursive: true, force: true });
+          rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
         } catch (err) {
           // Windows holds the child's cwd handle briefly after kill(); a leftover
           // temp dir must not fail the case, but must not vanish silently either.
@@ -186,7 +186,7 @@ describe("modal focus sweep — exactly one focus node per open modal", () => {
       ctx.proc.kill();
       ctx.cleanup();
       try {
-        rmSync(home, { recursive: true, force: true });
+        rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       } catch (err) {
         console.error(`[modal-focus-sweep] temp home cleanup failed: ${(err as Error)?.message ?? err}`, { home });
       }

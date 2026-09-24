@@ -74,7 +74,7 @@ describe("MCP needs-key inline card E2E", () => {
     cleanup?.();
     if (!home) return;
     try {
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch (err) {
       // Windows keeps the killed child's cwd handle open for a moment, so this
       // EPERMs and failed the FILE even with every test green. Logged, not thrown.

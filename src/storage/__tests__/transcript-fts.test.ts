@@ -43,7 +43,7 @@ describe("FTS5 transcript integration", () => {
 
     // Clean up temp dir
     try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch {
       // ignore
     }

@@ -62,7 +62,7 @@ describe("gsd-native greenfield bootstrap", () => {
     // regression of the behavior under test.
     if (greenfield) {
       try {
-        rmSync(greenfield, { recursive: true, force: true });
+        rmSync(greenfield, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       } catch {
         /* best-effort — EBUSY on Windows when child handles linger */
       }

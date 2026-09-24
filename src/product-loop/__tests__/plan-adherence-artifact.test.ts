@@ -186,8 +186,8 @@ afterEach(() => {
   delete process.env.MUONROI_SPRINT_SELF_VERIFY;
   delete process.env.MUONROI_IDEAL_ADHERENCE_REVIEW;
   delete process.env.MUONROI_IDEAL_ADHERENCE_ROUNDS;
-  rmSync(flowDir, { recursive: true, force: true });
-  rmSync(projectCwd, { recursive: true, force: true });
+  rmSync(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  rmSync(projectCwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 function readRecord(): SprintAdherenceRecord | null {
@@ -384,7 +384,7 @@ describe("plan-adherence artifact — the review throws before producing a verdi
       const readBack = await readSprintAdherence(localFlowDir, runId, sprintN);
       expect(readBack).toEqual(record);
     } finally {
-      rmSync(localFlowDir, { recursive: true, force: true });
+      rmSync(localFlowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 });

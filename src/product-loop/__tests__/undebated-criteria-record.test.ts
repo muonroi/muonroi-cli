@@ -49,7 +49,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await fs.rm(runDir, { recursive: true, force: true }).catch(() => {
+  await fs.rm(runDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {
     /* temp dir cleanup is best-effort */
   });
 });

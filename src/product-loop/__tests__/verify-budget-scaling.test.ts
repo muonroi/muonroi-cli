@@ -142,7 +142,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
-  rmSync(flowDir, { recursive: true, force: true });
+  rmSync(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("verify budget — derived from the run's own measured baseline", () => {
@@ -311,7 +311,7 @@ describe("the baseline records the cost the budget is derived from", () => {
     // Scope: another run's measurement is a different amount of code.
     await expect(readBaselineVerifyCostMs(baselinePath, "some-other-run")).resolves.toBeNull();
 
-    rmSync(cwd, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }, 30_000);
 
   it("returns null for a record written before the field existed", async () => {

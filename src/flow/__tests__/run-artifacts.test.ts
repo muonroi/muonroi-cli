@@ -443,7 +443,12 @@ describe("run-artifacts", () => {
         );
       } finally {
         errSpy.mockRestore();
-        await fs.rm(path.join(runDir, "spec-layout-check.json"), { recursive: true, force: true });
+        await fs.rm(path.join(runDir, "spec-layout-check.json"), {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 50,
+        });
       }
     });
 

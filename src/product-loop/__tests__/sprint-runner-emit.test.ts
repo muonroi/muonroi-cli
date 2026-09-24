@@ -80,7 +80,7 @@ beforeEach(() => {
   testFlowDir = mkdtempSync(join(tmpdir(), "sprint-runner-emit-"));
 });
 afterEach(() => {
-  rmSync(testFlowDir, { recursive: true, force: true });
+  rmSync(testFlowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 function makeCtx(overrides: Record<string, unknown> = {}): unknown {

@@ -54,7 +54,7 @@ describe("tool_results write-ahead", () => {
     if (originalUserProfile !== undefined) process.env.USERPROFILE = originalUserProfile;
     else delete process.env.USERPROFILE;
     try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch {
       /* best-effort temp cleanup */
     }

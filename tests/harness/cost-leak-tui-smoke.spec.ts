@@ -96,7 +96,7 @@ describe("cost-leak TUI smoke — fixture + dump path works end-to-end", () => {
     cleanup?.();
     if (workDir) {
       try {
-        rmSync(workDir, { recursive: true, force: true });
+        rmSync(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       } catch {
         // ignore
       }

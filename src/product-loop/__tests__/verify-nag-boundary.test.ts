@@ -219,8 +219,8 @@ describe("sprint-runner call site — the verify turn declares itself machine-re
   });
 
   afterEach(() => {
-    rmSync(flowDir, { recursive: true, force: true });
-    rmSync(projectCwd, { recursive: true, force: true });
+    rmSync(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    rmSync(projectCwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("suppression is ON while the verify turn streams, and OFF again afterwards", async () => {

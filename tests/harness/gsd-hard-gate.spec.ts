@@ -268,7 +268,7 @@ describe("GSD hard mutation gate — E2E via real TUI tool-execute wrapper", { r
     handle = null;
     if (workDir) {
       try {
-        rmSync(workDir, { recursive: true, force: true });
+        rmSync(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       } catch {
         // ignore — best-effort cleanup
       }

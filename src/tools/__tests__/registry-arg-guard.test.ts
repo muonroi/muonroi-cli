@@ -35,7 +35,7 @@ const ELIDED_ARGS = { __elided_note: MARKER };
 
 const dirs: string[] = [];
 afterAll(() => {
-  for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 function tempDir(): string {

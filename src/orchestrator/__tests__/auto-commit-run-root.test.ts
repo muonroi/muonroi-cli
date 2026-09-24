@@ -75,7 +75,7 @@ describe("auto-commit run-root containment", () => {
       // Windows file-lock failure is never invisible.
       console.error(`[auto-commit-run-root.test] worktree remove failed: ${(err as Error)?.message}`);
     }
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("git and the fixture agree that the worktree is a DIFFERENT toplevel from its parent", () => {

@@ -124,8 +124,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(flowDir, { recursive: true, force: true });
-  rmSync(projectCwd, { recursive: true, force: true });
+  rmSync(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  rmSync(projectCwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("F9 — the sprint outcome records WHY the floor failed (real runSprint)", () => {

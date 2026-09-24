@@ -68,7 +68,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(repo, { recursive: true, force: true });
+  rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const DECISIVE = "<TargetFramework>net9.0</TargetFramework>";
@@ -191,7 +191,7 @@ describe("readChangeDiff — untracked work is part of the change", () => {
       if (read.ok) return;
       expect(read.reason).toBe("diff-unreadable");
     } finally {
-      rmSync(notARepo, { recursive: true, force: true });
+      rmSync(notARepo, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 });

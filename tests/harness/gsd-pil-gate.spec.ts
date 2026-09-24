@@ -295,7 +295,7 @@ describe("PIL Prompt Gate — E2E via real TUI turn pipeline", { retry: 0 }, () 
     handle = null;
     if (workDir) {
       try {
-        rmSync(workDir, { recursive: true, force: true });
+        rmSync(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       } catch {
         // ignore — best-effort cleanup
       }

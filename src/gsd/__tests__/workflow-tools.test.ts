@@ -23,7 +23,7 @@ describe("gsd workflow tools registry", () => {
 
   afterEach(() => {
     process.env.MUONROI_GSD_NATIVE = prev;
-    if (tmp) rmSync(tmp, { recursive: true, force: true });
+    if (tmp) rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("registers gsd_* tools when native flag on", () => {

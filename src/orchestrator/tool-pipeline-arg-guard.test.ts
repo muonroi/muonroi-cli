@@ -68,7 +68,7 @@ const REUSE_STUB = /dup of call #\d+|dup of \w+ from turn \d+|already returned t
 
 const dirs: string[] = [];
 afterAll(() => {
-  for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 function tempDir(): string {

@@ -25,10 +25,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import {
-  type Finding,
   analyze,
   analyzeRevision,
   changedFilesSince,
+  type Finding,
   readBaselineSources,
   resolveBaseline,
   revExists,
@@ -39,7 +39,7 @@ const DISABLED = process.env.MUONROI_EXPORT_REACHABILITY === "0";
 
 const tempDirs: string[] = [];
 afterAll(() => {
-  for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
+  for (const d of tempDirs) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 function scaffold(files: Record<string, string>): string {
@@ -229,15 +229,19 @@ describe("export reachability — historical defect fixtures", () => {
     // Guarded: a shallow CI clone may not carry these objects. Skipping is
     // honest; asserting against a missing rev would be a fabricated pass.
     const present = revExists(REPO_ROOT, fx.rev);
-    it.skipIf(!present)(`fires on ${fx.rev} (${fx.label})`, () => {
-      const { findings } = analyzeRevision(REPO_ROOT, fx.rev);
-      const hit = findings.find((f) => f.symbol === fx.symbol && f.file === fx.file);
-      expect(hit, `expected ${fx.symbol} at ${fx.file} in ${JSON.stringify(symbolsOf(findings))}`).toBeDefined();
-      expect(hit?.kind).toBe(fx.kind);
-      // Precision matters as much as sensitivity: the defect must not arrive
-      // buried in noise, or the report gets skimmed and the finding missed.
-      expect(findings.length).toBe(1);
-    }, 60_000);
+    it.skipIf(!present)(
+      `fires on ${fx.rev} (${fx.label})`,
+      () => {
+        const { findings } = analyzeRevision(REPO_ROOT, fx.rev);
+        const hit = findings.find((f) => f.symbol === fx.symbol && f.file === fx.file);
+        expect(hit, `expected ${fx.symbol} at ${fx.file} in ${JSON.stringify(symbolsOf(findings))}`).toBeDefined();
+        expect(hit?.kind).toBe(fx.kind);
+        // Precision matters as much as sensitivity: the defect must not arrive
+        // buried in noise, or the report gets skimmed and the finding missed.
+        expect(findings.length).toBe(1);
+      },
+      60_000,
+    );
   }
 });
 

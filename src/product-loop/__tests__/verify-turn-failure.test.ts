@@ -137,8 +137,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(flowDir, { recursive: true, force: true });
-  rmSync(projectCwd, { recursive: true, force: true });
+  rmSync(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  rmSync(projectCwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   for (const k of ENV_KEYS) {
     if (prevEnv[k] === undefined) delete process.env[k];
     else process.env[k] = prevEnv[k];

@@ -250,8 +250,8 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.MUONROI_SPRINT_SELF_VERIFY;
-  rmSync(flowDir, { recursive: true, force: true });
-  rmSync(projectCwd, { recursive: true, force: true });
+  rmSync(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  rmSync(projectCwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("runSprint consults the goal-contradiction gate", () => {

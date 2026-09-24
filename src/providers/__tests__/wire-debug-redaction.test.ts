@@ -48,7 +48,7 @@ describe("wireDebug — llm-wire.log never persists a credential verbatim", () =
     else process.env.MUONROI_DEBUG_LLM_WIRE_PATH = savedPath;
     vi.resetModules();
     try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch (err) {
       console.error(`[wire-debug.test] temp dir cleanup failed for ${tmpDir}: ${(err as Error)?.message}`);
     }

@@ -12,7 +12,7 @@ describe("auth path utilities", () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {});
   });
 
   it("relativizes home path structures and replaces slashes safely", () => {

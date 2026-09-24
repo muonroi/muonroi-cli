@@ -174,7 +174,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(testFlowDir, { recursive: true, force: true });
+  rmSync(testFlowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   delete (globalThis as Record<string, unknown>).__muonroiAgentRuntime;
 });
 

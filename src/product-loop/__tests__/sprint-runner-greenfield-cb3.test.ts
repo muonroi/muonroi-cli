@@ -65,7 +65,7 @@ beforeEach(() => {
   classification.value = "greenfield";
 });
 afterEach(() => {
-  rmSync(testFlowDir, { recursive: true, force: true });
+  rmSync(testFlowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 function makeSpec(): ProductSpec {

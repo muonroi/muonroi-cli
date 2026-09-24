@@ -167,7 +167,7 @@ describe("loadMockModelFromDir", () => {
   afterAll(() => {
     for (const d of tmpDirs) {
       try {
-        rmSync(d, { recursive: true, force: true });
+        rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       } catch {
         // ignore — best-effort cleanup
       }

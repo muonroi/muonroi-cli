@@ -67,7 +67,7 @@ describe.skipIf(!!process.env.CI)("council flow E2E", () => {
     proc?.kill();
     cleanup?.();
     try {
-      rmSync(greenfield, { recursive: true, force: true });
+      rmSync(greenfield, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch {
       /* best-effort temp cleanup */
     }

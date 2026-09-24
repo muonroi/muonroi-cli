@@ -69,7 +69,7 @@ describe("council intent gate + plan card", () => {
     proc?.kill();
     cleanup?.();
     try {
-      rmSync(greenfield, { recursive: true, force: true });
+      rmSync(greenfield, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch (err) {
       // Best-effort temp cleanup — a leftover temp dir is not a test failure,
       // but a silent catch here would still hide a real cause (e.g. a file

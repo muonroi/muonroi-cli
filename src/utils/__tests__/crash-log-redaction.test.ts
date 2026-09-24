@@ -44,7 +44,7 @@ describe("appendCrashLog — crash.log never persists a credential verbatim", ()
     if (originalUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = originalUserProfile;
     try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch (err) {
       console.error(`[crash-log.test] temp dir cleanup failed for ${tmpDir}: ${(err as Error)?.message}`);
     }

@@ -123,7 +123,7 @@ beforeEach(() => {
   testFlowDir = mkdtempSync(join(tmpdir(), "sprint-runner-"));
 });
 afterEach(() => {
-  rmSync(testFlowDir, { recursive: true, force: true });
+  rmSync(testFlowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("sprint-runner", () => {
@@ -212,7 +212,7 @@ describe("sprint-runner", () => {
       // Loop advanced past implementation into verification.
       expect(runVerifyOrchestration).toHaveBeenCalledTimes(1);
     } finally {
-      rmSync(realCwd, { recursive: true, force: true });
+      rmSync(realCwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 
@@ -409,7 +409,7 @@ describe("sprint-runner", () => {
       expect(result!.nextFocus).toContain("this run introduced its own break");
       expect(result!.nextFocus).toContain("Fix it before the next sprint can be verified.");
     } finally {
-      rmSync(realCwd, { recursive: true, force: true });
+      rmSync(realCwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 

@@ -146,7 +146,7 @@ describe("done-gate hasTests is judged from the disk, not from the model's recip
   afterAll(() => {
     for (const dir of [qaPlatform, noTests]) {
       try {
-        rmSync(dir, { recursive: true, force: true });
+        rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[test-command-derivation] temp tree cleanup failed for ${dir}: ${message}`);

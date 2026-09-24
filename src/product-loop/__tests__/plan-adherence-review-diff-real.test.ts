@@ -37,7 +37,7 @@ describe("runPlanAdherenceReview — default diff source against a real repo", (
   });
 
   afterEach(() => {
-    rmSync(repo, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("a genuinely empty diff still gives stopReason 'no_diff' through the REAL default path", async () => {

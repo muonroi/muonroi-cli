@@ -121,7 +121,7 @@ describe("applySettledSynthesisGate — DB session-chain evidence (the real fork
     else process.env.HOME = prevHome;
     if (prevUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = prevUserProfile;
-    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("suppresses when the PARENT session's DB row settles this turn (real topic strings, 0.032 similarity)", () => {

@@ -131,7 +131,7 @@ describe("B3 TUI: sub-agent compactor reduces cumulative prompt size", () => {
   afterAll(() => {
     handle?.cleanup();
     try {
-      rmSync(payloadDir, { recursive: true, force: true });
+      rmSync(payloadDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch {
       // ignore
     }

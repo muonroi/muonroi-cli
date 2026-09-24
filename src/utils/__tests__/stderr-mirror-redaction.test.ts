@@ -66,7 +66,7 @@ describe("stderr-mirror — durable copy is redacted, terminal copy is not", () 
     if (originalEnvFile === undefined) delete process.env.MUONROI_TUI_STDERR_MIRROR_FILE;
     else process.env.MUONROI_TUI_STDERR_MIRROR_FILE = originalEnvFile;
     try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch (err) {
       console.error(`[stderr-mirror.test] temp dir cleanup failed for ${tmpDir}: ${(err as Error)?.message}`);
     }

@@ -179,7 +179,7 @@ describe("/ideal scoping synthesis grounds folderStructure in the repo's observe
   });
 
   afterEach(() => {
-    rmSync(flowDir, { recursive: true, force: true });
+    rmSync(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   async function drive(): Promise<{ chunks: any[]; result: any }> {

@@ -26,7 +26,7 @@ describe("sprint plan persistence (Wave 2)", () => {
     dir = await mktmp();
   });
   afterEach(async () => {
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("round-trips a persisted plan (persist → read same synthesis)", async () => {
@@ -60,7 +60,7 @@ describe("detectExistingPlanTargets (Wave 3)", () => {
     cwd = await mktmp();
   });
   afterEach(async () => {
-    await fs.rm(cwd, { recursive: true, force: true });
+    await fs.rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("returns only the plan's named target files that already exist on disk", async () => {
@@ -107,7 +107,7 @@ describe("computeMissingPlanTargets (4A completeness re-check)", () => {
     cwd = await mktmp();
   });
   afterEach(async () => {
-    await fs.rm(cwd, { recursive: true, force: true });
+    await fs.rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("returns plan targets that do NOT exist on disk (unaddressed items)", async () => {
@@ -174,7 +174,7 @@ describe("extractDeferredTargetPaths / deferral-aware re-check (regression: run 
     cwd = await mktmp();
   });
   afterEach(async () => {
-    await fs.rm(cwd, { recursive: true, force: true });
+    await fs.rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   // Real shape from the sandbox plan: module-hook.ts is NAMED in folderStructure

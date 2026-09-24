@@ -132,7 +132,7 @@ async function spawnLive(opts: {
 async function rmRetry(dir: string, attempts = 6): Promise<void> {
   for (let i = 0; i < attempts; i++) {
     try {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       return;
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;

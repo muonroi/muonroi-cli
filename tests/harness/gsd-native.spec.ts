@@ -27,7 +27,7 @@ describe("gsd-native E2E smoke", () => {
     ctx?.cleanup();
     if (greenfield) {
       try {
-        rmSync(greenfield, { recursive: true, force: true });
+        rmSync(greenfield, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       } catch {
         /* best-effort — EBUSY on Windows when child handles linger */
       }

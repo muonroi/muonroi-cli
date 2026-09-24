@@ -10,7 +10,7 @@ describe("ensureFootprintGitignored", () => {
     dir = mkdtempSync(join(tmpdir(), "footprint-gi-"));
   });
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("does nothing when cwd is NOT a git repo", () => {

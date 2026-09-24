@@ -64,7 +64,7 @@ describe("resume picker collapses conversation trees", () => {
     });
 
     try {
-      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch {
       /* best-effort */
     }

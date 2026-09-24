@@ -150,7 +150,7 @@ describe("loop-driver research→scoping consults the undebated-criteria gate", 
   });
 
   afterEach(async () => {
-    await fs.rm(flowDir, { recursive: true, force: true }).catch(() => {
+    await fs.rm(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {
       /* temp dir cleanup is best-effort */
     });
   });

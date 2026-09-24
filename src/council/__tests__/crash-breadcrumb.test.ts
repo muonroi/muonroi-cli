@@ -72,7 +72,7 @@ afterEach(() => {
   delete process.env.MUONROI_COUNCIL_BREADCRUMBS;
   delete process.env.MUONROI_COUNCIL_BREADCRUMB_HEARTBEAT_MS;
   try {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   } catch {
     // Windows can hold a handle briefly; the OS temp dir is disposable anyway.
   }

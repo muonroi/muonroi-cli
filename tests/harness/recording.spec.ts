@@ -110,7 +110,7 @@ describe("recording helpers", () => {
       expect(loaded[0]?.role).toBe(live[0]?.role);
       expect(loaded[0]?.promptChars).toBe(live[0]?.promptChars);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 

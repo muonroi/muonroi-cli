@@ -50,7 +50,7 @@ afterEach(() => {
   delete process.env.MUONROI_TUI_STDERR_MIRROR_FILE;
   delete process.env.MUONROI_TUI_STDERR_MIRROR;
   try {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   } catch {
     // Disposable OS temp dir; a held handle on Windows is not worth failing on.
   }

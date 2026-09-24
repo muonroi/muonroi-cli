@@ -162,7 +162,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllMocks();
-  rmSync(projectCwd, { recursive: true, force: true });
+  rmSync(projectCwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("maintain verify agent — a killed nested turn is not a successful verify", () => {

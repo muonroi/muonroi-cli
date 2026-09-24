@@ -102,7 +102,7 @@ describe("undebated-criteria gate — withdrawal E2E (session 697419024ec8)", ()
     ctx?.proc?.kill();
     ctx?.cleanup?.();
     try {
-      rmSync(cwd, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch {
       /* best-effort temp cleanup */
     }

@@ -53,7 +53,7 @@ describe("failDelegation — the error text is redacted in both artifacts", () =
 
   afterEach(() => {
     try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch (err) {
       console.error(`[delegations.test] temp dir cleanup failed for ${tmpDir}: ${(err as Error)?.message}`);
     }

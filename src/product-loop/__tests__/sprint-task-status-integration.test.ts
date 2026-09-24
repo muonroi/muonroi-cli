@@ -222,8 +222,8 @@ afterEach(() => {
   delete process.env.MUONROI_SPRINT_SELF_VERIFY;
   delete process.env.MUONROI_IDEAL_ADHERENCE_REVIEW;
   delete process.env.MUONROI_IDEAL_ADHERENCE_ROUNDS;
-  rmSync(flowDir, { recursive: true, force: true });
-  rmSync(projectCwd, { recursive: true, force: true });
+  rmSync(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  rmSync(projectCwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("task-aware plan-adherence review — sprints/<n>-plan.json statuses", () => {

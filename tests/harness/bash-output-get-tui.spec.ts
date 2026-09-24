@@ -185,7 +185,7 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
     handle?.cleanup();
     if (workDir) {
       try {
-        rmSync(workDir, { recursive: true, force: true });
+        rmSync(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       } catch {
         // ignore
       }

@@ -69,7 +69,7 @@ afterEach(() => {
   }
   for (const k of Object.keys(savedEnv)) delete savedEnv[k];
   try {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   } catch (err) {
     // Windows: writeFile() hands the file to the LSP runtime, which can still
     // hold a handle when the test ends (EPERM). The fixture is a mkdtemp dir —

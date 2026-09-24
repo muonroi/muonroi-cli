@@ -62,7 +62,7 @@ beforeEach(() => {
   (CB3_verifyBlank as unknown as ReturnType<typeof vi.fn>).mockReturnValue({ halt: true, reason: "no_recipe" });
 });
 afterEach(() => {
-  rmSync(testFlowDir, { recursive: true, force: true });
+  rmSync(testFlowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 function makeSpec(): ProductSpec {

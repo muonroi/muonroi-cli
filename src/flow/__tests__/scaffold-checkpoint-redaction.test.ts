@@ -41,7 +41,7 @@ describe("writeScaffoldCheckpoint — errorMessage is redacted, replay inputs ar
 
   afterEach(() => {
     try {
-      fs.rmSync(cwd, { recursive: true, force: true });
+      fs.rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch (err) {
       console.error(`[scaffold-checkpoint.test] temp dir cleanup failed for ${cwd}: ${(err as Error)?.message}`);
     }

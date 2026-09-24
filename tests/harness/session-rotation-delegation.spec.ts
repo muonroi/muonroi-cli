@@ -80,7 +80,7 @@ describe.skipIf(!!process.env.CI)("E2E Harness - Sub-Session Delegation & Silent
 
   afterAll(() => {
     try {
-      rmSync(workDir, { recursive: true, force: true });
+      rmSync(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch {
       // ignore
     }

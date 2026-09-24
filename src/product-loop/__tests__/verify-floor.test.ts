@@ -25,7 +25,7 @@ beforeEach(() => {
   cwd = mkdtempSync(join(tmpdir(), "verify-floor-"));
 });
 afterEach(() => {
-  rmSync(cwd, { recursive: true, force: true });
+  rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 function writePkg(scripts: Record<string, string>, opts: { lockfile?: boolean } = {}): void {

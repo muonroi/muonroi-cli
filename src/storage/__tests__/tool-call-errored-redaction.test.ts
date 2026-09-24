@@ -61,7 +61,7 @@ describe("markToolCallErrored — the error text has no path into tool_calls.arg
     if (originalUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = originalUserProfile;
     try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch (err) {
       console.error(`[tool-call-errored.test] temp dir cleanup failed for ${tmpDir}: ${(err as Error)?.message}`);
     }

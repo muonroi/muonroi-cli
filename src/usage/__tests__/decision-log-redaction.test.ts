@@ -43,7 +43,7 @@ describe("appendDecisionLog — the audit trail never persists a credential verb
 
   afterEach(() => {
     try {
-      fs.rmSync(tmpHome, { recursive: true, force: true });
+      fs.rmSync(tmpHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch (err) {
       console.error(`[decision-log.test] temp dir cleanup failed for ${tmpHome}: ${(err as Error)?.message}`);
     }

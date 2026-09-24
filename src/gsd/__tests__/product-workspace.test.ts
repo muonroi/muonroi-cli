@@ -14,7 +14,7 @@ describe("product-workspace", () => {
   let tmp: string;
 
   afterEach(() => {
-    if (tmp) rmSync(tmp, { recursive: true, force: true });
+    if (tmp) rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("bootstraps PROJECT.md and ROADMAP.md for /ideal product kind", () => {

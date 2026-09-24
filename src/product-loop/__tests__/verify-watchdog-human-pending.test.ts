@@ -125,7 +125,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   __resetInteractivePauseForTests();
-  rmSync(flowDir, { recursive: true, force: true });
+  rmSync(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("verify silence budget — a pending human is not silence", () => {

@@ -186,7 +186,7 @@ describe("runVerifyFloor — coverage comes from the project's own test output",
     writeFileSync(join(cwd, "Fixture.sln"), "Microsoft Visual Studio Solution File, Format Version 12.00\n", "utf8");
   });
   afterEach(() => {
-    rmSync(cwd, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("discovers the dotnet ecosystem from the working tree", () => {

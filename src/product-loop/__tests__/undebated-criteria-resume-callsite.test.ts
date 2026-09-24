@@ -95,7 +95,7 @@ beforeEach(async () => {
 afterEach(async () => {
   if (phaseModeBefore === undefined) delete process.env.MUONROI_PHASE_MODE;
   else process.env.MUONROI_PHASE_MODE = phaseModeBefore;
-  await fs.rm(flowDir, { recursive: true, force: true }).catch(() => {
+  await fs.rm(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {
     /* temp dir cleanup is best-effort */
   });
 });

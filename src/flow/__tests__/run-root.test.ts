@@ -40,7 +40,7 @@ function repoRoot(): string {
 
 afterEach(() => {
   setCommitRunRoot(null);
-  for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true });
+  for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("runAnchoredStateRoot", () => {

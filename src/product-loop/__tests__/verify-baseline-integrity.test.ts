@@ -138,8 +138,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(cwd, { recursive: true, force: true });
-  rmSync(outside, { recursive: true, force: true });
+  rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  rmSync(outside, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

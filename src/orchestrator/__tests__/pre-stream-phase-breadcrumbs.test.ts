@@ -70,7 +70,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.MUONROI_COUNCIL_BREADCRUMB_FILE;
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("preStreamPhase — normal turns emit start/end breadcrumbs per phase", () => {

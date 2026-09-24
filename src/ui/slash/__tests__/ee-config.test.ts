@@ -44,7 +44,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   try {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   } catch (err) {
     console.error(`[ee-config.test] temp cleanup failed: ${(err as Error).message}`);
   }

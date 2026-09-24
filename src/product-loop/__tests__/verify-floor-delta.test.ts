@@ -49,7 +49,7 @@ beforeEach(() => {
   setFailing(PRE_EXISTING);
 });
 afterEach(() => {
-  rmSync(cwd, { recursive: true, force: true });
+  rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const commands = (build: string[] = [OK_BUILD]) => ({ build, test: [TEST_CMD] });

@@ -53,7 +53,7 @@ async function teardownSurface(proc: ChildProcess | undefined, cleanup: (() => v
   cleanup?.();
   if (!home) return;
   try {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   } catch (err) {
     // Not fatal: a leaked temp dir under os.tmpdir() is harmless, whereas
     // failing the hook turns a passing suite red for a teardown race.

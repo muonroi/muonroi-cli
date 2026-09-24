@@ -40,7 +40,7 @@ describe("idealTrace — the trace file never persists a credential verbatim", (
     if (savedFlag === undefined) delete process.env.MUONROI_IDEAL_TRACE;
     else process.env.MUONROI_IDEAL_TRACE = savedFlag;
     try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch (err) {
       console.error(`[ideal-trace.test] temp dir cleanup failed for ${tmpDir}: ${(err as Error)?.message}`);
     }

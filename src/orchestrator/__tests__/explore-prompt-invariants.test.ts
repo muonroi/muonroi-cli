@@ -44,7 +44,7 @@ describe("Explore sub-agent prompt invariants", () => {
   });
 
   afterAll(() => {
-    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     if (origHome === undefined) delete process.env.HOME;
     else process.env.HOME = origHome;
     if (origUserProfile === undefined) delete process.env.USERPROFILE;

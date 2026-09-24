@@ -160,7 +160,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(testFlowDir, { recursive: true, force: true });
+  rmSync(testFlowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("S6 wiring — the project-registration check runs independent of the verify verdict", () => {

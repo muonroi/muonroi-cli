@@ -149,7 +149,7 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
     spawnCleanup();
     if (tempHome) {
       try {
-        rmSync(tempHome, { recursive: true, force: true });
+        rmSync(tempHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       } catch {
         /* best-effort */
       }

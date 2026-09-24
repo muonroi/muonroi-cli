@@ -48,7 +48,7 @@ beforeEach(() => {
   cwd = mkdtempSync(path.join(os.tmpdir(), "floor-nonblock-"));
 });
 afterEach(() => {
-  rmSync(cwd, { recursive: true, force: true });
+  rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("runFloorCommand — the event loop stays free while a gate runs", () => {
@@ -124,8 +124,8 @@ describe("phase-runner call site — the run SHOWS the capture instead of freezi
   });
 
   afterEach(() => {
-    rmSync(flowDir, { recursive: true, force: true });
-    rmSync(projectCwd, { recursive: true, force: true });
+    rmSync(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    rmSync(projectCwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("streams baseline progress chunks and leaves timers able to fire", async () => {

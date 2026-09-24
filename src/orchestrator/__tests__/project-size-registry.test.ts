@@ -43,7 +43,7 @@ beforeEach(() => {
   cwd = mkdtempSync(join(tmpdir(), "project-size-"));
 });
 afterEach(() => {
-  rmSync(cwd, { recursive: true, force: true });
+  rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 /** Write `n` files with the given extension under `<cwd>/src/<sub>`. */
@@ -98,7 +98,7 @@ describe("the language set comes from the registry, not from this module", () =>
         }
         expect(estimateProjectSizeAt(dir), `${ext} must be counted as source`).toBe("medium");
       } finally {
-        rmSync(dir, { recursive: true, force: true });
+        rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       }
     }
   });

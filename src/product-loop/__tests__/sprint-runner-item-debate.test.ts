@@ -209,7 +209,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(testFlowDir, { recursive: true, force: true });
+  rmSync(testFlowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("C5 — per-item debate wiring", () => {

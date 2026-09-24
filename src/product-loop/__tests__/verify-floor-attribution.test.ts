@@ -210,7 +210,7 @@ describe("readGitIdentity — captures gitCommit and no longer swallows git fail
   });
 
   afterEach(() => {
-    rmSync(repo, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("captures gitCommit when HEAD resolves — the exact value HEAD rev-parses to", () => {
@@ -238,7 +238,7 @@ describe("readGitIdentity — captures gitCommit and no longer swallows git fail
       );
       expect(loggedRevParseFailure).toBe(true);
     } finally {
-      rmSync(notARepo, { recursive: true, force: true });
+      rmSync(notARepo, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       warnSpy.mockRestore();
     }
   });
@@ -300,7 +300,7 @@ describe("runVerifyFloor — honest attribution end-to-end (replays the mu54vrme
   });
 
   afterEach(() => {
-    rmSync(repo, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("captures a baseline with a real gitCommit and recorded dirty state", async () => {

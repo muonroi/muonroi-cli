@@ -102,7 +102,7 @@ describe("C1 TUI: DeepSeek cache field split (promptCacheHitTokens -> cacheReadT
     cleanup?.();
     if (workDir) {
       try {
-        rmSync(workDir, { recursive: true, force: true });
+        rmSync(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       } catch {
         // ignore
       }

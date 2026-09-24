@@ -84,7 +84,7 @@ describe("native gsd-tools behavior", () => {
     seed(cwd);
   });
   afterEach(() => {
-    if (cwd && existsSync(cwd)) rmSync(cwd, { recursive: true, force: true });
+    if (cwd && existsSync(cwd)) rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("roadmap analyze: phases in order; current_phase null when none in progress", () => {
@@ -187,7 +187,7 @@ describe("native gsd-tools mutating commands", () => {
     seedComplete(cwd);
   });
   afterEach(() => {
-    if (cwd && existsSync(cwd)) rmSync(cwd, { recursive: true, force: true });
+    if (cwd && existsSync(cwd)) rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("roadmap update-plan-progress: complete phase checks phase + plan boxes", () => {
@@ -233,7 +233,7 @@ describe("native gsd-tools mutating commands", () => {
       expect(existsSync(planningRoot(fresh))).toBe(true);
       expect(nativeConfigEnsure(fresh).created).toBe(false);
     } finally {
-      if (existsSync(fresh)) rmSync(fresh, { recursive: true, force: true });
+      if (existsSync(fresh)) rmSync(fresh, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 });

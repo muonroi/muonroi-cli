@@ -63,7 +63,7 @@ describe("fold-planning", () => {
     expect(planningRoot(cwd)).toBe(path.join(cwd, ".planning"));
 
     // Simulate Part B removing the subprocess writer's tree.
-    await fs.rm(path.join(cwd, ".planning"), { recursive: true, force: true });
+    await fs.rm(path.join(cwd, ".planning"), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     expect(planningRoot(cwd)).toBe(path.join(cwd, ".muonroi-flow", "planning"));
   });
 });

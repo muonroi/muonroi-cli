@@ -401,7 +401,7 @@ describe("a run parked on a council askcard survives every non-cancelling gestur
   afterAll(() => {
     if (!root) return;
     try {
-      rmSync(root, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch (err) {
       // Non-fatal: a leaked temp dir must not fail the suite. Still logged so a
       // machine that leaks one every run is diagnosable.

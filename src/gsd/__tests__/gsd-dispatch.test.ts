@@ -17,7 +17,7 @@ describe("gsd-dispatch", () => {
   let tmp: string;
 
   afterEach(() => {
-    if (tmp) rmSync(tmp, { recursive: true, force: true });
+    if (tmp) rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("dispatchConfigEnsure ensures .planning/ (native)", () => {
@@ -51,7 +51,7 @@ describe("gsd-dispatch read-through cache", () => {
   afterEach(() => {
     if (tmp) {
       invalidateGsdCache(tmp);
-      rmSync(tmp, { recursive: true, force: true });
+      rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 

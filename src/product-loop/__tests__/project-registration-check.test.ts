@@ -110,7 +110,7 @@ beforeEach(() => {
   repo = initRepo();
 });
 afterEach(() => {
-  rmSync(repo, { recursive: true, force: true });
+  rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -242,7 +242,7 @@ describe("checkProjectRegistration — .NET solution registration", () => {
       expect(warnSpy).toHaveBeenCalled();
       expect(errorSpy).toHaveBeenCalled();
     } finally {
-      rmSync(notARepo, { recursive: true, force: true });
+      rmSync(notARepo, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       warnSpy.mockRestore();
       errorSpy.mockRestore();
     }

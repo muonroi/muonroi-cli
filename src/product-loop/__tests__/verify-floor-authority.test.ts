@@ -205,8 +205,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(flowDir, { recursive: true, force: true });
-  rmSync(projectCwd, { recursive: true, force: true });
+  rmSync(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  rmSync(projectCwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("sprint-runner call site — the floor is reached on UNKNOWN, not only on PASS", () => {

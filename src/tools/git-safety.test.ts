@@ -167,7 +167,7 @@ describe("sensitive staging detection", () => {
     dir = mkdtempSync(join(tmpdir(), "git-safety-"));
   });
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("flags .env and .muonroi-cli present in the repo root", () => {

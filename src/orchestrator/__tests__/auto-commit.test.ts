@@ -139,7 +139,7 @@ describe("pathsForCommitGate — bash `git commit` gate path set (real git)", ()
     g(["config", "user.email", "t@t.t"]);
     g(["config", "user.name", "t"]);
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  afterEach(() => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
 
   it("returns only the already-staged set for a plain `git commit`", async () => {
     writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
