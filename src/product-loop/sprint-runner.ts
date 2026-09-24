@@ -79,6 +79,7 @@ import { applyItemDebateToPlanArtifact } from "./item-debate-apply.js";
 import { runItemDebate } from "./item-debate-runner.js";
 import { formatLayoutConvention, scanLayoutConvention } from "./layout-convention.js";
 import { type CollectedNestedTurn, collectNestedTurn, forwardNestedTurn } from "./nested-turn.js";
+import { deriveNextAction, type TestRunnerEvidence } from "./next-action.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
 import type { AdherenceVerdict, TaskVerdict } from "./plan-adherence-review.js";
 import { boundDeviations, runPlanAdherenceReview } from "./plan-adherence-review.js";
@@ -120,6 +121,58 @@ function envPositiveInt(name: string, fallback: number): number {
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
   if (Number.isFinite(n) && n > 0) return n;
   return fallback;
+}
+
+/**
+ * Manifests that could declare a Python test dependency, in the order a message
+ * should name them: a project with a `pyproject.toml` declares there, and
+ * `requirements.txt` is the fallback qa-platform actually uses.
+ */
+const PYTHON_DECLARATION_MANIFESTS = ["pyproject.toml", "requirements.txt", "setup.cfg", "Pipfile"] as const;
+
+/**
+ * Test trees this working tree actually has, and the manifest that would
+ * declare their runner — the evidence `deriveNextAction` needs to say "declare
+ * pytest in `backend/requirements.txt`" instead of "add a test command".
+ *
+ * Reuses `findPytestTargets` (src/verify/pytest-detect.ts), the same bounded
+ * walk the verify recipe infers from, so the digest can never name a directory
+ * the recipe does not also consider. A target whose directory holds none of
+ * {@link PYTHON_DECLARATION_MANIFESTS} is dropped rather than paired with an
+ * invented filename — naming a file that is not there is worse than staying
+ * generic. Never throws: this feeds a message, and a message must not be able
+ * to fail a sprint.
+ */
+async function measureTestRunnerEvidence(cwd: string): Promise<TestRunnerEvidence[]> {
+  try {
+    const [{ findPytestTargets }, fs, nodePath] = await Promise.all([
+      import("../verify/pytest-detect.js"),
+      import("node:fs"),
+      import("node:path"),
+    ]);
+    const out: TestRunnerEvidence[] = [];
+    for (const target of findPytestTargets(cwd)) {
+      const dirAbs = nodePath.join(cwd, target.dir);
+      const manifest = PYTHON_DECLARATION_MANIFESTS.find((m) => fs.existsSync(nodePath.join(dirAbs, m)));
+      if (!manifest) continue;
+      out.push({
+        dir: target.dir,
+        marker: target.marker,
+        manifest,
+        runner: "pytest",
+        declared: target.pytestDeclared,
+      });
+    }
+    return out;
+  } catch (err) {
+    console.error(
+      `[sprint-runner] could not measure test-runner evidence in ${cwd}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+      { stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined },
+    );
+    return [];
+  }
 }
 
 /**
@@ -1588,9 +1641,23 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   if (cb3.halt && !greenfieldBuildFirst) {
     // Yield a structured halt chunk so the TUI can render an actionable recovery
     // card (Task 5.2). Do NOT throw — callers must discriminate on chunk.type.
+    // The card renders `detail` above its options (halt-recovery-card.tsx). It
+    // used to be absent, so the card named three options and no reason to prefer
+    // any of them, while the resume digest — written from the SAME failure
+    // vocabulary — said "Retry sprint N". Both now read `deriveNextAction`, so
+    // the card and the digest cannot recommend opposite things again.
+    const cb3Advice = deriveNextAction({
+      sprintN,
+      verdict: { pass: false, score: 0, failedCondition: "engineering_floor", reason: cb3.reason ?? "no_recipe" },
+      testRunnerEvidence: await measureTestRunnerEvidence(cwd),
+      // CB-3 halts on `isClaimedZeroCoverage` — a figure the verify sub-agent
+      // wrote into its own recipe, which nothing measured (circuit-breakers.ts).
+      coverageZeroProvenance: "claimed",
+    });
     const haltChunk: HaltChunk = {
       type: "halt",
       reason: cb3.reason ?? "no_recipe",
+      detail: cb3Advice.action,
       recovery_options: [
         {
           id: "init_new",
@@ -2393,6 +2460,13 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // pre-existing (run-introduced or unattributable, see describeBuildMustFix in
   // verify-baseline.ts) carries into the next sprint's focus the same way.
   let floorMustFixNote: string | undefined;
+  // The floor's own evidence for the LAST pass this sprint reached, hoisted out
+  // of `runVerifyAndFloorPass` / the S4 loop so the end-of-sprint message can
+  // quote it. Without it a `gate-could-not-run` failure — which already knows
+  // the exact missing module (`detectGateCouldNotRun`) — reached the user as the
+  // done-gate's coarse `verify_FAIL` and the precise fact was discarded.
+  let floorDeltaFinal: FloorDelta | undefined;
+  let floorChecksFinal: FloorCheck[] | undefined;
   // S6 — the final project-registration-check result for this sprint (the
   // last verify+floor pass the S4 loop reached), used to write
   // `sprints/<n>-structure.json` and a note in `sprints/<n>-verify.md`.
@@ -2820,6 +2894,8 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   let recipeFromVerify = initialVerifyPass.recipeFromVerify;
   if (initialVerifyPass.floorMustFixNote) floorMustFixNote = initialVerifyPass.floorMustFixNote;
   if (initialVerifyPass.structureCheck) structureCheckFinal = initialVerifyPass.structureCheck;
+  floorDeltaFinal = initialVerifyPass.floorDelta;
+  floorChecksFinal = initialVerifyPass.floorChecks;
 
   // ── S4 — bounded verify -> fix -> re-verify loop ─────────────────────────
   // A FAIL used to go straight to judgment, and the NEXT sprint re-planned from
@@ -2927,6 +3003,10 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     recipeFromVerify = fixLoop.final.recipeFromVerify;
     if (fixLoop.final.floorMustFixNote) floorMustFixNote = fixLoop.final.floorMustFixNote;
     if (fixLoop.final.structureCheck) structureCheckFinal = fixLoop.final.structureCheck;
+    // The loop's final pass supersedes the initial one — a round that fixed the
+    // build must not leave the end-of-sprint message quoting the stale break.
+    if (fixLoop.final.floorDelta) floorDeltaFinal = fixLoop.final.floorDelta;
+    if (fixLoop.final.floorChecks) floorChecksFinal = fixLoop.final.floorChecks;
     verifyFixRecord = {
       version: 1,
       sprintN,
@@ -3400,6 +3480,25 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
 
   await appendIteration(ctx.flowDir, ctx.runId, iter);
 
+  // What would actually change this sprint's outcome. ONE derivation, read by
+  // every surface below: the resume digest (which `/ideal resume` prints back —
+  // src/product-loop/index.ts:2214-2220), the transcript line the user reads at
+  // this moment, and the carry-over focus the next sprint is planned against.
+  //
+  // It replaces `Retry sprint ${sprintN}: ${describeVerdictFailure(verdict)}`,
+  // which fired for EVERY non-pass verdict and named no action at all — run
+  // muc2joffe506 ended with "Next action: Retry sprint 2: engineering_floor:
+  // no_test_commands" while the real action was to declare pytest in
+  // `backend/requirements.txt`.
+  const nextActionAdvice = deriveNextAction({
+    sprintN,
+    verdict,
+    verifyVerdict,
+    floorDelta: floorDeltaFinal,
+    floorChecks: floorChecksFinal,
+    testRunnerEvidence: verdict.pass ? undefined : await measureTestRunnerEvidence(cwd),
+  });
+
   // Update Resume Digest in state.md so PIL Layer 5 + future resume can pick it up
   const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
   stateMap.sections.set(
@@ -3407,9 +3506,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     renderResumeDigest({
       stage: `sprint-${sprintN}`,
       lastCompleted: `sprint-${sprintN} ${iter.stage}`,
-      nextAction: verdict.pass
-        ? "Definition-of-Done met — advance to the next phase or ship"
-        : `Retry sprint ${sprintN}: ${describeVerdictFailure(verdict) ?? "continue toward Definition-of-Done"}`,
+      nextAction: nextActionAdvice.action,
       sprintN,
       score: verdict.score,
       verify: verifyVerdict,
@@ -3552,10 +3649,19 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     // S5 — carry a run-introduced/unattributable build break into the next
     // sprint's focus as a must-fix item, same as plan deviations and tasks.
     const floorMustFixText = floorMustFixNote ? `\n\n${floorMustFixNote}` : "";
-    iter.nextFocus = `${fb.focus}${deviationNote}${taskCarryOverNote}${floorMustFixText}`;
+    // The next sprint is planned against this text, so it leads with the derived
+    // action rather than `fb.focus` alone. When the fix is not one a sprint owns
+    // (a manifest declaration, a missing dependency, a human decision) say so —
+    // otherwise the next sprint is told to "fix verify failures" over a log that
+    // never mentioned the cause, which is the same defect one layer down.
+    const cannotCarryNote = nextActionAdvice.sprintCanCarryIt
+      ? ""
+      : ` This is NOT something a sprint's code changes can resolve (${nextActionAdvice.locus}) — surface it rather than re-attempting the same work.`;
+    const nextActionNote = `What would change the outcome: ${nextActionAdvice.action}${cannotCarryNote}`;
+    iter.nextFocus = `${nextActionNote}\n\n${fb.focus}${deviationNote}${taskCarryOverNote}${floorMustFixText}`;
     yield {
       type: "content",
-      content: `\n> Sprint ${sprintN} did not satisfy Definition-of-Done (${describeVerdictFailure(verdict) ?? "unknown"}). Next focus: ${fb.focus}\n`,
+      content: `\n> Sprint ${sprintN} did not satisfy Definition-of-Done (${describeVerdictFailure(verdict) ?? "unknown"}).\n> Next action: ${nextActionAdvice.action}\n`,
     };
   } else {
     yield {

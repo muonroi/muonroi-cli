@@ -46,10 +46,19 @@ describe("run-artifacts", () => {
 
   describe("ResumeDigest round-trip", () => {
     it("renders then parses back all fields", () => {
+      // `nextAction` is a real string `deriveNextAction` produces
+      // (src/product-loop/next-action.ts) rather than the old "Retry sprint N:
+      // <failure>" placeholder: it carries backticks, an em dash and a colon
+      // INSIDE the value, which is what `parseResumeDigest`'s `^-\s+([^:]+):`
+      // key capture has to stop before.
+      const nextAction =
+        "Install the module the gate needs for the interpreter it uses, and declare it in that project's manifest: " +
+        '`cd backend && ".venv/Scripts/python.exe" -m pytest` never ran — No module named pytest. ' +
+        "Until it is installed nothing executes, so re-running sprint 3 produces no evidence either.";
       const d: ResumeDigest = {
         stage: "sprint-3",
         lastCompleted: "sprint-3 retrospective",
-        nextAction: "Retry sprint 3: verify_failed",
+        nextAction,
         sprintN: 3,
         score: 0.72,
         verify: "FAIL",
@@ -61,7 +70,7 @@ describe("run-artifacts", () => {
       expect(parsed).not.toBeNull();
       expect(parsed!.stage).toBe("sprint-3");
       expect(parsed!.lastCompleted).toBe("sprint-3 retrospective");
-      expect(parsed!.nextAction).toBe("Retry sprint 3: verify_failed");
+      expect(parsed!.nextAction).toBe(nextAction);
       expect(parsed!.sprintN).toBe(3);
       expect(parsed!.score).toBeCloseTo(0.72, 2);
       expect(parsed!.verify).toBe("FAIL");

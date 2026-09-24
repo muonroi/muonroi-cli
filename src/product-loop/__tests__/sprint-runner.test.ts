@@ -319,7 +319,11 @@ describe("sprint-runner", () => {
     );
     expect(result!.stage).toBe("retrospective");
     expect(result!.lastVerifyResult).toBe("FAIL");
-    const continueChunk = chunks.find((c: any) => typeof c.content === "string" && c.content.includes("Next focus"));
+    // The transcript line used to read `Next focus: ${fb.focus}`, which pasted
+    // the whole verify log into the transcript. It now carries the single derived
+    // action line (deriveNextAction — src/product-loop/next-action.ts), the SAME
+    // string written to state.md's `Next action`, so the two cannot disagree.
+    const continueChunk = chunks.find((c: any) => typeof c.content === "string" && c.content.includes("Next action:"));
     expect(continueChunk).toBeDefined();
     // Task #10: the not-done sprint returns a carry-over focus so the phase-runner
     // adapter can thread it into the next sprint (continue the risky/failing parts).
