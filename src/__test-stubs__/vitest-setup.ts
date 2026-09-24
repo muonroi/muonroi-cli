@@ -2,6 +2,8 @@
  * Global vitest setup: mock bun:sqlite which is unavailable outside the Bun runtime.
  * Any module that transitively imports db.ts will resolve to this stub.
  */
+import * as nodeOs from "node:os";
+import * as nodePath from "node:path";
 import { vi } from "vitest";
 
 // vitest 2+ removed vi.mocked(). This shim restores it for the 93+ call sites across the
@@ -66,6 +68,18 @@ vi.mock("@opentui/react", () => ({
 // suite under load. Tests that explicitly test the timeout path use fake timers
 // or import resolveAfter directly, so they are unaffected by this env var.
 process.env.MUONROI_TEST_PIPELINE_TIMEOUT_MS = "5000";
+
+// The verify floor's baseline witness lives outside the project tree, which by
+// default means the developer's real `~/.muonroi-cli/floor-baselines/`. Every
+// test calling `captureVerifyFloorBaseline` would write there — measured: four
+// stray records from one run, and one of them leaked a previous test's baseline
+// into a later test's verdict, because run ids repeat across test files. Pin the
+// directory into the OS temp dir for the whole suite so no test can reach the
+// real home, whether or not it remembers to pass `witnessPath`.
+process.env.MUONROI_FLOOR_BASELINE_DIR ??= nodePath.join(
+  nodeOs.tmpdir(),
+  `muonroi-test-floor-baselines-${process.pid}`,
+);
 
 if (typeof Bun === "undefined") {
   vi.mock("bun:sqlite", () => {

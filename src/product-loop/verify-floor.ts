@@ -66,9 +66,9 @@ import {
   describeBaselineRule,
   extractErrorSet,
   type FloorDelta,
+  floorBaselineWitnessPath,
   isToleratedTestFailure,
   loadFloorBaseline,
-  resolveBaselinePathFromEnv,
   sha256Hex,
   VERIFY_BASELINE_VERSION,
   type VerifyBaseline,
@@ -224,10 +224,17 @@ export interface RunVerifyFloorOpts {
    */
   commandsOverride?: { build: string[]; test: string[] };
   /**
-   * Where this run's baseline lives. Defaults to `MUONROI_SPRINT_FLOOR_BASELINE`.
-   * When neither resolves, the floor applies the ABSOLUTE rule and says so.
+   * The HUMAN-READABLE in-tree copy. Cross-checked against the witness below,
+   * and used as the baseline only when no witness exists. When neither resolves
+   * the floor applies the ABSOLUTE rule and says so.
    */
   baselinePath?: string | null;
+  /**
+   * The AUTHORITATIVE out-of-tree copy. Defaults to
+   * `floorBaselineWitnessPath(runId)` when a run id is known; pass `null` to run
+   * in-tree-only. See the header of `verify-baseline.ts` for why this exists.
+   */
+  witnessPath?: string | null;
   /** The /ideal run asking. A baseline stamped with a different run id is rejected. */
   runId?: string;
   /** Per-command progress beats, so a caller can keep the UI alive. See FloorProgress. */
@@ -243,6 +250,11 @@ export interface CaptureBaselineOpts {
   flowDir?: string;
   /** Explicit destination, overriding flowDir. */
   baselinePath?: string;
+  /**
+   * Where the AUTHORITATIVE copy goes. Defaults to
+   * `floorBaselineWitnessPath(runId)`; `null` writes the in-tree copy only.
+   */
+  witnessPath?: string | null;
   timeoutMs?: number;
   commandsOverride?: { build: string[]; test: string[] };
   /** Per-command progress beats, so a caller can keep the UI alive. See FloorProgress. */
@@ -251,13 +263,27 @@ export interface CaptureBaselineOpts {
 
 export interface CaptureBaselineResult {
   baseline: VerifyBaseline;
+  /** The in-tree, human-readable copy. */
   path: string;
+  /** The out-of-tree authoritative copy, or null when none could be written. */
+  witnessPath: string | null;
   elapsedMs: number;
 }
 
 function envDisabled(name: string): boolean {
   const v = process.env[name];
   return v === "0" || (typeof v === "string" && v.toLowerCase() === "false");
+}
+
+/**
+ * One definition of "which out-of-tree witness applies", shared by the capture
+ * and the load so the two can never look in different places. An explicit value
+ * (including `null`, meaning in-tree-only) always wins; otherwise it is derived
+ * from the run id, and a caller with no run id gets none.
+ */
+function resolveWitnessPath(explicit: string | null | undefined, runId: string | undefined): string | null {
+  if (explicit !== undefined) return explicit;
+  return runId ? floorBaselineWitnessPath(runId) : null;
 }
 
 /**
@@ -886,7 +912,8 @@ export async function runVerifyFloor(opts: RunVerifyFloorOpts): Promise<VerifyFl
   // going, and re-reading it per command would let a mid-run edit change the rule.
   const git = readGitIdentity(opts.cwd);
   const loaded = await loadFloorBaseline({
-    baselinePath: opts.baselinePath ?? resolveBaselinePathFromEnv(),
+    baselinePath: opts.baselinePath ?? null,
+    witnessPath: resolveWitnessPath(opts.witnessPath, opts.runId),
     cwd: opts.cwd,
     commands: commandsDiscovered,
     runId: opts.runId,
@@ -1066,6 +1093,29 @@ export async function captureVerifyFloorBaseline(opts: CaptureBaselineOpts): Pro
     elapsedMs: Date.now() - started,
   };
 
+  // The AUTHORITATIVE copy goes first, outside the project tree. The in-tree
+  // file is a readable copy; when the two disagree later, `loadFloorBaseline`
+  // trusts this one and reports the other. See verify-baseline.ts's header for
+  // the measured clobber this ordering answers.
+  const witnessDestination = resolveWitnessPath(opts.witnessPath, opts.runId);
+  let witnessWritten: string | null = null;
+  if (witnessDestination) {
+    try {
+      await writeVerifyBaseline(witnessDestination, baseline);
+      witnessWritten = witnessDestination;
+    } catch (err) {
+      // Fail-open to in-tree-only rather than aborting the run: an unwritable
+      // CLI home must not stop a sprint. The guarantee degrades to what shipped
+      // before the witness existed, and `loadFloorBaseline` says so in the
+      // verdict message ("Source: the copy inside the working tree…").
+      logger.error(
+        "orchestrator",
+        `[verify-floor] captureVerifyFloorBaseline: could not write the out-of-tree baseline witness at ${witnessDestination}: ${err instanceof Error ? err.message : String(err)} — this run's floor will trust the in-tree copy, which anything the run does could overwrite`,
+        { operation: "captureVerifyFloorBaseline", cwd: opts.cwd, runId: opts.runId },
+      );
+    }
+  }
+
   try {
     await writeVerifyBaseline(destination, baseline);
   } catch (err) {
@@ -1080,10 +1130,15 @@ export async function captureVerifyFloorBaseline(opts: CaptureBaselineOpts): Pro
   logger.info(
     "orchestrator",
     `[verify-floor] baseline captured for run ${opts.runId}: buildOk=${buildOk}, ${baseline.failingTests.length} pre-existing test failure(s), unattributable=${unattributable}`,
-    { operation: "captureVerifyFloorBaseline", path: destination, elapsedMs: Date.now() - started },
+    {
+      operation: "captureVerifyFloorBaseline",
+      path: destination,
+      witnessPath: witnessWritten,
+      elapsedMs: Date.now() - started,
+    },
   );
 
-  return { baseline, path: destination, elapsedMs: Date.now() - started };
+  return { baseline, path: destination, witnessPath: witnessWritten, elapsedMs: Date.now() - started };
 }
 
 /**
@@ -1179,15 +1234,35 @@ export function applyVerifyFloor(
  * Never throws — a missing baseline is an ordinary state (the capture is skipped
  * when the floor is disabled) and the caller falls back to the floor budget.
  * Unexpected failures are logged per the No Silent Catch rule.
+ *
+ * Reads the out-of-tree WITNESS first when a run id is known. The measured
+ * clobber landed here too and nobody noticed: the foreign `verify.mjs` report
+ * carried the right `version` and the right `runId`, so both checks below passed,
+ * and only the absent `elapsedMs` returned null — silently dropping the verify
+ * stage's watchdog back to the floor for a repository whose real build+test pass
+ * had been measured.
  */
 export async function readBaselineVerifyCostMs(baselinePath: string, runId?: string): Promise<number | null> {
+  const witnessPath = runId ? floorBaselineWitnessPath(runId) : null;
+  const ms = witnessPath ? await readElapsedFrom(witnessPath, runId, { quiet: true }) : null;
+  if (ms !== null) return ms;
+  return await readElapsedFrom(baselinePath, runId, { quiet: false });
+}
+
+async function readElapsedFrom(
+  baselinePath: string,
+  runId: string | undefined,
+  opts: { quiet: boolean },
+): Promise<number | null> {
   let raw: string;
   try {
     raw = await fsp.readFile(baselinePath, "utf8");
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
-    // ENOENT is the normal "no baseline was captured for this run" case.
-    if (code !== "ENOENT") {
+    // ENOENT is the normal "no baseline was captured for this run" case. `quiet`
+    // is the witness probe, whose miss is likewise ordinary (a record from before
+    // the witness existed) and whose failure the in-tree attempt below reports.
+    if (code !== "ENOENT" && !opts.quiet) {
       logger.warn("orchestrator", `[verify-floor] readBaselineVerifyCostMs: read failed for ${baselinePath}`, {
         operation: "readBaselineVerifyCostMs",
         path: baselinePath,
@@ -1202,11 +1277,13 @@ export async function readBaselineVerifyCostMs(baselinePath: string, runId?: str
   try {
     parsed = JSON.parse(raw) as VerifyBaseline;
   } catch (err) {
-    logger.warn("orchestrator", `[verify-floor] readBaselineVerifyCostMs: JSON parse failed for ${baselinePath}`, {
-      operation: "readBaselineVerifyCostMs",
-      path: baselinePath,
-      error: err instanceof Error ? err.message : String(err),
-    });
+    if (!opts.quiet) {
+      logger.warn("orchestrator", `[verify-floor] readBaselineVerifyCostMs: JSON parse failed for ${baselinePath}`, {
+        operation: "readBaselineVerifyCostMs",
+        path: baselinePath,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     return null;
   }
 

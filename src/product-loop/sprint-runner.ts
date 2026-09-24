@@ -3134,11 +3134,29 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     try {
       const { checkProjectRegistration, formatProjectRegistrationMustFix, hasProjectRegistrationViolations } =
         await import("./project-registration-check.js");
-      const { verifyBaselinePath: baselinePathOf } = await import("./verify-baseline.js");
+      const { verifyBaselinePath: baselinePathOf, floorBaselineWitnessPath } = await import("./verify-baseline.js");
+      // Prefer the out-of-tree witness, for the same reason the floor does: the
+      // in-tree copy sits in the working tree this very sprint just edited, and
+      // has been observed overwritten by a project script (see verify-baseline.ts).
+      const witnessPath = floorBaselineWitnessPath(ctx.runId);
       const baselinePath = baselinePathOf(ctx.flowDir, ctx.runId);
-      let baselineRaw: string | null;
+      let baselineRaw: string | null = null;
+      if (witnessPath) {
+        try {
+          baselineRaw = await readFile(witnessPath, "utf8");
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException)?.code;
+          // A witness miss is ordinary (older run, or capture skipped); the
+          // in-tree read below reports whatever it finds.
+          logger.debug(
+            "orchestrator",
+            `[project-registration] no baseline witness at ${witnessPath} (${code ?? "read error"}) — falling back to the in-tree copy`,
+            { operation: "checkProjectRegistration", sprintN, runId: ctx.runId },
+          );
+        }
+      }
       try {
-        baselineRaw = await readFile(baselinePath, "utf8");
+        if (baselineRaw === null) baselineRaw = await readFile(baselinePath, "utf8");
       } catch (err) {
         const code = (err as NodeJS.ErrnoException)?.code;
         baselineRaw = null;

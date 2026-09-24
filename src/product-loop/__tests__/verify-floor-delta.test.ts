@@ -55,11 +55,21 @@ afterEach(() => {
 const commands = (build: string[] = [OK_BUILD]) => ({ build, test: [TEST_CMD] });
 const baselineAt = () => join(cwd, "verify-baseline.json");
 
+/**
+ * These tests are about the RULE applied to a loaded record — reject reasons,
+ * delta arithmetic, build attribution — none of which depends on which copy the
+ * record came from. So they run with the out-of-tree witness OFF
+ * (`witnessPath: null`), which keeps "edit the file to change what the record
+ * says" as the way to express each case. The witness mechanism itself, and what
+ * happens when the two copies disagree, is covered in
+ * `verify-baseline-integrity.test.ts`.
+ */
 async function capture(build: string[] = [OK_BUILD]) {
   return captureVerifyFloorBaseline({
     cwd,
     runId: "run-A",
     baselinePath: baselineAt(),
+    witnessPath: null,
     commandsOverride: commands(build),
   });
 }
@@ -70,6 +80,7 @@ async function floor(opts: { runId?: string; baselinePath?: string | null; build
     forceEnable: true,
     commandsOverride: commands(opts.build ?? [OK_BUILD]),
     baselinePath: opts.baselinePath === undefined ? baselineAt() : opts.baselinePath,
+    witnessPath: null,
     runId: opts.runId ?? "run-A",
   });
 }

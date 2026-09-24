@@ -56,10 +56,57 @@
  * the run asking. A baseline from another run, another branch, or a changed
  * command set is REJECTED, which falls back to the absolute rule rather than
  * silently authorising a broken suite.
+ *
+ * ## Where the baseline lives, and why it moved out of the project
+ *
+ * `verify-floor.ts` opens by stating the floor's premise: the gate commands are
+ * re-derived from disk because "disk-derived commands are unspoofable from
+ * inside the turn". The baseline was NOT held to that standard. It lived at
+ * `<project>/.muonroi-flow/runs/<runId>/verify-baseline.json` — inside the very
+ * working tree the turn edits — and that is the artifact deciding whether a
+ * failure is blamed on this run or excused as inherited.
+ *
+ * MEASURED, run `muc2joffe506` in `D:\sources\CompanyLibs\qa-platform`. During
+ * sprint 2's implementation stage a sub-agent authored a project script
+ * (`verify.mjs`) whose report destination was
+ *
+ *     path.join(process.cwd(), ".muonroi-flow", "runs", "muc2joffe506", "verify-baseline.json")
+ *
+ * — this exact path, with the live run's id hardcoded — and COMMITTED it to the
+ * project (`git_commit`, 2026-09-23T14:24:12Z, "feat(ci): add verify script").
+ * From then on every invocation of the project's own verify command overwrote
+ * the baseline with a 176-byte report of its own. The write at
+ * `2026-09-24T06:53:58.576Z` landed inside sprint 2's verification window, and
+ * `sprints/2-verify.md` recorded the floor losing its baseline for the rest of
+ * the run.
+ *
+ * Note what limited the damage: LUCK. The foreign file had the wrong SHAPE. It
+ * had the right `runId` and the right `version`. A file with the right shape and
+ * a long fabricated `failingTests` list would have been ACCEPTED, and every real
+ * regression in the run excused as pre-existing. That is a gate-defeat path.
+ *
+ * So the authority moved OUT of the project tree, to
+ * `~/.muonroi-cli/floor-baselines/<runId>.json` (`floorBaselineWitnessPath`).
+ * The in-tree file is still written, because a baseline a human can open next to
+ * the run's other artifacts is genuinely useful — it is now a COPY, and
+ * `loadFloorBaseline` cross-checks it against the witness so that a project
+ * script overwriting it is REPORTED rather than obeyed.
+ *
+ * ## What this is and is not
+ *
+ * This is tamper DETECTION with the authority held somewhere a project's own
+ * tooling does not compute, NOT authentication. A turn with unrestricted shell
+ * access can read and write `~/.muonroi-cli` as easily as the project tree, so a
+ * keyed hash would be theatre: any key the loop can read to verify, the turn can
+ * read to forge. What the move does buy is decisive against the failure that
+ * actually happens — a project-local script computing a path from
+ * `process.cwd()` can never reach the witness — and every disagreement between
+ * the two copies is surfaced with a reason that names it.
  */
 
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { atomicWriteJSON } from "../storage/atomic-io.js";
 import { logger } from "../utils/logger.js";
@@ -164,6 +211,16 @@ export type BaselineRejectReason =
   | "not-configured"
   | "missing"
   | "unreadable"
+  /**
+   * The bytes read and parsed as JSON perfectly well, and then turned out not to
+   * be a baseline record at all. Split out of `unreadable` because collapsing
+   * the two is what made the measured incident unreadable to its user: the
+   * foreign `verify.mjs` report parsed fine and was rejected on SHAPE, while the
+   * sentence blamed an IO/parse failure that never happened. The distinction is
+   * the difference between "your disk hiccuped" and "something else is writing
+   * to this path".
+   */
+  | "shape-mismatch"
   | "version-mismatch"
   | "different-working-tree"
   | "different-run"
@@ -173,6 +230,39 @@ export type BaselineRejectReason =
 
 /** Which comparison the floor actually applied. Always stated in the failure message. */
 export type BaselineRule = "delta" | "absolute";
+
+/**
+ * WHICH copy of the baseline the verdict was computed from. Stated in the
+ * message, because the three carry different guarantees:
+ *
+ * - `witness`: the authoritative copy outside the project tree. The only source
+ *   a project-local script cannot compute a path to.
+ * - `in-tree`: the copy inside the working tree the run itself edits. Trusted
+ *   only when no witness exists (a record from before the witness existed, or a
+ *   run whose witness write failed). A weaker guarantee, and it must not be
+ *   reported as if it were the strong one.
+ * - `env`: the operator pointed `MUONROI_SPRINT_FLOOR_BASELINE` at a file. An
+ *   explicit human override outranks everything, including the witness.
+ */
+export type BaselineSource = "witness" | "in-tree" | "env";
+
+/**
+ * The in-tree copy disagrees with the authoritative witness. The verdict is
+ * unaffected (the witness decides), but the user has a script or an agent
+ * writing to the gate's path and cannot fix what they are not told about.
+ *
+ * - `foreign`: the file at the baseline path is not a baseline record at all —
+ *   the measured incident's exact shape.
+ * - `clobbered`: it IS a baseline record, and it is not the one this gate wrote.
+ * - `vanished`: the gate wrote it and it is no longer there.
+ */
+export interface BaselineTamper {
+  kind: "foreign" | "clobbered" | "vanished";
+  /** The in-tree path that was overwritten, so the user can go and look at it. */
+  path: string;
+  /** What specifically differed, in one clause. */
+  detail: string;
+}
 
 export type FloorFailureKind =
   | "build-failed"
@@ -264,6 +354,12 @@ export interface FloorDelta {
   baselineInfo?: { runId: string; capturedAtUtc: string; gitCommit: string | null; failingCount: number };
   /** Why no baseline was applied. Only set when rule === "absolute". */
   rejectReason?: BaselineRejectReason;
+  /** The specifics behind `rejectReason` — which fields were missing, which path. */
+  rejectDetail?: string;
+  /** Which copy the verdict came from. Only set when rule === "delta". */
+  baselineSource?: BaselineSource;
+  /** Set when the in-tree copy disagreed with the witness. Never changes the verdict. */
+  tamper?: BaselineTamper;
   /** False when the baseline's run id was accepted without a run id to check it against. */
   runIdVerified: boolean;
 }
@@ -271,8 +367,14 @@ export interface FloorDelta {
 export interface LoadedBaseline {
   baseline: VerifyBaseline | null;
   reason?: BaselineRejectReason;
+  /** The specifics behind `reason` — which fields were missing, which path. */
+  reasonDetail?: string;
   /** Where the floor looked, for the failure message. Null when nothing was configured. */
   path: string | null;
+  /** Which copy the returned baseline came from. Only set when one was returned. */
+  source?: BaselineSource;
+  /** Set when the in-tree copy disagreed with the witness. Never changes the verdict. */
+  tamper?: BaselineTamper;
   /**
    * False when the caller could not name the run asking, so the record's run id
    * was accepted without being checked (the `MUONROI_SPRINT_FLOOR_BASELINE`
@@ -285,6 +387,54 @@ export interface LoadedBaseline {
 export function verifyBaselinePath(flowDir: string, runId: string): string {
   return path.join(flowDir, "runs", runId, VERIFY_BASELINE_FILENAME);
 }
+
+/**
+ * A run id is about to become a path segment. Anything that is not a plain id
+ * could escape the witness directory, so an unexpected shape yields NO witness
+ * rather than a guessed-at path — the floor then runs in-tree-only and says so,
+ * which is a weaker guarantee but never a wrong file.
+ */
+function isSafeRunId(runId: string): boolean {
+  return /^[A-Za-z0-9._-]{1,128}$/.test(runId) && runId !== "." && runId !== "..";
+}
+
+/**
+ * The AUTHORITATIVE copy's path: outside every project tree, keyed by run id.
+ *
+ * This is the whole mechanism. The measured clobber came from a project script
+ * computing `path.join(process.cwd(), ".muonroi-flow", "runs", <runId>, ...)`;
+ * no such script can arrive here, because nothing about this path derives from
+ * the project being worked on. Returns null for a run id that cannot safely be
+ * a path segment (see `isSafeRunId`).
+ *
+ * Keyed by run id ALONE, not by run id + working tree. Run ids are generated
+ * unique per run, so two trees holding the same id means one was REUSED — and
+ * `baselineRejectReason`'s `different-working-tree` check already catches that
+ * loudly. Folding the tree into the filename would only make the record harder
+ * for a human to find, in exchange for silencing a signal worth hearing.
+ */
+export function floorBaselineWitnessPath(runId: string, homeDir: string = os.homedir()): string | null {
+  if (!isSafeRunId(runId)) {
+    logger.warn(
+      "orchestrator",
+      `[verify-baseline] run id ${JSON.stringify(runId)} cannot be a path segment — no out-of-tree baseline witness for this run`,
+      { operation: "floorBaselineWitnessPath", runId },
+    );
+    return null;
+  }
+  const override = process.env[VERIFY_BASELINE_WITNESS_DIR_ENV];
+  const dir =
+    override && override.trim().length > 0 ? override.trim() : path.join(homeDir, ".muonroi-cli", "floor-baselines");
+  return path.join(dir, `${runId}${path.extname(VERIFY_BASELINE_FILENAME)}`);
+}
+
+/**
+ * Relocate the witness DIRECTORY. For a host where `~` is not writable, and for
+ * the test suite, which must never write into the developer's real CLI home (it
+ * did, once: four stray `floor-baselines/*.json` records from a single run, one
+ * of which then leaked a previous test's baseline into the next test's verdict).
+ */
+export const VERIFY_BASELINE_WITNESS_DIR_ENV = "MUONROI_FLOOR_BASELINE_DIR";
 
 /** Explicit escape hatch: run the floor in delta mode without a wiring change. */
 export function resolveBaselinePathFromEnv(): string | null {
@@ -307,15 +457,75 @@ export async function writeVerifyBaseline(filePath: string, baseline: VerifyBase
   await atomicWriteJSON(filePath, baseline);
 }
 
+/** One read attempt: the bytes parsed, or the reason they were not usable. */
+type ReadAttempt =
+  | { ok: true; parsed: VerifyBaseline }
+  | { ok: false; reason: "missing" | "unreadable"; detail?: string };
+
+async function readBaselineFile(filePath: string): Promise<ReadAttempt> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      logger.warn("orchestrator", `[verify-baseline] readBaselineFile: no baseline at ${filePath}`, {
+        operation: "readBaselineFile",
+      });
+      return { ok: false, reason: "missing" };
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error("orchestrator", `[verify-baseline] readBaselineFile: read failed for ${filePath}: ${message}`, {
+      operation: "readBaselineFile",
+      path: filePath,
+      code,
+    });
+    return { ok: false, reason: "unreadable", detail: `${code ?? "read error"}: ${message}` };
+  }
+
+  try {
+    return { ok: true, parsed: JSON.parse(raw) as VerifyBaseline };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error("orchestrator", `[verify-baseline] readBaselineFile: JSON parse failed for ${filePath}: ${message}`, {
+      operation: "readBaselineFile",
+      path: filePath,
+    });
+    return { ok: false, reason: "unreadable", detail: `not JSON — ${message}` };
+  }
+}
+
 /**
  * Read a baseline and decide whether it may be applied to THIS run.
  *
  * Returns `{baseline: null, reason}` for every rejection so the caller can state
  * which rule it fell back to and why — a silent rejection would be
  * indistinguishable from a repository that simply has no pre-existing failures.
+ *
+ * ## Precedence, and why it goes this way
+ *
+ *  1. `MUONROI_SPRINT_FLOOR_BASELINE` — an operator pointing the gate at a file
+ *     is an explicit instruction and outranks everything. It is also the remedy
+ *     the ABSOLUTE message tells users to reach for, so it has to actually work
+ *     from every call site, including the ones that pass a `baselinePath`.
+ *  2. The out-of-tree witness — the authoritative copy, when one exists.
+ *  3. The in-tree copy — trusted only when there is no witness (a record from
+ *     before the witness existed, or a run whose witness write failed).
+ *
+ * When BOTH 2 and 3 exist, the witness decides the verdict and the in-tree copy
+ * is CROSS-CHECKED against it. A disagreement is reported via `tamper` and never
+ * changes the verdict: the witness is strictly better evidence (written at run
+ * start, at a path the project's own tooling does not compute), and falling back
+ * to ABSOLUTE on a clobber would reproduce the very damage the incident caused.
  */
 export async function loadFloorBaseline(opts: {
+  /** The in-tree copy — `<flowDir>/runs/<runId>/verify-baseline.json`. */
   baselinePath: string | null;
+  /**
+   * The out-of-tree authoritative copy. Pass `null` to run in-tree-only (tests
+   * that exercise the legacy path, and callers with no run id).
+   */
+  witnessPath?: string | null;
   cwd: string;
   commands: { build: string[]; test: string[] };
   /** When known, a baseline stamped with a different run id is rejected. */
@@ -323,68 +533,186 @@ export async function loadFloorBaseline(opts: {
   /** When known, a baseline captured on a different branch is rejected. */
   gitBranch?: string | null;
 }): Promise<LoadedBaseline> {
-  const { baselinePath } = opts;
-  if (!baselinePath) return { baseline: null, reason: "not-configured", path: null, runIdVerified: false };
+  const envPath = resolveBaselinePathFromEnv();
+  const witnessPath = opts.witnessPath ?? null;
+  const inTreePath = opts.baselinePath;
 
-  let raw: string;
-  try {
-    raw = await fs.readFile(baselinePath, "utf8");
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      logger.warn("orchestrator", `[verify-baseline] loadFloorBaseline: no baseline at ${baselinePath}`, {
-        operation: "loadFloorBaseline",
-      });
-      return { baseline: null, reason: "missing", path: baselinePath };
+  // 1 — the explicit operator override.
+  if (envPath) {
+    return await applyCandidate(envPath, "env", opts);
+  }
+
+  // 2 — the authoritative witness, cross-checked against the readable copy.
+  if (witnessPath) {
+    const witness = await readBaselineFile(witnessPath);
+    if (witness.ok) {
+      const loaded = await applyCandidate(witnessPath, "witness", opts, witness);
+      const tamper = inTreePath ? await detectInTreeTamper(inTreePath, witness.parsed) : undefined;
+      if (tamper) {
+        logger.error(
+          "orchestrator",
+          `[verify-baseline] the in-tree baseline copy at ${inTreePath} was not written by this gate (${tamper.kind}: ${tamper.detail}) — the verdict used the out-of-tree witness at ${witnessPath}`,
+          { operation: "loadFloorBaseline", runId: opts.runId, tamper: tamper.kind },
+        );
+      }
+      return tamper ? { ...loaded, tamper } : loaded;
     }
-    logger.error(
-      "orchestrator",
-      `[verify-baseline] loadFloorBaseline: read failed for ${baselinePath}: ${err instanceof Error ? err.message : String(err)}`,
-      { operation: "loadFloorBaseline", path: baselinePath, code },
-    );
-    return { baseline: null, reason: "unreadable", path: baselinePath };
+    // No witness for this run. Fall through to the in-tree copy, which is the
+    // only source older runs ever had.
   }
 
-  let parsed: VerifyBaseline;
-  try {
-    parsed = JSON.parse(raw) as VerifyBaseline;
-  } catch (err) {
-    logger.error(
-      "orchestrator",
-      `[verify-baseline] loadFloorBaseline: JSON parse failed for ${baselinePath}: ${err instanceof Error ? err.message : String(err)}`,
-      { operation: "loadFloorBaseline", path: baselinePath },
-    );
-    return { baseline: null, reason: "unreadable", path: baselinePath };
+  // 3 — the in-tree copy, on its own.
+  if (!inTreePath) return { baseline: null, reason: "not-configured", path: null, runIdVerified: false };
+  return await applyCandidate(inTreePath, "in-tree", opts);
+}
+
+async function applyCandidate(
+  filePath: string,
+  source: BaselineSource,
+  opts: { cwd: string; commands: { build: string[]; test: string[] }; runId?: string; gitBranch?: string | null },
+  prefetched?: { ok: true; parsed: VerifyBaseline },
+): Promise<LoadedBaseline> {
+  const attempt = prefetched ?? (await readBaselineFile(filePath));
+  if (!attempt.ok) {
+    return { baseline: null, reason: attempt.reason, reasonDetail: attempt.detail, path: filePath };
   }
 
-  const reason = baselineRejectReason(parsed, opts);
-  if (reason) {
-    logger.warn("orchestrator", `[verify-baseline] baseline at ${baselinePath} rejected: ${reason}`, {
+  const verdict = baselineRejectReason(attempt.parsed, opts);
+  if (verdict) {
+    logger.warn("orchestrator", `[verify-baseline] baseline at ${filePath} rejected: ${verdict.reason}`, {
       operation: "loadFloorBaseline",
-      baselineRunId: parsed?.runId,
+      baselineRunId: attempt.parsed?.runId,
       askingRunId: opts.runId,
+      source,
+      detail: verdict.detail,
     });
-    return { baseline: null, reason, path: baselinePath };
+    return { baseline: null, reason: verdict.reason, reasonDetail: verdict.detail, path: filePath };
   }
 
-  return { baseline: parsed, path: baselinePath, runIdVerified: opts.runId !== undefined };
+  return { baseline: attempt.parsed, path: filePath, source, runIdVerified: opts.runId !== undefined };
+}
+
+/**
+ * Is the readable in-tree copy still the record this gate wrote?
+ *
+ * Compared structurally against the witness rather than by embedded digest: a
+ * digest inside the file would be recomputable by whatever overwrote it, so it
+ * would prove nothing. The witness is the reference precisely because it is
+ * somewhere a project-local script does not look.
+ */
+async function detectInTreeTamper(inTreePath: string, witness: VerifyBaseline): Promise<BaselineTamper | undefined> {
+  const attempt = await readBaselineFile(inTreePath);
+  if (!attempt.ok) {
+    if (attempt.reason === "missing") {
+      return { kind: "vanished", path: inTreePath, detail: "the gate wrote it and it is no longer there" };
+    }
+    return {
+      kind: "foreign",
+      path: inTreePath,
+      detail: attempt.detail ?? "the bytes there could not be read or parsed as JSON",
+    };
+  }
+
+  const shape = describeShapeMismatch(attempt.parsed);
+  if (shape) {
+    return { kind: "foreign", path: inTreePath, detail: `it is not a baseline record — ${shape}` };
+  }
+
+  if (canonicalDigest(attempt.parsed) === canonicalDigest(witness)) return undefined;
+  const theirs = Array.isArray(attempt.parsed.failingTests) ? attempt.parsed.failingTests.length : "?";
+  // Name the difference a reader can act on. The failure COUNT is the one that
+  // matters (it is what authorises failures); the capture time is only mentioned
+  // when it actually differs, or it reads as the same value printed twice.
+  const clauses = [`it claims ${theirs} pre-existing failure(s) against the witness's ${witness.failingTests.length}`];
+  if (attempt.parsed.capturedAtUtc !== witness.capturedAtUtc) {
+    clauses.push(
+      `and is stamped ${String(attempt.parsed.capturedAtUtc)} against the witness's ${witness.capturedAtUtc}`,
+    );
+  }
+  return {
+    kind: "clobbered",
+    path: inTreePath,
+    detail: `it is a baseline record, but not the one this gate captured (${clauses.join(", ")})`,
+  };
+}
+
+/** Key order must not change the answer, so the record is canonicalised first. */
+function canonicalDigest(value: unknown): string {
+  const canonical = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(canonical);
+    if (v && typeof v === "object") {
+      return Object.fromEntries(
+        Object.entries(v as Record<string, unknown>)
+          .filter(([, val]) => val !== undefined)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([k, val]) => [k, canonical(val)]),
+      );
+    }
+    return v;
+  };
+  return sha256Hex(JSON.stringify(canonical(value)));
+}
+
+/**
+ * The fields without which a record cannot be a baseline. Absence means
+ * something other than this gate wrote the file — which is a different problem
+ * from a corrupt read, and must be reported as one.
+ */
+function describeShapeMismatch(b: VerifyBaseline | null): string | null {
+  if (!b || typeof b !== "object") return "it is not a JSON object";
+  const missing: string[] = [];
+  if (typeof b.runId !== "string") missing.push("runId");
+  if (typeof b.capturedAtUtc !== "string") missing.push("capturedAtUtc");
+  if (typeof b.cwd !== "string") missing.push("cwd");
+  if (!b.commands || typeof b.commands !== "object") missing.push("commands");
+  if (typeof b.buildOk !== "boolean") missing.push("buildOk");
+  if (!Array.isArray(b.failingTests)) missing.push("failingTests");
+  if (!Array.isArray(b.results)) missing.push("results");
+  if (missing.length === 0) return null;
+  return `missing or wrong-typed field(s): ${missing.join(", ")}`;
 }
 
 function baselineRejectReason(
   b: VerifyBaseline | null,
   opts: { cwd: string; commands: { build: string[]; test: string[] }; runId?: string; gitBranch?: string | null },
-): BaselineRejectReason | null {
-  if (!b || typeof b !== "object") return "unreadable";
-  if (b.version !== VERIFY_BASELINE_VERSION) return "version-mismatch";
-  if (!Array.isArray(b.failingTests) || !b.commands) return "unreadable";
-  if (typeof b.cwd !== "string" || !samePath(b.cwd, opts.cwd)) return "different-working-tree";
-  if (opts.runId && b.runId !== opts.runId) return "different-run";
-  if (opts.gitBranch && b.gitBranch && b.gitBranch !== opts.gitBranch) return "different-branch";
-  if (!sameCommandSet(b.commands.build ?? [], opts.commands.build)) return "commands-changed";
-  if (!sameCommandSet(b.commands.test ?? [], opts.commands.test)) return "commands-changed";
+): { reason: BaselineRejectReason; detail?: string } | null {
+  if (!b || typeof b !== "object") return { reason: "unreadable", detail: "the JSON was not an object" };
+  const shape = describeShapeMismatch(b);
+  // Version first, but only when the record DECLARES one: a v2 record that
+  // renamed fields must report `version-mismatch`, not a shape complaint about
+  // a schema this code is not meant to understand. A file with no version at
+  // all is not a baseline of any vintage, so it falls to the shape reason.
+  if (typeof b.version === "number" && b.version !== VERIFY_BASELINE_VERSION) {
+    return {
+      reason: "version-mismatch",
+      detail: `record version ${b.version}, this gate speaks ${VERIFY_BASELINE_VERSION}`,
+    };
+  }
+  if (shape) return { reason: "shape-mismatch", detail: shape };
+  if (b.version !== VERIFY_BASELINE_VERSION) {
+    return {
+      reason: "version-mismatch",
+      detail: `record version ${String(b.version)}, this gate speaks ${VERIFY_BASELINE_VERSION}`,
+    };
+  }
+  if (!samePath(b.cwd, opts.cwd)) {
+    return { reason: "different-working-tree", detail: `captured in ${b.cwd}, running in ${opts.cwd}` };
+  }
+  if (opts.runId && b.runId !== opts.runId) {
+    return { reason: "different-run", detail: `record belongs to run ${b.runId}, this is run ${opts.runId}` };
+  }
+  if (opts.gitBranch && b.gitBranch && b.gitBranch !== opts.gitBranch) {
+    return { reason: "different-branch", detail: `captured on ${b.gitBranch}, running on ${opts.gitBranch}` };
+  }
+  if (!sameCommandSet(b.commands.build ?? [], opts.commands.build)) {
+    return { reason: "commands-changed", detail: "the build/typecheck command set differs from the capture" };
+  }
+  if (!sameCommandSet(b.commands.test ?? [], opts.commands.test)) {
+    return { reason: "commands-changed", detail: "the test command set differs from the capture" };
+  }
   // A baseline that could not attribute its own failures cannot excuse anyone
   // else's: applying it would silently authorise every failure of that command.
-  if (b.unattributable === true) return "baseline-unattributable";
+  if (b.unattributable === true) return { reason: "baseline-unattributable" };
   return null;
 }
 
@@ -590,6 +918,12 @@ export function computeFloorDelta(
     rule,
     baselineInfo,
     rejectReason: baseline ? undefined : loaded.reason,
+    rejectDetail: baseline ? undefined : loaded.reasonDetail,
+    baselineSource: baseline ? loaded.source : undefined,
+    // Reported whether the verdict passed or failed: a clobbered readable copy
+    // is the user's problem to fix either way, and on a PASS it is the only
+    // place they would ever learn about it.
+    tamper: loaded.tamper,
     runIdVerified: loaded.runIdVerified === true,
   };
 
@@ -706,16 +1040,44 @@ export function describeBaselineRule(delta: FloorDelta): string {
     const caveat = delta.runIdVerified
       ? ""
       : ` NOTE: the caller named no run, so that run id was NOT checked against this one — confirm the baseline belongs to this run.`;
-    return `Rule applied: DELTA — compared against the baseline captured for run ${b.runId} at ${b.capturedAtUtc} (commit ${commit}, ${b.failingCount} test(s) already failing).${caveat}`;
+    const provenance = delta.baselineSource ? ` ${SOURCE_NOTE[delta.baselineSource]}` : "";
+    return `Rule applied: DELTA — compared against the baseline captured for run ${b.runId} at ${b.capturedAtUtc} (commit ${commit}, ${b.failingCount} test(s) already failing).${provenance}${caveat}${describeTamper(delta)}`;
   }
   const why = ABSOLUTE_REASON[delta.rejectReason ?? "not-configured"];
-  return `Rule applied: ABSOLUTE (fail-closed) — ${why} With no baseline the floor cannot tell a failure this run caused from one it inherited, and a gate whose evidence is missing must not open. Capture a baseline before the loop starts changing things, or point ${VERIFY_BASELINE_ENV} at one.`;
+  const detail = delta.rejectDetail ? ` (${delta.rejectDetail})` : "";
+  return `Rule applied: ABSOLUTE (fail-closed) — ${why}${detail} With no baseline the floor cannot tell a failure this run caused from one it inherited, and a gate whose evidence is missing must not open. Capture a baseline before the loop starts changing things, or point ${VERIFY_BASELINE_ENV} at one.${describeTamper(delta)}`;
 }
+
+/**
+ * The sentence through which a user learns their baseline was overwritten.
+ *
+ * Appended on PASS as well as FAIL: the witness means a clobber no longer
+ * changes the verdict, so a PASS is now the likeliest place this shows up, and a
+ * silent PASS would leave the script doing it running forever.
+ */
+function describeTamper(delta: FloorDelta): string {
+  const t = delta.tamper;
+  if (!t) return "";
+  return (
+    ` WARNING: the readable copy of this baseline at ${t.path} was NOT written by this gate — ${t.detail}.` +
+    ` The verdict above used the authoritative copy outside the working tree, so nothing was excused on its word;` +
+    ` but something in this project writes to that path (a verification script computing it from the project root is the measured cause), and it will keep doing so until you find it.`
+  );
+}
+
+const SOURCE_NOTE: Record<BaselineSource, string> = {
+  witness: "Source: the authoritative copy outside the working tree.",
+  "in-tree":
+    "Source: the copy inside the working tree the run itself edits, with no out-of-tree witness to check it against — a weaker guarantee, since anything the run does could have written it.",
+  env: `Source: the file ${VERIFY_BASELINE_ENV} points at, which overrides the gate's own copy.`,
+};
 
 const ABSOLUTE_REASON: Record<BaselineRejectReason, string> = {
   "not-configured": "no baseline was configured for this run.",
   missing: "the configured baseline file does not exist.",
   unreadable: "the baseline file could not be read or parsed.",
+  "shape-mismatch":
+    "the file at the baseline path read and parsed perfectly well and is NOT a baseline record — so it was not written by this gate, and something else in this project is writing there.",
   "version-mismatch": "the baseline was written by an older, incompatible version of this gate.",
   "different-working-tree": "the baseline was captured in a different working tree.",
   "different-run": "the baseline belongs to a different /ideal run.",
