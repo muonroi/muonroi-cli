@@ -39,9 +39,11 @@
  * and `resolveFloorCommands` on that tree returns
  * `{test: ["cd backend && \".venv/Scripts/python.exe\" -m pytest"]}`. The recipe
  * the gate read was the stored `qa-platform/.muonroi-cli/environment.json`
- * (`testCommands: []`, `ecosystem: "node-python-docker"`, last written
- * 2026-09-23 21:29 and never re-derived). A sprint whose test gate had just
- * executed was scored "this project declares no test command".
+ * (`testCommands: []`, `ecosystem: "node-python-docker"`, written 2026-09-23
+ * 21:29 and, at the time of that run, never re-derived — a stored manifest
+ * REPLACED the disk derivation, which `src/verify/recipe-merge.ts` has since
+ * changed to a merge). A sprint whose test gate had just executed was scored
+ * "this project declares no test command".
  *
  * ## UNION, not replacement — and why that is enough
  *

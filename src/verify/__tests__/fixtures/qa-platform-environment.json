@@ -1,0 +1,54 @@
+{
+  "recipe": {
+    "ecosystem": "node-python-docker",
+    "appKind": "fullstack-web-app",
+    "appLabel": "qa-platform",
+    "shellInitCommands": ["export DEBIAN_FRONTEND=noninteractive", "export PATH=\"/usr/local/bin:$PATH\""],
+    "bootstrapCommands": [
+      "apt-get update && apt-get install -y curl gnupg ca-certificates git python3 python3-pip python3-venv docker.io docker-compose-plugin",
+      "curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs",
+      "node -v && npm -v && python3 --version && docker --version && docker compose version"
+    ],
+    "installCommands": [
+      "cd frontend && npm ci",
+      "cd /d/sources/CompanyLibs/qa-platform/backend && python3 -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -r requirements.txt"
+    ],
+    "buildCommands": ["npm run verify"],
+    "testCommands": [],
+    "startCommand": "docker compose up -d",
+    "startPort": "9090",
+    "smokeKind": "http",
+    "smokeTarget": "http://127.0.0.1:9090",
+    "evidence": [
+      "frontend/package.json: next 16.3.4, antd 6.6.3, next.config.ts output=standalone — Next.js 16 App Router frontend",
+      "frontend/Dockerfile: FROM node:20-bookworm-slim — Node.js 20 required",
+      "backend/requirements.txt: fastapi 0.115.0, uvicorn 0.30.6, sqlalchemy, alembic, psycopg2-binary, pydantic-settings — FastAPI backend, Python 3.11",
+      "backend/Dockerfile: FROM python:3.11-slim — Python 3.11 runtime",
+      "backend/main.py: FastAPI app with health router at /api/health, DB connection check in lifespan hook",
+      "backend/app/config.py: Settings from .env via pydantic-settings — DATABASE_URL, SECRET_KEY, ENCRYPTION_KEY required",
+      "worker/requirements.txt: httpx, requests — Python worker agent",
+      "worker/Dockerfile: python:3.11-slim-bookworm, Playwright chromium, TestZeus Hercules — worker infra",
+      "docker-compose.yml: services: nginx(9090:80), frontend(3000), backend(8000), postgres(5432), worker-build — full stack via Docker Compose",
+      "docker-compose.dev.yml: same stack with worker service included — local dev uses full Compose",
+      "nginx/nginx.conf: /api/ → backend:8000, / → frontend:3000 — nginx reverse proxy at 9090",
+      ".env.example: all required env vars listed — POSTGRES_*, DATABASE_URL, SECRET_KEY, ENCRYPTION_KEY, ANTHROPIC_API_KEY, LLM_*",
+      "README.md: prerequisites Node 18+, Python 3.11+, run via docker compose in production",
+      "bitbucket-pipelines.yml: CI builds all 3 Docker images (backend, frontend, worker) and deploys via Docker Compose",
+      "ARCHITECTURE.md: full-stack B2B QA SaaS platform — nginx → frontend + backend + postgres + worker",
+      "No .env file found in repo root — create from .env.example before docker compose up (DATABASE_URL, SECRET_KEY, ENCRYPTION_KEY, ANTHROPIC_API_KEY required)"
+    ],
+    "notes": [
+      "No .env found in repo root — create from .env.example before docker compose up (DATABASE_URL, SECRET_KEY, ENCRYPTION_KEY, ANTHROPIC_API_KEY required). Without it the backend lifespan hook raises RuntimeError.",
+      "Backend has no test framework installed (no pytest in requirements.txt, no tests/ dir). testCommands is intentionally empty.",
+      "Frontend has a `verify` script in package.json that runs verify.mjs (ts type-check + TS/Next gate checks). CI verification passes with verdict PASS.",
+      "Start command requires Docker daemon running. If Docker is not available in the sandbox, fall back to `npm run build` in frontend and `python -m compileall` in backend as static-only verification.",
+      "smokeTarget http://localhost:9090/api/health requires docker compose up -d to have succeeded with a valid .env and a healthy Postgres container.",
+      "Worker service (TestZeus Hercules + Playwright Chromium) builds a large Python image and is not needed for basic smoke verification; it is excluded from the minimal start command.",
+      "Frontend Dockerfile uses standalone output — the built artifact is a single server.js, not requiring a separate npm start step inside the container.",
+      "Node.js 20 (not just >=18) is the correct version — frontend Dockerfile pins node:20-bookworm-slim."
+    ]
+  },
+  "sandbox": {
+    "ports": ["9090:9090"]
+  }
+}

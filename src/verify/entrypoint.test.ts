@@ -325,7 +325,14 @@ describe("verify entrypoint helpers", () => {
     };
     const runtime = createVerifyRuntimeConfig(dir, {}, overrideRecipe);
     expect(runtime.profile.recipe.ecosystem).toBe("custom");
-    expect(runtime.sandboxSettings.shellInit).toEqual(["export FOO=bar"]);
+    // The override's own shell init reaches the sandbox, FIRST. It is no longer the
+    // only entry: `inferVerifyProjectProfile` merges the override with the live
+    // disk derivation (`src/verify/recipe-merge.ts`), and `shellInitCommands` is
+    // one of the unioned fields — an empty temp dir derives
+    // `defaultShellInit()`. Unioning exports is what `buildRuntimeSandboxSettings`
+    // (orchestrator.ts:41) already does one layer up, through a `Set`.
+    expect(runtime.sandboxSettings.shellInit?.[0]).toBe("export FOO=bar");
+    expect(runtime.sandboxSettings.shellInit).toContain("export DEBIAN_FRONTEND=noninteractive");
   });
 
   it("adds notes for unknown projects instead of pretending it knows the recipe", () => {

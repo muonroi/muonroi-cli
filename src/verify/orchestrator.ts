@@ -60,36 +60,39 @@ export async function prepareVerifyRun(
   let usedVerifyDetect = false;
   let manifestPath = manifest?.path;
 
-  // KNOWN, MEASURED, AND DELIBERATELY NOT FIXED HERE — see the matching note at
-  // `inferVerifyProjectProfile` (src/verify/recipes.ts:1024).
+  // WHY THE MANIFEST IS CACHED, AND WHAT THE CACHE IS ALLOWED TO DECIDE.
   //
-  // A MANIFEST WRITTEN ONCE IS AUTHORITATIVE FOREVER. This is the only call to
-  // `saveVerifyEnvironment` in the codebase and it is gated on `!manifest`, so the
-  // stored `.muonroi-cli/environment.json` is never refreshed — and because
-  // `manifest.recipe` is passed to `inferVerifyProjectProfile` as `recipeOverride`
-  // just above, where `??` REPLACES the disk derivation rather than merging with
-  // it, a stale manifest also means `detectVerifyRecipe` never runs again.
+  // `agent.detectVerifyRecipe` is a full LLM sub-agent turn (`agent:
+  // "verify-detect"`, src/orchestrator/orchestrator.ts:4541) — billed tokens,
+  // latency, non-deterministic output. It is also the only source of things no
+  // disk scan can produce: the apt/nodesource bootstrap sequence, `docker compose
+  // up -d`, the smoke target, the evidence and notes written after reading the
+  // repo. That is what the `!manifest` gate protects, and it stays: an existing
+  // manifest still means no second model turn.
   //
-  // The consequence is larger than one gate: every recipe-detection improvement
-  // reaches NO consumer that reads `profile.recipe` on a project that already has
-  // a manifest — the sub-directory component scan, the nearest sub-package manager
-  // lookup, the pytest rootdir markers, the sub-directory build gate.
-  //
-  // Measured: `D:\sources\CompanyLibs\qa-platform\.muonroi-cli\environment.json`
-  // was written 2026-09-23 21:29 with `testCommands: []` and has been
-  // authoritative for every run since, including run `muc2joffe506`.
-  //
-  // What should refresh a stored manifest — and when a user-authored one must be
-  // left alone, since this file is theirs — is a separate change, left separate on
-  // purpose. The `no_test_commands` defect that surfaced it was closed without
-  // mutating the file (`src/product-loop/test-command-signal.ts`).
+  // What the cache is NOT allowed to decide is the half the disk answers for
+  // free. `inferVerifyProjectProfile` above now MERGES the stored recipe with the
+  // live derivation instead of being replaced by it, so a manifest written once no
+  // longer freezes the recipe: every detection improvement reaches
+  // `profile.recipe` on the next run, with no model call and no file write. The
+  // per-field rule, and why an existing manifest is never rewritten (it carries no
+  // provenance, so a loop-written record and a hand-authored one are
+  // indistinguishable), are argued in `src/verify/recipe-merge.ts`.
   if (!manifest) {
     const detectedRecipe = await agent.detectVerifyRecipe(baseSettings, options.abortSignal);
     if (detectedRecipe) {
       usedVerifyDetect = true;
       profile = inferVerifyProjectProfile(cwd, baseSettings, detectedRecipe);
       options.onProgress?.(`verify-detect selected recipe for ${profile.appLabel}`);
-      manifestPath = saveVerifyEnvironment(cwd, profile.recipe, profile.sandboxSettings);
+      // The MODEL's recipe is what gets persisted — deliberately NOT
+      // `profile.recipe`, which is that recipe already merged with today's disk
+      // derivation. Persisting the merge would freeze this run's derived commands
+      // into the record, and since the merge only ever ADDS, a later fix to a
+      // WRONG derived command could never take effect. Nothing is lost by writing
+      // the un-merged recipe: the derived half is recomputed on every load, and so
+      // are the two runtime rewrites `inferVerifyProjectProfile` applies
+      // (`smokeTarget` from the port mapping, the missing-node_modules note).
+      manifestPath = saveVerifyEnvironment(cwd, detectedRecipe, profile.sandboxSettings);
       options.onProgress?.(`Created verify environment manifest: ${manifestPath}`);
     } else {
       options.onProgress?.(
