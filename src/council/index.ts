@@ -2918,8 +2918,19 @@ export async function* runCouncil(
           runDir: options.runDir,
           spec,
           timestamp: new Date().toISOString(),
+          // Role → model provenance. Under sprintPlanningMode the [Council
+          // Memory] record above is skipped entirely (FK guard, see :2851), so
+          // this file is the ONLY artifact that can answer "which role ran the
+          // model I am looking at in the billing table". Both halves are passed
+          // straight from the resolver / debate state — never re-derived here.
+          leader: {
+            modelId: leaderResolution.modelId,
+            ...(leaderResolution.promotedFrom ? { promotedFrom: leaderResolution.promotedFrom } : {}),
+            ...(leaderResolution.defaulted ? { defaulted: leaderResolution.defaulted } : {}),
+          },
           participants: debateState.active.map((a) => ({
             role: a.role,
+            model: a.model,
             stance: a.stance,
             position: a.position,
           })),

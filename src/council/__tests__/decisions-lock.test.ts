@@ -480,3 +480,104 @@ describe("buildFollowupPrompt — cache-prefix stability", () => {
     expect(prompt).toContain("UNIQUE_SUMMARY_MARKER");
   });
 });
+
+// ── Panel provenance: which model served which council role ───────────────────
+//
+// The gap this closes, measured on a real run: `usage_events` showed
+// step-5-preview serving 15 council calls (1,357,702 input tokens, $0.4073 —
+// 24% of the run's spend) and NO artifact anywhere named which role used it. The
+// billing table was the only source, so the reader inferred "it must be the
+// leader" and was wrong: all four stepfun text models carry `roles: ["leader",
+// …]`, `pickCatalogLeader` (src/council/leader.ts:257) broke the premium tie by
+// catalog LINE ORDER, and the leader was step-3.7-flash. step-5-preview came
+// from the panel-role assignment.
+//
+// decisions.lock.md is the artifact that gets this, because it is the one
+// per-run council artifact that is still written under `/ideal` sprint planning
+// — `[Council Memory]`, which already carries `leaderModel` + `participants`,
+// is skipped wholesale there by the FK guard at src/council/index.ts:2851.
+//
+// The fixture is the measured assignment, not a single-role stub: four roles
+// across four distinct models, and step-5-preview on a PANEL role while a
+// different model leads.
+describe("decisions.lock.md records role → model", () => {
+  const stepfunPanel = {
+    runId: "run-panel-001",
+    runDir: "/tmp/ignored",
+    spec: makeSpecWithBBStack(),
+    timestamp: "2026-09-24T12:00:00.000Z",
+    leader: {
+      modelId: "step-3.7-flash",
+      defaulted: true,
+    },
+    participants: [
+      { role: "implement", model: "step-5-preview", stance: { name: "Architect", lens: "design" }, position: "A" },
+      { role: "verify", model: "step-2-mini", stance: { name: "Cost-Controller", lens: "cost" }, position: "B" },
+      { role: "research", model: "step-3-opus", stance: { name: "Skeptic", lens: "risk" }, position: "C" },
+    ],
+    synthesisExcerpt: "Agreed: CQRS with MediatR.",
+  };
+
+  it("names the leader model and how it was picked", () => {
+    const content = renderDecisionsLock(stepfunPanel);
+    expect(content).toContain("## Panel (role → model)");
+    expect(content).toContain("leader → `step-3.7-flash`");
+    // `defaulted` is the fact that was missing: nobody configured a leader, so
+    // catalog tier picked it and catalog line order broke the tie.
+    expect(content).toMatch(/leader → `step-3\.7-flash`.*catalog/i);
+  });
+
+  it("pairs every panel role with the model that served it", () => {
+    const content = renderDecisionsLock(stepfunPanel);
+    expect(content).toContain("implement → `step-5-preview`");
+    expect(content).toContain("verify → `step-2-mini`");
+    expect(content).toContain("research → `step-3-opus`");
+  });
+
+  it("keeps leader and panel readable as separate lines when they differ", () => {
+    const content = renderDecisionsLock(stepfunPanel);
+    const panel = content.split("## Panel (role → model)")[1].split("\n##")[0];
+    const leaderLine = panel.split("\n").find((l) => l.includes("leader →"));
+    const implementLine = panel.split("\n").find((l) => l.includes("implement →"));
+    expect(leaderLine).toBeDefined();
+    expect(implementLine).toBeDefined();
+    expect(leaderLine).not.toBe(implementLine);
+    // The exact misreading this prevents: the costly model is NOT the leader.
+    expect(leaderLine).not.toContain("step-5-preview");
+    expect(implementLine).toContain("step-5-preview");
+  });
+
+  it("records an auto-promotion so the configured model is not mistaken for the one that ran", () => {
+    const content = renderDecisionsLock({
+      ...stepfunPanel,
+      leader: { modelId: "step-3-opus", promotedFrom: { modelId: "step-2-mini", tier: "routine" } },
+    });
+    expect(content).toContain("leader → `step-3-opus`");
+    expect(content).toContain("step-2-mini");
+    expect(content).toMatch(/promot/i);
+  });
+
+  it("survives the write/read round trip so the record is readable off disk", async () => {
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "decisions-lock-panel-"));
+    try {
+      expect(await writeDecisionsLock({ ...stepfunPanel, runDir: dir })).toBe(true);
+      const content = await readDecisionsLock(dir);
+      expect(content).toContain("leader → `step-3.7-flash`");
+      expect(content).toContain("implement → `step-5-preview`");
+    } finally {
+      await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("says so explicitly when no model id reached the artifact, rather than omitting the section", () => {
+    const content = renderDecisionsLock({
+      ...stepfunPanel,
+      leader: undefined,
+      participants: [{ role: "implement", stance: { name: "Architect", lens: "design" }, position: "A" }],
+    });
+    // A silently absent section reads the same as "the run had no panel" — the
+    // ambiguity that cost a wrong conclusion in the first place.
+    expect(content).toContain("## Panel (role → model)");
+    expect(content).toMatch(/not recorded|unknown/i);
+  });
+});
