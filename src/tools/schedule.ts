@@ -190,8 +190,22 @@ export class ScheduleManager {
       return null;
     }
 
-    await fs.rm(getScheduleRecordPath(id), { force: true });
-    await fs.rm(getScheduleLogDir(id), { recursive: true, force: true });
+    // DECISION (Defect 3, site 2/10): retry, but let the error PROPAGATE.
+    //
+    // This is an explicit user action ("remove this schedule"), and the record is
+    // already gone by the time the log directory is removed. A failure here means
+    // the user's schedule is half-removed — logs orphaned under
+    // ~/.muonroi-cli/schedules with no record to explain them. That is exactly the
+    // class of failure the user must see, so no catch is added: it still throws to
+    // the caller.
+    //
+    // Retries ARE right here, unlike bash.cleanup: the plausible cause is the
+    // schedule daemon momentarily holding a log file it is appending to, a genuine
+    // transient. And because the error still surfaces when the retries do not
+    // help, the retry cannot mask anything — the "ride it out AND still report"
+    // case.
+    await fs.rm(getScheduleRecordPath(id), { force: true, maxRetries: 10, retryDelay: 50 });
+    await fs.rm(getScheduleLogDir(id), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     return schedule;
   }
 

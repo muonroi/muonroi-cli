@@ -35,5 +35,21 @@ try {
     process.exit(1);
   }
 } finally {
-  rmSync(tmp, { recursive: true, force: true });
+  // DECISION (Defect 3, site 10/10): log, retry, and NEVER throw from here.
+  //
+  // Same `finally` hazard as the two above, with a sharper edge: the try block
+  // decides this spike's EXIT CODE (`process.exit(1)` on too few loop points). A
+  // throw from `finally` would replace both a clean exit and a deliberate failure
+  // with an unrelated ENOTEMPTY stack trace, so the one thing the spike reports
+  // would be wrong. Non-fatal but logged: `tmp` is a scratch dir, and a dev spike
+  // leaking one is worth a line, not a failure.
+  try {
+    rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  } catch (err) {
+    console.error(
+      `[spike-gsd-boot] temp dir cleanup failed (${tmp}); a scratch tree is left behind: ${
+        (err as Error)?.message ?? String(err)
+      }`,
+    );
+  }
 }

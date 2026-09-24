@@ -1708,8 +1708,20 @@ export async function collectA7Matrix(opts?: {
     if (res.error) console.error(`[${MODULE}] A7 row ${spec.id} did not execute: ${res.error}`);
   }
 
+  // DECISION (Defect 3, sites 5-8/10): retry, keep the existing log, stay non-fatal.
+  //
+  // All four removals in this file clear a scoring-run scratch tree. The score is
+  // already computed by the time they run, so a leftover temp dir must not fail
+  // the run — and none of them was ever silent: each already logs via
+  // console.error, which is the right sink for a script that writes to a terminal
+  // rather than through the TUI. What they lacked is the retry, and these are the
+  // HIGHEST-value of the ten sites for it: two (in a9RunRow) fire immediately
+  // after killing a spawned TUI child, so an ENOTEMPTY while that child's last
+  // handles are released is precisely the transient node does retry — unlike a
+  // handle still held by a live process, which was measured not to enter the loop
+  // at all.
   try {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   } catch (err) {
     console.error(`[${MODULE}] A7: temp dir cleanup failed (${root}): ${(err as Error)?.message ?? String(err)}`);
   }
@@ -2487,7 +2499,7 @@ export async function collectA9Matrix(opts?: {
   }
 
   try {
-    rmSync(fixtureRoot, { recursive: true, force: true });
+    rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   } catch (err) {
     console.error(
       `[${MODULE}] A9: temp dir cleanup failed (${fixtureRoot}): ${(err as Error)?.message ?? String(err)}`,
@@ -2562,7 +2574,7 @@ async function a9RunRow(
     session = a9Wire(transport);
   } catch (err) {
     try {
-      rmSync(cwd, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch (rmErr) {
       console.error(`[${MODULE}] A9 ${spec.id}: cwd cleanup failed: ${(rmErr as Error)?.message}`);
     }
@@ -2636,7 +2648,7 @@ async function a9RunRow(
     console.error(`[${MODULE}] A9 ${spec.id}: transport cleanup failed: ${(err as Error)?.message}`);
   }
   try {
-    rmSync(cwd, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   } catch (err) {
     console.error(`[${MODULE}] A9 ${spec.id}: cwd cleanup failed: ${(err as Error)?.message}`);
   }

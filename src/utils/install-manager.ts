@@ -7,6 +7,7 @@ import readline from "readline";
 import semverGt from "semver/functions/gt.js";
 import semverValid from "semver/functions/valid.js";
 import { fileURLToPath } from "url";
+import { removeTreeLoggingFailureSync } from "./fs-cleanup.js";
 
 export const GITHUB_REPO = "muonroi/muonroi-cli";
 export const RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases`;
@@ -638,7 +639,28 @@ export async function runScriptManagedUpdate(currentVersion: string): Promise<Sc
   } catch (error) {
     return { success: false, output: error instanceof Error ? error.message : String(error) };
   } finally {
-    if (process.platform !== "win32") fs.rmSync(tempDir, { recursive: true, force: true });
+    // DECISION (Defect 3, site 3/10): log, retry, and NEVER throw from here.
+    //
+    // A throw from a `finally` block REPLACES the function's return value, so the
+    // shipped form turned a transient ENOTEMPTY on a scratch download directory
+    // into "the self-update failed" — the successful
+    // `{success: true, output: "Updated to ..."}` above never reached the caller,
+    // and the `catch` on the outer try could not see it either.
+    //
+    // This is the site the brief flags as "may be mid-install where a silent retry
+    // masks a real problem", and it is exactly why the removal is NOT silent: a
+    // leftover downloaded binary + checksum under tmp after an install is
+    // something a maintainer needs to see, even though it must not fail the
+    // update the user just completed successfully. Retries are on because the
+    // plausible cause is the just-closed download stream, a real transient.
+    if (process.platform !== "win32") {
+      removeTreeLoggingFailureSync(tempDir, {
+        module: "install-manager.runScriptManagedUpdate",
+        namespace: "cli",
+        consequence: "the downloaded binary and checksum are left behind in the temp dir",
+        retry: true,
+      });
+    }
   }
 }
 
@@ -691,7 +713,22 @@ export async function runScriptManagedUninstall(options: ScriptUninstallOptions 
 
   try {
     if (plan.pathCleanup) removePathLine(plan.pathCleanup.configFile, plan.pathCleanup.command);
-    for (const p of plan.removePaths) fs.rmSync(p, { recursive: true, force: true });
+    // DECISION (Defect 3, site 4/10): retry, but let the error reach the USER.
+    //
+    // These are not temp files — `plan.removePaths` is the user's install
+    // directory, binary, config and data (buildScriptUninstallPlan above). A
+    // failure means the uninstall did not finish, which the user must be told:
+    // the surrounding catch already returns `{success: false, output: message}`,
+    // and that stays. Nothing is swallowed and nothing is downgraded to a log.
+    //
+    // Retries are still right: on Windows the running binary or an open DB handle
+    // is a plausible transient. If they do not help, the user sees the failure —
+    // so unlike a silent retry, this cannot mask a real problem. Note the measured
+    // limit though: a handle held by a LIVE process returns EPERM/EBUSY in 1-2ms
+    // without node entering the retry loop, so "uninstall while the CLI is
+    // running" is not fixed by this and will still surface as a failure. That is
+    // the correct outcome here.
+    for (const p of plan.removePaths) fs.rmSync(p, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     for (const d of plan.pruneDirs) removeDirIfEmpty(d);
     return { success: true, output: "muonroi-cli uninstall complete." };
   } catch (error) {

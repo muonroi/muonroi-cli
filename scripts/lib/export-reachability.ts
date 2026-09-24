@@ -47,7 +47,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix, relative, resolve } from "node:path";
 import ts from "typescript";
@@ -337,8 +337,7 @@ export function parseSource(rel: string, text: string): ParsedFile {
   const lineOf = (node: ts.Node): number => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
 
   const hasExportModifier = (node: ts.Node): boolean =>
-    ts.canHaveModifiers(node) &&
-    (ts.getModifiers(node) ?? []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+    ts.canHaveModifiers(node) && (ts.getModifiers(node) ?? []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
 
   /** Leading comment text of a declaration, for `@testonly`-style markers. */
   function leadingComment(node: ts.Node): string {
@@ -434,11 +433,7 @@ export function parseSource(rel: string, text: string): ParsedFile {
     }
 
     // ── export declarations ────────────────────────────────────────────────
-    if (
-      (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) &&
-      hasExportModifier(node) &&
-      node.name
-    ) {
+    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && hasExportModifier(node) && node.name) {
       declarationNameNodes.add(node.name);
       addExport(node.name.text, node, false);
     }
@@ -987,10 +982,14 @@ export function revExists(repoRoot: string, rev: string): boolean {
 export function extractRevision(repoRoot: string, rev: string): string {
   const dir = mkdtempSync(join(tmpdir(), "export-reach-"));
   const tarball = join(dir, "__rev.tar");
-  execFileSync("git", ["archive", "--format=tar", "-o", tarball, rev, "src", "scripts", "packages", "tests", "package.json"], {
-    cwd: repoRoot,
-    stdio: ["ignore", "ignore", "pipe"],
-  });
+  execFileSync(
+    "git",
+    ["archive", "--format=tar", "-o", tarball, rev, "src", "scripts", "packages", "tests", "package.json"],
+    {
+      cwd: repoRoot,
+      stdio: ["ignore", "ignore", "pipe"],
+    },
+  );
   // GNU tar (the build Git for Windows ships) reads `C:\…` as a remote host,
   // so extract from inside the directory with a relative name instead of -C.
   execFileSync("tar", ["-xf", "__rev.tar"], { cwd: dir, stdio: ["ignore", "ignore", "pipe"] });
@@ -1010,7 +1009,28 @@ export function analyzeRevision(repoRoot: string, rev: string): AnalyzeResult {
       baselineLabel: `${rev}^..${rev}`,
     });
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    // DECISION (Defect 3, site 9/10): log, retry, and NEVER throw from here.
+    //
+    // Same `finally` hazard as install-manager: a throw here REPLACES the
+    // `analyze(...)` return value, so a transient ENOTEMPTY on the extracted
+    // revision tree would surface as the reachability analysis itself failing.
+    // This runs in the pre-push / CI gate, where that reads as "the gate found
+    // unreachable exports" — a wrong verdict on a clean tree, which is exactly
+    // the misclassification shape f3fa174e was written to stop.
+    //
+    // Non-fatal but logged: `dir` is a scratch extraction under tmp, so a leftover
+    // costs disk, not correctness — but a repeated leak on a gate that runs on
+    // every push should be visible. Retries are on; the writer here is git's own
+    // extraction, already finished, so ENOTEMPTY is the plausible mode.
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    } catch (err) {
+      console.error(
+        `[export-reachability] extracted-revision cleanup failed (${dir}); a scratch tree is left behind: ${
+          (err as Error)?.message ?? String(err)
+        }`,
+      );
+    }
   }
 }
 
@@ -1027,9 +1047,7 @@ export function readBaselineSources(repoRoot: string, ref: string, files: string
       const detail = `${e?.message ?? String(err)}\n${typeof e?.stderr === "string" ? e.stderr : ""}`;
       const expected = /does not exist|exists on disk, but not in|unknown revision|invalid object name|fatal: path/i;
       if (!expected.test(detail)) {
-        console.error(
-          `[export-reachability] git show ${ref}:${f} failed unexpectedly: ${detail.split("\n")[0]}`,
-        );
+        console.error(`[export-reachability] git show ${ref}:${f} failed unexpectedly: ${detail.split("\n")[0]}`);
       }
     }
   }

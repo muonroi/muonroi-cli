@@ -1,11 +1,13 @@
 import { type ChildProcess, spawn } from "child_process";
 import { createReadStream, createWriteStream, existsSync } from "fs";
-import { mkdtemp, rm, stat, unlink } from "fs/promises";
+import { mkdtemp, stat, unlink } from "fs/promises";
 import os from "os";
 import path from "path";
 import { executeEventHooks } from "../hooks/index";
 import type { CwdChangedHookInput } from "../hooks/types";
 import type { ToolResult } from "../types/index";
+import { removeTreeLoggingFailure } from "../utils/fs-cleanup.js";
+import { logger } from "../utils/logger.js";
 import { checkCatastrophicCommand, type SafetyBlockResult } from "../utils/permission-mode.js";
 import type { SandboxMode, SandboxSettings } from "../utils/settings.js";
 import { posixToNative, type ResolvedShell, resolveShell, type ShellSettings } from "../utils/shell";
@@ -605,23 +607,46 @@ export class BashTool {
       if (entry.alive) {
         try {
           entry.child.kill("SIGTERM");
-        } catch {
-          /* */
+        } catch (err) {
+          logger.warn("orchestrator", "bash.cleanup: SIGTERM to background child failed — it may outlive the CLI", {
+            pid: entry.child.pid,
+            message: (err as Error)?.message,
+          });
         }
       }
       try {
         await unlink(entry.logPath);
-      } catch {
-        /* */
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        // ENOENT is the normal path — the log was already removed or never written.
+        if (code !== "ENOENT") {
+          logger.warn("orchestrator", "bash.cleanup: background log unlink failed — a stale log file is left behind", {
+            target: entry.logPath,
+            code,
+            message: (err as Error)?.message,
+          });
+        }
       }
     }
     this.bgProcesses.clear();
     if (this.tmpDir) {
-      try {
-        await rm(this.tmpDir, { recursive: true, force: true });
-      } catch {
-        /* */
-      }
+      // DECISION (Defect 3, site 1/10): log, do NOT retry.
+      //
+      // Nothing here may fail the CLI's shutdown: the target is a `muonroi-bg-*`
+      // scratch tree under os.tmpdir() holding background-process logs, and the
+      // OS reclaims it. But it must not be silent either — that was a bare
+      // `catch { /* *\/ }` (No Silent Catch), so a leak had no record at all.
+      //
+      // No retries, deliberately: the likely cause is a background child that has
+      // not released its log handle after the SIGTERM above, and a held handle was
+      // measured to return EPERM/EBUSY in 1-2ms WITHOUT node entering the retry
+      // loop. Passing maxRetries here would claim a protection that does not
+      // apply; the log line is what actually makes the leak visible.
+      await removeTreeLoggingFailure(this.tmpDir, {
+        module: "bash.cleanup",
+        namespace: "orchestrator",
+        consequence: "the background temp dir is left behind under os.tmpdir()",
+      });
     }
   }
 
