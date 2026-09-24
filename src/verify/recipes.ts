@@ -6,9 +6,11 @@ import { extractCoverageFromOutput } from "./coverage-parsers.js";
 import {
   buildPytestCommand,
   buildPytestInstallCommand,
+  buildPythonDepsInstallCommand,
   findPytestTargets,
   type PytestTarget,
 } from "./pytest-detect.js";
+import { commandIn, fileExistsIn, findMarkedDirectories } from "./workspace-scan.js";
 
 export { extractCoverageFromOutput };
 
@@ -34,6 +36,16 @@ export interface VerifyProjectProfile {
   appKind: VerifyAppKind;
   appLabel: string;
   packageManager: string | null;
+  /**
+   * The ecosystem of EVERY stack found on disk, deduped, primary first.
+   *
+   * `recipe.ecosystem` is a single string and names only the primary stack, so on
+   * a polyglot repo it is a half-truth: qa-platform reports `node` while half its
+   * gates are pytest under `backend/`. This list is the honest answer, always
+   * from the disk probe rather than from the recipe (a model-written recipe
+   * cannot talk it down), and the verify sub-agent is told about it.
+   */
+  componentEcosystems: string[];
   availableScripts: string[];
   hasNodeModules: boolean;
   sandboxSettings: SandboxSettings;
@@ -44,6 +56,12 @@ interface PackageJsonLike {
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   scripts?: Record<string, string>;
+  /**
+   * npm / yarn / bun workspace globs. Present means the root package's own
+   * scripts are the workspace-wide entry point, so its members must not each
+   * become a separate component — see `findNodePackageRoots`.
+   */
+  workspaces?: string[] | { packages?: string[] };
 }
 
 function fileExists(cwd: string, file: string): boolean {
@@ -68,22 +86,61 @@ function readPackageJson(cwd: string): PackageJsonLike | null {
   }
 }
 
-export function detectPackageManager(cwd: string): string | null {
-  const candidates: Array<[string, string]> = [
-    ["pnpm-lock.yaml", "pnpm"],
-    ["bun.lock", "bun"],
-    ["bun.lockb", "bun"],
-    ["yarn.lock", "yarn"],
-    ["package-lock.json", "npm"],
-    ["uv.lock", "uv"],
-    ["poetry.lock", "poetry"],
-    ["Pipfile.lock", "pipenv"],
-  ];
+/** JS lockfiles, highest precedence first. */
+const NODE_LOCKFILES: ReadonlyArray<readonly [string, string]> = [
+  ["pnpm-lock.yaml", "pnpm"],
+  ["bun.lock", "bun"],
+  ["bun.lockb", "bun"],
+  ["yarn.lock", "yarn"],
+  ["package-lock.json", "npm"],
+];
 
-  for (const [file, manager] of candidates) {
+/** Python lockfiles, which name a dependency manager rather than a JS runner. */
+const PYTHON_LOCKFILES: ReadonlyArray<readonly [string, string]> = [
+  ["uv.lock", "uv"],
+  ["poetry.lock", "poetry"],
+  ["Pipfile.lock", "pipenv"],
+];
+
+/**
+ * The package manager declared by a lockfile in `cwd` ITSELF.
+ *
+ * Deliberately root-only. Its two production callers ask a root question —
+ * `ensureBootstrapCommands` (src/verify/entrypoint.ts) decides whether the
+ * sandbox needs a `bun` install, and `detectPythonRecipe` below decides whether
+ * the ROOT install line is `uv sync` / `poetry install`. Walking here would make
+ * a `backend/uv.lock` produce a root-relative `uv sync`, which fails on a repo
+ * with no root Python project. Per-package resolution is
+ * {@link detectPackageManagerFor}.
+ */
+export function detectPackageManager(cwd: string): string | null {
+  for (const [file, manager] of [...NODE_LOCKFILES, ...PYTHON_LOCKFILES]) {
     if (fileExists(cwd, file)) return manager;
   }
+  return null;
+}
 
+/**
+ * The package manager for the Node package at `<root>/<dir>`: its OWN lockfile
+ * first, then the root's.
+ *
+ * Root-only resolution is why qa-platform never got an install command for its
+ * front end at all — measured on the real tree at ea529904,
+ * `detectPackageManager("D:/sources/CompanyLibs/qa-platform")` returns null
+ * because the only lockfile is `frontend/package-lock.json`, and
+ * `detectNodeRecipe` emits no install command when the manager is null. The
+ * root fallback covers the opposite layout: a monorepo with ONE lockfile at the
+ * top and no lockfile beside each member.
+ */
+export function detectPackageManagerFor(root: string, dir: string): string | null {
+  const here = path.join(root, dir);
+  for (const [file, manager] of NODE_LOCKFILES) {
+    if (fileExists(here, file)) return manager;
+  }
+  if (!dir) return null;
+  for (const [file, manager] of NODE_LOCKFILES) {
+    if (fileExists(root, file)) return manager;
+  }
   return null;
 }
 
@@ -122,6 +179,79 @@ export function getNodeWebBootstrapCommands(packageManager: string | null, appKi
     commands.push("curl -fsSL https://bun.sh/install | bash");
   }
   return commands;
+}
+
+const NODE_ECOSYSTEMS = new Set(["node", "nodejs", "npm", "bun", "yarn", "pnpm"]);
+const PYTHON_ECOSYSTEMS = new Set(["python", "django", "fastapi"]);
+const GO_ECOSYSTEMS = new Set(["go", "golang"]);
+const RUST_ECOSYSTEMS = new Set(["rust", "cargo"]);
+
+/**
+ * The sandbox provisioning an ecosystem label implies.
+ *
+ * Lives here, beside the detectors, rather than in `src/verify/entrypoint.ts`
+ * where it started: `composeRecipe` needs it so a polyglot repo's SECOND stack
+ * gets a toolchain too. `ensureBootstrapCommands` returns early once a recipe
+ * carries any bootstrap command at all (to preserve a model- or
+ * manifest-supplied one), and a composed recipe already carries the primary
+ * stack's — so by the time it ran, the sibling stack's toolchain could no longer
+ * be added. Measured on the qa-platform shape: bootstrap was the single node apt
+ * line, which installs `python3` but neither `python3-pip` nor `python3-venv`,
+ * so the recipe's own `cd backend && python -m pip install pytest` had nothing
+ * to run with.
+ */
+export function inferBootstrapFromEcosystem(
+  ecosystem: string,
+  packageManager: string | null,
+): { bootstrap: string[]; shellInit: string[] } {
+  const eco = ecosystem.toLowerCase();
+
+  if (
+    NODE_ECOSYSTEMS.has(eco) ||
+    eco.includes("node") ||
+    eco.includes("next") ||
+    eco.includes("react") ||
+    eco.includes("vite")
+  ) {
+    const bootstrap = [
+      "apt-get update && apt-get install -y curl unzip ca-certificates git python3 make g++ pkg-config nodejs npm",
+    ];
+    const shellInit = [...defaultShellInit()];
+    if (packageManager === "bun") {
+      bootstrap.push("curl -fsSL https://bun.sh/install | bash");
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell variable, not JS template
+      shellInit.push('export BUN_INSTALL="${HOME}/.bun"');
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell variable, not JS template
+      shellInit.push('export PATH="${BUN_INSTALL}/bin:$PATH"');
+    }
+    return { bootstrap, shellInit };
+  }
+
+  if (PYTHON_ECOSYSTEMS.has(eco) || eco.includes("python") || eco.includes("django") || eco.includes("flask")) {
+    return {
+      bootstrap: ["apt-get update && apt-get install -y python3 python3-pip python3-venv ca-certificates git"],
+      shellInit: defaultShellInit(),
+    };
+  }
+
+  if (GO_ECOSYSTEMS.has(eco) || eco.includes("go")) {
+    return {
+      bootstrap: ["apt-get update && apt-get install -y golang ca-certificates git"],
+      shellInit: defaultShellInit(),
+    };
+  }
+
+  if (RUST_ECOSYSTEMS.has(eco) || eco.includes("rust")) {
+    return {
+      bootstrap: [
+        "apt-get update && apt-get install -y curl ca-certificates git build-essential && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+      ],
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell variable, not JS template
+      shellInit: [...defaultShellInit(), 'export PATH="${HOME}/.cargo/bin:$PATH"'],
+    };
+  }
+
+  return { bootstrap: [], shellInit: [] };
 }
 
 function parseHostPort(mapping: string): string | null {
@@ -310,6 +440,12 @@ function contributionFromPytestTargets(targets: PytestTarget[]): PytestContribut
     const where = target.dir || "the repository root";
     contribution.testCommands.push(buildPytestCommand(target));
     contribution.evidence.push(`Detected pytest in ${where} via ${target.marker}`);
+    // A sub-project's own manifest is not reachable from the repository root, so
+    // its dependencies are installed from its own directory, in its own
+    // interpreter — BEFORE pytest, so a manifest that already pins pytest
+    // satisfies it and the fallback install below is a no-op.
+    const deps = buildPythonDepsInstallCommand(target);
+    if (deps) contribution.installCommands.push(deps);
     if (!target.pytestDeclared) {
       contribution.installCommands.push(buildPytestInstallCommand(target));
       contribution.notes.push(
@@ -342,11 +478,19 @@ function detectPythonRecipe(cwd: string): VerifyRecipe | null {
   const isDjango = managePy || lower.includes("django");
   const isFastApi = lower.includes("fastapi") || lower.includes("uvicorn");
 
-  let install = "pip install -r requirements.txt";
+  let install: string | undefined = "pip install -r requirements.txt";
   if (packageManager === "uv") install = "uv sync";
   else if (packageManager === "poetry") install = "poetry install";
   else if (packageManager === "pipenv") install = "pipenv install";
   else if (pyproject && !requirements) install = "pip install -e .";
+  // A root-relative install is only runnable when the ROOT actually declares
+  // dependencies. qa-platform's only manifest is `backend/requirements.txt`, and
+  // the recipe reached this function solely because a pytest target was
+  // discovered under `backend/`; emitting `pip install -r requirements.txt` there
+  // names a file that does not exist, and the floor would fail on the install
+  // before it ever ran a test. The per-target install in
+  // `contributionFromPytestTargets` covers that case instead.
+  if (!pyproject && !requirements && !fileExists(cwd, "setup.py") && !fileExists(cwd, "Pipfile")) install = undefined;
 
   if (isDjango) {
     return {
@@ -355,7 +499,7 @@ function detectPythonRecipe(cwd: string): VerifyRecipe | null {
       appLabel: "Django app",
       shellInitCommands: defaultShellInit(),
       bootstrapCommands: [],
-      installCommands: [install],
+      installCommands: dedupe([install]),
       buildCommands: [],
       // Left alone deliberately: `manage.py test` is Django's own runner, always
       // present and always launchable, so there is no gap here for pytest
@@ -573,49 +717,204 @@ function detectFallbackRecipe(cwd: string): VerifyRecipe {
   };
 }
 
+/** One stack found in the repository, and where it lives relative to the root. */
+interface RecipeComponent {
+  /** Directory relative to the repository root; "" is the root itself. */
+  dir: string;
+  recipe: VerifyRecipe;
+}
+
 /**
- * A Node recipe that found no test script gets one last look for a sibling
- * stack's tests before it reports "this project has no tests".
+ * Re-point every command in a sub-directory's recipe at that directory.
  *
- * `inferFallbackRecipe` returns the Node recipe the moment a root `package.json`
- * exists, so on a polyglot repo the Python detector was never reached. That is
- * what happened on qa-platform: its root package.json declares a single
- * `verify` script, so the deterministic profile came back
- * `{ecosystem:"node", testCommands:[], buildCommands:[]}` — measured against the
- * real repo — while `backend/conftest.py` sat one directory away.
- *
- * `ecosystem` deliberately stays `node`. It keys the bootstrap hints
- * (`inferBootstrapFromEcosystem`, src/verify/entrypoint.ts:367) and the
- * node_modules note below, so relabelling a Node repo would break runtime
- * provisioning to fix test discovery. The known cost is that the coverage
- * grammar is chosen per-RUN from this one label
- * (`resolveFloorEcosystem` → `extractCoverageFromOutput`), so pytest-cov output
- * from a polyglot repo parses as Istanbul and yields null — an honest
- * "unmeasured", which blocks nothing.
+ * Uses the one shared `cd <dir> && …` shape (`commandIn`), so a relocated
+ * `cargo test` and the shipped pytest path emit identically-structured commands
+ * to the verify floor's `spawn(command, {shell: true})`.
  */
-function augmentNodeRecipeWithSiblingTests(cwd: string, recipe: VerifyRecipe): VerifyRecipe {
-  if (recipe.testCommands.length > 0) return recipe;
-  const pytest = contributionFromPytestTargets(findPytestTargets(cwd));
-  if (pytest.testCommands.length === 0) return recipe;
+function relocate(recipe: VerifyRecipe, dir: string): VerifyRecipe {
+  if (!dir) return recipe;
+  const at = (commands: string[]): string[] => commands.map((command) => commandIn(dir, command));
   return {
     ...recipe,
-    installCommands: dedupe([...recipe.installCommands, ...pytest.installCommands]),
-    testCommands: pytest.testCommands,
-    evidence: dedupe([...recipe.evidence, ...pytest.evidence]),
-    notes: dedupe([...recipe.notes, ...pytest.notes]),
+    installCommands: at(recipe.installCommands),
+    buildCommands: at(recipe.buildCommands),
+    testCommands: at(recipe.testCommands),
+    startCommand: recipe.startCommand ? commandIn(dir, recipe.startCommand) : undefined,
+    evidence: recipe.evidence.map((line) => `${line} (in ${dir})`),
   };
 }
 
-function inferFallbackRecipe(cwd: string, pkg: PackageJsonLike | null, packageManager: string | null): VerifyRecipe {
-  if (pkg) return augmentNodeRecipeWithSiblingTests(cwd, detectNodeRecipe(cwd, pkg, packageManager));
-  return (
-    detectPythonRecipe(cwd) ??
-    detectGoRecipe(cwd) ??
-    detectRustRecipe(cwd) ??
-    detectJavaRecipe(cwd) ??
-    detectDotnetRecipe(cwd) ??
-    detectFallbackRecipe(cwd)
+/**
+ * Every Node package in the bounded scan.
+ *
+ * NOT pruned at a claimed directory, because a root `package.json` does not
+ * imply it builds or tests its sub-packages: qa-platform's root declares the
+ * single script `verify` and nothing else, so pruning would lose
+ * `frontend/package.json`'s `build` — the missing build gate this exists to
+ * close. A declared workspace IS pruned: there the root's own `build`/`test`
+ * scripts are the workspace-wide entry point (muonroi-cli itself declares
+ * `workspaces: ["packages/*"]`), so per-member components would duplicate work
+ * the root command already does.
+ */
+function findNodePackageRoots(cwd: string): Array<{ dir: string; pkg: PackageJsonLike }> {
+  const rootPkg = readPackageJson(cwd);
+  const declaresWorkspaces = Boolean(
+    rootPkg &&
+      (Array.isArray(rootPkg.workspaces)
+        ? rootPkg.workspaces.length > 0
+        : Array.isArray(rootPkg.workspaces?.packages) && rootPkg.workspaces.packages.length > 0),
   );
+  if (declaresWorkspaces || fileExists(cwd, "pnpm-workspace.yaml")) {
+    return rootPkg ? [{ dir: "", pkg: rootPkg }] : [];
+  }
+  return findMarkedDirectories(cwd, (dir) => readPackageJson(dir)).map(({ dir, value }) => ({ dir, pkg: value }));
+}
+
+/**
+ * Every Cargo root in the bounded scan, PRUNED at each claim.
+ *
+ * `cargo test` at a workspace root already runs every member, so descending into
+ * `crates/*` would emit a second, redundant test command per crate. Verified
+ * against the real `D:/sources/Core/claw-code-parity`, whose only Cargo.toml is
+ * `rust/Cargo.toml` (`[workspace] members = ["crates/*"]`) and which the
+ * root-only detector reported as `ecosystem: "unknown"` / TRUSTED false at
+ * ea529904 — a CB-3 `no_recipe` halt on a repo with a real Rust test suite.
+ */
+function findCargoRoots(cwd: string): string[] {
+  return findMarkedDirectories(cwd, (dir) => (fileExistsIn(dir, "Cargo.toml") ? true : null), {
+    pruneClaimed: true,
+  }).map(({ dir }) => dir);
+}
+
+/**
+ * Every stack this repository really has, in a fixed precedence order.
+ *
+ * Replaces the `if (pkg) return detectNodeRecipe(...)` short-circuit, which made
+ * a root `package.json` hide every other detector: qa-platform's root package
+ * declares one `verify` script, so the whole FastAPI backend under `backend/`
+ * was invisible and the deterministic profile came back
+ * `{ecosystem:"node", testCommands:[], buildCommands:[]}` (measured on the real
+ * tree at ea529904).
+ *
+ * Order matters — it decides which component is PRIMARY (see
+ * {@link composeRecipe}) — and reproduces the previous chain's precedence
+ * (python before go before rust before java before dotnet) so no single-stack
+ * repo changes hands.
+ *
+ * Which detectors got a bounded scan, and which did not:
+ *  - node, python, rust, dotnet — scan sub-directories. Each is exercised
+ *    against a real tree on this machine (qa-platform, claw-code-parity,
+ *    storyflow).
+ *  - go, java (maven/gradle) — ROOT ONLY, unchanged. There is no Go, Maven or
+ *    Gradle tree anywhere under `D:/sources`, and no `go`/`mvn`/`gradle` on
+ *    PATH, so the sub-directory command shape cannot be exercised: a Gradle
+ *    subproject has no `./gradlew` of its own, and a Maven child module needs
+ *    its parent installed first. Guessing `cd <dir> && …` for those would be
+ *    inventing a command shape. They are still promoted from the old
+ *    short-circuit to real components, so a root `pom.xml` is no longer hidden
+ *    by a root `package.json`.
+ *  - Makefile — deliberately NOT a component. A Makefile is very often an
+ *    auxiliary task runner in a Node or Python repo (docker, deploy), so
+ *    `make test` there is not the project's gate. It keeps its existing
+ *    last-resort position in {@link detectFallbackRecipe}.
+ */
+function detectRecipeComponents(cwd: string): RecipeComponent[] {
+  const components: RecipeComponent[] = [];
+
+  for (const { dir, pkg } of findNodePackageRoots(cwd)) {
+    const packageManager = detectPackageManagerFor(cwd, dir);
+    components.push({ dir, recipe: relocate(detectNodeRecipe(path.join(cwd, dir), pkg, packageManager), dir) });
+  }
+
+  // Already sub-directory aware internally (`findPytestTargets`), so it is asked
+  // about the root once rather than re-walked per directory here.
+  const python = detectPythonRecipe(cwd);
+  if (python) components.push({ dir: "", recipe: python });
+
+  const go = detectGoRecipe(cwd);
+  if (go) components.push({ dir: "", recipe: go });
+
+  for (const dir of findCargoRoots(cwd)) {
+    const rust = detectRustRecipe(path.join(cwd, dir));
+    if (rust) components.push({ dir, recipe: relocate(rust, dir) });
+  }
+
+  const java = detectJavaRecipe(cwd);
+  if (java) components.push({ dir: "", recipe: java });
+
+  // Already scans depth 2 via `findDotnetMarkers`, and targets the .sln, so its
+  // commands are correct run from the root.
+  const dotnet = detectDotnetRecipe(cwd);
+  if (dotnet) components.push({ dir: "", recipe: dotnet });
+
+  return components;
+}
+
+/**
+ * Why the composed recipe still carries ONE `ecosystem` string.
+ *
+ * It cannot honestly describe a polyglot repo, and this note says so in the
+ * recipe itself rather than letting the label pass for the whole truth. The
+ * label is consumed by two SINGLE-CHOICE dispatches, and both take the primary
+ * component's answer:
+ *  - `inferBootstrapFromEcosystem` (src/verify/entrypoint.ts) — mitigated:
+ *    `ensureBootstrapCommands` unions over {@link detectComponentEcosystems}
+ *    instead of reading this field.
+ *  - `resolveFloorEcosystem` (src/product-loop/verify-floor.ts) →
+ *    `extractCoverageFromOutput` — NOT mitigated. The floor resolves one grammar
+ *    per RUN and threads it into every command, so pytest-cov output from a
+ *    node-primary repo parses as Istanbul and yields null: an honest
+ *    "unmeasured", which blocks nothing.
+ */
+const POLYGLOT_LABEL_NOTE =
+  "This repository has more than one stack. `ecosystem` names only the primary one, so a " +
+  "coverage figure is measured for the primary stack's test output only; the other stacks' " +
+  "commands still run and still gate the sprint.";
+
+/**
+ * Fold the components into the one recipe shape the pipeline consumes.
+ *
+ * Commands are unioned in component order so the primary stack's gates run
+ * first. `ecosystem` / `appKind` / `appLabel` / `startCommand` / `smokeKind` come
+ * from the PRIMARY component — no relabelling, because those fields key runtime
+ * provisioning and the smoke check, and a repo whose primary stack is Node must
+ * keep behaving like one.
+ */
+function composeRecipe(cwd: string, components: RecipeComponent[]): VerifyRecipe {
+  const primary = components[0]!.recipe;
+  const recipes = components.map(({ recipe }) => recipe);
+  const roster = components
+    .map(({ dir, recipe }) => `${recipe.appLabel} in ${dir || "the repository root"}`)
+    .join("; ");
+  // Each component's toolchain, from the component's OWN bootstrap when it emits
+  // one (a Next.js package does) and otherwise from its ecosystem label. Without
+  // this the sandbox only ever gets the primary stack's runtime — see
+  // `inferBootstrapFromEcosystem`.
+  const provisioning = components.map(({ dir, recipe }) =>
+    recipe.bootstrapCommands.length > 0
+      ? { bootstrap: recipe.bootstrapCommands, shellInit: recipe.shellInitCommands }
+      : inferBootstrapFromEcosystem(recipe.ecosystem, detectPackageManagerFor(cwd, dir) ?? detectPackageManager(cwd)),
+  );
+  return {
+    ...primary,
+    shellInitCommands: dedupe([
+      ...recipes.flatMap((r) => r.shellInitCommands),
+      ...provisioning.flatMap((p) => p.shellInit),
+    ]),
+    bootstrapCommands: dedupe(provisioning.flatMap((p) => p.bootstrap)),
+    installCommands: dedupe(recipes.flatMap((r) => r.installCommands)),
+    buildCommands: dedupe(recipes.flatMap((r) => r.buildCommands)),
+    testCommands: dedupe(recipes.flatMap((r) => r.testCommands)),
+    evidence: dedupe([`Detected ${components.length} sub-projects: ${roster}`, ...recipes.flatMap((r) => r.evidence)]),
+    notes: dedupe([...recipes.flatMap((r) => r.notes), POLYGLOT_LABEL_NOTE]),
+  };
+}
+
+function recipeFromComponents(cwd: string, components: RecipeComponent[]): VerifyRecipe {
+  if (components.length === 0) return detectFallbackRecipe(cwd);
+  // A single-stack repository takes its component's recipe verbatim, so nothing
+  // about a plain root-level Node / .NET / Python repo changes shape.
+  return components.length === 1 ? components[0]!.recipe : composeRecipe(cwd, components);
 }
 
 export function normalizeVerifyRecipe(value: unknown): VerifyRecipe | null {
@@ -657,6 +956,19 @@ export function normalizeVerifyRecipe(value: unknown): VerifyRecipe | null {
   };
 }
 
+/**
+ * The package manager of the shallowest Node sub-package that declares a
+ * lockfile, or null. Only consulted when the root declares none.
+ */
+function nearestSubPackageManager(cwd: string, components: RecipeComponent[]): string | null {
+  for (const { dir } of components) {
+    if (!dir) continue;
+    const manager = detectPackageManagerFor(cwd, dir);
+    if (manager) return manager;
+  }
+  return null;
+}
+
 export function inferVerifySmokeUrl(settings?: SandboxSettings): string | null {
   const ports = settings?.ports ?? [];
   if (ports.length !== 1) return null;
@@ -670,8 +982,14 @@ export function inferVerifyProjectProfile(
   recipeOverride?: VerifyRecipe | null,
 ): VerifyProjectProfile {
   const pkg = readPackageJson(cwd);
-  const packageManager = detectPackageManager(cwd);
-  const recipe = recipeOverride ?? inferFallbackRecipe(cwd, pkg, packageManager);
+  // Scanned ONCE and reused for the recipe, the package manager and the
+  // ecosystem roster below — each of those used to probe the disk again.
+  const components = detectRecipeComponents(cwd);
+  // The ROOT lockfile first, then the nearest sub-package's. Root-only is why
+  // qa-platform reported `packageManager: null` to the verify sub-agent while
+  // `frontend/package-lock.json` sat one directory down.
+  const packageManager = detectPackageManager(cwd) ?? nearestSubPackageManager(cwd, components);
+  const recipe = recipeOverride ?? recipeFromComponents(cwd, components);
   const inferredDefaults: SandboxSettings =
     recipe.smokeKind === "http" && recipe.startPort ? { ports: [`${recipe.startPort}:${recipe.startPort}`] } : {};
   const sandboxSettings = mergeSandboxSettings(inferredDefaults, baseSettings);
@@ -693,6 +1011,7 @@ export function inferVerifyProjectProfile(
     appKind: normalizeVerifyAppKind(recipeWithRuntime.appKind),
     appLabel: recipeWithRuntime.appLabel,
     packageManager,
+    componentEcosystems: dedupe(components.map(({ recipe: component }) => component.ecosystem)),
     availableScripts: Object.keys(pkg?.scripts ?? {}),
     hasNodeModules: fs.existsSync(path.join(cwd, "node_modules")),
     sandboxSettings,

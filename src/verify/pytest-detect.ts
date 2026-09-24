@@ -23,11 +23,21 @@
  *      installCommands say `cd frontend && npm ci` and `cd <abs>/backend &&
  *      python3 -m venv .venv`. Commands emitted from these targets use the same
  *      `cd <dir> && …` shape.
+ *
+ * The walk itself lives in `./workspace-scan.js` — shared with every other
+ * detector so they cannot disagree about how deep to look or what to skip.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { BUILD_OUTPUT_DIRS } from "../product-loop/language-registry.js";
+import {
+  commandIn,
+  fileExistsIn,
+  findMarkedDirectories,
+  isDirectory,
+  safeReaddir,
+  toPosixPath,
+} from "./workspace-scan.js";
 
 /**
  * How strongly a directory is proven to be a pytest root.
@@ -60,6 +70,11 @@ export interface PytestTarget {
    * say so) rather than ignore.
    */
   pytestDeclared: boolean;
+  /**
+   * The `pip` verb that installs THIS directory's declared dependencies, or
+   * null when it declares none. See {@link buildPythonDepsInstallCommand}.
+   */
+  depsInstall: string | null;
 }
 
 /** Config files that mark a rootdir unconditionally, highest precedence first. */
@@ -85,21 +100,6 @@ const TEST_DIR_NAMES = ["tests", "test"] as const;
  */
 const PYTHON_MANIFESTS = ["requirements.txt", "pyproject.toml", "setup.py", "setup.cfg", "Pipfile"] as const;
 
-/**
- * Virtualenv directory names that carry no dot, so the dot-prefix skip below
- * does not already cover them. A venv vendors thousands of installed packages
- * and their conftest.py files; collecting from one is never right.
- */
-const VENV_DIR_NAMES = new Set(["venv", "env", "site-packages"]);
-
-/**
- * How deep to look. Matches the existing bound in `findDotnetMarkers`
- * (src/verify/recipes.ts, `depth < 2`), which covers a root-level layout, a
- * one-level split like `backend/` + `frontend/`, and a two-level monorepo like
- * `packages/api/` — without walking a whole tree on every recipe inference.
- */
-const MAX_DEPTH = 2;
-
 function readIfPresent(dir: string, file: string): string | null {
   try {
     return fs.readFileSync(path.join(dir, file), "utf8");
@@ -108,19 +108,6 @@ function readIfPresent(dir: string, file: string): string | null {
     // apply" — and is the expected case for most probes, so it is not an error.
     return null;
   }
-}
-
-function isDirectory(full: string): boolean {
-  try {
-    return fs.statSync(full).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function skipDir(name: string): boolean {
-  // Dot-prefixed covers `.venv`, `.git`, `.pytest_cache`, `.tox`, `.mypy_cache`.
-  return name.startsWith(".") || BUILD_OUTPUT_DIRS.has(name) || VENV_DIR_NAMES.has(name);
 }
 
 /** Candidate venv interpreters, in the order a layout is probed on disk. */
@@ -165,22 +152,8 @@ function detectPytestAvailability(dir: string, pythonBin: string | null): boolea
   return false;
 }
 
-function safeReaddir(dir: string): string[] {
-  try {
-    return fs.readdirSync(dir);
-  } catch {
-    return [];
-  }
-}
-
 function hasPythonManifest(dir: string): boolean {
-  return PYTHON_MANIFESTS.some((m) => {
-    try {
-      return fs.existsSync(path.join(dir, m));
-    } catch {
-      return false;
-    }
-  });
+  return PYTHON_MANIFESTS.some((m) => fileExistsIn(dir, m));
 }
 
 /**
@@ -210,50 +183,44 @@ function classifyDirectory(dir: string): { marker: string; kind: PytestMarkerKin
 }
 
 /**
- * Every directory under `root` (bounded, see {@link MAX_DEPTH}) that pytest
- * would treat as a root, shallowest first then alphabetical so the result is
- * stable across platforms and filesystems.
+ * Every directory under `root` that pytest would treat as a root, shallowest
+ * first then alphabetical so the result is stable across platforms and
+ * filesystems. Depth bound and skip list come from `./workspace-scan.js`.
  *
  * Never throws: recipe inference runs on arbitrary user trees, and an
  * unreadable directory must degrade to "no target here" rather than take down
  * the whole verification recipe.
  */
 export function findPytestTargets(root: string): PytestTarget[] {
-  const found: Array<PytestTarget & { depth: number }> = [];
-
-  const visit = (dir: string, depth: number): void => {
+  return findMarkedDirectories(root, (dir) => {
     const hit = classifyDirectory(dir);
-    if (hit) {
-      const pythonBin = findVenvInterpreter(dir);
-      found.push({
-        dir: path.relative(root, dir),
-        marker: hit.marker,
-        kind: hit.kind,
-        pythonBin,
-        pytestDeclared: detectPytestAvailability(dir, pythonBin),
-        depth,
-      });
-    }
-    if (depth >= MAX_DEPTH) return;
-    for (const name of safeReaddir(dir).sort()) {
-      if (skipDir(name)) continue;
-      const full = path.join(dir, name);
-      if (isDirectory(full)) visit(full, depth + 1);
-    }
-  };
+    if (!hit) return null;
+    const pythonBin = findVenvInterpreter(dir);
+    return {
+      marker: hit.marker,
+      kind: hit.kind,
+      pythonBin,
+      pytestDeclared: detectPytestAvailability(dir, pythonBin),
+      depsInstall: pythonDepsInstallVerb(dir),
+    };
+  }).map(({ dir, value }) => ({ dir, ...value }));
+}
 
-  try {
-    visit(root, 0);
-  } catch {
-    // Defensive: `visit` already swallows per-directory failures, so reaching
-    // here means the root itself was unusable. Callers get an empty list, which
-    // yields `testCommands: []` — an honest "no tests found", not a crash.
-    return [];
-  }
-
-  return found
-    .sort((a, b) => a.depth - b.depth || a.dir.localeCompare(b.dir))
-    .map(({ depth: _depth, ...target }) => target);
+/**
+ * How this directory's own Python dependencies are installed, or null when it
+ * declares none.
+ *
+ * Needed because a sub-project's manifest is NOT reachable from the repository
+ * root: qa-platform's only `requirements.txt` is `backend/requirements.txt`, so
+ * the root-relative `pip install -r requirements.txt` the recipe used to emit
+ * names a file that does not exist, while the FastAPI/SQLAlchemy imports
+ * `backend/conftest.py` triggers need it installed or every test errors on
+ * collection.
+ */
+function pythonDepsInstallVerb(dir: string): string | null {
+  if (fileExistsIn(dir, "requirements.txt")) return "-m pip install -r requirements.txt";
+  if (fileExistsIn(dir, "pyproject.toml") || fileExistsIn(dir, "setup.py")) return "-m pip install -e .";
+  return null;
 }
 
 /**
@@ -271,8 +238,7 @@ export function findPytestTargets(root: string): PytestTarget[] {
  * own installCommands already use.
  */
 export function buildPytestCommand(target: PytestTarget): string {
-  const run = `${quoteInterpreter(target.pythonBin)} -m pytest`;
-  return target.dir ? `cd ${toPosixPath(target.dir)} && ${run}` : run;
+  return commandIn(target.dir, `${quoteInterpreter(target.pythonBin)} -m pytest`);
 }
 
 /**
@@ -281,8 +247,20 @@ export function buildPytestCommand(target: PytestTarget): string {
  * lands in the SAME interpreter the test command will run.
  */
 export function buildPytestInstallCommand(target: PytestTarget): string {
-  const install = `${quoteInterpreter(target.pythonBin)} -m pip install pytest`;
-  return target.dir ? `cd ${toPosixPath(target.dir)} && ${install}` : install;
+  return commandIn(target.dir, `${quoteInterpreter(target.pythonBin)} -m pip install pytest`);
+}
+
+/**
+ * Install this target's own declared dependencies, in its own interpreter, from
+ * its own directory — or null when it declares none.
+ *
+ * Only emitted for a SUB-directory target: a root target's manifest is already
+ * covered by the recipe's root-level install line, and emitting both would run
+ * the same install twice.
+ */
+export function buildPythonDepsInstallCommand(target: PytestTarget): string | null {
+  if (!target.dir || !target.depsInstall) return null;
+  return commandIn(target.dir, `${quoteInterpreter(target.pythonBin)} ${target.depsInstall}`);
 }
 
 /**
@@ -304,15 +282,4 @@ export function buildPytestInstallCommand(target: PytestTarget): string {
  */
 function quoteInterpreter(pythonBin: string | null): string {
   return pythonBin ? `"${toPosixPath(pythonBin)}"` : "python";
-}
-
-/**
- * Emitted commands run in a shell, and on Windows `path.join` yields
- * backslashes that a POSIX shell reads as escapes. The recipe's own
- * installCommands are POSIX (`cd frontend && npm ci`, `.venv/bin/pip`) and the
- * sandbox is Debian, so commands are normalised to forward slashes — which
- * cmd.exe and PowerShell also accept.
- */
-function toPosixPath(p: string): string {
-  return p.split(path.sep).join("/");
 }

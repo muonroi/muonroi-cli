@@ -5,10 +5,10 @@ import { ensureVerifyCheckpoint, type PreparedVerifyCheckpoint } from "./checkpo
 import { loadVerifyEnvironment } from "./environment";
 import { buildBrowserGuidance, buildEvidenceGuidance, buildReadinessGuidance } from "./evidence";
 import {
-  defaultShellInit,
   detectPackageManager,
   getNodeWebBootstrapCommands,
   getNodeWebShellInitCommands,
+  inferBootstrapFromEcosystem,
   inferVerifyProjectProfile,
   normalizeVerifyAppKind,
   type VerifyProjectProfile,
@@ -42,6 +42,14 @@ function formatRecipeCommands(title: string, commands: string[]): string {
 
 function buildProjectContextLines(profile: VerifyProjectProfile): string[] {
   const lines = [`- Detected app type: ${profile.appLabel}.`, `- Recipe ecosystem: ${profile.recipe.ecosystem}.`];
+  if (profile.componentEcosystems.length > 1) {
+    // Said explicitly, because `Recipe ecosystem` names the primary stack only —
+    // a sub-agent told "node" about a repo whose tests are pytest under
+    // `backend/` has been misinformed about half the work.
+    lines.push(
+      `- This repository has more than one stack: ${profile.componentEcosystems.join(", ")}. The commands below cover all of them; run every one.`,
+    );
+  }
   if (profile.packageManager) {
     lines.push(`- Likely package manager: ${profile.packageManager}.`);
   }
@@ -288,68 +296,15 @@ export function buildVerifyDetectPrompt(
   ].join("\n");
 }
 
-const NODE_ECOSYSTEMS = new Set(["node", "nodejs", "npm", "bun", "yarn", "pnpm"]);
-const PYTHON_ECOSYSTEMS = new Set(["python", "django", "fastapi"]);
-const GO_ECOSYSTEMS = new Set(["go", "golang"]);
-const RUST_ECOSYSTEMS = new Set(["rust", "cargo"]);
-
-function inferBootstrapFromEcosystem(
-  ecosystem: string,
-  packageManager: string | null,
-): { bootstrap: string[]; shellInit: string[] } {
-  const eco = ecosystem.toLowerCase();
-
-  if (
-    NODE_ECOSYSTEMS.has(eco) ||
-    eco.includes("node") ||
-    eco.includes("next") ||
-    eco.includes("react") ||
-    eco.includes("vite")
-  ) {
-    const bootstrap = [
-      "apt-get update && apt-get install -y curl unzip ca-certificates git python3 make g++ pkg-config nodejs npm",
-    ];
-    const shellInit = [...defaultShellInit()];
-    if (packageManager === "bun") {
-      bootstrap.push("curl -fsSL https://bun.sh/install | bash");
-      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell variable, not JS template
-      shellInit.push('export BUN_INSTALL="${HOME}/.bun"');
-      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell variable, not JS template
-      shellInit.push('export PATH="${BUN_INSTALL}/bin:$PATH"');
-    }
-    return { bootstrap, shellInit };
-  }
-
-  if (PYTHON_ECOSYSTEMS.has(eco) || eco.includes("python") || eco.includes("django") || eco.includes("flask")) {
-    return {
-      bootstrap: ["apt-get update && apt-get install -y python3 python3-pip python3-venv ca-certificates git"],
-      shellInit: defaultShellInit(),
-    };
-  }
-
-  if (GO_ECOSYSTEMS.has(eco) || eco.includes("go")) {
-    return {
-      bootstrap: ["apt-get update && apt-get install -y golang ca-certificates git"],
-      shellInit: defaultShellInit(),
-    };
-  }
-
-  if (RUST_ECOSYSTEMS.has(eco) || eco.includes("rust")) {
-    return {
-      bootstrap: [
-        "apt-get update && apt-get install -y curl ca-certificates git build-essential && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
-      ],
-      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell variable, not JS template
-      shellInit: [...defaultShellInit(), 'export PATH="${HOME}/.cargo/bin:$PATH"'],
-    };
-  }
-
-  return { bootstrap: [], shellInit: [] };
-}
-
 function ensureBootstrapCommands(cwd: string, recipe: VerifyRecipe): VerifyRecipe {
   if (recipe.bootstrapCommands.length > 0) return recipe;
-  if (recipe.installCommands.length === 0) return recipe;
+  // Any command at all needs a runtime to run in — not just an install command.
+  // Gating on `installCommands` alone left every Rust and Go recipe with an empty
+  // bootstrap, because `cargo build` / `go build` fetch dependencies themselves
+  // and those detectors emit no install step: the sandbox got no rustup and no
+  // golang, so the commands the recipe DID emit could not launch. An
+  // all-empty recipe (the `unknown` fallback) still provisions nothing.
+  if (recipe.installCommands.length + recipe.buildCommands.length + recipe.testCommands.length === 0) return recipe;
 
   const packageManager = detectPackageManager(cwd);
 
