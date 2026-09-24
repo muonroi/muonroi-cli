@@ -18,6 +18,7 @@
 import { pilContext } from "../ee/bridge.js";
 import type { GsdPhase } from "../gsd/types.js";
 import { getUnifiedPilBudgetMs, isLlmFirstBrainEnabled } from "./config.js";
+import { buildFileRefAlternation } from "./file-ref-extensions.js";
 import type { LlmClassifyFn, LlmClassifyResult } from "./llm-classify.js";
 import type { BrainData, IntentDetectionTrace, OutputStyle, PipelineContext, TaskType } from "./types.js";
 
@@ -42,8 +43,23 @@ export interface ComplexityOutput {
   score: number;
 }
 
-/** File/path reference regex — matches common source-file extensions. */
-const FILE_REF_RE = /[\w./-]+\.(ts|tsx|js|jsx|json|md|py|rs|go|cs)\b/gi;
+/**
+ * File/path reference regex — "does this prompt name a file?".
+ *
+ * The extension vocabulary is NOT written here. It was, as
+ * `ts|tsx|js|jsx|json|md|py|rs|go|cs` — 10 of the registry's 36 source
+ * extensions, so a prompt whose only anchor was `Analyzer.fs`, `Main.kt` or
+ * `Widget.swift` scored as having no target at all and `scoreSufficiency` sent it
+ * to Council to ask "fix what?" about a file it had just been handed. It now
+ * comes from `file-ref-extensions.ts`: the registry owns the language half, a
+ * documented local addition owns `.md` / `.json` / config / project files, which
+ * this question legitimately needs and "is it source code" does not.
+ *
+ * The trailing `\b` is pre-existing and load-bearing — see
+ * `buildFileRefAlternation` on why the group must be terminated now that the
+ * vocabulary contains the single-letter `.c`, `.h` and `.m`.
+ */
+const FILE_REF_RE = new RegExp(`[\\w./-]+\\.(?:${buildFileRefAlternation()})\\b`, "gi");
 
 /** Keywords that force a "low" complexity signal (additive score -3). */
 const FORCE_LOW_RE = /\b(fix typo|rename|delete|format|lint|whitespace|comment only)\b/i;

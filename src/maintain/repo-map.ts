@@ -10,6 +10,7 @@
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { isCodeFile } from "../product-loop/language-registry.js";
 
 export interface RepoMapResult {
   content: string; // truncated to ~2000 chars
@@ -85,7 +86,8 @@ export async function ensureRepoMap(cwd: string): Promise<RepoMapResult> {
 /**
  * Pure tree-walk generator. Exposed for testing.
  * Walks cwd up to MAX_DEPTH levels, skips SKIP_DIRS + hidden dirs,
- * extracts top-of-file JSDoc/comment for TS/JS/Python/C# files.
+ * extracts a top-of-file JSDoc/comment for every file `language-registry.ts`
+ * recognises as source (see `extractFileDescription`).
  */
 export async function generateRepoMap(cwd: string): Promise<string> {
   const lines: string[] = [];
@@ -163,8 +165,17 @@ export async function generateRepoMap(cwd: string): Promise<string> {
  */
 async function extractFileDescription(filePath: string): Promise<string | null> {
   const ext = path.extname(filePath).toLowerCase();
-  const descExts = new Set([".ts", ".tsx", ".js", ".jsx", ".py", ".cs", ".go", ".rs", ".java", ".kt", ".rb"]);
-  if (!descExts.has(ext)) return null;
+  // WHICH files are source code is `language-registry.ts`'s question. The set
+  // written here named 11 of the registry's 36 extensions, so a repo in any other
+  // language got a map that was a bare list of filenames — and this map is what
+  // `gatherCodebaseIntel` hands the P15 task-runner as its description of the
+  // repo. Same drift the registry exists to end; see its header.
+  //
+  // The per-language COMMENT SYNTAX below stays local, and is a different
+  // question: a language whose leading-comment marker is not handled (`'` in
+  // Visual Basic) simply yields null, exactly as it did when its extension was
+  // missing from the gate. No caller sees a wrong description, only no description.
+  if (!isCodeFile(filePath)) return null;
 
   let content: string;
   try {

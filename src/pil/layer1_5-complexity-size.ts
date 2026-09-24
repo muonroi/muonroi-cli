@@ -12,6 +12,7 @@
  * baseline harness regression.
  */
 
+import { buildFileRefAlternation } from "./file-ref-extensions.js";
 import type { RepoStructureHint } from "./repo-structure-hints.js";
 
 export interface ComplexitySizeInput {
@@ -38,15 +39,45 @@ const HEAVY_RE = /\brefactor|migrate|architecture\b/i;
 
 /**
  * Path-like tokens. Matches:
- *   - POSIX path segments: src/foo/bar.ts, packages/x/y
- *   - Dotted modules: a.b.c.d (≥3 segments) — avoids matching plain English
- *   - Filename + extension: file.ext (when ext is a common code/config suffix)
+ *   - POSIX path segments: src/foo/bar.ts, packages/x/y — extension-agnostic
+ *   - Filename + extension: file.ext, when the extension is one
+ *     `file-ref-extensions.ts` recognises
  *
  * The combined regex deliberately scans for `path/like/tokens` so we count
- * distinct file/path mentions per the locked spec.
+ * distinct file/path mentions per the locked spec. The COUNT weights below are
+ * untouched; only the vocabulary of the second alternative changed.
+ *
+ * ## Why the vocabulary is no longer written here
+ *
+ * It was an inline `ts|tsx|js|jsx|mjs|cjs|json|md|py|rs|go|cs|rb|java|yml|yaml|
+ * toml|sh|ps1` — 12 of the registry's 36 source extensions. A prompt anchored on
+ * `Analyzer.fs` or `Widget.swift` counted ZERO path mentions, which is not
+ * neutral: `vaguenessAmplifier` fires at `+4` on `sweepCount > 0 && pathCount
+ * === 0`, so "clean up Widget.swift" sized as a wandering sweep rather than a
+ * targeted edit. The language half now derives from `language-registry.ts`, and
+ * the non-language half (`.md`, `.json`, config, project files) is the documented
+ * local addition it shares with `layer1-intent.ts`.
+ *
+ * ## Two fixes the derivation forced, both measured
+ *
+ * 1. **Longest-first alternation.** The inline list put `ts` before `tsx` and
+ *    `js` before `json`, and a regex alternation is ordered: `Widget.tsx`
+ *    yielded the token `widget.ts` and `conf.json` yielded `conf.js`. The COUNT
+ *    was right, so the size score never noticed — but `scoreRepoGrounding` looks
+ *    each token up in the REPO_DEEP_MAP index by exact path, and a truncated
+ *    token matches nothing, so repo grounding was silently dead for every bare
+ *    filename mention. `buildFileRefAlternation` sorts longest-first.
+ * 2. **A trailing boundary.** The registry includes C/C++ and Objective-C, so the
+ *    vocabulary contains `.c`, `.h` and `.m`. Measured without a terminator:
+ *    `TCIS.CodeStandards` → `tcis.c`, `Muonroi.Core` → `muonroi.c`,
+ *    `file.command` → `file.c`. `(?![\w-])` rather than `\b` because a path token
+ *    may legitimately contain `-` (`cli-args.ts`), which `\b` would let a token
+ *    end in front of.
  */
-const PATH_TOKEN_RE =
-  /(?:[\w.@-]+\/[\w./@-]+|[\w-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|py|rs|go|cs|rb|java|yml|yaml|toml|sh|ps1))/gi;
+const PATH_TOKEN_RE = new RegExp(
+  `(?:[\\w.@-]+\\/[\\w./@-]+|[\\w-]+\\.(?:${buildFileRefAlternation()})(?![\\w-]))`,
+  "gi",
+);
 
 /** Question-form starter words (case-insensitive). */
 const QUESTION_START_RE = /^(what|why|how|where|can|is|are|does)\b/i;
