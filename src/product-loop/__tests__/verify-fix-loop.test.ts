@@ -228,14 +228,60 @@ describe("computeVerifyFixTrigger / deriveFailureIdentity / computeFailureKey", 
     expect(r.identity?.reason).toBe("test_regression");
   });
 
-  it("triggers on zero coverage even when verify itself PASSED", () => {
+  it("triggers on a MEASURED zero coverage even when verify itself PASSED", () => {
+    const r = computeVerifyFixTrigger({
+      verifyVerdict: "PASS",
+      recipe: recipe({ testCommands: ["dotnet test"], coverage: 0, coverageSource: "measured" }),
+      verifyOutput: "",
+    });
+    expect(r.shouldRun).toBe(true);
+    expect(r.identity?.reason).toBe("zero_coverage");
+  });
+
+  // The other half of the same fixture. `coverage: 0` with NO `coverageSource` is
+  // the ambiguous state `coverage-signal.ts` exists to disambiguate: nothing
+  // proves anything measured it, so it is "unmeasured", and an unmeasured suite is
+  // not an uncovered one. Spending a fix round on it sends the fixer after
+  // coverage that may already exist — measured on qa-platform, where the sprint's
+  // own gates went GREEN.
+  it("does NOT trigger on an UNSTAMPED zero coverage — nothing proves it was measured", () => {
     const r = computeVerifyFixTrigger({
       verifyVerdict: "PASS",
       recipe: recipe({ testCommands: ["dotnet test"], coverage: 0 }),
       verifyOutput: "",
     });
-    expect(r.shouldRun).toBe(true);
-    expect(r.identity?.reason).toBe("zero_coverage");
+    expect(r.shouldRun).toBe(false);
+    expect(r.identity).toBeUndefined();
+  });
+
+  it("does NOT trigger on a MODEL-ASSERTED zero coverage — a filled-in box, not a finding", () => {
+    const r = computeVerifyFixTrigger({
+      verifyVerdict: "PASS",
+      recipe: recipe({ testCommands: ["dotnet test"], coverage: 0, coverageSource: "model-asserted" }),
+      verifyOutput: "",
+    });
+    expect(r.shouldRun).toBe(false);
+    expect(r.identity).toBeUndefined();
+  });
+
+  // The case this slice newly created: before the disk-derived test commands were
+  // unioned in, qa-platform's recipe carried `testCommands: []` so the
+  // zero_coverage branch was unreachable. Afterwards `hasTests` is true and
+  // `coverage` is null, so without the provenance check a sprint whose gates went
+  // GREEN would burn a fix round on coverage nobody measured.
+  it("does NOT trigger on disk-derived test commands with NO coverage figure at all", () => {
+    const r = computeVerifyFixTrigger({
+      verifyVerdict: "PASS",
+      recipe: recipe({
+        testCommands: ['cd backend && ".venv/Scripts/python.exe" -m pytest'],
+        testCommandsSource: "disk-derived",
+        coverage: null,
+        coverageSource: null,
+      }),
+      verifyOutput: "",
+    });
+    expect(r.shouldRun).toBe(false);
+    expect(r.identity).toBeUndefined();
   });
 
   it("does not trigger on a clean PASS with real coverage", () => {
@@ -461,14 +507,14 @@ describe("runVerifyFixLoop", () => {
     expect(result.rounds).toEqual([]);
   });
 
-  it("the zero_coverage case triggers the loop", async () => {
+  it("the MEASURED zero_coverage case triggers the loop", async () => {
     const initial = outcome({
       verifyVerdict: "PASS",
-      recipeFromVerify: recipe({ testCommands: ["dotnet test"], coverage: 0 }),
+      recipeFromVerify: recipe({ testCommands: ["dotnet test"], coverage: 0, coverageSource: "measured" }),
     });
     const fixed = outcome({
       verifyVerdict: "PASS",
-      recipeFromVerify: recipe({ testCommands: ["dotnet test"], coverage: 80 }),
+      recipeFromVerify: recipe({ testCommands: ["dotnet test"], coverage: 80, coverageSource: "measured" }),
     });
     const { fn: runVerifyPass } = sequencePass(fixed);
     const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "registered the project" });
@@ -480,6 +526,35 @@ describe("runVerifyFixLoop", () => {
     expect(result.triggered).toBe(true);
     expect(result.stopReason).toBe("pass");
     expect(result.rounds[0].failureKeyBefore).toContain("zero_coverage");
+  });
+
+  // The other half: the same PASS + zero, with nothing proving the zero was
+  // measured, must not start the loop at all — no round, no fixer call, no cost.
+  it("the UNSTAMPED zero_coverage case does not start the loop", async () => {
+    const initial = outcome({
+      verifyVerdict: "PASS",
+      recipeFromVerify: recipe({ testCommands: ["dotnet test"], coverage: 0 }),
+    });
+    let verifyPassCalls = 0;
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      verifyPassCalls++;
+      return initial;
+    }
+    let fixerCalls = 0;
+    const runIsolatedTask = async (): Promise<ToolResult> => {
+      fixerCalls++;
+      return { success: true, output: "should never be reached" };
+    };
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, maxRounds: 2 }),
+    );
+
+    expect(result.triggered).toBe(false);
+    expect(result.rounds).toEqual([]);
+    expect(verifyPassCalls).toBe(0);
+    expect(fixerCalls).toBe(0);
   });
 
   it("an already-aborted signal stops the loop before any round runs", async () => {
@@ -586,10 +661,23 @@ describe("isCheapRecheckEligible", () => {
   it("is NOT eligible for zero_coverage (needs the sub-agent's own recipe read)", () => {
     const identity = deriveFailureIdentity({
       verifyVerdict: "PASS",
+      recipe: recipe({ testCommands: ["dotnet test"], coverage: 0, coverageSource: "measured" }),
+      verifyOutput: "",
+    });
+    // Asserted, not assumed: the premise of this test is that the identity IS
+    // `zero_coverage`, and that now requires the zero to be a MEASURED one.
+    expect(identity.reason).toBe("zero_coverage");
+    expect(isCheapRecheckEligible(identity)).toBe(false);
+  });
+
+  it("an unstamped zero does not even produce a zero_coverage identity", () => {
+    const identity = deriveFailureIdentity({
+      verifyVerdict: "PASS",
       recipe: recipe({ testCommands: ["dotnet test"], coverage: 0 }),
       verifyOutput: "",
     });
-    expect(isCheapRecheckEligible(identity)).toBe(false);
+    expect(identity.reason).not.toBe("zero_coverage");
+    expect(identity.failedCondition).toBe("verify_verdict");
   });
 
   it("is NOT eligible for a plain verify_verdict failure, even with a recognizable error code", () => {
@@ -1316,9 +1404,12 @@ describe("runVerifyFixLoop — D12 re-check after a fixer timeout", () => {
   });
 
   it("a timeout on a failure the cheap path is NOT eligible for (zero_coverage) stops as error, never attempting a recheck", async () => {
+    // The zero must be a MEASURED one for this to be a zero_coverage failure at
+    // all — an unstamped zero no longer triggers the loop, so it could not reach
+    // the timeout this test is about (that case is pinned separately above).
     const initial = outcome({
       verifyVerdict: "PASS",
-      recipeFromVerify: recipe({ testCommands: ["dotnet test"], coverage: 0 }),
+      recipeFromVerify: recipe({ testCommands: ["dotnet test"], coverage: 0, coverageSource: "measured" }),
     });
     const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(outcome({ verifyVerdict: "PASS" }));
     const { fn: runFloorRecheck, calls: recheckCalls } = sequenceFloorRecheck({

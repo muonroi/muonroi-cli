@@ -996,6 +996,31 @@ export function inferVerifyProjectProfile(
   // qa-platform reported `packageManager: null` to the verify sub-agent while
   // `frontend/package-lock.json` sat one directory down.
   const packageManager = detectPackageManager(cwd) ?? nearestSubPackageManager(cwd, components);
+  // KNOWN, MEASURED, AND DELIBERATELY NOT FIXED HERE — see the matching note at
+  // `prepareVerifyRun` (src/verify/orchestrator.ts:86).
+  //
+  // `??` means an override REPLACES the disk derivation wholesale — it is not
+  // merged with it, and nothing re-derives the parts the override left empty. The
+  // override's usual source is a stored `.muonroi-cli/environment.json`, which
+  // `prepareVerifyRun` writes ONCE (only when no manifest exists) and never
+  // refreshes. So on any project that already has a manifest, every recipe
+  // improvement lands on NO consumer that reads `profile.recipe`: the
+  // sub-directory component scan (`detectRecipeComponents`), the nearest
+  // sub-package manager lookup (`nearestSubPackageManager`), the pytest rootdir
+  // markers (`findPytestTargets`) and the sub-directory build gate are all
+  // computed above and then discarded.
+  //
+  // Measured: `D:\sources\CompanyLibs\qa-platform\.muonroi-cli\environment.json`
+  // was written 2026-09-23 21:29 with `testCommands: []` and has been
+  // authoritative for every run since, while `inferVerifyProjectProfile(cwd)` with
+  // NO override — which is what `resolveFloorCommands` calls — returns
+  // `{build: ["cd frontend && npm run build"],
+  //   test: ["cd backend && \".venv/Scripts/python.exe\" -m pytest"]}`.
+  //
+  // Deciding what should refresh a stored manifest (and when a user-authored one
+  // must be left alone) is a separate change, kept separate on purpose: the
+  // done-gate's `no_test_commands` defect that surfaced this was closed WITHOUT
+  // mutating the user's file — see `src/product-loop/test-command-signal.ts`.
   const recipe = recipeOverride ?? recipeFromComponents(cwd, components);
   const inferredDefaults: SandboxSettings =
     recipe.smokeKind === "http" && recipe.startPort ? { ports: [`${recipe.startPort}:${recipe.startPort}`] } : {};

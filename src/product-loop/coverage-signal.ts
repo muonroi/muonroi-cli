@@ -5,13 +5,16 @@
  *
  * ## The defect this exists to make impossible
  *
- * `coverage` used to be read in two places with two different meanings:
+ * `coverage` used to be read in three places with three different meanings:
  *
  * - `done-gate.ts`: `const hasCoverage = (ctx.recipe?.coverage ?? 0) > 0` —
  *   absent coverage was coerced to 0, i.e. "not measured" became "measured, and
  *   it is zero". It is condition 1 of 5 and short-circuits.
  * - `circuit-breakers.ts` (CB-3): `recipe.coverage === 0` — absent coverage was
  *   NOT a zero, the exact opposite reading of the same field.
+ * - `verify-fix-loop.ts`: the same `(recipe?.coverage ?? 0) > 0` coercion, in two
+ *   places (the trigger and the failure identity). This reader was missed when
+ *   the module was first written and kept the defect for both.
  *
  * Measured consequence, run `muauw6u93e1c` (tcis-libraries, a .NET repo):
  * `sprints/1-verify.md` ended `VERIFY_PASS` ("build and full test suite now pass
@@ -145,8 +148,14 @@ export function isVerifiedZeroCoverage(signal: CoverageSignal): boolean {
  *    can act on. An asserted zero there costs one visible, answerable prompt, so
  *    it uses this predicate — which also keeps CB-3's halt set byte-identical to
  *    what it was before this module existed.
+ *  - the verify-fix loop (`computeVerifyFixTrigger` + `deriveFailureIdentity`,
+ *    verify-fix-loop.ts) was a THIRD reader this module did not know about, and it
+ *    still carried the original `(recipe?.coverage ?? 0) > 0` coercion. Its
+ *    consequence — a fix round spent on an invented failure, sending the fixer
+ *    after coverage that may already exist — is silent and self-repeating like the
+ *    done-gate's, so it uses `isVerifiedZeroCoverage` too.
  *
- * If you are adding a third caller: pick the predicate that matches your failure
+ * If you are adding a fourth caller: pick the predicate that matches your failure
  * mode's VISIBILITY, and say which and why at the call site.
  */
 export function isClaimedZeroCoverage(signal: CoverageSignal): boolean {

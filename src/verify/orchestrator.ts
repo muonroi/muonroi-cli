@@ -60,6 +60,29 @@ export async function prepareVerifyRun(
   let usedVerifyDetect = false;
   let manifestPath = manifest?.path;
 
+  // KNOWN, MEASURED, AND DELIBERATELY NOT FIXED HERE — see the matching note at
+  // `inferVerifyProjectProfile` (src/verify/recipes.ts:1024).
+  //
+  // A MANIFEST WRITTEN ONCE IS AUTHORITATIVE FOREVER. This is the only call to
+  // `saveVerifyEnvironment` in the codebase and it is gated on `!manifest`, so the
+  // stored `.muonroi-cli/environment.json` is never refreshed — and because
+  // `manifest.recipe` is passed to `inferVerifyProjectProfile` as `recipeOverride`
+  // just above, where `??` REPLACES the disk derivation rather than merging with
+  // it, a stale manifest also means `detectVerifyRecipe` never runs again.
+  //
+  // The consequence is larger than one gate: every recipe-detection improvement
+  // reaches NO consumer that reads `profile.recipe` on a project that already has
+  // a manifest — the sub-directory component scan, the nearest sub-package manager
+  // lookup, the pytest rootdir markers, the sub-directory build gate.
+  //
+  // Measured: `D:\sources\CompanyLibs\qa-platform\.muonroi-cli\environment.json`
+  // was written 2026-09-23 21:29 with `testCommands: []` and has been
+  // authoritative for every run since, including run `muc2joffe506`.
+  //
+  // What should refresh a stored manifest — and when a user-authored one must be
+  // left alone, since this file is theirs — is a separate change, left separate on
+  // purpose. The `no_test_commands` defect that surfaced it was closed without
+  // mutating the file (`src/product-loop/test-command-signal.ts`).
   if (!manifest) {
     const detectedRecipe = await agent.detectVerifyRecipe(baseSettings, options.abortSignal);
     if (detectedRecipe) {

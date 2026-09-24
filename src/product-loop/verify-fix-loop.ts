@@ -77,9 +77,11 @@
  */
 
 import type { StreamChunk, TaskRequest, ToolResult, VerifyRecipe } from "../types/index.js";
+import { classifyCoverage, isVerifiedZeroCoverage } from "./coverage-signal.js";
 import { type IsolatedGuardObservation, runIsolatedGuarded } from "./plan-adherence-review.js";
 import { hasProjectRegistrationViolations, type ProjectRegistrationCheckResult } from "./project-registration-check.js";
 import { boundTaskText } from "./sprint-plan-artifact.js";
+import { classifyTestCommands } from "./test-command-signal.js";
 import { extractErrorSet, type FloorDelta } from "./verify-baseline.js";
 import type { FloorCheck } from "./verify-floor.js";
 import type { VerifyVerdict } from "./verify-result.js";
@@ -455,9 +457,28 @@ export function deriveFailureIdentity(input: {
     return { failedCondition: "engineering_floor", reason: "project_not_registered", errorSet: structureManifests };
   }
 
-  const hasTests = (recipe?.testCommands?.length ?? 0) > 0;
-  const hasCoverage = (recipe?.coverage ?? 0) > 0;
-  if (hasTests && !hasCoverage) {
+  // THE THIRD READER of `coverage`, and it used to carry the coercion the other
+  // two had already removed: `(recipe?.coverage ?? 0) > 0` reads "nobody measured
+  // coverage" as "coverage is zero", which is the exact defect
+  // `coverage-signal.ts` was written to delete. It now uses the same predicate
+  // the done-gate uses, so only a zero the FLOOR actually measured names this
+  // failure.
+  //
+  // WHICH PREDICATE AND WHY (the module asks a third caller to say): the
+  // consequence here matches the done-gate's, not CB-3's — a fix round spent on
+  // an invented failure is silent and self-repeating, nothing prompts the user,
+  // and the fixer is sent after coverage that may already exist. So
+  // `isVerifiedZeroCoverage`, never `isClaimedZeroCoverage`.
+  //
+  // This became urgent rather than merely wrong in the same change that unioned
+  // the disk-derived test commands into the recipe: before it, a project whose
+  // recipe carried `testCommands: []` (qa-platform's stored
+  // `.muonroi-cli/environment.json`) made `hasTests` false and this branch
+  // unreachable. Afterwards `hasTests` is true and `coverage` is null, so a
+  // sprint whose own gates went GREEN would have burned a round on `zero_coverage`.
+  const hasTests = classifyTestCommands(recipe).state === "present";
+  const coverageIsZero = isVerifiedZeroCoverage(classifyCoverage(recipe));
+  if (hasTests && coverageIsZero) {
     return { failedCondition: "engineering_floor", reason: "zero_coverage", errorSet: [] };
   }
 
@@ -556,9 +577,15 @@ export function computeVerifyFixTrigger(input: {
     }
   }
 
-  const hasTests = (recipe?.testCommands?.length ?? 0) > 0;
-  const hasCoverage = (recipe?.coverage ?? 0) > 0;
-  if (hasTests && !hasCoverage) {
+  // Same terms as `deriveFailureIdentity`'s zero-coverage branch, and they MUST
+  // stay the same: this decides whether to spend a round, that names what the
+  // round is for, and a trigger that fires on a failure the identity would not
+  // call `zero_coverage` sends the fixer after nothing. See the full argument at
+  // that branch — in short, only a zero the FLOOR measured is a finding, and an
+  // unmeasured suite is not an uncovered one.
+  const hasTests = classifyTestCommands(recipe).state === "present";
+  const coverageIsZero = isVerifiedZeroCoverage(classifyCoverage(recipe));
+  if (hasTests && coverageIsZero) {
     return { shouldRun: true, identity: deriveFailureIdentity(input) };
   }
 
