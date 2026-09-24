@@ -57,8 +57,11 @@ export default defineConfig({
       // OpenTUI E2E specs require the dedicated harness config (longer timeouts,
       // fileParallelism:false). Run via: bunx vitest -c vitest.harness.config.ts run tests/harness/
       "tests/harness/**",
-      // export-transcripts.test.ts is bun-native (uses bun:sqlite `db.run(sql, ...args)`
-      // API that vitest's module loader cannot resolve). Run with: `bun test
+      // export-transcripts.test.ts is bun-native: `getDatabase()` selects its
+      // SQLite driver from `typeof Bun` (src/storage/db.ts:43), so only a Bun
+      // runtime exercises `BunSqliteDatabase` — the adapter the product ships on.
+      // A vitest worker is Node (`typeof Bun === "undefined"`) and would silently
+      // test `BetterSqlite3Database` instead. Run with: `bun test
       // src/ee/__tests__/export-transcripts.test.ts`.
       "src/ee/__tests__/export-transcripts.test.ts",
       // transcript-fts.test.ts requires bun:sqlite (better-sqlite3 native build unavailable under vitest/node).
