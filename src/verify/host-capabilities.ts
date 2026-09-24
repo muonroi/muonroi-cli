@@ -105,6 +105,19 @@ export interface VerifyHostCapabilityDeps {
  */
 const defaultProbeCache = new Map<string, boolean>();
 
+/**
+ * MEMOISED, and that is what makes it acceptable on a hot path.
+ *
+ * `resolveBrowserToolAvailable()` is called from three prompt builders, one of
+ * which — `prompts.ts`'s verify sub-agent system prompt — runs per turn. First call
+ * per PATH does the scan (~60 entries x 4 extensions of `statSync` on Windows);
+ * every later call is a `Map.get`. No spawn, ever.
+ *
+ * DECIDED (reviewer, on the run muc2joffe506 fix): all three call sites keep the
+ * probe, including the per-turn one. Two honest prompts plus one that still asserts
+ * "It WILL work. Do not skip it or assume it is unavailable." is precisely the
+ * divergence that produced the incident — consistency is worth a map lookup.
+ */
 function cachedHasHostExecutable(name: string): boolean {
   const key = `${process.env.PATH ?? process.env.Path ?? ""}\u0000${name}`;
   const hit = defaultProbeCache.get(key);

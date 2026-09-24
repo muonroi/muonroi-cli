@@ -770,6 +770,14 @@ export function buildSubagentPrompt(
                   // them." on a host where the binary is absent (measured on the
                   // host of run muc2joffe506), which is how a verify stage spent six
                   // minutes hunting for substitutes and then asked a human.
+                  //
+                  // This is the PER-TURN call site of the probe. It is affordable
+                  // because `resolveBrowserToolAvailable` is memoised per PATH and
+                  // spawn-free: the first call in the process does the PATH scan,
+                  // every later one is a map lookup (see host-capabilities.ts). It
+                  // stays here rather than being trimmed to the two verify-specific
+                  // prompts on purpose — a system prompt that contradicts the task
+                  // prompt about the same binary is the divergence that caused this.
                   ...(resolveBrowserToolAvailable()
                     ? [
                         "5. Wait for the app to be ready (curl readiness check or agent-browser wait).",

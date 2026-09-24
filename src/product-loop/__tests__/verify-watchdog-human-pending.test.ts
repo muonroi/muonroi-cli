@@ -203,7 +203,7 @@ describe("verify timeout — the work the stage did must survive", () => {
     expect(res.output).toContain("agent-browser: command not found");
   }, 30_000);
 
-  it("still reports a partial payload it never received as empty, without hanging", async () => {
+  it("says the salvage ITSELF timed out — never leaves an empty payload looking like the old behaviour", async () => {
     verifyGoesQuiet();
     const p = runInIdealScope(() => runVerifyWithWatchdog(AGENT, RUN_ID, SPRINT_N, { budget: BUDGET }));
     await untilWatchdogArmed();
@@ -214,5 +214,34 @@ describe("verify timeout — the work the stage did must survive", () => {
     expect(res.success).toBe(false);
     expect(res.output).toBe("");
     expect(res.error ?? "").toContain("verify-timeout");
+    // The trap this closes: an empty `output` is byte-identical to the defect this
+    // whole change fixed, so the artifact must say WHICH empty it is. "the aborted
+    // stage did not answer within the grace" is a different fact from "the stage
+    // answered and had nothing".
+    expect(res.error ?? "").toMatch(/did not hand anything back within the \d+\.\d+s salvage grace/);
+    expect(res.error ?? "").toMatch(/may still be running when this returned/i);
+    // And it must NOT claim anything about the payload it never saw.
+    expect(res.error ?? "").toMatch(/says NOTHING about what it had produced/);
+  }, 30_000);
+
+  it("distinguishes a stage that answered with an EMPTY payload from one that never answered", async () => {
+    (runVerifyOrchestration as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (_agent: unknown, opts?: { abortSignal?: AbortSignal }) =>
+        new Promise<ToolResult>((resolve) => {
+          opts?.abortSignal?.addEventListener("abort", () => {
+            // Settles promptly, but with nothing to show.
+            resolve({ success: false, output: "   ", error: "verify turn ended in failure: aborted" } as ToolResult);
+          });
+        }),
+    );
+    const p = runInIdealScope(() => runVerifyWithWatchdog(AGENT, RUN_ID, SPRINT_N, { budget: BUDGET }));
+    await untilWatchdogArmed();
+    await vi.advanceTimersByTimeAsync(BUDGET_MS + 1_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    const res = await p;
+    expect(res.output).toBe("");
+    expect(res.error ?? "").toMatch(/answered the abort but had produced nothing/i);
+    expect(res.error ?? "").not.toMatch(/salvage grace/);
   }, 30_000);
 });

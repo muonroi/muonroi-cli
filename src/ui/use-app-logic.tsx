@@ -1,4 +1,33 @@
 // @ts-nocheck
+//
+// ⚠ A DEFAULT ripgrep SEARCH DOES NOT SEE THIS FILE.
+//
+// `stripControlBytes` (search it below) writes its character class with RAW control
+// bytes rather than escapes: the source literally contains one 0x00 and one 0x1b.
+// Measured 2026-09-24: exactly 1 NUL byte in the file, so ripgrep classifies it as
+// BINARY and silently drops its matches from any tree-wide search. The search
+// reports zero hits here and looks authoritative.
+//
+// WHAT IT COST (2026-09-24): a repo-wide search for `setAskUserHandler` returned
+// only the definition in orchestrator.ts, which "proved" the `ask_user` handler was
+// never wired and that every call returned the dismissed sentinel immediately. Both
+// conclusions were false — it is registered at `agent.setAskUserHandler(...)` in
+// this file and opens a real blocking card. Only a DB row that disagreed with the
+// search caught it before a fix was built on the wrong premise.
+//
+// HOW TO SEARCH THIS FILE
+//   - Name it: `rg -n <pattern> src/ui/use-app-logic.tsx` prints "binary file
+//     matches" plus the hits. Or pass `--text` / `-a`. Or just Read it — line
+//     numbers are reliable; only the tree-wide scan skips it.
+//   - Never conclude "no call sites in src/" from a tree-wide search while this
+//     notice stands. Check this file and `src/ui/app.tsx` by name.
+//
+// THE REAL FIX, deliberately not taken here: rewrite that one character class with
+// escapes (`\x00`, `\x1b`, `\x1f`), which is semantically identical in a JS regex
+// and makes the file plain text again. It was left alone because it sits in the
+// secret-sanitisation path of a watched UI surface (CLAUDE.md "Self-QA workflow"),
+// so it wants a self-verify run rather than a drive-by edit. Take it when you are
+// already running that.
 import * as path from "node:path";
 import type { AgentModeRuntime } from "@muonroi/agent-harness-opentui";
 import { Semantic, SemanticProvider, useAgentInputBridge } from "@muonroi/agent-harness-opentui";

@@ -612,7 +612,38 @@ export async function runVerifyWithWatchdog(
     // the window restarts from the answer rather than from a stale beat.
     let pausedSince: number | null = null;
     let lastPauseSeen: number | null = null;
-    /** True while a blocking card is open; accumulates the observed pause. */
+    /**
+     * True while a blocking card is open; accumulates the observed pause.
+     *
+     * ── READ THIS BEFORE ADDING A BOUND HERE ──────────────────────────────────
+     *
+     * (a) The budget DELIBERATELY does not run while a card is open. Both arms
+     *     below re-arm instead of firing. This is the same gate the per-attempt
+     *     stall watchdog (orchestrator.ts:2594) and the turn-idle watchdog
+     *     (orchestrator.ts:3871) already consult, put in place by the blocking
+     *     card's own `beginInteractivePause()` bracket (orchestrator.ts:4319).
+     *
+     * (b) THE CONSEQUENCE, accepted knowingly: an unattended run can park
+     *     INDEFINITELY on a card. `ask_user` can no longer open one here (the
+     *     verify turn is an unattended turn — see
+     *     orchestrator/unattended-turn.ts), but safety-override and council
+     *     preflight cards still can, and they should park.
+     *
+     * (c) THE INTENDED DETECTION IS THE HARNESS EVENT, NOT A TIMER. The card
+     *     emits `askcard-open` as a `LiveEvent` (use-app-logic.tsx:3217 for
+     *     ask-user, council/planner.ts:304 and council/preflight.ts:102 for the
+     *     others); `tui.last_event {kind:"askcard-open"}` / `tui.wait_for` and the
+     *     JSONL event log are the documented way to watch an unattended run. Note
+     *     it writes NO `interaction_logs` row, so a DB poller is structurally
+     *     blind to it — that blindness is what made this incident look like a hang.
+     *
+     * DECIDED (reviewer, on the run muc2joffe506 fix): do NOT add an auto-dismiss.
+     * The cards that can still open here are approval prompts, and a safety prompt
+     * that dismisses itself after N minutes converts "a human declined to approve"
+     * into "nobody objected" — a silent approval is a worse failure than a visible
+     * stall. If you want a bound anyway, this comment is where to start arguing,
+     * and the argument has to answer that sentence first.
+     */
     const humanPending = (): boolean => {
       const now = Date.now();
       if (isInteractivePaused()) {
@@ -686,11 +717,11 @@ export async function runVerifyWithWatchdog(
       // `timeout` can only settle via `fire()`, which sets `firedMessage` first.
       return (raced as { result: ToolResult }).result;
     }
-    const salvaged = await salvageAbortedVerifyOutput(work, runId, sprintN);
+    const salvage = await salvageAbortedVerifyOutput(work, runId, sprintN);
     return {
       success: false,
-      output: salvaged,
-      error: `verify-timeout: ${firedMessage}${describeVerifySalvage(salvaged)}`,
+      output: salvage.output,
+      error: `verify-timeout: ${firedMessage}${describeVerifySalvage(salvage)}`,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -717,9 +748,43 @@ const VERIFY_PAUSE_RECHECK_MS = 5_000;
  * Bounded because an aborted turn is not guaranteed to settle at all — the
  * watchdog's own doc notes the hung op may leak in the background. Override with
  * MUONROI_SPRINT_VERIFY_SALVAGE_MS.
+ *
+ * DECIDED (reviewer, on the run muc2joffe506 fix): 30s stays, and a request to drop
+ * it to 5s was declined. It is only ever spent on a stage that has ALREADY burned
+ * its full budget (>= 600s), so the worst case is ~5% on the rare timeout path, and
+ * a recovered partial report is the entire point of the salvage. If you are here to
+ * shrink it, the thing to weigh is "how long does an aborted nested turn actually
+ * take to unwind" — measure that, do not guess it down.
  */
 function getVerifySalvageGraceMs(): number {
   return envPositiveInt("MUONROI_SPRINT_VERIFY_SALVAGE_MS", 30_000);
+}
+
+/**
+ * WHY the empty case is not one case.
+ *
+ * An empty `output` on a timeout is byte-identical to the defect this whole change
+ * fixed (run muc2joffe506 sprint 2: `sprints/2-verify.md` held the timeout text and
+ * nothing else), so a silent empty salvage would read as a regression of it — and
+ * "it looked the same as the old behaviour" is exactly the trap this codebase keeps
+ * falling into. Each outcome therefore gets its own sentence in the artifact:
+ *
+ * - `partial`       the stage answered and had something. The normal good path.
+ * - `empty-payload` the stage answered promptly and had produced nothing. A real,
+ *                   final fact about the stage — not a salvage failure.
+ * - `grace-expired` the stage never answered inside the grace and may still be
+ *                   running. Says nothing about what it had produced.
+ * - `rejected`      the aborted work threw instead of returning. Also not a
+ *                   statement about the payload.
+ */
+type VerifySalvageOutcome = "partial" | "empty-payload" | "grace-expired" | "rejected";
+
+interface VerifySalvage {
+  /** Trimmed partial report, or `""` for every non-`partial` outcome. */
+  output: string;
+  outcome: VerifySalvageOutcome;
+  /** The grace actually applied, so the message can quote the real number. */
+  graceMs: number;
 }
 
 /**
@@ -730,14 +795,14 @@ function getVerifySalvageGraceMs(): number {
  * `sprints/2-verify.md` recorded nothing but the timeout text, because the
  * timeout branch resolved `output: ""`. The payload was always there —
  * `buildVerifyAgent.runTaskRequest` returns the truncated output of a killed turn
- * — the race just discarded it. Returns `""` when the aborted work hands nothing
- * back inside the grace, and says so in the log (never silently).
+ * — the race just discarded it. Every outcome is NAMED (see `VerifySalvageOutcome`)
+ * rather than collapsed into an empty string, and logged (never silently).
  */
 async function salvageAbortedVerifyOutput(
   work: Promise<{ kind: string; result?: ToolResult; err?: unknown }>,
   runId: string,
   sprintN: number,
-): Promise<string> {
+): Promise<VerifySalvage> {
   const graceMs = getVerifySalvageGraceMs();
   let graceTimer: ReturnType<typeof setTimeout> | undefined;
   const grace = new Promise<null>((resolve) => {
@@ -752,7 +817,7 @@ async function salvageAbortedVerifyOutput(
         sprintN,
         graceMs,
       });
-      return "";
+      return { output: "", outcome: "grace-expired", graceMs };
     }
     if (settled.kind === "work-threw") {
       const err = settled.err;
@@ -762,9 +827,20 @@ async function salvageAbortedVerifyOutput(
         error: err instanceof Error ? err.message : String(err),
         stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
       });
-      return "";
+      return { output: "", outcome: "rejected", graceMs };
     }
-    return (settled.result?.output ?? "").trim();
+    const output = (settled.result?.output ?? "").trim();
+    if (output.length === 0) {
+      // Distinct from `grace-expired`: the stage DID answer, and the answer was
+      // empty. Logged at error level like the others because a verify stage that
+      // produced no text at all before being cut is itself worth knowing.
+      logger.error("orchestrator", "[sprint-runner] aborted verify stage answered with an empty payload", {
+        runId,
+        sprintN,
+      });
+      return { output: "", outcome: "empty-payload", graceMs };
+    }
+    return { output, outcome: "partial", graceMs };
   } catch (err) {
     logger.error("orchestrator", "[sprint-runner] salvaging the aborted verify payload failed", {
       runId,
@@ -772,22 +848,38 @@ async function salvageAbortedVerifyOutput(
       error: err instanceof Error ? err.message : String(err),
       stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
     });
-    return "";
+    return { output: "", outcome: "rejected", graceMs };
   } finally {
     if (graceTimer) clearTimeout(graceTimer);
   }
 }
 
 /**
- * The one sentence that tells a reader of `<n>-verify.md` how to read the payload
- * that follows a timeout: it is what the stage HAD established, not a verdict.
+ * The sentence appended to the timeout message, which is what a reader of
+ * `<n>-verify.md` actually sees.
+ *
+ * One distinct sentence per outcome, on purpose — see `VerifySalvageOutcome`. An
+ * empty payload must never be reported with wording a reader could mistake for
+ * "the salvage was not attempted" or for the pre-fix behaviour.
  */
-function describeVerifySalvage(salvaged: string): string {
-  if (salvaged.length === 0) return "; the stage handed back no partial report";
-  return (
-    `; the stage's partial report was kept (${salvaged.length} chars) — read it as a PARTIAL verification ` +
-    "(what it did establish, and what it could not run), never as a verdict"
-  );
+function describeVerifySalvage(salvage: VerifySalvage): string {
+  const s = (ms: number) => (ms / 1000).toFixed(1);
+  switch (salvage.outcome) {
+    case "partial":
+      return (
+        `; the stage's partial report was kept (${salvage.output.length} chars) — read it as a PARTIAL verification ` +
+        "(what it did establish, and what it could not run), never as a verdict"
+      );
+    case "empty-payload":
+      return "; the stage answered the abort but had produced nothing, so there is no partial report to read";
+    case "grace-expired":
+      return (
+        `; the stage did not hand anything back within the ${s(salvage.graceMs)}s salvage grace, so nothing could be ` +
+        "recovered — it may still be running when this returned, and this says NOTHING about what it had produced"
+      );
+    case "rejected":
+      return "; the aborted stage rejected instead of returning a partial, so nothing could be recovered (see the log)";
+  }
 }
 
 /** @internal Test-only: reset CB-2 retry state for a given runId. */
