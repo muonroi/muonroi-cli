@@ -77,6 +77,57 @@
  * | `coverage`, `coverageSource` | stored wins | The derivation never sets them; the deterministic floor overwrites them later with a MEASUREMENT (see `../product-loop/coverage-signal.ts`). |
  * | `testCommandsSource` | recomputed by {@link mergeDerivedTestCommands} | Same stamp discipline, same enum, one definition. |
  *
+ * ## There is NO pin, and that is deliberate
+ *
+ * A consequence of the union, recorded here so the next person does not read it
+ * as an oversight and does not re-litigate it without new evidence:
+ *
+ * **(a) A user currently cannot pin "this project genuinely has no test suite."**
+ * Write `testCommands: []` into the manifest and the union will still add
+ * whatever the disk suggests. There is no field, and no env flag, that suppresses
+ * it.
+ *
+ * **(b) That is the anti-disarm property working, not a gap.** The union exists
+ * precisely so a stored record cannot make the gate set SMALLER. A pin is a hole
+ * in exactly that property, so it has to earn its way in on a measured case; it
+ * does not get one for free because the shape is imaginable.
+ *
+ * **(c) The two shapes that would implement it**, if a real case appears — do not
+ * build either speculatively:
+ *  - a per-field pin list on the manifest (`"pinned": ["testCommands"]`), which
+ *    {@link mergeStoredVerifyRecipe} would consult before unioning that field; or
+ *  - the provenance stamp described above (`generatedBy` on write, absent ⇒
+ *    hand-authored), letting a hand-authored record be honoured differently from
+ *    one this loop wrote.
+ *
+ * **(d) What would justify it.** A project where the disk-derived command is
+ * WRONG *and* running it is HARMFUL — it mutates state, costs real money, or
+ * takes the tree somewhere a verify pass must not. A merely USELESS added command
+ * does not justify a pin: the floor EXECUTES what the union adds, so a wrongly
+ * added command surfaces as a failed gate with real output a human can read and
+ * then fix. That is self-correcting in a way a mis-score is not — and a pin, once
+ * set, is invisible: nothing in a later run says a gate was suppressed.
+ *
+ * ## Worked example: a record's prose can go stale while the tree moves
+ *
+ * qa-platform's stored record carries this note:
+ *
+ * > "Backend has no test framework installed (no pytest in requirements.txt, no
+ * > tests/ dir). testCommands is intentionally empty."
+ *
+ * The union overrides that sentence, and the evidence says it should. In run
+ * `muc2joffe506` the verify floor EXECUTED a test command in the same minute the
+ * sprint was scored "no test commands" (`sprints/1-verify.md`, quoted at
+ * `../product-loop/test-command-signal.ts:26-44`), and `resolveFloorCommands` on
+ * that tree now finds a `.venv` with pytest that did not exist when the record was
+ * written on 2026-09-23.
+ *
+ * This is the general argument for deriving from disk rather than trusting a
+ * stored assertion: a record states a fact ABOUT a tree at one instant, the tree
+ * keeps changing, and nothing re-checks the sentence. It is also why overriding it
+ * here is safe rather than presumptuous — the override is backed by a measurement
+ * of the CURRENT tree, not by a preference for the derivation.
+ *
  * Pure: neither input is mutated.
  */
 
@@ -121,6 +172,13 @@ export function mergeStoredVerifyRecipe(stored: VerifyRecipe | null | undefined,
   // definition of folding a disk-derived test set into a recipe, including the
   // provenance stamp. It returns null only for a null recipe, which is excluded
   // above.
+  //
+  // THIS UNION HAS NO OPT-OUT, ON PURPOSE. A record cannot pin "no test suite"
+  // here or at `buildCommands` below. See "There is NO pin, and that is
+  // deliberate" in the module header for the two shapes that would implement one,
+  // and for the only evidence that would justify building it (a derived command
+  // that is wrong AND harmful to run — a merely useless one costs a visible failed
+  // gate, which is self-correcting where a suppressed gate is silent).
   const withTests = mergeDerivedTestCommands(stored, derived.testCommands) ?? stored;
 
   return {
