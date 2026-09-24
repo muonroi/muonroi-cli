@@ -10,7 +10,11 @@
  *   BEFORE spawning the child. Passes their names via env vars
  *   MUONROI_HARNESS_OUT_PIPE and MUONROI_HARNESS_IN_PIPE. Waits for the child
  *   to connect and send the handshake { t: "handshake", ok: true } within 5 s.
- *   Returns the connected socket streams.
+ *   The out pipe is captured into a PassThrough from the connection event
+ *   onward, so a child that writes before the handshake reader attaches does not
+ *   lose those bytes to a flowing socket with no listener; `outRead` is that
+ *   relay, not the raw socket. `inWrite` is the raw socket — the host only
+ *   writes to it.
  *
  * Both paths return the same { proc, inWrite, outRead } shape so callers are
  * fully platform-neutral.
@@ -84,15 +88,78 @@ function makePipeName(role: "in" | "out"): string {
   return `\\\\.\\pipe\\muonroi-harness-${process.pid}-${randomUUID().replace(/-/g, "").slice(0, 12)}-${role}`;
 }
 
-async function waitForConnection(server: Server, timeoutMs: number, label: string): Promise<Socket> {
-  return new Promise<Socket>((resolve, reject) => {
+type Connected = {
+  socket: Socket;
+  /**
+   * Everything the child has written since the instant the connection landed,
+   * in order. Present only for a pipe opened with `capture: true`.
+   */
+  stream?: PassThrough;
+};
+
+/**
+ * Wait for the child to connect, and — for a pipe we will READ — start capturing
+ * immediately, in the connection handler itself.
+ *
+ * Without the capture there is a window in which bytes are silently destroyed:
+ * `spawnWindows` resolves this promise, then sits in `Promise.all` waiting for
+ * the OTHER pipe, and only then attaches the handshake reader. Nothing is
+ * consuming the socket for that whole span, and under Bun that is not a benign
+ * state. Measured over that exact sequence, with a child writing 87 bytes
+ * immediately on connecting:
+ *
+ *   [out connection event]                  readableFlowing=null  readableLength=0
+ *   [after Promise.all, reader about to attach]
+ *                                           readableFlowing=true  readableLength=0
+ *   RESULT received=""
+ *
+ * The socket arrives BUFFERING and flips itself to FLOWING inside the gap with
+ * no listener attached; a flowing readable with nowhere to emit discards what it
+ * receives. The handshake is then gone with no error, and the caller gets a
+ * 90-second `Handshake not received` throw that blames the wrong thing.
+ *
+ * Pausing here does NOT fix it, and that had to be measured rather than reasoned
+ * from Node's documented semantics. `pause()` takes effect synchronously
+ * (`isPaused()=true`, `readableFlowing=false` on the next line) and Bun undoes it
+ * before the bytes land — sampled 300 ms later the same socket reported
+ * `isPaused()=false`, `readableFlowing=true`, `readableLength=0`, so a later
+ * explicit `resume()` had nothing to deliver.
+ *
+ * `pipe()` is what works, and works for a reason that does not depend on resume
+ * semantics at all: it wires the destination first and only then starts the
+ * flow, so there is no listener-less instant. Measured, the relay held
+ * `readableLength=41` with no consumer and delivered every byte to a consumer
+ * attaching a second later. Same mechanism as `relayHandshakeLeftover` below,
+ * one step earlier in the sequence.
+ *
+ * The in pipe is opened with `capture: false`: the host only ever WRITES to it,
+ * so a relay there would buffer forever with nobody to drain it.
+ */
+async function waitForConnection(
+  server: Server,
+  timeoutMs: number,
+  label: string,
+  opts: { capture: boolean },
+): Promise<Connected> {
+  return new Promise<Connected>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`Named pipe "${label}": client did not connect within ${timeoutMs} ms`));
     }, timeoutMs);
 
     server.once("connection", (sock) => {
       clearTimeout(timer);
-      resolve(sock);
+      if (!opts.capture) {
+        resolve({ socket: sock });
+        return;
+      }
+      const stream = new PassThrough();
+      // Wired in the connection handler, before this promise resolves and so
+      // before any `await` can yield — the earliest reachable instant.
+      sock.pipe(stream);
+      // `pipe` does not forward 'error'; re-emit so a consumer still sees the
+      // real cause instead of a stream that just stops.
+      sock.on("error", (err) => stream.destroy(err));
+      resolve({ socket: sock, stream });
     });
     server.once("error", (err) => {
       clearTimeout(timer);
@@ -105,41 +172,48 @@ async function waitForConnection(server: Server, timeoutMs: number, label: strin
  * Read the child's handshake line and RETURN whatever followed it, so the caller
  * can put those bytes back in front of the stream.
  *
+ * Reads the CAPTURE RELAY built in `waitForConnection`, never the raw socket.
+ * That is what makes this reader's arrival time stop mattering: the relay has
+ * been accumulating since the connection event, so a handshake the child wrote
+ * before this function existed is sitting in it rather than having been
+ * discarded by a flowing socket. It also means a `pause()` here acts on a plain
+ * in-memory `PassThrough` — pure stream code with no net layer to undo it — and
+ * not on the Bun socket whose `pause()` was measured to be reverted (see
+ * `waitForConnection`).
+ *
  * The handshake shares the out pipe with every frame, event and idle sentinel
  * the child will ever send. Anything that arrives in the same chunk sits in
  * `buf` after the newline, and this function used to drop it on the floor:
- * `socket.off("data", onData)` stopped the listener, nothing re-delivered the
+ * `off("data", onData)` stopped the listener, nothing re-delivered the
  * remainder, and the caller's splitter — attached microtasks later — never saw
  * it. A lost idle sentinel or first frame presents as precisely the
  * intermittent "child never became ready" this transport is hardest to debug
  * for, with no trace that anything was lost.
  *
  * Measured 2026-09-24 over 75 spawns of the real agent-mode child: leftover was
- * 0 bytes every time, because the child writes the handshake alone ~120 ms in
- * and the parent is already listening. So this is a latent path, not an active
- * bug — and the guard below keeps it a strict no-op on that measured-normal
- * path: with nothing left over the socket is never paused, the relay is never
- * built, and behaviour is byte-for-byte what it was.
+ * 0 bytes every time, because the child writes the handshake alone ~120 ms in.
+ * So the leftover path is latent, not an active bug — and the guard below keeps
+ * it a strict no-op on that measured-normal path: with nothing left over the
+ * relay is never paused, no second relay is built, and the caller gets the
+ * capture relay unchanged.
  *
- * When there IS a remainder, this pauses the socket and returns the bytes to
- * `spawnWindows`, which relays them ahead of the live stream. Pausing is what
- * stops the remainder being lost a second way: a server-side socket arrives
- * FLOWING (measured `isPaused() === false`), and a flowing stream with no
- * `data` listener emits to nobody and discards the chunk (measured
- * `readableLength === 0` a second after the child wrote).
+ * When there IS a remainder, this pauses the relay and returns the bytes to
+ * `spawnWindows`, which puts them back in front of the live stream. Pausing
+ * before yielding control is what stops the remainder being lost a second way,
+ * in the gap between this listener detaching and the next one attaching.
  *
- * It deliberately does NOT `unshift` and hand the socket back. That was the
- * first attempt and it does not work on this runtime: after
+ * It deliberately does NOT `unshift` and hand the stream straight back. That was
+ * the first attempt and it does not work on this runtime: after
  * `pause()` + `unshift()` the bytes are genuinely buffered
  * (`readableLength === 87`), but under Bun attaching a `data` listener does NOT
- * resume an explicitly paused socket the way Node documents — measured, the
+ * resume an explicitly paused stream the way Node documents — measured, the
  * consumer attached and received nothing while `isPaused()` stayed true and the
- * 87 bytes sat there. Hence the relay in `spawnWindows`, which does not depend
- * on resume semantics at all.
+ * 87 bytes sat there. Hence `relayHandshakeLeftover`, which does not depend on
+ * resume semantics at all.
  *
  * @returns the bytes that followed the handshake line — `""` on the normal path.
  */
-async function waitForHandshake(socket: Socket, timeoutMs: number): Promise<string> {
+async function waitForHandshake(socket: PassThrough, timeoutMs: number): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`Handshake not received within ${timeoutMs} ms`));
@@ -230,15 +304,25 @@ async function spawnWindows(args: string[], opts: SpawnOptions): Promise<SpawnRe
 
   // Wait for both child sockets to connect, then for the handshake on outPipe.
   let inSocket: Socket;
-  let outSocket: Socket;
+  // Everything the child wrote on the out pipe, captured from the connection
+  // event onward — see `waitForConnection`. The handshake reader and the caller
+  // both read THIS, never the raw out socket, so no byte can land in an unread
+  // gap. The out socket needs no name of its own past this point: the pipe keeps
+  // it referenced, and the 'error' listener it needs was attached at connection
+  // time and re-emits onto this relay.
+  let outStream: PassThrough;
   let handshakeLeftover = "";
   try {
-    [inSocket, outSocket] = await Promise.all([
-      waitForConnection(inServer, timeoutMs, inPipeName),
-      waitForConnection(outServer, timeoutMs, outPipeName),
+    const [inConn, outConn] = await Promise.all([
+      waitForConnection(inServer, timeoutMs, inPipeName, { capture: false }),
+      waitForConnection(outServer, timeoutMs, outPipeName, { capture: true }),
     ]);
+    inSocket = inConn.socket;
+    // `capture: true` above guarantees this; the cast is the type system catching
+    // up with the option, not an assumption about the runtime.
+    outStream = outConn.stream as PassThrough;
     // outPipe is where the child writes frames — wait for the handshake line.
-    handshakeLeftover = await waitForHandshake(outSocket, timeoutMs);
+    handshakeLeftover = await waitForHandshake(outStream, timeoutMs);
   } catch (err) {
     if (proc && typeof proc.kill === "function") {
       proc.kill();
@@ -254,12 +338,17 @@ async function spawnWindows(args: string[], opts: SpawnOptions): Promise<SpawnRe
   };
   proc.once("exit", cleanup);
 
-  attachStreamErrorGuards(inSocket, outSocket);
+  const outRead = relayHandshakeLeftover(outStream, handshakeLeftover);
+  // Guard the stream the CALLER actually holds, not the raw socket. A socket
+  // error is re-emitted onto the capture relay (see `waitForConnection`), so
+  // guarding only the socket would leave that `destroy(err)` unhandled and take
+  // down the whole worker on an ordinary teardown EPIPE.
+  attachStreamErrorGuards(inSocket, outRead);
 
   return {
     proc,
     inWrite: inSocket, // host writes commands → child reads on MUONROI_HARNESS_IN_PIPE
-    outRead: relayHandshakeLeftover(outSocket, handshakeLeftover),
+    outRead,
     cleanup,
   };
 }
@@ -268,20 +357,20 @@ async function spawnWindows(args: string[], opts: SpawnOptions): Promise<SpawnRe
  * Put the bytes that rode along with the handshake back in front of the stream.
  *
  * On the normal path — `leftover === ""`, which is what all 75 measured spawns
- * of the real child produced — this returns the socket itself, so the transport
- * is byte-for-byte unchanged and no extra stream sits in the hot path.
+ * of the real child produced — this returns the capture relay itself, so no
+ * SECOND stream is added to the hot path.
  *
- * When the child DID coalesce, `waitForHandshake` has already paused the socket
- * and the remainder would otherwise be gone for good. Relaying through a
- * PassThrough is used rather than `socket.unshift()` because unshift needs the
- * consumer's `data` listener to resume the socket, and under Bun it does not:
+ * When the child DID coalesce, `waitForHandshake` has already paused the relay
+ * and the remainder would otherwise be gone for good. Relaying through another
+ * PassThrough is used rather than `unshift()` because unshift needs the
+ * consumer's `data` listener to resume the stream, and under Bun it does not:
  * measured, after `pause()` + `unshift()` the 87 leftover bytes were correctly
  * buffered (`readableLength === 87`) and the consumer that attached afterwards
- * received nothing, with `isPaused()` still true. `pipe()` resumes the socket
+ * received nothing, with `isPaused()` still true. `pipe()` resumes the source
  * itself and only after its destination is wired, so nothing can fall into a
  * listener-less gap.
  */
-function relayHandshakeLeftover(socket: Socket, leftover: string): NodeJS.ReadableStream {
+function relayHandshakeLeftover(socket: PassThrough, leftover: string): NodeJS.ReadableStream {
   if (leftover.length === 0) return socket;
 
   const relay = new PassThrough();
