@@ -105,6 +105,7 @@ import {
   type SprintPlanArtifact,
 } from "./sprint-plan-artifact.js";
 import { upsertSprint } from "./sprint-store.js";
+import { mergeDerivedTestCommands } from "./test-command-signal.js";
 import { readCriteriaSnapshot } from "./typed-artifacts.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
 import { readUndebatedGateRecord } from "./undebated-criteria-gate.js";
@@ -2991,6 +2992,13 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     let floorDelta: FloorDelta | undefined;
     let floorChecks: FloorCheck[] | undefined;
     let floorMustFixNoteLocal: string | undefined;
+    /**
+     * The DISK-DERIVED test commands this pass resolved, or undefined when the
+     * floor never got to resolve any (a model-reported FAIL/ERROR skips the floor
+     * entirely, and a floor that threw resolved nothing this caller can see).
+     * Consumed once, at the return — see `foldDerivedTestCommandsIntoRecipe`.
+     */
+    let floorTestCommands: string[] | undefined;
     // S6 — set inside the project-registration check below; carried into the
     // returned VerifyPassOutcome so the verify-fix loop can trigger on it even
     // when the floor (above) passed.
@@ -3029,6 +3037,13 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
             coverageSource: "measured",
           };
         }
+        // The disk-derived set THIS pass resolved, reused below instead of
+        // probing again — see `foldDerivedTestCommandsIntoRecipe`. Read
+        // defensively although the field is required on `VerifyFloorResult`:
+        // this whole block's catch downgrades a claimed PASS to ERROR, so a read
+        // that exists only to feed a REASON STRING must not be able to fail the
+        // sprint. Absent → the fold re-derives the set itself.
+        floorTestCommands = floor.commandsDiscovered?.test;
         // S5 — a build break the floor could not honestly call pre-existing
         // (run-introduced or unattributable) must reach the next sprint as a
         // must-fix item, the same way S3b carries unfinished tasks.
@@ -3177,6 +3192,24 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       );
     }
 
+    // ── THE DISK BEATS AN OMISSION ───────────────────────────────────────────
+    // The last thing every pass does, on EVERY path through it, for the same
+    // reason a measurement beats an assertion above: `recipeFromVerify.testCommands`
+    // is the value `verify-floor.ts:21-29` explicitly refuses to run its own gates
+    // from ("a model that emitted `testCommands: []` would silently disarm its own
+    // gate") — and it was the only thing the done-gate's `hasTests` condition had
+    // to read. Measured, run muc2joffe506 (qa-platform sprint 1): the floor
+    // executed a test command (`sprints/1-verify.md`) and `sprints/1-outcome.json`
+    // still recorded `reason: "no_test_commands"`, because the recipe leaving here
+    // carried an empty array.
+    //
+    // It is applied HERE rather than beside the coverage merge inside the floor
+    // branch above because that branch only runs for a PASS/UNKNOWN verdict: a
+    // model-reported FAIL skips it, and the unmerged recipe from such a pass
+    // overwrites the merged one (`cur = next` in verify-fix-loop.ts) — so the
+    // reason would go back to being dishonest on exactly the rounds that fail.
+    recipeFromVerify = await foldDerivedTestCommandsIntoRecipe(recipeFromVerify, floorTestCommands);
+
     return {
       verifyResult,
       verifyVerdict,
@@ -3186,6 +3219,52 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       floorChecks,
       floorMustFixNote: floorMustFixNoteLocal,
     };
+  }
+
+  /**
+   * Union the run's disk-derived test commands into the recipe leaving a verify
+   * pass, so the done-gate's engineering floor judges `hasTests` from the same
+   * source the floor actually executes. The fold itself (and the argument for a
+   * union rather than a replacement) lives in `test-command-signal.ts`.
+   *
+   * `alreadyResolved` is `VerifyFloorResult.commandsDiscovered.test` when the
+   * floor ran — reused verbatim, so the happy path adds NO probe. When the floor
+   * did not run (a model-reported FAIL/ERROR never reaches it) this resolves the
+   * set with `resolveFloorCommands`, the SAME function, the same `cwd` and the
+   * same bounds the floor would have used. Once per verify pass either way, never
+   * per criterion and never per command.
+   *
+   * Never throws: `resolveFloorCommands` already degrades a failed probe to
+   * `{build: [], test: []}` and logs it, and a recipe that gains nothing is
+   * simply the recipe the model emitted.
+   */
+  async function foldDerivedTestCommandsIntoRecipe(
+    recipe: VerifyRecipe | null,
+    alreadyResolved: string[] | undefined,
+  ): Promise<VerifyRecipe | null> {
+    if (!recipe) return null;
+    let derived = alreadyResolved;
+    if (!derived) {
+      try {
+        const { resolveFloorCommands } = await import("./verify-floor.js");
+        derived = resolveFloorCommands(cwd).test;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error(
+          "orchestrator",
+          `[sprint-runner] could not derive test commands for the done-gate (sprint ${sprintN}, run ${ctx.runId}): ${message}`,
+          {
+            operation: "foldDerivedTestCommandsIntoRecipe",
+            runId: ctx.runId,
+            sprintN,
+            cwd,
+            stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+          },
+        );
+        derived = [];
+      }
+    }
+    return mergeDerivedTestCommands(recipe, derived);
   }
 
   const initialVerifyPass = yield* runVerifyAndFloorPass("");

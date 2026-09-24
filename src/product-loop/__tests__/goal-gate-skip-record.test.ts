@@ -39,13 +39,22 @@ vi.mock("../../flow/artifact-io.js", () => ({
 // Held "unavailable" so no real toolchain is shelled out, and so the verdict
 // under test can only have come from the stubbed verify orchestration.
 vi.mock("../verify-floor.js", () => ({
+  // The shape `runVerifyFloor` really returns for an unavailable verdict
+  // (verify-floor.ts:842-857): `unavailableReason` — not `reason` — plus the
+  // `commandsDiscovered` and `measuredCoverage` fields sprint-runner reads off
+  // every result. The old stand-in omitted both, so `measuredCoverage` read
+  // `undefined !== null` and stamped the recipe `coverageSource: "measured"`
+  // with no figure behind it.
   runVerifyFloor: vi.fn(async () => ({
     verdict: "unavailable",
-    reason: "no-commands-discovered",
+    unavailableReason: "no-commands-discovered",
     detail: "held unavailable by the skip-record fixture",
     checks: [],
+    commandsDiscovered: { build: [], test: [] },
+    measuredCoverage: null,
     elapsedMs: 0,
   })),
+  resolveFloorCommands: () => ({ build: [], test: [] }),
   applyVerifyFloor: (current: string) => ({ verdict: current, downgraded: false, upgraded: false, note: "" }),
   readBaselineVerifyCostMs: vi.fn(async () => null),
 }));

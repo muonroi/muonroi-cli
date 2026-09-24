@@ -132,6 +132,19 @@ export interface VerifyRecipe {
    * assertion (see sprint-runner's floor merge). Absent on legacy records.
    */
   coverageSource?: "measured" | "model-asserted" | null;
+  /**
+   * Who named the commands in `testCommands`. `"model-asserted"` = the verify
+   * sub-agent wrote them into its recipe JSON; `"disk-derived"` = they came from
+   * the deterministic verify floor's own probe of the working tree
+   * (`resolveFloorCommands`), which is unspoofable from inside the turn;
+   * `"both"` = the array is the union of the two. The floor's set is UNIONED in,
+   * never substituted, so a model cannot disarm the gate by emitting `[]` and a
+   * model that knows a command the detector cannot see does not lose it — see
+   * `src/product-loop/test-command-signal.ts`, the only place this field's
+   * meaning is defined. Absent on legacy records and on recipes from paths that
+   * do not stamp.
+   */
+  testCommandsSource?: "model-asserted" | "disk-derived" | "both" | null;
 }
 
 export interface VerifyEnvironmentManifest {

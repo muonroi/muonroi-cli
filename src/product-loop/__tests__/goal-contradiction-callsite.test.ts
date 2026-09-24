@@ -43,13 +43,18 @@ vi.mock("../../flow/artifact-io.js", () => ({
 // project, which is a real analyzer project file, never causes a real toolchain
 // build to be shelled out during a unit test.
 vi.mock("../verify-floor.js", () => ({
+  // The shape `runVerifyFloor` really returns for an unavailable verdict
+  // (verify-floor.ts:842-857) — see the same note in goal-gate-skip-record.test.ts.
   runVerifyFloor: vi.fn(async () => ({
     verdict: "unavailable",
-    reason: "no-commands-discovered",
+    unavailableReason: "no-commands-discovered",
     detail: "held unavailable by the F5 call-site fixture",
     checks: [],
+    commandsDiscovered: { build: [], test: [] },
+    measuredCoverage: null,
     elapsedMs: 0,
   })),
+  resolveFloorCommands: () => ({ build: [], test: [] }),
   applyVerifyFloor: (current: string) => ({ verdict: current, downgraded: false, upgraded: false, note: "" }),
 }));
 vi.mock("../phase-tracker-bridge.js", () => ({ postSprintBoundary: vi.fn(async () => undefined) }));

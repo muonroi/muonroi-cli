@@ -3,6 +3,7 @@ import { logger } from "../utils/logger.js";
 import { blockingAssumptions, readLedger } from "./assumption-ledger.js";
 import { classifyCoverage, isVerifiedZeroCoverage } from "./coverage-signal.js";
 import { evidenceLooksValid } from "./reality-anchor.js";
+import { classifyTestCommands } from "./test-command-signal.js";
 import type { Criterion, DoneGateContext, DoneVerdict } from "./types.js";
 import { parseVerifyResult } from "./verify-result.js";
 
@@ -40,7 +41,29 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
   // required either way: non-empty `testCommands` AND a PASS verdict — so "tests
   // exist and passed" remains mandatory, and a suite that passes while genuinely
   // covering nothing is caught downstream by criteria and evidence, loudly.
-  const hasTests = (ctx.recipe?.testCommands?.length ?? 0) > 0;
+  //
+  // The `hasTests` term used to be `(ctx.recipe?.testCommands?.length ?? 0) > 0`
+  // — read straight off the recipe the verify sub-agent returned, which is the
+  // ONE value `verify-floor.ts:21-29` refuses to take its own commands from
+  // ("a model that emitted `testCommands: []` would silently disarm its own
+  // gate"). So the floor defended itself and this gate was handed the undefended
+  // number. Measured, run muc2joffe506 (qa-platform, sprint 1): the floor RAN a
+  // test command in the same minute (`sprints/1-verify.md`:
+  // "- [test] `npm run test` → NO-TESTS-EXECUTED") and this gate still recorded
+  // `reason: "no_test_commands"`, because the stored recipe it read carried
+  // `testCommands: []`.
+  //
+  // It now reads through `classifyTestCommands`, the sibling of
+  // `classifyCoverage`: the disk-derived set the floor discovered is UNIONED into
+  // the recipe in sprint-runner before this gate sees it (the same place a
+  // MEASURED coverage figure overwrites an asserted one), and the field's meaning
+  // lives in exactly one module so it cannot drift again. Provenance plays no
+  // part in the DECISION here — a command is a command whoever named it, and the
+  // direction of travel is that the model can only ADD to what the disk already
+  // proves — it is recorded below so a floor that opened on a command the model
+  // never mentioned can be read back.
+  const testCommands = classifyTestCommands(ctx.recipe);
+  const hasTests = testCommands.state === "present";
   const coverage = classifyCoverage(ctx.recipe);
   const coverageIsZero = isVerifiedZeroCoverage(coverage);
   // Prefer the caller's ALREADY-ADJUDICATED verdict over re-parsing the raw
@@ -79,7 +102,8 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
     logger.info("orchestrator", "[done-gate] engineering floor passed with NO coverage measurement", {
       runId: ctx.runId,
       ecosystem: ctx.recipe?.ecosystem,
-      testCommands: ctx.recipe?.testCommands?.length ?? 0,
+      testCommands: testCommands.state === "present" ? testCommands.commands.length : 0,
+      testCommandsSource: testCommands.state === "present" ? testCommands.source : null,
     });
   } else if (coverage.state === "measured" && coverage.value <= 0) {
     logger.info(
@@ -90,6 +114,24 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
         ecosystem: ctx.recipe?.ecosystem,
         coverage: coverage.value,
         coverageSource: coverage.source,
+      },
+    );
+  }
+
+  // The floor's `hasTests` term opened on commands the verify sub-agent never
+  // named — the disk's set alone carried it. That is the intended outcome (it is
+  // the whole point of unioning the derived set in), but it means the model's own
+  // recipe would have scored this sprint `no_test_commands`, and a gate that
+  // silently swaps the source it opened on stops being auditable. Named, never
+  // blocking — the same treatment as the coverage-provenance branches above.
+  if (testCommands.state === "present" && testCommands.source === "disk-derived") {
+    logger.info(
+      "orchestrator",
+      "[done-gate] engineering floor opened on DISK-DERIVED test commands — the verify sub-agent's own recipe declared none",
+      {
+        runId: ctx.runId,
+        ecosystem: ctx.recipe?.ecosystem,
+        testCommands: testCommands.commands,
       },
     );
   }

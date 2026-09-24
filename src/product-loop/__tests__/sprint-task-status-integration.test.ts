@@ -34,13 +34,18 @@ vi.mock("../../flow/artifact-io.js", () => ({
   writeArtifact: vi.fn(async () => undefined),
 }));
 vi.mock("../verify-floor.js", () => ({
+  // The shape `runVerifyFloor` really returns for an unavailable verdict
+  // (verify-floor.ts:842-857) — see the same note in goal-gate-skip-record.test.ts.
   runVerifyFloor: vi.fn(async () => ({
     verdict: "unavailable",
-    reason: "no-commands-discovered",
+    unavailableReason: "no-commands-discovered",
     detail: "held unavailable by the S3b fixture",
     checks: [],
+    commandsDiscovered: { build: [], test: [] },
+    measuredCoverage: null,
     elapsedMs: 0,
   })),
+  resolveFloorCommands: () => ({ build: [], test: [] }),
   applyVerifyFloor: (current: string) => ({ verdict: current, downgraded: false, upgraded: false, note: "" }),
   readBaselineVerifyCostMs: vi.fn(async () => null),
 }));

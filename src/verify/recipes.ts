@@ -953,6 +953,13 @@ export function normalizeVerifyRecipe(value: unknown): VerifyRecipe | null {
     // overwrites both fields when it actually measures coverage.
     coverage: typeof raw.coverage === "number" ? raw.coverage : null,
     coverageSource: typeof raw.coverage === "number" ? "model-asserted" : null,
+    // Same reasoning one field up, for the commands: everything in this object
+    // came out of the MODEL's recipe JSON, so its test commands are an assertion.
+    // `null` when it named none — that is the value the deterministic floor's own
+    // disk-derived set is later UNIONED into (see
+    // `src/product-loop/test-command-signal.ts`), which is what stops an empty
+    // array from disarming the done-gate's engineering floor.
+    testCommandsSource: asStrings(raw.testCommands).length > 0 ? "model-asserted" : null,
   };
 }
 
