@@ -4,8 +4,34 @@ import os from "os";
 import path from "path";
 import { getCurrentModel } from "../utils/settings";
 
-const SCHEDULES_DIR = path.join(os.homedir(), ".muonroi-cli", "schedules");
-const SCHEDULE_DAEMON_PID_PATH = path.join(os.homedir(), ".muonroi-cli", "daemon.pid");
+/**
+ * Root of the muonroi home.
+ *
+ * Priority: MUONROI_CLI_HOME env → os.homedir()/.muonroi-cli — the same
+ * `muonroiHome()` convention already used by src/storage/config.ts,
+ * src/usage/ledger.ts, src/chat/channel-manager.ts et al.
+ *
+ * These were module-level `const`s (`path.join(os.homedir(), …)`) evaluated at
+ * import, which is why adding the env var alone would NOT have redirected them:
+ * a const is frozen before any test can set anything, so the suite-wide pin in
+ * `src/__test-stubs__/vitest-setup.ts` could never reach this module and
+ * `ensureSchedulesDir()` / `writeScheduleDaemonPid()` wrote into the developer's
+ * real `~/.muonroi-cli`. `src/lsp/npm-cache.ts:20-28` records what that class of
+ * trap already cost once. Resolving per call is what makes the isolation
+ * reachable; `home-pin-direct-homedir.test.ts` re-points the env var AFTER
+ * import and fails if anyone freezes these again.
+ */
+function muonroiHome(): string {
+  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+}
+
+function schedulesDir(): string {
+  return path.join(muonroiHome(), "schedules");
+}
+
+function scheduleDaemonPidPath(): string {
+  return path.join(muonroiHome(), "daemon.pid");
+}
 
 export interface StoredSchedule {
   id: string;
@@ -148,7 +174,7 @@ export class ScheduleManager {
 
   async list(): Promise<StoredSchedule[]> {
     const files = await listScheduleFiles();
-    const items = await Promise.all(files.map((file) => readScheduleRecord(path.join(SCHEDULES_DIR, file))));
+    const items = await Promise.all(files.map((file) => readScheduleRecord(path.join(schedulesDir(), file))));
     return items
       .filter((item): item is StoredSchedule => item !== null)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -241,18 +267,18 @@ export class ScheduleManager {
 }
 
 export async function ensureSchedulesDir(): Promise<string> {
-  await fs.mkdir(SCHEDULES_DIR, { recursive: true });
-  return SCHEDULES_DIR;
+  await fs.mkdir(schedulesDir(), { recursive: true });
+  return schedulesDir();
 }
 
 export function getScheduleRecordPath(id: string): string {
-  const resolved = path.join(SCHEDULES_DIR, `${id}.json`);
+  const resolved = path.join(schedulesDir(), `${id}.json`);
   assertInsideSchedulesDir(resolved);
   return resolved;
 }
 
 export function getScheduleLogDir(id: string): string {
-  const resolved = path.join(SCHEDULES_DIR, id);
+  const resolved = path.join(schedulesDir(), id);
   assertInsideSchedulesDir(resolved);
   return resolved;
 }
@@ -260,8 +286,8 @@ export function getScheduleLogDir(id: string): string {
 function assertInsideSchedulesDir(resolved: string): void {
   const normalized = path.resolve(resolved);
   if (
-    !normalized.startsWith(`${path.resolve(SCHEDULES_DIR)}${path.sep}`) &&
-    normalized !== path.resolve(SCHEDULES_DIR)
+    !normalized.startsWith(`${path.resolve(schedulesDir())}${path.sep}`) &&
+    normalized !== path.resolve(schedulesDir())
   ) {
     throw new Error("Invalid schedule id: path traversal detected.");
   }
@@ -272,21 +298,21 @@ export function getScheduleRunLogPath(id: string): string {
 }
 
 export function getScheduleDaemonPidPath(): string {
-  return SCHEDULE_DAEMON_PID_PATH;
+  return scheduleDaemonPidPath();
 }
 
 export async function writeScheduleDaemonPid(pid: number): Promise<void> {
-  await fs.mkdir(path.dirname(SCHEDULE_DAEMON_PID_PATH), { recursive: true });
-  await fs.writeFile(SCHEDULE_DAEMON_PID_PATH, `${pid}\n`, "utf8");
+  await fs.mkdir(path.dirname(scheduleDaemonPidPath()), { recursive: true });
+  await fs.writeFile(scheduleDaemonPidPath(), `${pid}\n`, "utf8");
 }
 
 export async function removeScheduleDaemonPid(): Promise<void> {
-  await fs.rm(SCHEDULE_DAEMON_PID_PATH, { force: true });
+  await fs.rm(scheduleDaemonPidPath(), { force: true });
 }
 
 export async function getScheduleDaemonStatus(): Promise<ScheduleDaemonStatus> {
   try {
-    const raw = (await fs.readFile(SCHEDULE_DAEMON_PID_PATH, "utf8")).trim();
+    const raw = (await fs.readFile(scheduleDaemonPidPath(), "utf8")).trim();
     const pid = Number(raw);
     if (!Number.isInteger(pid) || pid <= 0) {
       await removeScheduleDaemonPid();
@@ -587,7 +613,7 @@ async function resolveScheduleDirectory(directory: string | undefined, cwd: stri
 async function listScheduleFiles(): Promise<string[]> {
   await ensureSchedulesDir();
   try {
-    const files = await fs.readdir(SCHEDULES_DIR);
+    const files = await fs.readdir(schedulesDir());
     return files.filter((file) => file.endsWith(".json"));
   } catch {
     return [];

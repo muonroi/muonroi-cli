@@ -73,10 +73,32 @@ export function setStderrMirrorFailureSink(sink: FailureSink | null): void {
   failureSink = sink;
 }
 
+/**
+ * Root of the muonroi home.
+ *
+ * Priority: MUONROI_CLI_HOME env → os.homedir()/.muonroi-cli — the same
+ * `muonroiHome()` convention already used by src/storage/config.ts,
+ * src/usage/ledger.ts, src/chat/channel-manager.ts et al. Resolved lazily per
+ * call, never as a module-level `const`, so the suite-wide pin in
+ * `src/__test-stubs__/vitest-setup.ts` can reach it (`src/lsp/npm-cache.ts:20-28`
+ * records why a const cannot be redirected from a test).
+ */
+function muonroiHome(): string {
+  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+}
+
+/**
+ * Where the mirror appends.
+ *
+ * `MUONROI_TUI_STDERR_MIRROR_FILE` names an exact file and stays the most
+ * specific override — it wins outright. Below it the general home pin applies,
+ * so a test that sets neither still cannot append to the operator's real
+ * `~/.muonroi-cli/tui-stderr.log`.
+ */
 export function stderrMirrorPath(): string {
   const override = process.env.MUONROI_TUI_STDERR_MIRROR_FILE?.trim();
   if (override) return override;
-  return path.join(os.homedir(), ".muonroi-cli", BASENAME);
+  return path.join(muonroiHome(), BASENAME);
 }
 
 export function isStderrMirrorEnabled(): boolean {

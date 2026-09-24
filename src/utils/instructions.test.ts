@@ -18,6 +18,13 @@ async function importLoadCustomInstructions(mockedHome?: string) {
 
   if (mockedHome) {
     process.env.HOME = mockedHome;
+    // instructions.ts now resolves its home through the repo-wide
+    // `MUONROI_CLI_HOME ?? homedir() + "/.muonroi-cli"` convention, and
+    // vitest-setup.ts pins that var suite-wide — so mocking `os.homedir()`
+    // alone no longer redirects the loader. Point the var at the same temp
+    // home this test already builds; the homedir mock stays as belt-and-braces
+    // for anything else the module reads.
+    process.env.MUONROI_CLI_HOME = path.join(mockedHome, ".muonroi-cli");
     vi.doMock("os", async () => {
       const actual = await vi.importActual<typeof import("os")>("os");
       return {
@@ -32,10 +39,13 @@ async function importLoadCustomInstructions(mockedHome?: string) {
 }
 
 const originalHome = process.env.HOME;
+const originalCliHome = process.env.MUONROI_CLI_HOME;
 
 describe("loadCustomInstructions", () => {
   afterEach(() => {
     process.env.HOME = originalHome;
+    if (originalCliHome === undefined) delete process.env.MUONROI_CLI_HOME;
+    else process.env.MUONROI_CLI_HOME = originalCliHome;
     vi.restoreAllMocks();
     vi.resetModules();
     vi.doUnmock("os");

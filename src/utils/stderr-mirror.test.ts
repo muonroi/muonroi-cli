@@ -127,8 +127,23 @@ describe("stderr mirror", () => {
     expect(seenByTerminal).toContain("not mirrored\n");
   });
 
-  it("defaults to ~/.muonroi-cli/tui-stderr.log", () => {
+  it("defaults to <muonroi home>/tui-stderr.log, honouring MUONROI_CLI_HOME", () => {
     delete process.env.MUONROI_TUI_STDERR_MIRROR_FILE;
-    expect(stderrMirrorPath()).toBe(path.join(os.homedir(), ".muonroi-cli", "tui-stderr.log"));
+    // The resolver follows the repo-wide `MUONROI_CLI_HOME ?? homedir() +
+    // "/.muonroi-cli"` convention. This test used to assert the raw
+    // `os.homedir()` form with no mock, so it silently named the developer's
+    // REAL log file — and would have gone red the moment the suite-wide pin
+    // reached this module. Assert the convention instead, both branches.
+    const saved = process.env.MUONROI_CLI_HOME;
+    const pinned = path.join(os.tmpdir(), "stderr-mirror-home-probe");
+    process.env.MUONROI_CLI_HOME = pinned;
+    try {
+      expect(stderrMirrorPath()).toBe(path.join(pinned, "tui-stderr.log"));
+      delete process.env.MUONROI_CLI_HOME;
+      expect(stderrMirrorPath()).toBe(path.join(os.homedir(), ".muonroi-cli", "tui-stderr.log"));
+    } finally {
+      if (saved === undefined) delete process.env.MUONROI_CLI_HOME;
+      else process.env.MUONROI_CLI_HOME = saved;
+    }
   });
 });

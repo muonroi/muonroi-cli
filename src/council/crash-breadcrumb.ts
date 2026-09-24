@@ -222,11 +222,32 @@ export function isBreadcrumbEnabled(): boolean {
   return true;
 }
 
-/** Absolute path of the active breadcrumb file. */
+/**
+ * Root of the muonroi home.
+ *
+ * Priority: MUONROI_CLI_HOME env → os.homedir()/.muonroi-cli — the same
+ * `muonroiHome()` convention already used by src/storage/config.ts,
+ * src/usage/ledger.ts, src/chat/channel-manager.ts et al. Resolved lazily per
+ * call, never as a module-level `const`, so the suite-wide pin in
+ * `src/__test-stubs__/vitest-setup.ts` can reach it (`src/lsp/npm-cache.ts:20-28`
+ * records why a const cannot be redirected from a test).
+ */
+function muonroiHome(): string {
+  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+}
+
+/**
+ * Absolute path of the active breadcrumb file.
+ *
+ * `MUONROI_COUNCIL_BREADCRUMB_FILE` names an exact file and stays the most
+ * specific override — it wins outright, and `isBreadcrumbEnabled()` requires it
+ * before the writer runs at all under vitest. The general home pin applies below
+ * it so the resolved PATH is also harmless for the callers that only read it.
+ */
 export function breadcrumbFilePath(): string {
   const override = process.env.MUONROI_COUNCIL_BREADCRUMB_FILE?.trim();
   if (override) return override;
-  return path.join(os.homedir(), ".muonroi-cli", FILE_BASENAME);
+  return path.join(muonroiHome(), FILE_BASENAME);
 }
 
 function rotatedPathFor(active: string): string {

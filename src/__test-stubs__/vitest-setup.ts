@@ -105,20 +105,29 @@ process.env.MUONROI_FLOOR_BASELINE_DIR ??= nodePath.join(
 // `??=`, matching the pin above: an explicitly exported MUONROI_CLI_HOME still
 // wins, so a developer can still aim the suite somewhere deliberately.
 //
-// LIMIT, deliberately not papered over: this only redirects code that CONSULTS
-// the env var. These resolve `os.homedir()` directly and are NOT pinned —
-//   src/utils/instructions.ts:79      (~/.muonroi-cli/AGENTS.md)
-//   src/tools/schedule.ts:7-8         (schedules/, daemon.pid)
-//   src/utils/stderr-mirror.ts:79     (tui-stderr.log)
-//   src/council/…  breadcrumbFilePath (council-breadcrumbs.jsonl)
-//   src/providers/auth/token-store.ts:21 (has its own MUONROI_AUTH_DIR escape)
-// Their existing tests are safe because each mocks `os.homedir()` per file, and
-// that is also why adding this pin did not change their behaviour — measured,
-// all four stayed green. A NEW test touching one of them without mocking
-// homedir would still reach the real home. `schedule.ts` is the awkward one: its
-// paths are module-level `const`s evaluated at import, so an env var alone could
-// not redirect it even if one were added — the same trap `npm-cache.ts:20-28`
-// records. Converting these to the shared convention is a separate change.
+// The pin only redirects code that CONSULTS the env var. Five modules used to
+// resolve `os.homedir()` themselves and were therefore NOT pinned — they have
+// since been converted to the same convention and now honour it:
+//   src/utils/instructions.ts            (~/.muonroi-cli/AGENTS.md)
+//   src/tools/schedule.ts                (schedules/, daemon.pid)
+//   src/utils/stderr-mirror.ts           (tui-stderr.log)
+//   src/council/crash-breadcrumb.ts      (council-breadcrumbs.jsonl)
+//   src/providers/auth/token-store.ts    (auth/, under its own MUONROI_AUTH_DIR)
+// Their old tests stayed green only because each mocked `os.homedir()` per file,
+// so the pin was never in their path — safety by coincidence, and a NEW test
+// touching any of them would have reached the real home. Evidence it was real:
+// an empty `~/.muonroi-cli/schedules/` appeared in the developer's home at
+// 2026-09-24 18:23, which `ScheduleManager.list()` → `ensureSchedulesDir()`
+// creates. `schedule.ts` was the awkward one — its paths were module-level
+// `const`s evaluated at import, so an env var alone could not have redirected it
+// (the trap `npm-cache.ts:20-28` records). All five now resolve LAZILY;
+// `__tests__/home-pin-direct-homedir.test.ts` asserts each production resolver
+// lands in the pinned home AND re-points the var after import, so freezing one
+// into a const again fails.
+//
+// `MUONROI_AUTH_DIR` (token-store) and `MUONROI_TUI_STDERR_MIRROR_FILE` /
+// `MUONROI_COUNCIL_BREADCRUMB_FILE` remain the MORE SPECIFIC overrides and still
+// win outright; they now sit above this general pin rather than beside it.
 process.env.MUONROI_CLI_HOME ??= nodePath.join(nodeOs.tmpdir(), `muonroi-test-home-${process.pid}`);
 // Create it: the modules above mkdir their own subpaths, but a bare read of a
 // missing root is a needless difference from a real home that already exists.

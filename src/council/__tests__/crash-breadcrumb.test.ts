@@ -409,8 +409,22 @@ describe("heartbeat", () => {
 });
 
 describe("breadcrumbFilePath()", () => {
-  it("defaults under ~/.muonroi-cli when no override is set", () => {
+  it("defaults under the muonroi home, honouring MUONROI_CLI_HOME", () => {
     delete process.env.MUONROI_COUNCIL_BREADCRUMB_FILE;
-    expect(breadcrumbFilePath()).toBe(path.join(os.homedir(), ".muonroi-cli", "council-breadcrumbs.jsonl"));
+    // The resolver follows the repo-wide `MUONROI_CLI_HOME ?? homedir() +
+    // "/.muonroi-cli"` convention. This test used to assert the raw
+    // `os.homedir()` form with no mock, so it named the operator's REAL crash
+    // trail. Assert the convention instead, both branches.
+    const saved = process.env.MUONROI_CLI_HOME;
+    const pinned = path.join(os.tmpdir(), "breadcrumb-home-probe");
+    process.env.MUONROI_CLI_HOME = pinned;
+    try {
+      expect(breadcrumbFilePath()).toBe(path.join(pinned, "council-breadcrumbs.jsonl"));
+      delete process.env.MUONROI_CLI_HOME;
+      expect(breadcrumbFilePath()).toBe(path.join(os.homedir(), ".muonroi-cli", "council-breadcrumbs.jsonl"));
+    } finally {
+      if (saved === undefined) delete process.env.MUONROI_CLI_HOME;
+      else process.env.MUONROI_CLI_HOME = saved;
+    }
   });
 });
