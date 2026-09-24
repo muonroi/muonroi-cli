@@ -4,6 +4,7 @@ import type { SandboxMode, SandboxSettings } from "../utils/settings";
 import { ensureVerifyCheckpoint, type PreparedVerifyCheckpoint } from "./checkpoint";
 import { loadVerifyEnvironment } from "./environment";
 import { buildBrowserGuidance, buildEvidenceGuidance, buildReadinessGuidance } from "./evidence";
+import { BROWSER_TOOL_NAME, resolveBrowserToolAvailable, type VerifyHostCapabilityDeps } from "./host-capabilities";
 import {
   detectPackageManager,
   getNodeWebBootstrapCommands,
@@ -70,11 +71,63 @@ function buildProjectContextLines(profile: VerifyProjectProfile): string[] {
   return lines;
 }
 
+/**
+ * What the stage must do INSTEAD of asking a human.
+ *
+ * The verify stage runs as one step of an autonomous `/ideal` sprint; nobody is
+ * watching a card it opens. `ask_user` is removed from its tool set for the
+ * duration of the turn (`beginUnattendedTurn` in sprint-runner's
+ * `buildVerifyAgent.runTaskRequest` → `registry.ts`), and a model told only
+ * "you cannot ask" stalls a different way — so the alternative is spelled out.
+ *
+ * MEASURED, run `muc2joffe506` sprint 2: `ask_user` at 14:50:21.922Z offered the
+ * human three branches (debug a Playwright script / use the `computer` tool /
+ * mark VERIFY_FAIL) and the stage sat on it until its 600s budget expired. Any of
+ * the three, chosen by the stage itself and reported, would have been better.
+ */
+function buildUnattendedGuidance(): string[] {
+  return [
+    "UNATTENDED RUN (read this before you consider stopping to ask):",
+    "- No human is watching this stage. There is no `ask_user` tool and no card anyone can answer; a question here",
+    "  stalls the whole sprint until its budget expires and the stage is recorded as an error.",
+    "- When you hit a decision you would have asked about: pick the option that keeps the verification HONEST",
+    "  (never the one that claims more than you checked), report the choice and the reason under Blockers, and emit",
+    "  the verdict marker.",
+    "- When something REQUIRED cannot run at all, that is a result, not a blocker on you: name the phase, say it",
+    "  could not run, quote the exact command and output that proves it, and continue to the next phase.",
+    "- A partial verification reported precisely is worth more than a complete one you waited for and never got.",
+  ];
+}
+
+/**
+ * Phase 4 when the browser tool is MEASURED absent from the host.
+ *
+ * The text this replaces asserted the opposite ("They WILL work. Do not skip
+ * them.") without ever probing, and the stage spent six minutes of tool calls
+ * trying to make it true before asking a human — see `host-capabilities.ts` for
+ * the measurement.
+ */
+function buildMissingBrowserToolGuidance(browserToolName: string): string[] {
+  return [
+    "Phase 4 — Browser QA testing: CANNOT RUN on this host.",
+    `- MEASURED before this prompt was built: \`${browserToolName}\` is not installed on this host (it is not on PATH).`,
+    "- This is a known could not run condition, NOT a failure of the code under test and NOT something for you to fix.",
+    `- Do NOT install ${browserToolName}, do NOT go looking for it in other shells, and do NOT substitute another`,
+    "  browser stack (playwright/puppeteer/a `computer` tool) — a substitute produces evidence nobody asked for and",
+    "  is how this stage has burned its entire budget before.",
+    "- Do instead: verify what you CAN without a browser — the app starts, it stays up, and its HTTP endpoints answer",
+    "  (a bounded curl loop against the smoke target, plus any health endpoint). Capture the exact commands + output.",
+    `- Report under Blockers, verbatim: "Phase 4 browser QA could not run: ${browserToolName} is not installed on this host."`,
+    "- Then emit the verdict marker from what you DID measure. Do not withhold it over this phase.",
+  ];
+}
+
 export function buildVerifyTaskPrompt(
   cwd: string,
   settings?: SandboxSettings,
   recipeOverride?: VerifyRecipe | null,
   sandboxMode: SandboxMode = "shuru",
+  capabilityDeps?: VerifyHostCapabilityDeps,
 ): string {
   const manifest = recipeOverride ? null : loadVerifyEnvironment(cwd, settings);
   const effectiveSettings = manifest?.sandboxSettings ?? settings;
@@ -127,24 +180,40 @@ export function buildVerifyTaskPrompt(
   // build. Gate the runtime/browser phases and the verdict rule on this flag.
   const hasRuntimeSmoke = profile.recipe.smokeKind === "http" && Boolean(profile.recipe.startCommand);
 
+  // MEASURED, not assumed. The phases below used to assert the browser tool "WILL
+  // work" on every host; run `muc2joffe506` proved that false and paid the stage's
+  // whole budget for it. See host-capabilities.ts.
+  const browserToolAvailable = resolveBrowserToolAvailable(capabilityDeps);
+
   const runtimePhases = hasRuntimeSmoke
     ? [
         "Phase 3 — Start the app (REQUIRED, do not skip):",
         "- Start the app using startCommand from the recipe, running it in the background.",
-        "- Wait for the app to be ready: use a curl readiness loop or `agent-browser wait --load networkidle`.",
+        browserToolAvailable
+          ? "- Wait for the app to be ready: use a curl readiness loop or `agent-browser wait --load networkidle`."
+          : "- Wait for the app to be ready with a bounded curl readiness loop.",
         "- If the app fails to start, report the error but still attempt to capture evidence (logs, screenshots).",
         "",
-        "Phase 4 — Browser QA testing (REQUIRED, do not skip):",
-        "- You are a QA tester. Open the app in the browser and test it like a human would.",
-        `- agent-browser commands run on the HOST${sandboxMode === "shuru" ? ", not the sandbox" : ""}. They WILL work. Do not skip them.`,
-        "- Record a video of the entire browser session.",
-        "- Navigate the app: click links, buttons, menus. Verify pages load correctly.",
-        "- Check for JavaScript console errors.",
-        "- Spend 3-5 interactions testing the critical path. Take screenshots after each.",
-        "- This is the most important phase. Build/lint passing means nothing if the app doesn't actually work.",
-        "",
-        "Phase 5 — Teardown:",
-        "- Stop recording, close browser, THEN stop the dev server.",
+        ...(browserToolAvailable
+          ? [
+              "Phase 4 — Browser QA testing (REQUIRED, do not skip):",
+              "- You are a QA tester. Open the app in the browser and test it like a human would.",
+              `- ${BROWSER_TOOL_NAME} commands run on the HOST${sandboxMode === "shuru" ? ", not the sandbox" : ""}. They WILL work. Do not skip them.`,
+              "- Record a video of the entire browser session.",
+              "- Navigate the app: click links, buttons, menus. Verify pages load correctly.",
+              "- Check for JavaScript console errors.",
+              "- Spend 3-5 interactions testing the critical path. Take screenshots after each.",
+              "- This is the most important phase. Build/lint passing means nothing if the app doesn't actually work.",
+              "",
+              "Phase 5 — Teardown:",
+              "- Stop recording, close browser, THEN stop the dev server.",
+            ]
+          : [
+              ...buildMissingBrowserToolGuidance(BROWSER_TOOL_NAME),
+              "",
+              "Phase 5 — Teardown:",
+              "- Stop the dev server once the HTTP checks above are done.",
+            ]),
       ]
     : [
         "Phase 3 — Runtime smoke (CLI / library / script — there is NO long-running app to start):",
@@ -158,6 +227,15 @@ export function buildVerifyTaskPrompt(
     ? [
         `- After the report, emit the verdict on its own final line: exactly \`${VERIFY_PASS_MARKER}\` if install/build/test and the smoke/QA phases all succeeded, otherwise exactly \`${VERIFY_FAIL_MARKER}\`.`,
         `- Emit \`${VERIFY_FAIL_MARKER}\` on ANY failed or skipped required phase (build error, failing test, app did not start, blocking console error). Do NOT emit \`${VERIFY_PASS_MARKER}\` if you could not actually run the recipe.`,
+        ...(browserToolAvailable
+          ? []
+          : [
+              // Without this the browser phase reads as a "skipped required phase"
+              // above and the stage withholds the marker, which scores the sprint
+              // 0.00 on a MISSING HOST TOOL — the same contradiction the CLI/library
+              // branch was written to remove (see the comment above hasRuntimeSmoke).
+              `- Phase 4 could not run because \`${BROWSER_TOOL_NAME}\` is absent from this host. That is an environment fact, not a skipped phase and not a failure of the code: it alone must NOT make you emit \`${VERIFY_FAIL_MARKER}\`, and it must never make you withhold a marker. Judge install/build/test and the HTTP checks you did run, name the phase that could not run under Blockers, and emit the marker that those results earn.`,
+            ]),
       ]
     : [
         `- After the report, emit the verdict on its own final line: exactly \`${VERIFY_PASS_MARKER}\` if install/build/test (and the CLI smoke, if any) all succeeded, otherwise exactly \`${VERIFY_FAIL_MARKER}\`.`,
@@ -188,9 +266,11 @@ export function buildVerifyTaskPrompt(
     "",
     ...runtimePhases,
     ...buildReadinessGuidance(profile),
-    ...buildBrowserGuidance(profile),
+    ...buildBrowserGuidance(profile, browserToolAvailable),
     ...buildRetryGuidance(profile),
     ...buildEvidenceGuidance(),
+    "",
+    ...buildUnattendedGuidance(),
     "",
     "Reporting requirements:",
     "- Return a concise structured report with these sections only:",
@@ -451,11 +531,21 @@ export function buildVerifyPrompt(cwd: string, sandboxMode: SandboxMode = "shuru
     ...step2Desc,
     "  - Ephemeral installs allowed.",
     "  - Probe for runtimes first (`command -v node`, etc), only install what is missing.",
-    "  - agent-browser runs on the HOST, not the sandbox. It WILL work.",
-    "  - If recipe has startCommand + startPort, start app in background and run browser smoke tests.",
-    "  - Use `agent-browser record start .muonroi-cli/verify-artifacts/verify-smoke.webm` before opening the page.",
-    "  - Use `agent-browser --screenshot-dir .muonroi-cli/verify-artifacts screenshot` after the page loads.",
-    "  - CRITICAL: Stop the recording (`agent-browser record stop`) and close the browser (`agent-browser close`) BEFORE stopping the dev server. The server must stay alive until all browser commands finish.",
+    // Same measured gate as buildVerifyTaskPrompt — this prompt asserted the browser
+    // tool "WILL work" without ever checking, on the same hosts.
+    ...(resolveBrowserToolAvailable()
+      ? [
+          `  - ${BROWSER_TOOL_NAME} runs on the HOST, not the sandbox. It WILL work.`,
+          "  - If recipe has startCommand + startPort, start app in background and run browser smoke tests.",
+          `  - Use \`${BROWSER_TOOL_NAME} record start .muonroi-cli/verify-artifacts/verify-smoke.webm\` before opening the page.`,
+          `  - Use \`${BROWSER_TOOL_NAME} --screenshot-dir .muonroi-cli/verify-artifacts screenshot\` after the page loads.`,
+          `  - CRITICAL: Stop the recording (\`${BROWSER_TOOL_NAME} record stop\`) and close the browser (\`${BROWSER_TOOL_NAME} close\`) BEFORE stopping the dev server. The server must stay alive until all browser commands finish.`,
+        ]
+      : [
+          `  - Browser QA CANNOT run here: \`${BROWSER_TOOL_NAME}\` is not installed on this host (measured, not assumed). Tell the sub-agent NOT to install it and NOT to substitute another browser stack.`,
+          "  - If recipe has startCommand + startPort, start app in background and verify it over HTTP instead (smoke target + any health endpoint, status + body).",
+          `  - Tell it to report "browser QA could not run: ${BROWSER_TOOL_NAME} is not installed on this host" under Blockers, and to judge the verdict on what it did measure.`,
+        ]),
     "  - Return a concise report: Summary, Results, Evidence (mandatory), Blockers, Residual Risk.",
     "",
     "Important:",

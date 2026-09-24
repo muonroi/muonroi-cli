@@ -190,11 +190,22 @@ describe("verify entrypoint helpers", () => {
       ),
     );
 
-    const prompt = buildVerifyTaskPrompt(dir, {
-      from: "web-env",
-      allowNet: true,
-      allowedHosts: ["registry.npmjs.org"],
-    });
+    // The browser-QA branch is now gated on a MEASURED host probe (see
+    // host-capabilities.ts), so this assertion has to name which branch it is
+    // about instead of depending on whether the machine running the suite happens
+    // to have `agent-browser` installed. The absent-tool branch is covered in
+    // entrypoint-host-capability.test.ts.
+    const prompt = buildVerifyTaskPrompt(
+      dir,
+      {
+        from: "web-env",
+        allowNet: true,
+        allowedHosts: ["registry.npmjs.org"],
+      },
+      null,
+      "shuru",
+      { hasHostExecutable: () => true },
+    );
 
     expect(prompt).toContain("Detected app type: Next.js.");
     expect(prompt).toContain("Recipe ecosystem: node.");

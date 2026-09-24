@@ -16,6 +16,7 @@ import {
 } from "../utils/settings";
 import { resolveShell } from "../utils/shell.js";
 import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
+import { BROWSER_TOOL_NAME, resolveBrowserToolAvailable } from "../verify/host-capabilities.js";
 
 // F3a — hard cap on tool rounds per user turn. Reduced 100 → 40
 // after session 526a83cf22df logged 2.44M input tokens over 46 LLM calls
@@ -764,16 +765,32 @@ export function buildSubagentPrompt(
                   "2. Build the project (run buildCommands from the recipe).",
                   "3. Run tests/lint if available (run testCommands from the recipe).",
                   "4. Start the app (run startCommand from the recipe in the background).",
-                  "5. Wait for the app to be ready (curl readiness check or agent-browser wait).",
-                  "6. Run browser smoke tests like a real human QA tester:",
-                  "   - Open the app in the browser, record a video, take screenshots.",
-                  "   - Navigate the app: click links, buttons, menus. Verify pages load.",
-                  "   - Check for JavaScript console errors.",
-                  "   - Spend 3-5 interactions testing the critical path.",
-                  "7. Stop recording, close browser, then stop the dev server.",
-                  "",
-                  "Do NOT stop after build/lint. Starting the app and testing it in the browser is the most important part.",
-                  "agent-browser commands run on the HOST, not inside the sandbox. They WILL work. Do not skip them.",
+                  // The browser steps are MEASURED against the host, not asserted.
+                  // This system prompt used to say "They WILL work. Do not skip
+                  // them." on a host where the binary is absent (measured on the
+                  // host of run muc2joffe506), which is how a verify stage spent six
+                  // minutes hunting for substitutes and then asked a human.
+                  ...(resolveBrowserToolAvailable()
+                    ? [
+                        "5. Wait for the app to be ready (curl readiness check or agent-browser wait).",
+                        "6. Run browser smoke tests like a real human QA tester:",
+                        "   - Open the app in the browser, record a video, take screenshots.",
+                        "   - Navigate the app: click links, buttons, menus. Verify pages load.",
+                        "   - Check for JavaScript console errors.",
+                        "   - Spend 3-5 interactions testing the critical path.",
+                        "7. Stop recording, close browser, then stop the dev server.",
+                        "",
+                        "Do NOT stop after build/lint. Starting the app and testing it in the browser is the most important part.",
+                        `${BROWSER_TOOL_NAME} commands run on the HOST, not inside the sandbox. They WILL work. Do not skip them.`,
+                      ]
+                    : [
+                        "5. Wait for the app to be ready with a bounded curl readiness loop.",
+                        "6. Exercise the app over HTTP: request the smoke target and any health endpoint, and check the status + body.",
+                        "7. Stop the dev server.",
+                        "",
+                        "Do NOT stop after build/lint. Starting the app and proving it answers is the most important part.",
+                        `Browser QA CANNOT run here: \`${BROWSER_TOOL_NAME}\` is not installed on this host (measured, not assumed). Do not install it, do not look for it in another shell, and do not substitute another browser stack. Report "browser QA could not run: ${BROWSER_TOOL_NAME} is not installed on this host" under Blockers and judge the verdict on what you did measure.`,
+                      ]),
                   "Return a concise verification report. Keep it compact but always include Evidence with artifact file paths.",
                 ]
               : [

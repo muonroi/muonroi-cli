@@ -388,13 +388,31 @@ describe("verify stage budget", () => {
       expect(state.settled).toBe(false);
     });
 
+    /**
+     * A timed-out stage now gets a bounded grace to hand back the partial report
+     * it had already produced (see `salvageAbortedVerifyOutput` — run
+     * `muc2joffe506` sprint 2 lost three verified phases to `output: ""`). A mock
+     * that never settles at all uses the whole grace, so the promise resolves at
+     * `bound + grace` rather than at `bound`. The DECISION is still taken at the
+     * bound, which is what these two tests pin — asserted on the abort signal.
+     */
+    const SALVAGE_GRACE_MS = 30_000;
+
     it("STILL aborts a verify stage that reports nothing at all", async () => {
-      runVerifyOrchestrationMock.mockImplementation(async () => new Promise<ToolResult>(() => {}));
+      let signal: AbortSignal | undefined;
+      runVerifyOrchestrationMock.mockImplementation(async (_agent: unknown, opts: { abortSignal?: AbortSignal }) => {
+        signal = opts.abortSignal;
+        return new Promise<ToolResult>(() => {});
+      });
       const p = runInIdealScope(() => runVerifyWithWatchdog({} as never, "run-y", 2, { budget: BUDGET }));
       const state = track(p);
       await vi.advanceTimersByTimeAsync(599_000);
       expect(state.settled).toBe(false);
+      expect(signal?.aborted).toBe(false);
       await vi.advanceTimersByTimeAsync(2_000);
+      // The bound was reached and the stage was cancelled AT the bound.
+      expect(signal?.aborted).toBe(true);
+      await vi.advanceTimersByTimeAsync(SALVAGE_GRACE_MS + 1_000);
       expect(state.settled).toBe(true);
       await expect(p).resolves.toMatchObject({ success: false, error: /verify-timeout/ as never });
     });
@@ -404,6 +422,7 @@ describe("verify stage budget", () => {
       const p = runVerifyWithWatchdog({} as never, "run-z", 2, { budget: BUDGET });
       const state = track(p);
       await vi.advanceTimersByTimeAsync(601_000);
+      await vi.advanceTimersByTimeAsync(SALVAGE_GRACE_MS + 1_000);
       expect(state.settled).toBe(true);
       const r = (await p) as ToolResult;
       expect(r.success).toBe(false);

@@ -14,6 +14,7 @@ import { promisify } from "node:util";
 import { pickCouncilTaskModel } from "../council/leader.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
 import { beginRecallNagSuppression } from "../ee/recall-ledger.js";
+import { beginUnattendedTurn } from "../orchestrator/unattended-turn.js";
 import { evaluateDoneGate } from "../product-loop/done-gate.js";
 import { type CollectedNestedTurn, collectNestedTurn, forwardNestedTurn } from "../product-loop/nested-turn.js";
 import type { Criterion } from "../product-loop/types.js";
@@ -482,10 +483,18 @@ function buildVerifyAgent(ctx: MaintenanceCtx, recipe: import("../types/index.js
       // `evaluateDoneGate` below. Declaring the scope keeps the EE recall nag
       // out of it at the emitter rather than filtering it back out here.
       const releaseNagSuppression = beginRecallNagSuppression();
+      // Same no-human boundary as the /ideal verify agent, and for a sharper
+      // reason: this call site is a bare `runVerifyOrchestration(verifyAgent)`
+      // with NO watchdog (task-runner.ts:243), so an `ask_user` card opened here
+      // parks the maintain run indefinitely with nothing to cut it. Measured on
+      // the /ideal path, run `muc2joffe506`: the card was answered 10.5 hours
+      // after the stage asked. See orchestrator/unattended-turn.ts.
+      const releaseUnattended = beginUnattendedTurn();
       let turn: CollectedNestedTurn;
       try {
         turn = await collectNestedTurn(ctx.processMessageFn(req.prompt));
       } finally {
+        releaseUnattended();
         releaseNagSuppression();
       }
       // Same kill-vs-completion distinction as the /ideal verify agent: a turn

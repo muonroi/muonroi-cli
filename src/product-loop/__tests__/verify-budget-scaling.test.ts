@@ -191,6 +191,9 @@ describe("verify budget — derived from the run's own measured baseline", () =>
     const p = runVerifyWithWatchdog(AGENT, RUN_ID, SPRINT_N, { flowDir });
     await untilWatchdogArmed();
     await vi.advanceTimersByTimeAsync(OLD_FLAT_BUDGET_MS + 1_000);
+    // A stage that never settles uses the whole partial-report salvage grace
+    // (`salvageAbortedVerifyOutput`, default 30s) before the caller is unblocked.
+    await vi.advanceTimersByTimeAsync(31_000);
     const res = await p;
     expect(res.success).toBe(false);
     expect(res.error ?? "").toContain("verify-timeout");

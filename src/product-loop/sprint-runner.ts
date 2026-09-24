@@ -47,6 +47,8 @@ import {
   writeSprintVerifyFix,
 } from "../flow/run-artifacts.js";
 import { isContextRailEnabled } from "../gsd/flags.js";
+import { isInteractivePaused } from "../orchestrator/interactive-pause.js";
+import { beginUnattendedTurn } from "../orchestrator/unattended-turn.js";
 import { SPRINT_EXECUTION_MARKER } from "../pil/layer6-output.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { logInteraction, logUIInteraction } from "../storage/index.js";
@@ -83,6 +85,7 @@ import { deriveNextAction, type TestRunnerEvidence } from "./next-action.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
 import type { AdherenceVerdict, TaskVerdict } from "./plan-adherence-review.js";
 import { boundDeviations, runPlanAdherenceReview } from "./plan-adherence-review.js";
+import { buildVerifyReportBody } from "./verify-report.js";
 
 // Re-exported so existing callers that import extractPlanTargetPaths from this
 // file (its pre-S3a home) keep working unchanged — the implementation moved to
@@ -345,6 +348,17 @@ export interface VerifyStageObservation {
   lastEventAtMs: number | null;
   /** The text of that most recent one, verbatim. Null when none arrived. */
   lastDetail: string | null;
+  /**
+   * Milliseconds of this window the watchdog OBSERVED a blocking human card open
+   * (`isInteractivePaused()`), sampled on the re-arm poll so it is accurate to
+   * within one poll interval. Optional so a caller that never measured it says
+   * nothing rather than claiming zero.
+   *
+   * A stage waiting on a human is not a silent stage. Reporting the two facts
+   * apart is the whole point: run `muc2joffe506` sprint 2 was cut at the 600s
+   * silence bound while an `ask_user` card had been open since 14:50:21.922Z.
+   */
+  humanPauseMs?: number;
 }
 
 /**
@@ -437,6 +451,17 @@ export function buildVerifyTimeoutMessage(args: {
     );
   }
 
+  // A human card holding the stage open is a DIFFERENT fact from a silent stage,
+  // and the two were indistinguishable in the text this replaces. Stated as a
+  // measurement (sampled on the re-arm poll), never as a cause.
+  const humanPauseMs = observation?.humanPauseMs ?? 0;
+  if (humanPauseMs > 0) {
+    parts.push(
+      `a human question was open for ${s(humanPauseMs)}s of that window — the budget did not run while it was, ` +
+        "so this deadline was reached on non-paused time",
+    );
+  }
+
   parts.push("cause not diagnosed — only the observations above were measured");
   return parts.join("; ");
 }
@@ -496,6 +521,23 @@ export async function resolveVerifyBudget(flowDir: string | undefined, runId: st
  * silence window (time since the last beat) rather than as a total, so a stage
  * that is still reporting is never cut and a stage reporting nothing still is.
  * See the `silenceMode` block below.
+ *
+ * A blocking human card is NOT silence. `ask_user` (and the safety-override card,
+ * and a council preflight card) bracket their wait with `beginInteractivePause()`
+ * precisely so a watchdog re-arms instead of aborting; the per-attempt stall
+ * watchdog and the turn-idle watchdog already consult `isInteractivePaused()`
+ * (orchestrator.ts:2594, :3871). This one did not, and run `muc2joffe506` sprint 2
+ * was cut at 14:52:34 while an `ask_user` card opened at 14:50:21.922Z sat
+ * unanswered — "blocked on a human" and "died" were one observation. Both arms
+ * below now re-arm while a card is open, and the pause is REPORTED so the two
+ * facts stay apart in the message.
+ *
+ * A cut stage also no longer loses its work. `buildVerifyAgent.runTaskRequest`
+ * already returns the truncated payload of a killed turn, but the timeout branch
+ * resolved `output: ""` and threw it away: run `muc2joffe506` had genuinely
+ * verified the Docker stack, service health and `/api/health` and `2-verify.md`
+ * recorded only the timeout. After the abort the aborted work gets a bounded
+ * grace to hand its partial report back, and it rides out in `output`.
  */
 export async function runVerifyWithWatchdog(
   verifyAgent: VerifyAgentLike,
@@ -508,7 +550,12 @@ export async function runVerifyWithWatchdog(
   const controller = new AbortController();
   const startedAt = Date.now();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const observation: VerifyStageObservation = { events: 0, lastEventAtMs: null, lastDetail: null };
+  const observation: VerifyStageObservation = {
+    events: 0,
+    lastEventAtMs: null,
+    lastDetail: null,
+    humanPauseMs: 0,
+  };
   const onProgress = (detail: string) => {
     observation.events += 1;
     observation.lastEventAtMs = Date.now();
@@ -524,6 +571,11 @@ export async function runVerifyWithWatchdog(
   // derived budget as that window is exactly how it clears one, since the budget
   // IS a measurement of this repo's own build+test cost.
   const silenceMode = isIdealRunUnlimited();
+  // Set by `fire()` BEFORE it aborts. The abort can settle the work promise in the
+  // SAME tick (an aborted turn that resolves synchronously wins `Promise.race`),
+  // so the race winner is not authoritative about whether the watchdog fired —
+  // this is.
+  let firedMessage: string | null = null;
   const timeout = new Promise<ToolResult>((resolve) => {
     const fire = () => {
       const msg = buildVerifyTimeoutMessage({
@@ -534,6 +586,7 @@ export async function runVerifyWithWatchdog(
         observation: { ...observation },
         mode: silenceMode ? "silence" : "total",
       });
+      firedMessage = msg;
       // Cancel the work we are giving up on BEFORE unblocking the caller.
       controller.abort();
       console.error(`[sprint-runner] ${msg}`);
@@ -545,34 +598,100 @@ export async function runVerifyWithWatchdog(
         basis: budget.basis,
         baselineMs: budget.baselineMs,
         observedEvents: observation.events,
+        humanPauseMs: observation.humanPauseMs ?? 0,
         message: msg,
       });
+      // `output` is filled in by the salvage pass below — the caller composes the
+      // final ToolResult so the aborted stage gets a chance to hand its partial
+      // report back first.
       resolve({ success: false, output: "", error: `verify-timeout: ${msg}` });
     };
+    // Sampled state for the human-pause gate, shared by both arms.
+    // `pausedSince` is the start of the CURRENT observed pause; `lastPauseSeen` is
+    // the last moment a pause was observed and doubles as the silence anchor, so
+    // the window restarts from the answer rather than from a stale beat.
+    let pausedSince: number | null = null;
+    let lastPauseSeen: number | null = null;
+    /** True while a blocking card is open; accumulates the observed pause. */
+    const humanPending = (): boolean => {
+      const now = Date.now();
+      if (isInteractivePaused()) {
+        if (pausedSince === null) pausedSince = now;
+        lastPauseSeen = now;
+        return true;
+      }
+      if (pausedSince !== null) {
+        observation.humanPauseMs = (observation.humanPauseMs ?? 0) + Math.max(0, (lastPauseSeen ?? now) - pausedSince);
+        pausedSince = null;
+      }
+      return false;
+    };
+    const rearm = (fn: () => void, waitMs: number) => {
+      timer = setTimeout(fn, waitMs);
+      (timer as { unref?: () => void }).unref?.();
+    };
     if (!silenceMode) {
-      timer = setTimeout(fire, timeoutMs);
+      // The total arm re-arms too, and EXTENDS itself by the observed pause: time a
+      // human spent deciding is not time the stage ran. `elapsedMs` in the message
+      // still reports true wall clock, with the pause stated separately.
+      const armTotal = () => {
+        if (humanPending()) {
+          rearm(armTotal, Math.min(VERIFY_PAUSE_RECHECK_MS, timeoutMs));
+          return;
+        }
+        const waitMs = startedAt + timeoutMs + (observation.humanPauseMs ?? 0) - Date.now();
+        if (waitMs <= 0) {
+          fire();
+          return;
+        }
+        rearm(armTotal, waitMs);
+      };
+      armTotal();
       return;
     }
     // Self-rearming silence timer, the same shape `withIsolatedImplDeadline`
     // uses: sleep until the last-seen event would age out, then re-read — if the
     // stage reported meanwhile, sleep again for the remainder. One live timer,
-    // no polling.
+    // and a short poll only while a human card is actually open.
     const armIdle = () => {
-      const waitMs = (observation.lastEventAtMs ?? startedAt) + timeoutMs - Date.now();
+      if (humanPending()) {
+        rearm(armIdle, Math.min(VERIFY_PAUSE_RECHECK_MS, timeoutMs));
+        return;
+      }
+      const anchor = Math.max(observation.lastEventAtMs ?? startedAt, lastPauseSeen ?? 0);
+      const waitMs = anchor + timeoutMs - Date.now();
       if (waitMs <= 0) {
         fire();
         return;
       }
-      timer = setTimeout(armIdle, waitMs);
-      (timer as { unref?: () => void }).unref?.();
+      rearm(armIdle, waitMs);
     };
     armIdle();
   });
+  type Raced =
+    | { kind: "work"; result: ToolResult }
+    | { kind: "work-threw"; err: unknown }
+    | { kind: "timeout"; result: ToolResult };
+  const work: Promise<Raced> = runVerifyOrchestration(verifyAgent, {
+    abortSignal: controller.signal,
+    onProgress,
+  }).then(
+    (result): Raced => ({ kind: "work", result }),
+    (err): Raced => ({ kind: "work-threw", err }),
+  );
   try {
-    return await Promise.race([
-      runVerifyOrchestration(verifyAgent, { abortSignal: controller.signal, onProgress }),
-      timeout,
-    ]);
+    const raced = await Promise.race<Raced>([work, timeout.then((result): Raced => ({ kind: "timeout", result }))]);
+    if (firedMessage === null) {
+      if (raced.kind === "work-threw") throw raced.err;
+      // `timeout` can only settle via `fire()`, which sets `firedMessage` first.
+      return (raced as { result: ToolResult }).result;
+    }
+    const salvaged = await salvageAbortedVerifyOutput(work, runId, sprintN);
+    return {
+      success: false,
+      output: salvaged,
+      error: `verify-timeout: ${firedMessage}${describeVerifySalvage(salvaged)}`,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[sprint-runner] verify stage threw (sprint ${sprintN}, run ${runId}): ${message}`);
@@ -580,6 +699,95 @@ export async function runVerifyWithWatchdog(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * How often the watchdog re-checks while a blocking human card is open.
+ *
+ * A pause ENDS without emitting anything the watchdog can observe, so the end has
+ * to be sampled. One unref'd timer, alive only while a card is open; the silence
+ * window then restarts from the last sampled pause moment, i.e. within this
+ * interval of the human's answer.
+ */
+const VERIFY_PAUSE_RECHECK_MS = 5_000;
+
+/**
+ * How long an aborted verify stage gets to hand back its partial report.
+ *
+ * Bounded because an aborted turn is not guaranteed to settle at all — the
+ * watchdog's own doc notes the hung op may leak in the background. Override with
+ * MUONROI_SPRINT_VERIFY_SALVAGE_MS.
+ */
+function getVerifySalvageGraceMs(): number {
+  return envPositiveInt("MUONROI_SPRINT_VERIFY_SALVAGE_MS", 30_000);
+}
+
+/**
+ * Recover whatever the aborted verify stage had produced.
+ *
+ * MEASURED: run `muc2joffe506` sprint 2 had verified the Docker stack, service
+ * health and `/api/health` (Phases 1-3) before it was cut, and
+ * `sprints/2-verify.md` recorded nothing but the timeout text, because the
+ * timeout branch resolved `output: ""`. The payload was always there —
+ * `buildVerifyAgent.runTaskRequest` returns the truncated output of a killed turn
+ * — the race just discarded it. Returns `""` when the aborted work hands nothing
+ * back inside the grace, and says so in the log (never silently).
+ */
+async function salvageAbortedVerifyOutput(
+  work: Promise<{ kind: string; result?: ToolResult; err?: unknown }>,
+  runId: string,
+  sprintN: number,
+): Promise<string> {
+  const graceMs = getVerifySalvageGraceMs();
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const grace = new Promise<null>((resolve) => {
+    graceTimer = setTimeout(() => resolve(null), graceMs);
+    (graceTimer as { unref?: () => void }).unref?.();
+  });
+  try {
+    const settled = await Promise.race([work, grace]);
+    if (settled === null) {
+      logger.error("orchestrator", "[sprint-runner] aborted verify stage handed back no partial report in time", {
+        runId,
+        sprintN,
+        graceMs,
+      });
+      return "";
+    }
+    if (settled.kind === "work-threw") {
+      const err = settled.err;
+      logger.error("orchestrator", "[sprint-runner] aborted verify stage rejected instead of returning a partial", {
+        runId,
+        sprintN,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
+      return "";
+    }
+    return (settled.result?.output ?? "").trim();
+  } catch (err) {
+    logger.error("orchestrator", "[sprint-runner] salvaging the aborted verify payload failed", {
+      runId,
+      sprintN,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+    });
+    return "";
+  } finally {
+    if (graceTimer) clearTimeout(graceTimer);
+  }
+}
+
+/**
+ * The one sentence that tells a reader of `<n>-verify.md` how to read the payload
+ * that follows a timeout: it is what the stage HAD established, not a verdict.
+ */
+function describeVerifySalvage(salvaged: string): string {
+  if (salvaged.length === 0) return "; the stage handed back no partial report";
+  return (
+    `; the stage's partial report was kept (${salvaged.length} chars) — read it as a PARTIAL verification ` +
+    "(what it did establish, and what it could not run), never as a verdict"
+  );
 }
 
 /** @internal Test-only: reset CB-2 retry state for a given runId. */
@@ -3537,8 +3745,12 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       criteriaUnmet: iter.criteriaUnmet,
       finishedAt: new Date().toISOString(),
     });
-    const verifyReport =
-      (verifyResult.error?.trim() ? verifyResult.error : (verifyResult.output ?? "")).trim() || "(no verify output)";
+    // BOTH channels, not either/or. A stage the watchdog cut still carries the work
+    // it had done in `output` (see `salvageAbortedVerifyOutput`); this used to take
+    // `error` and drop it, which is how run muc2joffe506's three verified phases
+    // became the single word ERROR. `buildVerifyReportBody` keeps a single-channel
+    // result byte-identical to before.
+    const verifyReport = buildVerifyReportBody({ error: verifyResult.error, output: verifyResult.output });
     // S4 — only when the verify-fix loop actually ran something: with it
     // disabled or never triggered, this report stays byte-identical to before
     // S4 (no addendum line for a loop that never acted).
@@ -3565,8 +3777,14 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       sprintN,
       `# Sprint ${sprintN} verify — ${verifyVerdict} (score ${verdict.score.toFixed(2)})\n${verifyFixNote}${structureNote}\n\`\`\`\n${verifyReport.slice(0, 8000)}\n\`\`\`\n`,
     );
-  } catch {
-    /* non-critical — sprint artifacts are a review surface, never derail the loop */
+  } catch (err) {
+    // Non-critical — sprint artifacts are a review surface, never derail the loop.
+    // Still logged: a swallowed write is how a review surface goes quietly missing.
+    console.error(
+      `[sprint-runner] could not persist the sprint ${sprintN} outcome/verify artifacts (run ${ctx.runId}): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
   }
 
   // Emit ProgressSnapshot on sprint boundary so the user sees rolling progress.
@@ -3808,10 +4026,23 @@ function buildVerifyAgent(ctx: DriverContext, cwd: string): VerifyAgentLike {
       // writing into a channel it has no business in, and the next notice
       // someone adds would have to be filtered all over again.
       const releaseNagSuppression = beginRecallNagSuppression();
+      // ── The no-human boundary ─────────────────────────────────────────────
+      // Declared at the same one place, for the same reason. This turn runs
+      // through `ctx.processMessageFn`, i.e. as a normal top-level turn, so it
+      // inherits the MAIN tool set — `ask_user` included, with a live handler
+      // behind it (use-app-logic.tsx:3217 wires a real blocking card). Nobody is
+      // watching a card opened from inside an autonomous sprint stage. Measured,
+      // run `muc2joffe506` sprint 2: one `ask_user` at 14:50:21.922Z burned the
+      // whole 600s silence budget, the stage was recorded `verify: "ERROR"`, and
+      // the card was finally answered 10.5 hours later. The scope removes the
+      // tool for the duration of this turn (registry.ts) and the prompt tells the
+      // model what to do instead (buildVerifyTaskPrompt's unattended directive).
+      const releaseUnattended = beginUnattendedTurn();
       let turn: CollectedNestedTurn;
       try {
         turn = await collectNestedTurn(ctx.processMessageFn(req.prompt));
       } finally {
+        releaseUnattended();
         releaseNagSuppression();
       }
       const output = turn.output;

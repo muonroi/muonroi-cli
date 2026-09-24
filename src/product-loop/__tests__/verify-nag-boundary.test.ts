@@ -145,6 +145,7 @@ vi.mock("../cost-scoper.js", () => ({
 vi.mock("../../providers/runtime.js", () => ({ detectProviderForModel: vi.fn(() => "anthropic") }));
 
 import { runCouncil } from "../../council/index.js";
+import { isUnattendedTurn } from "../../orchestrator/unattended-turn.js";
 import { runVerifyOrchestration } from "../../verify/orchestrator.js";
 import { CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
 import { evaluateDoneGate } from "../done-gate.js";
@@ -159,6 +160,13 @@ describe("sprint-runner call site — the verify turn declares itself machine-re
   let projectCwd: string;
   /** Sampled INSIDE the verify turn's own stream, which is what matters. */
   let suppressedDuringVerify: boolean | null;
+  /**
+   * Same sampling, for the no-human boundary. `ask_user` must not be reachable
+   * from the verify turn: measured, run `muc2joffe506` sprint 2 called it at
+   * 14:50:21.922Z and the card was answered 10.5 HOURS later, after the stage's
+   * 600s budget had already recorded `verify: "ERROR"`.
+   */
+  let unattendedDuringVerify: boolean | null;
 
   function makeSpec(): ProductSpec {
     return {
@@ -186,6 +194,7 @@ describe("sprint-runner call site — the verify turn declares itself machine-re
     flowDir = mkdtempSync(join(tmpdir(), "nag-flow-"));
     projectCwd = mkdtempSync(join(tmpdir(), "nag-cwd-"));
     suppressedDuringVerify = null;
+    unattendedDuringVerify = null;
     vi.clearAllMocks();
     // biome-ignore lint/suspicious/noExplicitAny: vitest mock handle
     // biome-ignore lint/suspicious/noExplicitAny: vitest mock handle
@@ -227,6 +236,7 @@ describe("sprint-runner call site — the verify turn declares itself machine-re
       processMessageFn: vi.fn(async function* (prompt: string) {
         if (prompt.includes("verify please")) {
           suppressedDuringVerify = isRecallNagSuppressed();
+          unattendedDuringVerify = isUnattendedTurn();
           yield { type: "content", content: `ran the gates\n${VERIFY_PASS_MARKER}\n` };
           return;
         }
@@ -244,6 +254,11 @@ describe("sprint-runner call site — the verify turn declares itself machine-re
     // The scope is per-turn, not sticky: a leaked scope would silently mute the
     // nag for the rest of the session, which is a different bug.
     expect(isRecallNagSuppressed()).toBe(false);
+    // The verify turn is also declared UNATTENDED, so `createBuiltinTools` leaves
+    // `ask_user` out of its tool set (registry.ts).
+    expect(unattendedDuringVerify).toBe(true);
+    // A leaked unattended scope would strip `ask_user` from every later chat turn.
+    expect(isUnattendedTurn()).toBe(false);
   }, 90_000);
 
   it("releases the scope even when the verify stream throws", async () => {
@@ -272,5 +287,6 @@ describe("sprint-runner call site — the verify turn declares itself machine-re
     );
 
     expect(isRecallNagSuppressed()).toBe(false);
+    expect(isUnattendedTurn()).toBe(false);
   }, 90_000);
 });

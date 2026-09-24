@@ -71,6 +71,13 @@ const COULD_NOT_RUN_PATTERNS: ReadonlyArray<{ kind: GateCouldNotRunSignal["kind"
   },
   // POSIX sh, measured: `sh: line 1: definitely-not-a-real-cmd: command not found`
   { kind: "launcher_missing", re: /^[^\n]*\bcommand not found\b[^\n]*/m },
+  // GNU `which`, measured verbatim on the Windows host of run muc2joffe506 while
+  // the verify stage probed for the browser tool its own prompt demanded:
+  //   which: no agent-browser in (/mingw64/bin:/usr/bin:/c/Users/phila/bin:...)
+  // The lookahead keeps the ~3KB PATH out of `evidence`, which is quoted into a
+  // human-facing reason, while still requiring the ` in (` context so model prose
+  // saying "which: no idea" cannot match.
+  { kind: "launcher_missing", re: /\bwhich: no \S+(?= in \()/ },
   // Windows, when the file exists but is not executable.
   { kind: "launcher_missing", re: /\bis not recognized as the name of a cmdlet\b[^\n]*/ },
   // npm, measured: `npm error Missing script: "test"`

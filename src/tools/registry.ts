@@ -14,6 +14,7 @@ import type { AskUserAskInfo, AskUserOption } from "../orchestrator/ask-user.js"
 import { requestProactiveCompact } from "../orchestrator/compact-request.js";
 import { requestCouncilConvene } from "../orchestrator/council-request.js";
 import { canonicalizeBashCommand } from "../orchestrator/tool-args-hash.js";
+import { isUnattendedTurn } from "../orchestrator/unattended-turn.js";
 import {
   analyzeImageFromSource,
   askVisionProxy,
@@ -358,8 +359,16 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // go/no-go before implementing). The CLI does NOT synthesise options or decide
   // the branch: question, options, and default all come from the model's input.
   // execute() BLOCKS until the human answers; the answer becomes the tool result.
-  // Registered only when a UI answerer is wired (opts.askUser present).
-  if (opts?.askUser) {
+  // Registered only when a UI answerer is wired (opts.askUser present) AND the
+  // turn is not a machine-driven stage. `isUnattendedTurn()` is the second half
+  // of the same contract the field doc states: a card nobody is watching can
+  // never be answered, so the tool must not be offered. `/ideal`'s verify stage
+  // runs as a normal top-level turn (sprint-runner.buildVerifyAgent →
+  // ctx.processMessageFn), so `opts.askUser` is a live closure there — the scope
+  // is what distinguishes it from a chat turn. See unattended-turn.ts for the
+  // measured incident (run muc2joffe506: one ask_user cost a 600s budget and
+  // discarded three verified phases).
+  if (opts?.askUser && !isUnattendedTurn()) {
     const askUser = opts.askUser;
     tools.ask_user = dynamicTool({
       description:
