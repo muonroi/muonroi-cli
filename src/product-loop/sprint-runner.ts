@@ -288,31 +288,45 @@ export interface VerifyBudget {
  * `verifyVerdict === "PASS"`, that one number kept `CriteriaMet` at 0 for every
  * sprint of all four runs and the goal gate never executed in production at all.
  *
- * WHY SCALED-FROM-BASELINE AND NOT AN IDLE WINDOW. The neighbouring isolated
- * implementation stage was converted from a flat budget to silence-plus-ceiling
- * (`withIsolatedImplDeadline`), and the same signal is wired here — this
- * stage's `onProgress` is handed straight to `runTaskRequest` as its
- * `onActivity` (`verify/orchestrator.ts:138`). But the two stages differ in the
+ * WHY SCALED-FROM-BASELINE AND NOT A CONSTANT IDLE WINDOW. The neighbouring
+ * isolated implementation stage was converted from a flat budget to
+ * silence-plus-ceiling (`withIsolatedImplDeadline`), and the same signal is wired
+ * here — this stage's `onProgress` is handed straight to `runTaskRequest` as its
+ * `onActivity` (`verify/orchestrator.ts:164`). But the two stages differ in the
  * DENSITY of that signal, and density is what makes an idle rule work:
  *
- *   - `onActivity` fires in exactly one place, on `part.type === "tool-call"`
- *     (`stream-runner.ts:993`) — when the model EMITS a call, not while the call
- *     runs. Nothing is emitted during a tool's execution.
- *   - On the impl stage that is dense: 196 events across 900s, a mean gap of
+ *   - On the impl stage it is dense: 196 events across 900s, a mean gap of
  *     4.6s (measured, run `mtv9v1xu7615`). Silence there really is silence.
  *   - On the verify stage the dominant cost IS one tool call — `dotnet test`
- *     across ~36 assemblies — so the longest silent gap is most of the stage,
- *     and it is precisely the quantity that grows with the codebase. An idle
- *     window would have to exceed the longest single command, i.e. be tuned to
- *     the same growing number the flat budget got wrong. It would reproduce this
- *     defect in a subtler form, and cut a green `dotnet test` mid-run.
+ *     across ~36 assemblies — so the longest silent gap is a large fraction of
+ *     the stage, and it is precisely the quantity that grows with the codebase.
+ *     A CONSTANT idle window would have to exceed the longest single command,
+ *     i.e. be tuned to the same growing number the flat budget got wrong.
  *
- * So the budget is derived from a measurement of that same command set instead:
- * `captureVerifyFloorBaseline` already runs the project's build and test
- * commands once, at run start, before any sprint has touched the tree. Activity
- * IS still observed here — it is reported in the timeout message (see
- * `buildVerifyTimeoutMessage`), it just does not decide, because on this stage
- * it cannot.
+ * So the window is not a constant: it is derived from a measurement of that same
+ * command set. `captureVerifyFloorBaseline` already runs the project's build and
+ * test commands once, at run start, before any sprint has touched the tree, and
+ * inside `/ideal` `runVerifyWithWatchdog` arms that derived number as a SILENCE
+ * window rather than a total.
+ *
+ * WHAT THE ACTIVITY SIGNAL IS FOR, AND THE DEFECT THAT MADE IT DECORATIVE. The
+ * sentence that stood here said activity "does not decide, because on this stage
+ * it cannot". That was written while the signal was structurally EMPTY: the
+ * `onActivity` this stage passes was dropped by the implementation on the other
+ * side (`buildVerifyAgent.runTaskRequest` took only `req`), so the only events
+ * ever recorded were the parent's own preparation beats — the last of which,
+ * "Running verify sub-agent", fires immediately BEFORE the child starts. A silence
+ * window anchored on that is a TOTAL budget on the child wearing a silence label,
+ * and it cut run `muc2joffe506` sprint 1 while the child was 6.3x inside the bound.
+ *
+ * With the callback honoured, the density question is answerable by measurement
+ * instead of argument. That run's child session `9f04faf649b3` logged 76
+ * `tool_call` and 77 `tool_result` rows inside the window the parent was silent
+ * for, and the LARGEST gap between consecutive tool events was 125.8s against the
+ * 786.6s armed budget. The budget, multiplier, floor and ceiling are all unchanged
+ * by that wiring — what changed is that the window now measures the child. Pinned
+ * by `__tests__/verify-child-liveness.test.ts`, which also pins the property most
+ * easily lost here: a child that is alive and producing nothing is still cut.
  *
  * `baselineMs === null` (no baseline captured, an older record, a different
  * run's) yields exactly the previous behaviour: the 600s floor.
@@ -343,7 +357,16 @@ export function computeVerifyBudget(
  * has about it — so the timeout message can state facts instead of a narrative.
  */
 export interface VerifyStageObservation {
-  /** Progress notifications seen (orchestration beats + one per tool call started). */
+  /**
+   * Progress notifications seen: the orchestration's own preparation beats, PLUS
+   * one per forward-progress chunk from the verify child (its tool calls and tool
+   * results — see `CollectNestedTurnOptions.onActivity`).
+   *
+   * The child half used to be missing, which is what made a healthy stage and a
+   * hung one the same observation. Run `muc2joffe506` sprint 1 reported "observed
+   * 4 stage activity event(s)" — the 4 preparation beats — while the child logged
+   * 302 rows in that same window and worked 9.7 min past the abandonment.
+   */
   events: number;
   /** `Date.now()` of the most recent one, or null when none ever arrived. */
   lastEventAtMs: number | null;
@@ -4320,7 +4343,13 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function buildVerifyAgent(ctx: DriverContext, cwd: string): VerifyAgentLike {
+/**
+ * Exported so the child-liveness test drives the PRODUCTION closure rather than a
+ * stand-in — the standard `maintain/__tests__/maintain-verify-turn-failure.test.ts`
+ * already holds itself to ("exercises the production closure … rather than a
+ * stand-in"). The live path is sprint-runner.ts:1914; this changes visibility only.
+ */
+export function buildVerifyAgent(ctx: DriverContext, cwd: string): VerifyAgentLike {
   let sandbox: SandboxSettings = {} as SandboxSettings;
   return {
     getCwd: () => cwd,
@@ -4332,7 +4361,29 @@ function buildVerifyAgent(ctx: DriverContext, cwd: string): VerifyAgentLike {
       if (ctx.detectVerifyRecipe) return ctx.detectVerifyRecipe();
       return null; // Treat as fail-closed — CB-3 will halt on sprint 1.
     },
-    runTaskRequest: async (req) => {
+    // ── BOTH of these used to be dropped here ─────────────────────────────────
+    // `verify/orchestrator.ts:164` calls this with THREE arguments —
+    // `(taskRequest, options.onProgress, options.abortSignal)` — and the
+    // implementation took only `req`, so the second and third went on the floor.
+    //
+    // `onActivity` is the CHILD's liveness: without it the verify silence watchdog
+    // had nothing from the child to measure and fell back to the parent's own
+    // preparation beats, the last of which ("Running verify sub-agent") is emitted
+    // immediately BEFORE the child starts — a silence window anchored there is a
+    // TOTAL budget on the child wearing a silence label.
+    //
+    // `abortSignal` is the watchdog's CANCELLATION: `runVerifyWithWatchdog` calls
+    // `controller.abort()` before it resolves, and with the signal discarded nothing
+    // ever stopped the collection loop, so the abandoned child kept burning tokens
+    // (measured: ~10 min and 125 further rows past the abandonment on run
+    // `muc2joffe506` sprint 1). The two are one defect and are fixed together: the
+    // activity half stops the watchdog firing on healthy children, which makes the
+    // firings that remain far likelier to be genuinely hung ones — exactly the case
+    // where the abort has to land.
+    //
+    // See `CollectNestedTurnOptions` for both, including why the signal is honoured
+    // by unwinding the stream rather than passed down (nothing below takes one).
+    runTaskRequest: async (req, onActivity, abortSignal) => {
       // If a host process loop is wired, run the verify prompt through it. Otherwise
       // return a deterministic synthetic result so the loop can still complete in tests.
       if (!ctx.processMessageFn) {
@@ -4367,7 +4418,7 @@ function buildVerifyAgent(ctx: DriverContext, cwd: string): VerifyAgentLike {
       const releaseUnattended = beginUnattendedTurn();
       let turn: CollectedNestedTurn;
       try {
-        turn = await collectNestedTurn(ctx.processMessageFn(req.prompt));
+        turn = await collectNestedTurn(ctx.processMessageFn(req.prompt), { onActivity, abortSignal });
       } finally {
         releaseUnattended();
         releaseNagSuppression();
