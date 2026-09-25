@@ -2,6 +2,7 @@ import { stat } from "fs/promises";
 import path from "path";
 import { ripgrep } from "ripgrep";
 import type { ToolResult } from "../types/index";
+import { normalizeMsysDrivePath } from "./write-scope.js";
 
 const MAX_MATCHES = 100;
 const MAX_LINE_LENGTH = 2000;
@@ -100,7 +101,26 @@ export async function executeGrep(params: GrepParams, cwd: string): Promise<Tool
     };
   }
 
-  const searchPath = params.path ? (path.isAbsolute(params.path) ? params.path : path.join(cwd, params.path)) : cwd;
+  // An MSYS drive spelling (`/d/src`) is what the bash tool PRINTS on Windows, so
+  // the model hands it straight back here. `path.isAbsolute` is true for it on
+  // win32, so it used to be taken as already-absolute and `stat` then tested the
+  // current-drive resolution (`D:\d\src`) — which does not exist, dropping into
+  // the catch below and handing ripgrep the unresolvable spelling as its target.
+  // Measured before the fix: a search whose native spelling returned
+  // `Found 1 matches` returned `{success:true, output:"No matches found.\n(Some
+  // paths were inaccessible and skipped)"}`. A search root that never resolved
+  // reads to the model as "the code is not here", and nothing in the result says
+  // otherwise — the single worst failure shape a search tool has.
+  //
+  // Normalised ONCE here, so the search root and the fallback target below can
+  // never disagree about what the caller's path means. `write-scope.ts` owns the
+  // function; this module imports the fact rather than restating it.
+  const requestedPath = params.path === undefined ? undefined : normalizeMsysDrivePath(params.path);
+  const searchPath = requestedPath
+    ? path.isAbsolute(requestedPath)
+      ? requestedPath
+      : path.join(cwd, requestedPath)
+    : cwd;
 
   let searchCwd: string;
   let searchTarget: string | undefined;
@@ -114,7 +134,7 @@ export async function executeGrep(params: GrepParams, cwd: string): Promise<Tool
     }
   } catch {
     searchCwd = cwd;
-    searchTarget = params.path;
+    searchTarget = requestedPath;
   }
 
   const args = buildArgs({ ...params, path: searchTarget });

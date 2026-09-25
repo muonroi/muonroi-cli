@@ -12,7 +12,7 @@ import { checkCatastrophicCommand, type SafetyBlockResult } from "../utils/permi
 import type { SandboxMode, SandboxSettings } from "../utils/settings.js";
 import { posixToNative, type ResolvedShell, resolveShell, type ShellSettings } from "../utils/shell";
 import { nextBashRunId, recordBashRun, stripAnsi } from "./bash-output-cache.js";
-import { describeCwdDrift } from "./write-scope.js";
+import { describeCwdDrift, normalizeMsysDrivePath } from "./write-scope.js";
 
 const MAX_TAIL_BYTES = 8_192;
 const MAX_BACKGROUND_PROCESSES = 8;
@@ -654,14 +654,34 @@ export class BashTool {
     return this.cwd;
   }
 
+  /**
+   * Move the tool cwd — the anchor every later relative path in the session
+   * resolves against, and the value `stream-runner.ts` propagates to sub-agents.
+   *
+   * The MSYS spelling is normalised FIRST because `path.isAbsolute("/c/x")` is
+   * TRUE on win32: the guard below passed such a path through untouched, and
+   * `existsSync` then tested the CURRENT-drive resolution instead. Measured: a
+   * `setCwd("/c/Users/.../msys-probe-X")` naming a directory that exists threw
+   * `path does not exist` because what got tested was `D:\c\Users\...`. The
+   * in-band `cd` handler above never had this hole — it runs `posixToNative`
+   * (utils/shell.ts:171) whenever the resolved shell is POSIX — but `setCwd` is
+   * called straight from the orchestrator (`orchestrator.ts:889`, reached from
+   * `use-app-logic.tsx` on project adoption) and bypasses that path entirely.
+   *
+   * Neither guard's CONDITION changes: on win32 both spellings were already
+   * `isAbsolute`-true, and on POSIX `normalizeMsysDrivePath` is identity, so
+   * `/d/x` stays an ordinary absolute path. What changes is only WHICH path the
+   * existence check tests, which path is stored, and which path a refusal names.
+   */
   setCwd(next: string): void {
-    if (!path.isAbsolute(next)) {
+    const spelled = normalizeMsysDrivePath(next);
+    if (!path.isAbsolute(spelled)) {
       throw new Error(`setCwd: path must be absolute, got: ${next}`);
     }
-    if (!existsSync(next)) {
-      throw new Error(`setCwd: path does not exist: ${next}`);
+    if (!existsSync(spelled)) {
+      throw new Error(`setCwd: path does not exist: ${spelled}`);
     }
-    this.cwd = next;
+    this.cwd = spelled;
   }
 
   getToolDescription(): string {
