@@ -2380,6 +2380,25 @@ async function* runResume(
     return { runId: resolvedRunId, stage: "halted", success: false, reason: "aborted" };
   }
 
+  // Past every guard above, so this run has a usable manifest and is not
+  // aborted — i.e. it owns the workspace focus exactly as a fresh run does.
+  //
+  // `runHotPath` (:444) and `runMaintain` (:761) already claimed the pointer;
+  // resume did NOT, and resume is the path a user takes when a session-boot
+  // skeleton is holding the slot. Measured on `qa-platform`: `/ideal status`
+  // reported "the next /ideal run takes the pointer over", the user then ran
+  // `/ideal resume muc2joffe506`, the run drove correctly for 12 minutes — and
+  // `.muonroi-flow/state.md` still read `muc126520fb1`, so every reader of the
+  // Active Run slot (pil/layer5-context.ts:67, orchestrator/flow-resume.ts:42,
+  // ui/slash/{compact,clear}.ts, flow/warning-persist.ts:65) kept seeing the
+  // skeleton. The claim is conditional in the same way, so resuming can never
+  // steal the slot from another real run.
+  await claimActiveRunSlot(opts.flowDir, resolvedRunId).catch((err) => {
+    console.error(
+      `[ideal] could not claim the Active Run pointer for ${resolvedRunId} on resume: ${(err as Error)?.message}`,
+    );
+  });
+
   // Surface the Resume Digest so the user sees where the run stopped and what
   // resuming will do — the whole point of giving the digest real content.
   {

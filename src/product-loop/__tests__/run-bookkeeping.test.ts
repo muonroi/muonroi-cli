@@ -223,6 +223,36 @@ describe("createRun / Active Run ordering", () => {
     await claimActiveRunSlot(flowDir, run);
     expect(await getActiveRunId(flowDir)).toBe(run);
   });
+
+  // The three cases above drive `claimActiveRunSlot` DIRECTLY, which is how the
+  // wiring gap below survived review: the mechanism was proven and no test asked
+  // whether `/ideal resume` calls it. Measured on `qa-platform` — `/ideal status`
+  // announced "the next /ideal run takes the pointer over", the user ran
+  // `/ideal resume muc2joffe506`, the run drove correctly, and
+  // `.muonroi-flow/state.md` still read the skeleton id `muc126520fb1`.
+  // `runHotPath` and `runMaintain` claimed it; `runResume` did not.
+  it("resume claims the slot from a skeleton holder — the CALL SITE, not the function", async () => {
+    const flowDir = await tmpFlowDir();
+    const resumable = await seedHealthyRun(flowDir, "the run the user resumes");
+    const skeleton = await seedHeaderOnlyRun(flowDir);
+    await setActiveRunId(flowDir, skeleton);
+    expect(await getActiveRunId(flowDir)).toBe(skeleton);
+
+    await drain(runProductLoop(makeOpts({ flowDir, subcommand: "resume", runId: resumable })));
+
+    expect(await getActiveRunId(flowDir)).toBe(resumable);
+  });
+
+  it("resume does not steal the slot from another usable run", async () => {
+    const flowDir = await tmpFlowDir();
+    const incumbent = await seedHealthyRun(flowDir, "a real run already holding focus");
+    const other = await seedHealthyRun(flowDir, "the run being resumed");
+    await setActiveRunId(flowDir, incumbent);
+
+    await drain(runProductLoop(makeOpts({ flowDir, subcommand: "resume", runId: other })));
+
+    expect(await getActiveRunId(flowDir)).toBe(incumbent);
+  });
 });
 
 // ── Defect 3 — `Manifest missing` must name the next step ───────────────────
