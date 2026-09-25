@@ -1,7 +1,12 @@
 import { existsSync } from "fs";
 import path from "path";
 import { getCurrentLspSettings } from "../utils/settings";
-import { createWorkspaceLspManager, summarizeLspDiagnostics, type WorkspaceLspManager } from "./manager";
+import {
+  createWorkspaceLspManager,
+  describeLspDiagnostics,
+  type LspDiagnosticDetailOptions,
+  type WorkspaceLspManager,
+} from "./manager";
 import type {
   ImpactOfChangeResult,
   LspDiagnosticFile,
@@ -71,8 +76,14 @@ export function isLspToolEnabled(_cwd: string): boolean {
   return settings.enabled && settings.tool;
 }
 
-export function summarizeDiagnostics(diagnostics: LspDiagnosticFile[]): string | null {
-  return summarizeLspDiagnostics(diagnostics);
+/**
+ * Per-diagnostic detail (file:line:col, severity, rule code, message) under a
+ * count header — what a BLOCKING gate or a write ack must show so the agent can
+ * fix the errors instead of guessing. `max` bounds the rendered lines; callers
+ * pass LSP_DETAIL_MAX_GATE / LSP_DETAIL_MAX_ACK from ./manager.
+ */
+export function describeDiagnostics(diagnostics: LspDiagnosticFile[], opts: LspDiagnosticDetailOptions): string | null {
+  return describeLspDiagnostics(diagnostics, opts);
 }
 
 export async function shutdownWorkspaceLspManager(cwd: string): Promise<void> {

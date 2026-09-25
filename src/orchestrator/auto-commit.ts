@@ -101,7 +101,8 @@ export async function gateStagedPaths(
   if (!isCommitGateEnabled()) return { ok: true };
   try {
     const { readFile } = await import("node:fs/promises");
-    const { syncFileWithLsp, summarizeDiagnostics } = await import("../lsp/runtime.js");
+    const { syncFileWithLsp, describeDiagnostics } = await import("../lsp/runtime.js");
+    const { LSP_DETAIL_MAX_GATE } = await import("../lsp/manager.js");
 
     // Per-file diagnostics wait. The LSP default (1.5s) is fine for a WARM
     // server (diagnostics cached) but a COLD tsserver loading the project on
@@ -140,7 +141,14 @@ export async function gateStagedPaths(
       return { ok: true };
     }
     if (errorFiles.length === 0) return { ok: true };
-    const summary = summarizeDiagnostics(errorFiles) ?? `${errorFiles.length} file(s) have LSP errors`;
+    // NAME the diagnostics, don't just count them. A bare count ("6 LSP issues ·
+    // 6 errors") is what wedged /ideal run muc2joffe506 for ten minutes across
+    // four blocked commits — the agent had nothing to act on, so it edited blind
+    // and the count went 6 → 6 → 6 → 7. errorFiles is already filtered to
+    // severity 1 by blockingErrorsForFile, so nothing here can read as a warning.
+    const summary =
+      describeDiagnostics(errorFiles, { cwd, max: LSP_DETAIL_MAX_GATE }) ??
+      `${errorFiles.length} file(s) have LSP errors`;
     return { ok: false, summary };
   } catch (err) {
     logger.error("orchestrator", "gate failed open", {

@@ -1,7 +1,8 @@
 import { createTwoFilesPatch } from "diff";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { dirname, isAbsolute, resolve } from "path";
-import { summarizeDiagnostics, syncFileWithLsp } from "../lsp/runtime";
+import { LSP_DETAIL_MAX_ACK } from "../lsp/manager";
+import { describeDiagnostics, syncFileWithLsp } from "../lsp/runtime";
 import type { LspDiagnosticFile } from "../lsp/types";
 import type { FileTracker } from "./file-tracker.js";
 import { blockWriteIfOutOfScope } from "./write-scope.js";
@@ -150,7 +151,10 @@ export async function writeFile(
     const diff = computeDiff(filePath, before, content);
     const verb = before === "" ? "Created" : "Updated";
     const lspDiagnostics = await syncFileWithLsp(cwd, full, content, true, true).catch(() => [] as LspDiagnosticFile[]);
-    const lspSummary = summarizeDiagnostics(lspDiagnostics);
+    // Name the diagnostics, don't just count them: the measured blind-edit loop
+    // (/ideal run muc2joffe506) STARTED at an edit ack that said only
+    // "6 LSP issues · 6 errors". Errors sort first, warnings are labelled.
+    const lspSummary = describeDiagnostics(lspDiagnostics, { cwd, max: LSP_DETAIL_MAX_ACK });
     return {
       success: true,
       output: `${verb} ${filePath} (+${diff.additions} -${diff.removals})${lspSummary ? `\n${lspSummary}` : ""}`,
@@ -235,7 +239,7 @@ export async function editFile(
 
     const diff = computeDiff(filePath, before, after);
     const lspDiagnostics = await syncFileWithLsp(cwd, full, after, true, true).catch(() => [] as LspDiagnosticFile[]);
-    const lspSummary = summarizeDiagnostics(lspDiagnostics);
+    const lspSummary = describeDiagnostics(lspDiagnostics, { cwd, max: LSP_DETAIL_MAX_ACK });
     return {
       success: true,
       output: `Edited ${filePath} (+${diff.additions} -${diff.removals})${lspSummary ? `\n${lspSummary}` : ""}`,

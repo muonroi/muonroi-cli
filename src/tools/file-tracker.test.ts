@@ -6,7 +6,7 @@ import { editFile, readFile, writeFile } from "./file";
 import { FileTracker } from "./file-tracker";
 
 vi.mock("../lsp/runtime", () => ({
-  summarizeDiagnostics: () => "",
+  describeDiagnostics: () => null,
   syncFileWithLsp: async () => [],
 }));
 
