@@ -105,8 +105,19 @@ const CATASTROPHIC_PATTERNS: ReadonlyArray<{ pattern: RegExp; reason: string }> 
  * `null` means the command is safe to proceed.
  */
 export interface SafetyBlockResult {
-  /** Machine-readable kind for routing to the right askcard layout. */
-  kind: "catastrophic" | "dangerous" | "git-safety" | "empty-bash";
+  /**
+   * Machine-readable kind for routing to the right askcard layout.
+   *
+   * `checkCatastrophicCommand` is the only producer of this shape, so
+   * `"catastrophic"` is the only value it can carry. The other block kinds
+   * (`dangerous`, `git-safety`, `destructive-revert`, `empty-bash`) never
+   * travel through this interface — they reach the askcard layer as the
+   * `BLOCKED (<kind>):` output prefix written by `_prefixBlock` in
+   * `src/tools/registry.ts` and parsed back into `SafetyBlockKind` by
+   * `src/orchestrator/safety-intercept.ts`. That union, not this field, is
+   * the full block vocabulary.
+   */
+  kind: "catastrophic";
   /** Human-readable reason explaining why it was blocked. */
   reason: string;
   /** The original command text that was blocked. */
@@ -129,69 +140,6 @@ export function checkCatastrophicCommand(command: string): SafetyBlockResult | n
     }
   }
   return null;
-}
-
-/**
- * Check a command against the "dangerous" patterns used by `toolNeedsApproval`.
- * These are less severe than catastrophic but should still prompt for approval
- * in safe / auto-edit modes.
- *
- * Returns a SafetyBlockResult or null if safe.
- */
-export function checkDangerousCommand(command: string): SafetyBlockResult | null {
-  const dangerousPatterns: RegExp[] = [
-    // Filesystem destruction
-    /rm\s+-rf?\s+\/(?!tmp|var\/tmp)/i,
-    // Unrestricted chmod
-    /chmod\s+(?:777|a\+[rwx])/i,
-    // Code injection
-    /eval\s*\(/i,
-    /exec\s*\(/i,
-    // External network fetches (non-local)
-    /curl\s+https?:\/\/(?!127\.0\.0\.1|localhost)/i,
-    /wget\s+https?:\/\/(?!127\.0\.0\.1|localhost)/i,
-    // Process substitution with external commands
-    /\$\([^)]*(?:curl|wget|nc|socat)[^)]*\)/i,
-    // Writing to /etc (besides allowed subdirs)
-    /\bchown\s+root/i,
-  ];
-  for (const pattern of dangerousPatterns) {
-    if (pattern.test(command)) {
-      return {
-        kind: "dangerous",
-        reason: `Command matched dangerous pattern: ${pattern.source}`,
-        command,
-      };
-    }
-  }
-  return null;
-}
-
-/**
- * Check if a command is a safety-blocked git operation (push-on-red, broad staging).
- */
-export function checkGitSafetyCommand(command: string, gitSafetyKey: string): SafetyBlockResult | null {
-  // Lazy import to avoid circular deps at module level
-  const { analyzeGitCommand, checkPushGate, checkSensitiveStaging } = require_inline_safety_deps();
-  const gt = analyzeGitCommand(command);
-  if (gt.isPush) {
-    const gate = checkPushGate(gitSafetyKey);
-    if (gate.blocked) {
-      return {
-        kind: "git-safety",
-        reason: `git push blocked: ${gate.failed.join(", ")}`,
-        command,
-      };
-    }
-  }
-  return null;
-}
-
-// Inline require to avoid circular dependency at module load.
-function require_inline_safety_deps() {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const mod = require("../tools/git-safety.js") as typeof import("../tools/git-safety.js");
-  return mod;
 }
 
 /**
