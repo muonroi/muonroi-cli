@@ -5,7 +5,7 @@ import { LSP_DETAIL_MAX_ACK } from "../lsp/manager";
 import { describeDiagnostics, syncFileWithLsp } from "../lsp/runtime";
 import type { LspDiagnosticFile } from "../lsp/types";
 import type { FileTracker } from "./file-tracker.js";
-import { blockWriteIfOutOfScope } from "./write-scope.js";
+import { blockWriteIfOutOfScope, normalizeMsysDrivePath } from "./write-scope.js";
 
 export interface FileDiff {
   filePath: string;
@@ -22,8 +22,22 @@ export interface FileResult {
   lspDiagnostics?: LspDiagnosticFile[];
 }
 
+/**
+ * The one boundary every file tool routes its target through.
+ *
+ * The MSYS normalisation happens HERE, before containment, so `write-scope.ts`
+ * and this module cannot disagree about what a path means. `write-scope.ts` owns
+ * the function (it already owns `canonicalize`, i.e. "what does this path really
+ * mean") and applies it inside `canonicalize` too — the same one-owner shape the
+ * two guards already use for `getCommitRunRoot()`.
+ *
+ * Without it, `isAbsolute("/d/x")` is true on win32 and the path passed through
+ * UNCHANGED: never joined to cwd, never corrected, and `path.resolve` downstream
+ * prefixed the current drive (`D:\d\x`, which does not exist).
+ */
 function resolvePath(filePath: string, cwd: string): string {
-  return isAbsolute(filePath) ? filePath : resolve(cwd, filePath);
+  const spelled = normalizeMsysDrivePath(filePath);
+  return isAbsolute(spelled) ? spelled : resolve(cwd, spelled);
 }
 
 function computeDiff(filePath: string, before: string, after: string): FileDiff {

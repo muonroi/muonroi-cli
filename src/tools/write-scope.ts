@@ -122,14 +122,81 @@ export function loadExtraWriteRoots(runRoot: string): string[] {
   return roots;
 }
 
+/** True for exactly one ASCII letter — the only thing a Windows drive can be named. */
+function isAsciiLetter(ch: string | undefined): boolean {
+  if (ch === undefined || ch.length !== 1) return false;
+  return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z");
+}
+
 /**
- * Canonical form of `p` for comparison: realpath the deepest ancestor that
- * EXISTS (so a not-yet-created write target still resolves through symlinked
- * parents, e.g. macOS `/var` -> `/private/var`) and re-append the missing tail.
+ * Rewrite an MSYS drive path to the drive-qualified form it means: `/d/x` ->
+ * `D:\x`. Identity on every other shape, and identity on every non-win32
+ * platform.
+ *
+ * ## Why this is needed at all (measured live, session 2a116648b48e)
+ *
+ * `path.isAbsolute("/d/sources/x")` is **true** on win32, so such a path used to
+ * pass through `resolvePath` in file.ts untouched; `path.resolve` then prefixed
+ * the CURRENT drive and produced `D:\d\sources\x`, which does not exist
+ * (`realpathSync` threw ENOENT). Containment then refused the write as "outside
+ * the run root" — true about the resolved path, and deeply misleading about the
+ * cause. The run made exactly 1 `edit_file` call and 82 `bash` calls after it.
+ *
+ * The spelling is not the model inventing something: the bash tool on Windows is
+ * git bash and prints MSYS paths, so the model reads `/d/sources/...` in its own
+ * tool output and reuses it. This is the recurring case, not an edge one.
+ *
+ * ## The shape, and what is deliberately left alone
+ *
+ * Matched: a single ASCII letter between slashes at the very START — MSYS's own
+ * spelling of a drive root. Each exclusion below was measured on win32 first:
+ *
+ *   - `/tmp/x`, `/usr/lib`, `/dev/null` — `path.resolve` gives `D:\tmp\x` etc.,
+ *     drive-relative just the same, but "tmp" is not a drive letter and inventing
+ *     a T: drive would be a guess. These keep the existing behaviour (and the
+ *     refusal they earn now says the target does not exist, see below).
+ *   - `//server/share`, `//server/share/f.txt` — UNC. `path.resolve` gives
+ *     `\\server\share\`, an already-correct absolute path with nothing to fix.
+ *   - `//d/x` — resolves to `\\d\x\`, a UNC path whose SERVER is "d", NOT drive
+ *     D. The leading DOUBLE slash is the whole difference, which is why this
+ *     anchors on `p[0] === "/"` followed immediately by a letter.
+ *   - `/dd/x`, `/1/x` — first segment is not a single letter.
+ *   - `\d\x` — resolves to `D:\d\x`, i.e. drive-relative too, but MSYS never
+ *     emits backslashes, so the spelling carries no MSYS intent; on win32 a
+ *     leading backslash legitimately means "root of the current drive".
+ *   - a BARE `/d` with no trailing slash — too ambiguous to touch, and pointless:
+ *     the shape names no file, so no file tool can have a legitimate target of
+ *     it. Requiring the trailing slash keeps the matched shape exactly MSYS's own
+ *     spelling of a drive ROOT prefix.
+ *
+ * Stated as three positive character tests rather than a regex on purpose: the
+ * pre-commit `biome check --write` hook rewrites a negated character class that
+ * contains a literal backslash (`[...\\-]` -> `[...-]`), silently changing the
+ * semantics. There is no pattern here for it to rewrite.
+ *
+ * `platform` is an ARGUMENT (default `process.platform`) so tests drive both
+ * platforms without mutating a global — same shape as
+ * `src/verify/provisioning-platform.ts`.
+ */
+export function normalizeMsysDrivePath(p: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== "win32") return p;
+  if (p.length < 3) return p;
+  if (p[0] !== "/") return p;
+  if (!isAsciiLetter(p[1])) return p;
+  if (p[2] !== "/") return p;
+  return path.win32.normalize(`${p[1].toUpperCase()}:${p.slice(2)}`);
+}
+
+/**
+ * Canonical form of `p` for comparison: normalise an MSYS drive spelling (so
+ * this module and file.ts can never disagree about what a path MEANS), then
+ * realpath the deepest ancestor that EXISTS (so a not-yet-created write target
+ * still resolves through symlinked parents, e.g. macOS `/var` -> `/private/var`)
+ * and re-append the missing tail.
  * Never throws — an unresolvable path falls back to `path.resolve`.
  */
 export function canonicalize(p: string): string {
-  const abs = path.resolve(p);
+  const abs = path.resolve(normalizeMsysDrivePath(p));
   const tail: string[] = [];
   let cur = abs;
   for (;;) {
@@ -199,7 +266,35 @@ export function resetWorktreeCache(): void {
   worktreeCache.clear();
 }
 
-export type WriteScopeReason = "outside-run-root" | "foreign-worktree";
+/**
+ * True when NO directory along `target` exists — not even its top-level one, so
+ * the deepest existing ancestor is the filesystem root itself.
+ *
+ * This separates two findings the guard used to report identically. A path that
+ * resolves fine and simply sits elsewhere is cwd drift, and saying so sends an
+ * agent somewhere useful. A path whose resolution exists at NO level is a
+ * spelling that did not resolve, and telling that agent to check its `cd` sends
+ * it away from the real problem — which is exactly what happened to the MSYS
+ * `/d/...` target (resolved to `D:\d\sources\...`; deepest existing ancestor
+ * `D:\`).
+ *
+ * It cannot misfire on a legitimate out-of-root write: a sibling repo's
+ * directories exist, so the walk stops on the first one.
+ */
+function resolvesNowhere(target: string): boolean {
+  const fsRoot = path.parse(target).root;
+  let cur = path.dirname(target);
+  for (;;) {
+    if (cur === fsRoot) return true;
+    if (existsSync(cur)) return false;
+    const parent = path.dirname(cur);
+    // Defensive: a path with no recognised root still terminates the walk.
+    if (parent === cur) return true;
+    cur = parent;
+  }
+}
+
+export type WriteScopeReason = "outside-run-root" | "foreign-worktree" | "unresolvable-target";
 
 export interface WriteScopeVerdict {
   ok: boolean;
@@ -261,7 +356,9 @@ export function checkWriteScope(absTarget: string): WriteScopeVerdict {
     return {
       ...base,
       ok: false,
-      reason: "outside-run-root",
+      // Same refusal either way — containment is NOT relaxed by this. What
+      // changes is only which FACT the message reports.
+      reason: resolvesNowhere(target) ? "unresolvable-target" : "outside-run-root",
       runWorktree: worktreeRootOfDir(runRoot),
       // Populated even though the message does not use it: the refusal LOG
       // prints this field, and reporting "<none>" for a path that is plainly
@@ -285,19 +382,51 @@ export function checkWriteScope(absTarget: string): WriteScopeVerdict {
   return { ...base, targetWorktree, runWorktree };
 }
 
-/** The operator- and agent-facing explanation of a refused write. */
+/**
+ * The operator- and agent-facing explanation of a refused write.
+ *
+ * Skeleton is fixed across all three reasons — `BLOCKED (write-scope)`, the
+ * requested path, the finding, `Nothing was written`, `Resolved target` — and only
+ * the finding and the advice that follows from it vary. The cwd-drift advice is
+ * NOT given for `unresolvable-target`: that path resolved nowhere, so pointing at
+ * a `cd` aims the reader at the wrong thing (measured: it aimed a live run at
+ * shell edits for 82 bash calls).
+ */
 export function describeWriteScopeBlock(requestedPath: string, v: WriteScopeVerdict): string {
-  const why =
-    v.reason === "foreign-worktree"
-      ? `it belongs to a DIFFERENT git worktree (${v.targetWorktree}) than the one this run was launched in (${v.runWorktree})`
-      : `it is OUTSIDE the directory this run was launched in (${v.runRoot})`;
+  const head =
+    `BLOCKED (write-scope): refused to write "${requestedPath}" — ` +
+    `${describeWriteScopeFinding(v)}. Nothing was written. Resolved target: ${v.target}. `;
+  if (v.reason === "unresolvable-target") {
+    return (
+      head +
+      `That is a resolution, not a location on disk: on Windows a POSIX-rooted spelling ` +
+      `(for example "/usr/x" or "/opt/x") counts as already-absolute, so the CURRENT drive ` +
+      `gets prefixed and a path that looks right lands somewhere nothing exists. ` +
+      `Re-check the spelling, then write using a path relative to ${v.runRoot} ` +
+      `or its drive-qualified absolute form.`
+    );
+  }
   return (
-    `BLOCKED (write-scope): refused to write "${requestedPath}" — ${why}. ` +
-    `Nothing was written. Resolved target: ${v.target}. ` +
+    head +
     `Your tool working directory has most likely drifted out of the launch directory via a \`cd\`, ` +
     `so a relative path now resolves somewhere else. Write only inside ${v.runRoot}; ` +
     `if you truly need to change that other directory, run the CLI from there instead.`
   );
+}
+
+/** The one-clause finding for each reason. Shared by the agent message and the log. */
+function describeWriteScopeFinding(v: WriteScopeVerdict): string {
+  if (v.reason === "foreign-worktree") {
+    return `it belongs to a DIFFERENT git worktree (${v.targetWorktree}) than the one this run was launched in (${v.runWorktree})`;
+  }
+  if (v.reason === "unresolvable-target") {
+    return (
+      `that path does not exist at any level — not even its top-level directory — ` +
+      `so the spelling did not resolve to a real location, and what it DID resolve to ` +
+      `is outside the directory this run was launched in (${v.runRoot})`
+    );
+  }
+  return `it is OUTSIDE the directory this run was launched in (${v.runRoot})`;
 }
 
 /**
