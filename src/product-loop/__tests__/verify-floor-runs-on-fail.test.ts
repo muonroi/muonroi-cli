@@ -40,7 +40,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  *    and preserves what it measured.
  * 2. A genuine regression (the floor's own test command failing) still fails,
  *    with the floor's evidence in the record.
- * 3. The verify-fix loop: a floor SKIP must not silence the model's own FAIL.
+ * 3. The verify-fix-loop interaction, in the direction concluded correct: the
+ *    measured case (model FAIL + GREEN floor) still triggers the loop exactly as
+ *    before, the newly reachable floor-FAILURE pairs adopt the floor's own
+ *    established skips rather than overriding them, and `cur = next` now carries a
+ *    FAIL round's floor evidence instead of erasing the previous round's.
  */
 
 import { readSprintOutcomes } from "../../flow/run-artifacts.js";
