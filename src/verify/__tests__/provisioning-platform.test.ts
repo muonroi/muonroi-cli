@@ -246,3 +246,98 @@ describe("findImpossibleProvisioning is narrow", () => {
     expect(findImpossibleProvisioning(["cd backend && .venv\\bin\\pip install -r r.txt"], "win32")).toHaveLength(1);
   });
 });
+
+/**
+ * A command that hands off to another OS or host makes NO claim about this host,
+ * so the win32 invariants do not apply to it.
+ *
+ * These four were measured against the shipped invariants and every one was a
+ * FALSE POSITIVE — a correct win32 command reported as impossible:
+ *
+ *   REJECTED  venv=1 msys=0  docker compose run --rm backend /opt/venv/bin/pip install -r requirements.txt
+ *   REJECTED  venv=0 msys=1  wsl -d Ubuntu -- bash -lc 'cd /d/sources/x && make deps'
+ *   REJECTED  venv=1 msys=0  ssh host 'cd /opt/app && ./venv/bin/pip install -e .'
+ *   REJECTED  venv=0 msys=1  docker run -v /c/Users/phila/app:/app node:20 npm ci
+ *
+ * Not hypothetical for the project these invariants were built for: qa-platform is
+ * a docker-compose project (`../recipe-merge.ts:73` records its `startCommand` as
+ * `docker compose up -d`), and this repo's own `CLAUDE.md` documents the harness
+ * fallback as `wsl -d Ubuntu -- bash -lc 'cd ~/muonroi-cli && …'`. The pattern is
+ * idiomatic here.
+ *
+ * The POSIX path inside a delegated command describes the CONTAINER, the WSL guest
+ * or the REMOTE host. Whether it is correct there is not decidable from the string
+ * and is not this predicate's question.
+ */
+describe("a command delegated to another platform is not judged by this one's invariants", () => {
+  it.each([
+    ["a linux container", "docker compose run --rm backend /opt/venv/bin/pip install -r requirements.txt"],
+    ["WSL", "wsl -d Ubuntu -- bash -lc 'cd /d/sources/x && make deps'"],
+    ["a remote host over ssh", "ssh host 'cd /opt/app && ./venv/bin/pip install -e .'"],
+    ["a container with a volume mount", "docker run -v /c/Users/phila/app:/app node:20 npm ci"],
+  ])("keeps a command delegated to %s", (_label, command) => {
+    expect(findImpossibleProvisioning([command], "win32")).toEqual([]);
+  });
+
+  it("recognises the delegating executable after a shell separator, not only at the start", () => {
+    const command = "cd frontend && docker compose run --rm api /opt/venv/bin/pip install -r requirements.txt";
+    expect(findImpossibleProvisioning([command], "win32")).toEqual([]);
+  });
+
+  it("requires the delegator to be the INVOKED command, not a word anywhere in the line", () => {
+    // `echo docker` must not launder an impossible path. The token has to be the
+    // command being invoked — start of string, or straight after a separator.
+    const command = "echo docker && .venv/bin/pip install -r requirements.txt";
+    expect(findImpossibleProvisioning([command], "win32")).toHaveLength(1);
+  });
+
+  it("scopes delegation PER ENTRY — one docker line cannot launder an impossible sibling", () => {
+    const list = ["docker compose run --rm backend /opt/venv/bin/pip install -r requirements.txt", IMPOSSIBLE_INSTALL];
+
+    // Only the second entry is reported...
+    const found = findImpossibleProvisioning(list, "win32");
+    expect(found).toHaveLength(1);
+    expect(found[0]?.command).toBe(IMPOSSIBLE_INSTALL);
+
+    // ...and one impossible non-delegated entry still costs the WHOLE list.
+    const merged = mergeStoredVerifyRecipe(stored({ installCommands: list }), derived, "win32");
+    expect(merged.installCommands).toEqual(DERIVED_INSTALL);
+    expect(merged.notes.some((n) => n.includes(IMPOSSIBLE_INSTALL))).toBe(true);
+    // The delegated entry is not accused of anything.
+    expect(merged.notes.some((n) => n.includes("docker compose run"))).toBe(false);
+  });
+
+  it.each([
+    // Same-host shells are NOT delegation — the invariants correctly still bind.
+    ["pwsh -c", "pwsh -c '.venv/bin/pip install -r requirements.txt'"],
+    ["cmd /c", "cmd /c .venv\\bin\\pip install -r requirements.txt"],
+    // KNOWN RESIDUAL FALSE POSITIVES, pinned so that widening the anchor is a
+    // deliberate, visible contract change rather than an accident. These ARE
+    // delegating commands that this module still judges by the host's invariants;
+    // the module header argues why each stays out of the delegator set.
+    ["a sudo-prefixed delegator", "sudo docker compose run --rm api /opt/venv/bin/pip install -r r.txt"],
+    ["an env-prefixed delegator", "env FOO=1 docker compose run --rm api /opt/venv/bin/pip install -r r.txt"],
+    ["kubectl exec", "kubectl exec deploy/api -- /opt/venv/bin/pip install -r r.txt"],
+  ])("still judges %s by this host's invariants", (_label, command) => {
+    expect(findImpossibleProvisioning([command], "win32")).toHaveLength(1);
+  });
+
+  it("a `host:/c/…` remote spec is not an MSYS host path, so rsync/scp are unaffected", () => {
+    // Measured, not assumed: the MSYS boundary requires the drive root to follow
+    // start-of-string or a shell separator, and here `/c/` follows `:`. So these
+    // never reached the residual surface at all.
+    expect(findImpossibleProvisioning(["rsync -a ./ host:/c/srv/app/"], "win32")).toEqual([]);
+    expect(findImpossibleProvisioning(["scp -r ./dist host:/d/srv/app"], "win32")).toEqual([]);
+  });
+
+  it("a list of only delegated commands keeps the record's deference intact", () => {
+    const list = [
+      "docker compose run --rm backend /opt/venv/bin/pip install -r requirements.txt",
+      "wsl -d Ubuntu -- bash -lc 'cd /d/sources/x && make deps'",
+    ];
+    const merged = mergeStoredVerifyRecipe(stored({ installCommands: list }), derived, "win32");
+
+    expect(merged.installCommands).toEqual(list);
+    expect(merged.notes).toEqual([]);
+  });
+});

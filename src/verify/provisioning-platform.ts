@@ -56,6 +56,64 @@
  * {@link findImpossibleProvisioning} takes the platform as an argument and never
  * reads `process.platform` itself.
  *
+ * ## Delegation: the invariants only bind a command that RUNS on this host
+ *
+ * The first shipped version judged every entry by the host's invariants, and that
+ * was wrong for a whole family of correct commands. Measured against those
+ * invariants — all four are valid win32 commands, all four were reported
+ * impossible:
+ *
+ *     REJECTED  venv=1 msys=0  docker compose run --rm backend /opt/venv/bin/pip install -r requirements.txt
+ *     REJECTED  venv=0 msys=1  wsl -d Ubuntu -- bash -lc 'cd /d/sources/x && make deps'
+ *     REJECTED  venv=1 msys=0  ssh host 'cd /opt/app && ./venv/bin/pip install -e .'
+ *     REJECTED  venv=0 msys=1  docker run -v /c/Users/phila/app:/app node:20 npm ci
+ *
+ * When a command hands off to a container, a WSL guest or a remote host, the POSIX
+ * path inside it describes THAT environment. It is not a claim about this host, so
+ * this host's invariants have nothing to say about it. Whether the path is right
+ * over there is not decidable from the string, and is not this module's question.
+ *
+ * This is live for the project the invariants were built for: qa-platform is a
+ * docker-compose project (`./recipe-merge.ts:73` records `docker compose up -d` as
+ * its `startCommand`), and this repo's own `CLAUDE.md` documents the harness
+ * fallback as `wsl -d Ubuntu -- bash -lc 'cd ~/muonroi-cli && …'`.
+ *
+ * Two properties make the exemption safe:
+ *
+ *  - **Anchored on the INVOKED executable**, never a substring. The delegator has
+ *    to sit at the start of the command or straight after a shell separator, so
+ *    `echo docker && .venv/bin/pip install …` is still rejected — a stray word
+ *    cannot disarm the check.
+ *  - **Scoped PER ENTRY.** A delegating entry is exempt; a non-delegating
+ *    impossible entry in the SAME list still triggers the wholesale fallthrough.
+ *    One `docker` line cannot launder an impossible sibling.
+ *
+ * ### What is deliberately NOT recognised (the residual false-positive surface)
+ *
+ * Every name below would also delegate, and a stored command using one is still
+ * judged by this host's invariants — i.e. it can still be a false positive. Each
+ * is excluded because it has no measured case in this repo or this project, and
+ * every added name widens the hole through which a genuinely impossible command
+ * passes unexamined:
+ *
+ *  - **Prefix-wrapped delegators**: `sudo docker …`, `env FOO=1 docker …`,
+ *    `winpty docker …`, `sshpass -p … ssh …`, `cmd /c wsl …`. The delegator is no
+ *    longer the invoked token, and loosening the anchor to "anywhere" is exactly
+ *    what lets `echo docker` through.
+ *  - **Other container/VM runners**: `nerdctl`, `kubectl exec`, `vagrant ssh`,
+ *    `lima`, `colima`, `multipass exec`, `ubuntu.exe run`.
+ *  - **Other remote transports**: `scp`, `rsync` with a `host:path` spec, `plink`,
+ *    `putty`.
+ *  - **Indirection that hides the handoff entirely**: `make deps`, `npm run
+ *    docker:deps`, `./scripts/provision.sh` — the delegation is inside a file this
+ *    module never reads, so no string test could see it.
+ *  - **Same-host shells**: `pwsh -c`, `powershell -c`, `cmd /c`. These are NOT
+ *    delegation — they run on this host, so the invariants correctly still apply.
+ *
+ * A miss here is recoverable and visible: the rejection is named in `notes` with
+ * the command and the invariant, so an operator can read exactly what was ignored
+ * and why, and the fallback list is re-derived from disk rather than stale.
+ *
  * Pure: no disk access, no globals, no mutation of the input.
  */
 
@@ -116,10 +174,54 @@ const INVARIANTS: readonly PlatformInvariant[] = [
 ];
 
 /**
+ * The command position a delegator has to occupy: the start of the command, or
+ * immediately after a shell separator.
+ *
+ * Stated POSITIVELY and assembled with `new RegExp`, for the same two reasons the
+ * MSYS invariant above is: a negated class would have to spell a literal backslash,
+ * which `biome check --write` rewrites (dropping it and widening the match), and one
+ * shared source string cannot drift between the patterns built from it.
+ *
+ * This anchor is the whole reason `echo docker && …` cannot disarm the check.
+ */
+const INVOKED = String.raw`(?:^|[\n;|&(])\s*`;
+
+/**
+ * Executables that hand the command off to another OS or host. The set is small on
+ * purpose — the module header lists what is excluded and why.
+ */
+const DELEGATORS: readonly RegExp[] = [
+  // `docker run`, `docker compose run`, `docker exec`, `docker-compose up`.
+  new RegExp(`${INVOKED}docker(?:-compose)?\\s`, "i"),
+  new RegExp(`${INVOKED}podman(?:-compose)?\\s`, "i"),
+  // `wsl -d Ubuntu -- …`, `wsl.exe …`.
+  new RegExp(`${INVOKED}wsl(?:\\.exe)?\\s`, "i"),
+  new RegExp(`${INVOKED}ssh\\s`, "i"),
+  // A POSIX shell invoked to run a command string: `bash -lc '…'`, `sh -c '…'`.
+  // Requires the `-…c` flag, so `bash install.sh` (a file this module cannot read)
+  // is not treated as delegation.
+  new RegExp(`${INVOKED}(?:bash|sh)\\s+-[A-Za-z]*c\\b`, "i"),
+];
+
+/**
+ * True when the command's INVOKED executable hands work to another OS or host, so
+ * this host's platform invariants do not bind it.
+ *
+ * Platform-independent by construction: it asks what the command does, not where it
+ * is running.
+ */
+function delegatesOffHost(command: string): boolean {
+  return DELEGATORS.some((shape) => shape.test(command));
+}
+
+/**
  * Every entry in `commands` that names a path impossible on `platform`.
  *
  * Empty when all entries are possible — which is the answer on every non-win32
  * platform today, since both invariants are win32-only.
+ *
+ * Entries that delegate off-host are skipped before the invariants are consulted,
+ * per entry, so one delegating command never excuses a non-delegating sibling.
  */
 export function findImpossibleProvisioning(
   commands: readonly string[],
@@ -128,6 +230,10 @@ export function findImpossibleProvisioning(
   const out: ImpossibleProvisioningCommand[] = [];
   for (const command of commands) {
     if (typeof command !== "string" || command.trim() === "") continue;
+    // A delegated command's POSIX paths describe the container / guest / remote
+    // host, not this one. Judging them by this host's invariants is the false
+    // positive this guard exists to prevent.
+    if (delegatesOffHost(command)) continue;
     const invariants = INVARIANTS.filter((rule) => rule.platforms.includes(platform) && rule.shape.test(command)).map(
       (rule) => rule.because,
     );
