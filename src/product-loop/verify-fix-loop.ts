@@ -556,28 +556,40 @@ export function computeVerifyFixTrigger(input: {
     return { shouldRun: true, identity: deriveFailureIdentity(input) };
   }
 
-  // A floor SKIP must not silence the model's own positive FAIL claim.
+  // ── NEW INPUT PAIRS, deliberately NOT special-cased ──────────────────────
   //
-  // The two skip returns below ("the user's build was already broken", "an
-  // un-runnable gate is not something a code fixer can close") both reason about
-  // what the FLOOR found. Until the floor ran on a model-reported FAIL they could
-  // never collide with one: the floor was gated on `PASS || UNKNOWN`, so a FAIL
-  // always fell through to the verify-verdict trigger further down and the loop
-  // ran. Now that the floor runs on every verdict, a floor skip would pre-empt
-  // that fall-through and cancel the fix round for a failure the floor never
-  // spoke to — the sub-agent's FAIL is about something else (in run
-  // muc2joffe506 sprint 1, a Phase 3 app start no floor command executes).
+  // The deterministic floor now runs on a model-reported FAIL/ERROR too
+  // (sprint-runner.ts), so two pairs reach this function that previously could
+  // not: a `VERIFY_FAIL` narration alongside a floor that ALSO failed with
+  // `pre_existing_build_only` or `gate-could-not-run`. Before, a FAIL carried no
+  // `floorDelta` at all and always fell through to the verify-verdict trigger
+  // below, so the loop ran; now the two skip returns can pre-empt that.
   //
-  // So the skip is declined when the model itself reported FAIL with output to
-  // act on — the exact condition the verify-verdict trigger below uses, stated
-  // here so the two cannot drift. UNKNOWN is deliberately NOT included: the floor
-  // has always run for it, so its skips are established behaviour, and an absent
-  // claim gives the fixer nothing the floor has not already ruled out.
-  const modelClaimedFailure = verifyVerdict === "FAIL" && verifyOutput.trim().length > 0;
-
+  // That pre-emption is the RIGHT outcome, and it is the reason the guard that
+  // used to sit here was removed. Both skips rest on the same measured fact: on a
+  // red build "no test result is attributable while it is red"
+  // (`describeFloorFailure`), and an un-runnable gate "produces no evidence"
+  // (`formatFloorDetail`) — so NOTHING a fixer round writes can be verified this
+  // sprint either way, whatever the sub-agent's narration said. Declining the skip
+  // would also mis-aim the round: `deriveFailureIdentity` keys it on the FLOOR's
+  // `gate_could_not_run` / excused-build reading, pointing a code fixer at an
+  // environment problem it cannot close — exactly the churn the `gate-could-not-run`
+  // skip below was written against.
+  //
+  // Nothing is lost by skipping: the cause reaches `deriveNextAction` through the
+  // floor evidence and comes out as a precise, human-actionable line. Measured on
+  // this very run, `.muonroi-flow/runs/muc2joffe506/state.md`: "Next action:
+  // Install the module the gate needs for the interpreter it uses, and declare it
+  // in that project's manifest: `"backend/.venv/Scripts/python.exe" -m pytest`
+  // never ran — No module named 'pydantic_core._pydantic_core'." A blind fixer
+  // round is strictly worse than that: the one measured model-FAIL fix round on
+  // this run (`sprints/1-verify-fix.json`) was `fixerSuccess: false` after
+  // 600,009ms with an unchanged failure key.
+  //
+  // The sprint that motivated running the floor on FAIL is unaffected either way —
+  // its floor PASSES, so neither skip fires and the loop runs exactly as before.
   if (floorDelta?.verdict === "fail" && floorDelta.failureKind === "build-failed") {
     if (floorDelta.buildAlreadyBroken === true && floorDelta.buildAttribution === "pre-existing") {
-      if (modelClaimedFailure) return { shouldRun: true, identity: deriveFailureIdentity(input) };
       return { shouldRun: false, skippedReason: "pre_existing_build_only" };
     }
     return { shouldRun: true, identity: deriveFailureIdentity(input) };
@@ -598,8 +610,9 @@ export function computeVerifyFixTrigger(input: {
       // reaches the next sprint as the `gate_could_not_run` carry-over reason,
       // where the implementation turn CAN declare the missing dependency in the
       // project's manifest.
+      // Reached on a model-reported FAIL too, now that the floor runs for one —
+      // see the NEW INPUT PAIRS note above for why the skip still stands there.
       case "gate-could-not-run":
-        if (modelClaimedFailure) return { shouldRun: true, identity: deriveFailureIdentity(input) };
         return { shouldRun: false, skippedReason: "not_actionable" };
       default:
         // "infra" (spawn error / timeout) — no evidence a code fixer can act on.
