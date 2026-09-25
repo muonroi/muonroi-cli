@@ -240,6 +240,36 @@ export interface SprintOutcome {
    * without its evidence cannot be acted on.
    */
   reason?: string;
+  /**
+   * The ONE line naming what would change this outcome, exactly as
+   * `deriveNextAction` derived it for `state.md`'s Resume Digest and the
+   * end-of-sprint transcript — persisted here so the machine-readable record is
+   * actionable on its own.
+   *
+   * `reason` narrows the CAUSE to a gate label; it names no action. Measured, run
+   * muc2joffe506 sprint 1: `{"failedCondition":"engineering_floor","reason":
+   * "verify_FAIL"}` while the verify stage's own narration reported the build, the
+   * 12/12 test suite and the lint gate all passing and failed only on a phase
+   * requiring a Docker daemon that was down. A reader of this file could not act
+   * on any of that, and the digest that COULD say it lives in `state.md`, which
+   * the next sprint overwrites.
+   */
+  nextAction?: string;
+  /** `deriveNextAction`'s `FixLocus` — where the change has to be made. */
+  fixLocus?: string;
+  /** Whether the next sprint could carry `nextAction` out by itself. */
+  sprintCanCarryIt?: boolean;
+  /**
+   * The deterministic floor's own verdict for this sprint's last verify pass —
+   * `pass` | `fail` | `unavailable`, or absent when no floor ran.
+   *
+   * Recorded SEPARATELY from `verify` because the two legitimately disagree and
+   * the disagreement is the information: `{"verify":"FAIL","floorVerdict":"pass"}`
+   * says the project's own build and test commands were measured green and the
+   * verify sub-agent still failed on something they do not cover. Collapsing that
+   * into one field is what made run muc2joffe506 sprint 1 unreadable.
+   */
+  floorVerdict?: "pass" | "fail" | "unavailable";
   criteriaMet: number;
   criteriaPartial: number;
   criteriaUnmet: number;

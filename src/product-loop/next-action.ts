@@ -48,7 +48,7 @@
  */
 
 import type { FloorCheckLike, FloorDelta } from "./verify-baseline.js";
-import type { VerifyVerdict } from "./verify-result.js";
+import { detectGateCouldNotRun, type VerifyVerdict } from "./verify-result.js";
 
 /**
  * Where the change that would alter the verdict has to be made.
@@ -108,6 +108,17 @@ export interface NextActionInput {
   floorDelta?: FloorDelta;
   /** The floor's per-command evidence, when a floor ran. */
   floorChecks?: FloorCheckLike[];
+  /**
+   * The verify sub-agent's own narration, when the caller has it.
+   *
+   * Read for exactly one purpose: when the floor PASSED and the sub-agent still
+   * reported failure, the failing thing is outside the floor's command set, and
+   * the only record of what it was is that narration. `detectGateCouldNotRun`
+   * (verify-result.ts) is run over it so an un-runnable gate the sub-agent hit —
+   * a missing launcher, module or script — is named as the ENVIRONMENT fact it is
+   * rather than blamed on the code. Never used to decide pass/fail.
+   */
+  verifyOutput?: string;
   /** Test trees measured on disk — see {@link TestRunnerEvidence}. */
   testRunnerEvidence?: readonly TestRunnerEvidence[];
   /**
@@ -287,6 +298,62 @@ function describeNoTestCommands(input: NextActionInput, sprintN: number): NextAc
   );
 }
 
+/**
+ * The floor MEASURED the project's own gates green and the verify sub-agent still
+ * reported failure — so whatever failed is outside what the floor executes.
+ *
+ * ## Why this needs its own message
+ *
+ * Until the floor ran on a model-reported FAIL this combination did not exist:
+ * `sprint-runner.ts` gated the floor on `PASS || UNKNOWN`, so a `VERIFY_FAIL`
+ * narration produced no measurement at all and the only thing anyone could be
+ * told was `reason: "verify_FAIL"` → "read the report". Measured, run
+ * `muc2joffe506` sprint 1: the narration reported "Build ✓, Tests 12/12 ✓, Lint 0
+ * errors ✓" and failed at Phase 3 because the host's Docker daemon was down (the
+ * `docker-desktop` WSL distro was Stopped). Both halves of that are actionable and
+ * neither survived: `sprints/1-outcome.json` says only
+ * `{"failedCondition":"engineering_floor","reason":"verify_FAIL","criteriaUnmet":4}`.
+ *
+ * ## The locus, and why it is not `code`
+ *
+ * The floor cannot say what the sub-agent failed on, only that its own commands
+ * are green — so nothing here identifies a code change, and calling the locus
+ * `code` would assert one. Two facts are in evidence and they disagree: a
+ * measurement says the build and tests pass, a narration says the sprint failed.
+ * Adjudicating that is exactly what `applyVerifyFloor` refuses to do, and this
+ * module must not do it either by implying the sprint can fix it by writing code.
+ * `human` is the honest locus — someone has to read which phase failed and decide
+ * whether it is a real defect or an environment gap — EXCEPT when the narration
+ * itself carries a measured un-runnable-gate line, which names the environment.
+ *
+ * Returns null when the floor did not pass, or when the verdict is not a positive
+ * failure claim (nothing to reconcile).
+ */
+function describeFloorGreenModelRed(input: NextActionInput, sprintN: number): NextActionAdvice | null {
+  if (input.floorDelta?.verdict !== "pass") return null;
+  if (input.verifyVerdict !== "FAIL" && input.verifyVerdict !== "ERROR") return null;
+
+  const ran = (input.floorChecks ?? []).filter((c) => c.ok).length;
+  const measured = ran > 0 ? `${ran} deterministic gate(s) PASSED (build/typecheck + tests, measured)` : "";
+
+  // The same detector the floor runs over its OWN command output, here over the
+  // sub-agent's narration — one vocabulary for "it could not run", not a second.
+  const couldNotRun = input.verifyOutput ? detectGateCouldNotRun(input.verifyOutput) : null;
+  if (couldNotRun) {
+    return advise(
+      `Fix the ENVIRONMENT the verify stage could not get past — ${oneLine(couldNotRun.evidence, MAX_EVIDENCE_CHARS)}. ${
+        measured ? `${measured}, so the code-level gates are green` : "The floor's own gates passed"
+      } and no code change makes that step run. Read ${verifyReportPath(sprintN)} for the phase it stopped in.`,
+      "environment",
+    );
+  }
+
+  return advise(
+    `${measured || "The floor's own gates passed"}, and the verify stage still reported ${input.verifyVerdict} on a phase the floor does not execute — read ${verifyReportPath(sprintN)} to see which one, and decide whether it is a defect or an environment gap. Re-running sprint ${sprintN} runs the same un-measured phase again, and the floor's measurement does not lift the verify stage's own failure.`,
+    "human",
+  );
+}
+
 /** `verify_FAIL` with no floor evidence to go on. */
 function describeVerifyVerdictOnly(input: NextActionInput, sprintN: number): NextActionAdvice {
   if (input.verifyVerdict === "ERROR") {
@@ -331,7 +398,13 @@ function describeEngineeringFloor(input: NextActionInput, sprintN: number): Next
 
   // `verify_FAIL` (and any future reason): the floor's own evidence is the most
   // specific thing anyone has, so it is preferred over the gate's coarse label.
-  return describeFloorFailure(input, sprintN) ?? describeVerifyVerdictOnly(input, sprintN);
+  // A floor that PASSED is evidence too — it rules the code-level gates out — so
+  // it is read before falling back to the verdict on its own.
+  return (
+    describeFloorFailure(input, sprintN) ??
+    describeFloorGreenModelRed(input, sprintN) ??
+    describeVerifyVerdictOnly(input, sprintN)
+  );
 }
 
 /**

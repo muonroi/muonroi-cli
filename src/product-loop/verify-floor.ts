@@ -784,8 +784,11 @@ function needsRawEvidence(delta: FloorDelta): boolean {
 function formatFloorDetail(result: Omit<VerifyFloorResult, "detail">, testsSkipped: boolean): string {
   if (result.verdict === "unavailable") {
     return result.unavailableReason === "disabled"
-      ? "Deterministic verify floor DISABLED (MUONROI_SPRINT_VERIFY_FLOOR=0) — this PASS rests on the verify sub-agent's narration alone, with no exit code behind it."
-      : "Deterministic verify floor could not run: no build or test command was discoverable in the working tree. This PASS rests on the verify sub-agent's narration alone, with no exit code behind it.";
+      ? // "verdict", not "PASS": the floor is now run for every verdict the verify
+        // sub-agent produces (sprint-runner.ts), so this note stands beside a FAIL
+        // and an ERROR too, where "this PASS rests on…" would be a false statement.
+        "Deterministic verify floor DISABLED (MUONROI_SPRINT_VERIFY_FLOOR=0) — this verdict rests on the verify sub-agent's narration alone, with no exit code behind it."
+      : "Deterministic verify floor could not run: no build or test command was discoverable in the working tree. This verdict rests on the verify sub-agent's narration alone, with no exit code behind it.";
   }
 
   const lines = result.checks.map((c) => {

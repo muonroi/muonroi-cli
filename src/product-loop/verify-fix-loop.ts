@@ -246,6 +246,8 @@ export interface FloorRecheckOutcome {
   ranOk: boolean;
   floorDelta?: FloorDelta;
   floorChecks?: FloorCheck[];
+  /** See `VerifyPassOutcome.floorDetail` — folded into `cur` alongside the checks. */
+  floorDetail?: string;
   floorMustFixNote?: string;
 }
 
@@ -261,6 +263,13 @@ export interface VerifyPassOutcome {
   recipeFromVerify: VerifyRecipe | null;
   floorDelta?: FloorDelta;
   floorChecks?: FloorCheck[];
+  /**
+   * The floor's own formatted per-command record for this pass (`- [build] … →
+   * OK (Nms)`, `Rule applied: …`), carried so the sprint artifact can preserve
+   * the MEASUREMENT independently of the verdict. Not read by any decision in
+   * this module — a record, not a signal.
+   */
+  floorDetail?: string;
   floorMustFixNote?: string;
   /**
    * S6 — `project-registration-check.ts`'s result for this pass: whether a
@@ -547,8 +556,28 @@ export function computeVerifyFixTrigger(input: {
     return { shouldRun: true, identity: deriveFailureIdentity(input) };
   }
 
+  // A floor SKIP must not silence the model's own positive FAIL claim.
+  //
+  // The two skip returns below ("the user's build was already broken", "an
+  // un-runnable gate is not something a code fixer can close") both reason about
+  // what the FLOOR found. Until the floor ran on a model-reported FAIL they could
+  // never collide with one: the floor was gated on `PASS || UNKNOWN`, so a FAIL
+  // always fell through to the verify-verdict trigger further down and the loop
+  // ran. Now that the floor runs on every verdict, a floor skip would pre-empt
+  // that fall-through and cancel the fix round for a failure the floor never
+  // spoke to — the sub-agent's FAIL is about something else (in run
+  // muc2joffe506 sprint 1, a Phase 3 app start no floor command executes).
+  //
+  // So the skip is declined when the model itself reported FAIL with output to
+  // act on — the exact condition the verify-verdict trigger below uses, stated
+  // here so the two cannot drift. UNKNOWN is deliberately NOT included: the floor
+  // has always run for it, so its skips are established behaviour, and an absent
+  // claim gives the fixer nothing the floor has not already ruled out.
+  const modelClaimedFailure = verifyVerdict === "FAIL" && verifyOutput.trim().length > 0;
+
   if (floorDelta?.verdict === "fail" && floorDelta.failureKind === "build-failed") {
     if (floorDelta.buildAlreadyBroken === true && floorDelta.buildAttribution === "pre-existing") {
+      if (modelClaimedFailure) return { shouldRun: true, identity: deriveFailureIdentity(input) };
       return { shouldRun: false, skippedReason: "pre_existing_build_only" };
     }
     return { shouldRun: true, identity: deriveFailureIdentity(input) };
@@ -570,6 +599,7 @@ export function computeVerifyFixTrigger(input: {
       // where the implementation turn CAN declare the missing dependency in the
       // project's manifest.
       case "gate-could-not-run":
+        if (modelClaimedFailure) return { shouldRun: true, identity: deriveFailureIdentity(input) };
         return { shouldRun: false, skippedReason: "not_actionable" };
       default:
         // "infra" (spawn error / timeout) — no evidence a code fixer can act on.
@@ -1152,6 +1182,9 @@ export async function* runVerifyFixLoop(
             ...cur,
             floorDelta: cheap.floorDelta,
             floorChecks: cheap.floorChecks,
+            // Folded with the checks, never separately: a record that describes a
+            // different pass than `floorChecks` came from is worse than none.
+            floorDetail: cheap.floorDetail ?? cur.floorDetail,
             floorMustFixNote: cheap.floorMustFixNote ?? cur.floorMustFixNote,
           };
           const cheapKey = computeFailureKey(cheapIdentity);

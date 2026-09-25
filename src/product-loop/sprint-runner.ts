@@ -2774,6 +2774,13 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // done-gate's coarse `verify_FAIL` and the precise fact was discarded.
   let floorDeltaFinal: FloorDelta | undefined;
   let floorChecksFinal: FloorCheck[] | undefined;
+  // The floor's formatted per-command record for the LAST pass this sprint
+  // reached, persisted into `sprints/<n>-verify.md`. Hoisted for the same reason
+  // as the two above, and needed for one more: the floor's measured build/test
+  // results were previously absent from that artifact on EVERY path — it only
+  // ever reached `verifyResult.error` on a downgrade — so a sprint whose gates
+  // ran green left no record of it having happened at all.
+  let floorDetailFinal: string | undefined;
   // S6 — the final project-registration-check result for this sprint (the
   // last verify+floor pass the S4 loop reached), used to write
   // `sprints/<n>-structure.json` and a note in `sprints/<n>-verify.md`.
@@ -2992,24 +2999,63 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     // scored UNKNOWN and the floor never ran. Measured, run `mttwpmu8ee5b`: a
     // baseline costing 53s of real build+test work was captured and then never
     // read, both sprints ended `engineering_floor` / score 0, and the run shipped
-    // nothing. UNKNOWN is the absence of a claim, so exit codes may supply the
-    // verdict the model did not. A model-reported FAIL or ERROR is a positive
-    // claim and is never upgraded — see applyVerifyFloor's contract.
+    // nothing. It was then widened to `PASS || UNKNOWN` — and `FAIL`/`ERROR` were
+    // left out, which left the floor running only when the narration was
+    // OPTIMISTIC. A pessimistic narration was accepted with no measurement at all.
+    //
+    // ## Why the floor now runs on EVERY verdict
+    //
+    // Measured, run `muc2joffe506` sprint 1: the verify sub-agent's own narration
+    // reported "Build ✓, Tests 12/12 ✓, Lint 0 errors ✓, `npm run verify` ✓" and
+    // ended `VERIFY_FAIL` because the host's Docker daemon was down (the
+    // `docker-desktop` WSL distro was Stopped) so its Phase 3 app-start could not
+    // run. `sprints/1-verify.md` carries NOT ONE floor line — no `- [build]`, no
+    // `- [test]`, no `Rule applied` — and `sprints/1-outcome.json` records
+    // `{"verify":"FAIL","failedCondition":"engineering_floor","reason":"verify_FAIL"}`.
+    // The build and the test suite demonstrably passed and the record preserves no
+    // measured evidence of it. `sprints/1-verify-fix.json` shows the cost of that
+    // blindness: `failureKeyBefore: "verify_verdict:FAIL:"` — the fix loop had no
+    // floor evidence to aim at and burned a 600s round.
+    //
+    // ## What the measurement is allowed to MEAN
+    //
+    // Running the floor is NOT the same as letting it adjudicate. `applyVerifyFloor`
+    // already draws that line and this call site does not redraw it: `UNKNOWN` is the
+    // ABSENCE of a claim so exit codes may supply the verdict the model did not,
+    // while `FAIL`/`ERROR` are POSITIVE claims the floor's command set cannot
+    // disprove — the sub-agent may have failed on something the floor never
+    // executes, which is exactly the Phase 3 app start above. So a green floor on a
+    // model FAIL is RECORDED, never an upgrade. The measurement's value here is
+    // evidentiary, not adjudicative: it lands in `sprints/<n>-verify.md`, it feeds
+    // `deriveNextAction` (which can then say the code-level gates are green and name
+    // the environment fact instead of "verify_FAIL"), and it reaches the verify-fix
+    // loop, whose rounds previously overwrote real floor evidence with `undefined`.
     let floorDelta: FloorDelta | undefined;
     let floorChecks: FloorCheck[] | undefined;
     let floorMustFixNoteLocal: string | undefined;
     /**
+     * The floor's own formatted record for this pass (`- [build] … → OK (Nms)`,
+     * `Rule applied: …`), persisted verbatim into `sprints/<n>-verify.md`.
+     *
+     * It is deliberately NOT written to `verifyResult.error`: `parseVerifyResult`
+     * maps ANY non-empty `error` to ERROR, so routing the floor's measurement
+     * through that field would rewrite the verdict one line later (the same trap
+     * the upgrade branch below documents). A separate channel keeps the record and
+     * the verdict independent, which is the whole point — the measurement must
+     * exist for every sprint without deciding any of them.
+     */
+    let floorDetailLocal: string | undefined;
+    /**
      * The DISK-DERIVED test commands this pass resolved, or undefined when the
-     * floor never got to resolve any (a model-reported FAIL/ERROR skips the floor
-     * entirely, and a floor that threw resolved nothing this caller can see).
-     * Consumed once, at the return — see `foldDerivedTestCommandsIntoRecipe`.
+     * floor resolved none (a floor that threw resolved nothing this caller can
+     * see). Consumed once, at the return — see `foldDerivedTestCommandsIntoRecipe`.
      */
     let floorTestCommands: string[] | undefined;
     // S6 — set inside the project-registration check below; carried into the
     // returned VerifyPassOutcome so the verify-fix loop can trigger on it even
     // when the floor (above) passed.
     let structureCheckResult: import("./project-registration-check.js").ProjectRegistrationCheckResult | undefined;
-    if (verifyVerdict === "PASS" || verifyVerdict === "UNKNOWN") {
+    {
       const verdictBeforeFloor = verifyVerdict;
       try {
         const { applyVerifyFloor } = await import("./verify-floor.js");
@@ -3027,6 +3073,9 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         verifyVerdict = applied.verdict;
         floorDelta = floor.delta;
         floorChecks = floor.checks;
+        // Recorded on EVERY path, including the model-FAIL one this block used to
+        // skip — that is the half of run muc2joffe506 sprint 1 the artifact lost.
+        floorDetailLocal = floor.detail;
         // A MEASUREMENT BEATS AN ASSERTION. `recipeFromVerify.coverage` is
         // otherwise a number the verify sub-agent typed into its own recipe JSON
         // (`normalizeVerifyRecipe`), which is the only thing the done-gate's
@@ -3073,13 +3122,24 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
             type: "content",
             content: `\n> [verify-floor] Sprint ${sprintN} verdict upgraded ${verdictBeforeFloor} → PASS — the verify agent emitted no verdict, but the project's own gates passed (${floor.checks.length} command(s), ${floor.elapsedMs}ms).\n`,
           };
+        } else if (floor.verdict === "pass" && (verdictBeforeFloor === "FAIL" || verdictBeforeFloor === "ERROR")) {
+          // The one combination this block could not previously reach, and the one
+          // whose wording matters most: the measurement is green and the verdict
+          // stays red. Saying "Deterministic gates PASSED" alone here would read as
+          // a contradiction of the sprint's own FAIL, so the line states both halves
+          // and why the floor is not entitled to lift the model's claim — the same
+          // reasoning `applyVerifyFloor` documents, restated where a human reads it.
+          yield {
+            type: "content",
+            content: `\n> [verify-floor] Sprint ${sprintN}: the project's own gates PASSED (${floor.checks.length} command(s), ${floor.elapsedMs}ms) — RECORDED, not an upgrade. The verify stage reported ${verdictBeforeFloor} on something the floor does not execute, and a green build does not disprove it.\n`,
+          };
         } else if (floor.verdict === "pass") {
           yield {
             type: "content",
             content: `\n> [verify-floor] Deterministic gates PASSED (${floor.checks.length} command(s), ${floor.elapsedMs}ms).\n`,
           };
         } else {
-          // "unavailable" — surfaced loudly so a PASS with no exit code behind it
+          // "unavailable" — surfaced loudly so a verdict with no exit code behind it
           // is never mistaken for a verified one.
           yield {
             type: "content",
@@ -3228,10 +3288,11 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     // carried an empty array.
     //
     // It is applied HERE rather than beside the coverage merge inside the floor
-    // branch above because that branch only runs for a PASS/UNKNOWN verdict: a
-    // model-reported FAIL skips it, and the unmerged recipe from such a pass
-    // overwrites the merged one (`cur = next` in verify-fix-loop.ts) — so the
-    // reason would go back to being dishonest on exactly the rounds that fail.
+    // branch above for belt-and-braces: the branch now runs on every verdict, but
+    // it is wrapped in a try/catch whose FAIL/ERROR path deliberately leaves the
+    // verdict alone, so a floor that throws still reaches this line with nothing
+    // resolved — and the unmerged recipe from such a pass would overwrite the
+    // merged one (`cur = next` in verify-fix-loop.ts).
     recipeFromVerify = await foldDerivedTestCommandsIntoRecipe(recipeFromVerify, floorTestCommands);
 
     return {
@@ -3241,6 +3302,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       structureCheck: structureCheckResult,
       floorDelta,
       floorChecks,
+      floorDetail: floorDetailLocal,
       floorMustFixNote: floorMustFixNoteLocal,
     };
   }
@@ -3299,6 +3361,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   if (initialVerifyPass.structureCheck) structureCheckFinal = initialVerifyPass.structureCheck;
   floorDeltaFinal = initialVerifyPass.floorDelta;
   floorChecksFinal = initialVerifyPass.floorChecks;
+  floorDetailFinal = initialVerifyPass.floorDetail;
 
   // ── S4 — bounded verify -> fix -> re-verify loop ─────────────────────────
   // A FAIL used to go straight to judgment, and the NEXT sprint re-planned from
@@ -3328,6 +3391,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         recipeFromVerify,
         floorDelta: initialVerifyPass.floorDelta,
         floorChecks: initialVerifyPass.floorChecks,
+        floorDetail: initialVerifyPass.floorDetail,
         floorMustFixNote: initialVerifyPass.floorMustFixNote,
         structureCheck: initialVerifyPass.structureCheck,
       },
@@ -3350,6 +3414,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
             ranOk: floor.verdict !== "unavailable",
             floorDelta: floor.delta,
             floorChecks: floor.checks,
+            floorDetail: floor.detail,
             floorMustFixNote: floorMustFixNoteLocal,
           };
         } catch (err) {
@@ -3410,6 +3475,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     // build must not leave the end-of-sprint message quoting the stale break.
     if (fixLoop.final.floorDelta) floorDeltaFinal = fixLoop.final.floorDelta;
     if (fixLoop.final.floorChecks) floorChecksFinal = fixLoop.final.floorChecks;
+    if (fixLoop.final.floorDetail) floorDetailFinal = fixLoop.final.floorDetail;
     verifyFixRecord = {
       version: 1,
       sprintN,
@@ -3899,6 +3965,11 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     verifyVerdict,
     floorDelta: floorDeltaFinal,
     floorChecks: floorChecksFinal,
+    // The sub-agent's narration, so a floor-green/model-red sprint can have the
+    // un-runnable gate it hit named from the narration's own measured line rather
+    // than reported as a code failure. Read only in that branch — see
+    // `NextActionInput.verifyOutput`.
+    verifyOutput: verifyResult.output ?? undefined,
     testRunnerEvidence: verdict.pass ? undefined : await measureTestRunnerEvidence(cwd),
   });
 
@@ -3935,6 +4006,19 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       // failed with verify=PASS and failedCondition=engineering_floor left the
       // cause unrecoverable from the artifacts, the DB and the logs alike.
       reason: verdict.reason ?? undefined,
+      // The same derivation `state.md`'s digest and the transcript line below
+      // show, persisted so the machine-readable record names an ACTION and not
+      // only a gate label. See `SprintOutcome.nextAction`.
+      nextAction: nextActionAdvice.action,
+      fixLocus: nextActionAdvice.locus,
+      sprintCanCarryIt: nextActionAdvice.sprintCanCarryIt,
+      // The floor's own verdict, alongside — never folded into `verify`, because
+      // `{"verify":"FAIL","floorVerdict":"pass"}` is a fact the reader needs.
+      // `floorDetailFinal` is set iff the floor RETURNED, and `runVerifyFloor`
+      // attaches a delta on exactly the pass/fail paths (the `unavailable` returns
+      // carry none), so the pair distinguishes all three outcomes from "no floor
+      // ran at all" without carrying a fourth parallel field.
+      floorVerdict: floorDetailFinal === undefined ? undefined : (floorDeltaFinal?.verdict ?? "unavailable"),
       criteriaMet: iter.criteriaMet,
       criteriaPartial: iter.criteriaPartial,
       criteriaUnmet: iter.criteriaUnmet,
@@ -3966,11 +4050,24 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         `[sprint-runner] could not format the project-registration note (sprint ${sprintN}, run ${ctx.runId}): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    // The MEASUREMENT, in its own section, above the narration.
+    //
+    // Run muc2joffe506 sprint 1's report contains not one floor line — no
+    // `- [build]`, no `- [test]`, no `Rule applied` — because the floor's detail
+    // only ever reached this file through `verifyResult.error`, which is written
+    // on a DOWNGRADE alone. So a sprint whose gates ran green left no record of
+    // them having run, and a model-FAIL sprint ran no gates at all. Kept OUT of
+    // `verifyResult.error` on purpose: `parseVerifyResult` maps any non-empty
+    // error to ERROR, so a record routed through that field would rewrite the
+    // verdict it exists to stand beside.
+    const floorNote = floorDetailFinal
+      ? `\n## Deterministic verify floor\n\n\`\`\`\n${floorDetailFinal.slice(0, 4000)}\n\`\`\`\n`
+      : "";
     await writeSprintVerify(
       ctx.flowDir,
       ctx.runId,
       sprintN,
-      `# Sprint ${sprintN} verify — ${verifyVerdict} (score ${verdict.score.toFixed(2)})\n${verifyFixNote}${structureNote}\n\`\`\`\n${verifyReport.slice(0, 8000)}\n\`\`\`\n`,
+      `# Sprint ${sprintN} verify — ${verifyVerdict} (score ${verdict.score.toFixed(2)})\n${verifyFixNote}${structureNote}${floorNote}\n\`\`\`\n${verifyReport.slice(0, 8000)}\n\`\`\`\n`,
     );
   } catch (err) {
     // Non-critical — sprint artifacts are a review surface, never derail the loop.
