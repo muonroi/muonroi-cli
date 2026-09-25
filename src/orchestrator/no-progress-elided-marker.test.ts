@@ -25,8 +25,11 @@
  *      (`subagent-compactor.ts:928`) — 429, 1250, 280, so `sha1(input)` differs;
  *   2. the tool name alternates (`git_commit`, `git_commit`, `bash`);
  *   3. the guard's own escalation counter is inside its output text
- *      (`arg-guard.ts:226`, `:232`) — "N malformed tool calls in a row" — so
- *      `sha1(resultText)` differs on every strike, forever.
+ *      (`formatArgGuardMessage` in `arg-guard.ts`) — "N malformed tool calls in a
+ *      row" — so `sha1(resultText)` differed on every strike, forever. That third
+ *      component is since bounded at its source, for the sibling class's sake —
+ *      see `no-progress-keyless-args.test.ts`. It changes nothing here: this
+ *      class contributes no key at all, so its bound never depended on the text.
  *
  * Every step therefore registered a brand-new key, `allRepeats` was false, and
  * the streak reset to 0 each time. The diagnostics of the compactor and of the

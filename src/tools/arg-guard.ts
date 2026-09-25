@@ -65,6 +65,28 @@
  * treat a call this guard rejected as new information. Keep the two coherent:
  * anything added here as a NEW block class is still unbounded until that guard
  * can recognise it.
+ *
+ * ## …and a message must not defeat the bound either (measured 2026-09-25)
+ *
+ * That guard keys a call on `toolName + sha1(input) + sha1(resultText)`. The
+ * marker class contributes no key at all, but `missing-required-args` DOES, and
+ * for a call repeated verbatim the first two components are equal by
+ * construction — so the ONLY thing that could make two identical refused calls
+ * hash differently was this module's own escalation counter, rendered into the
+ * output. It grew without limit, which put the class permanently out of the
+ * structural rule's reach.
+ *
+ * The top rung of `formatArgGuardMessage` therefore carries no strike digits. A
+ * verbatim-repeated keyless call now ends its loop at strike 9 (pinned in
+ * `src/orchestrator/no-progress-keyless-args.test.ts`) instead of never — measured
+ * unbounded to 36 before the change. Any diagnostic added to a refusal here must
+ * stay bounded for the same reason.
+ *
+ * This class does NOT loop in practice: over the whole retained window of
+ * `~/.muonroi-cli/muonroi.db` (2026-09-11 .. 2026-09-25, 6,165 `tool_result`
+ * rows) it fired exactly 3 times, one per session, never twice in a row, each
+ * repaired on the next step — against 29/28/24/19-per-session for the marker
+ * class. So no terminator was built for it; only the variance was removed.
  */
 
 import { carriesElidedArgsMarker } from "../orchestrator/subagent-compactor.js";
@@ -221,9 +243,22 @@ function formatArgGuardMessage(
       : `BLOCKED (${kindToken}): ${toolName} was called without usable arguments — missing ${names}. ` +
         `The call was NOT executed. Supply a non-empty value, e.g. ${sampleCall(verdict, schema)}.`;
 
+  // The top rung deliberately does NOT interpolate `strike`. Every rung's text is
+  // component 3 of `createNoProgressGuard`'s novelty key
+  // (`toolName + sha1(input) + sha1(resultText)`, `no-progress-guard.ts`), and for
+  // the `missing-required-args` class — which, unlike the marker class, DOES
+  // contribute a key — the other two components are equal by construction when a
+  // call is repeated verbatim. So an unbounded count here was the sole reason two
+  // byte-identical refused calls hashed differently, and it put this class's loop
+  // permanently out of the structural rule's reach. Rungs 1 and 2 keep their
+  // counts: each fires at exactly one strike, so neither is unbounded.
+  //
+  // It says "at least 3", not "3": clamping the count would make the sentence
+  // false at strike 9. A bounded text must still be a true one, and nothing
+  // actionable is lost — this rung is already at maximum loudness.
   if (strike >= 3) {
     return (
-      `${head} [${strike} malformed tool calls in a row this session; none of them ran. ` +
+      `${head} [at least 3 malformed tool calls in a row this session; none of them ran. ` +
       `STOP issuing tool calls now and reply in plain text: say what you were trying to do and which argument values you do not have. ` +
       `Argument names must come from the tool schema you were shown, never from earlier tool-call arguments in this conversation.]`
     );

@@ -38,9 +38,16 @@
  *      of the arguments it replaced (`buildElidedArgsInput`) — the live
  *      calls carried 429, 1250 and 280, so `sha1(input)` differed every time;
  *   2. the tool name alternated (`git_commit`, `git_commit`, `bash`);
- *   3. the guard that refused them writes its own escalation counter into its
+ *   3. the guard that refused them wrote its own escalation counter into its
  *      output (`arg-guard.ts`: "N malformed tool calls in a row"), so
- *      `sha1(resultText)` differs on every strike, without limit.
+ *      `sha1(resultText)` differed on every strike, without limit. That one is
+ *      now fixed at its source: the ladder's top rung carries no strike digits,
+ *      so a refused call's text is stable from strike 3 on. It mattered most for
+ *      the guard's OTHER class (`missing-required-args`), which is keyed here
+ *      normally — for a verbatim repeat its tool name and `sha1(input)` are equal
+ *      by construction, so the counter was the sole reason it looked novel, and
+ *      the rule below could never reach it. It can now, at strike 9
+ *      (`no-progress-keyless-args.test.ts`; measured unbounded to 36 before).
  *
  * Three semantically identical, identically un-runnable calls therefore looked
  * like three discoveries. Narrowing any ONE of the three (dropping `${sz}`, say)

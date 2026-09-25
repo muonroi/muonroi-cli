@@ -26,9 +26,14 @@
  * Reproducing it needs no tuned thresholds, but it does need the live SHAPE.
  * Measured correction lengths against the wrappers' 500-char dedup minimum:
  *
- *   bash       strike 1 = 357   strike 2 = 508   strike 3 = 673
- *   grep       strike 1 = 367   strike 2 = 518   strike 3 = 683
- *   read_file  strike 1 = 396   strike 2 = 547   strike 3 = 712
+ *   bash       strike 1 = 357   strike 2 = 508   strike 3 = 682
+ *   grep       strike 1 = 367   strike 2 = 518   strike 3 = 692
+ *   read_file  strike 1 = 396   strike 2 = 547   strike 3 = 721
+ *
+ * (Re-measured 2026-09-25 through this same pipeline. Strike 3 grew by 9 chars
+ * when the top rung stopped interpolating the raw strike count — see
+ * `arg-guard.ts` and `no-progress-keyless-args.test.ts`. Strikes 1 and 2 are
+ * unchanged, and the 500-char conclusion below is unaffected.)
  *
  * So only a correction at strike ≥ 2 is long enough to be deduped, and two
  * corrections hash equal only at the SAME rung — which requires a successful
