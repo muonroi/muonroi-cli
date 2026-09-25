@@ -490,8 +490,13 @@ describe("sprint-runner — the floor runs on a model-reported FAIL, and the rec
     const report = readVerifyReport();
     expect(report).toContain("Deterministic verify floor");
     expect(report).toContain("Deterministic verify floor PASSED.");
-    expect(report).toMatch(/- \[build\] `bun run typecheck` → OK/);
-    expect(report).toMatch(/- \[test\] `bun run test` → OK/);
+    // The per-command ELAPSED TIME is part of what makes this section readable —
+    // "build OK (26724ms)" is how a reader sees that a build gate ran at all, and
+    // how long the failure path now costs. Pinned so a formatting change cannot
+    // drop it silently. Real shape, from run muc2joffe506 `sprints/2-verify.md`:
+    //   - [build] `cd frontend && npm run build` → OK (26724ms)
+    expect(report).toMatch(/- \[build\] `bun run typecheck` → OK \(\d+ms\)/);
+    expect(report).toMatch(/- \[test\] `bun run test` → OK \(\d+ms\)/);
     expect(report).toContain("Rule applied:");
 
     // Half 2 — and the sprint is still NOT verified. A green floor does not
@@ -529,7 +534,7 @@ describe("sprint-runner — the floor runs on a model-reported FAIL, and the rec
 
     const report = readVerifyReport();
     expect(report).toContain("Deterministic verify floor FAILED");
-    expect(report).toMatch(/- \[test\] `bun run test` → EXIT 1/);
+    expect(report).toMatch(/- \[test\] `bun run test` → EXIT 1 \(\d+ms\)/);
 
     const outcome = (await readSprintOutcomes(flowDir, RUN_ID))[0];
     expect(outcome.pass).toBe(false);
