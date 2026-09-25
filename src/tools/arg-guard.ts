@@ -41,7 +41,10 @@
  *    argument slot the marker lands in), never copied. One definition means a
  *    future change to the marker cannot leave a stale twin behind that silently
  *    stops matching — and the loop terminator below keys on the SAME predicate,
- *    so it can never count a different population than this guard blocks.
+ *    so it can never count a different population than this guard blocks. It
+ *    keys on the `__elided_note` KEY, not on the marker's sentence, because the
+ *    model reproduces the shape and invents the text; that is what decides which
+ *    of the two `ArgGuardKind`s a paraphrased marker gets (see below).
  *  - A blocked call NEVER reaches the underlying `execute`. Inertness is
  *    load-bearing: a marker shaped like real arguments would otherwise
  *    overwrite a source file with the marker text.
@@ -87,6 +90,16 @@
  * rows) it fired exactly 3 times, one per session, never twice in a row, each
  * repaired on the next step — against 29/28/24/19-per-session for the marker
  * class. So no terminator was built for it; only the variance was removed.
+ *
+ * Re-measured after the marker predicate widened (2026-09-25): all three of those
+ * blocks turned out to be PARAPHRASED markers — a `__elided_note` key holding a
+ * sentence the model invented, which the old text-matching predicate did not
+ * recognise. They are now `elision-marker-as-args`, i.e. the bounded class, so
+ * this class's live population over that window is zero. Same conclusion, more
+ * strongly: nothing here needs a terminator. The measurement and the three
+ * verbatim strings are in
+ * `src/orchestrator/no-progress-paraphrased-marker.test.ts`; the bound on this
+ * class's own text stays pinned in `no-progress-keyless-args.test.ts`.
  */
 
 import { carriesElidedArgsMarker } from "../orchestrator/subagent-compactor.js";

@@ -56,6 +56,15 @@
  * tool, so it contributes no key at all. It cannot reset the streak, and a step
  * made only of such calls counts as a repeat step.
  *
+ * `carriesElidedArgsMarker` recognises that population by the `__elided_note`
+ * KEY, not by the marker's sentence — which is what lets this rule reach a
+ * PARAPHRASED marker, the shape the model actually emits. All three of the
+ * window's `missing-required-args` blocks were paraphrases with an invented
+ * sentence and so a fresh `sha1(input)` on every step; no text-based predicate
+ * could ever have bounded them. See
+ * `src/orchestrator/no-progress-paraphrased-marker.test.ts` for the three live
+ * strings and the loop they now terminate.
+ *
  * Deliberately NOT suppressed: a step that ALSO makes a genuinely new call. The
  * measured recovery pattern (2026-09-09) is that most blocks are repaired on the
  * very next call, and a run that is getting somewhere alongside a malformed call

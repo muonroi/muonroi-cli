@@ -834,6 +834,16 @@ function stripAssistantReasoning(msg: ModelMessage): ModelMessage {
 const ELIDED_ARGS_PREFIX = "[earlier call args elided";
 
 /**
+ * The single key the marker object is written under — and the thing the model
+ * actually copies. It reproduces the SHAPE, inventing the sentence: see
+ * `carriesElidedArgsMarker`, which keys on this rather than on
+ * `ELIDED_ARGS_PREFIX`. No tool schema in this CLI declares a parameter by this
+ * name (the double underscore is what makes that safe to rely on), so its
+ * presence in a tool-call input is never a legitimate argument.
+ */
+const ELIDED_NOTE_KEY = "__elided_note";
+
+/**
  * F10 — minimum serialised `input` size for an args elision to be worth doing.
  *
  * The marker this compactor substitutes is itself 133-137 chars once serialised
@@ -925,7 +935,7 @@ export const MIN_ELIDE_ARGS_CHARS = 256;
  */
 export function buildElidedArgsInput(sz: number): Record<string, unknown> {
   return {
-    __elided_note: `${ELIDED_ARGS_PREFIX} by sub-agent compactor — ${sz} chars; consult the matching tool_result for what came back]`,
+    [ELIDED_NOTE_KEY]: `${ELIDED_ARGS_PREFIX} by sub-agent compactor — ${sz} chars; consult the matching tool_result for what came back]`,
   };
 }
 
@@ -943,25 +953,51 @@ export function buildElidedArgsInput(sz: number): Record<string, unknown> {
  * Both shapes are recognised: the current object form, and the legacy bare
  * string still present in histories persisted before the wire-validity fix.
  *
- * Exported because the rest of the pipeline must recognise the SAME marker when
- * a model imitates it as fresh tool-call arguments (267 such calls, 266 failed,
- * session 2026-09-08). Consumers outside this module go through
- * `carriesElidedArgsMarker` below, which adds the argument-slot scan; both are
- * imported rather than copied so a change to the marker cannot leave a stale
- * twin that silently stops matching.
+ * ## This is NOT the predicate the executor and the loop terminator ask
+ *
+ * Two different questions live in this file and must not be merged:
+ *
+ *   - THIS one — "did THIS compactor write this marker?" It is prefix-EXACT
+ *     because its job is the compactor's own round-trip: recognising output it
+ *     produced itself, so a second pass leaves the bytes alone. Widening it
+ *     would make the compactor treat a sentence the MODEL invented as its own
+ *     prior output and decline to elide a genuinely large argument object.
+ *   - `carriesElidedArgsMarker` below — "does this call carry a compaction note
+ *     at all, whoever wrote the sentence?" That one keys on `ELIDED_NOTE_KEY`,
+ *     because the model reproduces the key and invents the text.
+ *
+ * Exported so the elision specs can ask the round-trip question directly.
  */
-export function isElidedToolCallInput(input: unknown): boolean {
+export function isCompactorElisionMarker(input: unknown): boolean {
   if (typeof input === "string") return input.startsWith(ELIDED_ARGS_PREFIX);
   if (input && typeof input === "object") {
-    const note = (input as Record<string, unknown>).__elided_note;
+    const note = (input as Record<string, unknown>)[ELIDED_NOTE_KEY];
     return typeof note === "string" && note.startsWith(ELIDED_ARGS_PREFIX);
   }
   return false;
 }
 
 /**
- * "Does this tool-call input carry the compaction marker ANYWHERE the executor
- * will refuse it?" — the marker at the top level, or landed in an argument slot
+ * "Does this ONE value carry a compaction note?" — the per-slot half of
+ * `carriesElidedArgsMarker`, applied identically at the top level and to each
+ * argument value so the two cannot drift apart.
+ *
+ * An OBJECT is tested on the KEY, not on the sentence under it. A STRING is
+ * tested on the prefix, because a bare string has no key to test: that branch
+ * exists for the legacy string form and for a marker that landed in an argument
+ * slot (`{"file_path":"[earlier call args elided …]"}`).
+ */
+function carriesElidedNote(value: unknown): boolean {
+  if (typeof value === "string") return value.startsWith(ELIDED_ARGS_PREFIX);
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return Object.hasOwn(value, ELIDED_NOTE_KEY);
+  }
+  return false;
+}
+
+/**
+ * "Does this tool-call input carry a compaction note ANYWHERE the executor will
+ * refuse it?" — at the top level, or landed in an argument slot
  * (`{"file_path":"[earlier call args elided …]"}`), which passes every presence
  * check and would otherwise reach the filesystem.
  *
@@ -975,11 +1011,50 @@ export function isElidedToolCallInput(input: unknown): boolean {
  * If the two ever disagreed, the loop terminator would be counting a population
  * different from the one the executor blocks — which is exactly the state that
  * let 29 blocked calls look like 29 fresh discoveries.
+ *
+ * ## Why the KEY and not `ELIDED_ARGS_PREFIX` (measured 2026-09-25)
+ *
+ * This predicate used to test the marker's TEXT. What the model imitates is its
+ * SHAPE: it emits `__elided_note` with a sentence of its own. Over the whole
+ * retained window of `~/.muonroi-cli/muonroi.db` (24,665 rows, 2026-09-11 ..
+ * 2026-09-25, read-only) every one of the three `missing-required-args` blocks
+ * was such a paraphrase, verbatim from the `tool_call` rows that produced them:
+ *
+ *   18776  read_file  {"__elided_note":"[earlier tool result elided — skip and re-read instead]"}
+ *   23864  read_file  {"__elided_note":"[elided by compactor — see match for call #122]"}
+ *   26896  read_file  {"__elided_note":"[earlier tool_call_result elided by compaction]"}
+ *
+ * None starts with `ELIDED_ARGS_PREFIX`, so none was recognised, so each fell
+ * through to `missing-required-args` — the class measured as non-looping and
+ * therefore deliberately left with no terminator (`f265ff23`). A paraphrase thus
+ * escaped the bound `f6738bb5` built for precisely this pathology, and it could
+ * not be bounded by keying on text at all: a freshly invented sentence is a
+ * fresh `sha1(input)` every step.
+ *
+ * Keying on the key MOVES those three calls into `elision-marker-as-args`, in
+ * both consumers at once: the arg guard now gives them the marker refusal
+ * instead of the "without usable arguments" one (still BLOCKED either way — only
+ * the diagnosis changes, to the true one), and the no-progress guard withholds
+ * their key so a run of them ends at `DEFAULT_NO_PROGRESS_STEPS`. Pinned in
+ * `src/orchestrator/no-progress-paraphrased-marker.test.ts`.
+ *
+ * Bounded on purpose: prose that merely MENTIONS elision under some other key is
+ * not a match, and neither is an adjacent key like `__elided_note_v2`. A note
+ * carried alongside genuine arguments IS a match — that was already true for the
+ * verbatim marker, and an "only if it is the sole key" exception would let a
+ * paraphrase become runnable by padding it with one real argument.
+ *
+ * The one call this widening could misjudge is an UNGUARDED tool (arg guard is
+ * installed over the builtins only) that genuinely declares an `__elided_note`
+ * parameter. None does, and the double underscore is why that is safe to rely
+ * on; if one ever appeared the cost is the safe one already reasoned about in
+ * `no-progress-guard.ts` — its step stops resetting the streak, while any real
+ * work in the same step still does.
  */
 export function carriesElidedArgsMarker(input: unknown): boolean {
-  if (isElidedToolCallInput(input)) return true;
+  if (carriesElidedNote(input)) return true;
   if (input && typeof input === "object" && !Array.isArray(input)) {
-    return Object.values(input as Record<string, unknown>).some((v) => isElidedToolCallInput(v));
+    return Object.values(input as Record<string, unknown>).some((v) => carriesElidedNote(v));
   }
   return false;
 }
@@ -995,7 +1070,7 @@ function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
     // The marker is itself 133-137 chars serialised, so without this guard a
     // second pass re-wrapped it ("…— 400 chars…" → "…— 134 chars…"), changing the
     // bytes and churning the cached prefix every call. Once elided, terminal.
-    if (isElidedToolCallInput(input)) return part;
+    if (isCompactorElisionMarker(input)) return part;
     const sz = typeof input === "string" ? input.length : JSON.stringify(input ?? "").length;
     // F10 — below this the marker is not worth writing: it costs ~134 chars of
     // its own, and every marker written is one more exemplar of a shape the

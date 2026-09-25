@@ -55,26 +55,36 @@
  *
  * Deliberately NOT claimed: this bounds a loop that re-emits the SAME malformed
  * call. A model inventing a fresh argument string every time still produces a
- * fresh `sha1(input)` and is not bounded by this — see the adjacent finding
- * below, which is left alone on purpose.
+ * fresh `sha1(input)` and is not bounded by this. That was the escape route the
+ * adjacent finding below took, and it is now closed for the population that
+ * finding is about — not by keying text differently, which cannot work, but by
+ * moving those calls into the class that contributes no key at all.
  *
- * ## Adjacent, measured, and deliberately NOT fixed here
+ * ## The three live blocks have MOVED OUT of this class — read this before
+ * ## believing the counts above are still this class's population
  *
- * All three live blocks carried a `__elided_note` key holding a FABRICATED
- * sentence, from the `tool_call` rows that produced them:
+ * All three carried a `__elided_note` key holding a FABRICATED sentence, from the
+ * `tool_call` rows that produced them:
  *
  *   18776  read_file  {"__elided_note":"[earlier tool result elided — skip and re-read instead]"}
  *   23864  read_file  {"__elided_note":"[elided by compactor — see match for call #122]"}
  *   26896  read_file  {"__elided_note":"[earlier tool_call_result elided by compaction]"}
  *
- * `ELIDED_ARGS_PREFIX` is `"[earlier call args elided"` and
- * `isElidedToolCallInput` matches on `startsWith`, so none of the three is
- * recognised as the compaction marker; they fall through to the
- * `missing-required-args` branch instead. They are the same pathology — a model
- * imitating the marker — wearing a sentence it made up. Widening the predicate to
- * the `__elided_note` KEY would move them into the already-bounded class, but it
- * changes the population BOTH `arg-guard.ts` and `no-progress-guard.ts` count and
- * belongs to whoever owns `subagent-compactor.ts`. It is reported, not done.
+ * They reached `missing-required-args` only because `carriesElidedArgsMarker` then
+ * tested the marker's TEXT (`ELIDED_ARGS_PREFIX`, `startsWith`) while the model
+ * imitates its SHAPE. That predicate now keys on the `__elided_note` KEY, so all
+ * three are `elision-marker-as-args` — the already-bounded class — and are pinned
+ * there, with the query that measured them, in
+ * `src/orchestrator/no-progress-paraphrased-marker.test.ts`.
+ *
+ * Consequently the measurement quoted above ("three blocks in fourteen days")
+ * describes the class as it was BEFORE that widening. Post-widening this class's
+ * live population over the same window is ZERO, which is a stronger version of
+ * the same conclusion — still no measured loop, so still no terminator — and the
+ * fixtures below are therefore constructed keyless calls that carry no note at
+ * all (`{}`, a line range with no path, an empty `file_paths`). They are what
+ * genuinely lands in this branch now; using the three live strings here would
+ * silently test the OTHER class.
  *
  * These tests drive the REAL pipeline (`buildTurnToolPipeline` over
  * `createBuiltinTools`) and feed its real bytes into the REAL
@@ -93,15 +103,17 @@ import { createNoProgressGuard, DEFAULT_NO_PROGRESS_STEPS } from "./no-progress-
 import { buildTurnToolPipeline } from "./tool-engine.js";
 
 /**
- * The three `read_file` inputs the runs actually emitted, verbatim from
- * `interaction_logs` rows 18776 / 23864 / 26896. Every one of them supplies
- * neither `file_path` nor `file_paths`, which is why the guard reaches its
- * `missing-required-args` verdict.
+ * `read_file` inputs that supply neither `file_path` nor `file_paths` and carry
+ * NO compaction note, which is what reaches the `missing-required-args` verdict
+ * now that `carriesElidedArgsMarker` keys on the `__elided_note` key. Every key
+ * used here is one `read_file` really declares (`start_line` / `end_line` /
+ * `file_paths`), so each call is well-formed JSON against the schema and still
+ * unrunnable — the shape this branch exists for.
  */
-const LIVE_KEYLESS_INPUTS: ReadonlyArray<Record<string, unknown>> = [
-  { __elided_note: "[earlier tool result elided — skip and re-read instead]" },
-  { __elided_note: "[elided by compactor — see match for call #122]" },
-  { __elided_note: "[earlier tool_call_result elided by compaction]" },
+const KEYLESS_INPUTS: ReadonlyArray<Record<string, unknown>> = [
+  {},
+  { start_line: 1, end_line: 40 },
+  { file_paths: [] },
 ];
 
 const dirs: string[] = [];
@@ -160,9 +172,9 @@ describe("the arg guard's missing-required-args refusal text", () => {
     (globalThis as { __muonroiMalformedArgStreak?: Map<string, number> }).__muonroiMalformedArgStreak = new Map();
   });
 
-  it("refuses every one of the three live inputs and runs none of them", async () => {
+  it("refuses every one of the three keyless inputs and runs none of them", async () => {
     const call = livePipeline(tempDir(), "keyless-refusal");
-    for (const [i, input] of LIVE_KEYLESS_INPUTS.entries()) {
+    for (const [i, input] of KEYLESS_INPUTS.entries()) {
       const step = await call("read_file", input);
       const text = outputText(step);
       // The non-negotiable: blocking is what bounds the damage. Terminating is a
@@ -176,9 +188,9 @@ describe("the arg guard's missing-required-args refusal text", () => {
 
   it("stops carrying the unbounded strike count once the ladder is at its top rung", async () => {
     const call = livePipeline(tempDir(), "keyless-text");
-    // One live input, re-emitted — the shape a stuck model produces. Collect the
-    // refusal for each strike.
-    const input = LIVE_KEYLESS_INPUTS[0];
+    // One keyless input, re-emitted — the shape a stuck model produces. Collect
+    // the refusal for each strike.
+    const input = KEYLESS_INPUTS[0];
     const texts: string[] = [];
     for (let strike = 1; strike <= 8; strike++) {
       const step = await call("read_file", input);
@@ -216,7 +228,7 @@ describe("no-progress guard vs. a verbatim-repeated keyless call", () => {
     // MUONROI_NO_PROGRESS_STEPS in the ambient environment.
     const limit = DEFAULT_NO_PROGRESS_STEPS;
     const guard = createNoProgressGuard(limit);
-    const input = LIVE_KEYLESS_INPUTS[0];
+    const input = KEYLESS_INPUTS[0];
     const steps: Step[] = [];
     let stoppedAfter: number | null = null;
 
@@ -245,7 +257,7 @@ describe("no-progress guard vs. a verbatim-repeated keyless call", () => {
     // The property `f6738bb5` pins for the sibling class, held here too: a run
     // getting somewhere alongside a malformed call must not be killed.
     for (let i = 0; i < DEFAULT_NO_PROGRESS_STEPS * 3; i++) {
-      const blocked = await call("read_file", LIVE_KEYLESS_INPUTS[0]);
+      const blocked = await call("read_file", KEYLESS_INPUTS[0]);
       const real = await call("read_file", { file_path: `f${i}.ts` });
       expect(outputText(blocked)).toContain("BLOCKED (");
       expect(outputText(real)).toContain(`export const v${i}`);
@@ -262,10 +274,11 @@ describe("no-progress guard vs. a verbatim-repeated keyless call", () => {
     const guard = createNoProgressGuard(DEFAULT_NO_PROGRESS_STEPS);
     const steps: Step[] = [];
 
-    // This is the MEASURED pattern for this class: all three live blocks were
-    // singletons followed by real work. It must stay alive however long it runs.
+    // This is the MEASURED pattern for the blocks this class was diagnosed from:
+    // every one was a singleton followed by real work (they are now the marker
+    // class — see the header). It must stay alive however long it runs.
     for (let i = 0; i < DEFAULT_NO_PROGRESS_STEPS * 3; i++) {
-      steps.push(await call("read_file", LIVE_KEYLESS_INPUTS[i % LIVE_KEYLESS_INPUTS.length]));
+      steps.push(await call("read_file", KEYLESS_INPUTS[i % KEYLESS_INPUTS.length]));
       expect(guard(steps), `after block ${i + 1}`).toBe(false);
       steps.push(await call("read_file", { file_path: `f${i}.ts` }));
       expect(guard(steps), `after recovery ${i + 1}`).toBe(false);

@@ -20,7 +20,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildElidedArgsInput,
   compactSubAgentMessages,
-  isElidedToolCallInput,
+  isCompactorElisionMarker,
   MIN_ELIDE_ARGS_CHARS,
 } from "./subagent-compactor.js";
 
@@ -134,7 +134,7 @@ describe("subagent-compactor: F10 args elision never inflates", () => {
     const after = toolCallInputs(compactSubAgentMessages(historyWithArgSizes(SHORT_PATH_ARG_SIZES), COMPACT_ALL));
     expect(after).toHaveLength(SHORT_PATH_ARG_SIZES.length);
     for (const { id, input } of after) {
-      expect(isElidedToolCallInput(input), `call ${id} should not have been elided`).toBe(false);
+      expect(isCompactorElisionMarker(input), `call ${id} should not have been elided`).toBe(false);
     }
     // And pin the constant itself, so it cannot be lowered back into that band.
     expect(MIN_ELIDE_ARGS_CHARS).toBeGreaterThan(SHORT_PATH_ARG_SIZES[SHORT_PATH_ARG_SIZES.length - 1]!);
@@ -154,14 +154,14 @@ describe("subagent-compactor: F10 args elision never inflates", () => {
 
   it("still elides — and materially shrinks — genuinely large arguments", () => {
     const after = toolCallInputs(compactSubAgentMessages(historyWithArgSizes([4395, 12704]), COMPACT_ALL));
-    const elided = after.filter((c) => isElidedToolCallInput(c.input));
+    const elided = after.filter((c) => isCompactorElisionMarker(c.input));
     expect(elided).toHaveLength(2);
     for (const c of elided) expect(inputChars(c.input)).toBeLessThan(200);
   });
 
   it("an elided input is still a wire-valid JSON object (StepFun `arguments | fromjson`)", () => {
     const after = toolCallInputs(compactSubAgentMessages(historyWithArgSizes([4395]), COMPACT_ALL));
-    const elided = after.filter((c) => isElidedToolCallInput(c.input));
+    const elided = after.filter((c) => isCompactorElisionMarker(c.input));
     expect(elided).toHaveLength(1);
     // What goes on the wire is JSON.stringify(input); it must parse back to a
     // non-null, non-array OBJECT or the Jinja chat template 400s the request.
