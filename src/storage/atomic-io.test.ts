@@ -117,6 +117,21 @@ describe("atomicWriteJSON — transient rename contention", () => {
     await expect(fs.access(filePath)).rejects.toThrow();
   });
 
+  // The property the fail-fast DENYLIST buys over a retry allowlist: the set of
+  // codes the OS can report is open, so an unenumerated one must retry. EMFILE
+  // (file-handle exhaustion) is real, plainly transient, and MORE likely under
+  // exactly the load that produced both measured EPERMs — under an allowlist it
+  // would silently lose the write.
+  it("Test 10a: an UNENUMERATED transient code (EMFILE) is retried and the write lands", async () => {
+    const filePath = path.join(tmpDir, "handles-exhausted.json");
+    const rename = stubRename("EMFILE", 1);
+
+    await expect(atomicWriteJSON(filePath, { landed: true })).resolves.toBeUndefined();
+
+    expect(rename.calls()).toBe(2);
+    expect(JSON.parse(await fs.readFile(filePath, "utf8"))).toEqual({ landed: true });
+  });
+
   it("Test 10: ENOSPC is NOT retried — it fails fast on the first attempt", async () => {
     const filePath = path.join(tmpDir, "full-disk.json");
     const rename = stubRename("ENOSPC", Number.POSITIVE_INFINITY);

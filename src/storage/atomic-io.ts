@@ -14,35 +14,49 @@ const STEP_TIMEOUT_MS = 10_000;
 
 /**
  * Sentinel `code` stamped on a `withTimeout` rejection. The hang case carries no
- * errno of its own, so it gets one here — that keeps the retry decision a single
- * `code` lookup instead of a second, string-matching branch.
+ * errno of its own, so it gets one here: it keeps the fail-fast decision below a
+ * single `code` lookup with no string matching, and it gives a caller inspecting
+ * `err.code` something to distinguish a timeout from a real errno.
  */
 const TIMEOUT_CODE = "EATOMICWRITETIMEOUT";
 
 /**
- * Error codes worth retrying, and ONLY those. Each one is transient contention
- * on the TARGET, which a later attempt can win:
+ * Codes that make a retry pointless, and ONLY those. Everything else retries.
  *
- * - `EPERM`  — measured twice on 2026-09-26, in two different processes, on two
- *              different target files (`usage.json`, `config.json`), both at the
- *              `fs.rename` below. On Windows a rename fails EPERM while another
- *              handle (antivirus / Search Indexer / Explorer preview) holds the
- *              target open for read.
- * - `EBUSY`  — the same class of contention, reported by the same OS path.
- * - timeout  — observed once in E2E: the rename Promise never settles (Bun's
- *              libuv path on a contended target). A hang loses the write just
- *              as thoroughly as a rejection, so it retries.
+ * This is a DENYLIST, not a retry allowlist, and the direction is the whole
+ * point. On a write path the two outcomes are not symmetric: a wasted retry
+ * costs ~150ms of backoff, while a retry NOT taken costs the user's data. The
+ * set of codes an OS can report at a rename is open-ended, so a closed
+ * allowlist fails by silently losing a write on any code nobody enumerated —
+ * which is the exact defect class this module exists to close. `EMFILE` /
+ * `ENFILE` (handle exhaustion) and `EAGAIN` are the obvious examples: genuinely
+ * transient, and MORE likely under precisely the load that produced the two
+ * measured EPERMs. So: retry unless the code is a standing property of the
+ * environment rather than a race.
  *
- * Deliberately NOT retryable: a serialize failure (never reaches here), `ENOSPC`
- * (the disk does not empty in 150ms), `EACCES` / `EROFS` (a standing permission
- * or mount property of the DIRECTORY, not a race), and `ENOENT` (the race-loser
- * check below already turns the winnable case into a success; what is left is a
- * genuinely missing parent, which a retry cannot create).
- * Retrying those only delays a certain failure. `EPERM` is admittedly also what
- * Windows reports for a read-only directory; the cost of being wrong there is
- * bounded at 3 attempts and 150ms of backoff before the same error is thrown.
+ * - `ENOSPC`            — the disk does not empty itself within 150ms.
+ * - `EACCES` / `EROFS`  — a standing permission or mount property of the
+ *                         DIRECTORY, not contention on the target.
+ * - `ENOENT`            — the race-loser check below already converts the
+ *                         winnable case into a success; what remains is a
+ *                         genuinely missing parent, which a retry cannot create.
+ *
+ * `EPERM` is deliberately NOT here, and must stay out. It is the measured
+ * failure — twice on 2026-09-26, two different processes, two different target
+ * files (`usage.json`, `config.json`), both at the `fs.rename` below, where
+ * Windows reports it while antivirus / Search Indexer / Explorer briefly holds
+ * the target open for read. Windows ALSO reports `EPERM` for a read-only
+ * directory, so a standing permission failure costs 3 attempts and ~150ms
+ * before throwing the same error with its `code` intact. That is the accepted
+ * trade: moving `EPERM` into this denylist to save those 150ms reopens the
+ * measured data-loss bug. Don't.
+ *
+ * A serialize failure never reaches here at all — `atomicWriteJSON` throws
+ * before the helper is entered. The timeout sentinel is not here either: a
+ * rename that never settles loses the write just as thoroughly as one that
+ * rejects, so it retries.
  */
-const RETRYABLE_WRITE_CODES: ReadonlySet<string> = new Set([TIMEOUT_CODE, "EPERM", "EBUSY"]);
+const FAIL_FAST_WRITE_CODES: ReadonlySet<string> = new Set(["ENOSPC", "EACCES", "EROFS", "ENOENT"]);
 
 /**
  * The one write+rename+retry implementation, shared by `atomicWriteJSON` and
@@ -83,7 +97,10 @@ async function writeThenRenameWithRetry(
       await fs.unlink(tmpPath).catch(() => {
         /* ignore — the tmp may never have been created; sweepStaleAtomicTemps is the backstop */
       });
-      if (!RETRYABLE_WRITE_CODES.has(e?.code ?? "")) break;
+      // Retry by DEFAULT — only a code we can argue is a standing property of
+      // the environment stops us. An unknown code is assumed winnable, because
+      // losing the write is far more expensive than one wasted attempt.
+      if (FAIL_FAST_WRITE_CODES.has(e?.code ?? "")) break;
       if (attempt < RETRIES - 1) {
         await new Promise((r) => setTimeout(r, 50 * 2 ** attempt));
       }
