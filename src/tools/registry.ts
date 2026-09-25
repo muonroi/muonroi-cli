@@ -29,6 +29,7 @@ import { loadMcpServers } from "../utils/settings.js";
 import { installArgGuards } from "./arg-guard.js";
 import type { BashTool } from "./bash.js";
 import { type BashSliceMode, bashOutputNotFoundMessage, getBashRun, sliceBashOutput } from "./bash-output-cache.js";
+import { countUncommittedChanges, emptyLedgerRefusalMessage } from "./commit-ledger-refusal.js";
 import { editFile, readFile, readFiles, writeFile } from "./file.js";
 import { FileTracker } from "./file-tracker.js";
 import {
@@ -865,10 +866,11 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         }
         const written = fileTracker.writtenPaths();
         if (written.length === 0) {
+          // The ledger being empty says nothing about the repository — say so,
+          // report the repo's real state, and name the route that works.
           return {
             success: false,
-            output:
-              "Nothing to commit — you have not created or edited any file via write_file/edit_file this session.",
+            output: emptyLedgerRefusalMessage(await countUncommittedChanges(bash.getCwd())),
           };
         }
         try {
