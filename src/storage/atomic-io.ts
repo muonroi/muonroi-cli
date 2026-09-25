@@ -9,6 +9,90 @@ function tmpPathFor(filePath: string): string {
   return `${filePath}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
 }
 
+const RETRIES = 3;
+const STEP_TIMEOUT_MS = 10_000;
+
+/**
+ * Sentinel `code` stamped on a `withTimeout` rejection. The hang case carries no
+ * errno of its own, so it gets one here — that keeps the retry decision a single
+ * `code` lookup instead of a second, string-matching branch.
+ */
+const TIMEOUT_CODE = "EATOMICWRITETIMEOUT";
+
+/**
+ * Error codes worth retrying, and ONLY those. Each one is transient contention
+ * on the TARGET, which a later attempt can win:
+ *
+ * - `EPERM`  — measured twice on 2026-09-26, in two different processes, on two
+ *              different target files (`usage.json`, `config.json`), both at the
+ *              `fs.rename` below. On Windows a rename fails EPERM while another
+ *              handle (antivirus / Search Indexer / Explorer preview) holds the
+ *              target open for read.
+ * - `EBUSY`  — the same class of contention, reported by the same OS path.
+ * - timeout  — observed once in E2E: the rename Promise never settles (Bun's
+ *              libuv path on a contended target). A hang loses the write just
+ *              as thoroughly as a rejection, so it retries.
+ *
+ * Deliberately NOT retryable: a serialize failure (never reaches here), `ENOSPC`
+ * (the disk does not empty in 150ms), `EACCES` / `EROFS` (a standing permission
+ * or mount property of the DIRECTORY, not a race), and `ENOENT` (the race-loser
+ * check below already turns the winnable case into a success; what is left is a
+ * genuinely missing parent, which a retry cannot create).
+ * Retrying those only delays a certain failure. `EPERM` is admittedly also what
+ * Windows reports for a read-only directory; the cost of being wrong there is
+ * bounded at 3 attempts and 150ms of backoff before the same error is thrown.
+ */
+const RETRYABLE_WRITE_CODES: ReadonlySet<string> = new Set([TIMEOUT_CODE, "EPERM", "EBUSY"]);
+
+/**
+ * The one write+rename+retry implementation, shared by `atomicWriteJSON` and
+ * `atomicWriteText`. Do not inline a second copy into either caller: a safety
+ * behaviour that exists twice drifts, and `atomicWriteJSON` silently went
+ * without this retry for its whole life precisely because it was a copy.
+ *
+ * `opName` is the PUBLIC function on whose behalf we are writing; it prefixes
+ * the timeout label so a JSON timeout never reads as a text-function timeout.
+ */
+async function writeThenRenameWithRetry(
+  filePath: string,
+  tmpPath: string,
+  content: string,
+  opName: string,
+): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < RETRIES; attempt++) {
+    try {
+      await withTimeout(fs.writeFile(tmpPath, content, "utf8"), STEP_TIMEOUT_MS, `${opName}.writeFile`);
+      await withTimeout(fs.rename(tmpPath, filePath), STEP_TIMEOUT_MS, `${opName}.rename`);
+      return;
+    } catch (err) {
+      lastErr = err;
+      const e = err as NodeJS.ErrnoException;
+      // ENOENT on rename means another writer already completed the atomic swap.
+      // Verify the final file exists before treating as success.
+      if (e?.code === "ENOENT") {
+        try {
+          await fs.access(filePath);
+          return; // race loser — final file written by another process
+        } catch {
+          // final file does not exist — real failure, fall through
+        }
+      }
+      // Clean up the .tmp if the write/rename failed mid-flight.
+      await fs.unlink(tmpPath).catch(() => {
+        /* ignore — the tmp may never have been created; sweepStaleAtomicTemps is the backstop */
+      });
+      if (!RETRYABLE_WRITE_CODES.has(e?.code ?? "")) break;
+      if (attempt < RETRIES - 1) {
+        await new Promise((r) => setTimeout(r, 50 * 2 ** attempt));
+      }
+    }
+  }
+  // Rethrow the LAST REAL error, unwrapped, so callers can still read err.code.
+  throw lastErr;
+}
+
 /**
  * Atomically write a JSON value to filePath using .tmp + rename pattern.
  * Pitfall 9 mitigation: a Ctrl+C between write and rename leaves no dangling state.
@@ -18,34 +102,15 @@ function tmpPathFor(filePath: string): string {
  */
 export async function atomicWriteJSON(filePath: string, value: unknown): Promise<void> {
   const tmpPath = tmpPathFor(filePath);
+  // Serialize BEFORE anything touches the filesystem: a value that cannot be
+  // stringified must throw without creating a .tmp. Keep this out of the retry.
   let serialized: string;
   try {
     serialized = JSON.stringify(value, null, 2);
   } catch (err) {
     throw new Error(`atomicWriteJSON: failed to serialize value for ${filePath}: ${(err as Error).message}`);
   }
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  try {
-    await fs.writeFile(tmpPath, serialized, "utf8");
-    await fs.rename(tmpPath, filePath);
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    // ENOENT on rename means another writer already completed the atomic swap.
-    // Verify the final file exists before treating as success.
-    if (e.code === "ENOENT") {
-      try {
-        await fs.access(filePath);
-        return; // race loser — final file written by another process
-      } catch {
-        // final file does not exist — real failure
-      }
-    }
-    // Clean up the .tmp if rename failed mid-flight
-    await fs.unlink(tmpPath).catch(() => {
-      /* ignore */
-    });
-    throw err;
-  }
+  await writeThenRenameWithRetry(filePath, tmpPath, serialized, "atomicWriteJSON");
 }
 
 /**
@@ -53,42 +118,14 @@ export async function atomicWriteJSON(filePath: string, value: unknown): Promise
  * Same durability guarantees as atomicWriteJSON but without JSON serialization.
  */
 export async function atomicWriteText(filePath: string, content: string): Promise<void> {
-  const tmpPath = tmpPathFor(filePath);
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  // Retry the write+rename pair up to 3 times with backoff. On Windows the
-  // rename can race with antivirus / Search Indexer / Explorer probes that
-  // briefly open the target for read; under load the OS sometimes returns
-  // EBUSY / EPERM, and observed once in E2E: the rename Promise hangs
-  // forever (Bun's libuv path on a contended target). The retry+timeout
-  // recovers without losing the write.
-  const RETRIES = 3;
-  const STEP_TIMEOUT_MS = 10_000;
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < RETRIES; attempt++) {
-    try {
-      await withTimeout(fs.writeFile(tmpPath, content, "utf8"), STEP_TIMEOUT_MS, "writeFile");
-      await withTimeout(fs.rename(tmpPath, filePath), STEP_TIMEOUT_MS, "rename");
-      return;
-    } catch (err) {
-      lastErr = err;
-      const e = err as NodeJS.ErrnoException;
-      if (e?.code === "ENOENT") {
-        try {
-          await fs.access(filePath);
-          return; // race loser
-        } catch {}
-      }
-      await fs.unlink(tmpPath).catch(() => {
-        /* ignore */
-      });
-      if (attempt < RETRIES - 1) {
-        await new Promise((r) => setTimeout(r, 50 * 2 ** attempt));
-      }
-    }
-  }
-  throw lastErr;
+  await writeThenRenameWithRetry(filePath, tmpPathFor(filePath), content, "atomicWriteText");
 }
 
+/**
+ * Race `p` against `ms`. `label` is used VERBATIM — the caller supplies the
+ * operation name, so this helper cannot misattribute a timeout to the wrong
+ * public function (it used to hardcode an `atomicWriteText.` prefix).
+ */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
@@ -96,7 +133,11 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
       if (timer) clearTimeout(timer);
     }),
     new Promise<T>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`atomicWriteText.${label} timed out after ${ms}ms`)), ms);
+      timer = setTimeout(() => {
+        const err: NodeJS.ErrnoException = new Error(`${label} timed out after ${ms}ms`);
+        err.code = TIMEOUT_CODE;
+        reject(err);
+      }, ms);
     }),
   ]);
 }
