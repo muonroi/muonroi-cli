@@ -23,9 +23,46 @@
  *     tool loop that normally ends the loop by itself).
  *   - Results are part of the key, so the same `bash` command that now prints
  *     something different is progress.
+ *   - A call the executor REFUSED can never be new information: it did not run,
+ *     so it returned nothing to learn from. See `carriesElidedArgsMarker` below.
+ *
+ * ## Why refused calls need their own rule (measured, `/ideal` run muc2joffe506)
+ *
+ * The keying above is structural, and that is exactly what a refused call
+ * defeats. Session bf39c59e4dd1 logged 29 BLOCKED tool results in ~10 minutes
+ * with a sub-agent climbing through stepIndex 207-211 — this guard was its only
+ * terminator (`/ideal` removes the step cap; `stream-runner.ts:650`) and it never
+ * fired, because all three key components varied on every call:
+ *
+ *   1. the sub-agent compactor's args placeholder embeds `${sz}`, the byte count
+ *      of the arguments it replaced (`buildElidedArgsInput`) — the live
+ *      calls carried 429, 1250 and 280, so `sha1(input)` differed every time;
+ *   2. the tool name alternated (`git_commit`, `git_commit`, `bash`);
+ *   3. the guard that refused them writes its own escalation counter into its
+ *      output (`arg-guard.ts`: "N malformed tool calls in a row"), so
+ *      `sha1(resultText)` differs on every strike, without limit.
+ *
+ * Three semantically identical, identically un-runnable calls therefore looked
+ * like three discoveries. Narrowing any ONE of the three (dropping `${sz}`, say)
+ * leaves the other two, so the rule is stated where it is decidable: a call whose
+ * arguments carry the compaction marker was refused before `execute`, for every
+ * tool, so it contributes no key at all. It cannot reset the streak, and a step
+ * made only of such calls counts as a repeat step.
+ *
+ * Deliberately NOT suppressed: a step that ALSO makes a genuinely new call. The
+ * measured recovery pattern (2026-09-09) is that most blocks are repaired on the
+ * very next call, and a run that is getting somewhere alongside a malformed call
+ * must not be killed.
+ *
+ * The one call this could misjudge is an UNGUARDED tool (an MCP tool — the arg
+ * guard is installed over the builtins only) that carried the marker and ran
+ * anyway. Such a call is the same pathology with a different executor, and the
+ * cost of being wrong is bounded the safe way: the loop ends after N such steps
+ * instead of never, and any real work in the same step still resets the streak.
  */
 
 import { createHash } from "node:crypto";
+import { carriesElidedArgsMarker } from "./subagent-compactor.js";
 
 /** Consecutive repeat-only steps before a loop is declared stuck. */
 export const DEFAULT_NO_PROGRESS_STEPS = 6;
@@ -101,9 +138,15 @@ export function createNoProgressGuard(
       const results = step?.toolResults ?? [];
       let allRepeats = true;
       calls.forEach((call, index) => {
+        const input = call.input !== undefined ? call.input : call.args;
+        // Refused before `execute` by the arg guard, for every tool: it ran
+        // nothing, so it learned nothing and cannot count as novel. Skipping it
+        // rather than keying it is what makes the decision independent of the
+        // marker's `${sz}` digits, of which tool the model aimed it at, and of
+        // the guard's own strike counter — all three varied live.
+        if (carriesElidedArgsMarker(input)) return;
         const result =
           results.find((r) => r.toolCallId !== undefined && r.toolCallId === call.toolCallId) ?? results[index];
-        const input = call.input !== undefined ? call.input : call.args;
         const key = `${call.toolName ?? "?"}\x00${sha1(stableJson(input))}\x00${sha1(resultText(result))}`;
         if (!seen.has(key)) {
           seen.add(key);

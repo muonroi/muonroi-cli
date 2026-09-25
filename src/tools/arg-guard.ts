@@ -37,12 +37,11 @@
  * ## Design notes
  *
  *  - The elision predicate is IMPORTED from the compactor that produces the
- *    marker (`isElidedToolCallInput`), never copied. One definition means a
+ *    marker (`carriesElidedArgsMarker`, which covers the top-level input AND any
+ *    argument slot the marker lands in), never copied. One definition means a
  *    future change to the marker cannot leave a stale twin behind that silently
- *    stops matching.
- *  - Values are scanned as well as the top-level input: a marker that lands in
- *    a required slot (`{"file_path":"[earlier call args elided …]"}`) passes
- *    every presence check and would otherwise reach the filesystem.
+ *    stops matching — and the loop terminator below keys on the SAME predicate,
+ *    so it can never count a different population than this guard blocks.
  *  - A blocked call NEVER reaches the underlying `execute`. Inertness is
  *    load-bearing: a marker shaped like real arguments would otherwise
  *    overwrite a source file with the marker text.
@@ -52,9 +51,23 @@
  *    because the observed failure alternated between `read_file` and `grep`.
  *  - No guidance names another tool. That is what turned a bash-only stall into
  *    a whole-session stall.
+ *
+ * ## Blocking is not terminating (measured again 2026-09-25)
+ *
+ * This guard bounds the DAMAGE of a malformed call, never its COUNT. `/ideal` run
+ * muc2joffe506 (session bf39c59e4dd1) produced 29 blocked results in ~10 minutes
+ * and a sub-agent climbing past stepIndex 211; the escalation ladder below just
+ * kept counting ("N malformed tool calls in a row") and the run died
+ * `phases-deadlocked` with score 0. Asking a model to stop is not a bound, and a
+ * louder message here would not be one either.
+ *
+ * The bound lives in `src/orchestrator/no-progress-guard.ts`, which refuses to
+ * treat a call this guard rejected as new information. Keep the two coherent:
+ * anything added here as a NEW block class is still unbounded until that guard
+ * can recognise it.
  */
 
-import { isElidedToolCallInput } from "../orchestrator/subagent-compactor.js";
+import { carriesElidedArgsMarker } from "../orchestrator/subagent-compactor.js";
 import { logger } from "../utils/logger.js";
 
 declare global {
@@ -135,7 +148,7 @@ function evaluateToolArgs(toolName: string, input: unknown, schema: ArgGuardSche
   // 1. The elision marker, at the top level or in any argument slot. Always a
   //    block, for every tool, even one that takes no arguments: the marker is
   //    proof the model is quoting compacted history rather than deciding.
-  if (isElidedToolCallInput(input) || Object.values(args).some((v) => isElidedToolCallInput(v))) {
+  if (carriesElidedArgsMarker(input)) {
     // A tool whose parameters are ALL optional must not be told to "supply a
     // non-empty <optional key>" — `{}` is the correct re-issue for it. That is
     // exactly `compact`, the one call out of 267 that used to survive.

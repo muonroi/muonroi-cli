@@ -890,7 +890,27 @@ export const MIN_ELIDE_ARGS_CHARS = 256;
  * placeholder values: that is strictly more imitable, and a copied
  * `write_file({file_path:"[elided]",content:"[elided]"})` would pass the
  * executor's empty-args guard and overwrite a real source file. The single
- * `__elided_note` key's one virtue is that it is inert.
+ * `__elided_note` key is the least imitable object shape that still satisfies
+ * the wire constraint below.
+ *
+ * It is NOT inert, and this comment used to claim it was. Falsified twice over:
+ * 267 imitated calls in the 2026-09-08 run, then 29 more in `/ideal` run
+ * muc2joffe506 (session bf39c59e4dd1) AFTER the executor guard landed. Inertness
+ * is therefore not a property of the shape and cannot be one — any shape the
+ * model sees in its own context is imitable. The two consequences are handled
+ * elsewhere, on purpose:
+ *
+ *   - it must never RUN: `src/tools/arg-guard.ts` refuses every call carrying
+ *     the marker, for every tool, before `execute`;
+ *   - it must never look like PROGRESS: `carriesElidedArgsMarker` below is the
+ *     one predicate `no-progress-guard.ts` uses to keep a refused call out of
+ *     its novelty key, so `${sz}` (which differs per call) can no longer make a
+ *     stuck loop look like it is learning something. See that module's header.
+ *
+ * `${sz}` stays in the sentence. It is the only per-call diagnostic the marker
+ * carries, and removing it would narrow just one of the three things that varied
+ * across the measured calls (the tool name and the guard's own strike counter
+ * varied too) — so it cannot be the fix, only a cosmetic narrowing of it.
  *
  * Wire validity — it must still be an OBJECT. `input` is serialized into OpenAI
  * `tool_calls[].function.arguments`, which the spec defines as a JSON string
@@ -923,16 +943,43 @@ export function buildElidedArgsInput(sz: number): Record<string, unknown> {
  * Both shapes are recognised: the current object form, and the legacy bare
  * string still present in histories persisted before the wire-validity fix.
  *
- * Exported because `src/tools/arg-guard.ts` must recognise the SAME marker when
+ * Exported because the rest of the pipeline must recognise the SAME marker when
  * a model imitates it as fresh tool-call arguments (267 such calls, 266 failed,
- * session 2026-09-08). The predicate is imported there rather than copied so a
- * change to the marker cannot leave a stale twin that silently stops matching.
+ * session 2026-09-08). Consumers outside this module go through
+ * `carriesElidedArgsMarker` below, which adds the argument-slot scan; both are
+ * imported rather than copied so a change to the marker cannot leave a stale
+ * twin that silently stops matching.
  */
 export function isElidedToolCallInput(input: unknown): boolean {
   if (typeof input === "string") return input.startsWith(ELIDED_ARGS_PREFIX);
   if (input && typeof input === "object") {
     const note = (input as Record<string, unknown>).__elided_note;
     return typeof note === "string" && note.startsWith(ELIDED_ARGS_PREFIX);
+  }
+  return false;
+}
+
+/**
+ * "Does this tool-call input carry the compaction marker ANYWHERE the executor
+ * will refuse it?" — the marker at the top level, or landed in an argument slot
+ * (`{"file_path":"[earlier call args elided …]"}`), which passes every presence
+ * check and would otherwise reach the filesystem.
+ *
+ * This is the single named place the whole codebase asks. Two consumers, both of
+ * which must agree exactly or the system is incoherent:
+ *
+ *   - `src/tools/arg-guard.ts` — refuses the call, so it never runs;
+ *   - `src/orchestrator/no-progress-guard.ts` — keeps the refused call out of
+ *     the novelty key, so N of them in a row end the loop.
+ *
+ * If the two ever disagreed, the loop terminator would be counting a population
+ * different from the one the executor blocks — which is exactly the state that
+ * let 29 blocked calls look like 29 fresh discoveries.
+ */
+export function carriesElidedArgsMarker(input: unknown): boolean {
+  if (isElidedToolCallInput(input)) return true;
+  if (input && typeof input === "object" && !Array.isArray(input)) {
+    return Object.values(input as Record<string, unknown>).some((v) => isElidedToolCallInput(v));
   }
   return false;
 }
