@@ -1740,6 +1740,10 @@ export function buildAdherenceRecord(args: {
     fixModelId: args.fixModelId,
     startedAt: args.startedAt,
     finishedAt: args.finishedAt ?? new Date().toISOString(),
+    // Slice H — copied through verbatim (already bounded at scan time by
+    // `SUPPRESSION_DETAIL_MAX`). Omitted, never defaulted to an empty scan, when
+    // the review scanned no diff: absence and "none found" are different facts.
+    ...(args.verdict.suppressions ? { suppressions: args.verdict.suppressions } : {}),
   };
 }
 

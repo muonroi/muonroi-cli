@@ -19,6 +19,7 @@ import type { AdherenceRoundRecord, AdherenceStopReason } from "../product-loop/
 import type { ProjectRegistrationCheckResult } from "../product-loop/project-registration-check.js";
 import type { SpecLayoutCheckResult } from "../product-loop/spec-layout-check.js";
 import type { SprintPlanArtifact } from "../product-loop/sprint-plan-artifact.js";
+import type { SuppressionScan } from "../product-loop/suppression-signal.js";
 import type {
   VerifyFixRoundRecord,
   VerifyFixSkipReason,
@@ -361,6 +362,24 @@ export interface SprintAdherenceRecord {
   finishedAt: string;
   /** Present only when `stopReason` is `"error"` — the caught exception's message. */
   errorMessage?: string;
+  /**
+   * Slice H — suppression directives (`# type: ignore`, `// ts-ignore`,
+   * `#pragma warning disable`, …) that this sprint's own diff ADDED, from
+   * `src/product-loop/suppression-signal.ts`.
+   *
+   * Its OWN field, deliberately not a `rounds[].deviations` / `residualDeviations`
+   * entry: a deviation asserts the sprint diverged from its approved plan and is
+   * fed to the fixer and the next sprint's focus, while a suppression may be the
+   * correct call (if `save()` really accepts `bytes`, the ANNOTATION was wrong).
+   * Filing it as a deviation would state something untrue and dispatch a fixer at
+   * a line the plan never mentioned.
+   *
+   * Report only — nothing reads it to decide anything. Absent means no diff was
+   * scanned (review disabled, empty plan, empty diff, git spawn failure, or a
+   * record written before this field existed); `{findings: [], total: 0}` means
+   * scanned and none found. Those are different facts and are kept apart.
+   */
+  suppressions?: SuppressionScan;
 }
 
 /**

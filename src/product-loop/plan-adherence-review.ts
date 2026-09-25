@@ -3,6 +3,7 @@ import { runGitSpawn } from "../utils/git-spawn.js";
 import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
 import { boundTaskText, type SprintPlanTask } from "./sprint-plan-artifact.js";
+import { formatSuppressionNote, type SuppressionScan, scanDiffForSuppressions } from "./suppression-signal.js";
 
 /**
  * Run an isolated sub-agent with a wall-clock backstop. The review/fix agents
@@ -195,6 +196,19 @@ export interface AdherenceVerdict {
    * never fabricated.
    */
   taskVerdicts?: TaskVerdict[];
+  /**
+   * Slice H — suppression directives this sprint's own diff ADDED
+   * (`suppression-signal.ts`). Present only when a diff was actually scanned;
+   * `undefined` means no scan happened (empty plan, no diff, git spawn failure)
+   * and is deliberately NOT the same fact as `{findings: [], total: 0}`
+   * ("scanned, none found") — see `coverage-signal.ts` for the defect that
+   * conflating absence with zero causes.
+   *
+   * Report only. It is NOT folded into `deviations` (a deviation asserts the
+   * sprint diverged from its plan, which a legitimate suppression does not) and
+   * it never touches `adherent` or `stopReason`.
+   */
+  suppressions?: SuppressionScan;
 }
 
 /**
@@ -440,6 +454,28 @@ export async function* runPlanAdherenceReview(args: {
   const readDiff = (): { diff: string; unavailable: boolean } =>
     args.diffProvider ? { diff: args.diffProvider(args.cwd), unavailable: false } : currentDiffResult(args.cwd);
 
+  /**
+   * Slice H — the suppression scan of the LATEST diff read. `git diff HEAD` is
+   * cumulative, so the most recent read is the most complete picture of what
+   * this sprint added; a fixer round that adds or removes a directive is
+   * therefore reflected rather than frozen at round 1. Stays `undefined` until a
+   * diff is actually scanned, so "not scanned" never reads as "none found".
+   *
+   * It reuses the reviewer's OWN diff text — no second `git diff` with different
+   * bounds, which could disagree with the reviewer about what the sprint changed.
+   */
+  let suppressions: SuppressionScan | undefined;
+  let lastSuppressionNote: string | null = null;
+  /** Rescan `d` and return a transcript note only when it says something new. */
+  const rescanSuppressions = (d: string): string | null => {
+    if (!d) return null;
+    suppressions = scanDiffForSuppressions(d);
+    const note = formatSuppressionNote(suppressions);
+    if (!note || note === lastSuppressionNote) return null;
+    lastSuppressionNote = note;
+    return note;
+  };
+
   let diff: string;
   let diffUnavailable: boolean;
   {
@@ -457,6 +493,11 @@ export async function* runPlanAdherenceReview(args: {
     }
     yield { type: "content", content: `\n> [adherence] No diff to review for sprint ${args.sprintN}; skipping.\n` };
     return { rounds: 0, adherent: true, deviations: [], roundRecords, stopReason: "no_diff" };
+  }
+
+  {
+    const note = rescanSuppressions(diff);
+    if (note) yield { type: "content", content: note };
   }
 
   let lastDeviations: string[] = [];
@@ -497,7 +538,14 @@ export async function* runPlanAdherenceReview(args: {
         content: `\n> [adherence] Reviewer produced no parseable verdict (round ${round}); leaving verify+criteria as the gate.\n`,
       };
       roundRecords.push({ round, reviewerApproved: false, deviations: [], fixRan: false });
-      return { rounds: round, adherent: true, deviations: [], roundRecords, stopReason: "no_verdict" };
+      return {
+        rounds: round,
+        adherent: true,
+        deviations: [],
+        roundRecords,
+        stopReason: "no_verdict",
+        ...(suppressions ? { suppressions } : {}),
+      };
     }
 
     let taskVerdicts: TaskVerdict[] | undefined;
@@ -556,6 +604,7 @@ export async function* runPlanAdherenceReview(args: {
         roundRecords,
         stopReason: "approved",
         ...(taskVerdicts ? { taskVerdicts } : {}),
+        ...(suppressions ? { suppressions } : {}),
       };
     }
 
@@ -604,6 +653,7 @@ export async function* runPlanAdherenceReview(args: {
         roundRecords,
         stopReason: taskStopReason(round, "no_progress"),
         ...(taskVerdicts ? { taskVerdicts } : {}),
+        ...(suppressions ? { suppressions } : {}),
       };
     }
     previousDeviationKey = deviationKey;
@@ -627,6 +677,7 @@ export async function* runPlanAdherenceReview(args: {
         roundRecords,
         stopReason: taskStopReason(round, "round_cap"),
         ...(taskVerdicts ? { taskVerdicts } : {}),
+        ...(suppressions ? { suppressions } : {}),
       };
     }
 
@@ -678,6 +729,7 @@ export async function* runPlanAdherenceReview(args: {
         roundRecords,
         stopReason: "error",
         ...(taskVerdicts ? { taskVerdicts } : {}),
+        ...(suppressions ? { suppressions } : {}),
       };
     }
 
@@ -688,6 +740,10 @@ export async function* runPlanAdherenceReview(args: {
     // re-read failure is comparatively rare (the loop only reaches here after
     // at least one successful git spawn) and does not change `stopReason`.
     diff = readDiff().diff;
+    {
+      const note = rescanSuppressions(diff);
+      if (note) yield { type: "content", content: note };
+    }
   }
 
   // Reached only when an explicit, finite `maxRounds` was exhausted.
@@ -697,5 +753,6 @@ export async function* runPlanAdherenceReview(args: {
     deviations: lastDeviations,
     roundRecords,
     stopReason: "round_cap",
+    ...(suppressions ? { suppressions } : {}),
   };
 }
