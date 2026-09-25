@@ -9,6 +9,7 @@ import {
   buildPythonDepsInstallCommand,
   findPytestTargets,
   type PytestTarget,
+  selectPytestGateTargets,
 } from "./pytest-detect.js";
 import { mergeStoredVerifyRecipe } from "./recipe-merge.js";
 import { commandIn, fileExistsIn, findMarkedDirectories } from "./workspace-scan.js";
@@ -437,17 +438,41 @@ interface PytestContribution {
  */
 function contributionFromPytestTargets(targets: PytestTarget[]): PytestContribution {
   const contribution: PytestContribution = { testCommands: [], installCommands: [], evidence: [], notes: [] };
+  const gateTargets = new Set(selectPytestGateTargets(targets));
+
+  // Environment preparation, for EVERY target — a sub-project's own manifest is
+  // not reachable from the repository root, so its dependencies are installed
+  // from its own directory, in its own interpreter, whether or not its gate
+  // command survived the collapse.
   for (const target of targets) {
-    const where = target.dir || "the repository root";
-    contribution.testCommands.push(buildPytestCommand(target));
-    contribution.evidence.push(`Detected pytest in ${where} via ${target.marker}`);
-    // A sub-project's own manifest is not reachable from the repository root, so
-    // its dependencies are installed from its own directory, in its own
-    // interpreter — BEFORE pytest, so a manifest that already pins pytest
-    // satisfies it and the fallback install below is a no-op.
     const deps = buildPythonDepsInstallCommand(target);
     if (deps) contribution.installCommands.push(deps);
+  }
+
+  for (const target of targets) {
+    const where = target.dir || "the repository root";
+    if (!gateTargets.has(target)) {
+      // Detected, but its pytest command would duplicate another target's from the
+      // same rootdir. Said out loud so a reader does not conclude detection missed it.
+      contribution.evidence.push(
+        `Detected pytest in ${where} via ${target.marker}, already covered by the ` +
+          `${target.runDir || "repository root"} run — no duplicate command emitted`,
+      );
+      continue;
+    }
+    contribution.testCommands.push(buildPytestCommand(target));
+    // A test command that does NOT `cd` to the marker directory looks wrong until
+    // you know pytest resolves `testpaths` only from its rootdir — so the evidence
+    // says which config moved it and why. See PytestTarget.runDir.
+    const rootdir =
+      target.runDir === target.dir
+        ? ""
+        : `, run from ${target.runDir || "the repository root"} because ${target.rootdirConfig} there is pytest's ` +
+          `rootdir — the only directory from which its testpaths applies`;
+    contribution.evidence.push(`Detected pytest in ${where} via ${target.marker}${rootdir}`);
     if (!target.pytestDeclared) {
+      // Ordered AFTER the dependency installs above, so a manifest that already
+      // pins pytest satisfies it and this fallback is a no-op.
       contribution.installCommands.push(buildPytestInstallCommand(target));
       contribution.notes.push(
         `pytest is not declared in a manifest under ${where} and is not installed in a venv there, ` +

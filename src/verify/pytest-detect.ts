@@ -56,6 +56,36 @@ export interface PytestTarget {
   marker: string;
   kind: PytestMarkerKind;
   /**
+   * The directory the pytest command must RUN from — pytest's rootdir when a
+   * config governs this target, otherwise {@link dir}. Always {@link dir} or an
+   * ancestor of it, so a command built from it never escapes the scanned root.
+   *
+   * This is not the same question as "where is the marker". `testpaths` is
+   * honoured only when pytest is invoked FROM the rootdir, so `cd`-ing into the
+   * marker directory silently discards the project's own declaration of where
+   * its tests live. Measured on `D:\sources\CompanyLibs\qa-platform` (pytest
+   * 9.1.1), whose root `pytest.ini` declares `testpaths = specs` while the
+   * marker is `backend/conftest.py` — same interpreter, same configfile, same
+   * tree, through the floor's own `spawn(shell: true)`:
+   *
+   *   cd backend && ".venv/Scripts/python.exe" -m pytest   → exit 5, collected 0
+   *   "backend/.venv/Scripts/python.exe"      -m pytest    → exit 0, collected 12
+   *
+   * The `testpaths: specs` header line appears only in the second run, because
+   * `_pytest/config/__init__.py::_decide_args` reaches its TESTPATHS branch only
+   * `if invocation_dir == rootpath` and otherwise falls back to collecting from
+   * the invocation directory — which the root config's `norecursedirs` then
+   * prunes to nothing. Exit 5 is `EXIT_NOTESTSCOLLECTED`, so the floor failed a
+   * suite that passes.
+   */
+  runDir: string;
+  /**
+   * The config file that put the rootdir at {@link runDir}, relative to that
+   * directory, or null when no config governs this target — in which case
+   * nothing can declare `testpaths` either and the marker directory is right.
+   */
+  rootdirConfig: string | null;
+  /**
    * A venv interpreter that EXISTS on disk, relative to `dir`, or null for the
    * ambient one. Read off disk rather than assumed: the real qa-platform
    * `backend/.venv` is a Windows venv (`Scripts/python.exe`) even though the
@@ -63,6 +93,18 @@ export interface PytestTarget {
    * name a file that is not there.
    */
   pythonBin: string | null;
+  /**
+   * The same interpreter spelled from {@link runDir} instead of {@link dir} —
+   * what the TEST command needs, since that command no longer runs in the marker
+   * directory. Null whenever {@link pythonBin} is.
+   *
+   * Kept as its own field rather than derived at build time because {@link
+   * pythonBin} is what the INSTALL commands need: they run in {@link dir}, where
+   * the manifest and the venv actually are. Both spellings are relative and
+   * contain no `..` — {@link runDir} is {@link dir} or an ancestor — so the
+   * emitted commands stay transplantable into the Debian verify sandbox.
+   */
+  runDirPythonBin: string | null;
   /**
    * Is pytest provably obtainable — declared in a manifest in this directory,
    * or already installed in the detected venv? False means a pytest command
@@ -157,6 +199,60 @@ function hasPythonManifest(dir: string): boolean {
 }
 
 /**
+ * The pytest config file in `dir`, or null — the ONE derivation of "is there a
+ * rootdir declaration here", used both to classify a marker and to locate the
+ * rootdir a command must run from.
+ *
+ * Name order matches `_pytest/config/findpaths.py::locate_config`, which probes
+ * `pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, `pyproject.toml`,
+ * `tox.ini`, `setup.cfg` in that order, and the section requirement is the same
+ * one {@link SECTIONED_CONFIG_FILES} already encodes: a `pyproject.toml` with
+ * only `[project]` declares no rootdir.
+ */
+function findPytestConfigFile(dir: string): string | null {
+  for (const file of UNCONDITIONAL_CONFIG_FILES) {
+    if (readIfPresent(dir, file) !== null) return file;
+  }
+  for (const { file, section } of SECTIONED_CONFIG_FILES) {
+    const body = readIfPresent(dir, file);
+    if (body !== null && section.test(body)) return file;
+  }
+  return null;
+}
+
+/**
+ * Where pytest would put its rootdir for a target in `markerDir`, or null when
+ * no config governs it.
+ *
+ * `locate_config` walks `(argpath, *argpath.parents)` — the invocation directory
+ * then every parent — and takes the FIRST directory holding a config, so a
+ * nearer config shadows an outer one. Measured in a temp tree where the config
+ * directory is neither the marker directory nor the tree root: invoked from
+ * `cfgdir/backend`, pytest reported `rootdir: …/cfgdir`, i.e. the config's own
+ * directory, and collected 0; invoked from `cfgdir`, the same tree reported
+ * `testpaths: specs` and collected 1.
+ *
+ * The walk stops AT `root`. pytest itself would keep going to the filesystem
+ * root, but a command is emitted as a path relative to `root` and `cd`-ing above
+ * it would take the floor outside the workspace it is verifying. A config above
+ * the scanned root therefore degrades to "no config here", which is exactly
+ * today's behaviour and no worse.
+ */
+function findRootdir(root: string, markerDir: string): { abs: string; config: string } | null {
+  let current = markerDir;
+  for (;;) {
+    const config = findPytestConfigFile(current);
+    if (config) return { abs: current, config };
+    if (current === root) return null;
+    const parent = path.dirname(current);
+    // Defensive: a `markerDir` outside `root` would never hit `current === root`,
+    // so stop at the filesystem root rather than looping forever.
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+/**
  * The strongest pytest marker in `dir`, or null when it is not a pytest root.
  *
  * `config` markers stand alone — they ARE a rootdir declaration. `conftest` and
@@ -164,13 +260,8 @@ function hasPythonManifest(dir: string): boolean {
  * with a `tests/` subdirectory is not mistaken for a project.
  */
 function classifyDirectory(dir: string): { marker: string; kind: PytestMarkerKind } | null {
-  for (const file of UNCONDITIONAL_CONFIG_FILES) {
-    if (readIfPresent(dir, file) !== null) return { marker: file, kind: "config" };
-  }
-  for (const { file, section } of SECTIONED_CONFIG_FILES) {
-    const body = readIfPresent(dir, file);
-    if (body !== null && section.test(body)) return { marker: file, kind: "config" };
-  }
+  const config = findPytestConfigFile(dir);
+  if (config) return { marker: config, kind: "config" };
 
   const manifest = hasPythonManifest(dir);
   if (!manifest) return null;
@@ -196,14 +287,71 @@ export function findPytestTargets(root: string): PytestTarget[] {
     const hit = classifyDirectory(dir);
     if (!hit) return null;
     const pythonBin = findVenvInterpreter(dir);
+    const rootdir = findRootdir(root, dir);
     return {
       marker: hit.marker,
       kind: hit.kind,
+      // Resolved from the ABSOLUTE paths that are still in hand here, so neither
+      // the run directory nor the interpreter path below depends on the process
+      // cwd at the time a command is built.
+      rootDir: rootdir ? path.relative(root, rootdir.abs) : null,
+      rootdirConfig: rootdir?.config ?? null,
       pythonBin,
+      runDirPythonBin: pythonBin ? path.relative(rootdir?.abs ?? dir, path.join(dir, pythonBin)) : null,
       pytestDeclared: detectPytestAvailability(dir, pythonBin),
       depsInstall: pythonDepsInstallVerb(dir),
     };
-  }).map(({ dir, value }) => ({ dir, ...value }));
+  }).map(({ dir, value }) => {
+    const { rootDir, ...rest } = value;
+    return { dir, runDir: rootDir ?? dir, ...rest };
+  });
+}
+
+/**
+ * One GATE target per rootdir — which of several targets sharing a `runDir`
+ * should actually contribute a pytest command.
+ *
+ * Every target sharing a `runDir` runs pytest from the SAME directory and so
+ * collects the SAME tests; emitting all of them runs one suite N times. Which
+ * one survives is not cosmetic, because it decides which INTERPRETER the gate
+ * runs under.
+ *
+ * A target bound to a venv wins. The venv is the environment the project itself
+ * declares and provisions, read off disk; the ambient `python` is whatever the
+ * host happens to have. Measured on qa-platform: two targets (root `pytest.ini`,
+ * ambient; `backend/conftest.py`, `backend/.venv`) both resolve to `runDir: ""`,
+ * and `backend/.venv` has pytest plus the FastAPI/SQLAlchemy dependencies
+ * installed while a clean checkout's ambient interpreter has neither. The ambient
+ * command therefore fails for a reason that has nothing to do with the code under
+ * test — a false FAIL, which is the exact failure mode this gate exists to
+ * prevent, so it must not be emitted alongside a venv-bound alternative.
+ *
+ * When several share a `runDir` and NONE has a venv, every candidate builds the
+ * BYTE-IDENTICAL command — same ambient `python`, same directory — so the
+ * collapse is a pure dedupe and the survivor only decides which marker the
+ * evidence cites. The first in {@link findPytestTargets}' existing
+ * shallowest-then-alphabetical order wins, which keeps the choice stable across
+ * platforms and filesystems instead of following readdir order.
+ *
+ * Only the GATE collapses. Every target keeps its dependency install
+ * ({@link buildPythonDepsInstallCommand}), because the surviving run happens from
+ * the rootdir and can collect tests importing from any of the collapsed
+ * sub-projects — dropping those would trade a false FAIL for a missing
+ * dependency.
+ */
+export function selectPytestGateTargets(targets: PytestTarget[]): PytestTarget[] {
+  const byRunDir = new Map<string, PytestTarget>();
+  for (const target of targets) {
+    const incumbent = byRunDir.get(target.runDir);
+    // Insertion order is the caller's stable order, so an unbeaten incumbent also
+    // fixes the output order.
+    if (!incumbent) {
+      byRunDir.set(target.runDir, target);
+      continue;
+    }
+    if (!incumbent.pythonBin && target.pythonBin) byRunDir.set(target.runDir, target);
+  }
+  return [...byRunDir.values()];
 }
 
 /**
@@ -236,15 +384,32 @@ function pythonDepsInstallVerb(dir: string): string | null {
  *
  * Prefixed with `cd <dir> &&` for a sub-project, the same shape the recipe's
  * own installCommands already use.
+ *
+ * The directory is {@link PytestTarget.runDir} — pytest's rootdir — NOT the
+ * marker directory, because `testpaths` applies only when pytest is invoked from
+ * the rootdir. See {@link PytestTarget.runDir} for the 0-vs-12 measurement. The
+ * two are the same directory whenever no config sits above the marker, so a bare
+ * `conftest.py` project is unaffected.
+ *
+ * `-m` still adds the CURRENT directory to `sys.path`, and that current directory
+ * is now the rootdir. That is the project's own choice, not a regression: on
+ * qa-platform the tests `testpaths` selects carry their own `conftest.py` that
+ * puts `backend/` on `sys.path`, and all 12 pass from the root. A project whose
+ * imports only resolve from the marker directory declares that by keeping its
+ * config there, which keeps `runDir` on the marker directory.
  */
 export function buildPytestCommand(target: PytestTarget): string {
-  return commandIn(target.dir, `${quoteInterpreter(target.pythonBin)} -m pytest`);
+  return commandIn(target.runDir, `${quoteInterpreter(target.runDirPythonBin)} -m pytest`);
 }
 
 /**
  * The command that makes {@link buildPytestCommand} launchable when pytest is
  * not already declared or installed. Uses `<python> -m pip` so the install
  * lands in the SAME interpreter the test command will run.
+ *
+ * Runs in the MARKER directory, not {@link PytestTarget.runDir}: the venv being
+ * installed into is the marker directory's own. Only the test command moves up to
+ * the rootdir, and only because `testpaths` is resolved there.
  */
 export function buildPytestInstallCommand(target: PytestTarget): string {
   return commandIn(target.dir, `${quoteInterpreter(target.pythonBin)} -m pip install pytest`);
@@ -252,7 +417,8 @@ export function buildPytestInstallCommand(target: PytestTarget): string {
 
 /**
  * Install this target's own declared dependencies, in its own interpreter, from
- * its own directory — or null when it declares none.
+ * its own directory — the MARKER directory, where the manifest actually is, not
+ * {@link PytestTarget.runDir} — or null when it declares none.
  *
  * Only emitted for a SUB-directory target: a root target's manifest is already
  * covered by the recipe's root-level install line, and emitting both would run
