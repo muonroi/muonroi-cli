@@ -2789,6 +2789,27 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // last verify+floor pass the S4 loop reached), used to write
   // `sprints/<n>-structure.json` and a note in `sprints/<n>-verify.md`.
   let structureCheckFinal: import("./project-registration-check.js").ProjectRegistrationCheckResult | undefined;
+  /**
+   * F5/K — the commit this run started from, for the goal gate's committed half.
+   *
+   * Assigned inside `runVerifyAndFloorPass` off the SAME baseline record the
+   * project-registration check there already loads, rather than by a second git
+   * call or a second file read: `verify-baseline.json`'s `gitCommit` is the only
+   * SHA the run records anywhere (`SprintOutcome` in ../flow/run-artifacts.ts has
+   * no such field, and a scan of run muc2joffe506's sprint artifacts for a 40-hex
+   * string found none). Declared at THIS scope, not inside that pass, because the
+   * goal gate runs after the pass returns; re-assignment across verify-fix rounds
+   * writes the same value.
+   *
+   * Null when no baseline was captured — `readChangeDiff` then uses its bounded
+   * fallback range, which is still not a one-commit window.
+   *
+   * It is a RUN base, not a per-sprint one, so from sprint 2 on it also covers
+   * earlier sprints' commits. That is the safe direction for a gate:
+   * over-inclusion costs at worst one iteration, under-inclusion is the rubber
+   * stamp measured in goal-contradiction-gate.ts.
+   */
+  let goalGateBaseCommit: string | null = null;
   // Only pass tasks into a task-aware review when the artifact actually named
   // some (`source !== "none"`) — an empty/absent array falls the review back
   // to the legacy plan-text-only path, unchanged.
@@ -3259,6 +3280,8 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
             }
           })()
         : null;
+      // The one recorded SHA in the run — see `goalGateBaseCommit`'s declaration.
+      goalGateBaseCommit = parsedBaseline?.gitCommit ?? null;
       structureCheckResult = await checkProjectRegistration({ cwd, baseline: parsedBaseline });
       if (hasProjectRegistrationViolations(structureCheckResult)) {
         const structureMustFix = formatProjectRegistrationMustFix(structureCheckResult);
@@ -3639,6 +3662,14 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         // paperwork — including, now, this gate's own verdict. Feeding a judge
         // its previous answer as "the change that was made" is not a check.
         excludeDir: ctx.flowDir,
+        // The sprint's change is what it COMMITTED plus what it left pending —
+        // never whichever half happens to be non-empty. Measured on run
+        // muc2joffe506 sprint 2: four stray `.db` files in the working tree hid
+        // four commits of real work, and the gate reported the sprint aligned on
+        // 1,103 characters of leftover test databases. `null` here is honest
+        // (no baseline for this run) and degrades to the gate's bounded commit
+        // range, not to the `HEAD~1` window that missed three of those four.
+        sinceCommit: goalGateBaseCommit ?? undefined,
       });
       idealTrace("sprint.goal-gate.after", {
         runId: ctx.runId,

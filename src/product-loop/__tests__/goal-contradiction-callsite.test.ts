@@ -150,6 +150,41 @@ function seedRepo(): void {
   git(["commit", "-q", "-m", "seed"]);
 }
 
+/** The fixture repo's current HEAD, the way the real baseline capture reads it. */
+function headSha(): string {
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectCwd, encoding: "utf8" }).trim();
+}
+
+/**
+ * The run's `verify-baseline.json`, carrying the ONE SHA a run records.
+ *
+ * Only `gitCommit` matters to the goal gate, but the file is written with the
+ * fields `VerifyBaseline` declares non-optional so it parses as the real record
+ * the project-registration check beside it also reads.
+ */
+function writeBaselineWithCommit(gitCommit: string): void {
+  const dir = join(flowDir, "runs", "run-f5-callsite");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "verify-baseline.json"),
+    JSON.stringify({
+      version: 1,
+      runId: "run-f5-callsite",
+      capturedAtUtc: new Date().toISOString(),
+      cwd: projectCwd,
+      gitCommit,
+      gitBranch: "main",
+      gitDirty: false,
+      commands: { build: [], test: [] },
+      buildOk: true,
+      failingTests: [],
+      results: [],
+      unattributable: false,
+    }),
+    "utf8",
+  );
+}
+
 function writeCsproj(contents: string): void {
   mkdirSync(join(projectCwd, "src", "TCIS.CodeStandards"), { recursive: true });
   writeFileSync(join(projectCwd, CSPROJ_PATH), contents, "utf8");
@@ -275,6 +310,48 @@ describe("runSprint consults the goal-contradiction gate", () => {
     expect(text).toContain("[goal-gate]");
     // The contradiction reaches the transcript by name, not as a count.
     expect(text).toContain(GOAL_FRAGMENT);
+  }, 90_000);
+
+  /**
+   * F5/K — the measured muc2joffe506 sprint-2 shape, driven through the REAL
+   * `runSprint`.
+   *
+   * The sprint COMMITTED its change and left only leftover artifacts in the tree.
+   * Before the union, the gate read the working tree, found it non-empty, and
+   * judged those artifacts alone — `"diffOrigin": "working-tree"`, `"diffChars":
+   * 1103`, `"source": "aligned"` — while blind to the commit. This pins that the
+   * commit is judged instead, and that the run's ONE recorded SHA
+   * (`verify-baseline.json`'s `gitCommit`) is what bounds the range: without the
+   * sprint-runner wiring the origin would read `recent-commits+working-tree`, so
+   * the assertion fails if the SHA stops reaching the gate.
+   */
+  it("judges a COMMITTED change that leftover artifacts would otherwise hide", async () => {
+    seedRepo();
+    writeCsproj(CSPROJ_BEFORE);
+    execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "ignore" });
+    git(["commit", "-q", "-m", "pre-change analyzer project"]);
+    // This run's recorded base is that pre-change commit.
+    writeBaselineWithCommit(headSha());
+
+    // The change the sprint made — COMMITTED, the way run muc2joffe506 made it.
+    writeCsproj(CSPROJ_AFTER);
+    execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "ignore" });
+    git(["commit", "-q", "-m", "sprint work"]);
+    // …and the leftovers that were judged in its place. Not filtered out: they
+    // were never the problem, the missing commit was.
+    writeFileSync(join(projectCwd, "test_artifacts.db"), "SQLite format 3\u0000noise\n", "utf8");
+
+    judgeReply = CONTRADICTS;
+    const { result } = await runOneSprint();
+
+    expect(goalPrompts).toHaveLength(1);
+    expect(goalPrompts[0]).toContain(DECISIVE_REMOVAL);
+    // The stray artifact is still shown — the union adds, it does not filter.
+    expect(goalPrompts[0]).toContain("test_artifacts.db");
+    expect(result.lastVerifyResult).toBe("FAIL");
+    // `sprint-commits`, not `recent-commits`: the recorded base was honoured.
+    expect(readGoalGateRecord()?.diffOrigin).toBe("sprint-commits+working-tree");
+    expect(readGoalGateRecord()?.diffFiles).toContain(CSPROJ_PATH);
   }, 90_000);
 
   it("still scores PASS when the judge finds the change serves the goal", async () => {
@@ -415,7 +492,17 @@ describe("the goal gate leaves a durable record", () => {
     expect(rec?.contradictions?.[0]?.goal).toContain(GOAL_FRAGMENT);
     expect(rec?.contradictions?.[0]?.change).toContain(DECISIVE_REMOVAL);
     // …and what the judge was actually shown.
-    expect(rec?.diffOrigin).toBe("working-tree");
+    //
+    // F5/K — this asserted `"working-tree"` before the union landed, and that
+    // assertion was WRONG rather than merely stale: the fixture repo HAS commits,
+    // and the only reason the working tree was the whole account of the change
+    // was that the read discarded the committed half unconditionally whenever the
+    // tree was non-empty. That is precisely the defect measured on run
+    // muc2joffe506 sprint 2 — four stray `.db` files hid four commits. The origin
+    // now names BOTH sources, and with no `verify-baseline.json` in this
+    // fixture's flowDir the committed half is the BOUNDED fallback range, which
+    // the name says out loud rather than claiming a recorded base.
+    expect(rec?.diffOrigin).toBe("recent-commits+working-tree");
     expect(rec?.diffFiles).toContain(CSPROJ_PATH);
     expect(rec?.diffChars).toBeGreaterThan(0);
     expect(typeof rec?.judgedAt).toBe("string");

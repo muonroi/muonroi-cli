@@ -135,6 +135,82 @@
  *   the judge its own previous output as "the change that was made". The caller
  *   passes `excludeDir` so the module needs no knowledge of what that directory
  *   is called.
+ *
+ * ## Why the change is a UNION of the sprint's commits and its working tree
+ *
+ * The enumeration door above has a THIRD door behind it, and the same rubber
+ * stamp walks through: the read had two SOURCES and picked one.
+ *
+ * MEASURED, run `muc2joffe506` sprint 2, 2026-09-25, verbatim from
+ * `.muonroi-flow/runs/muc2joffe506/sprints/2-goal-gate.json`:
+ *
+ *   "fired": false, "source": "aligned", "diffOrigin": "working-tree",
+ *   "diffChars": 1103,
+ *   "detail": "The change adds test artifacts and a timestamp update, which do
+ *              not hinder the goal of porting a new project.",
+ *   "diffFiles": [".muonroi-flow/runs/muc2joffe506/verify-baseline.json",
+ *                 "backend/test_artifacts.db",
+ *                 "specs/040-sprint1-artifact-store/tests/_smoke_test.db",
+ *                 "test_artifacts.db"]
+ *
+ * That sprint had COMMITTED its work — `git log` over the same window shows
+ * `7384a88`, `3965a9a`, `3153d8d`, `94a6557` and more, 11 commits between the
+ * base this run recorded and HEAD. The gate judged 1,103 characters of leftover
+ * test databases, found them harmless — correctly, about those files — and
+ * reported the sprint aligned while blind to every line of the work.
+ *
+ * Two independent causes, from the code as it stood:
+ *
+ * 1. **The working tree won unconditionally when non-empty.** Four stray `.db`
+ *    files were enough to hide four commits, and the committed read was
+ *    reachable only from a perfectly clean tree — which a sprint that writes any
+ *    artifact never has.
+ * 2. **The committed read was `HEAD~1..HEAD` — ONE commit.** Even from a clean
+ *    tree it would have judged `7384a88` alone and missed the other three. The
+ *    gate had no concept of *the sprint's* changes.
+ *
+ * So the change is now the UNION of what the sprint committed and what it left
+ * uncommitted. This repository already argued the union case for a gate, at
+ * `src/verify/recipe-merge.ts:69`: "A gate is a check that must pass. A union is
+ * never smaller than the disk's set, so no record can disarm a gate." The same
+ * property is what is wanted here — a union cannot be smaller than what either
+ * source alone would show, so neither an empty tree nor a noisy one can disarm
+ * the judgement. The INVERSE argument at `recipe-merge.ts:72` (provisioning
+ * commands are not unioned, because `npm ci` and `npm install` are two spellings
+ * of one operation and running both is a conflict) does NOT reach this case: the
+ * committed diff and the working-tree diff are different hunks of one change, not
+ * two spellings of one, and showing both to a read-only judge executes nothing.
+ *
+ * **Filtering the artifacts out is the wrong lever and is deliberately not done.**
+ * The blindness was not caused by the `.db` files being present; it was caused by
+ * the commits being absent. `ARTIFACT_RE` in `src/orchestrator/auto-commit.ts:45`
+ * scopes auto-commits and does not even match `test_artifacts.db` (it covers
+ * `.muonroi-*`, `node_modules/`, `dist/`, `build/`, `coverage/`, `.next/`,
+ * `.turbo/`, `.git/`, `.DS_Store` and `*.log`). `excludeDir` remains the one
+ * exclusion, for the crowding reason derived above — and it now applies to the
+ * committed half too, since auto-commit commits that paperwork on a real run and
+ * an exclusion that covered only untracked files would let all 49 files back in.
+ *
+ * ## Where the sprint's base commit comes from
+ *
+ * One place in the run records a SHA, and it is not per-sprint:
+ * `verify-baseline.json`'s `gitCommit` (`./verify-baseline.ts`, the
+ * `VerifyBaseline` interface), captured ONCE per run before any sprint. Measured
+ * on the run above: `5bb37068977cd46912d8a612af46ad1184b22a8f`, `gitDirty: true`,
+ * and `git merge-base --is-ancestor` confirms it is an ancestor of HEAD. No
+ * sprint artifact carries a commit — `SprintOutcome` (`../flow/run-artifacts.ts`)
+ * has no such field, and a scan of the measured run's `2-adherence.json`,
+ * `2-plan.json`, `2-outcome.json`, `2-verify-fix.json`, `2-structure.json`,
+ * `sprint-plan.json` and `manifest.md` for a 40-hex string found none.
+ *
+ * So a RUN base is available and a SPRINT base is not. The run base over-reports
+ * for sprint 2 and later (it also covers sprint 1's commits), which is the safe
+ * direction for a gate: over-inclusion can cost one iteration, under-inclusion is
+ * the rubber stamp measured above. When even the run base is missing or unusable
+ * the fallback is a BOUNDED commit range with a named limit
+ * ({@link GOAL_GATE_FALLBACK_COMMIT_DEPTH}) — never a silent `HEAD~1`, whose
+ * one-commit window is cause 2 above. `origin` names which of the two was read,
+ * because the record is the only place a reader can see it.
  */
 
 import { statSync } from "node:fs";
@@ -183,11 +259,34 @@ const GIT_MAX_BUFFER = 32 * 1024 * 1024;
 
 /**
  * D10 — git's own message for "this commit has no parent" (a repo's first
- * commit; there is no `HEAD~1`). The ONLY failure text on the `HEAD~1..HEAD`
+ * commit; there is no `HEAD~1`). The ONLY failure text on the `HEAD~N..HEAD`
  * fallback that still means "no-diff" rather than "diff-unreadable" — see
- * `readChangeDiff`.
+ * `readCommittedDiff`.
+ *
+ * MEASURED against a real 2-commit repository: `git diff HEAD~5 HEAD` exits 128
+ * with `fatal: ambiguous argument 'HEAD~5': unknown revision or path not in the
+ * working tree.` — the same text, so the clamp below and this regex agree.
  */
 const MISSING_HEAD_TILDE_1_RE = /unknown revision or path not in the working tree/i;
+
+/**
+ * How far back the committed half reaches when no sprint base was recorded.
+ *
+ * A NAMED limit, which is the whole point: the previous behaviour was an
+ * unstated `HEAD~1`, and a one-commit window is exactly how the measured defect
+ * missed three of a sprint's four commits. Derived from that same measurement —
+ * run `muc2joffe506` landed 11 commits between its recorded base and HEAD across
+ * two sprints, so 20 covers the measured run with ~2x headroom.
+ *
+ * Reaching too far is bounded on both ends and cannot run away: the range is
+ * clamped to the commits that actually exist (`rev-list --count`, so `HEAD~N` is
+ * never asked for on a shallower history), and the PROMPT is bounded by
+ * {@link GOAL_GATE_DIFF_BUDGET} + `budgetDiffByFile` regardless of how many
+ * commits the range spans. The cost of a deeper range is one `git diff`, and the
+ * risk is judging work from before this sprint — over-inclusion, which costs at
+ * worst one iteration, against the under-inclusion that produced a rubber stamp.
+ */
+export const GOAL_GATE_FALLBACK_COMMIT_DEPTH = 20;
 
 /**
  * How many untracked files are rendered before the read stops.
@@ -307,7 +406,31 @@ export function formatGoalStatement(goal: GoalStatement, budget = GOAL_BUDGET): 
 
 // ─── the change ──────────────────────────────────────────────────────────────
 
-export type DiffOrigin = "working-tree" | "last-commit";
+/**
+ * Which sources the judged diff was actually read from.
+ *
+ * Reported to the user (`sprint-runner.ts`: "judged on the ${diffOrigin} diff")
+ * and persisted in the sprint's gate record, so every member names a real read
+ * and nothing more. `"last-commit"` was retired with the one-commit window it
+ * described: there is no longer any path that reads exactly the last commit.
+ */
+export type DiffOrigin =
+  /** Uncommitted change only — tracked edits plus untracked additions. */
+  | "working-tree"
+  /** Commits since the base the run recorded, only. */
+  | "sprint-commits"
+  /** Both: commits since the recorded base, plus the uncommitted change. */
+  | "sprint-commits+working-tree"
+  /**
+   * Commits only, over the BOUNDED fallback range — no base was recorded, or the
+   * recorded one was unusable. May reach back past this sprint; says so by name.
+   */
+  | "recent-commits"
+  /** Both, with the bounded fallback range standing in for a recorded base. */
+  | "recent-commits+working-tree";
+
+/** Which committed range a read used. Half of a {@link DiffOrigin}. */
+type CommittedKind = "sprint-commits" | "recent-commits";
 
 export type DiffRead =
   | { ok: true; diff: string; origin: DiffOrigin }
@@ -343,10 +466,23 @@ function git(
 export interface ChangeDiffOptions {
   /**
    * A directory whose contents are the RUN's output rather than the CHANGE's —
-   * excluded from the untracked scan. Absolute, or relative to `cwd`. See the
-   * module header for the 49-of-57 measurement that makes this load-bearing.
+   * excluded from BOTH halves of the read: the untracked scan, and the tracked
+   * diffs (working tree and committed range). Absolute, or relative to `cwd`.
+   * See the module header for the 49-of-57 measurement that makes this
+   * load-bearing, and for why it has to cover committed paths too.
    */
   excludeDir?: string;
+  /**
+   * The commit this unit of work started from, when the caller knows it. The
+   * committed half is then `<sinceCommit>..HEAD`.
+   *
+   * Validated before use (`merge-base --is-ancestor`): a SHA this repository
+   * cannot resolve, or one that is not an ancestor of HEAD — a baseline written
+   * on another branch or before a history rewrite — is stale garbage rather than
+   * knowledge, and degrades to the bounded fallback range with the origin saying
+   * so. See the module header for where a base is and is not recorded.
+   */
+  sinceCommit?: string;
   /** Injectable only so the cap can be proven to engage without 200 real files. */
   maxUntrackedFiles?: number;
 }
@@ -416,6 +552,27 @@ function readUntrackedDiff(
   return { ok: true, diff: sections.join("\n") };
 }
 
+/**
+ * `excludeDir` as trailing pathspec args for a tracked `git diff`, or `[]`.
+ *
+ * Deliberately exclude-ONLY, with no `.` alongside it. MEASURED on a real
+ * repository from a SUBDIRECTORY of it, `git diff HEAD~1 HEAD --name-only`:
+ *
+ *   no pathspec            → sub/.muonroi-flow/book.md, sub/inner.txt, top.txt
+ *   `-- . :(exclude)…`     → sub/inner.txt                 ← `top.txt` LOST
+ *   `-- :(exclude)…`       → sub/inner.txt, top.txt        ← the exclusion only
+ *
+ * A `.` limits the diff to the cwd subtree, and `cwd` here is the project
+ * directory, which is not guaranteed to be the git root. Silently shrinking the
+ * change is the defect this module exists to close, so the inclusive pathspec is
+ * left off: git applies an exclude-only pathspec to the result set it would have
+ * produced with no pathspec at all.
+ */
+function excludePathspecArgs(cwd: string, excludeDir: string | undefined): string[] {
+  const prefix = normalizeExcludePrefix(cwd, excludeDir);
+  return prefix ? ["--", `:(exclude)${prefix}`] : [];
+}
+
 /** `excludeDir` as a `cwd`-relative, slash-separated prefix, or "" when it is outside `cwd`. */
 function normalizeExcludePrefix(cwd: string, excludeDir: string | undefined): string {
   if (!excludeDir) return "";
@@ -442,19 +599,90 @@ function untrackedFileSize(cwd: string, relPath: string): number | null {
 }
 
 /**
- * Read what this unit of work changed.
+ * The COMMITTED half of the change: what this unit of work has already landed.
  *
- * The working tree comes first (a sprint's edits before it commits) and means
- * BOTH halves of it: tracked edits from `diff HEAD`, and untracked-not-ignored
- * additions, which that command does not show at all. When the working tree is
- * clean in both senses the last commit is used instead, because the first
- * measured defect landed as a commit (`6888526`) rather than as pending edits.
- * Both empty is `no-diff`, and a git that cannot be read at all is
- * `diff-unreadable` — two different facts that must not be collapsed, since one
- * means "nothing was changed" and the other means "we cannot tell".
+ * `empty: true` is a DETERMINATION that nothing was committed, not a failure to
+ * look — the two must not be collapsed, which is the same D10 rule the
+ * `HEAD~N` branch below preserves. A failure is `{ ok: false }` and reaches the
+ * caller as `diff-unreadable`.
+ */
+function readCommittedDiff(
+  cwd: string,
+  opts: ChangeDiffOptions,
+): { ok: true; diff: string; kind: CommittedKind } | { ok: false; detail: string } {
+  const pathspec = excludePathspecArgs(cwd, opts.excludeDir);
+
+  // 1 — a recorded base, if it survives validation.
+  const base = opts.sinceCommit?.trim();
+  if (base) {
+    // Exit 0 = ancestor; MEASURED exit 1 = not an ancestor and exit 128 =
+    // `fatal: Not a valid commit name`. Both land here as `!ok`, and both mean
+    // the same thing for us: this SHA cannot describe where the work started, so
+    // it is not used. `runGitSpawn` never retries a real git verdict, so the
+    // rejected case costs one process.
+    const ancestry = git(cwd, ["merge-base", "--is-ancestor", base, "HEAD"]);
+    if (ancestry.ok) {
+      const ranged = git(cwd, ["diff", base, "HEAD", ...pathspec]);
+      if (ranged.ok) return { ok: true, diff: ranged.stdout.trim(), kind: "sprint-commits" };
+      return { ok: false, detail: `could not diff ${base}..HEAD: ${ranged.detail}` };
+    }
+    logger.warn(
+      "orchestrator",
+      "[goal-gate] the recorded base commit is not usable in this repository — falling back to the bounded commit range",
+      { cwd, base, detail: ancestry.detail },
+    );
+  }
+
+  // 2 — the bounded fallback. The depth is CLAMPED to the commits that exist, so
+  // `HEAD~N` is never asked for on a shallower history (MEASURED: `git diff
+  // HEAD~5 HEAD` on a 2-commit repo exits 128). `--max-count` keeps the count
+  // itself bounded — it never walks a long history to answer "at least N?".
+  const counted = git(cwd, ["rev-list", "--count", `--max-count=${GOAL_GATE_FALLBACK_COMMIT_DEPTH + 1}`, "HEAD"]);
+  if (!counted.ok) return { ok: false, detail: `could not count commits: ${counted.detail}` };
+  const available = Number.parseInt(counted.stdout.trim(), 10);
+  if (!Number.isFinite(available)) {
+    return { ok: false, detail: `could not parse the commit count: ${JSON.stringify(counted.stdout.slice(0, 200))}` };
+  }
+  // One commit means there is no prior commit to compare against, which — unlike
+  // a failed read — really is "nothing was committed".
+  const depth = Math.min(GOAL_GATE_FALLBACK_COMMIT_DEPTH, available - 1);
+  if (depth < 1) return { ok: true, diff: "", kind: "recent-commits" };
+
+  const ranged = git(cwd, ["diff", `HEAD~${depth}`, "HEAD", ...pathspec]);
+  if (ranged.ok) return { ok: true, diff: ranged.stdout.trim(), kind: "recent-commits" };
+  // D10 — a FAILED range diff is not automatically proof nothing changed. It
+  // genuinely is in the one case git reports deterministically: the revision does
+  // not exist, so there is no prior commit to compare against. The clamp above
+  // should already have prevented that, but grafts and replace refs can still
+  // produce it, and keeping the branch costs nothing. Any OTHER failure (a
+  // spawn-level `ETIMEDOUT`, a repo that stopped being readable mid-run, …) is
+  // NOT that — it is "we cannot tell", and was once collapsed into the same
+  // "no-diff" by a bare ternary.
+  if (MISSING_HEAD_TILDE_1_RE.test(ranged.detail)) return { ok: true, diff: "", kind: "recent-commits" };
+  return { ok: false, detail: ranged.detail };
+}
+
+/**
+ * Read what this unit of work changed: the UNION of what it committed and what
+ * it left uncommitted.
+ *
+ * Both halves are always read, and neither can suppress the other — see the
+ * module header for the measured run where four stray `.db` files in the working
+ * tree hid four commits of real work behind an `aligned` verdict, and for the
+ * `recipe-merge.ts:69` union argument this follows.
+ *
+ * The uncommitted half means BOTH of its own halves: tracked edits from
+ * `diff HEAD`, and untracked-not-ignored additions, which that command does not
+ * show at all.
+ *
+ * Failure directions, deliberately distinct: both halves empty is `no-diff`
+ * ("nothing was changed"); any half that could not be READ is `diff-unreadable`
+ * ("we cannot tell") and never a partial pass. A gate that cannot determine what
+ * changed must not get as far as a verdict — the whole defect class here is a
+ * verdict rendered about something other than the change.
  */
 export function readChangeDiff(cwd: string, opts: ChangeDiffOptions = {}): DiffRead {
-  const worktree = git(cwd, ["diff", "HEAD"]);
+  const worktree = git(cwd, ["diff", "HEAD", ...excludePathspecArgs(cwd, opts.excludeDir)]);
   if (!worktree.ok) {
     logger.error("orchestrator", "[goal-gate] could not read the working-tree diff — gate skipped for this change", {
       cwd,
@@ -475,37 +703,50 @@ export function readChangeDiff(cwd: string, opts: ChangeDiffOptions = {}): DiffR
     return { ok: false, reason: "diff-unreadable", detail: untracked.detail };
   }
 
-  const combined = [worktree.stdout.trim(), untracked.diff.trim()].filter((s) => s.length > 0).join("\n");
-  if (combined) return { ok: true, diff: combined, origin: "working-tree" };
-
-  const committed = git(cwd, ["diff", "HEAD~1", "HEAD"]);
-  if (committed.ok && committed.stdout.trim()) {
-    return { ok: true, diff: committed.stdout, origin: "last-commit" };
-  }
-  // D10 — a FAILED `git diff HEAD~1 HEAD` is not automatically proof nothing
-  // changed. It genuinely is, though, in the one case git itself reports
-  // deterministically: there IS no `HEAD~1` (this is the repo's first
-  // commit) — combined with the working-tree + untracked reads above already
-  // having proven empty, "no prior commit to compare against" honestly means
-  // "nothing changed". Any OTHER failure here (a spawn-level `ETIMEDOUT`, a
-  // repo that stopped being readable mid-run, …) is NOT that — it is "we
-  // cannot tell", which was previously collapsed into the same "no-diff" by a
-  // bare ternary and must not be.
+  const committed = readCommittedDiff(cwd, opts);
   if (!committed.ok) {
-    if (MISSING_HEAD_TILDE_1_RE.test(committed.detail)) {
-      return { ok: false, reason: "no-diff", detail: "no changes since HEAD (first commit, no HEAD~1)" };
-    }
-    logger.warn(
+    // Same rule as the untracked enumeration above, for the same reason: the
+    // half we CAN see is not the change, and judging it as though it were is
+    // exactly the rubber stamp measured in the module header.
+    logger.error(
       "orchestrator",
-      "[goal-gate] could not read the last-commit diff fallback — gate skipped for this change",
-      {
-        cwd,
-        detail: committed.detail,
-      },
+      "[goal-gate] could not read the committed half of the change — gate skipped for this change",
+      { cwd, detail: committed.detail },
     );
     return { ok: false, reason: "diff-unreadable", detail: committed.detail };
   }
-  return { ok: false, reason: "no-diff", detail: "no changes since HEAD" };
+
+  const pending = [worktree.stdout.trim(), untracked.diff.trim()].filter((s) => s.length > 0).join("\n");
+  // Committed first: base → HEAD → working tree is the order the change happened
+  // in. Nothing is deduplicated across the two — a file this sprint both
+  // committed and then edited again contributes two sections, because they are
+  // different hunks, and merging them would invent a diff nobody produced.
+  //
+  // No "committed" / "pending" header is inserted between them, deliberately:
+  // `splitDiffByFile` keys on `diff --git ` lines and DROPS everything before the
+  // first one, so a header would survive a small diff and silently vanish from a
+  // budgeted one. The provenance lives in `origin`, which is reported and
+  // persisted, rather than in a string that disappears under load.
+  const diff = [committed.diff, pending].filter((s) => s.length > 0).join("\n");
+  if (diff) {
+    // The `+working-tree` spellings are template-literal types over
+    // `CommittedKind`, so every DiffOrigin member is reachable here and no cast
+    // is needed — add a member to the union and this stops compiling.
+    const origin: DiffOrigin = committed.diff
+      ? pending
+        ? `${committed.kind}+working-tree`
+        : committed.kind
+      : "working-tree";
+    return { ok: true, diff, origin };
+  }
+
+  return {
+    ok: false,
+    reason: "no-diff",
+    detail: opts.sinceCommit
+      ? `no changes in the working tree and none committed since ${opts.sinceCommit}`
+      : "no changes in the working tree and none in the bounded commit range",
+  };
 }
 
 /**
@@ -804,6 +1045,12 @@ export async function runGoalContradictionGate(opts: {
    * {@link ChangeDiffOptions.excludeDir}.
    */
   excludeDir?: string;
+  /**
+   * The commit this sprint started from, when the run recorded one. See
+   * {@link ChangeDiffOptions.sinceCommit}; absent degrades to the bounded
+   * fallback range, never to a one-commit window.
+   */
+  sinceCommit?: string;
   /** Injectable for tests; defaults to reading git in `cwd`. */
   diffReader?: (cwd: string, opts: ChangeDiffOptions) => DiffRead;
   /** Observability sink for the exact prompt sent. Diagnostics only. */
@@ -821,7 +1068,10 @@ export async function runGoalContradictionGate(opts: {
     return { fired: false, source: "no-goal", contradictions: [], detail: "no stated goal to judge against" };
   }
 
-  const read = (opts.diffReader ?? readChangeDiff)(opts.cwd, { excludeDir: opts.excludeDir });
+  const read = (opts.diffReader ?? readChangeDiff)(opts.cwd, {
+    excludeDir: opts.excludeDir,
+    sinceCommit: opts.sinceCommit,
+  });
   if (!read.ok) {
     return { fired: false, source: read.reason, contradictions: [], detail: read.detail };
   }
