@@ -69,13 +69,40 @@
  * | `testCommands`, `buildCommands` | UNION, stored first | A gate is a check that must pass. A union is never smaller than the disk's set, so no record can disarm a gate; and a record that knows a command no detector can see (`npm run verify` is a ROOT script — the detector only ever picks `build`/`typecheck`) does not lose it. Stored keeps its position: `composeRecipe` orders the primary stack's gates first on purpose. |
  * | `shellInitCommands` | UNION, stored first | They are `export`s — additive by construction, and `buildRuntimeSandboxSettings` (orchestrator.ts:41) already unions them into `shellInit` through a `Set` one layer up. |
  * | `evidence`, `notes` | UNION, stored first | Audit trail. Dropping either side loses provenance, and neither is executed. |
- * | `installCommands`, `bootstrapCommands` | stored wins when non-empty; derived fills an empty one | Provisioning, NOT a gate, and the union argument inverts here: `npm ci` and `npm install` are two spellings of one operation and running the second after the first rewrites the lockfile. qa-platform's bootstrap is an ordered apt + nodesource sequence; joining it with a differently-sourced node install is a conflict, not a superset. |
+ * | `installCommands`, `bootstrapCommands` | stored wins when non-empty; derived fills an empty one, AND derived wins wholesale when a stored entry is impossible on this platform (below) | Provisioning, NOT a gate, and the union argument inverts here: `npm ci` and `npm install` are two spellings of one operation and running the second after the first rewrites the lockfile. qa-platform's bootstrap is an ordered apt + nodesource sequence; joining it with a differently-sourced node install is a conflict, not a superset. |
  * | `startCommand`, `startPort`, `smokeTarget` | stored wins; `undefined` is a hole the derivation fills | Scalars — two start commands cannot both run, so there is no union to take. `docker compose up -d` is not derivable from any manifest file. |
  * | `smokeKind` | stored always wins | Non-optional, so `"none"` is a VALUE ("do not smoke"), not a hole; overriding it would start an HTTP probe the record refused. |
  * | `ecosystem`, `appKind` | stored wins UNLESS it is `"unknown"` | Non-optional, but `"unknown"` is the documented absence value — `detectFallbackRecipe` emits it and `shouldTrustDeterministicRecipe` rejects it. `node-python-docker` encodes a docker layer no disk scan can see and keys runtime provisioning, so a richer label must not be talked down to the derivation's primary-stack label. |
  * | `appLabel` | stored wins | A human-facing name, used only for progress text. |
  * | `coverage`, `coverageSource` | stored wins | The derivation never sets them; the deterministic floor overwrites them later with a MEASUREMENT (see `../product-loop/coverage-signal.ts`). |
  * | `testCommandsSource` | recomputed by {@link mergeDerivedTestCommands} | Same stamp discipline, same enum, one definition. |
+ *
+ * ## The one exception to provisioning deference: an impossible path
+ *
+ * Deference to a stored provisioning list is owed to a record that knows
+ * something the disk scan CANNOT SEE. It is not owed to a record asserting an
+ * impossibility about the host it is running on — that is stale garbage, not
+ * knowledge. `./provisioning-platform.ts` decides possibility from platform SHAPE
+ * (never a filesystem check: an install command legitimately names paths it is
+ * about to create), and holds the two documented win32 invariants plus the reason
+ * the test must stay narrow.
+ *
+ * **The fallthrough is WHOLESALE, not per-entry, and that is the subtle part.**
+ * qa-platform's stored install list is
+ * `["cd frontend && npm ci", "<a line naming /d/… and .venv/bin/…>"]`. Drop only
+ * the impossible ENTRY and `kept.length > 0` still holds, so the derived list is
+ * still discarded and the Windows-correct derived line
+ * (`cd backend && ".venv/Scripts/python.exe" -m pip install -r requirements.txt`)
+ * still never runs — the bug would survive the fix. A list containing an
+ * impossibility is not a trustworthy witness for the REST of that list either, so
+ * the whole field falls through.
+ *
+ * The trade-off accepted: a stored entry that was real knowledge loses its place
+ * when it shares a list with an impossible one. That is bounded and safe, because
+ * `derived` is recomputed from disk on EVERY run (see the refresh policy above),
+ * so the fallback is never itself stale — whereas keeping a list whose own author
+ * was demonstrably wrong about this host is unbounded. Every rejection is named in
+ * `notes`, so nothing is dropped silently.
  *
  * ## There is NO pin, and that is deliberate
  *
@@ -133,6 +160,7 @@
 
 import { mergeDerivedTestCommands } from "../product-loop/test-command-signal.js";
 import type { VerifyRecipe } from "../types/index.js";
+import { describeImpossibleProvisioning, findImpossibleProvisioning } from "./provisioning-platform.js";
 
 /** The value both non-optional label fields use to mean "nothing was recognized". */
 const UNRECOGNIZED = "unknown";
@@ -153,10 +181,33 @@ function union(stored: readonly string[], derived: readonly string[]): string[] 
   return out;
 }
 
-/** A provisioning list the record set wins outright; an empty one is a hole. */
-function provisioning(stored: readonly string[], derived: readonly string[]): string[] {
+/**
+ * A provisioning list the record set wins outright; an empty one is a hole.
+ *
+ * ONE exception, and it is not a weakening of the rule but the distinction the
+ * rule was missing: a list containing a command that names a path IMPOSSIBLE on
+ * this platform is not a trustworthy record of this host, so the whole field
+ * falls through to `derived`. See `./provisioning-platform.ts` for the invariants
+ * and why they must stay narrow, and the module header here for why the fallthrough
+ * is wholesale rather than per-entry.
+ *
+ * Returns the rejections so the caller can put them in `notes` — a silent drop is
+ * not an option.
+ */
+function provisioning(
+  field: "installCommands" | "bootstrapCommands",
+  stored: readonly string[],
+  derived: readonly string[],
+  platform: NodeJS.Platform,
+): { commands: string[]; notes: string[] } {
   const kept = stored.filter((entry) => typeof entry === "string" && entry.trim() !== "");
-  return kept.length > 0 ? [...kept] : [...derived];
+  if (kept.length === 0) return { commands: [...derived], notes: [] };
+
+  const impossible = findImpossibleProvisioning(kept, platform);
+  if (impossible.length > 0) {
+    return { commands: [...derived], notes: describeImpossibleProvisioning(field, platform, impossible) };
+  }
+  return { commands: [...kept], notes: [] };
 }
 
 /**
@@ -165,7 +216,15 @@ function provisioning(stored: readonly string[], derived: readonly string[]): st
  * Returns `derived` BY IDENTITY when there is no stored record, so the
  * no-manifest path is unchanged down to the object reference.
  */
-export function mergeStoredVerifyRecipe(stored: VerifyRecipe | null | undefined, derived: VerifyRecipe): VerifyRecipe {
+export function mergeStoredVerifyRecipe(
+  stored: VerifyRecipe | null | undefined,
+  derived: VerifyRecipe,
+  /**
+   * The host platform, injected so the platform-possibility test is drivable for
+   * both platforms without mutating a global. Production has exactly one answer.
+   */
+  platform: NodeJS.Platform = process.platform,
+): VerifyRecipe {
   if (!stored) return derived;
 
   // The test-command half is delegated, not reimplemented: that module is the ONE
@@ -181,18 +240,28 @@ export function mergeStoredVerifyRecipe(stored: VerifyRecipe | null | undefined,
   // gate, which is self-correcting where a suppressed gate is silent).
   const withTests = mergeDerivedTestCommands(stored, derived.testCommands) ?? stored;
 
+  const bootstrap = provisioning(
+    "bootstrapCommands",
+    stored.bootstrapCommands ?? [],
+    derived.bootstrapCommands,
+    platform,
+  );
+  const install = provisioning("installCommands", stored.installCommands ?? [], derived.installCommands, platform);
+
   return {
     ...withTests,
     ecosystem: stored.ecosystem !== UNRECOGNIZED ? stored.ecosystem : derived.ecosystem,
     appKind: stored.appKind !== UNRECOGNIZED ? stored.appKind : derived.appKind,
     shellInitCommands: union(stored.shellInitCommands ?? [], derived.shellInitCommands),
-    bootstrapCommands: provisioning(stored.bootstrapCommands ?? [], derived.bootstrapCommands),
-    installCommands: provisioning(stored.installCommands ?? [], derived.installCommands),
+    bootstrapCommands: bootstrap.commands,
+    installCommands: install.commands,
     buildCommands: union(stored.buildCommands ?? [], derived.buildCommands),
     startCommand: stored.startCommand ?? derived.startCommand,
     startPort: stored.startPort ?? derived.startPort,
     smokeTarget: stored.smokeTarget ?? derived.smokeTarget,
     evidence: union(stored.evidence ?? [], derived.evidence),
-    notes: union(stored.notes ?? [], derived.notes),
+    // Rejections land at the END of the audit trail: they are this run's finding
+    // about the record, not something the record or the derivation claimed.
+    notes: union(stored.notes ?? [], derived.notes).concat(bootstrap.notes, install.notes),
   };
 }

@@ -137,7 +137,7 @@ describe("a stored manifest never loses what only it knows", () => {
     expect(recipe.testCommandsSource).toBe("both");
   });
 
-  it("does not append a competing install or bootstrap step", () => {
+  it("does not append a competing bootstrap step", () => {
     const cwd = qaPlatformShape();
     const stored = storedQaPlatformRecipe(cwd);
 
@@ -145,11 +145,34 @@ describe("a stored manifest never loses what only it knows", () => {
 
     // Provisioning is not a gate: `npm ci` and `npm install` are two spellings of
     // ONE operation, and running the second after the first rewrites the lockfile.
-    expect(recipe.installCommands).toEqual(stored.installCommands);
-    expect(recipe.installCommands).not.toContain("cd frontend && npm install");
-    // Same for bootstrap — the record's apt/nodesource sequence must not be
-    // joined by a second, differently-sourced node install.
+    // The record's apt/nodesource sequence must not be joined by a second,
+    // differently-sourced node install. Every entry in it is platform-possible, so
+    // this deference holds on every platform.
     expect(recipe.bootstrapCommands).toEqual(stored.bootstrapCommands);
+  });
+
+  it("but DEFERS ONLY while the record is possible on this host", () => {
+    // This record's second install command is
+    //   cd /d/sources/… && python3 -m venv .venv && .venv/bin/pip install …
+    // which names an MSYS drive path and a POSIX venv `bin/` layout. On win32 both
+    // are impossible (see `../provisioning-platform.ts`), so the record is not a
+    // trustworthy witness for this host and the whole field falls through to the
+    // live derivation — including the derived line that actually works here.
+    // On POSIX the same command is correct, and deference is unchanged.
+    const cwd = qaPlatformShape();
+    const stored = storedQaPlatformRecipe(cwd);
+    const recipe = inferVerifyProjectProfile(cwd, {}, stored).recipe;
+
+    if (process.platform === "win32") {
+      expect(recipe.installCommands).not.toEqual(stored.installCommands);
+      expect(recipe.installCommands).toContain("cd frontend && npm install");
+      expect(recipe.installCommands.some((c) => c.includes(".venv/bin/"))).toBe(false);
+      // Never a silent drop — `notes` is the audit trail.
+      expect(recipe.notes.some((n) => n.includes("installCommands") && n.includes(".venv/bin/pip"))).toBe(true);
+    } else {
+      expect(recipe.installCommands).toEqual(stored.installCommands);
+      expect(recipe.installCommands).not.toContain("cd frontend && npm install");
+    }
   });
 
   it("keeps the record's scalars: ecosystem, appKind, start command, smoke kind", () => {
