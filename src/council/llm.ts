@@ -11,6 +11,7 @@ import { isAuthenticationError, summarizeApiErrorForLog } from "../orchestrator/
 import { createNoProgressStopWhen } from "../orchestrator/no-progress-guard.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "../orchestrator/stall-watchdog.js";
 import { combineAbortSignals } from "../orchestrator/tool-utils.js";
+import { pingTurnProgress, startPeriodicTurnProgressPing } from "../orchestrator/turn-progress.js";
 import { getProviderCapabilities, resolveTemperature } from "../providers/capabilities.js";
 import { loadKeyForProvider, ProviderKeyMissingError } from "../providers/keychain.js";
 import {
@@ -817,6 +818,22 @@ export function createCouncilLLM(
       // run, and the signal and the race must agree on that.
       const councilTimeoutMs = councilLlmTimeoutMs();
       const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(signal, councilTimeoutMs);
+      // Round 6 (G8 HIGH B): a `generate()` call is invisible to the
+      // top-level turn watchdog exactly like a sub-agent's — it runs inside
+      // ONE tool/phase call from the parent turn's perspective, and nothing
+      // it does gets yielded up as a StreamChunk. `onDelta` below already
+      // fires on every streamed chunk (was: cost/diagnostics only) — also
+      // ping turn progress there, and run a bounded pinger for the pre-first-
+      // byte wait, bounded by THIS call's own timeout (`councilTimeoutMs`;
+      // `0` — the `/ideal`-unlimited case — means no ceiling, matching that
+      // mode's existing "no deadline at all" contract). Stopped alongside
+      // `cleanupTimeout()` on both the success and error paths below.
+      const stopCouncilGeneratePing = startPeriodicTurnProgressPing({
+        maxMs: councilTimeoutMs > 0 ? councilTimeoutMs : undefined,
+        onCeiling: () => {
+          breadcrumb("council.generate.pingCeiling", { modelId, maxMs: councilTimeoutMs });
+        },
+      });
       try {
         const result = await withDeadlineRace(
           () =>
@@ -848,6 +865,11 @@ export function createCouncilLLM(
                   onDelta: (chars: number) => {
                     if (chars > 0) diag.streamedChars += chars;
                     noteCouncilStreamDelta(chars);
+                    // Round 6 (G8 HIGH B): every real chunk from this call is
+                    // proof of life the top-level turn watchdog otherwise
+                    // never sees — ping on every one, mirroring the
+                    // sub-agent stream's per-chunk ping in stream-runner.ts.
+                    pingTurnProgress();
                   },
                 });
               },
@@ -858,6 +880,7 @@ export function createCouncilLLM(
           signal,
         );
         cleanupTimeout();
+        stopCouncilGeneratePing();
         stats.calls++;
         const durMs = Date.now() - t0;
         const callUsage = logCouncilCost({
@@ -898,6 +921,7 @@ export function createCouncilLLM(
         return finalText;
       } catch (err) {
         cleanupTimeout();
+        stopCouncilGeneratePing();
         emitDiagnostics();
         // Capture the provider-side detail (status code + response body +
         // request param shape) that `err.message` alone drops — a generic

@@ -29,6 +29,7 @@
 
 import { appendFileSync } from "node:fs";
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
+import { breadcrumb } from "../council/crash-breadcrumb.js";
 import { recordArtifact } from "../ee/artifact-cache.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { acquireMcpTools } from "../mcp/client-pool";
@@ -68,6 +69,7 @@ import { logger } from "../utils/logger.js";
 import { openUrl } from "../utils/open-url.js";
 import {
   getCurrentShellSettings,
+  getFirstTokenTimeoutMs,
   getProviderProgressTimeoutMs,
   getProviderStallTimeoutMs,
   getSubAgentBudgetChars,
@@ -118,6 +120,7 @@ import { applyAnthropicPromptCaching, compactSubAgentMessages } from "./subagent
 import { buildSubAgentStepData, isSubAgentStepMeterEnabled } from "./subagent-step-meter.js";
 import { foldMidConversationSystemMessages } from "./system-message-fold.js";
 import { combineAbortSignals, firstLine, formatSubagentActivity } from "./tool-utils";
+import { pingTurnProgress, startPeriodicTurnProgressPing } from "./turn-progress.js";
 
 /**
  * Dependency callbacks the StreamRunner needs to reach back into Agent state
@@ -715,6 +718,42 @@ export class StreamRunner {
         },
       },
     );
+    // Round 6 (G8 HIGH B): the top-level turn watchdog cannot see ANY of this
+    // sub-agent's own chunks — its whole run happens inside ONE `task` tool
+    // call from the parent turn's perspective (turn-watchdog.ts's own header
+    // comment names exactly this class of gap: "WEDGES inside a tool call...
+    // a `task` sub-agent"). Unlike the main model call (tool-engine.ts),
+    // where the parent's watchdog resumes seeing real progress the instant
+    // streaming starts (each chunk is yielded up), a sub-agent's chunks are
+    // never yielded to the parent's generator at all — so liveness must be
+    // pinged on the parent's behalf for the sub-agent's WHOLE run, not just
+    // its first-byte wait. `stall.pet()` (below, called on every chunk in the
+    // `for await` drain loop) is wrapped to ping unconditionally on EVERY
+    // call, not just the first — that is the difference from tool-engine.ts's
+    // wrapper. The bounded pre-first-byte pinger still applies its own
+    // ceiling (`getFirstTokenTimeoutMs()`) for the wait before that first
+    // chunk arrives.
+    const stopFirstTokenPing = startPeriodicTurnProgressPing({
+      maxMs: getFirstTokenTimeoutMs(),
+      onCeiling: () => {
+        breadcrumb("pre-stream.subAgentStream.firstTokenCeiling", {
+          sessionId: this.deps.getSessionId(),
+          model: childRuntime.modelId,
+          maxMs: getFirstTokenTimeoutMs(),
+        });
+      },
+    });
+    const _origStallPet = stall.pet.bind(stall);
+    const _origStallDispose = stall.dispose.bind(stall);
+    (stall as { pet: () => void }).pet = () => {
+      stopFirstTokenPing(); // no-op after the first call — see doc comment above
+      pingTurnProgress(); // keep pinging on EVERY chunk for the sub-agent's whole run
+      _origStallPet();
+    };
+    (stall as { dispose: () => void }).dispose = () => {
+      stopFirstTokenPing();
+      _origStallDispose();
+    };
     // N3 — usefulness guard. Both timers above are re-armed by EMISSION: `pet()`
     // by any chunk, `petProgress()` by a text-delta or a tool-call. A sub-agent
     // that emits a failing tool call every few seconds therefore keeps both

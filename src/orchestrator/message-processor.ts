@@ -151,6 +151,7 @@ import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/pe
 import {
   getAutoCouncilConfidence,
   getAutoCouncilMinRoles,
+  getPrestreamPhaseMaxPingMs,
   getProviderStallRetries,
   getProviderStallTimeoutMs,
   getRoleModels,
@@ -360,13 +361,26 @@ export function reinjectTaggedSessionStartAcrossCompaction(
  * the G9 relatedness classifier, and any future addition) automatically stops
  * starving the watchdog, without a per-call-site change. This is a
  * DELIBERATE, structural fix over round 4's one-off `compaction.ts` fix,
- * which only pinged ITS OWN caller and left every other phase unpinged. See
- * `turn-progress.ts`'s doc comment for the trade-off this makes (a phase
- * hung forever inside here no longer trips the idle guard on its own).
+ * which only pinged ITS OWN caller and left every other phase unpinged.
+ *
+ * Round 6 (G8 HIGH A): the ping is bounded by `getPrestreamPhaseMaxPingMs()`
+ * (default 180s) — round 5's unbounded version pinged forever for a phase
+ * that never settles, which regressed the ORIGINAL "a genuinely wedged setup
+ * phase still fires" guarantee (see `turn-progress.ts`'s doc comment). Past
+ * the ceiling this stops pinging (the phase keeps running; the idle rule
+ * applies again) and writes a `pre-stream.<name>.pingCeiling` breadcrumb
+ * naming the phase, for the same `getLastOpenPhase` attribution path this
+ * function's `.start`/`.end` pair already feeds.
  */
 export function preStreamPhase<T>(name: string, sessionId: string | undefined, fn: () => Promise<T>): Promise<T> {
   breadcrumb(`pre-stream.${name}.start`, { sessionId });
-  const stopPing = startPeriodicTurnProgressPing();
+  const maxPingMs = getPrestreamPhaseMaxPingMs();
+  const stopPing = startPeriodicTurnProgressPing({
+    maxMs: maxPingMs,
+    onCeiling: () => {
+      breadcrumb(`pre-stream.${name}.pingCeiling`, { sessionId, maxMs: maxPingMs });
+    },
+  });
   return fn().then(
     (v) => {
       stopPing();

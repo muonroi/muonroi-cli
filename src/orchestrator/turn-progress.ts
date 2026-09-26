@@ -34,19 +34,64 @@
  * settles, and it re-pings on an interval for the phase's whole lifetime —
  * `message-processor.ts`'s `preStreamPhase` wraps every pre-stream phase with
  * it, so no phase (present or future) can starve the watchdog by simply being
- * slow. This intentionally trades away part of the original "a genuinely
- * wedged setup phase still fires" guarantee documented above: a phase that
- * hangs FOREVER inside `preStreamPhase` now also pings forever and never
- * trips the idle guard on its own — the `totalMs` hard ceiling (when armed)
- * and the phase's OWN internal deadline (if any) are what bound it instead.
+ * slow.
+ *
+ * Round 6 (G8 HIGH A) — round 5's pinger had NO ceiling of its own, which a
+ * refuter caught as a REGRESSION on the original "a genuinely wedged setup
+ * phase still fires" guarantee above: a phase that never settles now pinged
+ * FOREVER and could never trip the idle guard, worse than before round 5.
+ * `startPeriodicTurnProgressPing` now takes an optional `maxMs` — past it,
+ * the pinger stops on its own (`onCeiling` fires once, for the caller to log
+ * why) and the ordinary idle rule applies again; the wedged phase itself is
+ * NOT cancelled, only this mechanism's vouching for it. `preStreamPhase`
+ * passes `getPrestreamPhaseMaxPingMs()` (settings.ts, default 180s); the
+ * first-token callers (`tool-engine.ts`, `stream-runner.ts`) pass
+ * `getFirstTokenTimeoutMs()`. A caller that omits `maxMs` gets NO ceiling —
+ * only appropriate when it has its own hard bound already (a council call
+ * bounded by its own deadline signal).
+ *
+ * Round 6 also closes a second gap: a pinger is tied to the TURN that
+ * started it via a monotonic generation counter
+ * (`beginTurnGeneration`/`withTurnWatchdog`). An interval from a turn that
+ * has already ended (killed by the watchdog, completed, or itself hit its
+ * `maxMs` ceiling) stops pinging the instant it notices a NEWER turn has
+ * begun — so an orphaned interval from turn N can never reset turn N+1's
+ * idle clock. Every ping (immediate or interval) is gated on this check
+ * BEFORE it touches the shared `lastPingMs`, not just at pinger start.
  */
 
 /** Wall-clock instant of the most recent ping. 0 = never pinged. */
 let lastPingMs = 0;
 
+/**
+ * Monotonic id, bumped once per top-level turn (see `beginTurnGeneration`).
+ * A `startPeriodicTurnProgressPing` pinger captures this at start and checks
+ * it on every tick — a mismatch means a NEWER turn has begun since, so the
+ * pinger is orphaned and must stop without touching `lastPingMs`.
+ */
+let currentTurnGeneration = 0;
+
 /** Record forward progress: a request to the provider was just issued. */
 export function pingTurnProgress(now = Date.now()): void {
   lastPingMs = now;
+}
+
+/**
+ * Begin a new turn generation. Call exactly once per top-level turn (or
+ * continuation) — `turn-watchdog.ts`'s `withTurnWatchdog` calls this at
+ * entry, since that is invoked once per turn attempt. Invalidates every
+ * earlier generation's in-flight pingers: an interval started during turn N
+ * silently stops itself (no more pings) as soon as this runs for turn N+1,
+ * even if turn N's own code never explicitly stopped it.
+ */
+export function beginTurnGeneration(): number {
+  currentTurnGeneration += 1;
+  return currentTurnGeneration;
+}
+
+/** @testonly Read the current turn generation without bumping it. */
+export function __getCurrentTurnGenerationForTests(): number {
+  return currentTurnGeneration;
 }
 
 /**
@@ -64,28 +109,83 @@ function getTurnProgressPingIntervalMs(): number {
   return 15_000;
 }
 
+/** Options for {@link startPeriodicTurnProgressPing}. */
+export interface PeriodicTurnProgressPingOptions {
+  /** Interval between pings. Defaults to `getTurnProgressPingIntervalMs()`. */
+  intervalMs?: number;
+  /**
+   * Ceiling (ms) after which the pinger stops on its own, even if `stop()`
+   * was never called — the guarded operation may still be running, but this
+   * mechanism no longer vouches for it, so the ordinary idle watchdog rule
+   * applies again. Omit (or <= 0) for NO ceiling — only correct when the
+   * caller already has its own hard bound on the operation (e.g. a call
+   * already racing its own deadline signal).
+   */
+  maxMs?: number;
+  /**
+   * Called exactly once, synchronously, if/when `maxMs` is reached before
+   * `stop()` was called. Use it to log which operation this happened to
+   * (breadcrumb / toast) — the pinger itself has no name to offer.
+   */
+  onCeiling?: () => void;
+}
+
 /**
  * Start pinging turn progress immediately and then on an interval, for the
  * duration of some awaited operation that produces no yielded `StreamChunk`
- * of its own (a pre-stream phase, or a provider request awaiting its first
- * byte). Returns a `stop` function — the caller MUST call it exactly once the
- * operation settles (success or failure), on every code path, or the interval
- * leaks for the rest of the process (harmless since it is `unref`'d, but it
- * keeps pinging, which can mask an unrelated LATER idle turn).
+ * of its own (a pre-stream phase, a provider request awaiting its first
+ * byte, or a sub-agent/council call the top-level turn cannot otherwise see
+ * progress from). Returns a `stop` function — the caller MUST call it exactly
+ * once the operation settles (success or failure), on every code path.
+ * `stop` is idempotent and safe to call after the pinger already stopped
+ * itself (ceiling reached, or orphaned by a newer turn).
+ *
+ * Two independent safety nets bound this beyond the caller's own `stop()`:
+ *   - `maxMs` (see {@link PeriodicTurnProgressPingOptions}) — a per-pinger
+ *     ceiling.
+ *   - Turn generation — see the module doc comment. A pinger orphaned by a
+ *     newer turn (`beginTurnGeneration`) stops on its very next tick.
  *
  * The interval is `unref`'d so it never keeps the event loop alive on its
- * own, and `stop` is idempotent.
+ * own.
  */
-export function startPeriodicTurnProgressPing(intervalMs: number = getTurnProgressPingIntervalMs()): () => void {
-  pingTurnProgress();
-  const timer = setInterval(() => pingTurnProgress(), intervalMs);
-  (timer as { unref?: () => void }).unref?.();
+export function startPeriodicTurnProgressPing(opts: PeriodicTurnProgressPingOptions = {}): () => void {
+  const intervalMs = opts.intervalMs ?? getTurnProgressPingIntervalMs();
+  const maxMs = opts.maxMs;
+  const myGeneration = currentTurnGeneration;
+  const startedAt = Date.now();
   let stopped = false;
-  return () => {
+  let timer: ReturnType<typeof setInterval> | undefined;
+
+  const stop = (): void => {
     if (stopped) return;
     stopped = true;
-    clearInterval(timer);
+    if (timer) clearInterval(timer);
   };
+
+  const tick = (): void => {
+    if (stopped) return;
+    if (myGeneration !== currentTurnGeneration) {
+      // Orphaned: a newer turn began since this pinger started. Stop WITHOUT
+      // pinging — writing lastPingMs here would falsely vouch for the new
+      // turn on this stale pinger's behalf.
+      stop();
+      return;
+    }
+    if (maxMs !== undefined && maxMs > 0 && Date.now() - startedAt >= maxMs) {
+      stop();
+      opts.onCeiling?.();
+      return;
+    }
+    pingTurnProgress();
+  };
+
+  tick();
+  if (!stopped) {
+    timer = setInterval(tick, intervalMs);
+    (timer as { unref?: () => void }).unref?.();
+  }
+  return stop;
 }
 
 /**

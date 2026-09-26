@@ -2232,26 +2232,27 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // moment `stall` sees a chunk (pet()) or is torn down (dispose()): no
         // call site of either needs to change, so every existing exit path
         // (success, abort, error, the mid-loop continuation reusing this same
-        // `stall`) is covered automatically.
-        const stopFirstTokenPing = startPeriodicTurnProgressPing();
-        let firstTokenPingStopped = false;
-        const stopFirstTokenPingOnce = () => {
-          if (firstTokenPingStopped) return;
-          firstTokenPingStopped = true;
-          stopFirstTokenPing();
-        };
-        const firstTokenCeilingTimer = setTimeout(stopFirstTokenPingOnce, getFirstTokenTimeoutMs());
-        (firstTokenCeilingTimer as { unref?: () => void }).unref?.();
+        // `stall`) is covered automatically. Round 6: the ceiling is now the
+        // built-in `maxMs`/`onCeiling` on `startPeriodicTurnProgressPing`
+        // itself (was hand-rolled here in round 5) — same behaviour, one less
+        // bespoke timer to keep correct.
+        const stopFirstTokenPing = startPeriodicTurnProgressPing({
+          maxMs: getFirstTokenTimeoutMs(),
+          onCeiling: () => {
+            breadcrumb("pre-stream.mainStream.firstTokenCeiling", {
+              sessionId: deps.session?.id,
+              maxMs: getFirstTokenTimeoutMs(),
+            });
+          },
+        });
         const _origStallPet = stall.pet.bind(stall);
         const _origStallDispose = stall.dispose.bind(stall);
         (stall as { pet: () => void }).pet = () => {
-          stopFirstTokenPingOnce();
-          clearTimeout(firstTokenCeilingTimer);
+          stopFirstTokenPing();
           _origStallPet();
         };
         (stall as { dispose: () => void }).dispose = () => {
-          stopFirstTokenPingOnce();
-          clearTimeout(firstTokenCeilingTimer);
+          stopFirstTokenPing();
           _origStallDispose();
         };
         // F3c — hard-cap LLM calls per turn before this streamText()

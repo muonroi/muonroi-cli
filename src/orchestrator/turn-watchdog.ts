@@ -20,8 +20,16 @@
  *
  * Modelled on sprint-runner's proven `withImplIdleWatchdog`, generalised so any
  * turn generator can be guarded without coupling to the product loop.
+ *
+ * Round 6 (G8 HIGH A): each call to `withTurnWatchdog` marks the start of a
+ * new turn generation (`turn-progress.ts`'s `beginTurnGeneration`) — this is
+ * what lets a `startPeriodicTurnProgressPing` pinger tell "my turn is still
+ * the current one" from "a newer turn has begun, I am orphaned, stop pinging".
+ * Without it, an interval left running by a killed/finished turn could keep
+ * writing `lastPingMs` forever and mask the NEXT turn's genuine idleness.
  */
 import type { StreamChunk } from "../types/index.js";
+import { beginTurnGeneration } from "./turn-progress.js";
 
 export class TurnStallError extends Error {
   constructor(
@@ -69,6 +77,9 @@ export async function* withTurnWatchdog(
   opts: TurnWatchdogOptions,
 ): AsyncGenerator<StreamChunk, void, unknown> {
   const { idleMs, totalMs, label, shouldSuppressFire, hasProgressSince } = opts;
+  // New turn generation — orphans every pinger started by an earlier turn
+  // (see turn-progress.ts's module doc comment and beginTurnGeneration).
+  beginTurnGeneration();
   const it = gen[Symbol.asyncIterator]();
 
   let totalTimer: ReturnType<typeof setTimeout> | undefined;

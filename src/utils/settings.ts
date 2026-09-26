@@ -1240,6 +1240,29 @@ export function getFirstTokenTimeoutMs(): number {
 }
 
 /**
+ * Round 6 (G8 HIGH A): ceiling (ms) for how long `preStreamPhase`'s periodic
+ * turn-progress ping (message-processor.ts) may vouch for a single
+ * pre-stream phase. Round 5's ping had NO ceiling — a phase that never
+ * settled pinged forever, so a genuinely wedged phase could no longer trip
+ * the idle watchdog at all (a regression a refuter caught on round 5's own
+ * fix). Past this ceiling, `preStreamPhase` stops pinging — the phase itself
+ * is NOT cancelled, only this mechanism's liveness grant for it — and the
+ * ordinary idle rule applies again; a `pre-stream.<name>.pingCeiling`
+ * breadcrumb records which phase this happened to.
+ * Range 500–1_800_000 (low end for fast scaled tests, same convention as the
+ * other timeout getters in this file); default 180_000 (3 min). Env
+ * override: MUONROI_PRESTREAM_PHASE_MAX_MS.
+ */
+export function getPrestreamPhaseMaxPingMs(): number {
+  const envRaw = process.env.MUONROI_PRESTREAM_PHASE_MAX_MS;
+  if (envRaw !== undefined && envRaw !== "") {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 500 && n <= 1_800_000) return Math.floor(n);
+  }
+  return 180_000;
+}
+
+/**
  * Event-loop block reporting threshold (ms). The monitor
  * (`src/utils/event-loop-monitor.ts`) reports a block when its own tick runs at
  * least this late — evidence that the JS thread was stuck and NO timer could
