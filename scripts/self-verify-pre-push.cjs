@@ -75,9 +75,38 @@
  *
  * `PRE_PUSH_REMOTE` and `SELF_VERIFY_PRE_PUSH=0` behave exactly as before.
  * The only remaining "skip, push proceeds" cases are: a pure ref deletion;
- * no candidate base ref resolves for ANY pushed ref (not even the
- * develop/HEAD/master fallback — nothing left to diff against at all); or
- * every ref's diff was actually computed and genuinely touched nothing.
+ * no candidate base ref resolves for ANY pushed ref, and no empty-tree
+ * fallback either (see below); or every ref's diff was actually computed
+ * and genuinely touched nothing.
+ *
+ * ── Fetch cannot hang the push, and never prompts (round 10) ────────────
+ * Refuter on round 9: `fetchRefReal`'s `git fetch` had no timeout and no
+ * `GIT_TERMINAL_PROMPT=0` — a slow or misbehaving remote (or one that
+ * blocks waiting on a credential prompt with no TTY attached) could hang
+ * `git push` forever, since this script runs synchronously inside the
+ * pre-push hook. It now runs with a bounded `timeout`
+ * (`SELF_VERIFY_PRE_PUSH_FETCH_TIMEOUT_MS`, default 20000ms) and
+ * `killSignal: "SIGKILL"`, and with `GIT_TERMINAL_PROMPT=0` /
+ * `GIT_ASKPASS=""` / `SSH_ASKPASS=""` / a `GIT_SSH_COMMAND` that adds
+ * `-oBatchMode=yes` ONLY when the user has not already set one (an
+ * existing `GIT_SSH_COMMAND` is used verbatim, never overwritten) so the
+ * fetch can never block on a prompt either. A timed-out or killed fetch
+ * is just another "still undiffable" outcome — it flows into the exact
+ * same fail-CLOSED path as a fetch that completes but doesn't help.
+ * NOTE (LOW): fetching `<remote> <remoteRef>` with no destination refspec
+ * still updates this repo's own remote-tracking ref for it (e.g.
+ * `refs/remotes/<remote>/<branch>`) when the remote's configured fetch
+ * refspec matches — this diff-only helper has that one side effect on the
+ * local repo, same as running `git fetch <remote> <ref>` by hand would.
+ *
+ * ── No known integration branch at all (round 10, optional closure) ─────
+ * If NOTHING resolves a base for ANY pushed ref — not even the
+ * develop/HEAD/master fallback (e.g. a repo with no such remote branches
+ * fetched yet) — round 9 skipped outright. That both-lists-empty case now
+ * diffs the anchor commit against the git empty tree
+ * (`git hash-object -t tree /dev/null`) instead: every file in that commit
+ * counts as "changed", so a watched file still trips self-verify instead
+ * of silently reading as clean for want of ANY comparison point.
  */
 "use strict";
 
@@ -183,10 +212,50 @@ function commitAvailableReal(sha) {
   return r.status === 0;
 }
 
-/** One quiet, best-effort fetch of a single ref. A remote that refuses (auth, network, unknown ref) never throws. */
+const DEFAULT_FETCH_TIMEOUT_MS = 20000;
+
+function fetchTimeoutMs() {
+  const raw = process.env.SELF_VERIFY_PRE_PUSH_FETCH_TIMEOUT_MS;
+  if (!raw) return DEFAULT_FETCH_TIMEOUT_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_FETCH_TIMEOUT_MS;
+}
+
+/**
+ * One quiet, best-effort, BOUNDED fetch of a single ref. Never hangs the
+ * push (a bounded `timeout` + `SIGKILL`) and never prompts (no TTY is
+ * attached in a hook, so a credential/host-key prompt would hang exactly
+ * like a slow network — `GIT_TERMINAL_PROMPT=0`/empty askpass vars, and a
+ * `GIT_SSH_COMMAND` batch-mode default that never overwrites the user's
+ * own). A remote that refuses (auth, network, unknown ref, or a timeout)
+ * never throws — the caller's recheck is what matters, not this exit code.
+ */
 function fetchRefReal(remote, remoteRef) {
-  const r = spawnSync("git", ["fetch", "--no-tags", "--quiet", remote, remoteRef], { stdio: "pipe" });
+  const timeoutMs = fetchTimeoutMs();
+  log(`fetching ${remoteRef} from ${remote} to diff against it (timeout ${Math.round(timeoutMs / 1000)}s)`);
+  const existingSshCommand = process.env.GIT_SSH_COMMAND;
+  const env = {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "",
+    SSH_ASKPASS: "",
+    GIT_SSH_COMMAND: existingSshCommand?.trim() ? existingSshCommand : "ssh -oBatchMode=yes",
+  };
+  const r = spawnSync("git", ["fetch", "--no-tags", "--quiet", remote, remoteRef], {
+    stdio: "pipe",
+    timeout: timeoutMs,
+    killSignal: "SIGKILL",
+    env,
+  });
   return r.status === 0;
+}
+
+/** The empty-tree object id (`git hash-object -t tree /dev/null`) — computed rather than hardcoded so this works on any hash algorithm the repo uses. */
+function emptyTreeShaReal() {
+  const r = spawnSync("git", ["hash-object", "-t", "tree", "/dev/null"], { encoding: "utf8", stdio: "pipe" });
+  if (r.status !== 0) return null;
+  const sha = (r.stdout || "").trim();
+  return sha || null;
 }
 
 /**
@@ -388,6 +457,32 @@ function main() {
   // valid anchor for "what does HEAD's own history look like relative to
   // the remote's integration branch".
   const anchorSha = pushLines.find((l) => !isZero(l.localSha))?.localSha ?? null;
+
+  if (results.length === 0 && anchorSha) {
+    // No candidate base resolved for ANY pushed ref — not even the
+    // develop/HEAD/master fallback (no known integration branch fetched
+    // locally at all). Diff against the empty tree instead of giving up:
+    // every file in the anchor commit counts as "changed", so a watched
+    // file still trips self-verify rather than reading as clean for want
+    // of ANY comparison point.
+    const emptyTree = emptyTreeShaReal();
+    if (emptyTree) {
+      log(
+        `no local candidate base ref resolved for any pushed ref — diffing against the empty tree instead of skipping blind`,
+      );
+      try {
+        const changed = diffNames(emptyTree, anchorSha);
+        const touched = changed
+          .split(/\r?\n/)
+          .map((f) => f.trim())
+          .filter((f) => f && WATCH_DIRS.some((d) => f.startsWith(d)));
+        results.push({ base: emptyTree, touched, undiffable: false });
+      } catch {
+        results.push({ base: emptyTree, touched: [], undiffable: true });
+      }
+    }
+  }
+
   const fallbackBase = anchorSha ? resolveFallbackBase(remote, anchorSha, refExistsReal, mergeBaseReal) : null;
 
   const decision = decideSelfVerify(results, fallbackBase);

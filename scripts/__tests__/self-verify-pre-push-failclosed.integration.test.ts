@@ -66,12 +66,39 @@ function makeStubBun(exitCode: number): string {
   return binDir;
 }
 
-function runScript(cwd: string, stdin: string, stubBinDir: string) {
-  const env = { ...process.env };
+function runScript(cwd: string, stdin: string, stubBinDir: string, extraEnv: Record<string, string> = {}) {
+  const env = { ...process.env, ...extraEnv };
   delete env.SELF_VERIFY_PRE_PUSH;
   delete env.PRE_PUSH_REMOTE;
   env.PATH = `${stubBinDir}:${env.PATH || ""}`;
   return spawnSync(process.execPath, [SCRIPT_PATH], { cwd, input: stdin, encoding: "utf8", env });
+}
+
+/**
+ * A bin dir containing BOTH a stub `bun` (proves self-verify invocation
+ * without running it) AND a `git` wrapper that sleeps forever on `fetch`
+ * (any other subcommand passes through to the real git binary unmodified).
+ * Used to prove round 10's fetch timeout: without it, a hanging `git
+ * fetch` would hang the whole pre-push hook (and therefore `git push`)
+ * indefinitely.
+ */
+function makeHangingFetchShim(bunExitCode: number, fetchSleepMs: number): string {
+  const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+  const binDir = mkdtempSync(join(tmpdir(), "svpp-shim-"));
+
+  const bunPath = join(binDir, "bun");
+  writeFileSync(bunPath, `#!/bin/sh\necho STUB_SELF_VERIFY_INVOKED\nexit ${bunExitCode}\n`);
+  chmodSync(bunPath, 0o755);
+
+  const gitPath = join(binDir, "git");
+  const fetchSleepSec = (fetchSleepMs / 1000).toFixed(2);
+  writeFileSync(
+    gitPath,
+    `#!/bin/sh\nif [ "$1" = "fetch" ]; then\n  sleep ${fetchSleepSec}\n  exit 1\nfi\nexec "${realGit}" "$@"\n`,
+  );
+  chmodSync(gitPath, 0o755);
+
+  return binDir;
 }
 
 describe("self-verify-pre-push.cjs — round 9 fail-closed integration", () => {
@@ -205,4 +232,49 @@ describe("self-verify-pre-push.cjs — round 9 fail-closed integration", () => {
     expect(result.stderr).toContain("manual invocation");
     expect(result.stderr).toContain("watched surface changed");
   }, 15000);
+});
+
+describe("self-verify-pre-push.cjs — round 10: a hanging git fetch cannot hang the push", () => {
+  it("a git fetch that sleeps far longer than the configured timeout is killed, and the hook still returns quickly and fails closed", () => {
+    const bare = join(tmpRoot, "remote.git");
+    git(tmpRoot, ["init", "--quiet", "--bare", bare]);
+
+    const seed = join(tmpRoot, "seed");
+    mkdirSync(seed, { recursive: true });
+    git(seed, ["init", "--quiet"]);
+    commit(seed, "base.txt", "v1\n", "base");
+    git(seed, ["remote", "add", "origin", bare]);
+    git(seed, ["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
+    git(seed, ["push", "--quiet", "origin", "HEAD:refs/heads/develop"]);
+
+    const work = join(tmpRoot, "work");
+    // Fetched with the REAL git (setup only) before the hanging shim is on PATH.
+    git(tmpRoot, ["clone", "--quiet", "--no-local", "--branch", "main", "--single-branch", bare, work]);
+    git(work, ["fetch", "--quiet", "origin", "+refs/heads/develop:refs/remotes/origin/develop"]);
+
+    git(work, ["checkout", "-b", "local-branch"]);
+    const localSha = commit(work, "README.md", "no watched-dir change here\n", "docs only");
+    // Any remote sha not already present locally forces the ensureDiffable
+    // retry path — this one is real-looking but irrelevant; what matters
+    // is that the shim's `git fetch` never returns in time on its own.
+    const remoteSha = "a".repeat(40);
+
+    const timeoutMs = 1000;
+    const fetchSleepMs = 5000; // >> timeoutMs — proves the kill, not a lucky race
+    const shimBin = makeHangingFetchShim(0, fetchSleepMs);
+    const stdin = `refs/heads/local-branch ${localSha} refs/heads/feature ${remoteSha}\n`;
+
+    const startedAt = Date.now();
+    const result = runScript(work, stdin, shimBin, { SELF_VERIFY_PRE_PUSH_FETCH_TIMEOUT_MS: String(timeoutMs) });
+    const elapsedMs = Date.now() - startedAt;
+
+    // Generous margin over the configured timeout for process-spawn/kill
+    // overhead, but nowhere near the shim's 5s sleep — this is the
+    // measurement that proves the timeout actually bounds the hang.
+    expect(elapsedMs).toBeLessThan(4000);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("STUB_SELF_VERIFY_INVOKED");
+    expect(result.stderr).toContain("fetching refs/heads/feature from origin to diff against it (timeout 1s)");
+    expect(result.stderr).toMatch(/fail(ing)? closed/i);
+  }, 10000);
 });
