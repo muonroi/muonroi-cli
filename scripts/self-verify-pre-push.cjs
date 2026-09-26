@@ -122,10 +122,38 @@
  *   - `diffNamesFromTree(tree, head)` uses the plain two-argument diff
  *     form (`git diff a b`, no dots) instead, which accepts a bare tree.
  *   - `decideSelfVerify`'s last resort no longer skips: "undiffable, no
- *     fallback base resolved either" now also runs self-verify, with
- *     `base: null` meaning "no trustworthy comparison point exists at
- *     all — check everything, `--since` omitted", rather than reading an
- *     inability to compare as permission to skip.
+ *     fallback base resolved either" now also runs self-verify.
+ *
+ * ── Omitting `--since` does not mean "check everything" (round 12) ──────
+ * Refuter on round 11: `bun run src/index.ts self-verify` with NO `--since`
+ * does not check everything — `src/index.ts`'s own `--since` option DEFAULTS
+ * to `"HEAD~1"` (and `scenario-planner.ts`'s `planScenarios` defaults its
+ * `baseRef` to `"HEAD~1"` too), so round 11's `base: null` (omit `--since`)
+ * silently only compared the TIP commit to its own parent. A multi-commit
+ * push whose UI change lives in an EARLIER, non-tip commit was invisible to
+ * self-verify's own scenario planning — the pre-push script logged "failing
+ * closed", but the thing it invoked quietly checked almost nothing.
+ *
+ * Checked the sibling case too: does self-verify's planner choke on a TREE
+ * passed as `--since` (the empty-tree base already used elsewhere in this
+ * file)? No — `scenario-planner.ts`'s `collectChangedFiles` runs
+ * `git diff --name-only <baseRef> --`, a PLAIN SINGLE-OPERAND diff (working
+ * tree vs. that ref), never a `...`/`..` range, so it accepts a bare tree
+ * exactly like `diffNamesFromTree` above (verified: `git diff --name-only
+ * <emptyTreeSha> --` in a real repo lists every tracked file, no error).
+ * The empty tree is therefore both correct AND already safe to hand to the
+ * real planner as-is — no planner change needed, "fix in one place".
+ *
+ * Every "check everything" outcome now ALWAYS passes a real `--since`
+ * value, chosen in this priority: the empty tree
+ * (`emptyTreeShaReal`, reused from round 10 — the most robust: a genuine
+ * from-scratch diff, immune to the "root commit's own untouched files
+ * never show as changed" gap a real commit base would have), else the
+ * root commit of HEAD (`git rev-list --max-parents=0 HEAD`; several roots
+ * → the first one, logged) if `hash-object` itself somehow fails. Only if
+ * BOTH fail (git itself is broken) does this fall back to omitting
+ * `--since` as an absolute last resort — a defensive fallback that should
+ * be unreachable in practice, kept rather than crashing.
  * The only `run: false` outcomes left are a deletion-only push (nothing
  * to check, ever) and every diff actually computed with nothing touched.
  */
@@ -295,6 +323,27 @@ function emptyTreeShaReal() {
 }
 
 /**
+ * The root commit of HEAD's history (`git rev-list --max-parents=0 HEAD`) —
+ * the fallback-of-the-fallback "check everything" base, used only if the
+ * empty tree itself could not be computed (git badly broken). Several
+ * roots (a grafted/merged-in history) → the first one, logged, since any
+ * one root is a valid anchor for "diff since the beginning".
+ */
+function rootCommitShaReal() {
+  const r = spawnSync("git", ["rev-list", "--max-parents=0", "HEAD"], { encoding: "utf8", stdio: "pipe" });
+  if (r.status !== 0) return null;
+  const lines = (r.stdout || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+  if (lines.length > 1) {
+    log(`HEAD has ${lines.length} root commits (a grafted or merged-in history) — using the first: ${lines[0]}`);
+  }
+  return lines[0];
+}
+
+/**
  * Ensures `sha` is diffable locally before it is ever used as a diff base.
  * A remote sha that is not yet fetched is the ORDINARY case (stale
  * remote-tracking ref, shallow clone, first push of this branch), not a
@@ -316,6 +365,11 @@ function ensureDiffable(sha, remote, remoteRef, { commitAvailable, fetchRef }) {
  * refs with no resolvable base at all are excluded before this point).
  * `fallbackBase` is the develop/HEAD/master merge-base against the anchor
  * commit, precomputed once, used only for the fail-closed case.
+ * `checkEverythingBase` (round 12) is a REAL, always-diffable "check
+ * everything" value — the empty tree, or the root commit if even that
+ * could not be computed — used ONLY as the very last resort, so this never
+ * has to omit `--since` (which self-verify's own CLI/planner would then
+ * silently default to `HEAD~1`, not "everything").
  *
  *   - a ref whose diff actually touched a watched dir wins outright: run,
  *     using ITS base (not merely the first ref that happened to resolve).
@@ -323,19 +377,21 @@ function ensureDiffable(sha, remote, remoteRef, { commitAvailable, fetchRef }) {
  *     computed (an undiffable remote sha even after the fetch retry) →
  *     FAIL CLOSED: cannot rule out a watched change, so run self-verify
  *     anyway, using `fallbackBase` as the `--since` argument when one
- *     resolved — and even when NO fallback base resolves either (round 11:
- *     this used to skip here, a fail-open hole), run self-verify with
- *     `base: null`, meaning "check everything, no --since" — there is no
- *     comparison point left to trust, so trusting "clean" is not an option.
+ *     resolved, else `checkEverythingBase` (round 12: this used to be
+ *     `base: null` / omit `--since` — a fail-open hole, since that is NOT
+ *     "everything" from self-verify's own point of view), else — only if
+ *     NEITHER resolved — `base: null` as an unreachable-in-practice last
+ *     resort. There is no comparison point left to trust, so trusting
+ *     "clean" is not an option.
  *   - otherwise: every ref's diff was actually computed and none touched a
  *     watched dir → skip, the only case that is a real "no changes" finding.
  *
  * The only remaining `run: false` outcomes are therefore: a deletion-only
- * push (nothing reaches `results` at all and `fallbackBase` is null because
- * there was no anchor commit either), or every diff was actually computed
- * and genuinely touched nothing.
+ * push (nothing reaches `results` at all and `fallbackBase`/`checkEverythingBase`
+ * are null because there was no anchor commit either), or every diff was
+ * actually computed and genuinely touched nothing.
  */
-function decideSelfVerify(results, fallbackBase) {
+function decideSelfVerify(results, fallbackBase, checkEverythingBase) {
   const touching = results.find((r) => !r.undiffable && r.touched.length > 0);
   if (touching) {
     return { run: true, base: touching.base, touched: touching.touched, reason: "watched surface changed" };
@@ -351,12 +407,21 @@ function decideSelfVerify(results, fallbackBase) {
         reason: "a pushed ref's diff could not be computed even after a fetch retry — failing closed",
       };
     }
+    if (checkEverythingBase) {
+      return {
+        run: true,
+        base: checkEverythingBase,
+        touched: [],
+        reason:
+          "a pushed ref's diff could not be computed and no fallback base resolved either — failing closed against everything",
+      };
+    }
     return {
       run: true,
       base: null,
       touched: [],
       reason:
-        "a pushed ref's diff could not be computed and no fallback base resolved either — failing closed against everything (no --since)",
+        "a pushed ref's diff could not be computed, and neither a fallback base nor a check-everything base resolved — failing closed with --since omitted (last resort; self-verify's own default is HEAD~1, not everything)",
     };
   }
 
@@ -507,6 +572,15 @@ function main() {
   // the remote's integration branch".
   const anchorSha = pushLines.find((l) => !isZero(l.localSha))?.localSha ?? null;
 
+  // Computed once, up front, whenever there is anything to check at all:
+  // reused both by the "no candidate base at all" block below AND as
+  // `decideSelfVerify`'s last-resort "check everything" argument, so both
+  // paths agree on the same real, always-diffable value instead of ever
+  // falling back to omitting `--since` (which is NOT "everything" from
+  // self-verify's own CLI's point of view — see the round-12 header note).
+  const emptyTree = anchorSha ? emptyTreeShaReal() : null;
+  const checkEverythingBase = emptyTree ?? (anchorSha ? rootCommitShaReal() : null);
+
   if (results.length === 0 && anchorSha) {
     // No candidate base resolved for ANY pushed ref — not even the
     // develop/HEAD/master fallback (no known integration branch fetched
@@ -514,7 +588,6 @@ function main() {
     // every file in the anchor commit counts as "changed", so a watched
     // file still trips self-verify rather than reading as clean for want
     // of ANY comparison point.
-    const emptyTree = emptyTreeShaReal();
     if (emptyTree) {
       log(
         `no local candidate base ref resolved for any pushed ref — diffing against the empty tree instead of skipping blind`,
@@ -531,9 +604,25 @@ function main() {
       } catch {
         results.push({ base: emptyTree, touched: [], undiffable: true });
       }
+    } else if (checkEverythingBase) {
+      // hash-object itself failed but the root-commit fallback resolved —
+      // this IS a real commit, so the ordinary triple-dot diffNames is fine.
+      log(
+        "no local candidate base ref resolved for any pushed ref, and the empty-tree object id could not be computed — diffing against HEAD's root commit instead",
+      );
+      try {
+        const changed = diffNames(checkEverythingBase, anchorSha);
+        const touched = changed
+          .split(/\r?\n/)
+          .map((f) => f.trim())
+          .filter((f) => f && WATCH_DIRS.some((d) => f.startsWith(d)));
+        results.push({ base: checkEverythingBase, touched, undiffable: false });
+      } catch {
+        results.push({ base: checkEverythingBase, touched: [], undiffable: true });
+      }
     } else {
       log(
-        "no local candidate base ref resolved for any pushed ref, and the empty-tree object id could not be computed either",
+        "no local candidate base ref resolved for any pushed ref, and neither the empty-tree object id nor a root commit could be computed either",
       );
       results.push({ base: null, touched: [], undiffable: true });
     }
@@ -541,7 +630,7 @@ function main() {
 
   const fallbackBase = anchorSha ? resolveFallbackBase(remote, anchorSha, refExistsReal, mergeBaseReal) : null;
 
-  const decision = decideSelfVerify(results, fallbackBase);
+  const decision = decideSelfVerify(results, fallbackBase, checkEverythingBase);
   log(decision.reason + (manualInvocation ? " (manual invocation — no pre-push stdin)" : ""));
   if (decision.touched.length > 0) {
     log(`(${decision.touched.length} file(s))`);

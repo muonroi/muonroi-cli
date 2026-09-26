@@ -21,6 +21,10 @@ import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+// The REAL scenario planner — round 12 asserts against it directly (not a
+// stub) to prove self-verify's own planning, not just that some `bun`
+// process was invoked, actually sees a non-tip watched change.
+import { collectChangedFiles, planScenarios } from "../../src/self-qa/scenario-planner.js";
 
 const SCRIPT_PATH = join(__dirname, "..", "self-verify-pre-push.cjs");
 
@@ -326,7 +330,7 @@ describe("self-verify-pre-push.cjs — round 11: the empty-tree fallback was dea
     expect(result.stderr).toContain("watched surface changed");
   }, 15000);
 
-  it("every pushed ref's diff is undiffable AND no fallback base resolves either — self-verify still runs, checking everything (no --since), never skips", () => {
+  it("every pushed ref's diff is undiffable AND no fallback base resolves either — self-verify still runs, failing closed with a REAL --since (round 12: never omitted)", () => {
     const bare = join(tmpRoot, "remote.git");
     git(tmpRoot, ["init", "--quiet", "--bare", bare]);
 
@@ -336,7 +340,7 @@ describe("self-verify-pre-push.cjs — round 11: the empty-tree fallback was dea
     commit(seed, "base.txt", "v1\n", "base");
     git(seed, ["remote", "add", "origin", bare]);
     // Same as above: only main, so the develop/HEAD/master fallback is a
-    // dead end too — this is what forces base:null instead of a fallback base.
+    // dead end too — this is what forces the checkEverythingBase tier.
     git(seed, ["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
 
     const work = join(tmpRoot, "work");
@@ -344,6 +348,7 @@ describe("self-verify-pre-push.cjs — round 11: the empty-tree fallback was dea
 
     git(work, ["checkout", "-b", "local-branch"]);
     const localSha = commit(work, "README.md", "docs only, irrelevant to the outcome\n", "docs");
+    const emptyTreeSha = git(work, ["hash-object", "-t", "tree", "/dev/null"]);
 
     // A remote sha that is genuinely unresolvable (garbage, present nowhere,
     // and the ref it claims to belong to does not exist on the remote
@@ -358,9 +363,104 @@ describe("self-verify-pre-push.cjs — round 11: the empty-tree fallback was dea
     expect(result.stdout).toContain("STUB_SELF_VERIFY_INVOKED");
     expect(result.stderr).toMatch(/fail(ing)? closed/i);
     expect(result.stderr).not.toContain("no UI/harness/self-qa changes detected");
-    // The precise proof this is fixed: self-verify actually ran WITHOUT
-    // --since (there is no trustworthy comparison point left at all), not
-    // that it merely logged something and then quietly skipped.
-    expect(result.stdout).toContain("STUB_ARGS:run src/index.ts self-verify --max 4 --no-emit");
+    // Round 11 would have omitted --since here (base:null) — but self-verify's
+    // own CLI defaults an omitted --since to HEAD~1, not "everything", which
+    // was the round-12 bug. The precise proof this is fixed: self-verify ran
+    // WITH a real --since (the empty tree — a genuine "diff since the start"
+    // value), never with --since omitted.
+    expect(result.stdout).toContain(`STUB_ARGS:run src/index.ts self-verify --since ${emptyTreeSha} --max 4 --no-emit`);
+  }, 15000);
+});
+
+describe("self-verify-pre-push.cjs — round 12: self-verify's own planner must actually see a non-tip watched change", () => {
+  /**
+   * Builds a repo where the ui change that matters is NOT the tip commit:
+   *   commit1 (root): base.txt
+   *   commit2:         src/ui/Foo.tsx — a real, plannable Semantic surface
+   *                    ("model-picker"/"button" is a registered SURFACE_OPENERS
+   *                    key, so scenario-planner.ts builds an actual driven
+   *                    scenario for it, not just a smoke-boot fallback)
+   *   commit3 (tip):   README.md — docs only
+   * self-verify's own `--since` default (HEAD~1) would diff ONLY commit3
+   * against commit2, seeing nothing but the docs change — round 11's
+   * "omit --since" fallback is exactly as blind, since HEAD~1 is what
+   * self-verify's CLI defaults an omitted --since to.
+   */
+  function buildNonTipUiChangeRepo(root: string): { work: string; tipSha: string } {
+    const bare = join(root, "remote.git");
+    git(root, ["init", "--quiet", "--bare", bare]);
+
+    const seed = join(root, "seed");
+    mkdirSync(seed, { recursive: true });
+    git(seed, ["init", "--quiet"]);
+    commit(seed, "base.txt", "v1\n", "root commit");
+    git(seed, ["remote", "add", "origin", bare]);
+    // Only main is ever pushed — no develop/HEAD/master fallback exists,
+    // forcing both the empty-tree (no-candidate) and checkEverythingBase
+    // (undiffable, no-fallback) tiers to do the real work in these tests.
+    git(seed, ["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
+
+    const work = join(root, "work");
+    git(root, ["clone", "--quiet", "--no-local", "--branch", "main", "--single-branch", bare, work]);
+
+    git(work, ["checkout", "-b", "feature-local"]);
+    commit(
+      work,
+      "src/ui/Foo.tsx",
+      '<Semantic id="model-picker" role="button">\n  <button>Open model picker</button>\n</Semantic>\n',
+      "non-tip: add a real plannable UI surface",
+    );
+    const tipSha = commit(work, "README.md", "docs only, sits on top of the ui commit\n", "tip: docs only");
+    return { work, tipSha };
+  }
+
+  it("double-failure path (undiffable ref, no fallback): the resolved --since actually surfaces the non-tip UI file to the real planner", () => {
+    const { work, tipSha } = buildNonTipUiChangeRepo(tmpRoot);
+
+    const bogusRemoteSha = "f".repeat(40);
+    const stubBin = makeStubBunEchoingArgs(0);
+    const stdin = `refs/heads/feature-local ${tipSha} refs/heads/feature ${bogusRemoteSha}\n`;
+    const result = runScript(work, stdin, stubBin);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("STUB_SELF_VERIFY_INVOKED");
+    const argsLine = result.stdout.split("\n").find((l) => l.startsWith("STUB_ARGS:"));
+    expect(argsLine).toBeDefined();
+    const sinceMatch = argsLine?.match(/--since (\S+)/);
+    expect(sinceMatch).not.toBeNull();
+    const sinceValue = sinceMatch?.[1] ?? "";
+
+    // Prove it with the REAL planner, not a stub: this is exactly what
+    // `bun run src/index.ts self-verify --since <sinceValue>` would compute.
+    const changedFiles = collectChangedFiles({ cwd: work, baseRef: sinceValue });
+    expect(changedFiles).toContain("src/ui/Foo.tsx");
+
+    const scenarios = planScenarios({ cwd: work, baseRef: sinceValue, maxScenarios: 8 });
+    expect(scenarios.some((s) => s.id === "button-model-picker")).toBe(true);
+  }, 15000);
+
+  it("empty-tree (no-candidate-base) path: the resolved --since also surfaces the non-tip UI file to the real planner", () => {
+    const { work, tipSha } = buildNonTipUiChangeRepo(tmpRoot);
+
+    const stubBin = makeStubBunEchoingArgs(0);
+    // A brand-new remote branch: remote sha is all-zero, and (per
+    // buildNonTipUiChangeRepo) no develop/HEAD/master exists either — this
+    // is the "no candidate base at all" empty-tree path from round 10/11.
+    const stdin = `refs/heads/feature-local ${tipSha} refs/heads/feature-local ${"0".repeat(40)}\n`;
+    const result = runScript(work, stdin, stubBin);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("STUB_SELF_VERIFY_INVOKED");
+    const argsLine = result.stdout.split("\n").find((l) => l.startsWith("STUB_ARGS:"));
+    expect(argsLine).toBeDefined();
+    const sinceMatch = argsLine?.match(/--since (\S+)/);
+    expect(sinceMatch).not.toBeNull();
+    const sinceValue = sinceMatch?.[1] ?? "";
+
+    const changedFiles = collectChangedFiles({ cwd: work, baseRef: sinceValue });
+    expect(changedFiles).toContain("src/ui/Foo.tsx");
+
+    const scenarios = planScenarios({ cwd: work, baseRef: sinceValue, maxScenarios: 8 });
+    expect(scenarios.some((s) => s.id === "button-model-picker")).toBe(true);
   }, 15000);
 });

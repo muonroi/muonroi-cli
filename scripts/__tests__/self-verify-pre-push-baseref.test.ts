@@ -30,6 +30,7 @@ const { selectBaseRef, resolveFallbackBase, decideSelfVerify, selfVerifyArgs, pa
     decideSelfVerify: (
       results: Array<{ base: string | null; touched: string[]; undiffable: boolean }>,
       fallbackBase: string | null,
+      checkEverythingBase?: string | null,
     ) => { run: boolean; base: string | null; touched: string[]; reason: string };
     selfVerifyArgs: (sinceBase: string | null) => string[];
     parsePushLines: (
@@ -178,8 +179,15 @@ describe("self-verify-pre-push.cjs — decideSelfVerify (round 9: never fail ope
     expect(decision).toMatchObject({ run: true, base: "base-b", touched: ["src/ui/foo.ts"] });
   });
 
-  it("round 11: an undiffable ref with NO fallback base still fails CLOSED — runs self-verify with base:null (check everything, no --since), never skips", () => {
-    const decision = decideSelfVerify([{ base: "remote-sha", touched: [], undiffable: true }], null);
+  it("round 12: an undiffable ref with NO fallback base still fails CLOSED — uses checkEverythingBase (never omits --since when a real 'everything' base exists)", () => {
+    const decision = decideSelfVerify([{ base: "remote-sha", touched: [], undiffable: true }], null, "empty-tree-sha");
+    expect(decision.run).toBe(true);
+    expect(decision.base).toBe("empty-tree-sha");
+    expect(decision.reason).toMatch(/fail(ing)? closed/i);
+  });
+
+  it("round 12: an undiffable ref with NEITHER a fallback base NOR a checkEverythingBase falls back to base:null as an unreachable-in-practice last resort", () => {
+    const decision = decideSelfVerify([{ base: "remote-sha", touched: [], undiffable: true }], null, null);
     expect(decision.run).toBe(true);
     expect(decision.base).toBeNull();
     expect(decision.reason).toMatch(/fail(ing)? closed/i);
