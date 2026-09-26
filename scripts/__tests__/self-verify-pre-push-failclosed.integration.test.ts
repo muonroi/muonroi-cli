@@ -278,3 +278,89 @@ describe("self-verify-pre-push.cjs — round 10: a hanging git fetch cannot hang
     expect(result.stderr).toMatch(/fail(ing)? closed/i);
   }, 10000);
 });
+
+/** Same as makeStubBun, but also echoes the exact args it received (as `STUB_ARGS:<args>`), so a test can assert whether `--since` was passed. */
+function makeStubBunEchoingArgs(exitCode: number): string {
+  const binDir = mkdtempSync(join(tmpdir(), "svpp-bin-"));
+  const bunPath = join(binDir, "bun");
+  writeFileSync(bunPath, `#!/bin/sh\necho STUB_SELF_VERIFY_INVOKED\necho STUB_ARGS:"$@"\nexit ${exitCode}\n`);
+  chmodSync(bunPath, 0o755);
+  return binDir;
+}
+
+describe("self-verify-pre-push.cjs — round 11: the empty-tree fallback was dead, and undiffable+no-fallback used to skip", () => {
+  it("a brand-new branch with no develop/HEAD/master fetched anywhere still runs self-verify via the (now working) empty-tree diff, because it contains a watched file", () => {
+    const bare = join(tmpRoot, "remote.git");
+    git(tmpRoot, ["init", "--quiet", "--bare", bare]);
+
+    const seed = join(tmpRoot, "seed");
+    mkdirSync(seed, { recursive: true });
+    git(seed, ["init", "--quiet"]);
+    commit(seed, "base.txt", "v1\n", "base");
+    git(seed, ["remote", "add", "origin", bare]);
+    // ONLY main is ever pushed — no develop, no master — so none of
+    // origin/develop, origin/HEAD, origin/master can ever resolve locally.
+    git(seed, ["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
+
+    const work = join(tmpRoot, "work");
+    git(tmpRoot, ["clone", "--quiet", "--no-local", "--branch", "main", "--single-branch", bare, work]);
+
+    // Sanity: confirm none of the fallback candidates exist locally —
+    // otherwise this test would pass for the wrong reason.
+    for (const ref of ["origin/develop", "origin/HEAD", "origin/master"]) {
+      const check = spawnSync("git", ["rev-parse", "--verify", "--quiet", ref], { cwd: work });
+      expect(check.status).not.toBe(0);
+    }
+
+    git(work, ["checkout", "-b", "feature-local"]);
+    const localSha = commit(work, "src/ui/brand-new.ts", "export const x = 1;\n", "brand-new branch, watched file");
+
+    const stubBin = makeStubBun(0);
+    // A brand-new remote branch: remote sha is all-zero.
+    const stdin = `refs/heads/feature-local ${localSha} refs/heads/feature-local ${"0".repeat(40)}\n`;
+    const result = runScript(work, stdin, stubBin);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("STUB_SELF_VERIFY_INVOKED");
+    expect(result.stderr).toContain("diffing against the empty tree instead of skipping blind");
+    expect(result.stderr).toContain("watched surface changed");
+  }, 15000);
+
+  it("every pushed ref's diff is undiffable AND no fallback base resolves either — self-verify still runs, checking everything (no --since), never skips", () => {
+    const bare = join(tmpRoot, "remote.git");
+    git(tmpRoot, ["init", "--quiet", "--bare", bare]);
+
+    const seed = join(tmpRoot, "seed");
+    mkdirSync(seed, { recursive: true });
+    git(seed, ["init", "--quiet"]);
+    commit(seed, "base.txt", "v1\n", "base");
+    git(seed, ["remote", "add", "origin", bare]);
+    // Same as above: only main, so the develop/HEAD/master fallback is a
+    // dead end too — this is what forces base:null instead of a fallback base.
+    git(seed, ["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
+
+    const work = join(tmpRoot, "work");
+    git(tmpRoot, ["clone", "--quiet", "--no-local", "--branch", "main", "--single-branch", bare, work]);
+
+    git(work, ["checkout", "-b", "local-branch"]);
+    const localSha = commit(work, "README.md", "docs only, irrelevant to the outcome\n", "docs");
+
+    // A remote sha that is genuinely unresolvable (garbage, present nowhere,
+    // and the ref it claims to belong to does not exist on the remote
+    // either, so the fetch retry cannot recover it) — this ref's diff is
+    // undiffable, and there is no fallback base to fail closed against.
+    const bogusRemoteSha = "f".repeat(40);
+    const stubBin = makeStubBunEchoingArgs(0);
+    const stdin = `refs/heads/local-branch ${localSha} refs/heads/feature ${bogusRemoteSha}\n`;
+    const result = runScript(work, stdin, stubBin);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("STUB_SELF_VERIFY_INVOKED");
+    expect(result.stderr).toMatch(/fail(ing)? closed/i);
+    expect(result.stderr).not.toContain("no UI/harness/self-qa changes detected");
+    // The precise proof this is fixed: self-verify actually ran WITHOUT
+    // --since (there is no trustworthy comparison point left at all), not
+    // that it merely logged something and then quietly skipped.
+    expect(result.stdout).toContain("STUB_ARGS:run src/index.ts self-verify --max 4 --no-emit");
+  }, 15000);
+});

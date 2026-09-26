@@ -107,6 +107,27 @@
  * (`git hash-object -t tree /dev/null`) instead: every file in that commit
  * counts as "changed", so a watched file still trips self-verify instead
  * of silently reading as clean for want of ANY comparison point.
+ *
+ * ── The empty-tree fallback was itself dead, and had a second fail-open
+ *    hole underneath it (round 11) ────────────────────────────────────────
+ * Refuter on round 10: `diffNames` runs `git diff a...b` — a triple-dot
+ * SYMMETRIC-DIFFERENCE/merge-base range expression, which only accepts
+ * commit-ish operands. Handed the empty TREE object as `a`, git fails with
+ * "Invalid symmetric difference expression": the round-10 empty-tree
+ * fallback was marked `undiffable` on every single use, never actually
+ * diffed anything. And because `decideSelfVerify`'s "undiffable, no
+ * fallback base" branch still returned `run: false`, that undiffable
+ * result silently SKIPPED self-verify — fail open, despite the log line
+ * claiming otherwise. Fixed two ways:
+ *   - `diffNamesFromTree(tree, head)` uses the plain two-argument diff
+ *     form (`git diff a b`, no dots) instead, which accepts a bare tree.
+ *   - `decideSelfVerify`'s last resort no longer skips: "undiffable, no
+ *     fallback base resolved either" now also runs self-verify, with
+ *     `base: null` meaning "no trustworthy comparison point exists at
+ *     all — check everything, `--since` omitted", rather than reading an
+ *     inability to compare as permission to skip.
+ * The only `run: false` outcomes left are a deletion-only push (nothing
+ * to check, ever) and every diff actually computed with nothing touched.
  */
 "use strict";
 
@@ -206,6 +227,21 @@ function diffNames(base, head) {
   });
 }
 
+/**
+ * Diff a TREE object (not a commit) against a commit. `git diff a...b`
+ * (triple-dot) is a symmetric-difference / merge-base range expression and
+ * only accepts commit-ish operands — with a bare tree (e.g. the empty
+ * tree) as `a`, it fails with "Invalid symmetric difference expression".
+ * The plain two-argument form (`git diff a b`, no dots) is a direct
+ * tree-vs-tree/commit diff and accepts a tree on either side.
+ */
+function diffNamesFromTree(tree, head) {
+  return execSync(`git diff --name-only ${tree} ${head}`, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+}
+
 /** Is `sha` a commit object already present in the local object store? */
 function commitAvailableReal(sha) {
   const r = spawnSync("git", ["cat-file", "-e", `${sha}^{commit}`], { stdio: "pipe" });
@@ -286,9 +322,18 @@ function ensureDiffable(sha, remote, remoteRef, { commitAvailable, fetchRef }) {
  *   - no ref touched anything, but at least one ref's diff could not be
  *     computed (an undiffable remote sha even after the fetch retry) →
  *     FAIL CLOSED: cannot rule out a watched change, so run self-verify
- *     anyway, using `fallbackBase` as the `--since` argument.
+ *     anyway, using `fallbackBase` as the `--since` argument when one
+ *     resolved — and even when NO fallback base resolves either (round 11:
+ *     this used to skip here, a fail-open hole), run self-verify with
+ *     `base: null`, meaning "check everything, no --since" — there is no
+ *     comparison point left to trust, so trusting "clean" is not an option.
  *   - otherwise: every ref's diff was actually computed and none touched a
  *     watched dir → skip, the only case that is a real "no changes" finding.
+ *
+ * The only remaining `run: false` outcomes are therefore: a deletion-only
+ * push (nothing reaches `results` at all and `fallbackBase` is null because
+ * there was no anchor commit either), or every diff was actually computed
+ * and genuinely touched nothing.
  */
 function decideSelfVerify(results, fallbackBase) {
   const touching = results.find((r) => !r.undiffable && r.touched.length > 0);
@@ -307,11 +352,11 @@ function decideSelfVerify(results, fallbackBase) {
       };
     }
     return {
-      run: false,
+      run: true,
       base: null,
       touched: [],
       reason:
-        "a pushed ref's diff could not be computed and no fallback base resolved either — skipping (push will proceed)",
+        "a pushed ref's diff could not be computed and no fallback base resolved either — failing closed against everything (no --since)",
     };
   }
 
@@ -320,7 +365,8 @@ function decideSelfVerify(results, fallbackBase) {
       run: false,
       base: null,
       touched: [],
-      reason: "no candidate base ref resolved for any pushed ref — skipping (push will proceed)",
+      reason:
+        "no pushed ref to diff (deletion-only push, or nothing resolved anything to check) — skipping (push will proceed)",
     };
   }
 
@@ -330,17 +376,20 @@ function decideSelfVerify(results, fallbackBase) {
 // Exported for the unit test (vitest imports this file as a plain module via
 // require() — the block below runs ONLY when this file is executed directly,
 // the way `.husky/pre-push` does, never on a bare require()).
-module.exports = { selectBaseRef, resolveFallbackBase, decideSelfVerify, parsePushLines, ZERO_SHA };
+module.exports = { selectBaseRef, resolveFallbackBase, decideSelfVerify, selfVerifyArgs, parsePushLines, ZERO_SHA };
+
+/** Builds the self-verify args; omits `--since` entirely when there is no trustworthy base left to diff against (checks everything). */
+function selfVerifyArgs(sinceBase) {
+  const args = ["run", "src/index.ts", "self-verify", "--max", "4", "--no-emit"];
+  if (sinceBase) args.splice(3, 0, "--since", sinceBase);
+  return args;
+}
 
 function runSelfVerify(sinceBase) {
-  const result = spawnSync(
-    "bun",
-    ["run", "src/index.ts", "self-verify", "--since", sinceBase, "--max", "4", "--no-emit"],
-    {
-      stdio: "inherit",
-      shell: process.platform === "win32",
-    },
-  );
+  const result = spawnSync("bun", selfVerifyArgs(sinceBase), {
+    stdio: "inherit",
+    shell: process.platform === "win32",
+  });
   return result.status;
 }
 
@@ -361,7 +410,7 @@ function reportOutcome(status, sinceBase) {
     log("  'Child never became ready' = the TUI child did not come up, NOT a defect in your");
     log("  change (it names the gate it waited on, the budget, the measured wait, whether the");
     log("  child was alive, and the child's stderr tail). Re-run it directly to confirm:");
-    log(`  bun run src/index.ts self-verify --since ${sinceBase} --max 4 --no-emit`);
+    log(`  bun ${selfVerifyArgs(sinceBase).join(" ")}`);
   } else {
     log(`self-verify FAILED (exit ${status}) — an expectation was measured and MISSED`);
     log("the FAIL line above names the scenario and the expectation; this one is in your change");
@@ -471,7 +520,9 @@ function main() {
         `no local candidate base ref resolved for any pushed ref — diffing against the empty tree instead of skipping blind`,
       );
       try {
-        const changed = diffNames(emptyTree, anchorSha);
+        // `git diff a...b` (triple-dot) is a commit-ish range expression and
+        // rejects a bare tree operand — use the plain two-argument tree diff.
+        const changed = diffNamesFromTree(emptyTree, anchorSha);
         const touched = changed
           .split(/\r?\n/)
           .map((f) => f.trim())
@@ -480,6 +531,11 @@ function main() {
       } catch {
         results.push({ base: emptyTree, touched: [], undiffable: true });
       }
+    } else {
+      log(
+        "no local candidate base ref resolved for any pushed ref, and the empty-tree object id could not be computed either",
+      );
+      results.push({ base: null, touched: [], undiffable: true });
     }
   }
 

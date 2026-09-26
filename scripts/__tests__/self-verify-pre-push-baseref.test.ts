@@ -12,7 +12,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-const { selectBaseRef, resolveFallbackBase, decideSelfVerify, parsePushLines, ZERO_SHA } =
+const { selectBaseRef, resolveFallbackBase, decideSelfVerify, selfVerifyArgs, parsePushLines, ZERO_SHA } =
   require("../self-verify-pre-push.cjs") as {
     selectBaseRef: (opts: {
       localSha: string;
@@ -28,9 +28,10 @@ const { selectBaseRef, resolveFallbackBase, decideSelfVerify, parsePushLines, ZE
       mergeBase: (a: string, b: string) => string | null,
     ) => string | null;
     decideSelfVerify: (
-      results: Array<{ base: string; touched: string[]; undiffable: boolean }>,
+      results: Array<{ base: string | null; touched: string[]; undiffable: boolean }>,
       fallbackBase: string | null,
     ) => { run: boolean; base: string | null; touched: string[]; reason: string };
+    selfVerifyArgs: (sinceBase: string | null) => string[];
     parsePushLines: (
       raw: string,
     ) => Array<{ localRef: string; localSha: string; remoteRef: string; remoteSha: string }>;
@@ -177,9 +178,11 @@ describe("self-verify-pre-push.cjs — decideSelfVerify (round 9: never fail ope
     expect(decision).toMatchObject({ run: true, base: "base-b", touched: ["src/ui/foo.ts"] });
   });
 
-  it("an undiffable ref with NO fallback base does not fail open, but cannot fail closed either — skips (no way to check anything)", () => {
+  it("round 11: an undiffable ref with NO fallback base still fails CLOSED — runs self-verify with base:null (check everything, no --since), never skips", () => {
     const decision = decideSelfVerify([{ base: "remote-sha", touched: [], undiffable: true }], null);
-    expect(decision.run).toBe(false);
+    expect(decision.run).toBe(true);
+    expect(decision.base).toBeNull();
+    expect(decision.reason).toMatch(/fail(ing)? closed/i);
   });
 
   it("an undiffable ref WITH a fallback base fails CLOSED — runs self-verify using the fallback base, even though nothing was confirmed touched", () => {
@@ -243,5 +246,24 @@ describe("self-verify-pre-push.cjs — parsePushLines", () => {
     const raw =
       "\n   \nnot-enough-fields\nrefs/heads/a 1111111111111111111111111111111111111111 refs/heads/a 0000000000000000000000000000000000000000\n";
     expect(parsePushLines(raw)).toHaveLength(1);
+  });
+});
+
+describe("self-verify-pre-push.cjs — selfVerifyArgs (round 11: base:null means 'check everything')", () => {
+  it("includes --since when a base is given", () => {
+    expect(selfVerifyArgs("abc123")).toEqual([
+      "run",
+      "src/index.ts",
+      "self-verify",
+      "--since",
+      "abc123",
+      "--max",
+      "4",
+      "--no-emit",
+    ]);
+  });
+
+  it("omits --since entirely when the base is null (no trustworthy comparison point — check everything)", () => {
+    expect(selfVerifyArgs(null)).toEqual(["run", "src/index.ts", "self-verify", "--max", "4", "--no-emit"]);
   });
 });
