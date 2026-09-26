@@ -237,6 +237,7 @@ import {
   recordToolError as recordToolRepetitionError,
   recordToolSuccess as recordToolRepetitionSuccess,
 } from "./tool-repetition-detector.js";
+import { startPeriodicTurnProgressPing } from "./turn-progress.js";
 
 /**
  * F2 — approximate the char cost of the FIXED prompt envelope (system +
@@ -352,15 +353,28 @@ export function reinjectTaggedSessionStartAcrossCompaction(
  * on every line, and the tracker keeps one open-phase set PER SESSION, so a
  * forked sub-session running its own phases concurrently cannot shadow the
  * parent's. Always pass the session that OWNS the phase, never a child's.
+ *
+ * Round 5 (G8 HIGH #1): ALSO keeps the top-level turn watchdog alive for the
+ * phase's whole duration via `startPeriodicTurnProgressPing` — every phase
+ * that runs through this wrapper (hooks, PIL classify, samrGuidance, gsdGate,
+ * the G9 relatedness classifier, and any future addition) automatically stops
+ * starving the watchdog, without a per-call-site change. This is a
+ * DELIBERATE, structural fix over round 4's one-off `compaction.ts` fix,
+ * which only pinged ITS OWN caller and left every other phase unpinged. See
+ * `turn-progress.ts`'s doc comment for the trade-off this makes (a phase
+ * hung forever inside here no longer trips the idle guard on its own).
  */
 export function preStreamPhase<T>(name: string, sessionId: string | undefined, fn: () => Promise<T>): Promise<T> {
   breadcrumb(`pre-stream.${name}.start`, { sessionId });
+  const stopPing = startPeriodicTurnProgressPing();
   return fn().then(
     (v) => {
+      stopPing();
       breadcrumb(`pre-stream.${name}.end`, { sessionId });
       return v;
     },
     (err) => {
+      stopPing();
       breadcrumb(`pre-stream.${name}.end`, {
         sessionId,
         error: err instanceof Error ? err.message : String(err),
@@ -921,77 +935,83 @@ export class MessageProcessor {
         }
       })
     ) {
-      breadcrumb("pre-stream.gsdGate.start", { sessionId: _sessionIdForBreadcrumbs });
-      try {
-        const sessionModel = deps.session?.model ?? "unknown";
-        let depth: "quick" | "standard" | "heavy" = pilCtx.modelDepthTier ?? pilCtx.complexityTier ?? "standard";
+      // Round 5 (G8 HIGH #1): routed through `preStreamPhase` (instead of a
+      // hand-rolled breadcrumb pair) so this block — whose leader-tier
+      // assessor call can legitimately run long — also gets the periodic
+      // turn-progress ping that keeps the top-level watchdog from starving
+      // while it awaits. No `yield` happens inside this block, so wrapping
+      // it in a plain async fn is safe.
+      await preStreamPhase("gsdGate", _sessionIdForBreadcrumbs, async () => {
+        try {
+          const sessionModel = deps.session?.model ?? "unknown";
+          let depth: "quick" | "standard" | "heavy" = pilCtx.modelDepthTier ?? pilCtx.complexityTier ?? "standard";
 
-        // Leader-tier assessor enrichment: OVERRIDES the fast-classifier depth
-        // before it's written to SDK STATE.md. `assessComplexity` itself never
-        // throws (every internal step is caught, degrading to `priorDepth`),
-        // but this inner try/catch is defensive fail-open insurance so even an
-        // unexpected throw here keeps `depth` at its fast-classifier value —
-        // syncWorkflowContext below is never skipped because of the assessor.
-        let brief = "";
-        if (isComplexityAssessorEnabled()) {
-          try {
-            const { buildGateContextBundle } = await import("../gsd/pil-gate-context.js");
-            const bundle = buildGateContextBundle({
-              cwd,
-              conversationDigest: deps.buildRecentTurnsSummary(),
-              brainData: pilCtx._brainData,
-            });
-            const assessed = await assessComplexity({
-              cwd,
-              raw: pilCtx.raw,
-              priorDepth: depth,
-              confidence: pilCtx.confidence,
-              bundle,
-              sessionModelId: sessionModel,
-              runAssessor: buildLeaderAssessorRunner(deps, sessionModel), // single-shot leader call
-            });
-            depth = assessed.depth;
-            // Keep the native depth slot authoritative: write the assessed depth
-            // back to pilCtx.modelDepthTier so every downstream consumer that reads
-            // it (tool-engine depthTier -> gsd tool registration + gsd_verify depth
-            // + layer-derived tiering) sees the SAME value the mutation gate reads
-            // from STATE.md. Without this, the gate (readState().depth) and gsd_verify
-            // (pilCtx.modelDepthTier) diverge on any assessor override. Same pilCtx
-            // ref, and this block runs before executeToolEngine in the same turn.
-            pilCtx.modelDepthTier = depth;
-            if (assessed.assessed) pilCtx.gsdAutoCouncil = assessed.autoCouncil;
+          // Leader-tier assessor enrichment: OVERRIDES the fast-classifier depth
+          // before it's written to SDK STATE.md. `assessComplexity` itself never
+          // throws (every internal step is caught, degrading to `priorDepth`),
+          // but this inner try/catch is defensive fail-open insurance so even an
+          // unexpected throw here keeps `depth` at its fast-classifier value —
+          // syncWorkflowContext below is never skipped because of the assessor.
+          let brief = "";
+          if (isComplexityAssessorEnabled()) {
+            try {
+              const { buildGateContextBundle } = await import("../gsd/pil-gate-context.js");
+              const bundle = buildGateContextBundle({
+                cwd,
+                conversationDigest: deps.buildRecentTurnsSummary(),
+                brainData: pilCtx._brainData,
+              });
+              const assessed = await assessComplexity({
+                cwd,
+                raw: pilCtx.raw,
+                priorDepth: depth,
+                confidence: pilCtx.confidence,
+                bundle,
+                sessionModelId: sessionModel,
+                runAssessor: buildLeaderAssessorRunner(deps, sessionModel), // single-shot leader call
+              });
+              depth = assessed.depth;
+              // Keep the native depth slot authoritative: write the assessed depth
+              // back to pilCtx.modelDepthTier so every downstream consumer that reads
+              // it (tool-engine depthTier -> gsd tool registration + gsd_verify depth
+              // + layer-derived tiering) sees the SAME value the mutation gate reads
+              // from STATE.md. Without this, the gate (readState().depth) and gsd_verify
+              // (pilCtx.modelDepthTier) diverge on any assessor override. Same pilCtx
+              // ref, and this block runs before executeToolEngine in the same turn.
+              pilCtx.modelDepthTier = depth;
+              if (assessed.assessed) pilCtx.gsdAutoCouncil = assessed.autoCouncil;
 
-            if (isPilGateEnrichEnabled() && assessed.enrichedPrompt) {
-              let verdict = assessed.quality?.verdict ?? "enriched";
-              brief = assessed.enrichedPrompt;
-              if (depth === "heavy") {
-                const { runGateCritics } = await import("../gsd/pil-gate-critic.js");
-                const critiqued = await runGateCritics({
-                  draftBrief: brief,
-                  draftVerdict: verdict,
-                  bundle,
-                  runCritic: buildGateCriticRunner(deps, sessionModel),
-                });
-                verdict = critiqued.verdict;
-                brief = critiqued.brief;
+              if (isPilGateEnrichEnabled() && assessed.enrichedPrompt) {
+                let verdict = assessed.quality?.verdict ?? "enriched";
+                brief = assessed.enrichedPrompt;
+                if (depth === "heavy") {
+                  const { runGateCritics } = await import("../gsd/pil-gate-critic.js");
+                  const critiqued = await runGateCritics({
+                    draftBrief: brief,
+                    draftVerdict: verdict,
+                    bundle,
+                    runCritic: buildGateCriticRunner(deps, sessionModel),
+                  });
+                  verdict = critiqued.verdict;
+                  brief = critiqued.brief;
+                }
+                if (verdict === "adequate") brief = "";
               }
-              if (verdict === "adequate") brief = "";
+            } catch (assessErr) {
+              brief = "";
+              console.error(`[pil-gate] enrichment failed, using raw prompt: ${(assessErr as Error).message}`);
             }
-          } catch (assessErr) {
-            brief = "";
-            console.error(`[pil-gate] enrichment failed, using raw prompt: ${(assessErr as Error).message}`);
           }
-        }
 
-        if (brief) {
-          pilCtx.enriched = `[PIL Gate brief]\n${brief.slice(0, 1500)}\n\n${pilCtx.enriched}`;
+          if (brief) {
+            pilCtx.enriched = `[PIL Gate brief]\n${brief.slice(0, 1500)}\n\n${pilCtx.enriched}`;
+          }
+          getGsdLoopHost().ensureHost(cwd, sessionModel);
+          syncWorkflowContext(cwd, sessionModel, depth);
+        } catch (err) {
+          console.error(`[gsd-loop-host] turn sync failed: ${(err as Error).message}`);
         }
-        getGsdLoopHost().ensureHost(cwd, sessionModel);
-        syncWorkflowContext(cwd, sessionModel, depth);
-      } catch (err) {
-        console.error(`[gsd-loop-host] turn sync failed: ${(err as Error).message}`);
-      }
-      breadcrumb("pre-stream.gsdGate.end", { sessionId: _sessionIdForBreadcrumbs });
+      });
     }
 
     // Track whether forced-finalize is needed (set by stopWhen when the

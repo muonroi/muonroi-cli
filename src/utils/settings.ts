@@ -1212,6 +1212,34 @@ export function getProviderProgressTimeoutMs(): number {
 }
 
 /**
+ * Round 5 (G8 HIGH #2): ceiling (ms) for treating "a provider request is in
+ * flight, awaiting its first byte" as turn-watchdog liveness — Claude Code
+ * parity, no 120s kill of a MAIN model call that is merely slow to first
+ * token (z.ai/glm-4.7 TTFT 10.6-11.4s plus retries has been measured to blow
+ * past 120s while still genuinely working; session trace showed `stream_start`
+ * land 2m19s after a top-level watchdog kill). `tool-engine.ts` re-pings turn
+ * progress on an interval for up to this long while awaiting the first
+ * `fullStream` part; past it, pinging stops and the ordinary 120s idle rule
+ * applies again as a backstop. This is deliberately well ABOVE
+ * `getProviderStallTimeoutMs()` (default 120_000, max 600_000): a genuinely
+ * dead provider is expected to be caught by that dedicated, re-promptable
+ * stall watchdog (own toast + retry) long before this ceiling matters — this
+ * is a backstop for "unusually slow but alive", not the primary guard.
+ * Range 500–1_800_000 (the low end exists only so tests can scale the whole
+ * watchdog down to fast real timers, matching the convention already used by
+ * `MUONROI_COMPACTION_PROPOSER_TIMEOUT_MS`); default 600_000 (10 min). Env
+ * override: MUONROI_FIRST_TOKEN_TIMEOUT_MS.
+ */
+export function getFirstTokenTimeoutMs(): number {
+  const envRaw = process.env.MUONROI_FIRST_TOKEN_TIMEOUT_MS;
+  if (envRaw !== undefined && envRaw !== "") {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 500 && n <= 1_800_000) return Math.floor(n);
+  }
+  return 600_000;
+}
+
+/**
  * Event-loop block reporting threshold (ms). The monitor
  * (`src/utils/event-loop-monitor.ts`) reports a block when its own tick runs at
  * least this late — evidence that the JS thread was stuck and NO timer could

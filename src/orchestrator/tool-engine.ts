@@ -151,6 +151,7 @@ import {
   effectiveCompactionWindowTokens,
   getAutoCouncilConfidence,
   getAutoCouncilMinRoles,
+  getFirstTokenTimeoutMs,
   getProviderProgressTimeoutMs,
   getProviderStallRetries,
   getProviderStallTimeoutMs,
@@ -331,7 +332,7 @@ import {
   toToolCall,
   toToolResult,
 } from "./tool-utils";
-import { pingTurnProgress } from "./turn-progress.js";
+import { pingTurnProgress, startPeriodicTurnProgressPing } from "./turn-progress.js";
 import type { TurnRunnerDepsBase } from "./turn-runner-deps.js";
 
 /**
@@ -2217,6 +2218,42 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // Hold the stream open while a blocking `ask_user` card awaits a human.
           isInteractivePaused,
         );
+        // Round 5 (G8 HIGH #2): a request is now genuinely in flight, awaiting
+        // its first byte. The single `pingTurnProgress()` above buys the
+        // top-level turn watchdog exactly ONE more 120s idle window — a
+        // provider slower than that to first token (measured: z.ai/glm-4.7,
+        // `stream_start` landing 2m19s after a watchdog kill) is still raced
+        // against and can lose even though `stall` above is the mechanism
+        // actually responsible for judging this call dead. Keep re-pinging on
+        // an interval for up to `getFirstTokenTimeoutMs()` (default 600s,
+        // comfortably above `stall`'s own ceiling) so THAT dedicated,
+        // re-promptable watchdog — not a race with the generic top-level one —
+        // is what decides "alive but slow" vs. "actually hung". Stopped the
+        // moment `stall` sees a chunk (pet()) or is torn down (dispose()): no
+        // call site of either needs to change, so every existing exit path
+        // (success, abort, error, the mid-loop continuation reusing this same
+        // `stall`) is covered automatically.
+        const stopFirstTokenPing = startPeriodicTurnProgressPing();
+        let firstTokenPingStopped = false;
+        const stopFirstTokenPingOnce = () => {
+          if (firstTokenPingStopped) return;
+          firstTokenPingStopped = true;
+          stopFirstTokenPing();
+        };
+        const firstTokenCeilingTimer = setTimeout(stopFirstTokenPingOnce, getFirstTokenTimeoutMs());
+        (firstTokenCeilingTimer as { unref?: () => void }).unref?.();
+        const _origStallPet = stall.pet.bind(stall);
+        const _origStallDispose = stall.dispose.bind(stall);
+        (stall as { pet: () => void }).pet = () => {
+          stopFirstTokenPingOnce();
+          clearTimeout(firstTokenCeilingTimer);
+          _origStallPet();
+        };
+        (stall as { dispose: () => void }).dispose = () => {
+          stopFirstTokenPingOnce();
+          clearTimeout(firstTokenCeilingTimer);
+          _origStallDispose();
+        };
         // F3c — hard-cap LLM calls per turn before this streamText()
         if (++llmCallsThisTurn > MAX_LLM_CALLS_PER_TURN) {
           stall.dispose();
