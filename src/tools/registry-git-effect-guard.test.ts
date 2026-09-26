@@ -5,16 +5,20 @@
  * pre-execution pipeline (including the string gate, git-safety.ts's
  * `detectBlockedGitSubcommand`).
  *
+ * Round 5 kept this file's cases as-is (all still pass unchanged: the
+ * message still names the ref, "nothing was changed" still appears, the
+ * branch is still left in place) — round 5's cost/correctness fixes
+ * (cheap-first snapshotting, reachability-only new-vs-existing
+ * classification, deletion reporting, precise created/moved/deleted
+ * labeling) are unit-tested directly in `__tests__/git-effect-guard.test.ts`,
+ * which is the right level for exact wording/classification assertions.
+ *
  * `\git`/inline `-c alias`/`${IFS}` bypasses are caught PRE-execution by the
  * string gate, so they never reach the effect guard here — see
- * `git-safety-blocked-subcommand.test.ts` for those, and
- * `__tests__/git-effect-guard.test.ts` for the effect-guard module tested
- * directly (every round-4 required case: checkout between branches is a
- * non-event, a script-file commit, a concurrent commit, reset --hard to an
- * older commit, stash pop). What's unique to test at THIS (full-pipeline)
- * level is a bypass the string layer can never see at all: a SCRIPT FILE
- * with no literal "git" on the invoking command line — and that, unlike
- * round 3, a newly-created ref is left in place, only REPORTED.
+ * `git-safety-blocked-subcommand.test.ts` for those. What's unique to test
+ * at THIS (full-pipeline) level is a bypass the string layer can never see
+ * at all: a SCRIPT FILE with no literal "git" on the invoking command line —
+ * and that a newly-created ref is left in place, only REPORTED.
  */
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
