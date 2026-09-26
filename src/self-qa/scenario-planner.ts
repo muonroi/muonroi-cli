@@ -163,13 +163,41 @@ export function planScenarios(opts: PlannerOptions = {}): Scenario[] {
 }
 
 /**
- * Get the list of files touched by `git diff <baseRef>`.
- * Returns repo-relative POSIX-style paths.
+ * Get the list of files touched since `baseRef`. Returns repo-relative
+ * POSIX-style paths.
+ *
+ * UNION of two diffs, not just one:
+ *   - `git diff <baseRef> HEAD --` (two-argument form, so a bare TREE
+ *     `baseRef` — e.g. the empty tree used as a "check everything" base by
+ *     `scripts/self-verify-pre-push.cjs` — still works, same as the
+ *     single-operand form below): what is COMMITTED since `baseRef`.
+ *   - `git diff <baseRef> --` (single-operand form): `baseRef` vs. the
+ *     current WORKING TREE (index + uncommitted edits) — what local,
+ *     interactive self-verify runs have always relied on to see an
+ *     in-progress, not-yet-committed change.
+ *
+ * A single-operand diff ALONE (the original implementation) missed a
+ * committed UI change that a later, uncommitted `git checkout <baseRef> --
+ * <file>` reverts in the working tree: the working tree then matches
+ * `baseRef` again for that file, so it drops out of the single-operand
+ * diff even though the commit that will actually be PUSHED still contains
+ * it — self-verify's planner then sees nothing but a smoke-boot fallback
+ * for a real, committed, about-to-ship UI change. The committed-diff half
+ * closes that gap without narrowing the existing local-dev (uncommitted
+ * change) use at all — this is strictly a superset of the prior result.
+ * Untracked files are excluded from both, exactly as before (neither form
+ * of `git diff` reports them).
  */
 export function collectChangedFiles(args: { cwd: string; baseRef: string }): string[] {
+  const committed = runDiffNameOnly(`git diff --name-only ${args.baseRef} HEAD --`, args.cwd);
+  const workingTree = runDiffNameOnly(`git diff --name-only ${args.baseRef} --`, args.cwd);
+  return [...new Set([...committed, ...workingTree])];
+}
+
+function runDiffNameOnly(cmd: string, cwd: string): string[] {
   try {
-    const out = execSync(`git diff --name-only ${args.baseRef} --`, {
-      cwd: args.cwd,
+    const out = execSync(cmd, {
+      cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });

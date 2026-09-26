@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { extractSemanticHits, planScenarios } from "../scenario-planner.js";
+import { execSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { collectChangedFiles, extractSemanticHits, planScenarios } from "../scenario-planner.js";
 
 describe("scenario-planner", () => {
   describe("extractSemanticHits", () => {
@@ -110,6 +114,91 @@ describe("scenario-planner", () => {
       const smoke = planScenarios({ diffFilesOverride: [], maxScenarios: 4 }).find((s) => s.id === "smoke-boot");
       expect(smoke).toBeDefined();
       expect(smoke?.steps.some((step) => step.op === "wait_for" && step.guard === true)).toBe(false);
+    });
+  });
+
+  describe("collectChangedFiles (round 13: union of committed + working-tree diff)", () => {
+    let repo: string;
+
+    function git(args: string[]): string {
+      const r = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+      if (r.status !== 0) {
+        throw new Error(`git ${args.join(" ")} (cwd=${repo}) failed:\n${r.stdout}\n${r.stderr}`);
+      }
+      return (r.stdout || "").trim();
+    }
+
+    function commitFile(path: string, content: string, message: string): string {
+      const full = join(repo, path);
+      mkdirSync(join(full, ".."), { recursive: true });
+      writeFileSync(full, content);
+      git(["add", "."]);
+      git(["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", message]);
+      return git(["rev-parse", "HEAD"]);
+    }
+
+    beforeEach(() => {
+      repo = mkdtempSync(join(tmpdir(), "scenario-planner-ccf-"));
+      git(["init", "--quiet"]);
+    });
+
+    afterEach(() => {
+      try {
+        spawnSync("rm", ["-rf", repo]);
+      } catch {
+        // ignore
+      }
+    });
+
+    it("a COMMITTED UI change that a later, uncommitted checkout reverts in the working tree is still reported (was the HIGH: single-operand diff alone missed it)", () => {
+      // The file must already exist AT baseSha (plain, no Semantic) so
+      // `git checkout baseSha -- <path>` below has something to restore —
+      // reverting a file that was only ADDED after baseSha isn't a valid
+      // checkout target (nothing to check out FROM), so the interesting
+      // case is a later commit MODIFYING an existing file.
+      const baseSha = commitFile("src/ui/reverted.tsx", "// plain, no semantic wrapper yet\n", "base ui file");
+      commitFile(
+        "src/ui/reverted.tsx",
+        '<Semantic id="x" role="button">\n',
+        "commit the UI change (adds a Semantic wrapper)",
+      );
+
+      // Uncommitted revert: the working tree now matches baseSha again for
+      // this file, so the OLD single-operand `git diff <base> --` no longer
+      // sees it — but the commit that will actually be pushed still does.
+      git(["checkout", baseSha, "--", "src/ui/reverted.tsx"]);
+
+      const changed = collectChangedFiles({ cwd: repo, baseRef: baseSha });
+      expect(changed).toContain("src/ui/reverted.tsx");
+    });
+
+    it("an UNCOMMITTED UI change (no commit at all) is still reported — no regression for local, interactive self-verify use", () => {
+      const baseSha = commitFile("base.txt", "v1\n", "base");
+      mkdirSync(join(repo, "src", "ui"), { recursive: true });
+      writeFileSync(join(repo, "src", "ui", "uncommitted.tsx"), '<Semantic id="y" role="button">\n');
+      git(["add", "."]); // staged but not committed — still part of the working tree
+
+      const changed = collectChangedFiles({ cwd: repo, baseRef: baseSha });
+      expect(changed).toContain("src/ui/uncommitted.tsx");
+    });
+
+    it("a bare TREE base (e.g. the empty tree) works for the union, not just a commit", () => {
+      commitFile("base.txt", "v1\n", "base");
+      commitFile("src/ui/committed.tsx", '<Semantic id="z" role="button">\n', "add ui file");
+      const emptyTreeSha = execSync("git hash-object -t tree /dev/null", { cwd: repo, encoding: "utf8" }).trim();
+
+      const changed = collectChangedFiles({ cwd: repo, baseRef: emptyTreeSha });
+      expect(changed).toContain("src/ui/committed.tsx");
+      expect(changed).toContain("base.txt");
+    });
+
+    it("untracked files are still excluded from both halves of the union, exactly as before", () => {
+      const baseSha = commitFile("base.txt", "v1\n", "base");
+      mkdirSync(join(repo, "src", "ui"), { recursive: true });
+      writeFileSync(join(repo, "src", "ui", "untracked.tsx"), '<Semantic id="w" role="button">\n'); // never `git add`ed
+
+      const changed = collectChangedFiles({ cwd: repo, baseRef: baseSha });
+      expect(changed).not.toContain("src/ui/untracked.tsx");
     });
   });
 });
