@@ -203,12 +203,15 @@ export async function pathsForCommitGate(
 }
 
 /**
- * Single source of truth for "may this process auto-commit in the CURRENT
- * project" — checked by both the end-of-turn auto-commit (maybeAutoCommitTurn)
- * and the `git_commit` tool path (commitSpecificPaths). Only a DISABLE is
- * settable here: `MUONROI_AUTO_COMMIT=0` (env, existing) or a committed
- * `.muonroi-cli/settings.json` `{"autoCommit": false}` (project setting,
- * read-only-safe — a repo can turn this OFF for whoever runs it, never ON).
+ * "May the PASSIVE, automatic end-of-turn auto-commit run in the CURRENT
+ * project" (`maybeAutoCommitTurn`) — NOT the `git_commit` tool
+ * (`commitSpecificPaths`, which checks the env var + project setting
+ * directly, deliberately without the test-environment guard below; see its
+ * own comment). Only a DISABLE is settable here: `MUONROI_AUTO_COMMIT=0`
+ * (env, existing), the VITEST/NODE_ENV=test guard (this function only), or a
+ * committed `.muonroi-cli/settings.json` `{"autoCommit": false}` (project
+ * setting, read-only-safe — a repo can turn this OFF for whoever runs it,
+ * never ON).
  */
 export function isAutoCommitEnabled(): boolean {
   if (process.env.MUONROI_AUTO_COMMIT === "0") return false;
@@ -519,10 +522,24 @@ export async function maybeAutoCommitTurn(opts: {
  */
 export async function commitSpecificPaths(cwd: string, paths: string[], message: string): Promise<AutoCommitResult> {
   // Gate (b): this used to check `MUONROI_AUTO_COMMIT === "0"` directly,
-  // bypassing the project-level `autoCommit: false` setting that
-  // `isAutoCommitEnabled()` also honours — the git_commit tool path stayed
-  // live even when a repo's own `.muonroi-cli/settings.json` disabled it.
-  if (!isAutoCommitEnabled()) return { committed: false, reason: "disabled" };
+  // bypassing the project-level `autoCommit: false` setting — the git_commit
+  // tool path stayed live even when a repo's own `.muonroi-cli/settings.json`
+  // disabled it. Fixed by adding the project-setting check — but NOT by
+  // routing through `isAutoCommitEnabled()` (a regression a later loop-2 run
+  // caught, bun test src/tools/registry-git-commit-empty-ledger.test.ts and
+  // src/orchestrator/__tests__/auto-commit-run-root.test.ts, 5 failures):
+  // `isAutoCommitEnabled()` ALSO disables under VITEST/NODE_ENV=test, which
+  // is correct for the PASSIVE end-of-turn auto-commit (`maybeAutoCommitTurn`
+  // — it could fire during an unrelated test that never asked for a commit)
+  // but wrong here — `git_commit` is a DELIBERATE, explicit tool call, and
+  // tests that invoke it directly (in their own isolated temp repo) expect
+  // it to actually run, exactly like `bash`'s `git commit` isn't silently
+  // disabled under the test runner either. Only the explicit env escape
+  // hatch and the project setting are checked; the test-environment guard
+  // is deliberately NOT applied to this tool.
+  if (process.env.MUONROI_AUTO_COMMIT === "0" || isAutoCommitDisabledByProject()) {
+    return { committed: false, reason: "disabled" };
+  }
   const safe = paths.filter((p) => !isExcludedPath(p));
   if (safe.length === 0) return { committed: false, reason: "no-eligible-paths" };
   const inRepo = await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
