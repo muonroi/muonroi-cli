@@ -12,17 +12,30 @@
  */
 import { describe, expect, it } from "vitest";
 
-const { selectBaseRef, parsePushLines, ZERO_SHA } = require("../self-verify-pre-push.cjs") as {
-  selectBaseRef: (opts: {
-    localSha: string;
-    remoteSha: string;
-    remote: string;
-    refExists: (ref: string) => boolean;
-    mergeBase: (a: string, b: string) => string | null;
-  }) => string | null;
-  parsePushLines: (raw: string) => Array<{ localRef: string; localSha: string; remoteRef: string; remoteSha: string }>;
-  ZERO_SHA: string;
-};
+const { selectBaseRef, resolveFallbackBase, decideSelfVerify, parsePushLines, ZERO_SHA } =
+  require("../self-verify-pre-push.cjs") as {
+    selectBaseRef: (opts: {
+      localSha: string;
+      remoteSha: string;
+      remote: string;
+      refExists: (ref: string) => boolean;
+      mergeBase: (a: string, b: string) => string | null;
+    }) => string | null;
+    resolveFallbackBase: (
+      remote: string,
+      head: string,
+      refExists: (ref: string) => boolean,
+      mergeBase: (a: string, b: string) => string | null,
+    ) => string | null;
+    decideSelfVerify: (
+      results: Array<{ base: string; touched: string[]; undiffable: boolean }>,
+      fallbackBase: string | null,
+    ) => { run: boolean; base: string | null; touched: string[]; reason: string };
+    parsePushLines: (
+      raw: string,
+    ) => Array<{ localRef: string; localSha: string; remoteRef: string; remoteSha: string }>;
+    ZERO_SHA: string;
+  };
 
 const LOCAL_SHA = "1111111111111111111111111111111111111111";
 
@@ -122,6 +135,84 @@ describe("self-verify-pre-push.cjs — selectBaseRef", () => {
       mergeBase: () => null,
     });
     expect(seen).toEqual(["upstream/develop", "upstream/HEAD", "upstream/master"]);
+  });
+});
+
+describe("self-verify-pre-push.cjs — resolveFallbackBase", () => {
+  it("tries develop, then HEAD, then master, in that order, never master first", () => {
+    const seen: string[] = [];
+    resolveFallbackBase(
+      "origin",
+      LOCAL_SHA,
+      (ref) => {
+        seen.push(ref);
+        return false;
+      },
+      () => null,
+    );
+    expect(seen).toEqual(["origin/develop", "origin/HEAD", "origin/master"]);
+  });
+
+  it("returns null when nothing resolves", () => {
+    expect(
+      resolveFallbackBase(
+        "origin",
+        LOCAL_SHA,
+        () => false,
+        () => "unreachable",
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("self-verify-pre-push.cjs — decideSelfVerify (round 9: never fail open)", () => {
+  it("a ref whose diff touched a watched dir wins outright, using ITS base", () => {
+    const decision = decideSelfVerify(
+      [
+        { base: "base-a", touched: [], undiffable: false },
+        { base: "base-b", touched: ["src/ui/foo.ts"], undiffable: false },
+      ],
+      null,
+    );
+    expect(decision).toMatchObject({ run: true, base: "base-b", touched: ["src/ui/foo.ts"] });
+  });
+
+  it("an undiffable ref with NO fallback base does not fail open, but cannot fail closed either — skips (no way to check anything)", () => {
+    const decision = decideSelfVerify([{ base: "remote-sha", touched: [], undiffable: true }], null);
+    expect(decision.run).toBe(false);
+  });
+
+  it("an undiffable ref WITH a fallback base fails CLOSED — runs self-verify using the fallback base, even though nothing was confirmed touched", () => {
+    const decision = decideSelfVerify([{ base: "remote-sha", touched: [], undiffable: true }], "fallback-base");
+    expect(decision).toMatchObject({ run: true, base: "fallback-base", touched: [] });
+    expect(decision.reason).toMatch(/fail(ing)? closed/i);
+  });
+
+  it("a touching ref beats an undiffable one — a confirmed touch always wins over failing closed", () => {
+    const decision = decideSelfVerify(
+      [
+        { base: "remote-sha", touched: [], undiffable: true },
+        { base: "base-b", touched: ["src/ui/foo.ts"], undiffable: false },
+      ],
+      "fallback-base",
+    );
+    expect(decision).toMatchObject({ run: true, base: "base-b", touched: ["src/ui/foo.ts"] });
+  });
+
+  it("no results at all (no candidate base resolved for any ref) — skips", () => {
+    const decision = decideSelfVerify([], null);
+    expect(decision.run).toBe(false);
+  });
+
+  it("every ref diffed cleanly and none touched anything — the only real 'no changes' skip", () => {
+    const decision = decideSelfVerify(
+      [
+        { base: "base-a", touched: [], undiffable: false },
+        { base: "base-b", touched: [], undiffable: false },
+      ],
+      "fallback-base",
+    );
+    expect(decision.run).toBe(false);
   });
 });
 

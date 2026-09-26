@@ -12,41 +12,72 @@
  * Cost: ~30s + ~$0.005-0.01 per run when a watched surface changed,
  * zero cost otherwise.
  *
- * ── Base ref (round 8 fix) ──────────────────────────────────────────────
+ * ── Base ref (round 8) ───────────────────────────────────────────────────
  * This used to hardcode `${remote}/master` as the diff base regardless of
  * what was actually being pushed. On THIS repo `origin/master` is a
- * long-stale ref (its merge-base with `origin/develop` is far behind
- * `origin/develop`'s own tip) — diffing any `develop`-based branch against
- * it picks up hundreds of files of unrelated, already-integrated history,
- * including — by coincidence, not because the pushed branch touched them —
- * files under the WATCH_DIRS below. A push that touched ZERO UI/harness
- * files then still triggered self-verify, and the scenario it picked
- * (chosen from THAT bogus diff) had nothing to do with the actual change.
+ * long-stale ref, so diffing any `develop`-based branch against it picked
+ * up hundreds of unrelated files, including — by coincidence — files under
+ * WATCH_DIRS, tripping self-verify for pushes that touched none of them.
  *
  * `.husky/pre-push` invokes this script as a plain foreground command with
  * no stdin redirection, so it inherits the pre-push hook's own stdin
  * verbatim: git's pre-push protocol writes one line per pushed ref,
  * `<local ref> SP <local sha1> SP <remote ref> SP <remote sha1>` (see
- * githooks(5)), before waiting for this process to exit. `selectBaseRef`
- * (exported for the unit test) is the pure decision per line:
+ * githooks(5)). `selectBaseRef` (exported for the unit test) is the pure
+ * per-line decision:
  *   - local sha1 all-zero → a ref DELETION, nothing was pushed, nothing to
  *     diff (checked first — a delete can carry a real, non-zero remote
- *     sha1 for the ref being removed, which must NOT be mistaken for "the
- *     ref already exists, diff from there").
+ *     sha1 for the ref being removed).
  *   - remote sha1 non-zero (the ref already exists on the remote) → that
- *     sha1 IS the base — diff exactly what this push would move the ref by.
- *   - remote sha1 all-zero (a brand-new remote branch, e.g. this repo's
- *     first push of a feature branch) → there is no remote state to diff
- *     against, so fall back to a merge-base with the remote's own
- *     default/integration branch, tried in order: `<remote>/develop` (this
- *     repo's actual integration branch), else `<remote>/HEAD` (whatever the
- *     remote's own default branch is, symbolically), else `<remote>/master`
- *     (last-resort — never used FIRST, unlike before) — never a hardcoded
- *     `master` outright.
+ *     sha1 IS the base.
+ *   - remote sha1 all-zero (a brand-new remote branch) → `resolveFallbackBase`:
+ *     merge-base with the remote's own default/integration branch, tried
+ *     `<remote>/develop`, else `<remote>/HEAD`, else `<remote>/master`
+ *     (last resort, never used first, never a hardcoded master outright).
+ *
+ * ── Never fail open on an undiffable ref (round 9) ──────────────────────
+ * Round 8's "could not diff → skip" fallback was itself a fail-open hole:
+ * a remote sha that exists on the remote but is not yet fetched locally
+ * (a stale remote-tracking ref, a shallow clone, a first-time fetch of
+ * that branch) made `git diff <remoteSha>...<localSha>` throw. The catch
+ * swallowed it, contributed nothing to `touched`, and — if no OTHER pushed
+ * ref happened to touch a watched dir — the whole run fell through to "no
+ * UI/harness/self-qa changes detected", skipping self-verify for a push
+ * that may have touched exactly those files. An unfetched remote sha is
+ * the ordinary case, not a corrupt one, so it must never silently read as
+ * "clean".
+ *
+ * `ensureDiffable` now makes a real object-presence check
+ * (`git cat-file -e <sha>^{commit}`) before ever trying to diff a remote
+ * sha, and — only if that fails — ONE quiet `git fetch --no-tags <remote>
+ * <remoteRef>` attempt (ignored if the remote refuses; never a hard
+ * error) before rechecking. `decideSelfVerify` (exported, pure) is the
+ * decision across every pushed ref's outcome, and never fails open:
+ *   - any ref whose diff actually touched a watched dir wins outright —
+ *     run self-verify using THAT ref's base (not merely the first ref
+ *     that happened to resolve a base at all).
+ *   - otherwise, if any ref's diff could not be computed even after the
+ *     fetch retry → FAIL CLOSED: treat it as "watched surfaces may have
+ *     changed" and run self-verify anyway, using a fallback base
+ *     (`resolveFallbackBase` against the remote's own develop/HEAD/master,
+ *     same candidate order as the new-branch case) as the `--since` arg,
+ *     logging why.
+ *   - only when every ref's diff was actually computed, and none touched a
+ *     watched dir, is this a real "no changes" finding → skip.
+ *
+ * Manual invocation (no pre-push stdin — e.g. running this script by hand,
+ * or from a context that does not pipe git's protocol in) used to read as
+ * "could not read the pre-push ref list on stdin — skipping" unconditionally.
+ * That is also a fail-open hole with no upside: it now falls back to the
+ * pre-round-8 behaviour of diffing HEAD against the resolved fallback base
+ * directly, exactly as if HEAD were a brand-new branch push, instead of
+ * skipping outright.
+ *
  * `PRE_PUSH_REMOTE` and `SELF_VERIFY_PRE_PUSH=0` behave exactly as before.
- * The existing "could not diff → skip, push proceeds" fail-open behaviour
- * is preserved (now also covering "could not read/parse the pre-push stdin
- * lines" and "no candidate base ref resolved") — never loosened further.
+ * The only remaining "skip, push proceeds" cases are: a pure ref deletion;
+ * no candidate base ref resolves for ANY pushed ref (not even the
+ * develop/HEAD/master fallback — nothing left to diff against at all); or
+ * every ref's diff was actually computed and genuinely touched nothing.
  */
 "use strict";
 
@@ -64,27 +95,42 @@ function exitWith(code) {
   process.exit(code);
 }
 
+function isZero(sha) {
+  return !sha || sha === ZERO_SHA;
+}
+
+/**
+ * Fallback base when there is no remote sha to diff against directly (a
+ * brand-new remote branch, an undiffable remote sha, or a manual/no-stdin
+ * invocation): merge-base of `head` with the remote's own integration
+ * branch, tried `<remote>/develop`, else `<remote>/HEAD`, else
+ * `<remote>/master` — never a hardcoded master alone.
+ */
+function resolveFallbackBase(remote, head, refExists, mergeBase) {
+  const candidates = [`${remote}/develop`, `${remote}/HEAD`, `${remote}/master`];
+  for (const candidate of candidates) {
+    if (!refExists(candidate)) continue;
+    const mb = mergeBase(head, candidate);
+    if (mb) return mb;
+  }
+  return null;
+}
+
 /**
  * Pure base-ref decision for ONE pushed ref line — no I/O of its own;
  * `refExists`/`mergeBase` are injected so this is unit-testable without a
  * real git repo. Returns the sha/ref to diff FROM, or `null` when none can
- * be determined (caller treats that the same as any other "could not
- * diff" case: skip self-verify for this line, never block the push on it).
+ * be determined for THIS ref (the caller still may not skip overall — see
+ * `decideSelfVerify`).
  */
 function selectBaseRef({ localSha, remoteSha, remote, refExists, mergeBase }) {
-  if (!localSha || localSha === ZERO_SHA) {
+  if (isZero(localSha)) {
     return null; // a ref DELETION (checked first — a delete can carry a real, non-zero remote sha too) — nothing pushed, nothing to diff
   }
-  if (remoteSha && remoteSha !== ZERO_SHA) {
+  if (!isZero(remoteSha)) {
     return remoteSha;
   }
-  const candidates = [`${remote}/develop`, `${remote}/HEAD`, `${remote}/master`];
-  for (const candidate of candidates) {
-    if (!refExists(candidate)) continue;
-    const mb = mergeBase(localSha, candidate);
-    if (mb) return mb;
-  }
-  return null;
+  return resolveFallbackBase(remote, localSha, refExists, mergeBase);
 }
 
 /** Parse git's pre-push stdin protocol: one `<local ref> <local sha1> <remote ref> <remote sha1>` line per pushed ref. */
@@ -131,10 +177,129 @@ function diffNames(base, head) {
   });
 }
 
+/** Is `sha` a commit object already present in the local object store? */
+function commitAvailableReal(sha) {
+  const r = spawnSync("git", ["cat-file", "-e", `${sha}^{commit}`], { stdio: "pipe" });
+  return r.status === 0;
+}
+
+/** One quiet, best-effort fetch of a single ref. A remote that refuses (auth, network, unknown ref) never throws. */
+function fetchRefReal(remote, remoteRef) {
+  const r = spawnSync("git", ["fetch", "--no-tags", "--quiet", remote, remoteRef], { stdio: "pipe" });
+  return r.status === 0;
+}
+
+/**
+ * Ensures `sha` is diffable locally before it is ever used as a diff base.
+ * A remote sha that is not yet fetched is the ORDINARY case (stale
+ * remote-tracking ref, shallow clone, first push of this branch), not a
+ * corrupt one — so a missing object gets exactly one quiet fetch attempt
+ * of `remoteRef` before giving up. `commitAvailable`/`fetchRef` are
+ * injected for testing against real temp repos without hardcoding git's
+ * real binary path.
+ */
+function ensureDiffable(sha, remote, remoteRef, { commitAvailable, fetchRef }) {
+  if (commitAvailable(sha)) return true;
+  fetchRef(remote, remoteRef || "HEAD"); // best-effort; ignore the result either way, recheck is authoritative
+  return commitAvailable(sha);
+}
+
+/**
+ * Pure decision across every pushed ref's outcome — never fails open.
+ * `results` is `Array<{ base: string, touched: string[], undiffable: boolean }>`,
+ * one entry per pushed ref whose base COULD be selected (deletions and
+ * refs with no resolvable base at all are excluded before this point).
+ * `fallbackBase` is the develop/HEAD/master merge-base against the anchor
+ * commit, precomputed once, used only for the fail-closed case.
+ *
+ *   - a ref whose diff actually touched a watched dir wins outright: run,
+ *     using ITS base (not merely the first ref that happened to resolve).
+ *   - no ref touched anything, but at least one ref's diff could not be
+ *     computed (an undiffable remote sha even after the fetch retry) →
+ *     FAIL CLOSED: cannot rule out a watched change, so run self-verify
+ *     anyway, using `fallbackBase` as the `--since` argument.
+ *   - otherwise: every ref's diff was actually computed and none touched a
+ *     watched dir → skip, the only case that is a real "no changes" finding.
+ */
+function decideSelfVerify(results, fallbackBase) {
+  const touching = results.find((r) => !r.undiffable && r.touched.length > 0);
+  if (touching) {
+    return { run: true, base: touching.base, touched: touching.touched, reason: "watched surface changed" };
+  }
+
+  const anyUndiffable = results.some((r) => r.undiffable);
+  if (anyUndiffable) {
+    if (fallbackBase) {
+      return {
+        run: true,
+        base: fallbackBase,
+        touched: [],
+        reason: "a pushed ref's diff could not be computed even after a fetch retry — failing closed",
+      };
+    }
+    return {
+      run: false,
+      base: null,
+      touched: [],
+      reason:
+        "a pushed ref's diff could not be computed and no fallback base resolved either — skipping (push will proceed)",
+    };
+  }
+
+  if (results.length === 0) {
+    return {
+      run: false,
+      base: null,
+      touched: [],
+      reason: "no candidate base ref resolved for any pushed ref — skipping (push will proceed)",
+    };
+  }
+
+  return { run: false, base: null, touched: [], reason: "no UI/harness/self-qa changes detected" };
+}
+
 // Exported for the unit test (vitest imports this file as a plain module via
 // require() — the block below runs ONLY when this file is executed directly,
 // the way `.husky/pre-push` does, never on a bare require()).
-module.exports = { selectBaseRef, parsePushLines, ZERO_SHA };
+module.exports = { selectBaseRef, resolveFallbackBase, decideSelfVerify, parsePushLines, ZERO_SHA };
+
+function runSelfVerify(sinceBase) {
+  const result = spawnSync(
+    "bun",
+    ["run", "src/index.ts", "self-verify", "--since", sinceBase, "--max", "4", "--no-emit"],
+    {
+      stdio: "inherit",
+      shell: process.platform === "win32",
+    },
+  );
+  return result.status;
+}
+
+function reportOutcome(status, sinceBase) {
+  if (status === 0) {
+    log("self-verify PASSED — proceeding with push");
+    exitWith(0);
+  }
+
+  // Exit codes are the contract in `selfVerifyExitCode` (src/self-qa/index.ts):
+  // 1 = an expectation failed, 3 = nothing failed but nothing was established.
+  // Both block. Reporting them differently matters because the fix differs: a
+  // regression is in your change, an inconclusive is usually in the harness.
+  if (status === 3) {
+    log("self-verify INCONCLUSIVE — no scenario failed, but at least one verified NOTHING");
+    log("this is not a pass: the gate could not establish that your change works");
+    log("the INCONCLUSIVE line above names the scenario; read its first '·' line for why —");
+    log("  'Child never became ready' = the TUI child did not come up, NOT a defect in your");
+    log("  change (it names the gate it waited on, the budget, the measured wait, whether the");
+    log("  child was alive, and the child's stderr tail). Re-run it directly to confirm:");
+    log(`  bun run src/index.ts self-verify --since ${sinceBase} --max 4 --no-emit`);
+  } else {
+    log(`self-verify FAILED (exit ${status}) — an expectation was measured and MISSED`);
+    log("the FAIL line above names the scenario and the expectation; this one is in your change");
+  }
+  log("override with: git push --no-verify");
+  exitWith(1);
+}
 
 function main() {
   if (process.env.SELF_VERIFY_PRE_PUSH === "0") {
@@ -155,81 +320,89 @@ function main() {
     // fallback already set
   }
 
-  const pushLines = readPushLines();
+  let pushLines = readPushLines();
+  let manualInvocation = false;
   if (pushLines.length === 0) {
-    log("could not read the pre-push ref list on stdin — skipping self-verify (push will proceed)");
-    exitWith(0);
+    // No real pre-push stdin (manual invocation, or a context that does not
+    // pipe git's protocol in). Round 8 skipped outright here — a fail-open
+    // hole with no upside. Fall back to the pre-round-8 behaviour: diff
+    // HEAD against the resolved fallback base directly, as if HEAD were a
+    // brand-new branch push, instead of skipping unconditionally.
+    manualInvocation = true;
+    let headSha = null;
+    try {
+      headSha = execSync("git rev-parse HEAD", { encoding: "utf8" }).trim();
+    } catch {
+      headSha = null;
+    }
+    if (!headSha) {
+      log(
+        "could not read the pre-push ref list on stdin, and could not resolve HEAD either — skipping (push will proceed)",
+      );
+      exitWith(0);
+    }
+    pushLines = [{ localRef: "HEAD", localSha: headSha, remoteRef: "HEAD", remoteSha: ZERO_SHA }];
   }
 
-  const touched = new Set();
-  // The base used for the FIRST line that actually resolved — reused as the `--since` arg self-verify itself gets.
-  let representativeBase = null;
+  const results = [];
+  for (const { localSha, remoteSha, remoteRef } of pushLines) {
+    if (isZero(localSha)) continue; // a ref DELETION — nothing pushed, nothing to diff, no vote either way
 
-  for (const { localSha, remoteSha } of pushLines) {
     const base = selectBaseRef({ localSha, remoteSha, remote, refExists: refExistsReal, mergeBase: mergeBaseReal });
-    if (!base) continue; // a deletion, or no candidate resolved — this line contributes nothing
-    if (!representativeBase) representativeBase = base;
+    if (!base) continue; // no candidate base resolved for THIS ref — it contributes nothing (not itself a fail signal)
+
+    const usesRemoteShaDirectly = !isZero(remoteSha) && base === remoteSha;
+    if (usesRemoteShaDirectly) {
+      const diffable = ensureDiffable(base, remote, remoteRef, {
+        commitAvailable: commitAvailableReal,
+        fetchRef: fetchRefReal,
+      });
+      if (!diffable) {
+        log(
+          `remote sha ${base} is not available locally even after "git fetch ${remote} ${remoteRef}" — will fail closed unless another pushed ref proves clean`,
+        );
+        results.push({ base, touched: [], undiffable: true });
+        continue;
+      }
+    }
 
     let changed;
     try {
       changed = diffNames(base, localSha);
     } catch {
-      log(`could not diff against ${base} — skipping this ref (push will proceed)`);
+      log(
+        `could not diff against ${base} even though the commit is available — will fail closed unless another pushed ref proves clean`,
+      );
+      results.push({ base, touched: [], undiffable: true });
       continue;
     }
-    for (const f of changed.split(/\r?\n/)) {
-      const trimmed = f.trim();
-      if (trimmed && WATCH_DIRS.some((d) => trimmed.startsWith(d))) touched.add(trimmed);
-    }
+    const touched = changed
+      .split(/\r?\n/)
+      .map((f) => f.trim())
+      .filter((f) => f && WATCH_DIRS.some((d) => f.startsWith(d)));
+    results.push({ base, touched, undiffable: false });
   }
 
-  if (!representativeBase) {
-    log("could not resolve a base ref for any pushed ref — skipping self-verify (push will proceed)");
+  // The fail-closed / manual-invocation fallback base is resolved against
+  // the first pushed ref's own local sha — any pushed commit is an equally
+  // valid anchor for "what does HEAD's own history look like relative to
+  // the remote's integration branch".
+  const anchorSha = pushLines.find((l) => !isZero(l.localSha))?.localSha ?? null;
+  const fallbackBase = anchorSha ? resolveFallbackBase(remote, anchorSha, refExistsReal, mergeBaseReal) : null;
+
+  const decision = decideSelfVerify(results, fallbackBase);
+  log(decision.reason + (manualInvocation ? " (manual invocation — no pre-push stdin)" : ""));
+  if (decision.touched.length > 0) {
+    log(`(${decision.touched.length} file(s))`);
+    for (const f of decision.touched.slice(0, 5)) log(`  · ${f}`);
+    if (decision.touched.length > 5) log(`  · …and ${decision.touched.length - 5} more`);
+  }
+  if (!decision.run) {
     exitWith(0);
   }
 
-  if (touched.size === 0) {
-    log("no UI/harness/self-qa changes detected — skipping");
-    exitWith(0);
-  }
-
-  const touchedList = [...touched];
-  log(`watched surface changed (${touchedList.length} file(s)) — running self-verify`);
-  for (const f of touchedList.slice(0, 5)) log(`  · ${f}`);
-  if (touchedList.length > 5) log(`  · …and ${touchedList.length - 5} more`);
-
-  const result = spawnSync(
-    "bun",
-    ["run", "src/index.ts", "self-verify", "--since", representativeBase, "--max", "4", "--no-emit"],
-    {
-      stdio: "inherit",
-      shell: process.platform === "win32",
-    },
-  );
-
-  if (result.status === 0) {
-    log("self-verify PASSED — proceeding with push");
-    exitWith(0);
-  }
-
-  // Exit codes are the contract in `selfVerifyExitCode` (src/self-qa/index.ts):
-  // 1 = an expectation failed, 3 = nothing failed but nothing was established.
-  // Both block. Reporting them differently matters because the fix differs: a
-  // regression is in your change, an inconclusive is usually in the harness.
-  if (result.status === 3) {
-    log("self-verify INCONCLUSIVE — no scenario failed, but at least one verified NOTHING");
-    log("this is not a pass: the gate could not establish that your change works");
-    log("the INCONCLUSIVE line above names the scenario; read its first '·' line for why —");
-    log("  'Child never became ready' = the TUI child did not come up, NOT a defect in your");
-    log("  change (it names the gate it waited on, the budget, the measured wait, whether the");
-    log("  child was alive, and the child's stderr tail). Re-run it directly to confirm:");
-    log(`  bun run src/index.ts self-verify --since ${representativeBase} --max 4 --no-emit`);
-  } else {
-    log(`self-verify FAILED (exit ${result.status}) — an expectation was measured and MISSED`);
-    log("the FAIL line above names the scenario and the expectation; this one is in your change");
-  }
-  log("override with: git push --no-verify");
-  exitWith(1);
+  const status = runSelfVerify(decision.base);
+  reportOutcome(status, decision.base);
 }
 
 if (require.main === module) {
