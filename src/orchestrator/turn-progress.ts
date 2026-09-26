@@ -76,6 +76,24 @@
  * stack, not only at the top — nesting no longer orphans the outer turn.
  * "Orphaned" now means precisely: this generation has been POPPED, i.e. the
  * turn that started it has genuinely ended.
+ *
+ * Round 8 — round 7's stack fixed the ORPHAN check but `startPeriodicTurnProgressPing`
+ * still captured `myGeneration` from `nextTurnGeneration` (the monotonic id
+ * SOURCE, used only to mint new ids) instead of the stack's TOP (the
+ * innermost turn actually running). Those two diverge the instant any nested
+ * begin/end cycle has concluded: `nextTurnGeneration` keeps the id of the
+ * LAST turn ever begun — an inner turn that has already ended and been
+ * popped — while the stack's top correctly reflects the outer turn, which is
+ * still active. Repro: outer begins (stack=[G1]); inner begins (stack=[G1,
+ * G2]); inner ends (stack=[G1], but `nextTurnGeneration` is still G2); a NEW
+ * pinger starts NOW, on the outer turn's behalf — it captured G2 (already
+ * popped), so `isTurnGenerationActive(G2)` is false on its very first tick
+ * and it pings ZERO times, even though the outer turn (G1) is completely
+ * healthy. Fixed by capturing
+ * `activeTurnGenerations[activeTurnGenerations.length - 1]` instead — the
+ * stack's top at pinger-start time. If the stack is EMPTY (no turn active at
+ * all), the pinger has nothing to vouch liveness for and pings ZERO times by
+ * design, rather than pinging unbound to any generation.
  */
 
 /** Wall-clock instant of the most recent ping. 0 = never pinged. */
@@ -182,8 +200,13 @@ export interface PeriodicTurnProgressPingOptions {
  * Two independent safety nets bound this beyond the caller's own `stop()`:
  *   - `maxMs` (see {@link PeriodicTurnProgressPingOptions}) — a per-pinger
  *     ceiling.
- *   - Turn generation — see the module doc comment. A pinger orphaned by a
- *     newer turn (`beginTurnGeneration`) stops on its very next tick.
+ *   - Turn generation — see the module doc comment. A pinger binds to
+ *     whichever generation is on TOP of the active stack at the instant it
+ *     starts (the innermost currently-running turn) and stops on its very
+ *     next tick once that generation is popped. If the stack is EMPTY at
+ *     start (no turn is active at all), the pinger pings ZERO times — there
+ *     is nothing for it to vouch liveness for, so it is inert rather than
+ *     pinging unbound to any generation.
  *
  * The interval is `unref`'d so it never keeps the event loop alive on its
  * own.
@@ -191,7 +214,18 @@ export interface PeriodicTurnProgressPingOptions {
 export function startPeriodicTurnProgressPing(opts: PeriodicTurnProgressPingOptions = {}): () => void {
   const intervalMs = opts.intervalMs ?? getTurnProgressPingIntervalMs();
   const maxMs = opts.maxMs;
-  const myGeneration = nextTurnGeneration;
+  // Round 8: bind to the TOP of the active stack (the innermost currently-
+  // running turn), NOT `nextTurnGeneration` (the monotonic id SOURCE). Those
+  // two diverge the instant any nested begin/end cycle has concluded:
+  // `nextTurnGeneration` keeps the LAST id ever issued — an already-popped
+  // inner turn's id — while the stack's top correctly reflects the outer
+  // turn that is still active. A pinger started by the still-active outer
+  // turn AFTER a nested cycle finished used to capture the popped inner id
+  // and orphan itself from birth (0 pings, ever) — exactly backwards.
+  // `undefined` means no turn is active at all: this pinger has nothing to
+  // vouch for and must ping zero times (see the doc comment above).
+  const myGeneration =
+    activeTurnGenerations.length > 0 ? activeTurnGenerations[activeTurnGenerations.length - 1] : undefined;
   const startedAt = Date.now();
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -204,12 +238,14 @@ export function startPeriodicTurnProgressPing(opts: PeriodicTurnProgressPingOpti
 
   const tick = (): void => {
     if (stopped) return;
-    if (!isTurnGenerationActive(myGeneration)) {
-      // Orphaned: the turn that started this pinger has ended (its
-      // generation was popped) — a NESTED turn beginning and ending does NOT
-      // orphan this, since the outer generation stays in the stack the whole
-      // time. Stop WITHOUT pinging — writing lastPingMs here would falsely
-      // vouch for whatever is running now on this stale pinger's behalf.
+    if (myGeneration === undefined || !isTurnGenerationActive(myGeneration)) {
+      // Orphaned (or never bound to a turn at all — see above): the turn
+      // this pinger belongs to has ended (its generation was popped), or
+      // there was no active turn when it started. A NESTED turn beginning
+      // and ending does NOT orphan an OUTER pinger, since the outer
+      // generation stays in the stack the whole time. Stop WITHOUT pinging —
+      // writing lastPingMs here would falsely vouch for whatever is running
+      // now on this stale/unbound pinger's behalf.
       stop();
       return;
     }

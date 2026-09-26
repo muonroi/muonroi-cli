@@ -385,3 +385,41 @@ describe("round 7 — turn generations are a STACK, not a flat counter", () => {
     expect(outerPings).toEqual([1]);
   }, 3000);
 });
+
+describe("round 8 — the pinger must bind to the STACK'S TOP, not the monotonic id source", () => {
+  it("a pinger started by the still-active OUTER turn, AFTER a nested begin/end cycle has already concluded, still pings (round 7's stack fixed the orphan check, but the pinger itself still captured the popped INNER id)", async () => {
+    // Exact repro: outer begins; inner begins; inner ends; THEN a NEW pinger
+    // starts on the outer turn's behalf. Before this fix, the pinger
+    // captured `nextTurnGeneration` — which by now is the INNER id, already
+    // popped — and pinged zero times even though the outer turn is healthy.
+    const outerGen = beginTurnGeneration();
+    const innerGen = beginTurnGeneration();
+    endTurnGeneration(innerGen);
+    expect(__getActiveTurnGenerationsForTests()).toEqual([outerGen]); // outer still active
+
+    const before = Date.now() - 1;
+    const stop = startPeriodicTurnProgressPing({ intervalMs: PING_INTERVAL_MS });
+    try {
+      // Several ticks' worth — enough that a genuinely orphaned-from-birth
+      // pinger (0 pings, ever) would still show false here.
+      await new Promise((r) => setTimeout(r, PING_INTERVAL_MS * 4));
+      expect(hasTurnProgressSince(before)).toBe(true);
+    } finally {
+      stop();
+      endTurnGeneration(outerGen);
+    }
+  });
+
+  it("a pinger started with NO active turn at all (empty stack) pings zero times — nothing to vouch liveness for", async () => {
+    expect(__getActiveTurnGenerationsForTests()).toEqual([]);
+
+    const before = Date.now() - 1;
+    const stop = startPeriodicTurnProgressPing({ intervalMs: PING_INTERVAL_MS });
+    try {
+      await new Promise((r) => setTimeout(r, PING_INTERVAL_MS * 4));
+      expect(hasTurnProgressSince(before)).toBe(false);
+    } finally {
+      stop();
+    }
+  });
+});
