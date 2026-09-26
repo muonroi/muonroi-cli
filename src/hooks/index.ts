@@ -98,6 +98,20 @@ export async function executeEventHooks(
   _signal?: AbortSignal,
 ): Promise<AggregatedHookResult> {
   try {
+    if (input.hook_event_name === "SessionStart") {
+      // Real command execution for user-configured SessionStart hooks (see
+      // command-runner.ts's header comment — every other event branch below
+      // still only does EE dispatch; command hooks were never wired back in
+      // for non-EE events after src/hooks/executor.ts was deleted).
+      const { runCommandHooksForEvent } = await import("./command-runner.js");
+      const { additionalContexts, results } = await runCommandHooksForEvent(
+        "SessionStart",
+        input,
+        (input as import("./types.js").SessionStartHookInput).source,
+      );
+      return { ...emptyResult(), additionalContexts, results };
+    }
+
     if (input.hook_event_name === "PreToolUse") {
       const preInput = input as PreToolUseHookInput;
 

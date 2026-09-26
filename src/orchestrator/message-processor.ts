@@ -159,6 +159,7 @@ import {
   getTopLevelCompactThresholdChars,
   getTopLevelToolBudgetChars,
   isAutoCouncilEnabled,
+  isModelPinnedByProject,
   isProviderDisabled,
   loadMcpServers,
   loadValidSubAgents,
@@ -767,9 +768,24 @@ export class MessageProcessor {
         session_id: deps.session?.id,
         cwd: deps.bash.getCwd(),
       };
-      await preStreamPhase("sessionStartHook", _sessionIdForBreadcrumbs, () =>
-        deps.fireHook(sessionStartInput, signal).catch(() => {}),
+      const sessionStartResult = await preStreamPhase("sessionStartHook", _sessionIdForBreadcrumbs, () =>
+        deps.fireHook(sessionStartInput, signal).catch(() => ({
+          blocked: false,
+          blockingErrors: [] as Array<{ command: string; stderr: string }>,
+          preventContinuation: false,
+          additionalContexts: [] as string[],
+          results: [] as import("../hooks/types.js").HookResult[],
+        })),
       );
+      // Inject the hook's stdout/additionalContext into THIS turn's stream
+      // immediately — before PIL/routing decides DIRECT_ANSWER vs a tool
+      // turn. A no-tool DIRECT_ANSWER turn never reaches the PreToolUse
+      // content-yield path (tool-engine.ts), so without this the very first
+      // reply of a session could never show a SessionStart hook's output
+      // (e.g. a project's own onboarding briefing script).
+      for (const ctx of sessionStartResult?.additionalContexts ?? []) {
+        if (ctx?.trim()) yield { type: "content", content: `${ctx}\n` };
+      }
     }
 
     const promptInput: UserPromptSubmitHookInput = {
@@ -1025,83 +1041,103 @@ export class MessageProcessor {
     let visionUnavailableNotice: string | null = null;
     const _routeStart = Date.now();
     breadcrumb("pre-stream.routerDecide.start", { sessionId: _sessionIdForBreadcrumbs });
-    try {
-      const { decide } = await import("../router/decide.js");
-      const compactionMsg = deps.messages.find(
-        (m) => typeof m.content === "string" && m.content.startsWith("[Context checkpoint summary]"),
-      );
-      const compactionSummary =
-        compactionMsg && typeof compactionMsg.content === "string"
-          ? compactionMsg.content.slice("[Context checkpoint summary]".length).trim()
-          : null;
-
-      const routeDecision = await decide(userMessage, {
-        tenantId: "local",
-        cwd: deps.bash.getCwd(),
-        defaultModel: deps.modelId,
-        defaultProvider: deps.providerId,
-        pil: {
-          domain: pilCtx.domain,
-          taskType: pilCtx.taskType,
-          confidence: pilCtx.confidence,
-          gsdPhase: pilCtx.gsdPhase ?? null,
-          activeRunId: pilCtx.activeRunId ?? null,
-          recentTurnsSummary: deps.buildRecentTurnsSummary(),
-          projectSize: deps.estimateProjectSize(),
-          filesTouched: deps.countFilesTouched(),
-          mode: deps.mode,
-          turnIndex: deps.messages.filter((m) => m.role === "user").length,
-          messageCount: deps.messages.length,
-          compactionCount: deps.getCompactionStats().count,
-          totalSavedTokens: deps.getCompactionStats().totalSaved,
-          compactionSummary,
-        },
+    // Gap (d): a project-level `.muonroi-cli/settings.json` `{"model": "..."}`
+    // pin is an explicit instruction, not a mere default the per-turn router
+    // may second-guess (see `isModelPinnedByProject`'s doc comment). Skip
+    // decide() ENTIRELY for the MAIN conversation turn when pinned — turnModelId
+    // stays deps.modelId (itself resolved from the same project pin via
+    // getCurrentModel()'s precedence). Cheap sub-tasks (tool-loop rounds in
+    // tool-engine.ts, council sub-tasks) call decide()/routeModel() through
+    // their own, separate paths and are unaffected — they may still downgrade.
+    if (isModelPinnedByProject()) {
+      routeReason = "project-model-pin";
+      const prev = statusBarStore.getState();
+      if (prev.routed_from || prev.model !== deps.modelId) {
+        statusBarStore.setState({ routed_from: null, model: deps.modelId });
+      }
+      breadcrumb("pre-stream.routerDecide.end", {
+        sessionId: _sessionIdForBreadcrumbs,
+        skipped: "project-model-pin",
       });
-      if (routeDecision.model && routeDecision.model !== "HALT") {
-        // Respect user's default model when it has a vision proxy and the
-        // current turn (or history) has images — the proxy will convert
-        // images to text, so there's no need to switch to a vision-capable
-        // (and usually pricier / rate-limited) model.
-        const defaultHasVisionProxy = needsVisionProxy(deps.modelId);
-        const imagesOnTurn = turnHasImages || historyHasImages;
-        const canHandleImages =
-          !defaultHasVisionProxy || !imagesOnTurn || (await canHandleImagesForTextOnlyModel(deps.modelId));
-        const skipVisionRoute = defaultHasVisionProxy && imagesOnTurn && canHandleImages;
-        if (!skipVisionRoute) {
-          turnModelId = routeDecision.model;
-        }
-      }
-      taskHash = routeDecision.taskHash ?? null;
-      routeReason = routeDecision.reason ?? null;
-      // Update status bar with router switch info. Also reset back to the
-      // session default when the router does NOT switch on this turn —
-      // otherwise the bar stays "stuck" showing the previously-routed model
-      // (e.g. claude-sonnet-4-6) on later turns that actually run on the
-      // user's chosen default (e.g. deepseek-v4-flash).
-      if (turnModelId !== deps.modelId) {
-        statusBarStore.setState({ routed_from: deps.modelId, model: turnModelId });
-      } else {
-        const prev = statusBarStore.getState();
-        if (prev.routed_from || prev.model !== deps.modelId) {
-          statusBarStore.setState({ routed_from: null, model: deps.modelId });
-        }
-      }
-      if (_debugOn) {
-        _debugSteps.push({
-          name: "Router",
-          duration_ms: Date.now() - _routeStart,
-          input_summary: `default=${deps.modelId}`,
-          output_summary: turnModelId !== deps.modelId ? `routed→${turnModelId}` : `kept ${turnModelId}`,
+    } else {
+      try {
+        const { decide } = await import("../router/decide.js");
+        const compactionMsg = deps.messages.find(
+          (m) => typeof m.content === "string" && m.content.startsWith("[Context checkpoint summary]"),
+        );
+        const compactionSummary =
+          compactionMsg && typeof compactionMsg.content === "string"
+            ? compactionMsg.content.slice("[Context checkpoint summary]".length).trim()
+            : null;
+
+        const routeDecision = await decide(userMessage, {
+          tenantId: "local",
+          cwd: deps.bash.getCwd(),
+          defaultModel: deps.modelId,
+          defaultProvider: deps.providerId,
+          pil: {
+            domain: pilCtx.domain,
+            taskType: pilCtx.taskType,
+            confidence: pilCtx.confidence,
+            gsdPhase: pilCtx.gsdPhase ?? null,
+            activeRunId: pilCtx.activeRunId ?? null,
+            recentTurnsSummary: deps.buildRecentTurnsSummary(),
+            projectSize: deps.estimateProjectSize(),
+            filesTouched: deps.countFilesTouched(),
+            mode: deps.mode,
+            turnIndex: deps.messages.filter((m) => m.role === "user").length,
+            messageCount: deps.messages.length,
+            compactionCount: deps.getCompactionStats().count,
+            totalSavedTokens: deps.getCompactionStats().totalSaved,
+            compactionSummary,
+          },
         });
+        if (routeDecision.model && routeDecision.model !== "HALT") {
+          // Respect user's default model when it has a vision proxy and the
+          // current turn (or history) has images — the proxy will convert
+          // images to text, so there's no need to switch to a vision-capable
+          // (and usually pricier / rate-limited) model.
+          const defaultHasVisionProxy = needsVisionProxy(deps.modelId);
+          const imagesOnTurn = turnHasImages || historyHasImages;
+          const canHandleImages =
+            !defaultHasVisionProxy || !imagesOnTurn || (await canHandleImagesForTextOnlyModel(deps.modelId));
+          const skipVisionRoute = defaultHasVisionProxy && imagesOnTurn && canHandleImages;
+          if (!skipVisionRoute) {
+            turnModelId = routeDecision.model;
+          }
+        }
+        taskHash = routeDecision.taskHash ?? null;
+        routeReason = routeDecision.reason ?? null;
+        // Update status bar with router switch info. Also reset back to the
+        // session default when the router does NOT switch on this turn —
+        // otherwise the bar stays "stuck" showing the previously-routed model
+        // (e.g. claude-sonnet-4-6) on later turns that actually run on the
+        // user's chosen default (e.g. deepseek-v4-flash).
+        if (turnModelId !== deps.modelId) {
+          statusBarStore.setState({ routed_from: deps.modelId, model: turnModelId });
+        } else {
+          const prev = statusBarStore.getState();
+          if (prev.routed_from || prev.model !== deps.modelId) {
+            statusBarStore.setState({ routed_from: null, model: deps.modelId });
+          }
+        }
+        if (_debugOn) {
+          _debugSteps.push({
+            name: "Router",
+            duration_ms: Date.now() - _routeStart,
+            input_summary: `default=${deps.modelId}`,
+            output_summary: turnModelId !== deps.modelId ? `routed→${turnModelId}` : `kept ${turnModelId}`,
+          });
+        }
+      } catch {
+        // Router unavailable — use session default model (skip if provider is disabled)
+        if (!isProviderDisabled(deps.providerId as ProviderId)) {
+          const eeRoute = await routeModel(userMessage, {}, deps.providerId).catch(() => null);
+          taskHash = eeRoute?.taskHash ?? null;
+        }
       }
-    } catch {
-      // Router unavailable — use session default model (skip if provider is disabled)
-      if (!isProviderDisabled(deps.providerId as ProviderId)) {
-        const eeRoute = await routeModel(userMessage, {}, deps.providerId).catch(() => null);
-        taskHash = eeRoute?.taskHash ?? null;
-      }
+      breadcrumb("pre-stream.routerDecide.end", { sessionId: _sessionIdForBreadcrumbs });
     }
-    breadcrumb("pre-stream.routerDecide.end", { sessionId: _sessionIdForBreadcrumbs });
 
     if (needsVisionProxy(turnModelId) && (turnHasImages || historyHasImages)) {
       breadcrumb("pre-stream.visionPlan.start", { sessionId: _sessionIdForBreadcrumbs });

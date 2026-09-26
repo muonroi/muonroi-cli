@@ -176,6 +176,51 @@ describe("MessageProcessor — DI surface invariants", () => {
     expect(batchCalled).toBe(true);
   });
 
+  // Gap (c): SessionStart hook output used to be fired-and-discarded
+  // (message-processor.ts's old `deps.fireHook(sessionStartInput, signal).catch(() => {})`
+  // never looked at the resolved value) — a no-tool DIRECT_ANSWER turn never
+  // reaches tool-engine.ts's PreToolUse content-yield path, so the hook's
+  // output could never reach the user on the very first reply of a session.
+  // Fixed by capturing fireHook's additionalContexts and yielding them as
+  // content chunks immediately, before PIL/routing runs.
+  it("yields the SessionStart hook's additionalContexts as content chunks on the first turn", async () => {
+    const deps = makeDeps({
+      batchApi: true, // short-circuits the turn right after the session-start block
+      getSessionStartHookFired: () => false,
+      fireHook: async (input: unknown) => {
+        const hookInput = input as { hook_event_name?: string };
+        if (hookInput.hook_event_name === "SessionStart") {
+          return {
+            blocked: false,
+            blockingErrors: [],
+            preventContinuation: false,
+            additionalContexts: ["=== BRIEFING OUTPUT ==="],
+            results: [],
+            eeMatches: [],
+          };
+        }
+        return {
+          blocked: false,
+          blockingErrors: [],
+          preventContinuation: false,
+          additionalContexts: [],
+          results: [],
+          eeMatches: [],
+        };
+      },
+      processMessageBatchTurn: async function* () {
+        yield { type: "done" };
+      },
+    });
+    const processor = new MessageProcessor(deps);
+    const chunks: Array<{ type: string; content?: string }> = [];
+    for await (const c of processor.run("bắt đầu", undefined)) {
+      chunks.push(c as { type: string; content?: string });
+    }
+    const contentChunks = chunks.filter((c) => c.type === "content");
+    expect(contentChunks.some((c) => c.content?.includes("=== BRIEFING OUTPUT ==="))).toBe(true);
+  });
+
   it("delegates to deps.runCouncilV2 when auto-council gate is taken", async () => {
     let councilCalled = false;
     const deps = makeDeps({

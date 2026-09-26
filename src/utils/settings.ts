@@ -432,6 +432,24 @@ export interface ProjectSettings {
   model?: string;
   shell?: ShellSettings;
   lsp?: LspSettings;
+  /**
+   * Relocate GSD planning state (`STATE.md`, `config.json`, `phases/`, …) out
+   * of `.planning/` at the repo root. Some repos already use `.planning/` for
+   * their own unrelated plan folders (e.g. a Shipd/Olympus challenge repo),
+   * so every session writing GSD state there litters the working tree.
+   * Absolute, or relative to the repo root. See `gsd/paths.ts` `planningRoot`.
+   * Env override: `MUONROI_STATE_DIR` (wins over this setting).
+   */
+  stateDir?: string;
+  /**
+   * Per-project opt-out for the deterministic "task done -> commit" auto-commit
+   * (see `orchestrator/auto-commit.ts`). Only a disable is honoured here — a
+   * committed repo file can never turn auto-commit ON for a user who disabled
+   * it. `false` disables both the end-of-turn auto-commit and the `git_commit`
+   * tool; `MUONROI_AUTO_COMMIT=0` still works as the existing env-level
+   * opt-out and takes priority.
+   */
+  autoCommit?: boolean;
 }
 
 function getUserSettingsPath(): string {
@@ -774,6 +792,26 @@ export function getCurrentModel(mode?: AgentMode): string {
 
   const user = loadUserSettings();
   return pickValid(user.defaultModel) ?? getCatalogDefaultModel();
+}
+
+/**
+ * True when the ACTIVE project (`.muonroi-cli/settings.json` at process.cwd())
+ * pins `model` explicitly. Gap (d): the per-turn router (`router/decide.ts`,
+ * called every turn from `orchestrator/message-processor.ts` for the MAIN
+ * conversation turn) is allowed to downgrade the session's default model to a
+ * cheaper tier for turns that look trivial (PIL-classified) — by design, see
+ * `applyPromotionCap`'s doc comment: "the router may downgrade per turn but
+ * may not silently promote". That is the right default for a user's own loose
+ * `defaultModel` pick, but a repo that ships its own `.muonroi-cli/settings.json`
+ * pin (e.g. so every agent — Claude Code, muonroi-cli, … — runs the same
+ * orchestrator model under a shared framework) means the pin IS the
+ * instruction, not a mere suggestion the router may second-guess. Callers use
+ * this to skip per-turn downgrade routing for the main turn only; cheap
+ * sub-tasks (tool-loop rounds, council sub-tasks) route independently and are
+ * unaffected.
+ */
+export function isModelPinnedByProject(): boolean {
+  return typeof loadProjectSettings().model === "string" && loadProjectSettings().model!.trim().length > 0;
 }
 
 /**

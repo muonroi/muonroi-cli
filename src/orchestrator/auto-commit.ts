@@ -25,6 +25,7 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import type { LspDiagnostic, LspDiagnosticFile } from "../lsp/types.js";
 import { logger } from "../utils/logger.js";
+import { loadProjectSettings } from "../utils/settings.js";
 
 const pexecFile = promisify(execFile);
 
@@ -201,12 +202,40 @@ export async function pathsForCommitGate(
   return [...set];
 }
 
+/**
+ * Single source of truth for "may this process auto-commit in the CURRENT
+ * project" — checked by both the end-of-turn auto-commit (maybeAutoCommitTurn)
+ * and the `git_commit` tool path (commitSpecificPaths). Only a DISABLE is
+ * settable here: `MUONROI_AUTO_COMMIT=0` (env, existing) or a committed
+ * `.muonroi-cli/settings.json` `{"autoCommit": false}` (project setting,
+ * read-only-safe — a repo can turn this OFF for whoever runs it, never ON).
+ */
 export function isAutoCommitEnabled(): boolean {
   if (process.env.MUONROI_AUTO_COMMIT === "0") return false;
   // Never auto-commit while the unit-test suite runs — it executes in the repo
   // working tree and would commit junk.
   if (process.env.VITEST || process.env.NODE_ENV === "test") return false;
+  if (loadProjectSettings().autoCommit === false) return false;
   return true;
+}
+
+/**
+ * Gap (b), "consider also refusing a bash-tool git commit/push": when a
+ * project's `.muonroi-cli/settings.json` sets `autoCommit: false`, that is a
+ * deliberate policy choice (e.g. a Shipd/Olympus challenge repo whose own
+ * process owns every commit) — a model reaching for the bash tool to run
+ * `git commit`/`git push` directly undoes the same policy the setting exists
+ * to enforce. `src/tools/registry.ts`'s pre-execution git-safety gate is the
+ * right place to enforce it (it already parses the command via
+ * `analyzeGitCommand` and has the `_prefixBlock("git-safety", …)` askcard
+ * plumbing); this predicate is deliberately narrow — the explicit project
+ * setting only, never `MUONROI_AUTO_COMMIT=0` or the VITEST/NODE_ENV=test
+ * guard `isAutoCommitEnabled()` also checks, since those are broader,
+ * incidental disables (e.g. every unit test run) that must not also block a
+ * developer's own manual `git commit` in a bash tool call.
+ */
+export function isAutoCommitDisabledByProject(): boolean {
+  return loadProjectSettings().autoCommit === false;
 }
 
 async function git(
@@ -489,7 +518,11 @@ export async function maybeAutoCommitTurn(opts: {
  * (e.g. already committed). Never throws.
  */
 export async function commitSpecificPaths(cwd: string, paths: string[], message: string): Promise<AutoCommitResult> {
-  if (process.env.MUONROI_AUTO_COMMIT === "0") return { committed: false, reason: "disabled" };
+  // Gate (b): this used to check `MUONROI_AUTO_COMMIT === "0"` directly,
+  // bypassing the project-level `autoCommit: false` setting that
+  // `isAutoCommitEnabled()` also honours — the git_commit tool path stayed
+  // live even when a repo's own `.muonroi-cli/settings.json` disabled it.
+  if (!isAutoCommitEnabled()) return { committed: false, reason: "disabled" };
   const safe = paths.filter((p) => !isExcludedPath(p));
   if (safe.length === 0) return { committed: false, reason: "no-eligible-paths" };
   const inRepo = await git(cwd, ["rev-parse", "--is-inside-work-tree"]);

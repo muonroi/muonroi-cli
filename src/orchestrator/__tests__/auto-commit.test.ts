@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import type { LspDiagnostic, LspDiagnosticFile } from "../../lsp/types.js";
 import {
   blockingErrorsForFile,
   buildFileListSubject,
+  isAutoCommitDisabledByProject,
   isAutoCommitEnabled,
   isCliArtifactPath,
   isCommitGateEnabled,
@@ -169,5 +170,56 @@ describe("pathsForCommitGate — bash `git commit` gate path set (real git)", ()
     const broad = await pathsForCommitGate(dir, { broadAdd: true, commitAll: false });
     expect(broad).toContain("a.ts");
     expect(broad).toContain("c.ts");
+  });
+});
+
+// Gap (b): a project-level `.muonroi-cli/settings.json` `{"autoCommit": false}`
+// opt-out. `isAutoCommitEnabled()` itself always returns false under this
+// VITEST runner regardless of the project setting (see the test above), so
+// the project-setting predicate is tested directly here instead — it is the
+// same function both `maybeAutoCommitTurn`/`commitSpecificPaths` (via
+// isAutoCommitEnabled) AND the bash-tool git-safety gate
+// (src/tools/registry.ts) consult.
+describe("gap (b) — project-level autoCommit: false opt-out", () => {
+  let dir: string;
+  let prevCwd: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "autocommit-project-setting-"));
+    prevCwd = process.cwd();
+  });
+
+  afterEach(() => {
+    process.chdir(prevCwd);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("is false when no .muonroi-cli/settings.json exists (default unchanged)", () => {
+    process.chdir(dir);
+    expect(isAutoCommitDisabledByProject()).toBe(false);
+  });
+
+  it("is false when the project setting omits autoCommit", () => {
+    mkdirSync(join(dir, ".muonroi-cli"), { recursive: true });
+    writeFileSync(join(dir, ".muonroi-cli", "settings.json"), JSON.stringify({ model: "some-model" }));
+    process.chdir(dir);
+    expect(isAutoCommitDisabledByProject()).toBe(false);
+  });
+
+  it("is true when the project setting sets autoCommit: false", () => {
+    mkdirSync(join(dir, ".muonroi-cli"), { recursive: true });
+    writeFileSync(join(dir, ".muonroi-cli", "settings.json"), JSON.stringify({ autoCommit: false }));
+    process.chdir(dir);
+    expect(isAutoCommitDisabledByProject()).toBe(true);
+  });
+
+  it("a project setting cannot turn autoCommit ON — only a disable is honoured", () => {
+    // autoCommit: true is not a real opt-in path; the predicate only ever
+    // reports a DISABLE (see its doc comment) — true here is simply "not
+    // disabled by this predicate", same as omitting the field.
+    mkdirSync(join(dir, ".muonroi-cli"), { recursive: true });
+    writeFileSync(join(dir, ".muonroi-cli", "settings.json"), JSON.stringify({ autoCommit: true }));
+    process.chdir(dir);
+    expect(isAutoCommitDisabledByProject()).toBe(false);
   });
 });

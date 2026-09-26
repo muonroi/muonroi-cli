@@ -1,6 +1,7 @@
 import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { runAnchoredStateRoot } from "../flow/run-root.js";
+import { loadProjectSettings } from "../utils/settings.js";
 
 export const PLANNING_DIR = ".planning";
 
@@ -9,6 +10,26 @@ export const PLANNING_DIR = ".planning";
  * directory (`.muonroi-flow/planning/`). See `src/flow/fold-planning.ts`.
  */
 export const FOLDED_PLANNING_DIR = join(".muonroi-flow", "planning");
+
+/**
+ * Explicit relocation override for GSD planning state — env `MUONROI_STATE_DIR`
+ * (wins) or project setting `stateDir` (`.muonroi-cli/settings.json`).
+ *
+ * Exists for repos that already use `.planning/` at their root for something
+ * of their own (e.g. a Shipd/Olympus challenge repo's own plan folders):
+ * without this, `planningRoot` picks `.planning/` unconditionally whenever it
+ * exists, so every muonroi-cli session litters that repo's own directory with
+ * `STATE.md` / `config.json` / `phases/`. Returns undefined when neither is
+ * set — callers fall through to the existing `.planning/` / folded-location
+ * logic unchanged.
+ */
+export function resolveStateDirOverride(cwd: string): string | undefined {
+  const envDir = process.env.MUONROI_STATE_DIR;
+  if (envDir?.trim()) return isAbsolute(envDir) ? envDir : join(cwd, envDir);
+  const projectDir = loadProjectSettings().stateDir;
+  if (projectDir?.trim()) return isAbsolute(projectDir) ? projectDir : join(cwd, projectDir);
+  return undefined;
+}
 
 /**
  * Resolve the active GSD planning root.
@@ -20,9 +41,15 @@ export const FOLDED_PLANNING_DIR = join(".muonroi-flow", "planning");
  * fallback — i.e. once the subprocess writer is removed (Part B) and `.planning/`
  * no longer exists, GSD reads transparently continue from the consolidated tree.
  * This is purely additive: no live cutover, no desync risk.
+ *
+ * `resolveStateDirOverride` (env `MUONROI_STATE_DIR` / project `stateDir`) is
+ * checked FIRST and short-circuits all of the above when set — see its doc
+ * comment. Default behavior (no override configured) is unchanged.
  */
 export function planningRoot(rawCwd: string): string {
   const cwd = runAnchoredStateRoot(rawCwd);
+  const override = resolveStateDirOverride(cwd);
+  if (override) return override;
   const canonical = join(cwd, PLANNING_DIR);
   // Existing `.planning/` projects keep using it (back-compat, no disruption).
   if (existsSync(canonical)) return canonical;

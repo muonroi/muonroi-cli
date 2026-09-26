@@ -570,6 +570,23 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       }
 
       const gitShape = analyzeGitCommand(cmd);
+
+      // Gap (b): a project's `.muonroi-cli/settings.json` `{"autoCommit": false}`
+      // disables the CLI's own auto-commit — honour the same policy for a raw
+      // `git commit`/`git push` reached via the bash tool, otherwise the model
+      // just routes around the setting. Pre-execution, any permission mode.
+      if (gitShape.isCommit || gitShape.isPush) {
+        const { isAutoCommitDisabledByProject } = await import("../orchestrator/auto-commit.js");
+        if (isAutoCommitDisabledByProject()) {
+          return _prefixBlock(
+            "git-safety",
+            `this project's .muonroi-cli/settings.json sets "autoCommit": false — ` +
+              `git ${gitShape.isPush ? "push" : "commit"} via the bash tool is disabled to match. ` +
+              "Ask the user before committing/pushing despite this setting.",
+          );
+        }
+      }
+
       // Hard-block broad staging when sensitive files are present.
       // This runs PRE-EXECUTION (before bash.execute) regardless of permission mode.
       if (gitShape.isBroadStage) {
