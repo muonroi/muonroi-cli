@@ -37,10 +37,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { StreamChunk } from "../../types/index.js";
 import { preStreamPhase } from "../message-processor.js";
 import {
-  __getCurrentTurnGenerationForTests,
+  __getActiveTurnGenerationsForTests,
   __resetTurnProgressForTests,
   beginTurnGeneration,
+  endTurnGeneration,
   hasTurnProgressSince,
+  isTurnGenerationActive,
   pingTurnProgress,
   startPeriodicTurnProgressPing,
 } from "../turn-progress.js";
@@ -300,19 +302,86 @@ describe("round 6 (G8 HIGH B) — sub-agent/council pattern: pinging on every ch
   }, 3000);
 });
 
-describe("round 6 (G8 HIGH A) — turn generation counter", () => {
-  it("beginTurnGeneration monotonically increments, and withTurnWatchdog bumps it once per call", async () => {
-    const g0 = __getCurrentTurnGenerationForTests();
+describe("round 7 — turn generations are a STACK, not a flat counter", () => {
+  it("beginTurnGeneration issues monotonic ids and pushes; endTurnGeneration pops; withTurnWatchdog pushes on entry and pops on completion", async () => {
+    expect(__getActiveTurnGenerationsForTests()).toEqual([]);
     const g1 = beginTurnGeneration();
-    expect(g1).toBe(g0 + 1);
-    expect(__getCurrentTurnGenerationForTests()).toBe(g1);
     const g2 = beginTurnGeneration();
     expect(g2).toBe(g1 + 1);
+    // Both remain active simultaneously — this is the whole point: a NESTED
+    // generation does not evict an outer one.
+    expect(__getActiveTurnGenerationsForTests()).toEqual([g1, g2]);
+    expect(isTurnGenerationActive(g1)).toBe(true);
+    expect(isTurnGenerationActive(g2)).toBe(true);
+
+    endTurnGeneration(g2);
+    expect(__getActiveTurnGenerationsForTests()).toEqual([g1]);
+    expect(isTurnGenerationActive(g1)).toBe(true);
+    expect(isTurnGenerationActive(g2)).toBe(false);
+
+    endTurnGeneration(g1);
+    expect(__getActiveTurnGenerationsForTests()).toEqual([]);
 
     async function* turn(): AsyncGenerator<StreamChunk, void, unknown> {
       yield { type: "done" } as StreamChunk;
     }
-    await drain(withTurnWatchdog(turn(), { idleMs: IDLE_MS, totalMs: 0, label: "round6-gen-counter" }));
-    expect(__getCurrentTurnGenerationForTests()).toBe(g2 + 1);
+    await drain(withTurnWatchdog(turn(), { idleMs: IDLE_MS, totalMs: 0, label: "round7-gen-stack" }));
+    // withTurnWatchdog pops its own generation once the turn completes — the
+    // stack is empty again, not left holding a stale entry.
+    expect(__getActiveTurnGenerationsForTests()).toEqual([]);
   });
+
+  it("a nested withTurnWatchdog (the council-continuation shape) does NOT orphan the outer turn's pinger", async () => {
+    // Reproduces orchestrator.ts ~2640: a council continuation calls
+    // withTurnWatchdog again on processMessage(...) from INSIDE the outer
+    // top-level turn (~3943's own withTurnWatchdog). Both are simultaneously
+    // "active turns" — the outer one is merely suspended on `yield*` for the
+    // inner one to finish, not ended.
+    const outerPings: number[] = [];
+
+    async function* innerTurn(): AsyncGenerator<StreamChunk, void, unknown> {
+      await new Promise((r) => setTimeout(r, IDLE_MS)); // some inner work
+      yield { type: "content", content: "inner-done" } as StreamChunk;
+    }
+
+    async function* outerTurn(): AsyncGenerator<StreamChunk, void, unknown> {
+      // Outer pinger started BEFORE the nested turn begins — mirrors a
+      // preStreamPhase/first-token pinger already running in the outer turn.
+      const stopOuterPing = startPeriodicTurnProgressPing({
+        intervalMs: PING_INTERVAL_MS,
+      });
+      try {
+        // Nest — this is the exact shape that broke round 6's flat counter:
+        // it bumps/pushes a NEW generation while the outer one is still on
+        // the stack.
+        yield* withTurnWatchdog(innerTurn(), {
+          idleMs: IDLE_MS,
+          totalMs: 0,
+          label: "round7-nested-inner",
+          hasProgressSince: hasTurnProgressSince,
+        });
+        // The outer pinger must STILL be alive here — prove it by recording
+        // whether a ping landed strictly after the nested turn finished.
+        const checkpoint = Date.now() - 1;
+        await new Promise((r) => setTimeout(r, PING_INTERVAL_MS * 3));
+        outerPings.push(hasTurnProgressSince(checkpoint) ? 1 : 0);
+      } finally {
+        stopOuterPing();
+      }
+      yield { type: "done" } as StreamChunk;
+    }
+
+    const out = await drain(
+      withTurnWatchdog(outerTurn(), {
+        idleMs: IDLE_MS,
+        totalMs: 0,
+        label: "round7-nested-outer",
+        hasProgressSince: hasTurnProgressSince,
+      }),
+    );
+    expect(out.map((c) => (c as { content?: string; type: string }).type)).toEqual(["content", "done"]);
+    // The outer pinger was NOT orphaned by the nested turn beginning — it
+    // kept pinging after the nested turn completed.
+    expect(outerPings).toEqual([1]);
+  }, 3000);
 });

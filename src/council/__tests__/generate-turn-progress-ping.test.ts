@@ -19,8 +19,14 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAnyTestModel, registerTestProviderFactories } from "../../__test-helpers__/catalog-fixtures.js";
 import { loadCatalog } from "../../models/registry.js";
-import { __resetTurnProgressForTests, hasTurnProgressSince } from "../../orchestrator/turn-progress.js";
+import {
+  __resetTurnProgressForTests,
+  beginTurnGeneration,
+  endTurnGeneration,
+  hasTurnProgressSince,
+} from "../../orchestrator/turn-progress.js";
 import type { BashTool } from "../../tools/bash.js";
+import { runInIdealScope } from "../../utils/ideal-run-scope.js";
 
 // Controllable per-test stream shape: a sequence of text-delta parts, each
 // separated by `gapMs`, followed by a finish part. `never` produces a stream
@@ -65,6 +71,8 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.MUONROI_COUNCIL_LLM_TIMEOUT_MS;
+  delete process.env.MUONROI_FIRST_TOKEN_TIMEOUT_MS;
+  delete process.env.MUONROI_TURN_PROGRESS_PING_INTERVAL_MS;
   vi.clearAllMocks();
 });
 
@@ -105,5 +113,45 @@ describe("createCouncilLLM.generate — round 6 (G8 HIGH B)", () => {
     // proves the periodic pinger (which is still running, bounded by that
     // much larger ceiling) does not hold the call open past a real abort.
     expect(elapsedMs).toBeLessThan(4000);
+  }, 10_000);
+});
+
+describe("createCouncilLLM.generate — round 7 (LOW-MEDIUM): /ideal-unlimited still bounds the pre-first-byte wait", () => {
+  it('a genuinely dead call inside an /ideal-unlimited scope stops being pinged after getFirstTokenTimeoutMs (scaled) — a dead connection is not "budget"', async () => {
+    // councilLlmTimeoutMs() returns 0 inside isIdealRunUnlimited() — round 6
+    // read that as "no ceiling" for the pre-first-byte pinger too, so a
+    // never-producing stream in /ideal mode pinged forever. Round 7: the
+    // pre-first-byte pinger is bounded by getFirstTokenTimeoutMs() instead,
+    // regardless of /ideal.
+    streamPlan = { kind: "never" };
+    process.env.MUONROI_FIRST_TOKEN_TIMEOUT_MS = "500"; // settings.ts's floor
+    process.env.MUONROI_TURN_PROGRESS_PING_INTERVAL_MS = "20";
+
+    const stats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
+    const llm = createCouncilLLM({} as unknown as BashTool, "agent", "test-session", stats);
+
+    // Simulate an active turn context (real usage: .generate() is always
+    // reached from inside a turn already wrapped by withTurnWatchdog).
+    const gen = beginTurnGeneration();
+    try {
+      const before = Date.now() - 1;
+      // Fire-and-forget: inside /ideal, councilTimeoutMs is 0 (no deadline
+      // at all) — with a "never" stream and no abort this call genuinely
+      // never resolves. That is existing, intended /ideal behavior and not
+      // what this test is about; swallow it safely.
+      void runInIdealScope(() => llm.generate(getAnyTestModel(), "sys", "prompt", 256)).catch(() => {});
+
+      // Before the ceiling: the pinger is alive and has pinged at least once.
+      await new Promise((r) => setTimeout(r, 300));
+      expect(hasTurnProgressSince(before)).toBe(true);
+
+      // Past the ceiling (500ms) plus margin: pinging must have stopped.
+      await new Promise((r) => setTimeout(r, 350));
+      const afterCeiling = Date.now() - 1;
+      await new Promise((r) => setTimeout(r, 200));
+      expect(hasTurnProgressSince(afterCeiling)).toBe(false);
+    } finally {
+      endTurnGeneration(gen);
+    }
   }, 10_000);
 });

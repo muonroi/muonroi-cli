@@ -51,25 +51,49 @@
  * bounded by its own deadline signal).
  *
  * Round 6 also closes a second gap: a pinger is tied to the TURN that
- * started it via a monotonic generation counter
- * (`beginTurnGeneration`/`withTurnWatchdog`). An interval from a turn that
- * has already ended (killed by the watchdog, completed, or itself hit its
- * `maxMs` ceiling) stops pinging the instant it notices a NEWER turn has
- * begun — so an orphaned interval from turn N can never reset turn N+1's
- * idle clock. Every ping (immediate or interval) is gated on this check
- * BEFORE it touches the shared `lastPingMs`, not just at pinger start.
+ * started it via a generation id (`beginTurnGeneration`/`withTurnWatchdog`).
+ * An interval from a turn that has already ended (killed by the watchdog,
+ * completed, or itself hit its `maxMs` ceiling) stops pinging once it notices
+ * its turn is no longer active — so an orphaned interval from a finished turn
+ * can never reset a LATER turn's idle clock. Every ping (immediate or
+ * interval) is gated on this check BEFORE it touches the shared
+ * `lastPingMs`, not just at pinger start.
+ *
+ * Round 7 — round 6 modelled this as a single flat "current generation",
+ * which a refuter reproduced as a live bug on NESTED turns: `orchestrator.ts`
+ * ~2640 (a council continuation) calls `withTurnWatchdog` again on
+ * `this.processMessage(...)` from INSIDE the outer top-level turn
+ * (~3943's own `withTurnWatchdog`) — the outer turn is still legitimately
+ * running (suspended on `yield*` for the inner one to finish), but the flat
+ * counter has no way to say "both are current". Bumping it for the inner
+ * turn silently orphaned the OUTER turn's still-legit pinger.
+ *
+ * Fixed with a STACK of active generations instead of one flat value:
+ * `beginTurnGeneration` pushes; `endTurnGeneration` (called from
+ * `withTurnWatchdog`'s existing `finally`, so it pops on every exit path —
+ * normal completion, a thrown error, or early abandonment) pops. A pinger
+ * stays valid as long as its captured generation is ANYWHERE in the active
+ * stack, not only at the top — nesting no longer orphans the outer turn.
+ * "Orphaned" now means precisely: this generation has been POPPED, i.e. the
+ * turn that started it has genuinely ended.
  */
 
 /** Wall-clock instant of the most recent ping. 0 = never pinged. */
 let lastPingMs = 0;
 
+/** Monotonic id source for turn generations (see `beginTurnGeneration`). */
+let nextTurnGeneration = 0;
+
 /**
- * Monotonic id, bumped once per top-level turn (see `beginTurnGeneration`).
- * A `startPeriodicTurnProgressPing` pinger captures this at start and checks
- * it on every tick — a mismatch means a NEWER turn has begun since, so the
- * pinger is orphaned and must stop without touching `lastPingMs`.
+ * Stack of currently-active turn generations, outermost first. A
+ * `startPeriodicTurnProgressPing` pinger captures its generation at start and
+ * checks, on every tick, whether that id is STILL somewhere in this stack —
+ * absent means the turn that started it has ended (popped), so the pinger is
+ * orphaned and must stop without touching `lastPingMs`. Present anywhere
+ * (not just at the top) means it is still legitimate, even while a NESTED
+ * turn is also active.
  */
-let currentTurnGeneration = 0;
+const activeTurnGenerations: number[] = [];
 
 /** Record forward progress: a request to the provider was just issued. */
 export function pingTurnProgress(now = Date.now()): void {
@@ -77,21 +101,36 @@ export function pingTurnProgress(now = Date.now()): void {
 }
 
 /**
- * Begin a new turn generation. Call exactly once per top-level turn (or
- * continuation) — `turn-watchdog.ts`'s `withTurnWatchdog` calls this at
- * entry, since that is invoked once per turn attempt. Invalidates every
- * earlier generation's in-flight pingers: an interval started during turn N
- * silently stops itself (no more pings) as soon as this runs for turn N+1,
- * even if turn N's own code never explicitly stopped it.
+ * Begin a new turn generation and push it onto the active stack. Call
+ * exactly once per top-level turn (or continuation, including a NESTED one)
+ * — `turn-watchdog.ts`'s `withTurnWatchdog` calls this at entry. Pair with
+ * `endTurnGeneration` in a `finally` so it is popped on every exit path.
  */
 export function beginTurnGeneration(): number {
-  currentTurnGeneration += 1;
-  return currentTurnGeneration;
+  nextTurnGeneration += 1;
+  const gen = nextTurnGeneration;
+  activeTurnGenerations.push(gen);
+  return gen;
 }
 
-/** @testonly Read the current turn generation without bumping it. */
-export function __getCurrentTurnGenerationForTests(): number {
-  return currentTurnGeneration;
+/**
+ * End a turn generation — pops it from the active stack. Safe to call even
+ * if `gen` is not at the top (defensive: nesting is expected to unwind LIFO,
+ * but this does not assume it) or already absent (idempotent).
+ */
+export function endTurnGeneration(gen: number): void {
+  const idx = activeTurnGenerations.lastIndexOf(gen);
+  if (idx !== -1) activeTurnGenerations.splice(idx, 1);
+}
+
+/** True while `gen` is still somewhere in the active-generation stack. */
+export function isTurnGenerationActive(gen: number): boolean {
+  return activeTurnGenerations.includes(gen);
+}
+
+/** @testonly Snapshot of the active-generation stack, outermost first. */
+export function __getActiveTurnGenerationsForTests(): readonly number[] {
+  return [...activeTurnGenerations];
 }
 
 /**
@@ -152,7 +191,7 @@ export interface PeriodicTurnProgressPingOptions {
 export function startPeriodicTurnProgressPing(opts: PeriodicTurnProgressPingOptions = {}): () => void {
   const intervalMs = opts.intervalMs ?? getTurnProgressPingIntervalMs();
   const maxMs = opts.maxMs;
-  const myGeneration = currentTurnGeneration;
+  const myGeneration = nextTurnGeneration;
   const startedAt = Date.now();
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -165,10 +204,12 @@ export function startPeriodicTurnProgressPing(opts: PeriodicTurnProgressPingOpti
 
   const tick = (): void => {
     if (stopped) return;
-    if (myGeneration !== currentTurnGeneration) {
-      // Orphaned: a newer turn began since this pinger started. Stop WITHOUT
-      // pinging — writing lastPingMs here would falsely vouch for the new
-      // turn on this stale pinger's behalf.
+    if (!isTurnGenerationActive(myGeneration)) {
+      // Orphaned: the turn that started this pinger has ended (its
+      // generation was popped) — a NESTED turn beginning and ending does NOT
+      // orphan this, since the outer generation stays in the stack the whole
+      // time. Stop WITHOUT pinging — writing lastPingMs here would falsely
+      // vouch for whatever is running now on this stale pinger's behalf.
       stop();
       return;
     }
@@ -197,7 +238,8 @@ export function hasTurnProgressSince(sinceMs: number): boolean {
   return lastPingMs > sinceMs;
 }
 
-/** Test-only: forget every ping. */
+/** Test-only: forget every ping and clear the active-generation stack. */
 export function __resetTurnProgressForTests(): void {
   lastPingMs = 0;
+  activeTurnGenerations.length = 0;
 }

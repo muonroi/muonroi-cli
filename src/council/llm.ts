@@ -33,7 +33,7 @@ import { projectCostUSD } from "../usage/estimator.js";
 import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
-import { getProviderStallTimeoutMs, loadMcpServers } from "../utils/settings.js";
+import { getFirstTokenTimeoutMs, getProviderStallTimeoutMs, loadMcpServers } from "../utils/settings.js";
 import { withVisibleRetry } from "../utils/visible-retry.js";
 import { beginCouncilCall, breadcrumb, setBreadcrumbSession } from "./crash-breadcrumb.js";
 import {
@@ -824,14 +824,24 @@ export function createCouncilLLM(
       // it does gets yielded up as a StreamChunk. `onDelta` below already
       // fires on every streamed chunk (was: cost/diagnostics only) — also
       // ping turn progress there, and run a bounded pinger for the pre-first-
-      // byte wait, bounded by THIS call's own timeout (`councilTimeoutMs`;
-      // `0` — the `/ideal`-unlimited case — means no ceiling, matching that
-      // mode's existing "no deadline at all" contract). Stopped alongside
-      // `cleanupTimeout()` on both the success and error paths below.
+      // byte wait, bounded by THIS call's own timeout.
+      //
+      // Round 7 (LOW-MEDIUM): `councilTimeoutMs` is `0` inside an `/ideal`
+      // run (isIdealRunUnlimited() — no wall-clock deadline at all, since
+      // legitimate reasoning work there must not be cut short). Round 6
+      // read that as "no ceiling" for the PRE-FIRST-BYTE pinger too, which
+      // let a genuinely dead connection (zero bytes, ever) ping forever in
+      // that mode — a dead socket is not "budget being spent", it is exactly
+      // the class of hang this mechanism exists to stop propping up. So the
+      // pre-first-byte pinger is bounded by `getFirstTokenTimeoutMs()` even
+      // when `councilTimeoutMs` is 0; PER-CHUNK pings (`onDelta` below) stay
+      // genuinely unbounded in `/ideal` mode, since those ARE real, measured
+      // progress, not an unconditional grant.
+      const councilGeneratePingCeilingMs = councilTimeoutMs > 0 ? councilTimeoutMs : getFirstTokenTimeoutMs();
       const stopCouncilGeneratePing = startPeriodicTurnProgressPing({
-        maxMs: councilTimeoutMs > 0 ? councilTimeoutMs : undefined,
+        maxMs: councilGeneratePingCeilingMs,
         onCeiling: () => {
-          breadcrumb("council.generate.pingCeiling", { modelId, maxMs: councilTimeoutMs });
+          breadcrumb("council.generate.pingCeiling", { modelId, maxMs: councilGeneratePingCeilingMs });
         },
       });
       try {
