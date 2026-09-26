@@ -14,7 +14,11 @@ import type { BashTool } from "../../tools/bash";
 import type { ProcessMessageObserver } from "../agent-options";
 import type { CompactionSettings } from "../compaction";
 import type { CouncilManager } from "../council-manager.js";
-import { MessageProcessor, type MessageProcessorDeps } from "../message-processor.js";
+import {
+  MessageProcessor,
+  type MessageProcessorDeps,
+  reinjectTaggedSessionStartAcrossCompaction,
+} from "../message-processor.js";
 
 function makeBashStub(): BashTool {
   return {
@@ -342,6 +346,94 @@ describe("MessageProcessor — DI surface invariants", () => {
     expect(deps.messages).toContainEqual(priorAssistant);
   });
 
+  // Round 3 (MEDIUM, G1-adjacent): compaction used to drop the tagged
+  // SessionStart message entirely (it is not a "pinned user message", so
+  // compaction's kept-tail window had no reason to preserve it) — a
+  // compact-then-resume session got a FRESH briefing injected with no
+  // tagged copy left in history to replace, silently reintroducing the
+  // exact double-inject shape the round-2 G1 fix closed. This composes
+  // BOTH halves of the fix in one scenario: orchestrator.ts's compaction
+  // rebuild (simulated here via `reinjectTaggedSessionStartAcrossCompaction`
+  // — the real thing is a private method making real LLM calls, not
+  // directly reachable from this test) carries the tag through compaction,
+  // then a resumed process's injection replaces that ONE carried copy —
+  // exactly one tagged message survives end to end.
+  it("compaction (carrying the tag through) THEN resume (replacing it) leaves exactly one tagged message — not zero, not two", async () => {
+    const oldTagged: ModelMessage = {
+      role: "system",
+      content:
+        "[SessionStart hook output] — already shown to the user verbatim above; do not re-run it or repeat it\n=== BRIEFING FROM BEFORE COMPACTION ===",
+    };
+    const oldUserTurn1: ModelMessage = { role: "user", content: "turn 1, summarized away by compaction" };
+    const keptTailUser: ModelMessage = { role: "user", content: "turn N, kept verbatim (recent tail)" };
+    const keptTailAssistant: ModelMessage = { role: "assistant", content: "reply N" };
+
+    // Simulate what orchestrator.ts's compaction rebuild actually produces:
+    // [compactionSummary, taggedReinjection (carried, per the helper under
+    // test), ...pinnedReinjections (none here), ...keptMessages].
+    const compactionSummary: ModelMessage = { role: "system", content: "[Context checkpoint summary]\n..." };
+    const keptMessages: ModelMessage[] = [keptTailUser, keptTailAssistant];
+    const allBeforeCompaction: ModelMessage[] = [oldTagged, oldUserTurn1, keptTailUser, keptTailAssistant];
+    const carried = reinjectTaggedSessionStartAcrossCompaction(allBeforeCompaction, keptMessages);
+    expect(carried).toBe(oldTagged); // sanity: the helper actually found it
+
+    const postCompactionMessages: ModelMessage[] = [
+      compactionSummary,
+      carried as ModelMessage,
+      keptTailUser,
+      keptTailAssistant,
+    ];
+    const postCompactionSeqs: Array<number | null> = [null, null, 3, 4];
+
+    // Now resume: a fresh process rehydrates this post-compaction history
+    // and re-fires the SessionStart hook.
+    const deps = makeDeps({
+      messages: postCompactionMessages,
+      messageSeqs: postCompactionSeqs,
+      batchApi: true,
+      getSessionStartHookFired: () => false,
+      fireHook: async (input: unknown) => {
+        const hookInput = input as { hook_event_name?: string };
+        if (hookInput.hook_event_name === "SessionStart") {
+          return {
+            blocked: false,
+            blockingErrors: [],
+            preventContinuation: false,
+            additionalContexts: ["=== BRIEFING AFTER RESUME ==="],
+            results: [],
+            eeMatches: [],
+          };
+        }
+        return {
+          blocked: false,
+          blockingErrors: [],
+          preventContinuation: false,
+          additionalContexts: [],
+          results: [],
+          eeMatches: [],
+        };
+      },
+      processMessageBatchTurn: async function* () {
+        yield { type: "done" };
+      },
+    });
+    const processor = new MessageProcessor(deps);
+    for await (const _c of processor.run("continued after compaction + resume", undefined)) {
+      // drain
+    }
+
+    const taggedMessages = deps.messages.filter(
+      (m) => m.role === "system" && typeof m.content === "string" && m.content.startsWith("[SessionStart hook output]"),
+    );
+    expect(taggedMessages).toHaveLength(1);
+    expect(taggedMessages[0]?.content).toContain("=== BRIEFING AFTER RESUME ===");
+    expect(taggedMessages[0]?.content).not.toContain("BEFORE COMPACTION");
+    // The compaction summary and the kept tail both survive untouched.
+    expect(deps.messages).toContainEqual(compactionSummary);
+    expect(deps.messages).toContainEqual(keptTailUser);
+    expect(deps.messages).toContainEqual(keptTailAssistant);
+  });
+
   it("does NOT inject a system message when the SessionStart hook produced no additionalContexts (nothing to tell the model)", async () => {
     const deps = makeDeps({
       batchApi: true,
@@ -633,5 +725,41 @@ describe("MessageProcessor — abort-controller ownership (A1)", () => {
     // listener on the owner's shared signal — 25 completed nested calls must
     // leave 0 behind, not 25.
     expect(getEventListeners(ownerController.signal, "abort").length).toBe(0);
+  });
+});
+
+// Round 3 (MEDIUM, G1-adjacent): pure-function coverage for the compaction
+// carry-through decision itself, independent of the full
+// compaction-then-resume integration test above.
+describe("reinjectTaggedSessionStartAcrossCompaction", () => {
+  const tagged: ModelMessage = {
+    role: "system",
+    content: "[SessionStart hook output] — already shown...\n=== BRIEFING ===",
+  };
+  const untaggedSystem: ModelMessage = { role: "system", content: "[Some other system note]" };
+  const userMsg: ModelMessage = { role: "user", content: "hi" };
+
+  it("returns the tagged message when it fell outside the kept tail (the repro'd bug)", () => {
+    const allBefore = [tagged, userMsg];
+    const kept = [userMsg]; // tagged was summarized away
+    expect(reinjectTaggedSessionStartAcrossCompaction(allBefore, kept)).toBe(tagged);
+  });
+
+  it("returns null when the kept tail already has one — do not duplicate it", () => {
+    const allBefore = [tagged, userMsg];
+    const kept = [tagged, userMsg]; // tagged survived naturally (short session)
+    expect(reinjectTaggedSessionStartAcrossCompaction(allBefore, kept)).toBeNull();
+  });
+
+  it("returns null when there was never a tagged message at all", () => {
+    const allBefore = [untaggedSystem, userMsg];
+    const kept = [userMsg];
+    expect(reinjectTaggedSessionStartAcrossCompaction(allBefore, kept)).toBeNull();
+  });
+
+  it("does not mistake an untagged system message for the tagged one", () => {
+    const allBefore = [untaggedSystem, tagged, userMsg];
+    const kept = [untaggedSystem, userMsg]; // untagged survived, tagged did not
+    expect(reinjectTaggedSessionStartAcrossCompaction(allBefore, kept)).toBe(tagged);
   });
 });

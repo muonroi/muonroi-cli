@@ -20,6 +20,7 @@ import { loadCatalog } from "../../models/registry.js";
 import { closeDatabase, getDatabase } from "../../storage/db.js";
 import { appendMessages, buildChatEntries } from "../../storage/transcript.js";
 import { Agent } from "../orchestrator.js";
+import type { ModelTaskKind } from "../sub-agent-model-tier.js";
 
 // A single 50 KB intermediate tool result — the "clutter" a read-heavy turn (13
 // read_file calls) accumulates. The whole point of delegation is that THIS never
@@ -32,6 +33,40 @@ const mockClassify = vi.fn();
 vi.mock("../../pil/llm-classify.js", () => ({
   classifySubSessionAction: (...a: unknown[]) => (mockClassify as (...x: unknown[]) => unknown)(...a),
 }));
+
+// Round 3 (MEDIUM correction to G3 HIGH): spies on every `resolveModelForTask`
+// call, recording exactly which `opts.pinned` value orchestrator.ts's
+// `_resolveModelForTask` passed for each task kind — deterministic and
+// independent of what the loaded model catalog actually offers per
+// provider/tier (a real-catalog behavioural-difference assertion would be
+// vacuous whenever no cheaper same-provider tier happens to exist). Delegates
+// to the REAL implementation so every other behaviour (parentTier ceiling,
+// tier-walk, fallback) stays exactly as-is; only the call is observed.
+const capturedResolveModelForTaskCalls: Array<{ task: string; pinned: boolean | undefined }> = [];
+vi.mock("../sub-agent-model-tier.js", async () => {
+  const actual = await vi.importActual<typeof import("../sub-agent-model-tier.js")>("../sub-agent-model-tier.js");
+  return {
+    ...actual,
+    resolveModelForTask: (
+      task: string,
+      providerId: string,
+      fallbackModelId: string,
+      lookup?: unknown,
+      opts?: { parentTier?: string; pinned?: boolean },
+    ) => {
+      capturedResolveModelForTaskCalls.push({ task, pinned: opts?.pinned });
+      return (
+        actual.resolveModelForTask as (
+          task: string,
+          providerId: string,
+          fallbackModelId: string,
+          lookup?: unknown,
+          opts?: unknown,
+        ) => string
+      )(task, providerId, fallbackModelId, lookup, opts);
+    },
+  };
+});
 
 // Per-test knob: the cumulative tool-output chars the (mocked) turn reports to
 // the Agent, driving reactive next-turn escalation. 0 = light turn.
@@ -106,6 +141,7 @@ beforeEach(() => {
   process.env.MUONROI_FORCE_ROUTING_CLASSIFY = "1";
   reportedLoad = 0;
   capturedTurnModelIds.length = 0;
+  capturedResolveModelForTaskCalls.length = 0;
   closeDatabase();
   getDatabase(); // run migrations against the temp DB
   vi.clearAllMocks();
@@ -344,6 +380,77 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
       expect(capturedTurnModelIds).toHaveLength(1);
       expect(capturedTurnModelIds[0]?.sessionId).toBe(child?.id);
       expect(capturedTurnModelIds[0]?.modelId).toBe(PIN_MODEL);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+});
+
+// Round 3 (MEDIUM correction to round 2's G3 HIGH fix): round 2 applied the
+// project model pin unconditionally inside `_resolveModelForTask` — the
+// SINGLE shared resolver behind both stream-runner.ts's delegated
+// sub-agent dispatch (explore/general/verify) AND compaction's own model
+// choice (`_resolveCompactModel` -> `_resolveModelForTask("compact")`).
+// That pinned compaction too, an unintended cost change: compaction is
+// deliberately on its own cheap tier table
+// (`TASK_TIER_PREFS.compact = ["fast","balanced"]`) so a session
+// summarization pass never rides the expensive pinned model. Decision:
+// compaction stays on its cheap tier table; the pin applies only to
+// delegated sub-agent/sub-session dispatch (every OTHER task kind).
+//
+// `_resolveModelForTask` is a private method — accessed here via a type
+// cast, the same way any other JS runtime call would reach it; there is no
+// other way to observe this ONE orchestrator-level wiring decision without
+// either triggering a full real LLM compaction pass or the full
+// stream-runner sub-agent dispatch pipeline, both far heavier than the
+// thing actually under test (which task kinds get `pinned: true`).
+describe("_resolveModelForTask — round 3: the pin applies to delegated dispatch, NOT to compaction", () => {
+  it("passes pinned:false for task='compact' and pinned:true for every other task, when the project pins a model", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subsess-pin-compact-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    const PIN_MODEL = "deepseek-v4-pro";
+    fs.writeFileSync(path.join(projectDir, ".muonroi-cli", "settings.json"), JSON.stringify({ model: PIN_MODEL }));
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, PIN_MODEL, undefined, { persistSession: true });
+      const resolveModelForTask = (
+        agent as unknown as { _resolveModelForTask(task: ModelTaskKind): string }
+      )._resolveModelForTask.bind(agent);
+
+      resolveModelForTask("compact");
+      resolveModelForTask("general");
+      resolveModelForTask("explore");
+      resolveModelForTask("verify");
+
+      const byTask = Object.fromEntries(capturedResolveModelForTaskCalls.map((c) => [c.task, c.pinned]));
+      expect(byTask.compact).toBe(false); // NOT pinned — compaction keeps its own cheap tier table
+      expect(byTask.general).toBe(true);
+      expect(byTask.explore).toBe(true);
+      expect(byTask.verify).toBe(true);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("passes pinned:false for EVERY task when the project has no pin at all (no regression)", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subsess-nopin-"));
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const resolveModelForTask = (
+        agent as unknown as { _resolveModelForTask(task: ModelTaskKind): string }
+      )._resolveModelForTask.bind(agent);
+
+      resolveModelForTask("compact");
+      resolveModelForTask("general");
+
+      const byTask = Object.fromEntries(capturedResolveModelForTaskCalls.map((c) => [c.task, c.pinned]));
+      expect(byTask.compact).toBe(false);
+      expect(byTask.general).toBe(false);
     } finally {
       process.chdir(prevCwd);
       fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });

@@ -294,8 +294,41 @@ const _injectedGuidanceSha = new Map<string, string>();
  * one already sitting in the rehydrated history is not — the model would
  * see the same briefing twice. Tagged so the injection site can find and
  * REPLACE a prior copy instead of appending a second one.
+ *
+ * Exported (round 3, MEDIUM) so orchestrator.ts's compaction step can carry
+ * this ONE message verbatim across a summarization pass — see its own
+ * comment at the compaction call site: compaction's kept-tail window has no
+ * reason to know about this tag, so a tagged message that fell outside the
+ * kept window used to be summarized away like any other old message,
+ * leaving nothing for a later --resume to find and replace.
  */
-const SESSION_START_SYSTEM_TAG = "[SessionStart hook output]";
+export const SESSION_START_SYSTEM_TAG = "[SessionStart hook output]";
+
+function isTaggedSessionStartMessage(m: ModelMessage): boolean {
+  return m.role === "system" && typeof m.content === "string" && m.content.startsWith(SESSION_START_SYSTEM_TAG);
+}
+
+/**
+ * Round 3 (MEDIUM, G1-adjacent): whether orchestrator.ts's compaction
+ * rebuild needs to explicitly carry the tagged SessionStart system message
+ * across a summarization pass, and the exact message to carry if so.
+ *
+ * Extracted as a pure function — exported for the test — because the real
+ * compaction path (`Agent.compactForContext`) is a private method on a
+ * large class that makes real LLM calls, not directly unit-testable.
+ *
+ * Returns `null` when the kept tail already has one (a short/fresh
+ * session's compaction can legitimately keep it naturally — re-adding it
+ * would duplicate it), otherwise the tagged message found anywhere in the
+ * PRE-compaction history (`null` if there never was one).
+ */
+export function reinjectTaggedSessionStartAcrossCompaction(
+  allMessagesBeforeCompaction: readonly ModelMessage[],
+  keptMessages: readonly ModelMessage[],
+): ModelMessage | null {
+  if (keptMessages.some(isTaggedSessionStartMessage)) return null;
+  return allMessagesBeforeCompaction.find(isTaggedSessionStartMessage) ?? null;
+}
 
 /**
  * Durable phase breadcrumb for the pre-stream path (everything in `run()`

@@ -181,7 +181,11 @@ import { CrossTurnDedup, isCrossTurnDedupEnabled } from "./cross-turn-dedup.js";
 import { DelegationManager } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { beginInteractivePause, endInteractivePause, isInteractivePaused } from "./interactive-pause.js";
-import { MessageProcessor, type MessageProcessorDeps } from "./message-processor.js";
+import {
+  MessageProcessor,
+  type MessageProcessorDeps,
+  reinjectTaggedSessionStartAcrossCompaction,
+} from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
 import { createNoProgressGuard } from "./no-progress-guard.js";
 import { estimateProjectSizeAt, type ProjectSize } from "./project-size.js";
@@ -2012,19 +2016,27 @@ export class Agent {
 
   private _resolveModelForTask(task: ModelTaskKind): string {
     const parentTier = getModelInfo(this.modelId)?.tier;
-    // Round 2 (G3 HIGH): a project model pin holds for every automatic
-    // task-model resolution through this path — see `resolveModelForTask`'s
-    // `opts.pinned` doc comment in sub-agent-model-tier.ts. This is the
-    // SHARED resolver behind both stream-runner.ts's delegated sub-agent
-    // dispatch (explore/general/verify — its `childModelId` falls through
-    // to `deps.resolveModelForTask` only when nothing more specific was
-    // named, i.e. never for an explicitly-requested model) and compaction's
-    // own model choice; a pin holding for compaction too is consistent with
-    // "unless the spawning call explicitly names a model" — compaction
-    // never does.
+    // Round 2 (G3 HIGH) / round 3 (MEDIUM correction): a project model pin
+    // holds for automatic task-model resolution through this SHARED
+    // resolver — see `resolveModelForTask`'s `opts.pinned` doc comment in
+    // sub-agent-model-tier.ts — but NOT for `task === "compact"`.
+    // Round 2 applied the pin unconditionally here, which pinned
+    // compaction too: compaction is deliberately on its own cheap tier
+    // table (`TASK_TIER_PREFS.compact = ["fast","balanced"]`) precisely so
+    // a session summarization pass never rides the expensive pinned model —
+    // the pin exists to keep JUDGEMENT turns (the sub-agent dispatch this
+    // resolver otherwise serves: explore/general/verify) on the pinned
+    // model, not to make every internal housekeeping call as expensive as
+    // the orchestrator's own turns. `task !== "compact"` is the only
+    // exclusion needed: stream-runner.ts's sub-agent dispatch never passes
+    // "compact" (that task kind is only ever requested by
+    // `_resolveCompactModel` below), so this one condition fully separates
+    // "delegated sub-agent/sub-session dispatch" (pinned) from
+    // "compaction" (never pinned) without threading a second parameter
+    // through the DI interface.
     return resolveModelForTask(task, this.providerId, this.modelId, undefined, {
       parentTier,
-      pinned: isModelPinnedByProject(),
+      pinned: task !== "compact" && isModelPinnedByProject(),
     });
   }
 
@@ -2188,8 +2200,33 @@ export class Agent {
       pinnedReinjectionSeqs.push(null);
     }
 
-    this.messages = [createCompactionSummaryMessage(summary), ...pinnedReinjections, ...preparation.keptMessages];
-    this.messageSeqs = [null, ...pinnedReinjectionSeqs, ...keptSeqs];
+    // Round 3 (MEDIUM, G1-adjacent): the tagged SessionStart system message
+    // (SESSION_START_SYSTEM_TAG — message-processor.ts) is NOT a "pinned
+    // user message" — the mechanism just above only ever looks at
+    // `role === "user"` — so compaction's kept-tail window had no reason to
+    // preserve it. A tagged message that fell outside that window (the
+    // ordinary case: it is injected once, at/near session start, so any
+    // compaction far enough into a session summarizes it away like any
+    // other old message) lost the exact tag string that is the ONLY thing
+    // a later `--resume` can find-and-replace on — the resumed process then
+    // injects a fresh briefing with no tagged copy left to replace, and the
+    // round-2 G1 fix's own guarantee (exactly one tagged message) quietly
+    // stopped holding for any session that had ever compacted. Carried
+    // verbatim here, the same way a pinned user message is, right after the
+    // compaction summary — see `reinjectTaggedSessionStartAcrossCompaction`'s
+    // doc comment for the "already in the kept tail" no-duplicate case.
+    const taggedSessionStartReinjection = reinjectTaggedSessionStartAcrossCompaction(
+      this.messages,
+      preparation.keptMessages,
+    );
+
+    this.messages = [
+      createCompactionSummaryMessage(summary),
+      ...(taggedSessionStartReinjection ? [taggedSessionStartReinjection] : []),
+      ...pinnedReinjections,
+      ...preparation.keptMessages,
+    ];
+    this.messageSeqs = [null, ...(taggedSessionStartReinjection ? [null] : []), ...pinnedReinjectionSeqs, ...keptSeqs];
 
     // EE anti-mù (Phase 1 of docs/ee-anti-mu-compaction-plan.md): immediately extract the fresh structured checkpoint summary
     // so pilContext / layer3 search / ee.query can recall exact prior ✔ DONE items + progress for the rest of this long session
