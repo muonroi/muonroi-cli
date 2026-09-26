@@ -71,6 +71,39 @@ export async function runCommandHooksForEvent(
   return { additionalContexts, results };
 }
 
+/**
+ * Kill `child` and every process in its group — not just the shell PID.
+ * Round-2 fix (MEDIUM): a plain `child.kill()` on timeout only signals the
+ * `sh -c "..."` shell itself; a grandchild the shell spawned (`sleep 5`,
+ * a background `&` job, anything the hook command forked) can outlive it,
+ * defeating the timeout. Requires the child to have been spawned with
+ * `detached: true` on POSIX (makes it the leader of its OWN process group,
+ * so `-pid` addresses the whole group); Windows has no process-group signal,
+ * so `taskkill /T` (kill the tree) is used there instead, mirroring the same
+ * pattern `src/tools/bash.ts` already uses for its own tree-kill.
+ */
+function killProcessGroup(child: ReturnType<typeof spawn>): void {
+  const pid = child.pid;
+  try {
+    if (process.platform === "win32") {
+      if (pid) spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { windowsHide: true, stdio: "ignore" }).unref();
+      else child.kill("SIGKILL");
+    } else if (pid) {
+      process.kill(-pid, "SIGKILL");
+    } else {
+      child.kill("SIGKILL");
+    }
+  } catch {
+    // Group/tree kill can fail (process already gone, permission edge cases
+    // on some sandboxes) — fall back to a plain single-process kill.
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* best-effort — nothing more to do */
+    }
+  }
+}
+
 function runOneCommandHook(hook: CommandHook, input: HookInput): Promise<HookResult> {
   const timeoutMs = hook.timeout && hook.timeout > 0 ? hook.timeout : DEFAULT_TIMEOUT_MS;
   return new Promise<HookResult>((resolvePromise) => {
@@ -88,6 +121,10 @@ function runOneCommandHook(hook: CommandHook, input: HookInput): Promise<HookRes
         cwd: input.cwd,
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
+        // POSIX only — see killProcessGroup's doc comment. `detached: true`
+        // on win32 spawns a new console instead, which is not what we want
+        // there (taskkill /T handles the tree instead).
+        detached: process.platform !== "win32",
       });
     } catch (err) {
       logger.warn("cli", `[hooks] failed to spawn command hook: ${(err as Error)?.message}`, {
@@ -116,11 +153,7 @@ function runOneCommandHook(hook: CommandHook, input: HookInput): Promise<HookRes
     });
 
     const timer = setTimeout(() => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* best-effort */
-      }
+      killProcessGroup(child);
       finish({
         outcome: "non_blocking_error",
         exitCode: null,
@@ -169,7 +202,14 @@ function parseHookOutput(stdout: string): HookOutput | undefined {
   try {
     const parsed = JSON.parse(trimmed) as unknown;
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as HookOutput;
+      const out = parsed as HookOutput;
+      // Round-2 fix (MEDIUM): MAX_CONTEXT_CHARS was only applied on the
+      // plain-text fallback below — a hook that adopts the JSON contract
+      // could still hand back an unbounded `additionalContext` string.
+      if (typeof out.additionalContext === "string" && out.additionalContext.length > MAX_CONTEXT_CHARS) {
+        return { ...out, additionalContext: out.additionalContext.slice(0, MAX_CONTEXT_CHARS) };
+      }
+      return out;
     }
   } catch {
     /* not JSON — fall through to raw-text handling */

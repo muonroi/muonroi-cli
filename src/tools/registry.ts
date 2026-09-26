@@ -38,6 +38,7 @@ import {
   checkPushGate,
   checkSensitiveStaging,
   commitBlockedMessage,
+  detectBlockedGitSubcommand,
   pushBlockedMessage,
   recordCommandOutcome,
   stagingWarning,
@@ -573,17 +574,25 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
       // Gap (b): a project's `.muonroi-cli/settings.json` `{"autoCommit": false}`
       // disables the CLI's own auto-commit — honour the same policy for a raw
-      // `git commit`/`git push` reached via the bash tool, otherwise the model
-      // just routes around the setting. Pre-execution, any permission mode.
-      if (gitShape.isCommit || gitShape.isPush) {
+      // history/ref-writing git subcommand reached via the bash tool (commit,
+      // merge, cherry-pick, rebase, am, revert, commit-tree, update-ref, tag,
+      // push, pull, or a user alias resolving to one of those), otherwise the
+      // model just routes around the setting. `detectBlockedGitSubcommand`
+      // scans the RAW command (quotes included, so `sh -c "git commit ..."`
+      // cannot hide from it — round-2 refuter finding) — see its own doc
+      // comment in git-safety.ts. Pre-execution, any permission mode.
+      {
         const { isAutoCommitDisabledByProject } = await import("../orchestrator/auto-commit.js");
         if (isAutoCommitDisabledByProject()) {
-          return _prefixBlock(
-            "git-safety",
-            `this project's .muonroi-cli/settings.json sets "autoCommit": false — ` +
-              `git ${gitShape.isPush ? "push" : "commit"} via the bash tool is disabled to match. ` +
-              "Ask the user before committing/pushing despite this setting.",
-          );
+          const blocked = detectBlockedGitSubcommand(cmd, bash.getCwd());
+          if (blocked.blocked) {
+            return _prefixBlock(
+              "git-safety",
+              `this project's .muonroi-cli/settings.json sets "autoCommit": false — ` +
+                `\`git ${blocked.subcommand}\`${blocked.viaAlias ? ` (via alias \`git ${blocked.viaAlias}\`)` : ""} ` +
+                "via the bash tool is disabled to match. Ask the user before committing/pushing despite this setting.",
+            );
+          }
         }
       }
 

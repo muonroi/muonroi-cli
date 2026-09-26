@@ -1041,25 +1041,23 @@ export class MessageProcessor {
     let visionUnavailableNotice: string | null = null;
     const _routeStart = Date.now();
     breadcrumb("pre-stream.routerDecide.start", { sessionId: _sessionIdForBreadcrumbs });
-    // Gap (d): a project-level `.muonroi-cli/settings.json` `{"model": "..."}`
-    // pin is an explicit instruction, not a mere default the per-turn router
-    // may second-guess (see `isModelPinnedByProject`'s doc comment). Skip
-    // decide() ENTIRELY for the MAIN conversation turn when pinned — turnModelId
-    // stays deps.modelId (itself resolved from the same project pin via
-    // getCurrentModel()'s precedence). Cheap sub-tasks (tool-loop rounds in
-    // tool-engine.ts, council sub-tasks) call decide()/routeModel() through
-    // their own, separate paths and are unaffected — they may still downgrade.
-    if (isModelPinnedByProject()) {
-      routeReason = "project-model-pin";
-      const prev = statusBarStore.getState();
-      if (prev.routed_from || prev.model !== deps.modelId) {
-        statusBarStore.setState({ routed_from: null, model: deps.modelId });
-      }
-      breadcrumb("pre-stream.routerDecide.end", {
-        sessionId: _sessionIdForBreadcrumbs,
-        skipped: "project-model-pin",
-      });
-    } else {
+    // Gap (d) / round-2 fix: a project-level `.muonroi-cli/settings.json`
+    // `{"model": "..."}` pin is an explicit instruction, not a mere default
+    // the per-turn router may second-guess for the MAIN conversation turn
+    // (see `isModelPinnedByProject`'s doc comment) — but the cap/budget
+    // reservation + downgrade-chain/halt check must still run against
+    // whatever model actually ends up executing. Passing `forcedModel` makes
+    // decide() skip ONLY the free model-choice classifier ladder
+    // (role/PIL/hot/warm/cold) while still routing the pinned model through
+    // the SAME capCheck any other decision goes through — see
+    // `DecideOpts.forcedModel`'s doc comment in router/decide.ts. A prior
+    // version of this fix skipped decide() entirely for a pinned turn, which
+    // also skipped that cap check (round-2 refuter finding, HIGH). Cheap
+    // sub-tasks (tool-loop rounds in tool-engine.ts, council sub-tasks) call
+    // decide()/routeModel() through their own, separate paths and are
+    // unaffected — they may still downgrade independently of the pin.
+    {
+      const pinnedModel = isModelPinnedByProject() ? deps.modelId : undefined;
       try {
         const { decide } = await import("../router/decide.js");
         const compactionMsg = deps.messages.find(
@@ -1075,6 +1073,7 @@ export class MessageProcessor {
           cwd: deps.bash.getCwd(),
           defaultModel: deps.modelId,
           defaultProvider: deps.providerId,
+          ...(pinnedModel ? { forcedModel: pinnedModel } : {}),
           pil: {
             domain: pilCtx.domain,
             taskType: pilCtx.taskType,

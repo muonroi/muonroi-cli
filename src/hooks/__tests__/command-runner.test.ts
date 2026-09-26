@@ -113,4 +113,61 @@ describe("hooks/command-runner — runCommandHooksForEvent", () => {
     expect(result.additionalContexts).toEqual([]);
     expect(result.results[0]?.outcome).toBe("non_blocking_error");
   }, 10_000);
+
+  // Round-2, MEDIUM fixes below.
+
+  it("MAX_CONTEXT_CHARS truncation also applies to a JSON-contract additionalContext, not just the plain-text fallback", async () => {
+    const long = "x".repeat(20_000);
+    const script = `node -e "console.log(JSON.stringify({additionalContext: '${long}'}))"`;
+    writeUserHooks({ SessionStart: [{ hooks: [{ type: "command", command: script }] }] });
+    const input: SessionStartHookInput = { hook_event_name: "SessionStart", source: "startup", cwd };
+    const result = await runCommandHooksForEvent("SessionStart", input);
+    expect(result.additionalContexts[0]?.length).toBe(12_000);
+  });
+
+  (process.platform === "win32" ? it.skip : it)(
+    "PROCESS-GROUP FIX: killing a timed-out hook also kills a backgrounded grandchild, not just the shell",
+    async () => {
+      const pidFile = path.join(cwd, `grandchild-${Date.now()}.pid`);
+      // Non-interactive `sh` disables job control, so a backgrounded job
+      // stays in the SAME process group as the shell — exactly the case a
+      // plain `child.kill()` (signals only the shell PID) would leak.
+      writeUserHooks({
+        SessionStart: [
+          {
+            hooks: [
+              {
+                type: "command",
+                command: `sh -c 'sleep 20 & echo $! > ${pidFile}; sleep 20'`,
+                timeout: 300,
+              },
+            ],
+          },
+        ],
+      });
+      const input: SessionStartHookInput = { hook_event_name: "SessionStart", source: "startup", cwd };
+      await runCommandHooksForEvent("SessionStart", input);
+
+      // Grandchild pid was recorded before the timeout fired.
+      const pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+      expect(Number.isNaN(pid)).toBe(false);
+
+      const isAlive = () => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      // SIGKILL delivery/reaping is not instantaneous — poll briefly instead
+      // of asserting the instant the promise resolves.
+      const deadline = Date.now() + 3000;
+      while (isAlive() && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(isAlive()).toBe(false);
+    },
+    10_000,
+  );
 });

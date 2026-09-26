@@ -5,15 +5,23 @@
 // trivial (by design; see `applyPromotionCap`'s doc comment), which is wrong
 // once a repo's own settings.json pins the orchestrator model deliberately.
 //
-// message-processor.ts now skips the `decide()` call entirely (not just its
-// result) when `isModelPinnedByProject()` is true, keeping turnModelId ===
-// deps.modelId unconditionally.
+// Round 2 fix: message-processor.ts no longer skips `decide()` entirely when
+// pinned (that also skipped the cap/budget halt check — a HIGH refuter
+// finding). It now ALWAYS calls decide(), passing `forcedModel: deps.modelId`
+// only when pinned — decide() then skips just the free classifier ladder
+// (see `router/decide-forced-model-pin.test.ts` for the cap-check-preserved
+// behavior at the router level). This file asserts the OPTIONS message-
+// processor.ts passes to decide(), not whether it is called at all.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const decideSpy = vi.fn(async () => ({ model: "deepseek-v4-flash", tier: "fast", reason: "pil:trivial(0.9)" }));
+const decideSpy = vi.fn(async (_prompt: string, _opts: { forcedModel?: string }) => ({
+  model: "deepseek-v4-flash",
+  tier: "fast",
+  reason: "pil:trivial(0.9)",
+}));
 
 vi.mock("../../router/decide.js", () => ({
   decide: decideSpy,
@@ -149,16 +157,18 @@ describe("MessageProcessor — project model pin skips per-turn downgrade routin
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
-  it("calls decide() (may downgrade) when no project model pin is configured", async () => {
+  it("calls decide() WITHOUT forcedModel (may downgrade) when no project model pin is configured", async () => {
     process.chdir(dir);
     const processor = new MessageProcessor(makeDeps());
     for await (const _c of processor.run("check the weather", undefined)) {
       /* drain */
     }
     expect(decideSpy).toHaveBeenCalled();
+    const opts = decideSpy.mock.calls.at(-1)?.[1];
+    expect(opts?.forcedModel).toBeUndefined();
   });
 
-  it("NEVER calls decide() for the main turn once .muonroi-cli/settings.json pins a model", async () => {
+  it("still calls decide() (cap check preserved) but passes forcedModel once .muonroi-cli/settings.json pins a model", async () => {
     fs.mkdirSync(path.join(dir, ".muonroi-cli"), { recursive: true });
     fs.writeFileSync(path.join(dir, ".muonroi-cli", "settings.json"), JSON.stringify({ model: "deepseek-v4-pro" }));
     process.chdir(dir);
@@ -167,6 +177,8 @@ describe("MessageProcessor — project model pin skips per-turn downgrade routin
     for await (const _c of processor.run("check the weather", undefined)) {
       /* drain */
     }
-    expect(decideSpy).not.toHaveBeenCalled();
+    expect(decideSpy).toHaveBeenCalled();
+    const opts = decideSpy.mock.calls.at(-1)?.[1];
+    expect(opts?.forcedModel).toBe("deepseek-v4-pro");
   });
 });

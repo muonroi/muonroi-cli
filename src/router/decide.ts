@@ -49,6 +49,19 @@ export interface DecideOpts {
   sessionId?: string;
   /** Override home directory for ledger (testing). */
   homeOverride?: string;
+  /**
+   * Round-2 fix — a project-level `.muonroi-cli/settings.json` model pin
+   * (`isModelPinnedByProject()`) for the MAIN conversation turn. When set,
+   * `decide()` skips the classifier ladder (role/PIL/hot/warm/cold) entirely
+   * — the pin already decided the model choice — but STILL runs the SAME
+   * cap/budget reservation + downgrade-chain/halt check (`capCheck`) any
+   * other decision goes through. A cap breach on a pinned turn therefore
+   * still downgrades along that model's own chain, or halts, exactly as an
+   * unpinned turn would; only the free CHOICE of model is superseded by the
+   * pin. Bypasses the route cache too, so a cap state that changed since the
+   * last cached decision is always seen fresh.
+   */
+  forcedModel?: string;
   /** PIL enrichment signals — forwarded to EE context. */
   pil?: {
     domain?: string | null;
@@ -494,6 +507,31 @@ export function shouldUseRoleModel(
 }
 
 export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDecision> {
+  // Round-2 fix — a project model pin overrides ONLY the model CHOICE below
+  // (skips role/PIL/hot/warm/cold classification entirely); the cap/budget
+  // reservation + downgrade-chain/halt check still runs against the pinned
+  // model, exactly like every other decision path — see forcedModel's doc
+  // comment on DecideOpts. No cache (a fresh cap check every call), no
+  // promotion-cap check (exempt: true — moot anyway, dec.model === defaultModel).
+  if (opts.forcedModel) {
+    const provider = detectProviderForModel(opts.forcedModel) ?? opts.defaultProvider;
+    const d: RouteDecision = {
+      tier: "hot",
+      model: opts.forcedModel,
+      provider,
+      reason: "project-model-pin",
+      source: "project-pin",
+    };
+    const checked = await capCheck(d, { homeOverride: opts.homeOverride, defaultModel: opts.forcedModel }, true);
+    routerStore.setState({
+      tier: checked.tier,
+      lastDecision: checked,
+      taskHash: checked.taskHash ?? null,
+      source: checked.source ?? "project-pin",
+    });
+    return checked;
+  }
+
   const cacheKey = routeCacheKey(opts.pil, opts.defaultModel, opts.defaultProvider);
   if (cacheKey) {
     const cached = getCachedRoute(cacheKey);

@@ -323,6 +323,226 @@ function git(cwd: string, args: string[]): string {
   }
 }
 
+// ─── History/ref-writing subcommand detector (autoCommit-disabled gate) ────
+//
+// `analyzeGitCommand`'s isCommit/isPush are loose "does the word appear
+// somewhere in this clause" regexes over the QUOTE-STRIPPED command — good
+// enough for the push-gate/staging-warning features they drive, but
+// bypassable two ways a refuter found (round 2):
+//   1. `stripQuoted` blanks ANY quoted substring, so `sh -c "git commit -am x"`
+//      becomes `sh -c ""` before the regex ever runs — the whole invocation
+//      vanishes.
+//   2. They only recognize `commit`/`push`; `git merge`, `cherry-pick`,
+//      `rebase --continue`, `am`, `revert`, `commit-tree`, `update-ref`,
+//      `tag`, `pull`, and a user's own alias (`git ci` -> commit) all write
+//      history or refs just as much and were never classified at all.
+//
+// This detector is deliberately separate from `analyzeGitCommand` (used only
+// by the autoCommit-disabled bash-tool gate, registry.ts) rather than a
+// patch to it, because it makes an opposite, INTENTIONALLY more paranoid
+// tradeoff: it scans the RAW command — quotes included — so a `git` token
+// hidden inside a `sh -c`/`bash -c`/`eval "..."` string argument is still
+// found (the same reason it can also flag an `echo "... git commit ..."` that
+// never actually invokes git; accepted, since this only fires when a project
+// has explicitly disabled auto-commit and a false block is recoverable — the
+// user can just ask again — while a silent bypass is not).
+//
+// Unlike the loose "word appears somewhere" regexes, the subcommand is found
+// by tokenizing and taking the FIRST non-flag token after `git` (skipping
+// global flags, including the two-token forms `-c <k>=<v>` / `-C <dir>`) —
+// this is what fixes the `git log --grep push` false positive structurally:
+// "push" two tokens later than the subcommand slot is never inspected.
+const GIT_GLOBAL_FLAGS_WITH_ARG = new Set(["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
+
+/** Native subcommands common enough to skip an `alias.<word>` lookup for. */
+const KNOWN_GIT_SUBCOMMANDS = new Set([
+  "status",
+  "log",
+  "diff",
+  "show",
+  "blame",
+  "grep",
+  "rev-parse",
+  "for-each-ref",
+  "add",
+  "commit",
+  "push",
+  "pull",
+  "fetch",
+  "merge",
+  "rebase",
+  "cherry-pick",
+  "revert",
+  "tag",
+  "branch",
+  "checkout",
+  "restore",
+  "reset",
+  "stash",
+  "clone",
+  "init",
+  "config",
+  "remote",
+  "worktree",
+  "notes",
+  "am",
+  "commit-tree",
+  "update-ref",
+  "diff-tree",
+  "ls-files",
+  "cat-file",
+  "hash-object",
+  "symbolic-ref",
+  "describe",
+  "shortlog",
+  "reflog",
+  "gc",
+  "fsck",
+  "prune",
+  "submodule",
+  "apply",
+  "format-patch",
+  "send-email",
+  "request-pull",
+  "bisect",
+  "rerere",
+  "replace",
+  "filter-branch",
+  "mergetool",
+  "difftool",
+  "instaweb",
+  "archive",
+  "bundle",
+  "credential",
+  "help",
+  "version",
+]);
+
+/**
+ * History-writing (creates/rewrites a commit) or ref-writing (moves a branch/
+ * tag/notes ref) subcommands — blocked when a project disables auto-commit.
+ * `stash` is a deliberate judgement call: only its ref-writing forms
+ * (`push`/`store`, which write `refs/stash`) are blocked — `apply`/`pop`/
+ * `list`/`show`/`drop` never create a commit reachable from a branch, so they
+ * stay allowed. `notes` similarly only blocks its writing subcommands.
+ */
+const BLOCKED_SUBCOMMANDS = new Set([
+  "commit",
+  "merge",
+  "cherry-pick",
+  "rebase",
+  "am",
+  "revert",
+  "commit-tree",
+  "update-ref",
+  "tag",
+  "push",
+  "pull",
+]);
+const STASH_WRITE_SUBWORDS = new Set(["push", "store"]);
+const NOTES_WRITE_SUBWORDS = new Set(["add", "append", "edit", "remove", "merge", "prune", "copy"]);
+
+function stripSurroundingQuotes(token: string): string {
+  return token.replace(/^["']+/, "").replace(/["']+$/, "");
+}
+
+/**
+ * Split `command` into shell-metacharacter-aware tokens for the SOLE purpose
+ * of finding `git` occurrences and the token that follows — not a full shell
+ * parser. `;`, `&`, `|`, `(`, `)` are forced apart from adjacent words first
+ * (so `git commit;git push` tokenizes as two clauses) before a plain
+ * whitespace split.
+ */
+function tokenizeForGitScan(command: string): string[] {
+  return command
+    .replace(/([;&|()])/g, " $1 ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(stripSurroundingQuotes)
+    .filter(Boolean);
+}
+
+/** One `git ...` occurrence's extracted (not-yet-alias-resolved) subcommand token. */
+function extractGitSubcommandTokens(command: string): string[] {
+  const tokens = tokenizeForGitScan(command);
+  const found: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] !== "git") continue;
+    let j = i + 1;
+    while (j < tokens.length) {
+      const t = tokens[j];
+      if (GIT_GLOBAL_FLAGS_WITH_ARG.has(t)) {
+        j += 2;
+        continue;
+      }
+      if (t.startsWith("-")) {
+        j++;
+        continue;
+      }
+      found.push(t);
+      break;
+    }
+  }
+  return found;
+}
+
+export interface BlockedGitSubcommandResult {
+  blocked: boolean;
+  /** The subcommand that triggered the block (post-alias-resolution). */
+  subcommand?: string;
+  /** Set when `subcommand` was reached by resolving a user git alias. */
+  viaAlias?: string;
+}
+
+/**
+ * True when `command` contains (anywhere, including inside quoted
+ * `sh -c`/`bash -c`/`eval` strings) a `git` invocation whose subcommand
+ * writes history or a ref — directly, or through a user-defined alias
+ * (`git config --get alias.<word>`, resolved one level deep). See the module
+ * comment above `GIT_GLOBAL_FLAGS_WITH_ARG` for the full rationale.
+ */
+export function detectBlockedGitSubcommand(command: string, cwd: string): BlockedGitSubcommandResult {
+  const subcommandTokens = extractGitSubcommandTokens(command);
+  for (const raw of subcommandTokens) {
+    const [word, ...rest] = raw.split(/(?=[^a-z0-9-])/i); // split off a trailing punctuation blob, if any
+    const candidate = (word ?? raw).toLowerCase();
+    void rest;
+    if (candidate === "stash") continue; // handled via its own subword scan below
+    if (candidate === "notes") continue; // ditto
+    if (BLOCKED_SUBCOMMANDS.has(candidate)) return { blocked: true, subcommand: candidate };
+    if (!KNOWN_GIT_SUBCOMMANDS.has(candidate) && /^[a-z][a-z0-9-]*$/.test(candidate)) {
+      const aliasValue = git(cwd, ["config", "--get", `alias.${candidate}`]);
+      if (aliasValue) {
+        const aliasTarget = tokenizeForGitScan(aliasValue)[0]?.toLowerCase();
+        if (aliasTarget && BLOCKED_SUBCOMMANDS.has(aliasTarget)) {
+          return { blocked: true, subcommand: aliasTarget, viaAlias: candidate };
+        }
+      }
+    }
+  }
+  // `stash push`/`stash store` and `notes <write-subword>` — inspect the
+  // token immediately after each `stash`/`notes` occurrence.
+  const tokens = tokenizeForGitScan(command);
+  for (let i = 0; i < tokens.length - 1; i++) {
+    if (tokens[i] !== "git") continue;
+    // Find the subcommand slot the same way extractGitSubcommandTokens does.
+    let j = i + 1;
+    while (j < tokens.length && (GIT_GLOBAL_FLAGS_WITH_ARG.has(tokens[j]) || tokens[j].startsWith("-"))) {
+      j += GIT_GLOBAL_FLAGS_WITH_ARG.has(tokens[j]) ? 2 : 1;
+    }
+    const sub = tokens[j]?.toLowerCase();
+    if (sub !== "stash" && sub !== "notes") continue;
+    const next = tokens[j + 1]?.toLowerCase();
+    if (sub === "stash" && next && STASH_WRITE_SUBWORDS.has(next)) {
+      return { blocked: true, subcommand: `stash ${next}` };
+    }
+    if (sub === "notes" && next && NOTES_WRITE_SUBWORDS.has(next)) {
+      return { blocked: true, subcommand: `notes ${next}` };
+    }
+  }
+  return { blocked: false };
+}
+
 /** Working-tree paths that a destructive command would discard (best-effort). */
 function atRiskPaths(cwd: string, untrackedRisk: boolean): string[] {
   // NOTE: read raw stdout — do NOT trim the whole output. Porcelain v1 lines
