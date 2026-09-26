@@ -31,6 +31,40 @@ function readNonEmptyFile(filePath: string): string | null {
   }
 }
 
+/**
+ * Parity fix (G4): Claude Code also loads parent-directory CLAUDE.md files
+ * ABOVE the project's own root, up to $HOME (and `~/.claude/CLAUDE.md`) —
+ * this loader previously reached only from the git root DOWN to `cwd`.
+ * Measured (FINDINGS.md G4): a Vietnamese request got an all-English reply
+ * because the "reply in the user's own language" rule lives in
+ * `~/Personal/Core/CLAUDE.md`, one directory above the git root
+ * `~/Personal/Core/shipd-challenges` — a file this loader never reached.
+ *
+ * Ceiling on the total bytes loaded from ancestor directories, independent
+ * of the (uncapped, pre-existing) git-root-down and muonroi-home segments —
+ * an ancestor chain can be many levels deep on some machines and this is
+ * new, previously-untested surface, so it gets its own explicit budget
+ * rather than silently inflating every turn's system prompt.
+ */
+export const MAX_ANCESTOR_INSTRUCTIONS_BYTES = 32 * 1024;
+
+/**
+ * Directories from `home` down to (but EXCLUDING) `gitRoot` itself — the
+ * git root's own instruction files are already the first entry of the
+ * `directoryChain(root, canonicalCwd)` loop below, so including it here
+ * would double-load it.
+ *
+ * Returns `[]` when `gitRoot` is not inside `home` at all (a repo checked
+ * out somewhere like /tmp or /opt has no meaningful "ancestors up to
+ * $HOME" to walk) or IS `home` itself (nothing sits between them).
+ */
+export function ancestorDirsAboveGitRoot(home: string, gitRoot: string): string[] {
+  const rel = path.relative(home, gitRoot);
+  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return [];
+  const parent = path.dirname(gitRoot);
+  return directoryChain(home, parent);
+}
+
 function directoryChain(fromRoot: string, toCwd: string): string[] {
   const rel = path.relative(fromRoot, toCwd);
   if (rel === "") return [fromRoot];
@@ -101,6 +135,27 @@ function loadAgentsSegments(canonicalCwd: string): string[] {
   }
 
   const root = findGitRoot(canonicalCwd) ?? canonicalCwd;
+
+  // Parity fix (G4): see `ancestorDirsAboveGitRoot`'s doc comment. Loaded
+  // BEFORE the git-root-down loop so priority mirrors distance from the
+  // project: most general (closest to $HOME) first, most specific
+  // (the project's own root and cwd) last — same ordering logic as the
+  // muonroi-home segment above already using.
+  const home = os.homedir();
+  let _ancestorBytesLoaded = 0;
+  ancestorLoop: for (const dir of ancestorDirsAboveGitRoot(home, root)) {
+    for (const fname of INSTRUCTION_FILENAMES) {
+      const rel = path.relative(home, dir);
+      const label = rel === "" ? path.join("~", fname) : path.join("~", rel, fname);
+      const seg = readSegmentWithHeader(dir, fname, label);
+      if (!seg) continue;
+      const segBytes = Buffer.byteLength(seg, "utf-8");
+      if (_ancestorBytesLoaded + segBytes > MAX_ANCESTOR_INSTRUCTIONS_BYTES) break ancestorLoop;
+      segments.push(seg);
+      _ancestorBytesLoaded += segBytes;
+    }
+  }
+
   for (const dir of directoryChain(root, canonicalCwd)) {
     const overridePath = path.join(dir, "AGENTS.override.md");
     if (fs.existsSync(overridePath)) {

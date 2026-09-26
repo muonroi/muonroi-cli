@@ -119,4 +119,83 @@ describe("loadCustomInstructions", () => {
 
     expect(loadCustomInstructions(cwd)).toBe(["root instructions", "nested override instructions"].join("\n\n"));
   });
+
+  // Parity fix (G4): Claude Code also loads parent-directory CLAUDE.md files
+  // above the project's own root, up to $HOME. Measured (FINDINGS.md G4): a
+  // Vietnamese request got an all-English reply because "reply in the
+  // user's own language" lives in `~/Personal/Core/CLAUDE.md`, one directory
+  // above the git root `~/Personal/Core/shipd-challenges` — a file this
+  // loader never reached before.
+  describe("ancestor directories above the git root, up to $HOME (G4)", () => {
+    it("loads an ancestor directory's CLAUDE.md above the git root, ordered before the project's own", async () => {
+      const home = makeTempDir("muonroi-home-");
+      const repoRoot = path.join(home, "Personal", "Core", "shipd-challenges");
+      fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
+      writeFile(path.join(home, "Personal", "Core", "CLAUDE.md"), "reply in the user's own language");
+      writeFile(path.join(repoRoot, "AGENTS.md"), "project instructions");
+      const loadCustomInstructions = await importLoadCustomInstructions(home);
+
+      const out = loadCustomInstructions(repoRoot);
+      expect(out).not.toBeNull();
+      expect(out).toContain("reply in the user's own language");
+      expect(out).toContain("project instructions");
+      expect(out!.indexOf("reply in the user's own language")).toBeLessThan(out!.indexOf("project instructions"));
+    });
+
+    it("loads $HOME's own CLAUDE.md when the git root sits directly inside $HOME", async () => {
+      const home = makeTempDir("muonroi-home-");
+      const repoRoot = path.join(home, "myrepo");
+      fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
+      writeFile(path.join(home, "CLAUDE.md"), "home-level rule");
+      const loadCustomInstructions = await importLoadCustomInstructions(home);
+
+      expect(loadCustomInstructions(repoRoot)).toContain("home-level rule");
+    });
+
+    it("does not walk ancestors, and does not throw, when the git root is outside $HOME entirely", async () => {
+      const home = makeTempDir("muonroi-home-");
+      const repoRoot = makeTempDir("muonroi-repo-outside-"); // sibling tmp dir, NOT inside home
+      fs.mkdirSync(path.join(repoRoot, ".git"));
+      writeFile(path.join(repoRoot, "AGENTS.md"), "project instructions only");
+      const loadCustomInstructions = await importLoadCustomInstructions(home);
+
+      expect(loadCustomInstructions(repoRoot)).toBe("project instructions only");
+    });
+
+    it("does not double-load the git root itself as one of its own ancestors", async () => {
+      const home = makeTempDir("muonroi-home-");
+      const repoRoot = path.join(home, "repo");
+      fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
+      writeFile(path.join(repoRoot, "AGENTS.md"), "root instructions");
+      const loadCustomInstructions = await importLoadCustomInstructions(home);
+
+      const out = loadCustomInstructions(repoRoot);
+      expect(out?.split("root instructions").length).toBe(2); // one match, i.e. appears exactly once
+    });
+
+    it("caps ancestor bytes loaded — a deep chain cannot balloon the prompt past MAX_ANCESTOR_INSTRUCTIONS_BYTES", async () => {
+      const home = makeTempDir("muonroi-home-");
+      const level1 = path.join(home, "level1");
+      const level2 = path.join(level1, "level2");
+      const repoRoot = path.join(level2, "repo");
+      fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
+
+      const { MAX_ANCESTOR_INSTRUCTIONS_BYTES } = await import("./instructions");
+      const padded = (label: string) =>
+        `${label}:${"x".repeat(MAX_ANCESTOR_INSTRUCTIONS_BYTES / 2 - label.length - 1)}`;
+      // Each segment alone fits the cap; two together do not (cap is on the
+      // CUMULATIVE ancestor total, not per file) — home is walked first, so
+      // it survives and the deeper level(s) after it are dropped.
+      writeFile(path.join(home, "CLAUDE.md"), padded("L0"));
+      writeFile(path.join(level1, "CLAUDE.md"), padded("L1"));
+      writeFile(path.join(level2, "CLAUDE.md"), padded("L2"));
+      const loadCustomInstructions = await importLoadCustomInstructions(home);
+
+      const out = loadCustomInstructions(repoRoot);
+      expect(out).not.toBeNull();
+      expect(out).toContain("L0:");
+      expect(out).not.toContain("L1:");
+      expect(out).not.toContain("L2:");
+    });
+  });
 });

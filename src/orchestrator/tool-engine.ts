@@ -658,6 +658,44 @@ function stripWriteTools(tools: ToolSet): ToolSet {
   return result as ToolSet;
 }
 
+/**
+ * Pure tool-set selection for a turn — extracted from `executeToolEngine`'s
+ * assembly so it is unit-testable without the whole tool-engine's I/O
+ * plumbing. Exported for the test.
+ *
+ * Precedence (first match wins):
+ *   1. The provider itself does not support client tools at all → none,
+ *      full stop (a hard capability ceiling — nothing below can override it).
+ *   2. `hasProjectInstructions` (round-12 parity fix, G2): the FIRST turn of
+ *      a session whose project has its own AGENTS.md/CLAUDE.md → the full
+ *      tool set. A project instruction may require a tool call
+ *      unconditionally at session start (e.g. "run briefing.sh first")
+ *      regardless of how trivial the user's own first message looks; giving
+ *      zero (or read-only-only) tools on that turn left the model with an
+ *      instruction it could not follow, and it emitted raw native
+ *      tool-call markup as its entire answer trying anyway (measured live,
+ *      session 08a9c9a84990 — see FINDINGS.md G1/G2). Bounded to the FIRST
+ *      turn only, so an ordinary LATER chitchat turn still saves tokens.
+ *   3. `isChitchat` with no prior tool-turn in history → none (the
+ *      pre-existing BUG-A-guarded token-saving path).
+ *   4. `isDirectAnswer` with no prior tool-turn → read-only tools only.
+ *   5. Otherwise → the full base tool set.
+ */
+export function selectRawToolSet(opts: {
+  baseTools: ToolSet;
+  supportsClientTools: boolean;
+  hasProjectInstructions: boolean;
+  isChitchat: boolean;
+  isDirectAnswer: boolean;
+  priorTurnHadTools: boolean;
+}): ToolSet {
+  if (!opts.supportsClientTools) return {};
+  if (opts.hasProjectInstructions) return opts.baseTools;
+  if (opts.isChitchat && !opts.priorTurnHadTools) return {};
+  if (opts.isDirectAnswer && !opts.priorTurnHadTools) return stripWriteTools(opts.baseTools);
+  return opts.baseTools;
+}
+
 // Additional types
 export interface ToolEngineArgs {
   [key: string]: any;
@@ -1274,13 +1312,36 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Strip write tools (bash, edit_file, write_file) AND skip MCP;
         // only readonly tools remain (read_file, grep, ee_query, etc.).
         const isDirectAnswer = (pilCtx as { directAnswer?: boolean }).directAnswer === true;
-        let rawToolSet: ToolSet = !turnCaps.supportsClientTools(runtime.modelInfo)
-          ? {}
-          : isChitchat && !_priorTurnHadTools
-            ? {}
-            : isDirectAnswer && !_priorTurnHadTools
-              ? stripWriteTools(baseToolsRaw)
-              : baseToolsRaw;
+        // Parity fix (G2): a project's own AGENTS.md/CLAUDE.md may require a
+        // tool call unconditionally at session start (e.g. FRAMEWORK.md's
+        // "ON SESSION START: run bash shipd-verify/briefing.sh") regardless
+        // of how trivial the user's own first message looks ("xin chào"
+        // classifies as chitchat/DIRECT_ANSWER every time). Measured live
+        // (session 08a9c9a84990): the chitchat branch below gave the turn
+        // ZERO tools, the model tried to honor the project instruction
+        // anyway, and — having no tool schema to call — emitted raw native
+        // tool-call markup as its entire answer (caught, but not usefully
+        // recovered, by tool-markup-guard.ts's leak detector). The existing
+        // BUG-A guard above already carves an exception into this same
+        // ternary for "prior turns had tools"; this is the analogous
+        // exception for "first turn, and the project might need one; give
+        // it the full tool set rather than guessing which subset". Bounded
+        // to the FIRST turn only (`_userTurnCount <= 1`, mirroring the
+        // `turnIndex` computed the same way in message-processor.ts) so
+        // this never re-widens tools on an ordinary later chitchat turn —
+        // the existing token-saving intent is unaffected past turn 1.
+        const _userTurnCount = (deps.messages as Array<{ role?: string }>).filter((m) => m?.role === "user").length;
+        const _isFirstTurn = _userTurnCount <= 1;
+        const { loadCustomInstructions } = await import("../utils/instructions.js");
+        const _hasProjectInstructions = _isFirstTurn && loadCustomInstructions(deps.bash.getCwd()) !== null;
+        let rawToolSet: ToolSet = selectRawToolSet({
+          baseTools: baseToolsRaw,
+          supportsClientTools: turnCaps.supportsClientTools(runtime.modelInfo),
+          hasProjectInstructions: _hasProjectInstructions,
+          isChitchat,
+          isDirectAnswer,
+          priorTurnHadTools: _priorTurnHadTools,
+        });
         // MCP skip: chitchat / direct-answer / greeting inputs don't need 7 MCP servers'
         // worth of tool schemas (~20K input tokens). PIL Layer 1 already
         // gates this conservatively (≤10 chars + ≤2 words OR brain "none").

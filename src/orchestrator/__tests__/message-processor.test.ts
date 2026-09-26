@@ -221,6 +221,84 @@ describe("MessageProcessor — DI surface invariants", () => {
     expect(contentChunks.some((c) => c.content?.includes("=== BRIEFING OUTPUT ==="))).toBe(true);
   });
 
+  // Parity fix (G1): the yield-loop above is UI-only — it never told the
+  // MODEL the hook already ran. Measured live: the model's own reasoning
+  // said "there's a system note about session start: run briefing.sh", then
+  // tried to re-run it itself on a turn with no tools, leaking raw
+  // tool-call markup as its answer (see FINDINGS.md G1/G2). Fixed by ALSO
+  // pushing a `role: "system"` message into `deps.messages` (mirrors the
+  // existing EE-guidance / recall-nudge injections in the same function),
+  // worded so the model knows the content was already shown and should not
+  // repeat or re-run it.
+  it("also injects the SessionStart hook's output as a system message the MODEL can see, ordered before this turn's user message", async () => {
+    const deps = makeDeps({
+      batchApi: true,
+      getSessionStartHookFired: () => false,
+      fireHook: async (input: unknown) => {
+        const hookInput = input as { hook_event_name?: string };
+        if (hookInput.hook_event_name === "SessionStart") {
+          return {
+            blocked: false,
+            blockingErrors: [],
+            preventContinuation: false,
+            additionalContexts: ["=== BRIEFING OUTPUT ==="],
+            results: [],
+            eeMatches: [],
+          };
+        }
+        return {
+          blocked: false,
+          blockingErrors: [],
+          preventContinuation: false,
+          additionalContexts: [],
+          results: [],
+          eeMatches: [],
+        };
+      },
+      processMessageBatchTurn: async function* () {
+        yield { type: "done" };
+      },
+    });
+    const processor = new MessageProcessor(deps);
+    for await (const _c of processor.run("bắt đầu", undefined)) {
+      // drain
+    }
+    const systemMsg = deps.messages.find(
+      (m) => m.role === "system" && typeof m.content === "string" && m.content.includes("=== BRIEFING OUTPUT ==="),
+    );
+    expect(systemMsg).toBeDefined();
+    expect(systemMsg?.content).toMatch(/already shown/i);
+    // Ordered before this turn's own user message, so it reads as prior
+    // context rather than something the user is asking the model about.
+    const systemIdx = deps.messages.indexOf(systemMsg as ModelMessage);
+    const userIdx = deps.messages.findIndex((m) => m.role === "user");
+    expect(systemIdx).toBeGreaterThanOrEqual(0);
+    expect(userIdx).toBeGreaterThan(systemIdx);
+  });
+
+  it("does NOT inject a system message when the SessionStart hook produced no additionalContexts (nothing to tell the model)", async () => {
+    const deps = makeDeps({
+      batchApi: true,
+      getSessionStartHookFired: () => false,
+      fireHook: async () => ({
+        blocked: false,
+        blockingErrors: [],
+        preventContinuation: false,
+        additionalContexts: [],
+        results: [],
+        eeMatches: [],
+      }),
+      processMessageBatchTurn: async function* () {
+        yield { type: "done" };
+      },
+    });
+    const processor = new MessageProcessor(deps);
+    for await (const _c of processor.run("bắt đầu", undefined)) {
+      // drain
+    }
+    expect(deps.messages.some((m) => m.role === "system")).toBe(false);
+  });
+
   it("delegates to deps.runCouncilV2 when auto-council gate is taken", async () => {
     let councilCalled = false;
     const deps = makeDeps({

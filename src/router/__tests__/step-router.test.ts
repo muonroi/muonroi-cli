@@ -67,6 +67,49 @@ describe("decideStepRouting", () => {
     const decision = decideStepRouting("claude-sonnet-4-6", "anthropic", mockConfig({ enabled: false }));
     expect(decision.phase1ModelId).toBe("claude-sonnet-4-6");
   });
+
+  // Parity fix (G3): a project model pin must hold for every step of the
+  // orchestrator turn, not just the first LLM call. See the doc comment on
+  // `opts.pinned` in step-router.ts.
+  describe("opts.pinned (G3: a project pin holds for every step)", () => {
+    it("never downgrades when pinned, even with an enabled config that would otherwise downgrade", () => {
+      const premiumModel = MODELS.find((m) => m.tier === "premium" && m.provider);
+      if (!premiumModel?.provider) return;
+
+      const withoutPin = decideStepRouting(premiumModel.id, premiumModel.provider, mockConfig());
+      // Sanity: this config DOES downgrade when not pinned, on this catalog —
+      // otherwise the next assertion (pinned suppresses it) would be vacuous.
+      expect(withoutPin.phase2ModelId).not.toBeNull();
+
+      const pinned = decideStepRouting(premiumModel.id, premiumModel.provider, mockConfig(), { pinned: true });
+      expect(pinned.phase2ModelId).toBeNull();
+      expect(pinned.phase1ModelId).toBe(premiumModel.id);
+      expect(pinned.reason).toMatch(/pin/i);
+    });
+
+    it("pinned check runs BEFORE cfg.enabled, so it is not bypassable by config or an EE-guided override", () => {
+      const premiumModel = MODELS.find((m) => m.tier === "premium" && m.provider);
+      if (!premiumModel?.provider) return;
+
+      // Even with the config explicitly enabled (the shape an EE-guided
+      // on-the-fly override would produce), pinned still wins.
+      const decision = decideStepRouting(premiumModel.id, premiumModel.provider, mockConfig({ enabled: true }), {
+        pinned: true,
+      });
+      expect(decision.phase2ModelId).toBeNull();
+    });
+
+    it("unpinned (opts omitted, or pinned:false) behaves exactly as before — no regression for non-pinned turns", () => {
+      const premiumModel = MODELS.find((m) => m.tier === "premium" && m.provider);
+      if (!premiumModel?.provider) return;
+
+      const withoutOpts = decideStepRouting(premiumModel.id, premiumModel.provider, mockConfig());
+      const withFalsePin = decideStepRouting(premiumModel.id, premiumModel.provider, mockConfig(), {
+        pinned: false,
+      });
+      expect(withFalsePin.phase2ModelId).toBe(withoutOpts.phase2ModelId);
+    });
+  });
 });
 
 describe("getStepRouterConfig", () => {

@@ -783,8 +783,28 @@ export class MessageProcessor {
       // content-yield path (tool-engine.ts), so without this the very first
       // reply of a session could never show a SessionStart hook's output
       // (e.g. a project's own onboarding briefing script).
-      for (const ctx of sessionStartResult?.additionalContexts ?? []) {
-        if (ctx?.trim()) yield { type: "content", content: `${ctx}\n` };
+      const _sessionStartContexts = (sessionStartResult?.additionalContexts ?? []).filter((ctx) => !!ctx?.trim());
+      for (const ctx of _sessionStartContexts) {
+        yield { type: "content", content: `${ctx}\n` };
+      }
+      // Parity fix: the yield-loop above is UI-only — same gap as the
+      // EE-guidance/recall-nudge system-message injections elsewhere in this
+      // function (search "the model can actually see" in this file). Without
+      // also pushing this into `deps.messages`, the MODEL never learns the
+      // hook already ran: measured live, the model's own reasoning noted "a
+      // system note about session start" and then tried to re-run the hook's
+      // command itself on a turn that had no tools, leaking raw tool-call
+      // markup as its answer. Claude Code's own SessionStart hooks give the
+      // model `additionalContext` worded so it knows the content was already
+      // shown — mirrored here as a `system` message, once per session (same
+      // guard as the display loop above), ordered before this turn's own
+      // user message so it reads as prior context, not a reply to ask about.
+      if (_sessionStartContexts.length > 0) {
+        deps.messages.push({
+          role: "system",
+          content: `[SessionStart hook output — already shown to the user verbatim above; do not re-run it or repeat it]\n${_sessionStartContexts.join("\n")}`,
+        });
+        deps.messageSeqs.push(null);
       }
     }
 
@@ -1516,7 +1536,13 @@ export class MessageProcessor {
         });
       }
     }
-    const stepRouterDecision = decideStepRouting(turnModelId, deps.providerId, stepRouterCfg);
+    // Parity fix (G3): same pin the earlier decide()/forcedModel gate uses
+    // (see "Gap (d) / round-2 fix" above) — SAMR must not downgrade a
+    // pinned orchestrator turn's tool-continuation steps. See
+    // decideStepRouting's `opts.pinned` doc comment in router/step-router.ts.
+    const stepRouterDecision = decideStepRouting(turnModelId, deps.providerId, stepRouterCfg, {
+      pinned: isModelPinnedByProject(),
+    });
     const stepRouterPhase: "phase1" | "phase2" | "done" = stepRouterDecision.phase2ModelId ? "phase1" : "done";
     const phase2Runtime = stepRouterDecision.phase2ModelId
       ? resolveModelRuntime(stepRouterDecision.phase2ModelId, { stage: "main", sessionId: deps.session?.id })
