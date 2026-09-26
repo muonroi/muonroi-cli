@@ -32,6 +32,7 @@ import { type BashSliceMode, bashOutputNotFoundMessage, getBashRun, sliceBashOut
 import { countUncommittedChanges, emptyLedgerRefusalMessage } from "./commit-ledger-refusal.js";
 import { editFile, readFile, readFiles, writeFile } from "./file.js";
 import { FileTracker } from "./file-tracker.js";
+import { beginGitEffectGuard, effectViolationMessage } from "./git-effect-guard.js";
 import {
   analyzeGitCommand,
   checkDestructiveOp,
@@ -182,6 +183,40 @@ function formatResult(result: ToolResult): string {
     return truncateOutput(result.output ?? "OK");
   }
   return truncateOutput(`ERROR: ${result.error ?? result.output ?? "Unknown error"}`);
+}
+
+/**
+ * Round 3 — EFFECT-BASED backstop for `autoCommit: false`. String-parsing a
+ * shell command line for "does this write git history" is an arms race (see
+ * git-safety.ts's `detectBlockedGitSubcommand` module comment); this wraps
+ * EVERY `bash.execute()` call — including a pre-approved safety-override
+ * retry, which skips every pre-execution gate — with a before/after ref
+ * snapshot, regardless of how the command spelled "git". A violation
+ * restores the ref(s) and turns the result into an error; the command's own
+ * stdout/stderr is preserved so the model still sees what actually ran.
+ *
+ * Only pays the extra `git` subprocess calls when the project has disabled
+ * auto-commit (lazy-imported — keeps the LSP-heavy auto-commit module off
+ * the hot bash path when it is not needed, mirroring the G1 commit-gate
+ * import below). `push` is NOT covered here — a push cannot be undone once a
+ * remote has it, so it is still caught pre-execution by the string detector.
+ */
+async function runBashWithEffectGuard(
+  bash: BashTool,
+  command: string,
+  timeout: number,
+  abortSignal: AbortSignal | undefined,
+): Promise<ToolResult> {
+  const { isAutoCommitDisabledByProject } = await import("../orchestrator/auto-commit.js");
+  const guard = isAutoCommitDisabledByProject() ? beginGitEffectGuard(bash.getCwd()) : null;
+  const result = await bash.execute(command, timeout, abortSignal);
+  if (guard) {
+    const violation = guard.finish();
+    if (violation) {
+      return { ...result, success: false, error: effectViolationMessage(violation) };
+    }
+  }
+  return result;
 }
 
 // ee_query routing: tool-artifact rehydration ("tool-artifact id=<id>" / "full
@@ -547,7 +582,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         if (_approvalEntry.kind === "once") {
           _approvedMap.delete(_approvalKey!);
         }
-        const result = await bash.execute(input.command, input.timeout ?? 30000, extra?.abortSignal);
+        const result = await runBashWithEffectGuard(bash, input.command, input.timeout ?? 30000, extra?.abortSignal);
         return formatResult(result);
       }
 
@@ -664,7 +699,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       const repeatedIntent = canonical !== "" && canonical === entry.lastCanonical && entry.lastRunId !== null;
       const prevRunId = entry.lastRunId;
 
-      const result = await bash.execute(input.command, input.timeout ?? 30000, extra?.abortSignal);
+      const result = await runBashWithEffectGuard(bash, input.command, input.timeout ?? 30000, extra?.abortSignal);
       const formatted = formatResult(result);
 
       // Record verification outcome so a later `git push` can be gated on it.

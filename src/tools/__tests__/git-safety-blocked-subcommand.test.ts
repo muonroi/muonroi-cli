@@ -115,4 +115,62 @@ describe("detectBlockedGitSubcommand", () => {
     expect(detectBlockedGitSubcommand("git status && git commit -m x", dir).blocked).toBe(true);
     expect(detectBlockedGitSubcommand("git log; git push", dir).blocked).toBe(true);
   });
+
+  // Round 3 — refuter's fresh HIGH/MEDIUM findings against the string
+  // detector. This module is now a defense-in-depth EARLY warning, not the
+  // sole guarantee (git-effect-guard.ts is the real backstop for anything
+  // except push, which cannot be undone once the remote has it) — but these
+  // cheap fixes still close every concretely-named bypass and false positive.
+
+  it("BYPASS FIX: `\\git` (backslash-escaped to bypass a shell alias/function) is still recognized as git", () => {
+    expect(detectBlockedGitSubcommand("\\git commit -m x", dir).blocked).toBe(true);
+    expect(detectBlockedGitSubcommand("\\git push", dir).blocked).toBe(true);
+  });
+
+  it("BYPASS FIX: an inline `-c alias.<x>=<v>` defined on the SAME line resolves even though it was never persisted", () => {
+    const res = detectBlockedGitSubcommand("git -c alias.x=commit x -m fast-one", dir);
+    expect(res.blocked).toBe(true);
+    expect(res.subcommand).toBe("commit");
+    expect(res.viaAlias).toBe("x");
+  });
+
+  it("BYPASS FIX: `${IFS}`/`$IFS` glued into a word is still whitespace", () => {
+    expect(detectBlockedGitSubcommand("git${IFS}commit${IFS}-m${IFS}x", dir).blocked).toBe(true);
+    expect(detectBlockedGitSubcommand("git$IFS push", dir).blocked).toBe(true);
+  });
+
+  it("normalises `command git ...` and `env ... git ...` (no shell-builtin special-casing needed — `git` is found regardless of what precedes it)", () => {
+    expect(detectBlockedGitSubcommand("command git commit -m x", dir).blocked).toBe(true);
+    expect(detectBlockedGitSubcommand("env FOO=bar git commit -m x", dir).blocked).toBe(true);
+    expect(detectBlockedGitSubcommand("env -i git push", dir).blocked).toBe(true);
+  });
+
+  it("BYPASS FIX: `xargs git` with the subcommand fed from stdin is blocked conservatively", () => {
+    expect(detectBlockedGitSubcommand("echo commit | xargs git", dir).blocked).toBe(true);
+    expect(detectBlockedGitSubcommand("echo push | xargs git", dir).blocked).toBe(true);
+  });
+
+  it("`xargs git <subcommand>` is classified normally when the subcommand is literal text on the line", () => {
+    // The subcommand itself ("log") is fixed in the command line — only the
+    // per-line ARGUMENT comes from stdin — so this is read-only regardless
+    // of what xargs feeds it.
+    expect(detectBlockedGitSubcommand("find . -name '*.ts' | xargs git log --oneline --", dir).blocked).toBe(false);
+    // But a literal writing subcommand after `xargs git` is still blocked.
+    expect(detectBlockedGitSubcommand("echo x | xargs git commit -m", dir).blocked).toBe(true);
+  });
+
+  it("FALSE POSITIVE FIX: `git tag` with no args, `-l`, `--list`, `-n`, or `-v` is read-only", () => {
+    expect(detectBlockedGitSubcommand("git tag", dir).blocked).toBe(false);
+    expect(detectBlockedGitSubcommand("git tag -l", dir).blocked).toBe(false);
+    expect(detectBlockedGitSubcommand("git tag --list", dir).blocked).toBe(false);
+    expect(detectBlockedGitSubcommand("git tag -n", dir).blocked).toBe(false);
+    expect(detectBlockedGitSubcommand("git tag -n5", dir).blocked).toBe(false);
+    expect(detectBlockedGitSubcommand("git tag -v v1.0.0", dir).blocked).toBe(false);
+  });
+
+  it("`git tag` that actually creates/deletes a tag is still blocked", () => {
+    expect(detectBlockedGitSubcommand("git tag v1.0.0", dir).blocked).toBe(true);
+    expect(detectBlockedGitSubcommand("git tag -d v1.0.0", dir).blocked).toBe(true);
+    expect(detectBlockedGitSubcommand("git tag -a v1.0.0 -m x", dir).blocked).toBe(true);
+  });
 });

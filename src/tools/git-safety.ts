@@ -337,6 +337,33 @@ function git(cwd: string, args: string[]): string {
 //      `tag`, `pull`, and a user's own alias (`git ci` -> commit) all write
 //      history or refs just as much and were never classified at all.
 //
+// Round 3: string parsing of an arbitrary shell command line is an arms race
+// (a refuter kept finding new ways to say "git" without the literal token
+// `git`) — this detector is now a defense-in-depth EARLY warning, not the
+// sole guarantee; `git-effect-guard.ts` is the real backstop (it snapshots
+// refs and undoes any it did not expect, regardless of how the command spelled
+// "git"). This detector still matters for `push` specifically — a push
+// cannot be undone once the remote has it, so it must still be caught
+// BEFORE execution. Round-3 additions:
+//   3. `\git` (a literal backslash before the word, the standard way to
+//      bypass a shell alias/function of the same name) didn't match the bare
+//      token `git`.
+//   4. `git${IFS}commit` / `git$IFS commit` — `$IFS` is the shell's field
+//      separator variable; gluing it into a word with no literal whitespace
+//      still splits into two words at RUN time, but a naive whitespace split
+//      never saw two tokens.
+//   5. `-c alias.<x>=<v>` DEFINED on the same command line was never looked
+//      up — only a persisted `git config --get alias.<word>` was checked, so
+//      an inline, never-persisted alias definition sailed through.
+//   6. `echo commit | xargs git` — the actual subcommand comes from stdin at
+//      run time, invisible to any static scan; must be blocked
+//      conservatively UNLESS the command line itself already shows a
+//      concrete (and safe) subcommand right after `git` in that xargs
+//      invocation (`xargs git log` — "log" is fixed text, only the per-line
+//      argument comes from stdin).
+//   7. FALSE POSITIVE fix: `git tag` with no arguments, or only `-l`/
+//      `--list`/`-n`/`-v`, lists/inspects tags — it does not create one.
+//
 // This detector is deliberately separate from `analyzeGitCommand` (used only
 // by the autoCommit-disabled bash-tool gate, registry.ts) rather than a
 // patch to it, because it makes an opposite, INTENTIONALLY more paranoid
@@ -441,9 +468,22 @@ const BLOCKED_SUBCOMMANDS = new Set([
 ]);
 const STASH_WRITE_SUBWORDS = new Set(["push", "store"]);
 const NOTES_WRITE_SUBWORDS = new Set(["add", "append", "edit", "remove", "merge", "prune", "copy"]);
+/** `git tag` with ONLY these (or no args at all) lists/inspects — read-only. */
+const TAG_READ_ONLY_ARG_RE = /^(-l|--list|-n\d*|-v)$/;
+const CLAUSE_BOUNDARY = new Set([";", "&", "|", "(", ")"]);
 
 function stripSurroundingQuotes(token: string): string {
   return token.replace(/^["']+/, "").replace(/["']+$/, "");
+}
+
+/** A leading `\` (the standard way to invoke a name bypassing a shell alias/function of the same spelling). */
+function stripLeadingBackslash(token: string): string {
+  return token.replace(/^\\+/, "");
+}
+
+/** `${IFS}` / `$IFS` glued onto a word still splits it into two words at run time. */
+function normalizeIFS(command: string): string {
+  return command.replace(/\$\{IFS\}|\$IFS\b/g, " ");
 }
 
 /**
@@ -454,36 +494,40 @@ function stripSurroundingQuotes(token: string): string {
  * whitespace split.
  */
 function tokenizeForGitScan(command: string): string[] {
-  return command
+  return normalizeIFS(command)
     .replace(/([;&|()])/g, " $1 ")
     .split(/\s+/)
     .filter(Boolean)
     .map(stripSurroundingQuotes)
+    .map(stripLeadingBackslash)
     .filter(Boolean);
 }
 
-/** One `git ...` occurrence's extracted (not-yet-alias-resolved) subcommand token. */
-function extractGitSubcommandTokens(command: string): string[] {
-  const tokens = tokenizeForGitScan(command);
-  const found: string[] = [];
-  for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i] !== "git") continue;
-    let j = i + 1;
-    while (j < tokens.length) {
-      const t = tokens[j];
-      if (GIT_GLOBAL_FLAGS_WITH_ARG.has(t)) {
-        j += 2;
-        continue;
-      }
-      if (t.startsWith("-")) {
-        j++;
-        continue;
-      }
-      found.push(t);
-      break;
-    }
+/**
+ * Inline `-c alias.<name>=<value>` definitions on THIS command line — a
+ * one-shot alias that never touches persisted config, so `git config --get
+ * alias.<name>` (looked up against the repo) would never see it.
+ */
+function extractInlineAliases(command: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const re = /-c\s+alias\.([a-zA-Z0-9_-]+)=(?:"([^"]*)"|'([^']*)'|(\S+))/g;
+  let m: RegExpExecArray | null = re.exec(command);
+  while (m) {
+    const name = m[1].toLowerCase();
+    const value = (m[2] ?? m[3] ?? m[4] ?? "").trim();
+    if (value) map.set(name, value);
+    m = re.exec(command);
   }
-  return found;
+  return map;
+}
+
+/** [start, end) token-index range of the clause containing `idx` (bounded by `;`/`&`/`|`/`(`/`)`). */
+function clauseRange(tokens: string[], idx: number): [number, number] {
+  let start = idx;
+  while (start > 0 && !CLAUSE_BOUNDARY.has(tokens[start - 1])) start--;
+  let end = idx;
+  while (end < tokens.length && !CLAUSE_BOUNDARY.has(tokens[end])) end++;
+  return [start, end];
 }
 
 export interface BlockedGitSubcommandResult {
@@ -498,46 +542,72 @@ export interface BlockedGitSubcommandResult {
  * True when `command` contains (anywhere, including inside quoted
  * `sh -c`/`bash -c`/`eval` strings) a `git` invocation whose subcommand
  * writes history or a ref — directly, or through a user-defined alias
- * (`git config --get alias.<word>`, resolved one level deep). See the module
+ * (an inline `-c alias.<word>=...` on this line, or a persisted
+ * `git config --get alias.<word>`, resolved one level deep). See the module
  * comment above `GIT_GLOBAL_FLAGS_WITH_ARG` for the full rationale.
  */
 export function detectBlockedGitSubcommand(command: string, cwd: string): BlockedGitSubcommandResult {
-  const subcommandTokens = extractGitSubcommandTokens(command);
-  for (const raw of subcommandTokens) {
-    const [word, ...rest] = raw.split(/(?=[^a-z0-9-])/i); // split off a trailing punctuation blob, if any
-    const candidate = (word ?? raw).toLowerCase();
-    void rest;
-    if (candidate === "stash") continue; // handled via its own subword scan below
-    if (candidate === "notes") continue; // ditto
+  const tokens = tokenizeForGitScan(command);
+  const inlineAliases = extractInlineAliases(command);
+
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] !== "git") continue;
+    const [clauseStart, clauseEnd] = clauseRange(tokens, i);
+
+    let j = i + 1;
+    while (j < clauseEnd && (GIT_GLOBAL_FLAGS_WITH_ARG.has(tokens[j]) || tokens[j].startsWith("-"))) {
+      j += GIT_GLOBAL_FLAGS_WITH_ARG.has(tokens[j]) ? 2 : 1;
+    }
+
+    if (j >= clauseEnd) {
+      // No subcommand token visible on the line for THIS `git` occurrence.
+      // If it is being fed by `xargs` in the same clause, the real
+      // subcommand comes from stdin at run time and cannot be inspected
+      // statically — block conservatively.
+      if (tokens.slice(clauseStart, i).includes("xargs")) {
+        return { blocked: true, subcommand: "xargs-piped(unknown subcommand from stdin)" };
+      }
+      continue;
+    }
+
+    const rawSub = tokens[j];
+    const [word] = rawSub.split(/(?=[^a-z0-9-])/i); // split off a trailing punctuation blob, if any
+    const candidate = (word ?? rawSub).toLowerCase();
+
+    if (candidate === "stash") {
+      const next = tokens[j + 1]?.toLowerCase();
+      if (next && STASH_WRITE_SUBWORDS.has(next)) return { blocked: true, subcommand: `stash ${next}` };
+      continue;
+    }
+    if (candidate === "notes") {
+      const next = tokens[j + 1]?.toLowerCase();
+      if (next && NOTES_WRITE_SUBWORDS.has(next)) return { blocked: true, subcommand: `notes ${next}` };
+      continue;
+    }
+    if (candidate === "tag") {
+      const tagArgs = tokens.slice(j + 1, clauseEnd);
+      // Read-only: no args at all, OR every arg is one of -l/--list/-n[num]/-v,
+      // OR is the operand immediately following -l/--list/-v (a list pattern
+      // or the tag being verified — neither creates/moves a ref).
+      const isReadOnly =
+        tagArgs.length === 0 ||
+        tagArgs.every(
+          (a, idx) => TAG_READ_ONLY_ARG_RE.test(a) || (idx > 0 && /^(-l|--list|-v)$/.test(tagArgs[idx - 1] ?? "")),
+        );
+      if (isReadOnly) continue;
+      return { blocked: true, subcommand: "tag" };
+    }
+
     if (BLOCKED_SUBCOMMANDS.has(candidate)) return { blocked: true, subcommand: candidate };
+
     if (!KNOWN_GIT_SUBCOMMANDS.has(candidate) && /^[a-z][a-z0-9-]*$/.test(candidate)) {
-      const aliasValue = git(cwd, ["config", "--get", `alias.${candidate}`]);
+      const aliasValue = inlineAliases.get(candidate) ?? git(cwd, ["config", "--get", `alias.${candidate}`]);
       if (aliasValue) {
         const aliasTarget = tokenizeForGitScan(aliasValue)[0]?.toLowerCase();
         if (aliasTarget && BLOCKED_SUBCOMMANDS.has(aliasTarget)) {
           return { blocked: true, subcommand: aliasTarget, viaAlias: candidate };
         }
       }
-    }
-  }
-  // `stash push`/`stash store` and `notes <write-subword>` — inspect the
-  // token immediately after each `stash`/`notes` occurrence.
-  const tokens = tokenizeForGitScan(command);
-  for (let i = 0; i < tokens.length - 1; i++) {
-    if (tokens[i] !== "git") continue;
-    // Find the subcommand slot the same way extractGitSubcommandTokens does.
-    let j = i + 1;
-    while (j < tokens.length && (GIT_GLOBAL_FLAGS_WITH_ARG.has(tokens[j]) || tokens[j].startsWith("-"))) {
-      j += GIT_GLOBAL_FLAGS_WITH_ARG.has(tokens[j]) ? 2 : 1;
-    }
-    const sub = tokens[j]?.toLowerCase();
-    if (sub !== "stash" && sub !== "notes") continue;
-    const next = tokens[j + 1]?.toLowerCase();
-    if (sub === "stash" && next && STASH_WRITE_SUBWORDS.has(next)) {
-      return { blocked: true, subcommand: `stash ${next}` };
-    }
-    if (sub === "notes" && next && NOTES_WRITE_SUBWORDS.has(next)) {
-      return { blocked: true, subcommand: `notes ${next}` };
     }
   }
   return { blocked: false };
