@@ -116,6 +116,18 @@
  * whose own HEAD/logs do not. The dead `headSymbolic` field (computed by
  * round 4/5, never read by any check) is removed.
  *
+ * Round 7 (small): the round-6 fingerprint only ever walked `<common-dir>/
+ * refs` — a linked worktree's OWN per-worktree refs (`refs/bisect/*` from
+ * `git bisect`, `refs/worktree/*`) live under `<git-dir>/refs` instead and
+ * were never scanned (only caught by incidental `packed-refs` churn
+ * elsewhere). `computeRefsFingerprint` now also walks `<git-dir>/refs` +
+ * stats `<git-dir>/HEAD`/`logs/HEAD` whenever `gitDir !== commonDir`. Also
+ * added a defensive (unmeasured — this box runs git 2.39.5, which predates
+ * it) fallback for the reftable ref-storage format (git >= 2.44): when a
+ * `reftable/` directory exists under `commonDir`, the fingerprint fast path
+ * is skipped entirely (always mismatches) rather than risk fingerprinting
+ * a format not characterized here.
+ *
  * On a violation the tool result becomes an error (see
  * `effectViolationMessage`) and it is logged — nothing about the repository
  * is ever touched. `git push` remains a separate, still string-based concern
@@ -219,33 +231,10 @@ function resolveGitPaths(cwd: string): GitPaths | null {
   return { gitDir, commonDir };
 }
 
-/**
- * Cheap fs-only stand-in for "would `git for-each-ref` print something
- * different now" — no git subprocess, just `stat()`. Combines `packed-refs`'
- * own (mtime, size, inode) with the same triple for every LOOSE file under
- * `<common-dir>/refs` (sorted, so traversal order never spuriously changes
- * the result). A directory-mtime-only check would be cheaper still, but was
- * measured to be unsafe to rely on in general (see the round-6 header
- * comment) — every file is stat'd individually so a rewrite that reuses an
- * existing filename (`git branch -f` on an existing branch) is never missed
- * regardless of filesystem rename semantics.
- *
- * A mismatch only ever means "go check for real" (`for-each-ref` runs next);
- * it is never itself treated as proof of what changed. So a stat() racing a
- * concurrent ref write and losing (file vanished mid-walk, say) can only
- * cause an unnecessary `for-each-ref` call — never a missed violation.
- */
-function computeRefsFingerprint(paths: GitPaths | null): string {
-  if (!paths) return "";
-  const parts: string[] = [];
-  try {
-    const s = statSync(join(paths.commonDir, "packed-refs"), { bigint: true });
-    parts.push(`P:${s.mtimeNs}:${s.size}:${s.ino}`);
-  } catch {
-    /* no packed-refs is a valid, stable state — absence needs no entry */
-  }
+/** All (mtime, size, inode) entries for every regular file under `root`, recursively. Never throws — an unreadable dir/file is just skipped (see the fingerprint's own doc comment on why that's safe). */
+function statTreeEntries(root: string): string[] {
   const entries: string[] = [];
-  const stack = [join(paths.commonDir, "refs")];
+  const stack = [root];
   while (stack.length > 0) {
     const dir = stack.pop() as string; // length just checked above
     let dirents: Dirent[];
@@ -264,8 +253,83 @@ function computeRefsFingerprint(paths: GitPaths | null): string {
         const s = statSync(full, { bigint: true });
         entries.push(`${full}:${s.mtimeNs}:${s.size}:${s.ino}`);
       } catch {
-        /* raced with a delete mid-walk — see doc comment above */
+        /* raced with a delete mid-walk — see the fingerprint's doc comment */
       }
+    }
+  }
+  return entries;
+}
+
+/**
+ * Cheap fs-only stand-in for "would `git for-each-ref` print something
+ * different now" — no git subprocess, just `stat()`. Combines `packed-refs`'
+ * own (mtime, size, inode) with the same triple for every LOOSE file under
+ * `<common-dir>/refs` (sorted, so traversal order never spuriously changes
+ * the result). A directory-mtime-only check would be cheaper still, but was
+ * measured to be unsafe to rely on in general (see the round-6 header
+ * comment) — every file is stat'd individually so a rewrite that reuses an
+ * existing filename (`git branch -f` on an existing branch) is never missed
+ * regardless of filesystem rename semantics.
+ *
+ * Round 7 fix: PER-WORKTREE refs (`refs/bisect/*`, `refs/worktree/*`, ...)
+ * live under `<git-dir>/refs` in a LINKED worktree, not `<common-dir>/refs` —
+ * a round-6 refuter found `git bisect start/bad/good` run inside a linked
+ * worktree went undetected (only caught by incidental packed-refs churn).
+ * When `gitDir !== commonDir` this now also walks `<git-dir>/refs` and
+ * stats `<git-dir>/HEAD` + `<git-dir>/logs/HEAD` (the per-worktree files —
+ * redundant with the separate `rev-parse HEAD`/`reflog show HEAD` git calls
+ * for the common case, but folding them into the SAME fingerprint this
+ * function returns keeps it self-contained as "everything for-each-ref-
+ * adjacent that could differ").
+ *
+ * Round 7 also fix: reftable (git >= 2.44) stores every ref in a compacted,
+ * rotating table format (`<common-dir>/reftable/`) this function does not
+ * (yet) know how to cheaply and CORRECTLY fingerprint — a table can be
+ * rewritten/compacted in ways not characterized here, and getting this
+ * wrong risks a false "unchanged". Simpler and safe: when a `reftable`
+ * directory exists, skip the fingerprint fast path ENTIRELY — this returns
+ * a fresh, never-repeating value every single call, so `before !==
+ * after` always, and `for-each-ref` always runs for real. (This box runs
+ * git 2.39.5, which predates reftable, so this branch could not be
+ * exercised directly — it is a defensive default, not a measured cost.)
+ *
+ * A mismatch only ever means "go check for real" (`for-each-ref` runs next);
+ * it is never itself treated as proof of what changed. So a stat() racing a
+ * concurrent ref write and losing (file vanished mid-walk, say) can only
+ * cause an unnecessary `for-each-ref` call — never a missed violation.
+ */
+function computeRefsFingerprint(paths: GitPaths | null): string {
+  if (!paths) return "";
+  try {
+    if (statSync(join(paths.commonDir, "reftable")).isDirectory()) {
+      return `reftable-unsupported:${Date.now()}:${Math.random()}`;
+    }
+  } catch {
+    /* no reftable dir — the normal, files-backend case */
+  }
+  const parts: string[] = [];
+  try {
+    const s = statSync(join(paths.commonDir, "packed-refs"), { bigint: true });
+    parts.push(`P:${s.mtimeNs}:${s.size}:${s.ino}`);
+  } catch {
+    /* no packed-refs is a valid, stable state — absence needs no entry */
+  }
+  const entries = statTreeEntries(join(paths.commonDir, "refs"));
+  if (paths.gitDir !== paths.commonDir) {
+    // Linked worktree — its OWN refs/ (bisect, worktree, ...) and its own
+    // HEAD/logs/HEAD live here, not under commonDir.
+    entries.push(...statTreeEntries(join(paths.gitDir, "refs")));
+    try {
+      const s = statSync(join(paths.gitDir, "HEAD"), { bigint: true });
+      parts.push(`H:${s.mtimeNs}:${s.size}:${s.ino}`);
+    } catch {
+      /* HEAD always exists in a real worktree; absence would mean a race — safe to ignore, see doc comment */
+    }
+    try {
+      const s = statSync(join(paths.gitDir, "logs", "HEAD"), { bigint: true });
+      parts.push(`L:${s.mtimeNs}:${s.size}:${s.ino}`);
+    } catch {
+      /* no logs/HEAD is valid (reflog disabled/never created — see limitation 3) */
     }
   }
   entries.sort();

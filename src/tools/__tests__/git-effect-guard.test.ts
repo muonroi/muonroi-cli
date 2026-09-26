@@ -55,6 +55,7 @@ import {
   beginGitEffectGuard,
   effectViolationMessage,
   isInsideGitRepo,
+  snapshotGitEffects,
 } from "../git-effect-guard.js";
 
 function git(cwd: string, args: string[]): string {
@@ -380,6 +381,50 @@ describe("git-effect-guard — detect and report, never mutate (round 4/5)", () 
 
     const forEachRefCalls = __getGitCallLogForTests().filter((a) => a[0] === "for-each-ref");
     expect(forEachRefCalls.length).toBe(2); // before (unconditional) + after (fingerprint changed)
+  });
+
+  it("MEDIUM FIX (round 7): per-worktree refs (git bisect) in a LINKED WORKTREE are scanned by the fingerprint — not just <common-dir>/refs", () => {
+    // Need a second commit so `git bisect good <older>` has a real range.
+    writeFileSync(join(dir, "a.txt"), "two\n");
+    git(dir, ["commit", "-aq", "-m", "second"]);
+    const oldSha = git(dir, ["rev-parse", "HEAD~1"]);
+
+    // Deliberately no "bisect" in this name — `git worktree add` without
+    // `-b` auto-creates a branch named after the worktree's own directory,
+    // which would otherwise leak the substring "bisect" into a refs/heads/*
+    // path and false-pass the "before" assertion below for the wrong reason.
+    const wtDir = join(os.tmpdir(), `git-effect-guard-linked-wt-${Date.now()}`);
+    try {
+      git(dir, ["worktree", "add", "-q", wtDir]); // detaches at current HEAD in the new worktree
+      // The linked worktree's REAL git-dir is under the MAIN repo's own
+      // .git/worktrees/<name>/ — `<wtDir>/.git` is just a pointer FILE to it.
+      const wtGitDir = git(wtDir, ["rev-parse", "--git-dir"]);
+
+      // Snapshot from the LINKED WORKTREE's own perspective, before any
+      // bisect ref exists, AND start a guard at the same moment.
+      const before = snapshotGitEffects(wtDir);
+      expect(before.refsFingerprint).not.toContain("/refs/bisect/");
+      const guard = beginGitEffectGuard(wtDir);
+
+      // Creates refs/bisect/bad + refs/bisect/good-<sha> under the WORKTREE's
+      // OWN git-dir (.git/worktrees/<name>/refs/bisect/...) — NOT under the
+      // common dir's refs/, and with no packed-refs churn to piggyback on.
+      runShell(wtDir, `git bisect start && git bisect bad && git bisect good ${oldSha}`);
+
+      const after = snapshotGitEffects(wtDir);
+      expect(after.refsFingerprint).not.toBe(before.refsFingerprint);
+      // The bisect ref's own path is literally embedded in the fingerprint
+      // string — proof this is the per-worktree refs/ walk catching it, not
+      // an incidental packed-refs mtime change elsewhere.
+      expect(after.refsFingerprint).toContain(join(wtGitDir, "refs", "bisect", "bad"));
+
+      // And the guard, watching this worktree the whole time, reports it.
+      const violation = guard?.finish() ?? null;
+      expect(violation).not.toBeNull();
+    } finally {
+      runShell(wtDir, "git bisect reset");
+      runShell(dir, `git worktree remove --force ${wtDir}`);
+    }
   });
 
   describe("KNOWN LIMITATIONS (round 6) — net-zero sequences with no ref change and no HEAD-reflog entry in the guarded worktree are OUT OF SCOPE by design", () => {
