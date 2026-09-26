@@ -1,18 +1,20 @@
 /**
- * Round 3 — integration test: the EFFECT-BASED `autoCommit: false` backstop
- * (git-effect-guard.ts), wired into registry.ts's bash tool via
- * `runBashWithEffectGuard`, through the FULL pre-execution pipeline
- * (including the round-3-hardened string gate, git-safety.ts's
+ * Round 4 — integration test: the DETECT-AND-REPORT (never mutate)
+ * `autoCommit: false` backstop (git-effect-guard.ts), wired into
+ * registry.ts's bash tool via `runBashWithEffectGuard`, through the FULL
+ * pre-execution pipeline (including the string gate, git-safety.ts's
  * `detectBlockedGitSubcommand`).
  *
- * `\git`/inline `-c alias`/`${IFS}` bypasses are now caught PRE-execution by
- * the (also round-3-fixed) string gate, so they never reach the effect
- * guard here — see `git-safety-blocked-subcommand.test.ts` for those, and
+ * `\git`/inline `-c alias`/`${IFS}` bypasses are caught PRE-execution by the
+ * string gate, so they never reach the effect guard here — see
+ * `git-safety-blocked-subcommand.test.ts` for those, and
  * `__tests__/git-effect-guard.test.ts` for the effect-guard module tested
- * directly (proving IT ALONE still catches all four, independent of the
- * string layer). What's unique to test at THIS (full-pipeline) level is a
- * bypass the string layer can never see at all: a SCRIPT FILE with no
- * literal "git" on the invoking command line.
+ * directly (every round-4 required case: checkout between branches is a
+ * non-event, a script-file commit, a concurrent commit, reset --hard to an
+ * older commit, stash pop). What's unique to test at THIS (full-pipeline)
+ * level is a bypass the string layer can never see at all: a SCRIPT FILE
+ * with no literal "git" on the invoking command line — and that, unlike
+ * round 3, a newly-created ref is left in place, only REPORTED.
  */
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -39,7 +41,7 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
-describe("round 3 — EFFECT-BASED autoCommit guard, full pipeline (registry.ts wiring)", () => {
+describe("round 4 — DETECT-AND-REPORT autoCommit guard, full pipeline (registry.ts wiring)", () => {
   let dir: string;
   let prevCwd: string;
 
@@ -70,7 +72,7 @@ describe("round 3 — EFFECT-BASED autoCommit guard, full pipeline (registry.ts 
     return git(dir, ["rev-parse", "HEAD"]);
   }
 
-  it("catches a commit hidden inside a SCRIPT FILE — no literal 'git' on the bash command line at all", async () => {
+  it("catches a commit hidden inside a SCRIPT FILE — no literal 'git' on the bash command line at all — reported, NOT reverted", async () => {
     const before = baselineHead();
     writeFileSync(join(dir, "a.txt"), "four\n");
     writeFileSync(join(dir, "sneaky.sh"), '#!/bin/sh\ngit commit -am "sneaky via script file"\n');
@@ -84,10 +86,14 @@ describe("round 3 — EFFECT-BASED autoCommit guard, full pipeline (registry.ts 
 
     expect(out).toMatch(/^ERROR:/);
     expect(out).toMatch(/autoCommit is disabled for this project/);
-    expect(baselineHead()).toBe(before);
+    expect(out).toMatch(/nothing was changed/);
+    // Round 4: the commit is REPORTED, never reverted — HEAD legitimately
+    // moved (round 3 would have force-reset it back to `before`).
+    expect(baselineHead()).not.toBe(before);
+    expect(git(dir, ["log", "-1", "--format=%s"])).toBe("sneaky via script file");
   });
 
-  it("restores a newly-created ref (a branch) rather than just moving one back", async () => {
+  it("reports a newly-created ref (a branch) as an error but leaves it in place — round 4 never mutates", async () => {
     const bash = new BashTool(dir);
     const tools = createBuiltinTools(bash, "agent", { sessionId: "EG5" });
 
@@ -95,9 +101,26 @@ describe("round 3 — EFFECT-BASED autoCommit guard, full pipeline (registry.ts 
 
     expect(out).toMatch(/^ERROR:/);
     expect(out).toMatch(/refs\/heads\/sneaky-branch/);
-    // The branch ref must actually be gone again, not merely reported.
+    expect(out).toMatch(/nothing was changed/);
+    // Round 3 deleted it again; round 4 must leave it exactly as the
+    // command made it.
     const branches = git(dir, ["branch", "--list"]);
-    expect(branches).not.toContain("sneaky-branch");
+    expect(branches).toContain("sneaky-branch");
+  });
+
+  it("`git checkout` between two existing branches is a non-event through the full pipeline (no violation, no ref touched)", async () => {
+    git(dir, ["branch", "other"]);
+    const masterBefore = git(dir, ["rev-parse", "master"]);
+    const otherBefore = git(dir, ["rev-parse", "other"]);
+    const bash = new BashTool(dir);
+    const tools = createBuiltinTools(bash, "agent", { sessionId: "EG10" });
+
+    const out = await runBash(tools, "git checkout other");
+
+    expect(out).not.toMatch(/^ERROR:/);
+    expect(out).not.toMatch(/autoCommit is disabled/);
+    expect(git(dir, ["rev-parse", "master"])).toBe(masterBefore);
+    expect(git(dir, ["rev-parse", "other"])).toBe(otherBefore);
   });
 
   it("does NOT wrap/restore anything when autoCommit is not disabled (default project settings)", async () => {

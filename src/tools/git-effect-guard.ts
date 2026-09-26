@@ -1,37 +1,40 @@
 /**
  * src/tools/git-effect-guard.ts
  *
- * Round 3 — string parsing of an arbitrary shell command line is an arms
- * race: a refuter kept finding new spellings of "git" (`\git`, `git -c
- * alias.x=commit x`, `git${IFS}commit`, `echo commit | xargs git`, ...) that
- * `git-safety.ts`'s `detectBlockedGitSubcommand` (a text classifier) either
- * missed or, in the `git tag -l` case, over-blocked. Text classification
- * cannot be made complete against an adversarial command line — there is
- * always one more way to spell a word a shell will still execute.
+ * Round 3 made the `autoCommit: false` guarantee effect-based (detect a ref
+ * change no matter how the command spelled "git", since string parsing an
+ * arbitrary shell line is an arms race) — but round 3's AUTO-RESTORE
+ * (`update-ref` back to the snapshot, or `-d` on a newly-created ref) was
+ * itself destructive, and a round-4 refuter broke it three ways:
+ *   1. HIGH — a benign `git checkout other` made the guard run
+ *      `update-ref HEAD <old-sha>` through the symbolic HEAD, which
+ *      rewrote `other`'s OWN tip and orphaned its commits. Repro'd.
+ *   2. HIGH — another session's legitimate commit landing in the same
+ *      window got silently reverted — this guard has no way to know a ref
+ *      change was ITS command's doing versus a concurrent session's.
+ *   3. MEDIUM — `stash pop` (apply + drop) was left half-restored.
  *
- * This module makes the `autoCommit: false` guarantee EFFECT-BASED instead:
- * regardless of HOW the command spelled "git", if it moved or created a ref,
- * that is undone after the fact.
+ * Round 4: DETECT AND REPORT, NEVER MUTATE REFS. This module now only ever
+ * reads (`for-each-ref`, `symbolic-ref`, `log`) — no `update-ref`, `reset`,
+ * or `stash` call exists anywhere in it. A violation is:
+ *   - a NEW commit object created during the guarded window (found via
+ *     `git log --all --reflog --since=<window start>`, so it catches a
+ *     commit on any branch, a detached HEAD, or one only reachable via
+ *     reflog — filtered against a full "reachable before" snapshot so a
+ *     commit that already existed is never misclassified as new); or
+ *   - an EXISTING (already-reachable) commit that a NAMED ref (`for-each-ref`
+ *     — branch, tag, remote-tracking, `refs/stash`) now points to instead of
+ *     its snapshot value (`git reset`, `git update-ref`, a force-moved tag).
+ * A plain `git checkout <branch>` is NEVER a violation on its own: HEAD is
+ * symbolic and not enumerated by `for-each-ref`, so switching which branch
+ * HEAD follows changes no named ref's OWN recorded value — this needs no
+ * special-casing, it falls out of only ever diffing `for-each-ref` entries.
  *
- * Contract (see `runWithGitEffectGuard`):
- *   1. Before the command runs: snapshot every ref (`for-each-ref`), HEAD,
- *      the HEAD reflog length, and `git stash list`. A no-op (not a git
- *      repo, or the project has not disabled autoCommit) returns `null` —
- *      the caller runs the command with no wrapping at all.
- *   2. Run the command.
- *   3. After: re-snapshot and diff.
- *      - A ref that changed value is restored to its snapshot SHA via
- *        `git update-ref <ref> <old-sha>`.
- *      - A ref that did not exist before is deleted via `git update-ref -d`.
- *      - The commits themselves are NOT deleted (unreachable-but-present,
- *        recoverable via reflog for a good while) — only the ref that made
- *        them reachable moves back. Nothing is lost; the tool result is
- *        simply marked an error so the model (and the user, reading the
- *        transcript) knows the write did not stick.
- *   4. `git push` is a SEPARATE, still string-based concern
- *      (`detectBlockedGitSubcommand`/registry.ts) — a push cannot be undone
- *      once a remote has it, so it must still be caught BEFORE execution;
- *      this module only ever repairs LOCAL ref state.
+ * On a violation the tool result becomes an error (see
+ * `effectViolationMessage`) and it is logged — nothing about the repository
+ * is ever touched. `git push` remains a separate, still string-based concern
+ * (`detectBlockedGitSubcommand`/registry.ts) — a push cannot be undone once
+ * a remote has it, so it must still be caught BEFORE execution.
  */
 import { spawnSync } from "node:child_process";
 import { logger } from "../utils/logger.js";
@@ -52,17 +55,15 @@ export function isInsideGitRepo(cwd: string): boolean {
 }
 
 export interface GitEffectSnapshot {
-  /** refname -> objectname (sha), from `for-each-ref`. Includes `refs/stash` when present. */
+  /** refname -> objectname (sha), from `for-each-ref`. Includes `refs/stash` when present. Never contains "HEAD" — for-each-ref doesn't enumerate it, which is exactly what makes a plain branch-switching checkout a non-event here. */
   refs: Record<string, string>;
-  /** `git rev-parse HEAD` — null on a repo with no commits yet (or detached-HEAD-less edge cases). */
-  headSha: string | null;
-  /** Line count of `git reflog show HEAD` — an extra detection signal, not itself restored. */
-  reflogCount: number;
-  /** Raw `git stash list` output — an extra detection signal, not itself restored. */
-  stashList: string;
+  /** Every commit sha reachable from any ref OR reflog entry, at snapshot time (`git log --all --reflog --format=%H`). Used to tell a genuinely NEW commit apart from an old one a ref merely started pointing at again. */
+  reachable: Set<string>;
+  /** Unix seconds at snapshot time — the window start for the post-command `--since` query. */
+  startEpochSec: number;
 }
 
-/** Snapshot every ref + HEAD + the HEAD reflog length + the stash list. Never throws. */
+/** Snapshot every ref + the full reachable-commit set + the window start. Never throws. Read-only. */
 export function snapshotGitEffects(cwd: string): GitEffectSnapshot {
   const refs: Record<string, string> = {};
   const refsOut = git(cwd, ["for-each-ref", "--format=%(refname) %(objectname)"]);
@@ -75,78 +76,88 @@ export function snapshotGitEffects(cwd: string): GitEffectSnapshot {
       refs[trimmed.slice(0, idx)] = trimmed.slice(idx + 1);
     }
   }
-  const headOut = git(cwd, ["rev-parse", "HEAD"]);
-  const headSha = headOut.ok && headOut.stdout.trim() ? headOut.stdout.trim() : null;
-  const reflogOut = git(cwd, ["reflog", "show", "HEAD"]);
-  const reflogCount = reflogOut.ok ? reflogOut.stdout.split("\n").filter((l) => l.trim()).length : 0;
-  const stashOut = git(cwd, ["stash", "list"]);
-  const stashList = stashOut.ok ? stashOut.stdout : "";
-  return { refs, headSha, reflogCount, stashList };
+  const reachable = new Set<string>();
+  const logOut = git(cwd, ["log", "--all", "--reflog", "--format=%H"]);
+  if (logOut.ok) {
+    for (const line of logOut.stdout.split("\n")) {
+      const sha = line.trim();
+      if (sha) reachable.add(sha);
+    }
+  }
+  return { refs, reachable, startEpochSec: Math.floor(Date.now() / 1000) };
 }
 
 export interface GitEffectViolation {
-  /** Every ref name (including the synthetic `"HEAD"`) that changed or was created. */
-  changedRefs: string[];
-  /** Refs successfully restored to their snapshot value (or deleted, if newly created). */
-  restoredRefs: string[];
-  /** Refs a restore attempt failed for, with git's own error. */
-  restoreErrors: Array<{ ref: string; error: string }>;
+  /** Commit shas created during the guarded window (not reachable before it started). */
+  newCommits: string[];
+  /** Named refs (for-each-ref entries) that now point at one of `newCommits`. */
+  refsWithNewCommits: string[];
+  /** Named refs whose value changed to something that already existed before (reset/force-move/re-tag), NOT a new commit. */
+  movedToExistingRefs: string[];
 }
 
 /**
- * Diff `before` vs `after` and restore any ref that changed or was newly
- * created back to its snapshot state. Returns `null` when nothing changed
- * (the common, expected case — most bash calls touch no ref at all).
+ * Compare `before` (captured pre-command) against a FRESH snapshot and
+ * report — never mutate — any violation. Returns `null` when nothing
+ * happened (the overwhelmingly common case: most commands touch no ref and
+ * create no commit at all).
  */
-export function restoreGitEffects(
-  cwd: string,
-  before: GitEffectSnapshot,
-  after: GitEffectSnapshot,
-): GitEffectViolation | null {
-  const changedRefs: string[] = [];
-  const restoredRefs: string[] = [];
-  const restoreErrors: Array<{ ref: string; error: string }> = [];
+export function detectGitEffectViolation(cwd: string, before: GitEffectSnapshot): GitEffectViolation | null {
+  const after = snapshotGitEffects(cwd);
 
+  // 1. New commit objects: anything with committer-time >= the window start
+  // that was NOT already reachable before. `--since` narrows the candidate
+  // set (cheap); the `before.reachable` check is what actually decides "new"
+  // — a same-second coincidence, or a commit whose date was set explicitly,
+  // is still correctly excluded if its sha was already present beforehand.
+  const newCommits: string[] = [];
+  const sinceOut = git(cwd, ["log", "--all", "--reflog", "--format=%H %ct", `--since=@${before.startEpochSec - 1}`]);
+  if (sinceOut.ok) {
+    for (const line of sinceOut.stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const idx = trimmed.lastIndexOf(" ");
+      if (idx < 0) continue;
+      const sha = trimmed.slice(0, idx);
+      const ct = Number(trimmed.slice(idx + 1));
+      if (Number.isFinite(ct) && ct >= before.startEpochSec && !before.reachable.has(sha)) {
+        newCommits.push(sha);
+      }
+    }
+  }
+  const newCommitSet = new Set(newCommits);
+
+  // 2. Named-ref diff. A ref pointing at a NEW commit is reported alongside
+  // it; a ref pointing at something ELSE that changed (and is not new) moved
+  // to an already-existing commit — a reset, a force-push-style local
+  // update-ref, a tag recreated at an old sha, etc. HEAD is never a key
+  // here (for-each-ref doesn't enumerate it) — a plain `checkout <branch>`
+  // therefore produces zero entries in this loop by construction.
+  const refsWithNewCommits: string[] = [];
+  const movedToExistingRefs: string[] = [];
   const names = new Set([...Object.keys(before.refs), ...Object.keys(after.refs)]);
   for (const name of names) {
     const beforeSha = before.refs[name];
     const afterSha = after.refs[name];
     if (beforeSha === afterSha) continue;
-    changedRefs.push(name);
-    if (beforeSha) {
-      const r = git(cwd, ["update-ref", name, beforeSha]);
-      if (r.ok) restoredRefs.push(name);
-      else restoreErrors.push({ ref: name, error: r.stderr.trim() || "update-ref failed" });
-    } else {
-      // Newly created — delete it. The commit(s) it pointed at stay
-      // reachable via the reflog (HEAD's, or the deleted ref's own, briefly)
-      // — nothing is lost, only the thing that made them reachable by NAME.
-      const r = git(cwd, ["update-ref", "-d", name]);
-      if (r.ok) restoredRefs.push(name);
-      else restoreErrors.push({ ref: name, error: r.stderr.trim() || "update-ref -d failed" });
+    if (afterSha && newCommitSet.has(afterSha)) {
+      refsWithNewCommits.push(name);
+    } else if (afterSha) {
+      // Changed (or newly created) but points at something that already
+      // existed prior to this window — a pure ref move, not a new commit.
+      movedToExistingRefs.push(name);
     }
+    // A ref that DISAPPEARED (afterSha undefined) is not itself flagged —
+    // only creating/moving a ref is in scope here.
   }
 
-  // HEAD itself — covers a detached-HEAD commit, which moves no NAMED ref
-  // `for-each-ref` would report, only what HEAD points at directly.
-  if (before.headSha !== after.headSha) {
-    changedRefs.push("HEAD");
-    if (before.headSha) {
-      const r = git(cwd, ["update-ref", "HEAD", before.headSha]);
-      if (r.ok) restoredRefs.push("HEAD");
-      else restoreErrors.push({ ref: "HEAD", error: r.stderr.trim() || "update-ref HEAD failed" });
-    }
-  }
+  if (newCommits.length === 0 && movedToExistingRefs.length === 0) return null;
 
-  const reflogGrew = after.reflogCount > before.reflogCount;
-  const stashChanged = after.stashList !== before.stashList;
-  if (changedRefs.length === 0 && !reflogGrew && !stashChanged) return null;
-
-  return { changedRefs, restoredRefs, restoreErrors };
+  return { newCommits, refsWithNewCommits, movedToExistingRefs };
 }
 
 export interface EffectGuardHandle {
-  /** Re-snapshot and restore. Call exactly once, after the guarded command finishes. */
+  /** Re-snapshot and detect (read-only). Call exactly once, after the guarded command finishes. */
   finish(): GitEffectViolation | null;
 }
 
@@ -162,16 +173,15 @@ export function beginGitEffectGuard(cwd: string): EffectGuardHandle | null {
   const before = snapshotGitEffects(cwd);
   return {
     finish(): GitEffectViolation | null {
-      const after = snapshotGitEffects(cwd);
-      const violation = restoreGitEffects(cwd, before, after);
+      const violation = detectGitEffectViolation(cwd, before);
       if (violation) {
         logger.error(
           "cli",
-          "[git-effect-guard] command created/moved git ref(s) while autoCommit is disabled — restored",
+          "[git-effect-guard] command created or moved git ref(s) while autoCommit is disabled — reported, NOT reverted",
           {
-            changedRefs: violation.changedRefs,
-            restoredRefs: violation.restoredRefs,
-            restoreErrors: violation.restoreErrors,
+            newCommits: violation.newCommits,
+            refsWithNewCommits: violation.refsWithNewCommits,
+            movedToExistingRefs: violation.movedToExistingRefs,
             cwd,
           },
         );
@@ -181,11 +191,19 @@ export function beginGitEffectGuard(cwd: string): EffectGuardHandle | null {
   };
 }
 
-/** Human-readable refusal message for a tool result, given a violation. */
+/** Human-readable message for a tool result, given a violation. Never implies anything was undone. */
 export function effectViolationMessage(violation: GitEffectViolation): string {
-  const list = violation.changedRefs.join(", ");
-  const base = `autoCommit is disabled for this project: the command created or moved git refs (${list}); they were restored.`;
-  if (violation.restoreErrors.length === 0) return base;
-  const failed = violation.restoreErrors.map((e) => `${e.ref} (${e.error})`).join(", ");
-  return `${base} WARNING: failed to restore: ${failed} — manual cleanup may be needed.`;
+  const clauses: string[] = [];
+  if (violation.newCommits.length > 0) {
+    const shas = violation.newCommits.map((s) => s.slice(0, 12)).join(", ");
+    const refs = violation.refsWithNewCommits.length > 0 ? violation.refsWithNewCommits.join(", ") : "(no current ref)";
+    clauses.push(`new commit(s) ${shas} appeared under ${refs}`);
+  }
+  if (violation.movedToExistingRefs.length > 0) {
+    clauses.push(`ref(s) ${violation.movedToExistingRefs.join(", ")} moved to a different, pre-existing commit`);
+  }
+  return (
+    `autoCommit is disabled for this project: ${clauses.join("; ")} while this command ran; nothing was changed; ` +
+    "if it was yours, undo it (e.g. git reset), if it may be another session's, leave it"
+  );
 }
