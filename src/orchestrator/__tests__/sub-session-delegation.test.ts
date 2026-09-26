@@ -25,9 +25,15 @@ vi.mock("ai", async (importOriginal) => {
 
 // 1. Mock classifySubSessionAction
 const mockClassifySubSessionAction = vi.fn();
+// Round 4 (G9): relatedness classifier for the resume-vs-fork decision.
+// Defaults to "related" so a plain resume scenario still resumes without
+// every test in this file having to opt in explicitly; the two tests that
+// specifically exercise unrelated-forks-fresh override it per-case.
+const mockClassifySubSessionRelatedness = vi.fn().mockResolvedValue({ related: true, confidence: 0.9 });
 vi.mock("../../pil/llm-classify.js", () => {
   return {
     classifySubSessionAction: (...args: any[]) => (mockClassifySubSessionAction as any).apply(null, args),
+    classifySubSessionRelatedness: (...args: any[]) => (mockClassifySubSessionRelatedness as any).apply(null, args),
   };
 });
 
@@ -405,12 +411,23 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
       confidence: 0.98,
       reason: "requires sub-session",
     });
+    // Round 4 (G9): resume also requires a recorded goal that the relatedness
+    // classifier confirms is the SAME task — see shouldResumeSubSession.
+    mockClassifySubSessionRelatedness.mockResolvedValueOnce({
+      related: true,
+      confidence: 0.95,
+      reason: "same task, continuing",
+    });
 
     // Mock active sub-session row lookup
     mockDb.prepare.mockImplementation((sql: string) => {
       if (sql.includes("status = 'active'")) {
         return {
-          get: () => ({ id: "session-active-child" }),
+          get: () => ({
+            id: "session-active-child",
+            title: "Implement auth and write tests",
+            updated_at: new Date().toISOString(),
+          }),
           run: () => ({ changes: 1 }),
           all: () => [],
         };

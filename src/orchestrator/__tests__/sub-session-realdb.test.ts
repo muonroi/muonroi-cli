@@ -30,8 +30,15 @@ const FINAL_OUTCOME = "FINAL structured outcome for the parent";
 
 // Force the router to choose SPAWN_SUB_SESSION (the path under test).
 const mockClassify = vi.fn();
+// Round 4 (G9): relatedness classifier for the resume-vs-fork decision.
+// Defaults to "related" so every PRE-EXISTING test in this file (none of
+// which exercise a resume — each SPAWN test makes exactly one
+// processMessage() call, so `activeSubSession` is never found) is
+// unaffected; G9's own tests override this per-case.
+const mockRelatedness = vi.fn().mockResolvedValue({ related: true, confidence: 0.9, reason: "same task" });
 vi.mock("../../pil/llm-classify.js", () => ({
   classifySubSessionAction: (...a: unknown[]) => (mockClassify as (...x: unknown[]) => unknown)(...a),
+  classifySubSessionRelatedness: (...a: unknown[]) => (mockRelatedness as (...x: unknown[]) => unknown)(...a),
 }));
 
 // Round 3 (MEDIUM correction to G3 HIGH): spies on every `resolveModelForTask`
@@ -455,5 +462,92 @@ describe("_resolveModelForTask — round 3: the pin applies to delegated dispatc
       process.chdir(prevCwd);
       fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
+  });
+});
+
+// Round 4 (G9): an unrelated request must fork a FRESH sub-session instead of
+// resuming an active one purely because it is recent. Measured live: session
+// 69e68c766fcf's "hunt/stage0" request resumed the unrelated SEAL-challenge
+// sub-session's 29-message context.
+describe("sub-session resume vs. fork — round 4 (G9)", () => {
+  it("an UNRELATED second request does NOT resume the active sub-session: it is marked abandoned and a fresh one is forked", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    mockRelatedness.mockResolvedValueOnce({ related: false, confidence: 0.9, reason: "different repo/task entirely" });
+
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId()!;
+
+    for await (const _ of agent.processMessage("seal challenge precommit-working-set-drift")) {
+      // drain
+    }
+    const db = getDatabase();
+    const firstChild = db
+      .prepare("SELECT id, title, status FROM sessions WHERE parent_session_id = ? ORDER BY created_at ASC LIMIT 1")
+      .get(parentId) as { id: string; title: string | null; status: string };
+    expect(firstChild.title).toBe("seal challenge precommit-working-set-drift");
+
+    for await (const _ of agent.processMessage("tìm repo Python mới và dựng bài tới hết stage0")) {
+      // drain
+    }
+
+    const children = db
+      .prepare("SELECT id, title, status FROM sessions WHERE parent_session_id = ? ORDER BY created_at ASC")
+      .all(parentId) as Array<{ id: string; title: string | null; status: string }>;
+    expect(children).toHaveLength(2); // the old one was NOT reused — a second, distinct child was created
+    const oldChild = children.find((c) => c.id === firstChild.id)!;
+    const newChild = children.find((c) => c.id !== firstChild.id)!;
+    expect(oldChild.status).toBe("abandoned"); // marked abandoned, not silently left "active" with stale content
+    expect(newChild.title).toBe("tìm repo Python mới và dựng bài tới hết stage0");
+    // The relatedness classifier was actually consulted with the OLD sub-session's
+    // recorded goal and the NEW request — proving the decision is real, not a stub.
+    expect(mockRelatedness).toHaveBeenCalledWith(
+      expect.anything(),
+      "tìm repo Python mới và dựng bài tới hết stage0",
+      "seal challenge precommit-working-set-drift",
+    );
+  });
+
+  it("a RELATED second request DOES resume the active sub-session (no regression)", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    mockRelatedness.mockResolvedValueOnce({ related: true, confidence: 0.95, reason: "same challenge, follow-up" });
+
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId()!;
+
+    for await (const _ of agent.processMessage("seal challenge precommit-working-set-drift")) {
+      // drain
+    }
+    const db = getDatabase();
+    const firstChild = db
+      .prepare("SELECT id FROM sessions WHERE parent_session_id = ? ORDER BY created_at ASC LIMIT 1")
+      .get(parentId) as { id: string };
+
+    for await (const _ of agent.processMessage("done_check báo lỗi gì vậy, xem lại giúp tôi")) {
+      // drain
+    }
+
+    const children = db.prepare("SELECT id, status FROM sessions WHERE parent_session_id = ?").all(parentId) as Array<{
+      id: string;
+      status: string;
+    }>;
+    expect(children).toHaveLength(1); // the SAME sub-session was reused, not forked again
+    expect(children[0]!.id).toBe(firstChild.id);
+    expect(children[0]!.status).toBe("active");
+  });
+
+  it("no active sub-session at all still forks fresh without ever consulting the relatedness classifier (nothing to compare against)", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId()!;
+
+    for await (const _ of agent.processMessage("first task ever for this session")) {
+      // drain
+    }
+
+    expect(mockRelatedness).not.toHaveBeenCalled();
+    const db = getDatabase();
+    const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId);
+    expect(children).toHaveLength(1);
   });
 });

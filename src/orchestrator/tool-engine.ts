@@ -175,6 +175,7 @@ import { foldDynamicTailIntoUserMessage, splitFrontAndDynamicTail } from "./cach
 import { consumeProactiveCompact, getCompactionFocus } from "./compact-request.js";
 import { relaxCompactionSettings } from "./compaction";
 import { evaluateCompactionConsult } from "./compaction-consult.js";
+import { takeProposerStallNotice } from "./compaction-stall-notice.js";
 import { buildConvergenceMirror } from "./convergence-mirror.js";
 import type { CouncilManager } from "./council-manager.js";
 import { consumeCouncilConvene, hasPendingCouncilConvene, peekCouncilConveneToolCallId } from "./council-request.js";
@@ -1217,6 +1218,17 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           : deps.getCompactionSettings(contextWindow);
         if (contextWindow) {
           await deps.compactForContext(provider, system, contextWindow, signal, settings, attemptedOverflowRecovery);
+          // Round 4 (G8 HIGH): `compactForContext`'s proposer call is bounded
+          // and pings the turn watchdog now (compaction.ts), but a genuine
+          // stall/timeout still falls back "gracefully" (no compaction this
+          // turn) with no user-visible signal on its own — it's a plain
+          // `async function`, not a generator, so it cannot yield a toast
+          // itself. Surface it here instead of leaving the user to wonder
+          // why the turn paused for a while with nothing on screen.
+          const stallNotice = takeProposerStallNotice();
+          if (stallNotice) {
+            yield { type: "toast", toastLevel: "warn", content: stallNotice };
+          }
         }
 
         // Vision-tool gate: for vision-proxy (text-only) models the registry

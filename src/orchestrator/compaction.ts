@@ -2,10 +2,13 @@ import type { ModelMessage } from "ai";
 import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
 import { resolveModelRuntime, resolveTemperatureParam, shouldDropParam } from "../providers/runtime.js";
 import { generateTextStreamed } from "../providers/streamed-generate.js";
+import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
 import { COMPACT_PROPOSER_SYSTEM_PROMPT } from "./compaction-proposer-prompt.js";
+import { markProposerStalled } from "./compaction-stall-notice.js";
 import { containsEncryptedReasoning } from "./reasoning";
 import { countTokens } from "./token-counter.js";
+import { pingTurnProgress } from "./turn-progress.js";
 
 /**
  * A single action the compaction proposer model wants to take on one message.
@@ -26,37 +29,115 @@ export interface CompactionProposal {
 }
 
 /**
+ * Round 4 (G8 HIGH): wall-clock budget for ONE proposer attempt, and the
+ * bounded number of attempts. Default 30s x 2 attempts = 60s worst case for
+ * this pre-check, well under the top-level turn watchdog's 120s idle window
+ * — and each attempt gets its OWN fresh window via `pingTurnProgress()`
+ * below regardless. Env-overridable; clamped to [1s, 120s] — the floor is
+ * deliberately low enough for a fast, real-timer test (see
+ * compaction-proposer-stall.test.ts) while still ruling out an accidental
+ * near-zero value silently defeating the bound (0/negative would, per
+ * llm-deadline.ts's own convention, arm no timer at all).
+ */
+function getProposerDeadlineMs(): number {
+  const raw = Number.parseInt(process.env.MUONROI_COMPACTION_PROPOSER_TIMEOUT_MS ?? "", 10);
+  if (Number.isFinite(raw) && raw >= 1_000 && raw <= 120_000) return raw;
+  return 30_000;
+}
+const PROPOSER_MAX_ATTEMPTS = 2;
+
+/**
  * Call the model to propose what to compact/keep/drop.
  * The model sees the current messages and decides whether compaction is needed at all.
  * Returns null if the proposer call fails (caller should fall back gracefully).
+ *
+ * Root cause it fixes (G8 HIGH, measured live — session 69e68c766fcf): this
+ * call runs INSIDE the pre-stream setup of `executeToolEngine`, entirely
+ * BEFORE the main model call's own `pingTurnProgress()` (tool-engine.ts).
+ * It used to be a bare, unbounded `await` — no deadline, no forward-progress
+ * ping. A slow (not hung) proposer round-trip therefore burned the ENTIRE
+ * top-level turn watchdog idle window with ZERO signal, so a turn that was
+ * legitimately still working got killed as "produced no output for 120s".
+ * Fixed two ways: `pingTurnProgress()` before every attempt (same signal the
+ * main call already sends, so this auxiliary call is no longer invisible to
+ * the watchdog — see turn-progress.ts), and a bounded wall-clock deadline +
+ * bounded retry (`withTimeoutSignal` + `withDeadlineRace`, the same
+ * established non-streaming-LLM-call guard `llm-deadline.ts` already
+ * provides for other pre-flight calls) so the call itself can no longer run
+ * unbounded even if the provider genuinely stalls. On a final timeout,
+ * `markProposerStalled` records a user-visible notice — the caller
+ * (tool-engine.ts's pre-stream compaction check) surfaces it as a toast,
+ * since this function is a plain `async function` with no way to yield one
+ * itself. Claude Code parity: no hard no-output kill while work is ongoing.
  */
 export async function proposeCompaction(
   modelId: string,
   messages: ModelMessage[],
   signal?: AbortSignal,
 ): Promise<CompactionProposal | null> {
-  try {
-    const runtime = resolveModelRuntime(modelId);
-    const serialized = serializeConversation(messages);
+  const runtime = resolveModelRuntime(modelId);
+  const serialized = serializeConversation(messages);
+  const deadlineMs = getProposerDeadlineMs();
 
-    const result = await generateTextStreamed({
-      model: runtime.model,
-      system: COMPACT_PROPOSER_SYSTEM_PROMPT,
-      prompt: `Current conversation messages:\n\n${serialized}\n\nDecide if compaction is needed and what to keep/drop/summarize. Return strict JSON.`,
-      abortSignal: signal,
-      maxRetries: 1,
-      ...resolveTemperatureParam(runtime, 0.1),
-      // shouldDropParam — NOT capabilities.acceptsParam alone. The catalog can
-      // say the model accepts `maxOutputTokens` while the OAuth provider
-      // registry rejects it (`unsupportedParams`); ChatGPT Codex answers HTTP
-      // 400 `Unsupported parameter: max_output_tokens`. Session bce44da8134d:
-      // the proposer 400'd, the summary call below 400'd too, and the summary
-      // throw killed the whole turn before streamText ever ran.
-      ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 2048 }),
-      ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
-    });
+  for (let attempt = 1; attempt <= PROPOSER_MAX_ATTEMPTS; attempt++) {
+    pingTurnProgress();
+    // The abort-signal's OWN timer is armed slightly LATER than the race
+    // below — it exists only for clean HTTP-level cancellation, not as the
+    // authoritative bound. `withDeadlineRace`'s identically-`deadlineMs`
+    // timer is the caller-facing guarantee; giving the signal a small grace
+    // window ensures the race's own, deterministically-worded timeout error
+    // (matched by `isTimeout` below) is always what wins and gets thrown,
+    // instead of racing two same-length timers against each other.
+    const { signal: timedSignal, cleanup } = withTimeoutSignal(signal, deadlineMs + 2_000);
+    let text: string;
+    try {
+      const result = await withDeadlineRace(
+        () =>
+          generateTextStreamed({
+            model: runtime.model,
+            system: COMPACT_PROPOSER_SYSTEM_PROMPT,
+            prompt: `Current conversation messages:\n\n${serialized}\n\nDecide if compaction is needed and what to keep/drop/summarize. Return strict JSON.`,
+            abortSignal: timedSignal,
+            maxRetries: 1,
+            ...resolveTemperatureParam(runtime, 0.1),
+            // shouldDropParam — NOT capabilities.acceptsParam alone. The catalog can
+            // say the model accepts `maxOutputTokens` while the OAuth provider
+            // registry rejects it (`unsupportedParams`); ChatGPT Codex answers HTTP
+            // 400 `Unsupported parameter: max_output_tokens`. Session bce44da8134d:
+            // the proposer 400'd, the summary call below 400'd too, and the summary
+            // throw killed the whole turn before streamText ever ran.
+            ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 2048 }),
+            ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+          }),
+        deadlineMs,
+        "compaction proposer",
+        signal,
+      );
+      text = result.text.trim();
+    } catch (err) {
+      const isTimeout = err instanceof Error && /deadline|timeout/i.test(err.message);
+      if (isTimeout && attempt < PROPOSER_MAX_ATTEMPTS) {
+        logger.warn("orchestrator", "Compaction proposer stalled — bounded retry", { attempt, deadlineMs });
+        cleanup();
+        continue;
+      }
+      if (isTimeout) {
+        markProposerStalled(
+          `Compaction check timed out after ${PROPOSER_MAX_ATTEMPTS} attempt(s) (${Math.round(deadlineMs / 1000)}s each) — continuing without it.`,
+        );
+      }
+      // Proposer failure is non-fatal — caller falls back to heuristic or no-compact.
+      // Error instances serialize to "{}" via JSON.stringify (message/stack are
+      // non-enumerable), so the logger's appendToFile/formatConsole JSON.stringify
+      // path silently dropped the cause. Record message + a short stack head instead.
+      const errMessage = err instanceof Error ? err.message : String(err);
+      const errStack = err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined;
+      logger.warn("orchestrator", "Proposer failure", { error: errMessage, stack: errStack });
+      cleanup();
+      return null;
+    }
+    cleanup();
 
-    const text = result.text.trim();
     // Attempt to parse JSON object robustly, even if the model wraps it in conversational text or markdown fences.
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
@@ -79,16 +160,10 @@ export async function proposeCompaction(
     }
 
     return parsed;
-  } catch (err) {
-    // Proposer failure is non-fatal — caller falls back to heuristic or no-compact.
-    // Error instances serialize to "{}" via JSON.stringify (message/stack are
-    // non-enumerable), so the logger's appendToFile/formatConsole JSON.stringify
-    // path silently dropped the cause. Record message + a short stack head instead.
-    const errMessage = err instanceof Error ? err.message : String(err);
-    const errStack = err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined;
-    logger.warn("orchestrator", "Proposer failure", { error: errMessage, stack: errStack });
-    return null;
   }
+  // Unreachable — every loop iteration either `return`s or `continue`s into
+  // the next attempt, and the last attempt cannot `continue`.
+  return null;
 }
 
 export interface CompactionSettings {

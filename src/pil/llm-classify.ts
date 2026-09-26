@@ -905,3 +905,116 @@ export async function classifySubSessionAction(
     if (timer) clearTimeout(timer);
   }
 }
+
+export interface SubSessionRelatednessResult {
+  related: boolean;
+  confidence: number;
+  reason: string;
+}
+
+const RELATEDNESS_SYSTEM_PROMPT =
+  "You are deciding whether a NEW user request continues an ALREADY-RUNNING background task, or is a " +
+  "different, unrelated task.\n\n" +
+  "You will be given the ACTIVE TASK's original goal and the NEW REQUEST. Decide:\n" +
+  '- "RELATED": the new request continues, refines, checks on, or follows up on the SAME active task ' +
+  '(e.g. active task "fix the failing tests in src/auth", new request "also check the lint errors there" ' +
+  'or "is it done yet?").\n' +
+  '- "UNRELATED": the new request is a genuinely different task, topic, or target — even if it is the ' +
+  'same KIND of task (e.g. active task "seal challenge precommit-working-set-drift", new request "tìm repo ' +
+  'Python mới và dựng bài tới hết stage0" — a DIFFERENT challenge/repo, not a continuation).\n\n' +
+  "Response format: Reply with exactly one comma-separated line containing:\n" +
+  "<RELATED|UNRELATED>,<CONFIDENCE>,<REASON>\n\n" +
+  "Examples:\n" +
+  '- "RELATED,0.95,Same file and same bug, just asking for an additional check."\n' +
+  '- "UNRELATED,0.9,Different repository and different challenge entirely."\n' +
+  "No other text, only the comma-separated line.";
+
+/**
+ * Round 4 (G9): decide whether a NEW request should RESUME an already-active
+ * background sub-session, or is a genuinely unrelated task that should fork a
+ * fresh one instead. Mirrors `classifySubSessionAction`'s pattern exactly
+ * (cheap fast-tier model, flat timeout, fail-safe-on-error).
+ *
+ * The caller decides what "fail-safe" means for ITS OWN default when this
+ * returns `null` — see `shouldResumeSubSession` in orchestrator.ts, which
+ * treats "could not determine relatedness" the same as "unrelated" (forks
+ * fresh) rather than blindly resuming an old, possibly wrong, context.
+ */
+export async function classifySubSessionRelatedness(
+  modelId: string,
+  newRequest: string,
+  activeGoal: string,
+  signal?: AbortSignal,
+): Promise<SubSessionRelatednessResult | null> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const info = getModelInfo(modelId);
+    const provider = info?.provider;
+    const fastModel = provider
+      ? getRoutedModelByTier("fast", provider) || getRoutedModelByTier("balanced", provider)
+      : undefined;
+    const classificationModelId = fastModel?.id ?? modelId;
+
+    const runtime = resolveModelRuntime(classificationModelId);
+    const isReasoning = runtime.modelInfo?.reasoning === true;
+    timer = setTimeout(() => controller.abort(), CLASSIFY_TIMEOUT_MS);
+    const combinedSignal = signal
+      ? (AbortSignal.any?.([signal, controller.signal]) ?? controller.signal)
+      : controller.signal;
+
+    const dropMaxTokens = runtime.unsupportedParams?.includes("maxOutputTokens") === true;
+    const maxOut = isReasoning ? REASONING_MAX_OUTPUT_TOKENS : NONREASONING_MAX_OUTPUT_TOKENS;
+
+    let providerOptions = runtime.providerOptions;
+    if (runtime.modelInfo?.provider) {
+      const cheapest = getProviderCapabilities(runtime.modelInfo.provider).buildProviderOptions({
+        model: runtime.modelInfo,
+        minimizeReasoning: true,
+        ...(runtime.modelInfo.supportsReasoningEffort ? { reasoningEffort: "low" as const } : {}),
+      });
+      providerOptions = mergeProviderOptions(runtime.providerOptions, cheapest);
+    }
+
+    const prompt =
+      `[ACTIVE TASK — the background sub-session's original goal]\n${activeGoal.slice(0, 800)}\n\n` +
+      `[NEW REQUEST]\n${newRequest.slice(0, 1000)}`;
+
+    const result = streamText({
+      model: runtime.model,
+      abortSignal: combinedSignal,
+      system: RELATEDNESS_SYSTEM_PROMPT,
+      prompt,
+      ...(dropMaxTokens ? {} : { maxOutputTokens: maxOut }),
+      ...(providerOptions ? { providerOptions } : {}),
+    });
+
+    let text = "";
+    let reasoningText = "";
+    for await (const part of result.fullStream) {
+      if (part.type === "text-delta") text += (part as any).textDelta ?? (part as any).text ?? "";
+      else if (part.type === "reasoning-delta") reasoningText += (part as any).textDelta ?? (part as any).text ?? "";
+    }
+
+    const rawResult = text.trim() || reasoningText.trim();
+    if (!rawResult) return null;
+
+    const clean = rawResult.replace(/[`*"]/g, "").trim();
+    const firstLine = clean.split(/\r?\n/)[0] ?? "";
+    const parts = firstLine.split(",");
+    if (parts.length < 2) return null;
+
+    const verdict = parts[0].trim().toUpperCase();
+    const confidence = Number(parts[1].trim()) || 0.8;
+    const reason = parts.slice(2).join(",").trim() || "No reason given";
+
+    if (verdict === "RELATED") return { related: true, confidence, reason };
+    if (verdict === "UNRELATED") return { related: false, confidence, reason };
+    return null;
+  } catch (err) {
+    console.error(`[pil.llm-classify] classifySubSessionRelatedness failed: ${(err as Error)?.message}`);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}

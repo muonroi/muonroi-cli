@@ -198,6 +198,7 @@ import { salvageSubSessionOutput } from "./salvage-sub-session-output.js";
 import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
 import { noteElidedForCap, type SubAgentCapState } from "./sub-agent-cap.js";
 import { type ModelTaskKind, resolveModelForTask } from "./sub-agent-model-tier.js";
+import { shouldResumeSubSession } from "./sub-session-resume.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
 import { isToolActivityLive } from "./tool-activity.js";
@@ -3769,29 +3770,55 @@ export class Agent {
         // Check if there is already an active child session for this parent session
         const activeSubSession = db
           .prepare(
-            "SELECT id, updated_at FROM sessions WHERE parent_session_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
+            "SELECT id, title, updated_at FROM sessions WHERE parent_session_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
           )
-          .get(parentSessionId) as { id: string; updated_at: string } | undefined;
+          .get(parentSessionId) as { id: string; title: string | null; updated_at: string } | undefined;
 
         let shouldResume = false;
         if (activeSubSession) {
           const updatedAt = new Date(activeSubSession.updated_at).getTime();
           const now = Date.now();
           const diffMins = (now - updatedAt) / (60 * 1000);
-          if (diffMins > 15) {
-            // Stale: mark as abandoned
+          // Round 4 (G9): recency alone used to be sufficient to resume — an
+          // unrelated request within the 15-minute window resumed the OLD
+          // sub-session's context regardless of what it was actually about
+          // (measured live: session 69e68c766fcf's "hunt/stage0" request
+          // resumed the SEAL challenge sub-session's 29-message context).
+          // `shouldResumeSubSession` adds a relatedness check on top of the
+          // existing staleness check — see its own doc comment for the
+          // fail-CLOSED (fork fresh) default on every uncertain path.
+          const decision = await shouldResumeSubSession({
+            diffMins,
+            activeGoal: activeSubSession.title,
+            newRequest: userMessage,
+            classify: async (newRequest, activeGoal) => {
+              if (isMockMode && !forceClassify) return null; // unreachable in plain mock mode — routeAction never becomes SPAWN_SUB_SESSION without classification
+              try {
+                const { classifySubSessionRelatedness } = await import("../pil/llm-classify.js");
+                return await classifySubSessionRelatedness(this.modelId, newRequest, activeGoal);
+              } catch (err) {
+                logger.error("orchestrator", "Sub-session relatedness classification failed", { error: err });
+                return null;
+              }
+            },
+          });
+
+          if (decision.resume) {
+            shouldResume = true;
+            subSessionId = activeSubSession.id;
+          } else {
+            // Stale OR unrelated: mark as abandoned either way — the decision
+            // object's own `reason` already distinguishes them in the log.
             db.prepare("UPDATE sessions SET status = 'abandoned', updated_at = ? WHERE id = ?").run(
               new Date().toISOString(),
               activeSubSession.id,
             );
-            logger.info("orchestrator", "Stale sub-session found, marked as abandoned", {
+            logger.info("orchestrator", "Active sub-session not resumed — marked as abandoned", {
               parentSessionId,
               subSessionId: activeSubSession.id,
               diffMins,
+              reason: decision.reason,
             });
-          } else {
-            shouldResume = true;
-            subSessionId = activeSubSession.id;
           }
         }
 
@@ -3816,6 +3843,11 @@ export class Agent {
           const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
           this.sessionStore.linkChild(newSession.id, parentSessionId, "subagent");
           subSessionId = newSession.id;
+          // Round 4 (G9): record the ORIGINAL goal this sub-session was forked
+          // for, so a LATER request deciding whether to resume it (see
+          // `shouldResumeSubSession` above) has something real to compare
+          // against instead of resuming purely by recency.
+          this.sessionStore.setTitle(newSession.id, userMessage);
 
           // Seed the child with the parent's CURRENT working set — after a
           // compaction that is already [summary, ...kept raw tail] (see the
