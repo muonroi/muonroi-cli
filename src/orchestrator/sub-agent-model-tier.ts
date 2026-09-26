@@ -55,14 +55,29 @@ const TIER_RANK: Record<"fast" | "balanced" | "premium", number> = { fast: 0, ba
  *
  * The cap is skipped when `parentTier` is omitted (preserves legacy behavior
  * for callers that have not been threaded yet).
+ *
+ * `opts.pinned` (round 2, G3 HIGH): when the project pins a model
+ * (`isModelPinnedByProject()`), a delegated sub-agent task (stream-runner.ts's
+ * `explore`/`general`/`verify` dispatch — see its own `childModelId`
+ * resolution) used to tier-walk to a cheaper same-provider model regardless
+ * of the pin, exactly the same class of bug SAMR had (step-router.ts's
+ * `decideStepRouting`) before its own `opts.pinned` fix. Checked FIRST,
+ * before the tier walk: when `true`, returns `fallbackModelId` unchanged —
+ * the pin holds. Every OTHER precedence in the caller's own ternary
+ * (`request.modelId`, a vision/computer fixed model, a configured
+ * `custom.model`) already runs BEFORE this function is ever called, so an
+ * explicitly-named model for a specific spawn always wins regardless of
+ * this flag — this only affects the fallback path a pin has no reason not
+ * to hold for.
  */
 export function resolveModelForTask(
   task: ModelTaskKind,
   providerId: string,
   fallbackModelId: string,
   lookup: TierLookup = getRoutedModelByTier as TierLookup,
-  opts?: { parentTier?: "fast" | "balanced" | "premium" },
+  opts?: { parentTier?: "fast" | "balanced" | "premium"; pinned?: boolean },
 ): string {
+  if (opts?.pinned) return fallbackModelId;
   const ceilingRank = opts?.parentTier ? TIER_RANK[opts.parentTier] : undefined;
   for (const tier of TASK_TIER_PREFS[task] ?? ["balanced"]) {
     if (ceilingRank !== undefined && TIER_RANK[tier] > ceilingRank) continue;

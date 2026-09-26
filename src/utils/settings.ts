@@ -450,6 +450,23 @@ export interface ProjectSettings {
    * opt-out and takes priority.
    */
   autoCommit?: boolean;
+  /**
+   * Opt-in: give the FIRST turn of a session the full tool set even when
+   * PIL classifies it as chitchat/direct-answer (which would otherwise give
+   * it zero, or read-only-only, tools). For a project whose own
+   * AGENTS.md/CLAUDE.md requires a tool call unconditionally at session
+   * start (e.g. a framework's "run this briefing script first"), a
+   * tool-less first turn leaves the model unable to follow that instruction
+   * — see `orchestrator/tool-engine.ts`'s `selectRawToolSet`.
+   *
+   * Explicit opt-in, not automatic on "this project has an instructions
+   * file": giving every project with an AGENTS.md/CLAUDE.md the full tool
+   * set on turn 1 is a real cost/latency change (more tool schemas in the
+   * first prompt) for every user of this CLI, most of whom have no
+   * session-start-script requirement at all. Default `false` — unset means
+   * unchanged behaviour.
+   */
+  firstTurnTools?: boolean;
 }
 
 function getUserSettingsPath(): string {
@@ -812,6 +829,16 @@ export function getCurrentModel(mode?: AgentMode): string {
  */
 export function isModelPinnedByProject(): boolean {
   return typeof loadProjectSettings().model === "string" && loadProjectSettings().model!.trim().length > 0;
+}
+
+/**
+ * Whether this project explicitly opted into giving the FIRST turn of a
+ * session the full tool set (see `ProjectSettings.firstTurnTools`'s doc
+ * comment). Default `false` — every project that has not set this in
+ * `.muonroi-cli/settings.json` keeps today's behaviour unchanged.
+ */
+export function isFirstTurnToolsEnabledByProject(): boolean {
+  return loadProjectSettings().firstTurnTools === true;
 }
 
 /**

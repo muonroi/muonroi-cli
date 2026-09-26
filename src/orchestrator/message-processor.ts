@@ -284,6 +284,20 @@ import type { TurnRunnerDepsBase } from "./turn-runner-deps.js";
 const _injectedGuidanceSha = new Map<string, string>();
 
 /**
+ * Stable marker prefix for the SessionStart-hook system message (round 2,
+ * G1 HIGH). `--resume` rehydrates `deps.messages` from the session's
+ * persisted transcript BEFORE this function ever runs, but
+ * `getSessionStartHookFired()` is a per-PROCESS flag — it resets on every
+ * new process, including a resumed one. Firing the hook again on resume is
+ * correct (the `SessionStartHookInput.source: "resume"` already reflects
+ * this), but appending ANOTHER copy of this system message on top of the
+ * one already sitting in the rehydrated history is not — the model would
+ * see the same briefing twice. Tagged so the injection site can find and
+ * REPLACE a prior copy instead of appending a second one.
+ */
+const SESSION_START_SYSTEM_TAG = "[SessionStart hook output]";
+
+/**
  * Durable phase breadcrumb for the pre-stream path (everything in `run()`
  * before the first provider request — see `turn-progress.ts`'s
  * `pingTurnProgress`, which only fires once `executeToolEngine` is about to
@@ -800,9 +814,21 @@ export class MessageProcessor {
       // guard as the display loop above), ordered before this turn's own
       // user message so it reads as prior context, not a reply to ask about.
       if (_sessionStartContexts.length > 0) {
+        // Round 2 (G1 HIGH): REPLACE, don't append — a `--resume` process
+        // rehydrates the persisted transcript first, so a tagged message
+        // from a PRIOR process may already be sitting in `deps.messages`.
+        // Remove it before pushing the fresh one, keeping `deps.messages`/
+        // `deps.messageSeqs` in lockstep (parallel arrays, same index).
+        const _priorTaggedIdx = deps.messages.findIndex(
+          (m) => m.role === "system" && typeof m.content === "string" && m.content.startsWith(SESSION_START_SYSTEM_TAG),
+        );
+        if (_priorTaggedIdx !== -1) {
+          deps.messages.splice(_priorTaggedIdx, 1);
+          deps.messageSeqs.splice(_priorTaggedIdx, 1);
+        }
         deps.messages.push({
           role: "system",
-          content: `[SessionStart hook output — already shown to the user verbatim above; do not re-run it or repeat it]\n${_sessionStartContexts.join("\n")}`,
+          content: `${SESSION_START_SYSTEM_TAG} — already shown to the user verbatim above; do not re-run it or repeat it\n${_sessionStartContexts.join("\n")}`,
         });
         deps.messageSeqs.push(null);
       }

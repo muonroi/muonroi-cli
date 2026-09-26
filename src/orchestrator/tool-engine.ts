@@ -166,7 +166,7 @@ import {
   loadMcpServers,
   loadValidSubAgents,
 } from "../utils/settings";
-import { isAutoCouncilSkipReasoning } from "../utils/settings.js";
+import { isAutoCouncilSkipReasoning, isFirstTurnToolsEnabledByProject } from "../utils/settings.js";
 import { resolveShell } from "../utils/shell.js";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
@@ -666,16 +666,24 @@ function stripWriteTools(tools: ToolSet): ToolSet {
  * Precedence (first match wins):
  *   1. The provider itself does not support client tools at all → none,
  *      full stop (a hard capability ceiling — nothing below can override it).
- *   2. `hasProjectInstructions` (round-12 parity fix, G2): the FIRST turn of
- *      a session whose project has its own AGENTS.md/CLAUDE.md → the full
- *      tool set. A project instruction may require a tool call
- *      unconditionally at session start (e.g. "run briefing.sh first")
- *      regardless of how trivial the user's own first message looks; giving
- *      zero (or read-only-only) tools on that turn left the model with an
+ *   2. `firstTurnToolsEnabled` (round-12 parity fix G2, made opt-in in
+ *      round 2): the FIRST turn of a session, when the project has
+ *      EXPLICITLY set `firstTurnTools: true` in `.muonroi-cli/settings.json`
+ *      (see `isFirstTurnToolsEnabledByProject`) → the full tool set. A
+ *      project instruction may require a tool call unconditionally at
+ *      session start (e.g. "run briefing.sh first") regardless of how
+ *      trivial the user's own first message looks; giving zero (or
+ *      read-only-only) tools on that turn left the model with an
  *      instruction it could not follow, and it emitted raw native
  *      tool-call markup as its entire answer trying anyway (measured live,
  *      session 08a9c9a84990 — see FINDINGS.md G1/G2). Bounded to the FIRST
  *      turn only, so an ordinary LATER chitchat turn still saves tokens.
+ *      Round 2: this used to trigger on merely HAVING an
+ *      AGENTS.md/CLAUDE.md (`loadCustomInstructions() !== null`) — a real
+ *      cost/latency change (more tool schemas in the first prompt) for
+ *      every project with an instructions file, most of which have no
+ *      session-start-script requirement at all. Now explicit opt-in;
+ *      default (unset) behaviour for every other project is unchanged.
  *   3. `isChitchat` with no prior tool-turn in history → none (the
  *      pre-existing BUG-A-guarded token-saving path).
  *   4. `isDirectAnswer` with no prior tool-turn → read-only tools only.
@@ -684,13 +692,13 @@ function stripWriteTools(tools: ToolSet): ToolSet {
 export function selectRawToolSet(opts: {
   baseTools: ToolSet;
   supportsClientTools: boolean;
-  hasProjectInstructions: boolean;
+  firstTurnToolsEnabled: boolean;
   isChitchat: boolean;
   isDirectAnswer: boolean;
   priorTurnHadTools: boolean;
 }): ToolSet {
   if (!opts.supportsClientTools) return {};
-  if (opts.hasProjectInstructions) return opts.baseTools;
+  if (opts.firstTurnToolsEnabled) return opts.baseTools;
   if (opts.isChitchat && !opts.priorTurnHadTools) return {};
   if (opts.isDirectAnswer && !opts.priorTurnHadTools) return stripWriteTools(opts.baseTools);
   return opts.baseTools;
@@ -1330,14 +1338,22 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // `turnIndex` computed the same way in message-processor.ts) so
         // this never re-widens tools on an ordinary later chitchat turn —
         // the existing token-saving intent is unaffected past turn 1.
+        //
+        // Round 2 (G2 MEDIUM scope): giving the full tool set to ANY project
+        // that merely HAS an instructions file was itself a cost/latency
+        // change for every user of this CLI, most of whom have no
+        // session-start-script requirement. Made explicit opt-in —
+        // `isFirstTurnToolsEnabledByProject()` reads the project's own
+        // `.muonroi-cli/settings.json` `firstTurnTools: true`, mirroring
+        // `isModelPinnedByProject()`'s pattern — instead of firing on the
+        // mere presence of AGENTS.md/CLAUDE.md.
         const _userTurnCount = (deps.messages as Array<{ role?: string }>).filter((m) => m?.role === "user").length;
         const _isFirstTurn = _userTurnCount <= 1;
-        const { loadCustomInstructions } = await import("../utils/instructions.js");
-        const _hasProjectInstructions = _isFirstTurn && loadCustomInstructions(deps.bash.getCwd()) !== null;
+        const _firstTurnToolsEnabled = _isFirstTurn && isFirstTurnToolsEnabledByProject();
         let rawToolSet: ToolSet = selectRawToolSet({
           baseTools: baseToolsRaw,
           supportsClientTools: turnCaps.supportsClientTools(runtime.modelInfo),
-          hasProjectInstructions: _hasProjectInstructions,
+          firstTurnToolsEnabled: _firstTurnToolsEnabled,
           isChitchat,
           isDirectAnswer,
           priorTurnHadTools: _priorTurnHadTools,

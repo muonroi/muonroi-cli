@@ -173,7 +173,7 @@ describe("loadCustomInstructions", () => {
       expect(out?.split("root instructions").length).toBe(2); // one match, i.e. appears exactly once
     });
 
-    it("caps ancestor bytes loaded — a deep chain cannot balloon the prompt past MAX_ANCESTOR_INSTRUCTIONS_BYTES", async () => {
+    it("caps ancestor bytes loaded — a deep chain cannot balloon the prompt past MAX_ANCESTOR_INSTRUCTIONS_BYTES, and admits CLOSEST-first (round 2, G4 HIGH)", async () => {
       const home = makeTempDir("muonroi-home-");
       const level1 = path.join(home, "level1");
       const level2 = path.join(level1, "level2");
@@ -181,11 +181,11 @@ describe("loadCustomInstructions", () => {
       fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
 
       const { MAX_ANCESTOR_INSTRUCTIONS_BYTES } = await import("./instructions");
+      // Each segment is ~CAP/2.5 bytes: any TWO fit comfortably under the
+      // cap together, but all THREE do not — unambiguous regardless of the
+      // small per-file header-overhead difference from each label's length.
       const padded = (label: string) =>
-        `${label}:${"x".repeat(MAX_ANCESTOR_INSTRUCTIONS_BYTES / 2 - label.length - 1)}`;
-      // Each segment alone fits the cap; two together do not (cap is on the
-      // CUMULATIVE ancestor total, not per file) — home is walked first, so
-      // it survives and the deeper level(s) after it are dropped.
+        `${label}:${"x".repeat(Math.floor(MAX_ANCESTOR_INSTRUCTIONS_BYTES / 2.5) - label.length - 1)}`;
       writeFile(path.join(home, "CLAUDE.md"), padded("L0"));
       writeFile(path.join(level1, "CLAUDE.md"), padded("L1"));
       writeFile(path.join(level2, "CLAUDE.md"), padded("L2"));
@@ -193,9 +193,42 @@ describe("loadCustomInstructions", () => {
 
       const out = loadCustomInstructions(repoRoot);
       expect(out).not.toBeNull();
-      expect(out).toContain("L0:");
-      expect(out).not.toContain("L1:");
-      expect(out).not.toContain("L2:");
+      // Admission is CLOSEST-first (L2, nearest the project root, then L1),
+      // so those two survive and the FARTHEST one (L0 = $HOME) is the one
+      // dropped — the opposite of the pre-fix, break-on-first-oversized
+      // behaviour, which walked broadest-first and always favoured $HOME.
+      expect(out).toContain("L2:");
+      expect(out).toContain("L1:");
+      expect(out).not.toContain("L0:");
+      // Emission order is still broadest-first (general instructions read
+      // before more specific ones), even though admission was closest-first.
+      expect(out!.indexOf("L1:")).toBeLessThan(out!.indexOf("L2:"));
+    });
+
+    // Round 2 (G4 HIGH) — the exact repro handed to this fix: a single
+    // oversized file at $HOME (the farthest, most general point) must not
+    // starve out a tiny, nearer, more project-relevant file. Pre-fix, the
+    // ancestor loop walked broadest-first and `break`-ed on the very FIRST
+    // candidate once it alone exceeded the cap — so a 40KB $HOME/AGENTS.md
+    // dropped a real 44-byte ~/Personal/Core/CLAUDE.md entirely, and
+    // `loadCustomInstructions` returned `null` even though real, small,
+    // relevant instructions existed right next to the project.
+    it("G4 HIGH repro: a 40KB $HOME/AGENTS.md no longer drops a 44-byte nearer ancestor file (loadCustomInstructions must not return null)", async () => {
+      const home = makeTempDir("muonroi-home-");
+      const core = path.join(home, "Personal", "Core");
+      const repoRoot = path.join(core, "shipd-challenges");
+      fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
+
+      const oversizedHomeAgents = "x".repeat(40 * 1024); // 40KB > MAX_ANCESTOR_INSTRUCTIONS_BYTES (32KB) alone
+      const nearFileContent = "reply in the user's own language"; // 33 bytes of real content — well under 44
+      writeFile(path.join(home, "AGENTS.md"), oversizedHomeAgents);
+      writeFile(path.join(core, "CLAUDE.md"), nearFileContent);
+      const loadCustomInstructions = await importLoadCustomInstructions(home);
+
+      const out = loadCustomInstructions(repoRoot);
+      expect(out).not.toBeNull(); // was the exact repro'd bug: this returned null
+      expect(out).toContain(nearFileContent);
+      expect(out).not.toContain(oversizedHomeAgents);
     });
   });
 });

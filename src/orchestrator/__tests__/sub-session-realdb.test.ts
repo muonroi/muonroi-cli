@@ -37,14 +37,31 @@ vi.mock("../../pil/llm-classify.js", () => ({
 // the Agent, driving reactive next-turn escalation. 0 = light turn.
 let reportedLoad = 0;
 
+// Round 2 (G3 HIGH): captures the `modelId` MessageProcessor was actually
+// constructed with, per invocation (one per turn — parent OR child), so a
+// test can assert a project model pin propagates into the CHILD session's
+// own turn, not just its `sessions` table row. Reset per test in beforeEach.
+const capturedTurnModelIds: Array<{ sessionId: string | undefined; modelId: string | undefined }> = [];
+
 // Simulate a read-heavy turn: write intermediate clutter to the CHILD session
 // (real DB), and leave [.., final assistant, final tool] in the in-memory working
 // set so the orchestrator's salvage step can absorb the outcome to the parent.
 vi.mock("../message-processor.js", () => ({
   MessageProcessor: class {
-    private deps: { messages: unknown[]; session?: { id: string }; reportTurnToolLoad?: (n: number) => void };
-    constructor(deps: { messages: unknown[]; session?: { id: string }; reportTurnToolLoad?: (n: number) => void }) {
+    private deps: {
+      messages: unknown[];
+      session?: { id: string };
+      reportTurnToolLoad?: (n: number) => void;
+      modelId?: string;
+    };
+    constructor(deps: {
+      messages: unknown[];
+      session?: { id: string };
+      reportTurnToolLoad?: (n: number) => void;
+      modelId?: string;
+    }) {
       this.deps = deps;
+      capturedTurnModelIds.push({ sessionId: deps.session?.id, modelId: deps.modelId });
     }
     async *run() {
       this.deps.reportTurnToolLoad?.(reportedLoad);
@@ -88,6 +105,7 @@ beforeEach(() => {
   process.env.USERPROFILE = tmpHome;
   process.env.MUONROI_FORCE_ROUTING_CLASSIFY = "1";
   reportedLoad = 0;
+  capturedTurnModelIds.length = 0;
   closeDatabase();
   getDatabase(); // run migrations against the temp DB
   vi.clearAllMocks();
@@ -285,5 +303,50 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
     expect(db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId)).toHaveLength(0);
 
     delete process.env.MUONROI_REACTIVE_DELEGATE_CHARS;
+  });
+
+  // Round 2 (G3 HIGH): a project model pin (`.muonroi-cli/settings.json`
+  // `{"model": ...}`) must hold for a SPAWN_SUB_SESSION child too — both the
+  // child's OWN `sessions` row and the modelId its own turn actually runs
+  // with (its "tool loop") — not just the parent turn that spawned it.
+  it("a project model pin propagates to a SPAWN_SUB_SESSION child: the sessions row AND the modelId its own turn runs with", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    const PIN_MODEL = "deepseek-v4-flash";
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subsess-pin-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(path.join(projectDir, ".muonroi-cli", "settings.json"), JSON.stringify({ model: PIN_MODEL }));
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, PIN_MODEL, undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      for await (const _ of agent.processMessage("review toàn bộ src/council và liệt kê silent catch")) {
+        // drain
+      }
+
+      const db = getDatabase();
+      const child = db.prepare("SELECT id, model FROM sessions WHERE parent_session_id = ?").get(parentId) as
+        | { id: string; model: string }
+        | undefined;
+      expect(child).toBeDefined();
+      // The child session's OWN sessions row carries the pinned model.
+      expect(child?.model).toBe(PIN_MODEL);
+
+      // The turn that actually ran (MessageProcessor is constructed once
+      // per processMessage() call, AFTER the SPAWN_SUB_SESSION handler has
+      // already swapped session context to the child — this architecture
+      // never gives the "parent turn" its own separate MessageProcessor
+      // run) was constructed against the CHILD session, with the pinned
+      // modelId — not just the session row, the actual deps its tool loop
+      // runs with.
+      expect(capturedTurnModelIds).toHaveLength(1);
+      expect(capturedTurnModelIds[0]?.sessionId).toBe(child?.id);
+      expect(capturedTurnModelIds[0]?.modelId).toBe(PIN_MODEL);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
   });
 });

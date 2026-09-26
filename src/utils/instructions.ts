@@ -141,19 +141,48 @@ function loadAgentsSegments(canonicalCwd: string): string[] {
   // project: most general (closest to $HOME) first, most specific
   // (the project's own root and cwd) last — same ordering logic as the
   // muonroi-home segment above already using.
+  //
+  // Round 2 (G4 HIGH — cap starvation): `ancestorDirsAboveGitRoot` walks
+  // BROADEST (home) first. The original cap loop walked candidates in that
+  // SAME order and `break`-ed on the first one that would exceed the
+  // budget — so one oversized file FARTHEST from the project (most likely:
+  // a broad, growing `$HOME/AGENTS.md`) starved out every closer, smaller,
+  // more project-relevant file, even ones trivially small. Repro'd: a 40KB
+  // `$HOME/AGENTS.md` alone exceeds `MAX_ANCESTOR_INSTRUCTIONS_BYTES`
+  // (32KB), so the loop broke on the very first candidate and
+  // `loadCustomInstructions` returned `null` even though a real 44-byte
+  // `~/Personal/Core/CLAUDE.md` sat right next to the project root.
+  //
+  // Fixed by separating admission from emission: collect every ancestor
+  // candidate broadest-first (unchanged order), decide which ones fit the
+  // cap by walking that same list CLOSEST-first (reversed) — skipping
+  // (never breaking) any single file that alone would exceed the
+  // remaining budget, so one oversized far-away file can never block a
+  // smaller, nearer one — then emit the ACCEPTED segments back in the
+  // original broadest-first order, so the "general first, specific last"
+  // ordering intent is unaffected by which candidates happened to fit.
   const home = os.homedir();
-  let _ancestorBytesLoaded = 0;
-  ancestorLoop: for (const dir of ancestorDirsAboveGitRoot(home, root)) {
+  const ancestorCandidates: Array<{ seg: string; bytes: number }> = [];
+  for (const dir of ancestorDirsAboveGitRoot(home, root)) {
     for (const fname of INSTRUCTION_FILENAMES) {
       const rel = path.relative(home, dir);
       const label = rel === "" ? path.join("~", fname) : path.join("~", rel, fname);
       const seg = readSegmentWithHeader(dir, fname, label);
       if (!seg) continue;
-      const segBytes = Buffer.byteLength(seg, "utf-8");
-      if (_ancestorBytesLoaded + segBytes > MAX_ANCESTOR_INSTRUCTIONS_BYTES) break ancestorLoop;
-      segments.push(seg);
-      _ancestorBytesLoaded += segBytes;
+      ancestorCandidates.push({ seg, bytes: Buffer.byteLength(seg, "utf-8") });
     }
+  }
+  const acceptedAncestorIndices = new Set<number>();
+  let ancestorBytesUsed = 0;
+  for (let i = ancestorCandidates.length - 1; i >= 0; i--) {
+    const candidate = ancestorCandidates[i];
+    if (!candidate) continue;
+    if (ancestorBytesUsed + candidate.bytes > MAX_ANCESTOR_INSTRUCTIONS_BYTES) continue; // skip, never break
+    acceptedAncestorIndices.add(i);
+    ancestorBytesUsed += candidate.bytes;
+  }
+  for (let i = 0; i < ancestorCandidates.length; i++) {
+    if (acceptedAncestorIndices.has(i)) segments.push(ancestorCandidates[i]!.seg);
   }
 
   for (const dir of directoryChain(root, canonicalCwd)) {

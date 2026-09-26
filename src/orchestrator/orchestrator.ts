@@ -107,6 +107,7 @@ import {
   getSubAgentCompactThresholdChars,
   isAutoCompactAfterTurnEnabled,
   isCouncilMultiProviderPreferred,
+  isModelPinnedByProject,
   isProviderDisabled,
   loadUserSettings,
   type ModelRole,
@@ -2011,8 +2012,19 @@ export class Agent {
 
   private _resolveModelForTask(task: ModelTaskKind): string {
     const parentTier = getModelInfo(this.modelId)?.tier;
+    // Round 2 (G3 HIGH): a project model pin holds for every automatic
+    // task-model resolution through this path — see `resolveModelForTask`'s
+    // `opts.pinned` doc comment in sub-agent-model-tier.ts. This is the
+    // SHARED resolver behind both stream-runner.ts's delegated sub-agent
+    // dispatch (explore/general/verify — its `childModelId` falls through
+    // to `deps.resolveModelForTask` only when nothing more specific was
+    // named, i.e. never for an explicitly-requested model) and compaction's
+    // own model choice; a pin holding for compaction too is consistent with
+    // "unless the spawning call explicitly names a model" — compaction
+    // never does.
     return resolveModelForTask(task, this.providerId, this.modelId, undefined, {
       parentTier,
+      pinned: isModelPinnedByProject(),
     });
   }
 

@@ -276,6 +276,72 @@ describe("MessageProcessor — DI surface invariants", () => {
     expect(userIdx).toBeGreaterThan(systemIdx);
   });
 
+  // Round 2 (G1 HIGH): `--resume` rehydrates deps.messages from the
+  // session's persisted transcript BEFORE run() ever executes, but
+  // getSessionStartHookFired() is a per-PROCESS flag — it resets to false
+  // on every new process, including a resumed one. Firing the hook again on
+  // resume is correct, but appending a SECOND copy of the same tagged
+  // system message on top of the one still sitting in the rehydrated
+  // history is not: the model would see the same briefing injected twice.
+  it("on resume, REPLACES a prior tagged SessionStart system message already in history instead of appending a second one", async () => {
+    const priorTagged: ModelMessage = {
+      role: "system",
+      content:
+        "[SessionStart hook output] — already shown to the user verbatim above; do not re-run it or repeat it\n=== OLD BRIEFING (prior process) ===",
+    };
+    const priorUser: ModelMessage = { role: "user", content: "earlier turn from a previous process" };
+    const priorAssistant: ModelMessage = { role: "assistant", content: "earlier reply" };
+    const messages: ModelMessage[] = [priorTagged, priorUser, priorAssistant];
+    const messageSeqs: Array<number | null> = [null, 1, 2];
+
+    const deps = makeDeps({
+      messages,
+      messageSeqs,
+      batchApi: true,
+      getSessionStartHookFired: () => false, // fresh process — resume re-fires the hook
+      fireHook: async (input: unknown) => {
+        const hookInput = input as { hook_event_name?: string };
+        if (hookInput.hook_event_name === "SessionStart") {
+          return {
+            blocked: false,
+            blockingErrors: [],
+            preventContinuation: false,
+            additionalContexts: ["=== NEW BRIEFING (resumed process) ==="],
+            results: [],
+            eeMatches: [],
+          };
+        }
+        return {
+          blocked: false,
+          blockingErrors: [],
+          preventContinuation: false,
+          additionalContexts: [],
+          results: [],
+          eeMatches: [],
+        };
+      },
+      processMessageBatchTurn: async function* () {
+        yield { type: "done" };
+      },
+    });
+    const processor = new MessageProcessor(deps);
+    for await (const _c of processor.run("continued after resume", undefined)) {
+      // drain
+    }
+
+    const taggedMessages = deps.messages.filter(
+      (m) => m.role === "system" && typeof m.content === "string" && m.content.startsWith("[SessionStart hook output]"),
+    );
+    expect(taggedMessages).toHaveLength(1);
+    expect(taggedMessages[0]?.content).toContain("=== NEW BRIEFING (resumed process) ===");
+    expect(taggedMessages[0]?.content).not.toContain("OLD BRIEFING");
+    // messages/messageSeqs must stay parallel (same length, same indices).
+    expect(deps.messages.length).toBe(deps.messageSeqs.length);
+    // Prior unrelated history (not tagged) must survive untouched.
+    expect(deps.messages).toContainEqual(priorUser);
+    expect(deps.messages).toContainEqual(priorAssistant);
+  });
+
   it("does NOT inject a system message when the SessionStart hook produced no additionalContexts (nothing to tell the model)", async () => {
     const deps = makeDeps({
       batchApi: true,

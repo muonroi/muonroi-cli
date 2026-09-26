@@ -8,9 +8,17 @@ import { selectRawToolSet } from "../tool-engine.js";
  * turn ZERO tools. The project's own FRAMEWORK.md requires running
  * `bash shipd-verify/briefing.sh` unconditionally at session start; with no
  * tools to call, the model emitted raw native tool-call markup as its
- * entire answer (measured live, session 08a9c9a84990). `hasProjectInstructions`
+ * entire answer (measured live, session 08a9c9a84990). `firstTurnToolsEnabled`
  * is the fix: it wins over BOTH restrictive branches, but only on the first
  * turn — an ordinary later chitchat turn is unaffected.
+ *
+ * Round 2 (G2 MEDIUM scope): this used to fire on the mere PRESENCE of an
+ * AGENTS.md/CLAUDE.md file — a cost/latency change for every project that
+ * has one. `firstTurnToolsEnabled` is now the caller's own resolved value
+ * of `isFirstTurnToolsEnabledByProject()` (an explicit
+ * `.muonroi-cli/settings.json` opt-in), not `loadCustomInstructions() !==
+ * null` — `selectRawToolSet` itself stays a pure boolean-in predicate either
+ * way, so these tests exercise the same precedence tier under its new name.
  */
 describe("selectRawToolSet", () => {
   const baseTools = { bash: {}, read_file: {}, edit_file: {}, grep: {} } as unknown as ToolSet;
@@ -19,7 +27,7 @@ describe("selectRawToolSet", () => {
     const result = selectRawToolSet({
       baseTools,
       supportsClientTools: false,
-      hasProjectInstructions: true,
+      firstTurnToolsEnabled: true,
       isChitchat: false,
       isDirectAnswer: false,
       priorTurnHadTools: false,
@@ -31,7 +39,7 @@ describe("selectRawToolSet", () => {
     const result = selectRawToolSet({
       baseTools,
       supportsClientTools: true,
-      hasProjectInstructions: true,
+      firstTurnToolsEnabled: true,
       isChitchat: true,
       isDirectAnswer: false,
       priorTurnHadTools: false,
@@ -43,7 +51,7 @@ describe("selectRawToolSet", () => {
     const result = selectRawToolSet({
       baseTools,
       supportsClientTools: true,
-      hasProjectInstructions: true,
+      firstTurnToolsEnabled: true,
       isChitchat: false,
       isDirectAnswer: true,
       priorTurnHadTools: false,
@@ -51,11 +59,11 @@ describe("selectRawToolSet", () => {
     expect(result).toBe(baseTools);
   });
 
-  it("without hasProjectInstructions, chitchat on a fresh turn still gets zero tools (no regression)", () => {
+  it("without firstTurnToolsEnabled, chitchat on a fresh turn still gets zero tools (no regression)", () => {
     const result = selectRawToolSet({
       baseTools,
       supportsClientTools: true,
-      hasProjectInstructions: false,
+      firstTurnToolsEnabled: false,
       isChitchat: true,
       isDirectAnswer: false,
       priorTurnHadTools: false,
@@ -63,11 +71,11 @@ describe("selectRawToolSet", () => {
     expect(result).toEqual({});
   });
 
-  it("without hasProjectInstructions, direct-answer on a fresh turn still gets read-only tools only (no regression)", () => {
+  it("without firstTurnToolsEnabled, direct-answer on a fresh turn still gets read-only tools only (no regression)", () => {
     const result = selectRawToolSet({
       baseTools,
       supportsClientTools: true,
-      hasProjectInstructions: false,
+      firstTurnToolsEnabled: false,
       isChitchat: false,
       isDirectAnswer: true,
       priorTurnHadTools: false,
@@ -77,11 +85,11 @@ describe("selectRawToolSet", () => {
     expect(result).not.toHaveProperty("edit_file");
   });
 
-  it("BUG-A guard preserved: chitchat with prior-turn tool history keeps the full tool set (continuation), hasProjectInstructions=false", () => {
+  it("BUG-A guard preserved: chitchat with prior-turn tool history keeps the full tool set (continuation), firstTurnToolsEnabled=false", () => {
     const result = selectRawToolSet({
       baseTools,
       supportsClientTools: true,
-      hasProjectInstructions: false,
+      firstTurnToolsEnabled: false,
       isChitchat: true,
       isDirectAnswer: false,
       priorTurnHadTools: true,
@@ -93,7 +101,7 @@ describe("selectRawToolSet", () => {
     const result = selectRawToolSet({
       baseTools,
       supportsClientTools: true,
-      hasProjectInstructions: false,
+      firstTurnToolsEnabled: false,
       isChitchat: false,
       isDirectAnswer: false,
       priorTurnHadTools: false,

@@ -265,6 +265,25 @@ export function writeSubagentDebug(enabled: boolean, line: string): void {
 }
 
 /**
+ * Round 2 fix (G1-adjacent MEDIUM): the sub-agent `prepareStep` callback used
+ * to fold mid-conversation system messages ONLY when
+ * `childRuntime.modelId.startsWith("claude")` — a non-Claude sub-agent child
+ * got them raw. The main tool-engine.ts path (see its own
+ * `foldMidConversationSystemMessages` call, right before
+ * `applyAnthropicPromptCaching`) already applies the fold unconditionally,
+ * for every provider, and only lets the CACHING half self-gate on the model
+ * id (`applyAnthropicPromptCaching` already returns its input untouched for
+ * a non-Claude model — see its own `if (!modelId.startsWith("claude")) return
+ * messages` guard in subagent-compactor.ts). Extracted here (mirroring the
+ * pattern already used for `selectRawToolSet` in tool-engine.ts) so the
+ * composition is directly unit-testable without mocking the whole streaming
+ * call. Exported for the test.
+ */
+export function prepareSubAgentPromptMessages(messages: readonly ModelMessage[], modelId: string): ModelMessage[] {
+  return applyAnthropicPromptCaching(foldMidConversationSystemMessages(messages), modelId);
+}
+
+/**
  * StreamRunner — extracted sub-agent stream lifecycle.
  *
  * Lifecycle:
@@ -850,17 +869,9 @@ export class StreamRunner {
           ? attachReminderToMessages(finalMessages, _subMirrorNote)
           : finalMessages;
 
-        if (childRuntime.modelId.startsWith("claude")) {
-          return {
-            messages: applyAnthropicPromptCaching(
-              foldMidConversationSystemMessages(finalMessagesWithMirror),
-              childRuntime.modelId,
-            ),
-          };
-        }
-
-        if (compacted === stripped && stripped === messages && !_subMirrorNote) return undefined;
-        return { messages: finalMessagesWithMirror };
+        // Round 2 fix (G1-adjacent MEDIUM): see `prepareSubAgentPromptMessages`'s
+        // doc comment above — folds for every provider now, not Claude-only.
+        return { messages: prepareSubAgentPromptMessages(finalMessagesWithMirror, childRuntime.modelId) };
       },
       ...resolveTemperatureParam(childRuntime, isExplore ? 0.2 : 0.5),
       ...(childDropMaxOutput ? {} : { maxOutputTokens: Math.min(this.deps.getMaxTokens(), 8_192) }),

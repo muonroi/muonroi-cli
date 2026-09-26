@@ -19,7 +19,8 @@ import type { BashTool } from "../../tools/bash";
 import type { TaskRequest, ToolResult } from "../../types/index";
 import type { CrossTurnDedup } from "../cross-turn-dedup.js";
 import type { ReadPathBudget } from "../read-path-budget.js";
-import { StreamRunner, type StreamRunnerDeps } from "../stream-runner.js";
+import { prepareSubAgentPromptMessages, StreamRunner, type StreamRunnerDeps } from "../stream-runner.js";
+import { FOLDED_SYSTEM_PREFIX } from "../system-message-fold.js";
 
 beforeAll(async () => {
   await loadCatalog();
@@ -222,6 +223,50 @@ describe("StreamRunner — DI surface", () => {
       if (outcome.kind === "prepared") {
         expect(outcome.prepared.maxSteps).toBe(75);
       }
+    });
+  });
+
+  // Round 2 fix (G1-adjacent MEDIUM): a sub-agent's prepareStep callback used
+  // to fold mid-conversation system messages ONLY for a Claude child model —
+  // a non-Claude sub-agent child got a mid-conversation system message raw,
+  // unlike the main tool-engine.ts path, which folds for every provider.
+  describe("prepareSubAgentPromptMessages (G1-adjacent MEDIUM: fold for every provider)", () => {
+    const midConversationSystem: ModelMessage[] = [
+      { role: "user", content: "first" },
+      { role: "assistant", content: "reply" },
+      { role: "system", content: "guidance injected mid-conversation" },
+    ];
+
+    it("folds a mid-conversation system message for a NON-Claude model (was Claude-only)", () => {
+      const result = prepareSubAgentPromptMessages(midConversationSystem, "deepseek-v4-flash");
+      // No mid-conversation system message left — every provider's
+      // alternation rule (and Anthropic's outright rejection of a system
+      // message separated from the leading block by user/assistant turns)
+      // is respected the same way the main path already guarantees.
+      expect(result.some((m) => m.role === "system")).toBe(false);
+      const folded = result.find(
+        (m) => typeof m.content === "string" && m.content.includes("guidance injected mid-conversation"),
+      );
+      expect(folded).toBeDefined();
+      expect(folded?.content).toContain(FOLDED_SYSTEM_PREFIX);
+    });
+
+    it("still folds for a Claude model (no regression — same behaviour as before this fix)", () => {
+      const result = prepareSubAgentPromptMessages(midConversationSystem, "claude-sonnet-4-6");
+      expect(result.some((m) => m.role === "system")).toBe(false);
+    });
+
+    it("a leading system message (not mid-conversation) is left alone for every provider", () => {
+      const leadingOnly: ModelMessage[] = [
+        { role: "system", content: "leading guidance" },
+        { role: "user", content: "hi" },
+      ];
+      const nonClaude = prepareSubAgentPromptMessages(leadingOnly, "deepseek-v4-flash");
+      const claude = prepareSubAgentPromptMessages(leadingOnly, "claude-sonnet-4-6");
+      expect(nonClaude[0]).toMatchObject({ role: "system", content: "leading guidance" });
+      // Claude may additionally get cache-control metadata attached, but the
+      // message stays a single leading system entry, not folded away.
+      expect(claude.filter((m) => m.role === "system")).toHaveLength(1);
     });
   });
 });
