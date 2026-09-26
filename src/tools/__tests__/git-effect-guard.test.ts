@@ -22,6 +22,22 @@
  *       deleted (round 4 called `git branch bookmark HEAD~1`, which
  *       CREATES a ref, "moved").
  *
+ * Round 6 — a further cost pass, plus writing the guard's CONTRACT down
+ * explicitly (see the module's own header comment for the full text): it is
+ * a detect-and-report backstop for LASTING effects on the GUARDED
+ * repository — a net-zero sequence that leaves no ref change and no entry
+ * in the guarded worktree's OWN HEAD reflog is OUT OF SCOPE by design, for
+ * three named reasons. H1/H2/H3 below each PIN that documented limitation
+ * (assert the CURRENT `null` result) rather than leaving it a silent gap —
+ * a future change in behaviour has to edit these tests deliberately.
+ *   - COST: `for-each-ref` is O(ref count) (measured ~84ms at 5000 loose
+ *     refs, ~10ms packed) and used to run twice per guarded call even for a
+ *     no-op. A cheap fs-only fingerprint (stat of packed-refs + every loose
+ *     ref file) now gates the AFTER-side call; measured cheaper than
+ *     for-each-ref in both states (~28ms loose / ~4ms packed, including the
+ *     one `git rev-parse --git-dir --git-common-dir` needed to locate the
+ *     paths correctly from inside a linked worktree).
+ *
  * This file tests `git-effect-guard.ts` directly — no `update-ref`/`reset`/
  * `stash` call exists anywhere in the module (grepped below as a structural
  * guard against regressing back to round 3's design), and every case here
@@ -341,5 +357,95 @@ describe("git-effect-guard — detect and report, never mutate (round 4/5)", () 
     expect(message).toMatch(/nothing was changed/);
     expect(message).not.toMatch(/\brestored\b/);
     expect(message).not.toMatch(/reverted/i);
+  });
+
+  it("COST FIX (round 6): for-each-ref is called exactly ONCE (not twice) across a full begin+finish for a no-op command", () => {
+    __resetGitCallLogForTests();
+    const guard = beginGitEffectGuard(dir);
+    runShell(dir, "git log --oneline -1");
+    const violation = guard?.finish() ?? null;
+    expect(violation).toBeNull();
+
+    const forEachRefCalls = __getGitCallLogForTests().filter((a) => a[0] === "for-each-ref");
+    expect(forEachRefCalls.length).toBe(1); // the unconditional BEFORE-side call only
+  });
+
+  it("COST FIX (round 6): for-each-ref runs a SECOND time when a ref genuinely changed (fingerprint correctly triggers it)", () => {
+    __resetGitCallLogForTests();
+    const guard = beginGitEffectGuard(dir);
+    writeFileSync(join(dir, "a.txt"), "changed\n");
+    runShell(dir, 'git commit -am "x"');
+    const violation = guard?.finish() ?? null;
+    expect(violation).not.toBeNull();
+
+    const forEachRefCalls = __getGitCallLogForTests().filter((a) => a[0] === "for-each-ref");
+    expect(forEachRefCalls.length).toBe(2); // before (unconditional) + after (fingerprint changed)
+  });
+
+  describe("KNOWN LIMITATIONS (round 6) — net-zero sequences with no ref change and no HEAD-reflog entry in the guarded worktree are OUT OF SCOPE by design", () => {
+    it("H1 (per-worktree reflog): commit+reset-back in a DIFFERENT linked worktree of the same repo is invisible to a guard watching THIS worktree", () => {
+      const otherWorktreeDir = join(os.tmpdir(), `git-effect-guard-wt-${Date.now()}`);
+      try {
+        git(dir, ["worktree", "add", "-q", "-b", "other-wt-branch", otherWorktreeDir]);
+        const otherOriginalHead = git(otherWorktreeDir, ["rev-parse", "HEAD"]);
+
+        const guard = beginGitEffectGuard(dir); // watching the ORIGINAL worktree only
+        runShell(
+          otherWorktreeDir,
+          `git commit --allow-empty -q -m "in other worktree" && git reset --hard ${otherOriginalHead}`,
+        );
+        const violation = guard?.finish() ?? null;
+
+        // Documented limitation, not a silent accident: the OTHER worktree
+        // has its own HEAD and its own HEAD reflog
+        // (.git/worktrees/<name>/logs/HEAD) — this guard never reads it.
+        expect(violation).toBeNull();
+      } finally {
+        runShell(dir, `git worktree remove --force ${otherWorktreeDir}`);
+      }
+    });
+
+    it("H2 (no lasting repo effect): commit-tree + a create-then-delete ghost ref in one call is invisible", () => {
+      const guard = beginGitEffectGuard(dir);
+      const tree = git(dir, ["rev-parse", "HEAD^{tree}"]);
+      runShell(
+        dir,
+        `SHA=$(git commit-tree ${tree} -p HEAD -m ghost) && git update-ref refs/ghost/tmp $SHA && git update-ref -d refs/ghost/tmp`,
+      );
+      const violation = guard?.finish() ?? null;
+
+      // Documented limitation: refs/ghost/tmp was created AND deleted before
+      // the after-snapshot ever ran — no ref differs net, and update-ref on
+      // a non-HEAD ref never touches HEAD's reflog. The commit-tree object
+      // itself is left dangling (git fsck --unreachable would find it) but
+      // nothing observable through refs/reflog records it ever existed.
+      expect(violation).toBeNull();
+    });
+
+    it("H3 (reflog disabled): commit+reset-back with no .git/logs and core.logAllRefUpdates=false is invisible", () => {
+      // Simulate "a fresh repo with reflogging off": delete every reflog
+      // this fixture's own `beforeEach` already created, AND disable
+      // creating new ones. Measured: deleting ONLY `.git/logs/HEAD` is not
+      // enough — `git reflog show HEAD` falls back to the CURRENT branch's
+      // OWN reflog (`.git/logs/refs/heads/<branch>`) when HEAD's own is
+      // absent but the branch's still exists, so its count kept growing.
+      // core.logAllRefUpdates=false alone does not stop writes to an
+      // ALREADY-EXISTING log file either (measured) — only the removal of
+      // the WHOLE `logs/` directory, combined with the config, stops every
+      // reflog (HEAD's and every branch's) from being recreated at all.
+      rmSync(join(dir, ".git", "logs"), { recursive: true, force: true });
+      git(dir, ["config", "core.logAllRefUpdates", "false"]);
+      const originalHead = headSha();
+
+      const guard = beginGitEffectGuard(dir);
+      runShell(dir, `git commit --allow-empty -q -m "reflog-off transient" && git reset --hard ${originalHead}`);
+      const violation = guard?.finish() ?? null;
+
+      // Documented limitation: this module's ENTIRE detection mechanism for
+      // a "refs end up identical" sequence is the HEAD reflog — with
+      // reflogging off (and no log file to even observe a count on) there
+      // is no signal to read.
+      expect(violation).toBeNull();
+    });
   });
 });

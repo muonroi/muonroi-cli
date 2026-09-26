@@ -1,30 +1,69 @@
 /**
  * src/tools/git-effect-guard.ts
  *
- * Round 3 made the `autoCommit: false` guarantee effect-based (detect a ref
- * change no matter how the command spelled "git", since string parsing an
- * arbitrary shell line is an arms race) — but round 3's AUTO-RESTORE
- * (`update-ref` back to the snapshot, or `-d` on a newly-created ref) was
- * itself destructive (round-4 refuter: it rewrote a benign `checkout`
- * target's tip, reverted a concurrent session's legitimate commit, and left
- * a `stash pop` half-restored).
+ * ─── CONTRACT ───────────────────────────────────────────────────────────────
+ * This module is a detect-and-report backstop for LASTING effects of ONE
+ * guarded tool call on the guarded repository. It reports, and never
+ * mutates:
+ *   - any named ref (branch, tag, remote-tracking ref, `refs/stash`, ...)
+ *     created, moved, or deleted during the guarded window;
+ *   - any commit that becomes reachable from a ref, OR that appears in the
+ *     guarded worktree's OWN HEAD reflog, during the guarded window.
+ *
+ * It is NOT a full audit of every git operation the command performed, and
+ * it does not observe the command's transient/intermediate state — only the
+ * LASTING difference between a snapshot taken immediately before the
+ * command and one taken immediately after. A sequence that nets to zero —
+ * leaves no ref changed, created, or deleted, and adds no entry to the
+ * guarded worktree's own HEAD reflog — is OUT OF SCOPE by design, for three
+ * known reasons (each pinned by a test asserting the CURRENT, limited
+ * behaviour, so a future change is deliberate, not an accidental discovery):
+ *
+ *   1. PER-WORKTREE REFLOG — a commit created and reset back to its
+ *      original value inside a DIFFERENT linked worktree of the same
+ *      repository is invisible: each worktree has its OWN HEAD and its OWN
+ *      HEAD reflog (`.git/worktrees/<name>/logs/HEAD`); this module only
+ *      ever reads the reflog of the worktree it was started in.
+ *   2. NO LASTING REPO EFFECT — `git commit-tree` (creates a commit object
+ *      without touching any ref or reflog) followed by `git update-ref
+ *      refs/x <sha>` then `git update-ref -d refs/x` in the same call nets
+ *      to zero: no ref differs between the before/after snapshot, and no
+ *      HEAD reflog entry was written (update-ref on a non-HEAD ref never
+ *      touches HEAD's reflog). The commit object is left dangling in the
+ *      object store (recoverable via `git fsck --unreachable` until gc),
+ *      but nothing observable through refs or the HEAD reflog records it
+ *      ever existed.
+ *   3. REFLOG DISABLED — with `core.logAllRefUpdates=false`, or a repo
+ *      state where `.git/logs/HEAD` was never created, a commit-then-
+ *      reset-back sequence writes no reflog entries at all: this module's
+ *      ENTIRE detection mechanism for a "refs end up identical" sequence is
+ *      the HEAD reflog, so with reflogging off there is no signal to read.
+ * ────────────────────────────────────────────────────────────────────────────
+ *
+ * Round 3 made the guarantee effect-based (detect a ref change no matter how
+ * the command spelled "git", since string parsing an arbitrary shell line is
+ * an arms race) — but round 3's AUTO-RESTORE (`update-ref` back to the
+ * snapshot, or `-d` on a newly-created ref) was itself destructive (round-4
+ * refuter: it rewrote a benign `checkout` target's tip, reverted a
+ * concurrent session's legitimate commit, and left a `stash pop`
+ * half-restored).
  *
  * Round 4: DETECT AND REPORT, NEVER MUTATE. This module only ever reads
- * (`for-each-ref`, `rev-parse`, `symbolic-ref`, `reflog show`, `rev-list`) —
- * no `update-ref`, `reset`, or `stash` call exists anywhere in it.
+ * (`for-each-ref`, `rev-parse`, `reflog show`, `rev-list`) — no
+ * `update-ref`, `reset`, or `stash` call exists anywhere in it.
  *
  * Round 5, a cost + correctness pass on round 4's detection:
  *   (a) COST — round 4 ran `git log --all --reflog` (an UNBOUNDED walk of
  *       every ref, every reflog, the whole commit graph) on literally every
  *       guarded call, even a pure `git status`. Redesigned cheap-first: the
- *       snapshot is only `for-each-ref` + `rev-parse HEAD` + `symbolic-ref
- *       HEAD` + a HEAD-only `reflog show` (bounded by HEAD's OWN reflog,
- *       not `--all` — cheap). If before/after are identical on ALL of
- *       those, return immediately: NO history walk of any kind. Only when
- *       something differs does a walk run at all, and even then it is
- *       BOUNDED to the delta: `git rev-list <changed tips> --not <all
- *       before tips>` — this only visits commits reachable from what
- *       changed and NOT already reachable before, never the whole graph.
+ *       snapshot is only `for-each-ref` + `rev-parse HEAD` + a HEAD-only
+ *       `reflog show` (bounded by HEAD's OWN reflog, not `--all` — cheap).
+ *       If before/after are identical on ALL of those, return immediately:
+ *       NO history walk of any kind. Only when something differs does a
+ *       walk run at all, and even then it is BOUNDED to the delta: `git
+ *       rev-list <changed tips> --not <all before tips>` — this only visits
+ *       commits reachable from what changed and NOT already reachable
+ *       before, never the whole graph.
  *   (b) A commit is classified new-vs-existing PURELY by that reachability
  *       query — never by committer time (round 4's `--since` filter
  *       misclassified a backdated `GIT_COMMITTER_DATE` commit as
@@ -53,6 +92,30 @@
  *   since `before` (a bounded `reflog show --format=%H HEAD -n <delta>`,
  *   not a full walk) so the transient commit is still found.
  *
+ * Round 6, a further cost pass (round 4's detection logic itself confirmed
+ * correct by a refuter) — `for-each-ref` is O(ref count): measured ~84ms on
+ * a synthetic 5000-loose-ref repo, ~10ms once packed, and round 5 still
+ * called it TWICE per guarded call (before AND after) even for a no-op read.
+ * `computeRefsFingerprint` stands in for a full `for-each-ref` on the AFTER
+ * side: fs `stat()` of `packed-refs` plus every loose ref file under
+ * `<git-common-dir>/refs` (mtime+size+inode each — a directory-mtime-only
+ * check would miss a rewrite that reuses an existing filename; measured that
+ * THIS filesystem does bump the parent dir's mtime on such a rename anyway,
+ * but that is not a portable guarantee, so every file is stat'd). If the
+ * fingerprint (plus HEAD/reflog, already cheap) is unchanged, `for-each-ref`
+ * is skipped entirely on the after side — it still runs once, unconditionally,
+ * on the BEFORE side (the real ref values have to be captured with something
+ * before the command can run; there is no way to reconstruct them
+ * afterward). Measured on the same 5000-ref repo: fingerprint ~28ms (loose)
+ * / ~4ms (packed) including the one `git rev-parse --git-dir
+ * --git-common-dir` call needed to locate the paths — cheaper than
+ * `for-each-ref` in both states, so the no-op overhead drops from ~2×
+ * for-each-ref to 1× for-each-ref + 2× fingerprint. `--git-dir`/
+ * `--git-common-dir` (not a hardcoded `.git/`) is what makes this correct
+ * from inside a linked worktree, whose refs/ live in the COMMON dir but
+ * whose own HEAD/logs do not. The dead `headSymbolic` field (computed by
+ * round 4/5, never read by any check) is removed.
+ *
  * On a violation the tool result becomes an error (see
  * `effectViolationMessage`) and it is logged — nothing about the repository
  * is ever touched. `git push` remains a separate, still string-based concern
@@ -60,6 +123,8 @@
  * a remote has it, so it must still be caught BEFORE execution.
  */
 import { spawnSync } from "node:child_process";
+import { type Dirent, readdirSync, statSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { logger } from "../utils/logger.js";
 
 // ─── Test-only call instrumentation ────────────────────────────────────────
@@ -94,12 +159,12 @@ export function isInsideGitRepo(cwd: string): boolean {
 }
 
 export interface GitEffectSnapshot {
-  /** refname -> objectname (sha), from `for-each-ref` (cheap — no commit-graph walk). Never contains "HEAD". */
+  /** refname -> objectname (sha), from `for-each-ref` (no commit-graph walk, but O(ref count) — see `refsFingerprint`). Never contains "HEAD". */
   refs: Record<string, string>;
+  /** Cheap fs-only stand-in for "would for-each-ref's output differ" — see `computeRefsFingerprint`. */
+  refsFingerprint: string;
   /** `git rev-parse HEAD` — null with no commits yet. */
   headSha: string | null;
-  /** `git symbolic-ref -q HEAD` — the branch HEAD follows, or null when detached. */
-  headSymbolic: string | null;
   /** Line count of `git reflog show HEAD` — bounded by HEAD's OWN reflog only (never `--all`), so this is cheap regardless of overall repo size. Used purely as a change-detection signal. */
   reflogCount: number;
 }
@@ -125,15 +190,97 @@ function headReflogCount(cwd: string): number {
   return out.stdout.split("\n").filter((l) => l.trim()).length;
 }
 
-/** Cheap snapshot: for-each-ref + HEAD sha/symbolic-target + HEAD's own reflog count. Never throws, never walks the commit graph. */
+interface GitPaths {
+  /** `git rev-parse --git-dir` — per-WORKTREE (HEAD, logs/HEAD live here). */
+  gitDir: string;
+  /** `git rev-parse --git-common-dir` — shared across all worktrees of this repo (refs/, packed-refs live here). */
+  commonDir: string;
+}
+
+/**
+ * Resolve both directories in ONE call (each on its own stdout line). Using
+ * `--git-common-dir` (not a hardcoded `.git/`) is what makes
+ * `computeRefsFingerprint` correct from inside a linked worktree — its refs
+ * live in the common dir, shared with every other worktree of the same
+ * repository. Returns `null` on any failure; callers degrade to "always
+ * fingerprint-mismatch" (falls through to a real `for-each-ref`), never to a
+ * missed violation.
+ */
+function resolveGitPaths(cwd: string): GitPaths | null {
+  const out = git(cwd, ["rev-parse", "--git-dir", "--git-common-dir"]);
+  if (!out.ok) return null;
+  const lines = out.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length < 2) return null;
+  const gitDir = isAbsolute(lines[0]) ? lines[0] : join(cwd, lines[0]);
+  const commonDir = isAbsolute(lines[1]) ? lines[1] : join(cwd, lines[1]);
+  return { gitDir, commonDir };
+}
+
+/**
+ * Cheap fs-only stand-in for "would `git for-each-ref` print something
+ * different now" — no git subprocess, just `stat()`. Combines `packed-refs`'
+ * own (mtime, size, inode) with the same triple for every LOOSE file under
+ * `<common-dir>/refs` (sorted, so traversal order never spuriously changes
+ * the result). A directory-mtime-only check would be cheaper still, but was
+ * measured to be unsafe to rely on in general (see the round-6 header
+ * comment) — every file is stat'd individually so a rewrite that reuses an
+ * existing filename (`git branch -f` on an existing branch) is never missed
+ * regardless of filesystem rename semantics.
+ *
+ * A mismatch only ever means "go check for real" (`for-each-ref` runs next);
+ * it is never itself treated as proof of what changed. So a stat() racing a
+ * concurrent ref write and losing (file vanished mid-walk, say) can only
+ * cause an unnecessary `for-each-ref` call — never a missed violation.
+ */
+function computeRefsFingerprint(paths: GitPaths | null): string {
+  if (!paths) return "";
+  const parts: string[] = [];
+  try {
+    const s = statSync(join(paths.commonDir, "packed-refs"), { bigint: true });
+    parts.push(`P:${s.mtimeNs}:${s.size}:${s.ino}`);
+  } catch {
+    /* no packed-refs is a valid, stable state — absence needs no entry */
+  }
+  const entries: string[] = [];
+  const stack = [join(paths.commonDir, "refs")];
+  while (stack.length > 0) {
+    const dir = stack.pop() as string; // length just checked above
+    let dirents: Dirent[];
+    try {
+      dirents = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const d of dirents) {
+      const full = join(dir, d.name);
+      if (d.isDirectory()) {
+        stack.push(full);
+        continue;
+      }
+      try {
+        const s = statSync(full, { bigint: true });
+        entries.push(`${full}:${s.mtimeNs}:${s.size}:${s.ino}`);
+      } catch {
+        /* raced with a delete mid-walk — see doc comment above */
+      }
+    }
+  }
+  entries.sort();
+  parts.push(...entries);
+  return parts.join("|");
+}
+
+/** Full snapshot: for-each-ref + its cheap fingerprint + HEAD sha + HEAD's own reflog count. Never throws, never walks the commit graph. */
 export function snapshotGitEffects(cwd: string): GitEffectSnapshot {
   const refs = forEachRef(cwd);
+  const refsFingerprint = computeRefsFingerprint(resolveGitPaths(cwd));
   const headOut = git(cwd, ["rev-parse", "HEAD"]);
   const headSha = headOut.ok && headOut.stdout.trim() ? headOut.stdout.trim() : null;
-  const symOut = git(cwd, ["symbolic-ref", "-q", "HEAD"]);
-  const headSymbolic = symOut.ok && symOut.stdout.trim() ? symOut.stdout.trim() : null;
   const reflogCount = headReflogCount(cwd);
-  return { refs, headSha, headSymbolic, reflogCount };
+  return { refs, refsFingerprint, headSha, reflogCount };
 }
 
 export type RefActionKind = "created" | "moved" | "deleted";
@@ -157,43 +304,65 @@ export interface GitEffectViolation {
 }
 
 /**
- * Compare `before` (captured pre-command) against a FRESH snapshot and
- * report — never mutate — any violation. Returns `null` when nothing
- * happened. The overwhelmingly common case (a read-only command, or any
- * command that never touches a ref or HEAD) is detected from the cheap
- * snapshot alone, with ZERO further git calls.
+ * Compare `before` (captured pre-command) against a FRESH read and report —
+ * never mutate — any violation. Returns `null` when nothing happened. The
+ * overwhelmingly common case (a read-only command, or any command that
+ * never touches a ref or HEAD) is detected from the cheap fingerprint +
+ * HEAD sha + HEAD reflog count alone — `for-each-ref` is NOT called again on
+ * this (after) side at all when nothing changed; it only ever runs
+ * unconditionally once, on the BEFORE side (`snapshotGitEffects`), since the
+ * real before-values have to be captured with something before the command
+ * runs — there is no way to reconstruct them afterward.
  */
 export function detectGitEffectViolation(cwd: string, before: GitEffectSnapshot): GitEffectViolation | null {
-  const after = snapshotGitEffects(cwd);
+  const paths = resolveGitPaths(cwd);
+  const afterFingerprint = computeRefsFingerprint(paths);
+  const headOut = git(cwd, ["rev-parse", "HEAD"]);
+  const afterHeadSha = headOut.ok && headOut.stdout.trim() ? headOut.stdout.trim() : null;
+  const afterReflogCount = headReflogCount(cwd);
 
-  const refNames = new Set([...Object.keys(before.refs), ...Object.keys(after.refs)]);
+  const reflogChanged = afterReflogCount !== before.reflogCount;
+  const refsMaybeChanged = afterFingerprint !== before.refsFingerprint;
+
+  // FAST PATH — the cheap fingerprint says for-each-ref would print nothing
+  // different, and HEAD's own reflog didn't grow either: for-each-ref is
+  // never called on this side, and no history walk of any kind runs.
+  if (!refsMaybeChanged && !reflogChanged) {
+    return null;
+  }
+
+  // The fingerprint (or reflog count) differs — get the REAL after-state now.
+  const afterRefs = forEachRef(cwd);
+
+  const refNames = new Set([...Object.keys(before.refs), ...Object.keys(afterRefs)]);
   const changedRefNames: string[] = [];
   for (const name of refNames) {
-    if (before.refs[name] !== after.refs[name]) changedRefNames.push(name);
+    if (before.refs[name] !== afterRefs[name]) changedRefNames.push(name);
   }
-  const reflogChanged = after.reflogCount !== before.reflogCount;
 
-  // FAST PATH — nothing named changed, HEAD's own reflog didn't grow either:
-  // no history walk of any kind, not even a bounded one.
+  // A fingerprint mismatch is only ever a "go check for real" signal, never
+  // proof by itself — e.g. a loose ref rewritten to the SAME value still
+  // touches its file's mtime/inode. If the real diff finds nothing named
+  // changed and the reflog didn't grow, there is still nothing to report.
   if (changedRefNames.length === 0 && !reflogChanged) {
     return null;
   }
 
-  // Something changed — a BOUNDED reachability query decides new-vs-existing,
-  // never committer time. Seed it with every tip that could plausibly be new:
-  // the after-value of every changed ref, HEAD's current value (covers a
-  // detached-HEAD commit — no named ref backs it), and — for the reflog-only
-  // case — the reflog entries added since `before` (bounded to exactly the
-  // delta count, not a full walk).
+  // Something REALLY changed — a BOUNDED reachability query decides
+  // new-vs-existing, never committer time. Seed it with every tip that
+  // could plausibly be new: the after-value of every changed ref, HEAD's
+  // current value (covers a detached-HEAD commit — no named ref backs it),
+  // and — for the reflog-only case — the reflog entries added since
+  // `before` (bounded to exactly the delta count, not a full walk).
   const beforeTips = [...new Set([...Object.values(before.refs), before.headSha].filter((x): x is string => !!x))];
   const candidateTips = new Set<string>();
   for (const name of changedRefNames) {
-    const v = after.refs[name];
+    const v = afterRefs[name];
     if (v) candidateTips.add(v);
   }
-  if (after.headSha) candidateTips.add(after.headSha);
-  if (reflogChanged && after.reflogCount > before.reflogCount) {
-    const delta = after.reflogCount - before.reflogCount;
+  if (afterHeadSha) candidateTips.add(afterHeadSha);
+  if (reflogChanged && afterReflogCount > before.reflogCount) {
+    const delta = afterReflogCount - before.reflogCount;
     const deltaOut = git(cwd, ["reflog", "show", "--format=%H", "HEAD", "-n", String(delta)]);
     if (deltaOut.ok) {
       for (const line of deltaOut.stdout.split("\n")) {
@@ -219,7 +388,7 @@ export function detectGitEffectViolation(cwd: string, before: GitEffectSnapshot)
   const refActions: RefAction[] = [];
   for (const name of changedRefNames) {
     const b = before.refs[name];
-    const a = after.refs[name];
+    const a = afterRefs[name];
     if (a === undefined) {
       refActions.push({ ref: name, kind: "deleted", fromSha: b });
     } else if (b === undefined) {
