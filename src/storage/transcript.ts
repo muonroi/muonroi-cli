@@ -98,6 +98,51 @@ function loadMessageRows(sessionId: string): MessageRow[] {
   return rows;
 }
 
+/**
+ * Round 9 (G11c) — a single malformed `message_json` row must not take down
+ * the WHOLE session load. Measured live: a sub-session's turn aborted mid-
+ * stream (a `ToolCallMarkupLeakError` propagating uncaught out of an
+ * unguarded compaction summary call — see compaction.ts/orchestrator.ts),
+ * and the NEXT top-level turn on the resumed parent session failed instantly
+ * with a raw, uncustomized `JSON Parse error: Expected ']'` — every row this
+ * session ever persisted parsed cleanly on inspection, so the malformed JSON
+ * was constructed transiently during that turn's own processing, not
+ * corrupted at rest; the exact call site could not be pinned down from the
+ * available forensics (no error interaction_log row, no corrupted persisted
+ * data). Regardless of which future turn produces a bad row, resuming a
+ * session must survive it: each row is parsed independently here — a row
+ * that fails to parse is logged (session id + seq, for forensics) and
+ * OMITTED from the returned transcript rather than throwing and aborting the
+ * whole resume.
+ */
+function parseMessageRowsSafely(rows: readonly MessageRow[]): {
+  messages: ModelMessage[];
+  seqs: number[];
+  timestamps: Date[];
+} {
+  const messages: ModelMessage[] = [];
+  const seqs: number[] = [];
+  const timestamps: Date[] = [];
+  for (const row of rows) {
+    let message: ModelMessage;
+    try {
+      message = JSON.parse(row.message_json) as ModelMessage;
+    } catch (err) {
+      logger.error("storage", "Skipping unparseable message row on resume — the rest of the session still loads", {
+        sessionId: row.session_id,
+        seq: row.seq,
+        role: row.role,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+    messages.push(message);
+    seqs.push(row.seq);
+    timestamps.push(new Date(row.created_at));
+  }
+  return { messages, seqs, timestamps };
+}
+
 function toPersistedCompaction(row: CompactionRow | undefined): PersistedCompaction | null {
   if (!row) return null;
   return {
@@ -124,9 +169,7 @@ export function loadLatestCompaction(sessionId: string): PersistedCompaction | n
 
 function buildEffectiveMessageRecords(sessionId: string): EffectiveMessageRecord[] {
   const rows = loadMessageRows(sessionId);
-  const messages = rows.map((row) => JSON.parse(row.message_json) as ModelMessage);
-  const seqs = rows.map((row) => row.seq);
-  const timestamps = rows.map((row) => new Date(row.created_at));
+  const { messages, seqs, timestamps } = parseMessageRowsSafely(rows);
   const transcript = buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sessionId));
 
   return transcript.messages.map((message, index) => ({
@@ -137,17 +180,13 @@ function buildEffectiveMessageRecords(sessionId: string): EffectiveMessageRecord
 }
 
 export function loadRawTranscript(sessionId: string): ModelMessage[] {
-  return loadMessageRows(sessionId).map((row) => JSON.parse(row.message_json) as ModelMessage);
+  return parseMessageRowsSafely(loadMessageRows(sessionId)).messages;
 }
 
 export function loadTranscriptState(sessionId: string): LoadedTranscriptState {
   const rows = loadMessageRows(sessionId);
-  return buildEffectiveTranscript(
-    rows.map((row) => JSON.parse(row.message_json) as ModelMessage),
-    rows.map((row) => row.seq),
-    rows.map((row) => new Date(row.created_at)),
-    loadLatestCompaction(sessionId),
-  );
+  const { messages, seqs, timestamps } = parseMessageRowsSafely(rows);
+  return buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sessionId));
 }
 
 export function loadTranscript(sessionId: string): ModelMessage[] {
@@ -183,9 +222,7 @@ export function loadSessionChainTranscriptState(sessionId: string): LoadedTransc
   const records: ChainMessageRecord[] = [];
   for (const sid of chain) {
     const rows = loadMessageRows(sid);
-    const messages = rows.map((row) => JSON.parse(row.message_json) as ModelMessage);
-    const seqs = rows.map((row) => row.seq);
-    const timestamps = rows.map((row) => new Date(row.created_at));
+    const { messages, seqs, timestamps } = parseMessageRowsSafely(rows);
     const effective = buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sid));
 
     for (let i = 0; i < effective.messages.length; i++) {

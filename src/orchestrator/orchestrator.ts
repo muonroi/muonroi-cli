@@ -101,6 +101,7 @@ import {
   getCurrentModel,
   getCurrentShellSettings,
   getModeSpecificModel,
+  getProjectSubAgentModel,
   getRoleModel,
   getRoleModels,
   getSubAgentCompactKeepLast,
@@ -175,6 +176,7 @@ import {
   shouldCompactContext,
 } from "./compaction";
 import { buildCompactionCustomInstructions } from "./compaction-consult.js";
+import { markProposerStalled } from "./compaction-stall-notice.js";
 import { getCouncilContinuationWatchdogMs } from "./council-continuation-budget.js";
 import { CouncilManager } from "./council-manager.js";
 import { CrossTurnDedup, isCrossTurnDedupEnabled } from "./cross-turn-dedup.js";
@@ -2035,9 +2037,21 @@ export class Agent {
     // "delegated sub-agent/sub-session dispatch" (pinned) from
     // "compaction" (never pinned) without threading a second parameter
     // through the DI interface.
-    return resolveModelForTask(task, this.providerId, this.modelId, undefined, {
+    //
+    // Round 9 (HR8, owner correction to round 2's G3): making sub-agent
+    // dispatch inherit the main session's `model` pin unconditionally was
+    // the owner's own mistake to fix, not a bug in the pin mechanism itself
+    // — the owner's framework wants the orchestrator tier (main session) and
+    // worker tier (sub-agents/sub-sessions) to be able to run DIFFERENT
+    // models. `subAgentModel`, when set, is what delegated (non-"compact")
+    // dispatch pins to INSTEAD of `this.modelId` — same "pinned" bypass of
+    // tier resolution, just aimed at a different model string. Unset means
+    // exactly today's behaviour (falls through to `this.modelId` +
+    // `isModelPinnedByProject()`, unchanged).
+    const subAgentModel = task !== "compact" ? getProjectSubAgentModel() : undefined;
+    return resolveModelForTask(task, this.providerId, subAgentModel ?? this.modelId, undefined, {
       parentTier,
-      pinned: task !== "compact" && isModelPinnedByProject(),
+      pinned: task !== "compact" && (subAgentModel !== undefined || isModelPinnedByProject()),
     });
   }
 
@@ -2138,12 +2152,37 @@ export class Agent {
       customInstructions = buildCompactionCustomInstructions({ isSubSession, agentFocus: null });
     }
 
-    const { summary, usage: compactUsage } = await generateCompactionSummary(
-      compactModelId,
-      preparation,
-      customInstructions,
-      signal,
-    );
+    // Round 9 (G11a): `generateCompactionSummary` (via `summarizeConversation`)
+    // makes a tool-less auxiliary LLM call — the SAME quirk-prone shape as
+    // `proposeCompaction` above (which already treats ANY failure as
+    // non-fatal). This call had NO caller-side catch at all: measured live,
+    // step-3.5-flash's `ToolCallMarkupLeakError` (the tool-markup guard fires
+    // on every tool-less call, not just proposeCompaction's) propagated
+    // straight out of this `await`, uncaught, all the way through
+    // `compactForContext` and the sub-session's own turn — ending it
+    // completely empty ("No assistant messages found to absorb"), raw
+    // `<tool_call>` markup left on screen. ANY failure here (leak, timeout,
+    // parse, provider error) must take the SAME non-fatal path: skip
+    // compaction for this turn (return false, exactly like a proposer that
+    // said "don't compact") rather than aborting the turn — and since
+    // nothing is persisted before this point succeeds, no malformed content
+    // ever reaches the transcript either.
+    let summary: string;
+    let compactUsage: { promptTokens: number; completionTokens: number };
+    try {
+      const result = await generateCompactionSummary(compactModelId, preparation, customInstructions, signal);
+      summary = result.summary;
+      compactUsage = result.usage;
+    } catch (err) {
+      const errMessage = err instanceof Error ? err.message : String(err);
+      const errStack = err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined;
+      logger.warn("orchestrator", "Compaction summary failure — skipping compaction this turn", {
+        error: errMessage,
+        stack: errStack,
+      });
+      markProposerStalled(`Compaction failed (${errMessage.slice(0, 160)}) — continuing without it.`);
+      return false;
+    }
 
     // Record compaction usage in usage_events under a dedicated `compaction`
     // source. Previously this was cost-log-ONLY ("overhead, not user spend"),
@@ -3755,6 +3794,18 @@ export class Agent {
     let isSubSessionForked = false;
     let parentSessionId: string | null = null;
     let subSessionId: string | null = null;
+    // Round 9 (G13): `this.bash` is ONE shared BashTool instance for the
+    // whole Agent lifetime — forking a sub-session swaps `this.session` /
+    // `this.messages` but NEVER creates a new BashTool, so a `cd` the child
+    // runs (into a challenge/repo subdirectory, say) mutates the SAME cwd
+    // the parent will resume into. Measured live: debug.log's
+    // "[flow/run-root] flow-state dir re-anchored to the run root (tool cwd
+    // had drifted)" firing repeatedly, and the TUI status bar's path ending
+    // inside a challenge subdirectory after a sub-session turn. Captured
+    // here (before the fork) and restored in this function's own `finally`
+    // below, so the child's cwd changes never leak back to the parent —
+    // "isolate per session" without the cost of a second BashTool.
+    const parentCwdAtFork = this.bash.getCwd();
 
     if (routeAction === "SPAWN_SUB_SESSION" && this.session && this.sessionStore) {
       yield { type: "toast", toastLevel: "info", content: "Đang khởi tạo sub-session ngầm để xử lý tác vụ..." };
@@ -3829,6 +3880,13 @@ export class Agent {
             content: "Phát hiện sub-session trước đó bị gián đoạn, đang khôi phục...",
           };
           this.session = this.sessionStore.getRequiredSession(subSessionId);
+          // Round 9 (HR8, latent gap exposed by subAgentModel): a resumed
+          // session's OWN turn must run with ITS OWN stored model, not
+          // whatever `this.modelId` currently holds from the parent —
+          // previously harmless (round 2/3 always made the child inherit the
+          // SAME value as the parent), but subAgentModel can genuinely
+          // differ.
+          this.modelId = this.session.model;
           const childState = loadSessionChainTranscriptState(subSessionId);
           this.messages = childState.messages;
           this.messageSeqs = childState.seqs;
@@ -3840,7 +3898,25 @@ export class Agent {
           });
         } else {
           const latest = loadLatestCompaction(parentSessionId);
-          const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
+          // Round 9 (HR8): a SPAWN_SUB_SESSION child gets the project's
+          // `subAgentModel` override when set (owner correction to round 2's
+          // G3 mistake of making every sub-session inherit the main
+          // session's `model` pin unconditionally) — unset means unchanged
+          // behaviour (the child inherits `this.modelId` exactly as before).
+          // Computed once and reused below for `this.modelId` too: the
+          // `sessions` row alone is not what the child's OWN turn actually
+          // dispatches with — `this.modelId` is a separate Agent-instance
+          // field that round 2/3 never had to touch (the child always
+          // inherited the SAME value), but subAgentModel can genuinely
+          // differ from the main session's model, so it must be updated
+          // here or the child's turn silently keeps running on the parent's
+          // model despite its own `sessions.model` row saying otherwise.
+          const subAgentModelOverride = getProjectSubAgentModel();
+          const newSession = this.sessionStore.createSession(
+            subAgentModelOverride ?? this.modelId,
+            this.mode,
+            this.bash.getCwd(),
+          );
           this.sessionStore.linkChild(newSession.id, parentSessionId, "subagent");
           subSessionId = newSession.id;
           // Round 4 (G9): record the ORIGINAL goal this sub-session was forked
@@ -3888,6 +3964,10 @@ export class Agent {
           this.messages = seedMessages;
           this.messageSeqs = seedSeqs;
           this.sessionStore.touchSession(subSessionId, this.bash.getCwd());
+          // Round 9 (HR8): keep `this.modelId` in sync with the child's own
+          // `sessions.model` row — this is the field MessageProcessorDeps
+          // actually reads (see `_buildMessageProcessorDeps`), not the row.
+          if (subAgentModelOverride) this.modelId = subAgentModelOverride;
 
           isSubSessionForked = true;
           logger.info("orchestrator", "Forked child sub-session successfully", {
@@ -4067,6 +4147,27 @@ export class Agent {
 
           // Restore parent session
           this.session = this.sessionStore.getRequiredSession(parentSessionId);
+          // Round 9 (HR8): `this.modelId` may have been switched to
+          // `subAgentModel` for the child's own turn (see the fork branch
+          // above) — restore it to the PARENT's own model so the main
+          // session's NEXT turn keeps running on `model`, never leaking the
+          // sub-agent override past the sub-session's lifetime.
+          this.modelId = this.session.model;
+          // Round 9 (G13): restore the cwd the PARENT actually had before
+          // the fork — undoes whatever `cd` the child ran, so the child's
+          // tool-cwd changes never leak into the parent's next turn (see
+          // `parentCwdAtFork`'s doc comment above). Best-effort: a path that
+          // no longer exists (rare — the child deleted its own cwd) must not
+          // block absorbing the child's output, so this never throws past
+          // the finally's own try/catch either way.
+          try {
+            this.bash.setCwd(parentCwdAtFork);
+          } catch (cwdErr) {
+            logger.warn("orchestrator", "Failed to restore parent cwd after sub-session absorb", {
+              parentCwdAtFork,
+              error: cwdErr instanceof Error ? cwdErr.message : String(cwdErr),
+            });
+          }
 
           const { loadTranscriptState } = await import("../storage/transcript.js");
           const parentState = loadTranscriptState(parentSessionId);

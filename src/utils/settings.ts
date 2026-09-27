@@ -467,6 +467,22 @@ export interface ProjectSettings {
    * unchanged behaviour.
    */
   firstTurnTools?: boolean;
+  /**
+   * Round 9 (HR8, owner correction to round 2's G3): the project `model` pin
+   * is the MAIN session's instruction only. Round 2 made
+   * `SPAWN_SUB_SESSION` children and delegated sub-agents (any
+   * `resolveModelForTask` call for a non-"compact" task) inherit that SAME
+   * pin — the owner's framework wants the orchestrator tier (main session)
+   * and worker tier (sub-sessions/sub-agents) to potentially run DIFFERENT
+   * models, e.g. an expensive reasoning model for the main session and a
+   * cheaper one for delegated work. When set, a non-empty `subAgentModel`
+   * is what sub-sessions/sub-agents use instead of the main `model` pin;
+   * when unset, behaviour is unchanged (sub-sessions/sub-agents inherit
+   * `model` exactly as round 2 left it). Never applies to `compact` tasks
+   * (compaction/summarization always route independently — see
+   * `resolveModelForTask`'s `opts.pinned` gate).
+   */
+  subAgentModel?: string;
 }
 
 function getUserSettingsPath(): string {
@@ -829,6 +845,21 @@ export function getCurrentModel(mode?: AgentMode): string {
  */
 export function isModelPinnedByProject(): boolean {
   return typeof loadProjectSettings().model === "string" && loadProjectSettings().model!.trim().length > 0;
+}
+
+/**
+ * Round 9 (HR8): the project's explicit sub-agent/sub-session model override
+ * (`ProjectSettings.subAgentModel`), trimmed, or `undefined` when unset or
+ * blank. Callers that resolve a model for a `SPAWN_SUB_SESSION` child or a
+ * delegated sub-agent task check this FIRST — when present, it wins over the
+ * main-session `model` pin for that call; when absent, behaviour is
+ * unchanged from before this setting existed.
+ */
+export function getProjectSubAgentModel(): string | undefined {
+  const raw = loadProjectSettings().subAgentModel;
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 /**
