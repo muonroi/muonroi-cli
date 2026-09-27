@@ -307,6 +307,55 @@ const _injectedGuidanceSha = new Map<string, string>();
 export const SESSION_START_SYSTEM_TAG = "[SessionStart hook output]";
 
 /**
+ * Round 12b (F2 residual, MED) — strips ANSI/CSI/OSC terminal escape
+ * sequences and C0/C1 control characters (except `\n` and `\t`) from a
+ * SessionStart hook's raw stdout before it is ever bounded or rendered.
+ * The TUI log is not a terminal emulator: an unsanitized colour code, a
+ * cursor-move/clear-screen sequence, an OSC window-title/hyperlink
+ * sequence, or a bare `\r` "progress bar" overwrite would corrupt the
+ * log's own rendering or hide/replace text already printed above it, and a
+ * NUL byte can break assumptions elsewhere in string handling entirely.
+ *
+ * `\r\n` is normalised to `\n` FIRST (so a Windows-authored hook script's
+ * ordinary newlines are never mistaken for bare-`\r` overwrites); any
+ * OTHER `\r` is then simply dropped — this is plain text being rendered
+ * into a log, not a terminal, so there is no attempt to emulate an
+ * overwrite. Escape sequences are removed in FULL here, BEFORE any
+ * truncation happens later in `formatSessionStartHookNotice` — so
+ * truncation there always cuts already-sanitized, escape-free text and
+ * can never land "mid-escape" and leave a dangling ESC byte in the
+ * rendered output. The final blanket C0/C1 sweep is the safety net for
+ * any malformed/incomplete escape sequence the specific OSC/CSI/Fe
+ * patterns above did not recognize — it also happens to catch a bare,
+ * dangling ESC byte (`\x1B` is itself a C0 control byte), which is what
+ * guarantees "no dangling ESC" unconditionally, not just for the
+ * sequences this function knows how to name.
+ */
+function sanitizeHookOutput(raw: string): string {
+  let s = raw.replace(/\r\n/g, "\n").replace(/\r/g, "");
+  // OSC: ESC ] ... terminated by BEL or ST (ESC \) — window title, hyperlinks.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: sanitizer — these ARE the control bytes being stripped.
+  s = s.replace(/\x1B\][\s\S]*?(?:\x07|\x1B\\)/g, "");
+  // CSI: ESC [ parameter-bytes intermediate-bytes final-byte(@-~) — colour,
+  // cursor movement, clear-screen/line, etc.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: sanitizer — these ARE the control bytes being stripped.
+  s = s.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+  // Charset designation: ESC ( X / ESC ) X (G0/G1 designation).
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: sanitizer — these ARE the control bytes being stripped.
+  s = s.replace(/\x1B[()][A-Za-z0-9]/g, "");
+  // Other Fe escape sequences: ESC followed by a single byte in 0x40-0x5F
+  // (save/restore cursor, reset, and any malformed/leftover CSI/OSC lead-in
+  // a pattern above did not fully match).
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: sanitizer — these ARE the control bytes being stripped.
+  s = s.replace(/\x1B[@-_]/g, "");
+  // Safety net: any remaining C0 control byte (except \t/\n, and \r already
+  // handled above) or C1 control byte — including a bare/dangling ESC.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: sanitizer — these ARE the control bytes being stripped.
+  s = s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x80-\x9F]/g, "");
+  return s;
+}
+
+/**
  * Round 12 (F2/G14) — bound (default 16 KB) on how much of a SessionStart
  * hook's stdout/additionalContext gets rendered into the TUI's content
  * stream, per the FRAMEWORK's own "ON SESSION START" contract ("run the
@@ -318,12 +367,17 @@ export const SESSION_START_SYSTEM_TAG = "[SessionStart hook output]";
  * round-2 G1 fix) so it reads as a distinct notice item in the log, not
  * indistinguishable assistant prose.
  *
+ * Round 12b (F2 residual, MED): each context is run through
+ * `sanitizeHookOutput` BEFORE trimming/joining/bounding — see that
+ * function's doc comment for why the ordering (sanitize, then truncate)
+ * is what makes "no dangling ESC survives truncation" true unconditionally.
+ *
  * Returns `null` when there is nothing to show (every context was blank).
  * Pure — exported for direct testing without needing to drive a whole turn.
  */
 export function formatSessionStartHookNotice(contexts: readonly string[], maxChars = 16_384): string | null {
   const joined = contexts
-    .map((ctx) => ctx.trim())
+    .map((ctx) => sanitizeHookOutput(ctx).trim())
     .filter((ctx) => ctx.length > 0)
     .join("\n");
   if (!joined) return null;

@@ -202,17 +202,35 @@ function parseSegment(input: string): Term[] {
 
   // Round 12 (F3/G16): `current` still non-empty here means parsing stalled
   // on syntax this grammar does not recognize (e.g. a bare `#id` — this
-  // grammar requires `id=value`, not CSS `#id`). Without this, an empty
-  // `terms` array from a FAILED parse looked identical to a deliberately
-  // unconstrained segment, and `termsMatch`'s `Array.prototype.every` on an
-  // empty array is vacuously `true` — so an unparseable selector silently
-  // matched EVERY node instead of none. Measured live:
-  // `tui.wait_for({selector: "#nonexistent"})` resolved immediately instead
-  // of timing out. A leftover/malformed selector must match NOTHING, never
+  // grammar requires `id=value`, not CSS `#id`).
+  //
+  // Round 12b (F3 residual, MED-HIGH): checking `terms.length === 0` here
+  // (rather than just `current`, which is also `""` for a segment that was
+  // BLANK/whitespace-only from the very start — the `while (current)` loop
+  // above never even runs) covers that case too. An empty `terms` array —
+  // whether from a FAILED parse (leftover unparsed text) or a segment with
+  // NOTHING to parse in the first place (`""`, `"   "`, or a trailing empty
+  // segment from a malformed `>>` split, e.g. `"role=x >> "`) — looked
+  // identical to a deliberately unconstrained segment, and `termsMatch`'s
+  // `Array.prototype.every` on an empty array is vacuously `true` — so an
+  // unparseable OR blank selector segment silently matched EVERY node
+  // instead of none. Measured live: `tui.wait_for({selector:
+  // "#nonexistent"})` resolved immediately instead of timing out. A
+  // leftover/malformed/blank selector segment must match NOTHING, never
   // everything — `termMatches` below always fails a `__unparsed` term, and
   // (unlike `__index`) `termsMatch` does not filter it out of the `.every`
   // check, so it drags the WHOLE segment's match down to false.
-  if (current) {
+  //
+  // This is safe for the two legitimate "no selector" paths: a `wait_for`
+  // call with NO `selector` field at all (idle/event-only waits) never
+  // calls into this module — driver.ts's condition builder only invokes
+  // `selectorMatches` when `"selector" in cond`, so an omitted field is
+  // unaffected. And no documented form in `SELECTOR_GRAMMAR` relies on a
+  // zero-term segment to mean "match everything" — every real form (a
+  // field comparison, a flag, `[index=N]`) always produces at least one
+  // term, so this can only ever fire on input that was blank or failed to
+  // parse.
+  if (terms.length === 0) {
     terms.push({ key: "__unparsed", op: "=", value: current });
   }
 
