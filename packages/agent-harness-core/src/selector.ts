@@ -200,10 +200,30 @@ function parseSegment(input: string): Term[] {
     break;
   }
 
+  // Round 12 (F3/G16): `current` still non-empty here means parsing stalled
+  // on syntax this grammar does not recognize (e.g. a bare `#id` — this
+  // grammar requires `id=value`, not CSS `#id`). Without this, an empty
+  // `terms` array from a FAILED parse looked identical to a deliberately
+  // unconstrained segment, and `termsMatch`'s `Array.prototype.every` on an
+  // empty array is vacuously `true` — so an unparseable selector silently
+  // matched EVERY node instead of none. Measured live:
+  // `tui.wait_for({selector: "#nonexistent"})` resolved immediately instead
+  // of timing out. A leftover/malformed selector must match NOTHING, never
+  // everything — `termMatches` below always fails a `__unparsed` term, and
+  // (unlike `__index`) `termsMatch` does not filter it out of the `.every`
+  // check, so it drags the WHOLE segment's match down to false.
+  if (current) {
+    terms.push({ key: "__unparsed", op: "=", value: current });
+  }
+
   return terms;
 }
 
 function termMatches(node: UINode, t: Term): boolean {
+  // Round 12 (F3/G16): a segment that failed to parse (see parseSegment's
+  // doc comment) must never match — this is what turns "unparseable" into
+  // "matches nothing" instead of "matches everything".
+  if (t.key === "__unparsed") return false;
   if (t.key === "__flag") {
     if (!(SELECTOR_FLAGS as readonly string[]).includes(t.value)) return false;
     return node[t.value as SelectorFlag] === true;

@@ -491,6 +491,33 @@ export interface ProjectSettings {
    * `resolveModelForTask`'s `opts.pinned` gate).
    */
   subAgentModel?: string;
+  /**
+   * Round 12 (G15) — a router `SPAWN_SUB_SESSION` decision (or reactive
+   * escalation from a tool-heavy prior turn) hands the user's RAW request to
+   * a WORKER-tier child with a generic "you have full access to tools,
+   * satisfy the user's request" overlay. For a project whose OWN framework
+   * requires the orchestrator-tier session itself to map the request to a
+   * stage/workflow, write a brief, and hold judgement across the whole task
+   * (not just delegate and disappear), that hand-off is a real behavioural
+   * break: the main model never sees the turn again, so there is no
+   * orchestrator step at all for that turn. Measured live: session
+   * 94bf4fe19937 forked to a sub-session that skipped every framework step
+   * (no stage mapping, no plan, no brief) and started editing a solution
+   * file directly, in violation of an explicit "tell me the plan before you
+   * change anything" instruction from the SAME turn.
+   *
+   * Default `true` (today's behaviour, unchanged) — every project that has
+   * not set this in `.muonroi-cli/settings.json` keeps forking/resuming
+   * sub-sessions exactly as before. `false` keeps the CURRENT turn on the
+   * main session, on the main model: neither a router `SPAWN_SUB_SESSION`
+   * decision nor reactive escalation forks or resumes a child for it. The
+   * main session still has its `task`/`delegate` tools for delegating work
+   * explicitly (those already honour `subAgentModel`, unaffected by this
+   * setting) — this only removes the IMPLICIT, invisible hand-off of the
+   * whole turn. `ROTATE_SESSION` / context-rotation is a distinct mechanism
+   * (anti-mù compaction, not delegation) and is unaffected either way.
+   */
+  routerSubSessions?: boolean;
 }
 
 function getUserSettingsPath(): string {
@@ -868,6 +895,19 @@ export function getProjectSubAgentModel(): string | undefined {
   if (typeof raw !== "string") return undefined;
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Round 12 (G15): whether a router `SPAWN_SUB_SESSION` decision (or reactive
+ * escalation) may fork/resume a child sub-session for this project. See
+ * `ProjectSettings.routerSubSessions`'s doc comment. Default `true`
+ * (today's behaviour) — only an explicit `false` disables it; any other
+ * value (missing key, non-boolean) falls back to `true` rather than
+ * silently changing behaviour on a typo.
+ */
+export function isRouterSubSessionsEnabled(): boolean {
+  const raw = loadProjectSettings().routerSubSessions;
+  return raw === false ? false : true;
 }
 
 /**

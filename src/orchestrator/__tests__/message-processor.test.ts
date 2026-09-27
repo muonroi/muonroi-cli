@@ -225,6 +225,52 @@ describe("MessageProcessor — DI surface invariants", () => {
     expect(contentChunks.some((c) => c.content?.includes("=== BRIEFING OUTPUT ==="))).toBe(true);
   });
 
+  // Round 12 (F2/G14): the content chunk is now a BOUNDED, TAGGED notice
+  // block (formatSessionStartHookNotice) — a distinct system/notice item in
+  // the log, not a bare, indistinguishable content chunk, and never
+  // unbounded regardless of what the hook script prints.
+  it("tags the rendered SessionStart notice and truncates a huge hook output instead of flooding the turn", async () => {
+    const HUGE = "Z".repeat(20_000);
+    const deps = makeDeps({
+      batchApi: true,
+      getSessionStartHookFired: () => false,
+      fireHook: async (input: unknown) => {
+        const hookInput = input as { hook_event_name?: string };
+        if (hookInput.hook_event_name === "SessionStart") {
+          return {
+            blocked: false,
+            blockingErrors: [],
+            preventContinuation: false,
+            additionalContexts: [HUGE],
+            results: [],
+            eeMatches: [],
+          };
+        }
+        return {
+          blocked: false,
+          blockingErrors: [],
+          preventContinuation: false,
+          additionalContexts: [],
+          results: [],
+          eeMatches: [],
+        };
+      },
+      processMessageBatchTurn: async function* () {
+        yield { type: "done" };
+      },
+    });
+    const processor = new MessageProcessor(deps);
+    const chunks: Array<{ type: string; content?: string }> = [];
+    for await (const c of processor.run("bắt đầu", undefined)) {
+      chunks.push(c as { type: string; content?: string });
+    }
+    const notice = chunks.find((c) => c.type === "content" && c.content?.includes("[SessionStart hook output]"));
+    expect(notice).toBeDefined();
+    expect(notice?.content).toContain("truncated: showed 16384 of 20000 chars");
+    // Never renders the full 20_000-char blast into one chunk.
+    expect(notice!.content!.length).toBeLessThan(20_000);
+  });
+
   // Parity fix (G1): the yield-loop above is UI-only — it never told the
   // MODEL the hook already ran. Measured live: the model's own reasoning
   // said "there's a system note about session start: run briefing.sh", then

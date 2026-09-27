@@ -855,3 +855,168 @@ describe("sub-session resume vs. fork — round 4 (G9)", () => {
     expect(children).toHaveLength(1);
   });
 });
+
+// Round 12 (F1/G15) — router SPAWN_SUB_SESSION hands the user's raw request
+// to a WORKER-tier child with a generic overlay ("full access to tools,
+// satisfy the user's request"); the main (ORCHESTRATOR-tier) model never
+// sees the turn again. Measured live: session 94bf4fe19937's sub-session
+// never mapped the request to the project's own framework, skipped writing
+// a plan, and started editing a solution file directly — in violation of an
+// explicit "tell me the plan first" instruction from the SAME turn.
+// `routerSubSessions: false` keeps the CURRENT turn on the main session.
+describe("routerSubSessions — round 12 (F1/G15): keep the turn on the main session", () => {
+  it("false: a router SPAWN_SUB_SESSION decision does NOT fork — no child session row, the turn runs on this.modelId", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-routersubsessions-off-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ routerSubSessions: false }),
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const MAIN_MODEL = "deepseek-v4-flash";
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      for await (const _ of agent.processMessage("review toàn bộ src/council")) {
+        // drain
+      }
+
+      const db = getDatabase();
+      const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId);
+      expect(children).toHaveLength(0);
+
+      // The turn that actually ran was constructed against the MAIN session,
+      // on the MAIN model — not a forked child's.
+      expect(capturedTurnModelIds).toHaveLength(1);
+      expect(capturedTurnModelIds[0]?.sessionId).toBe(parentId);
+      expect(capturedTurnModelIds[0]?.modelId).toBe(MAIN_MODEL);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("false: reactive escalation (tool-heavy prior turn) also does NOT fork", async () => {
+    // Router itself answers DIRECT_ANSWER; reactive escalation is what would
+    // normally override it to SPAWN_SUB_SESSION (see the "REACTIVE" describe
+    // block above) — with the setting off, it must not fork either.
+    mockClassify.mockResolvedValue({ action: "DIRECT_ANSWER", confidence: 0.9, reason: "looks simple" });
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-routersubsessions-reactive-off-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ routerSubSessions: false }),
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      // Turn 1: heavy tool load reported (router says DIRECT — runs in the
+      // parent either way). This becomes `_lastTurnToolChars` for turn 2.
+      reportedLoad = 150_000;
+      for await (const _ of agent.processMessage("đánh giá phân tích council feature (turn 1, heavy)")) {
+        // drain
+      }
+      // Turn 2: router STILL says DIRECT, but turn 1's heavy load would
+      // normally trip reactive escalation to SPAWN_SUB_SESSION — with the
+      // setting off, it must stay on the main session instead.
+      reportedLoad = 0;
+      for await (const _ of agent.processMessage("tiếp tục phân tích (turn 2)")) {
+        // drain
+      }
+
+      const db = getDatabase();
+      const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId);
+      expect(children).toHaveLength(0);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("true (explicit): behaves exactly like unset — forks as before (no regression)", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-routersubsessions-true-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ routerSubSessions: true }),
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      for await (const _ of agent.processMessage("review toàn bộ src/council")) {
+        // drain
+      }
+
+      const db = getDatabase();
+      const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId);
+      expect(children).toHaveLength(1);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("unset: behaves exactly like today — forks as before (byte-for-byte default, no regression)", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-routersubsessions-unset-"));
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      for await (const _ of agent.processMessage("review toàn bộ src/council")) {
+        // drain
+      }
+
+      const db = getDatabase();
+      const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId);
+      expect(children).toHaveLength(1);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("malformed value (a string, not a boolean) falls back to the default (true) — still forks", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-routersubsessions-malformed-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ routerSubSessions: "false" }), // string, not boolean — malformed
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      for await (const _ of agent.processMessage("review toàn bộ src/council")) {
+        // drain
+      }
+
+      const db = getDatabase();
+      const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId);
+      expect(children).toHaveLength(1);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+});

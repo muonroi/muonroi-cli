@@ -110,6 +110,7 @@ import {
   isCouncilMultiProviderPreferred,
   isModelPinnedByProject,
   isProviderDisabled,
+  isRouterSubSessionsEnabled,
   loadUserSettings,
   type ModelRole,
   type SandboxMode,
@@ -3866,7 +3867,26 @@ export class Agent {
     // "isolate per session" without the cost of a second BashTool.
     const parentCwdAtFork = this.bash.getCwd();
 
-    if (routeAction === "SPAWN_SUB_SESSION" && this.session && this.sessionStore) {
+    // Round 12 (G15): `routerSubSessions: false` keeps the CURRENT turn on
+    // the main session/main model — router SPAWN_SUB_SESSION and reactive
+    // escalation (both converge on `routeAction === "SPAWN_SUB_SESSION"`,
+    // the ONLY thing this block's condition reads) hand the turn to a
+    // WORKER-tier child by construction, which is exactly what a project
+    // whose OWN framework requires the orchestrator tier to hold the whole
+    // turn (stage mapping, a written brief, judgement) cannot afford. Gating
+    // this single entry condition — rather than each upstream setter of
+    // `routeAction` — covers every path uniformly: nothing downstream of
+    // this block reads `routeAction` again, so skipping it here falls
+    // straight through to the ordinary (non-forked) turn body below,
+    // unchanged. Logged ONCE per turn, only when the router/escalation
+    // actually wanted to fork and was overridden — not on every turn.
+    if (routeAction === "SPAWN_SUB_SESSION" && this.session && this.sessionStore && !isRouterSubSessionsEnabled()) {
+      logger.info("orchestrator", "routerSubSessions disabled — keeping this turn on the main session", {
+        sessionId: this.session.id,
+      });
+    }
+
+    if (routeAction === "SPAWN_SUB_SESSION" && this.session && this.sessionStore && isRouterSubSessionsEnabled()) {
       yield { type: "toast", toastLevel: "info", content: "Đang khởi tạo sub-session ngầm để xử lý tác vụ..." };
       parentSessionId = this.session.id;
       breadcrumb("pre-stream.subSessionSpawn.start", { sessionId: parentSessionId });

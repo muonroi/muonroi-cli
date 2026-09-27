@@ -306,6 +306,34 @@ const _injectedGuidanceSha = new Map<string, string>();
  */
 export const SESSION_START_SYSTEM_TAG = "[SessionStart hook output]";
 
+/**
+ * Round 12 (F2/G14) — bound (default 16 KB) on how much of a SessionStart
+ * hook's stdout/additionalContext gets rendered into the TUI's content
+ * stream, per the FRAMEWORK's own "ON SESSION START" contract ("run the
+ * briefing script and print its output as is"). Without a bound, a
+ * misbehaving or verbose hook script could flood the very first turn's
+ * output with an unbounded amount of text before the model's own answer
+ * even starts. Prefixed with `SESSION_START_SYSTEM_TAG` (the SAME marker
+ * used for the model-facing tagged system message, message-processor.ts's
+ * round-2 G1 fix) so it reads as a distinct notice item in the log, not
+ * indistinguishable assistant prose.
+ *
+ * Returns `null` when there is nothing to show (every context was blank).
+ * Pure — exported for direct testing without needing to drive a whole turn.
+ */
+export function formatSessionStartHookNotice(contexts: readonly string[], maxChars = 16_384): string | null {
+  const joined = contexts
+    .map((ctx) => ctx.trim())
+    .filter((ctx) => ctx.length > 0)
+    .join("\n");
+  if (!joined) return null;
+  const body =
+    joined.length > maxChars
+      ? `${joined.slice(0, maxChars)}\n[... truncated: showed ${maxChars} of ${joined.length} chars ...]`
+      : joined;
+  return `${SESSION_START_SYSTEM_TAG}\n${body}`;
+}
+
 function isTaggedSessionStartMessage(m: ModelMessage): boolean {
   return m.role === "system" && typeof m.content === "string" && m.content.startsWith(SESSION_START_SYSTEM_TAG);
 }
@@ -859,8 +887,14 @@ export class MessageProcessor {
       // reply of a session could never show a SessionStart hook's output
       // (e.g. a project's own onboarding briefing script).
       const _sessionStartContexts = (sessionStartResult?.additionalContexts ?? []).filter((ctx) => !!ctx?.trim());
-      for (const ctx of _sessionStartContexts) {
-        yield { type: "content", content: `${ctx}\n` };
+      // Round 12 (F2/G14): rendered as ONE bounded, clearly-tagged notice
+      // block (see `formatSessionStartHookNotice`'s doc comment) instead of
+      // one bare content chunk per raw context string — a distinct
+      // system/notice item in the log, not indistinguishable assistant
+      // prose, and never unbounded regardless of what the hook script prints.
+      const _sessionStartNotice = formatSessionStartHookNotice(_sessionStartContexts);
+      if (_sessionStartNotice) {
+        yield { type: "content", content: `${_sessionStartNotice}\n` };
       }
       // Parity fix: the yield-loop above is UI-only — same gap as the
       // EE-guidance/recall-nudge system-message injections elsewhere in this
