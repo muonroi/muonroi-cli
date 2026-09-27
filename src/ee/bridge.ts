@@ -466,18 +466,33 @@ export function resetPilContextCircuit(): void {
 }
 
 /**
+ * Routing advice from the outcomes of similar past tasks (EE /api/route-history:
+ * one vector search, no LLM). Never throws; null when EE is unreachable or has no
+ * advice. Started alongside intent classification so it costs no turn latency.
+ */
+export async function routeHistoryAdvice(
+  task: string,
+  timeoutMs = 1500,
+): Promise<import("../router/decide.js").RouteHistoryAdvice | null> {
+  try {
+    const { getDefaultEEClient } = await import("./intercept.js");
+    const r = await getDefaultEEClient().routeHistory(task, timeoutMs);
+    if (!r || (!r.floorTier && !r.suggestedTier)) return null;
+    return { floorTier: r.floorTier, suggestedTier: r.suggestedTier };
+  } catch (err) {
+    logEeFailure("bridge.routeHistoryAdvice", classifyEeError(err), err, { budgetMs: timeoutMs });
+    return null;
+  }
+}
+
+/**
  * Unified PIL brain call. One round-trip returns classification +
  * experience retrieval. Returns null on any failure (timeout, schema reject,
  * circuit open, brain unreachable). Caller falls back to legacy multi-call path.
  */
 export async function pilContext(
   prompt: string,
-  options: {
-    localeHint?: string;
-    projectCtx?: Record<string, unknown>;
-    budgetMs?: number;
-    signal?: AbortSignal;
-  } = {},
+  options: import("./types.js").PilContextOptions = {},
 ): Promise<PilContextResponse | null> {
   if (pilShouldShortCircuit()) return null;
 

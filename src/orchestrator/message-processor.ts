@@ -920,6 +920,11 @@ export class MessageProcessor {
     // live interactive-discovery path (the default) awaits runLayers()
     // directly with no outer race — see pil/pipeline.ts runPipeline(). This
     // phase's own breadcrumb pair is the backstop for that gap.
+    // Route-history advice (EE vector search, no LLM) runs while PIL classifies, so
+    // decide() gets it without adding turn latency. Never rejects.
+    const routeHistoryPromise = import("../ee/bridge.js")
+      .then((b) => b.routeHistoryAdvice(userMessage))
+      .catch(() => null);
     breadcrumb("pre-stream.pilPrep.start", { sessionId: _sessionIdForBreadcrumbs });
     const prepGen = prepareTurnContext(deps, userMessage, _budgetOverride);
     let prepResult: import("./preprocessor.js").PreprocessorResult | undefined;
@@ -1186,6 +1191,7 @@ export class MessageProcessor {
           cwd: deps.bash.getCwd(),
           defaultModel: deps.modelId,
           defaultProvider: deps.providerId,
+          history: await routeHistoryPromise,
           ...(pinnedModel ? { forcedModel: pinnedModel } : {}),
           pil: {
             domain: pilCtx.domain,

@@ -744,6 +744,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
             resp = await pilContext(brainRaw, {
               projectCtx: domain ? { domain } : undefined,
               budgetMs: getUnifiedPilBudgetMs(),
+              intent: { kind: intentKind, taskType: llmRes.taskType },
             });
           } catch (err) {
             console.error(`[pil/layer1] llm-first unified brain fetch failed: ${(err as Error)?.message}`);
