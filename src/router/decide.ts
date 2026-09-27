@@ -6,6 +6,7 @@
  * If cap breach detected, downgrade chain overrides classifier output (ROUTE-06).
  */
 
+import { createHash } from "node:crypto";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import type { RouteOutcome } from "../ee/types.js";
 import { getModelInfo, getTextModelsForProvider } from "../models/registry.js";
@@ -20,17 +21,15 @@ import { CapBreachError } from "../usage/types.js";
 import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import {
   getRoleModel,
+  getRoutingDemoteMin,
   getRoutingPromoteMax,
   isCouncilMultiProviderPreferred,
   isProviderDisabled,
 } from "../utils/settings.js";
 import { classify } from "./classifier/index.js";
-import { callColdRoute } from "./cold.js";
 import { adjustPeakHourModel, getRoutedModelByTier } from "./peak-hour.js";
-import { isInheritProvider } from "./provider-sentinel.js";
 import { routerStore } from "./store.js";
 import type { RouteDecision } from "./types.js";
-import { callWarmRoute } from "./warm.js";
 
 export interface DecideOpts {
   tenantId: string;
@@ -62,7 +61,12 @@ export interface DecideOpts {
    * last cached decision is always seen fresh.
    */
   forcedModel?: string;
-  /** PIL enrichment signals — forwarded to EE context. */
+  /**
+   * Outcomes of similar past tasks from EE `/api/route-history`, fetched by the
+   * caller alongside intent classification. null/absent means no advice.
+   */
+  history?: RouteHistoryAdvice | null;
+  /** PIL enrichment signals. */
   pil?: {
     domain?: string | null;
     taskType?: string | null;
@@ -115,9 +119,16 @@ const routeCache = new Map<string, CachedRoute>();
  * (`clearRouteCache` exists but has no production caller, so nothing else
  * invalidated it.)
  */
-function routeCacheKey(pil?: DecideOpts["pil"], defaultModel?: string, defaultProvider?: string): string | null {
+function routeCacheKey(
+  pil?: DecideOpts["pil"],
+  defaultModel?: string,
+  defaultProvider?: string,
+  evidence?: string,
+): string | null {
   if (!pil?.domain && !pil?.taskType) return null;
-  return `${pil.domain ?? ""}|${pil.taskType ?? ""}|${pil.gsdPhase ?? ""}|${defaultModel ?? ""}|${defaultProvider ?? ""}`;
+  // The tier also depends on route history and the previous turn's outcome; a key
+  // without them would replay a pre-failure decision and never escalate.
+  return `${pil.domain ?? ""}|${pil.taskType ?? ""}|${pil.gsdPhase ?? ""}|${defaultModel ?? ""}|${defaultProvider ?? ""}|${evidence ?? ""}`;
 }
 
 function getCachedRoute(key: string): RouteDecision | null {
@@ -136,38 +147,6 @@ function setCachedRoute(key: string, decision: RouteDecision): void {
 
 export function clearRouteCache(): void {
   routeCache.clear();
-}
-
-// ─── Rich context builder for EE routing ────────────────────────────────────
-
-/**
- * Build a context object for EE routing calls (warm/cold).
- * Pulls projectSlug from cwd basename, phase from flow state if available,
- * and recently touched files if provided.
- */
-function buildRouteContext(cwd: string, pil?: DecideOpts["pil"]): Record<string, unknown> {
-  const ctx: Record<string, unknown> = {};
-
-  const slug = cwd.split(/[\\/]/).filter(Boolean).pop();
-  if (slug) ctx.projectSlug = slug;
-
-  if (pil?.domain) ctx.domain = pil.domain;
-  if (pil?.gsdPhase) ctx.phase = pil.gsdPhase;
-  if (pil?.activeRunId) ctx.activeRun = pil.activeRunId;
-  if (pil?.taskType && (pil.confidence ?? 0) > 0) {
-    ctx.localRoute = { tier: pil.taskType, confidence: pil.confidence };
-  }
-  if (pil?.recentTurnsSummary) ctx.recentTurns = pil.recentTurnsSummary;
-  if (pil?.projectSize) ctx.projectSize = pil.projectSize;
-  if (pil?.filesTouched && pil.filesTouched > 0) ctx.filesTouched = pil.filesTouched;
-  if (pil?.mode) ctx.mode = pil.mode;
-  if (pil?.turnIndex !== undefined) ctx.turnIndex = pil.turnIndex;
-  if (pil?.messageCount !== undefined) ctx.messageCount = pil.messageCount;
-  if (pil?.compactionCount !== undefined) ctx.compactionCount = pil.compactionCount;
-  if (pil?.totalSavedTokens !== undefined) ctx.totalSavedTokens = pil.totalSavedTokens;
-  if (pil?.compactionSummary) ctx.compactionSummary = pil.compactionSummary;
-
-  return ctx;
 }
 
 // ─── Disabled-provider guard: fallback providers ────────────────────────────
@@ -224,91 +203,59 @@ function resolveTierModel(
 
 const TIER_ORDER: ReadonlyArray<EETier> = ["fast", "balanced", "premium"];
 
+export interface RouteHistoryAdvice {
+  /** One tier above the highest tier a similar task failed on. */
+  floorTier: EETier | null;
+  /** The lowest tier a similar task succeeded on with no failure at or above it. */
+  suggestedTier: EETier | null;
+}
+
+const tierRank = (t: EETier): number => TIER_ORDER.indexOf(t);
+
 /**
- * Keep a PIL-derived tier from silently DROPPING below the tier of the model the
- * user actually chose.
+ * The tier a turn is served at: the classifier's base tier moved by evidence.
  *
- * The user's model pick is an explicit instruction; quietly serving them a
- * cheaper tier because this turn looked like "documentation" undoes it the same
- * way the stale route cache did (see routeCacheKey). Raising the tier for
- * demanding work is still allowed — `applyPromotionCap` inside capCheck bounds
- * that direction via the `routingPromoteMax` setting. There is no symmetric
- * "demote max" setting, so the floor is the user's own model.
+ * Down: a similar task succeeded on a lower tier before (EE route history), bounded
+ * below by `routingDemoteMin`. "off" keeps the session model as the floor, which is
+ * what this used to enforce unconditionally; the log then showed a chitchat turn
+ * lifted to premium only for the promotion cap to cut it back to balanced.
+ * Up: a similar task failed on this tier, or the previous turn failed or was
+ * cancelled. The ceiling stays with `applyPromotionCap` inside capCheck.
  */
-function clampTierToDefault(tier: EETier, defaultModel: string): EETier {
-  const defaultTier = getModelInfo(defaultModel)?.tier as EETier | undefined;
-  if (!defaultTier) return tier;
-  const want = TIER_ORDER.indexOf(tier);
-  const floor = TIER_ORDER.indexOf(defaultTier);
-  if (want < 0 || floor < 0) return tier;
-  return want >= floor ? tier : defaultTier;
-}
-
-function applyPeakHourRoute(dec: RouteDecision): RouteDecision {
-  const adj = adjustPeakHourModel(dec.model);
-  if (!adj.adjusted) return dec;
-  return {
-    ...dec,
-    model: adj.modelId,
-    provider: adj.provider,
-    reason: `${dec.reason}|${adj.reason}`,
-  };
-}
-
-// ─── Provider constraint: never route to a provider the user lacks a key for ─
-
-function constrainToProvider(decision: RouteDecision, opts: DecideOpts): RouteDecision {
-  // Inherit-sentinel: warm path may emit an empty provider to signal
-  // "trust upstream choice". Resolve the actual provider from the model ID
-  // so disabled-provider checks still apply.
-  if (isInheritProvider(decision.provider)) {
-    const resolved = detectProviderForModel(decision.model);
-    if (resolved && !isProviderDisabled(resolved as ProviderId)) return applyPeakHourRoute(decision);
-    if (resolved && isProviderDisabled(resolved as ProviderId)) {
-      return constrainToProvider({ ...decision, provider: resolved }, opts);
+export function resolveTurnTier(
+  base: EETier,
+  opts: Pick<DecideOpts, "defaultModel" | "history">,
+  recentFailures: number,
+): { tier: EETier; notes: string[] } {
+  const notes: string[] = [];
+  let tier = base;
+  const history = opts.history;
+  if (history?.suggestedTier && tierRank(history.suggestedTier) < tierRank(tier)) {
+    tier = history.suggestedTier;
+    notes.push(`history-down→${tier}`);
+  }
+  if (history?.floorTier && tierRank(history.floorTier) > tierRank(tier)) {
+    tier = history.floorTier;
+    notes.push(`history-floor→${tier}`);
+  }
+  if (recentFailures > 0 && tierRank(tier) < TIER_ORDER.length - 1) {
+    tier = TIER_ORDER[tierRank(tier) + 1];
+    notes.push(`escalate:prev-fail×${recentFailures}→${tier}`);
+  }
+  const defaultTier = getModelInfo(opts.defaultModel)?.tier as EETier | undefined;
+  if (defaultTier && tierRank(tier) < tierRank(defaultTier)) {
+    const min = getRoutingDemoteMin();
+    const floor = min === "off" || tierRank(min) > tierRank(defaultTier) ? defaultTier : min;
+    if (tierRank(tier) < tierRank(floor)) {
+      tier = floor;
+      notes.push(`demote-floor→${tier}`);
     }
-    return applyPeakHourRoute(decision);
   }
-
-  // Provider-only UX: the user enables N providers and pins one as default.
-  // Routing rules:
-  //   - decision.provider is enabled → keep it (router may switch across
-  //     enabled providers when >1 is on).
-  //   - decision.provider is disabled → constrain back to the default
-  //     provider's tier model, falling back to defaultModel.
-  //   - All providers disabled → leave the EE decision alone (caller will
-  //     surface a config error elsewhere).
-  const decisionDisabled = isProviderDisabled(decision.provider as ProviderId);
-  if (!decisionDisabled) {
-    return applyPeakHourRoute(decision);
-  }
-
-  if (isProviderDisabled(opts.defaultProvider as ProviderId)) {
-    return {
-      ...decision,
-      reason: `${decision.reason}|provider-not-constrained(default-also-disabled)`,
-    };
-  }
-
-  const sameProviderModel = getRoutedModelByTier(
-    decision.tier === "hot" ? "fast" : decision.tier === "cold" ? "premium" : "balanced",
-    opts.defaultProvider,
-  );
-  if (sameProviderModel && sameProviderModel.provider !== opts.defaultProvider) {
-    return {
-      ...decision,
-      model: opts.defaultModel,
-      provider: opts.defaultProvider,
-      reason: `${decision.reason}|provider-constrained(forced-default)`,
-    };
-  }
-  return applyPeakHourRoute({
-    ...decision,
-    model: sameProviderModel?.id ?? opts.defaultModel,
-    provider: sameProviderModel?.provider ?? opts.defaultProvider,
-    reason: `${decision.reason}|provider-constrained`,
-  });
+  return { tier, notes };
 }
+
+const withNotes = (reason: string, notes: string[]): string =>
+  notes.length ? `${reason}[${notes.join(",")}]` : reason;
 
 // ─── Route feedback (HTTP path) ─────────────────────────────────────────────
 
@@ -323,12 +270,18 @@ function constrainToProvider(decision: RouteDecision, opts: DecideOpts): RouteDe
 export function reportRouteOutcome(taskHash: string, outcome: RouteOutcome, duration?: number): void {
   const state = routerStore.getState();
   const dec = state.lastDecision;
+  // A failed or cancelled turn escalates the next decision one tier (resolveTurnTier).
+  const failed = outcome === "fail" || outcome === "cancelled";
+  routerStore.setState({ recentFailures: failed ? state.recentFailures + 1 : 0 });
   getDefaultEEClient().routeFeedback({
     taskHash,
     outcome,
-    tier: dec?.tier ?? null,
+    // The catalog tier EE learns in (fast/balanced/premium), not the router's
+    // hot/warm/cold ladder position, which is what `dec.tier` holds.
+    tier: state.eeTier,
     model: dec?.model ?? null,
     duration: duration ?? null,
+    ...(state.taskText ? { task: state.taskText } : {}),
   });
 }
 
@@ -359,8 +312,11 @@ function applyPromotionCap(dec: RouteDecision, defaultModel: string): RouteDecis
 
   const capRank = cap === "off" ? null : TIER_RANK[cap]; // "balanced" → 1
   const defaultTier = getModelInfo(defaultModel)?.tier;
-  // "off" means ceiling = the default model's own tier.
-  const maxAllowedRank = capRank === null ? (defaultTier ? TIER_RANK[defaultTier] : 0) : capRank;
+  const defaultRank = defaultTier ? TIER_RANK[defaultTier] : 0;
+  // "off" means ceiling = the default model's own tier. A cap below the session
+  // model is not a ceiling on promotion: serving the user's own tier promotes
+  // nothing, and clamping it cut a premium session down to balanced.
+  const maxAllowedRank = capRank === null ? defaultRank : Math.max(capRank, defaultRank);
 
   const decInfo = getModelInfo(dec.model);
   const decTier = decInfo?.tier;
@@ -506,7 +462,34 @@ export function shouldUseRoleModel(
   return true;
 }
 
+/** Same prefix and hash EE's router uses, so both sides name a task the same way. */
+const TASK_HASH_CHARS = 500;
+export function computeTaskHash(prompt: string): string {
+  return createHash("sha256").update(prompt.slice(0, TASK_HASH_CHARS)).digest("hex").slice(0, 16);
+}
+
+/**
+ * Route one turn. Every decision carries a taskHash and records the task text and
+ * the tier actually served, so `reportRouteOutcome` can send EE a learnable outcome.
+ * Before this, only EE warm/cold decisions carried a hash and neither ever arrived:
+ * 19 routed turns, 0 hashes, and EE held 263 decisions with 0 outcomes.
+ */
 export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDecision> {
+  const decision = await decideModel(prompt, opts);
+  const taskHash = computeTaskHash(prompt);
+  const served = decision.model === "HALT" ? undefined : (getModelInfo(decision.model)?.tier as EETier | undefined);
+  const out: RouteDecision = { ...decision, taskHash };
+  routerStore.setState({
+    lastDecision: out,
+    taskHash,
+    taskText: prompt.slice(0, TASK_HASH_CHARS),
+    eeTier: served ?? null,
+  });
+  return out;
+}
+
+async function decideModel(prompt: string, opts: DecideOpts): Promise<RouteDecision> {
+  const recentFailures = routerStore.getState().recentFailures;
   // Round-2 fix — a project model pin overrides ONLY the model CHOICE below
   // (skips role/PIL/hot/warm/cold classification entirely); the cap/budget
   // reservation + downgrade-chain/halt check still runs against the pinned
@@ -532,7 +515,12 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
     return checked;
   }
 
-  const cacheKey = routeCacheKey(opts.pil, opts.defaultModel, opts.defaultProvider);
+  const cacheKey = routeCacheKey(
+    opts.pil,
+    opts.defaultModel,
+    opts.defaultProvider,
+    `${recentFailures}|${opts.history?.floorTier ?? ""}|${opts.history?.suggestedTier ?? ""}`,
+  );
   if (cacheKey) {
     const cached = getCachedRoute(cacheKey);
     if (cached) {
@@ -545,8 +533,6 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
       return cached;
     }
   }
-
-  const routeCtx = buildRouteContext(opts.cwd, opts.pil);
 
   // Step -1: Role-model override — user-configured role→model mapping takes priority
   const role = taskTypeToRole(opts.pil?.taskType ?? null);
@@ -589,7 +575,8 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   // the route cache. `taskTypeToTier` is the canonical map (src/pil/task-tier-map.ts),
   // already used for the role lookup in Step -1 above.
   const pilTaskType = opts.pil?.taskType ?? null;
-  const pilTier = pilTaskType ? clampTierToDefault(taskTypeToTier(pilTaskType), opts.defaultModel) : undefined;
+  const pilResolved = pilTaskType ? resolveTurnTier(taskTypeToTier(pilTaskType), opts, recentFailures) : undefined;
+  const pilTier = pilResolved?.tier;
   const pilConf = opts.pil?.confidence ?? 0;
   if (pilTier && pilConf >= 0.6) {
     // Use effective (non-disabled) provider when default is disabled
@@ -612,7 +599,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
     // interaction_logs.reason must tell "classified debug" apart from "routed at
     // balanced"; the old `pil:debug(0.75)` conflated them, which is why three
     // replayed cache hits were indistinguishable from three fresh decisions.
-    const pilReasonBase = `pil:${pilTaskType}→${pilTier}(${pilConf.toFixed(2)})`;
+    const pilReasonBase = withNotes(`pil:${pilTaskType}→${pilTier}(${pilConf.toFixed(2)})`, pilResolved?.notes ?? []);
     const d: RouteDecision = {
       tier: "hot",
       model: peak.modelId,
@@ -639,9 +626,11 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   // Step 1: Hot-path local classifier
   const c = classify(prompt, opts.threshold ?? 0.55);
   if (c.tier === "hot") {
+    const hotResolved = c.tierHint ? resolveTurnTier(c.tierHint, opts, recentFailures) : undefined;
+    const hotTier = hotResolved?.tier;
     // Use effective (non-disabled) provider when default is disabled
-    const effective = c.tierHint ? resolveTierModel(c.tierHint, opts.defaultProvider) : undefined;
-    let tierModel = effective ?? (c.tierHint ? getRoutedModelByTier(c.tierHint, opts.defaultProvider) : undefined);
+    const effective = hotTier ? resolveTierModel(hotTier, opts.defaultProvider) : undefined;
+    let tierModel = effective ?? (hotTier ? getRoutedModelByTier(hotTier, opts.defaultProvider) : undefined);
     // Same guard as the PIL branch above: drop cross-provider fallback when
     // the cross-provider is disabled, so we don't switch to a provider the
     // user has turned off in the splash modal.
@@ -655,15 +644,16 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
     }
     const hotModel = tierModel?.id ?? opts.defaultModel;
     const peak = adjustPeakHourModel(hotModel);
+    const hotReason = withNotes(c.reason, hotResolved?.notes ?? []);
     const d: RouteDecision = {
       tier: "hot",
       model: peak.modelId,
       provider: tierModel?.provider ?? peak.provider,
       reason: peak.adjusted
-        ? `${effective ? `${c.reason}-rerouted(disabled-default)` : c.reason}|${peak.reason}`
+        ? `${effective ? `${hotReason}-rerouted(disabled-default)` : hotReason}|${peak.reason}`
         : effective
-          ? `${c.reason}-rerouted(disabled-default)`
-          : c.reason,
+          ? `${hotReason}-rerouted(disabled-default)`
+          : hotReason,
       confidence: c.confidence,
     };
     const checked = await capCheck(d, opts);
@@ -677,35 +667,35 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
     return checked;
   }
 
-  // Step 2: Warm path (EE /api/route-model, 250ms timeout)
-  const w = await callWarmRoute(prompt, { ...opts, context: routeCtx });
-  if (w) {
-    const checked = await capCheck(constrainToProvider(w, opts), opts);
-    routerStore.setState({
-      tier: checked.tier,
-      lastDecision: checked,
-      taskHash: checked.taskHash ?? null,
-      source: checked.source ?? null,
-    });
-    if (cacheKey && !checked.cap_overridden) setCachedRoute(cacheKey, checked);
-    return checked;
+  // Step 2: no classifier verdict. Start from the session model's tier and let the
+  // evidence (route history, a failed previous turn) move it. This replaces the EE
+  // warm/cold calls: /api/route-model answered in ~4.8s against a 250ms budget and
+  // /api/cold-route does not exist, so neither ever returned a decision.
+  const defaultTier = getModelInfo(opts.defaultModel)?.tier as EETier | undefined;
+  if (defaultTier) {
+    const evidence = resolveTurnTier(defaultTier, opts, recentFailures);
+    if (evidence.tier !== defaultTier) {
+      const effective = resolveTierModel(evidence.tier, opts.defaultProvider);
+      const tierModel = effective ?? getRoutedModelByTier(evidence.tier, opts.defaultProvider);
+      if (tierModel && !isProviderDisabled(tierModel.provider as ProviderId)) {
+        const peak = adjustPeakHourModel(tierModel.id);
+        const reason = withNotes(`evidence:${defaultTier}→${evidence.tier}`, evidence.notes);
+        const d: RouteDecision = {
+          tier: "hot",
+          model: peak.modelId,
+          provider: peak.adjusted ? peak.provider : (tierModel.provider ?? opts.defaultProvider),
+          reason: peak.adjusted ? `${reason}|${peak.reason}` : reason,
+          source: "evidence",
+        };
+        const checked = await capCheck(d, opts);
+        routerStore.setState({ tier: checked.tier, lastDecision: checked, source: "evidence" });
+        if (cacheKey && !checked.cap_overridden) setCachedRoute(cacheKey, checked);
+        return checked;
+      }
+    }
   }
 
-  // Step 3: Cold path (EE /api/cold-route, 1s timeout)
-  const cd = await callColdRoute(prompt, { ...opts, context: routeCtx });
-  if (cd) {
-    const checked = await capCheck(constrainToProvider(cd, opts), opts);
-    routerStore.setState({
-      tier: "cold",
-      lastDecision: checked,
-      taskHash: checked.taskHash ?? null,
-      source: checked.source ?? null,
-    });
-    if (cacheKey && !checked.cap_overridden) setCachedRoute(cacheKey, checked);
-    return checked;
-  }
-
-  // Step 4: Final fallback when EE entirely unreachable
+  // Step 3: nothing moved the tier — serve the session default.
   const effective = resolveEffectiveDefaults(opts);
   const peak = adjustPeakHourModel(effective.model);
   const fallback: RouteDecision = {
@@ -713,10 +703,10 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
     model: peak.modelId,
     provider: peak.provider,
     reason: peak.adjusted
-      ? `${effective.provider !== opts.defaultProvider ? "fallback:ee-unreachable+rerouted(disabled-default)" : "fallback:ee-unreachable"}|${peak.reason}`
+      ? `${effective.provider !== opts.defaultProvider ? "default+rerouted(disabled-default)" : "default"}|${peak.reason}`
       : effective.provider !== opts.defaultProvider
-        ? "fallback:ee-unreachable+rerouted(disabled-default)"
-        : "fallback:ee-unreachable",
+        ? "default+rerouted(disabled-default)"
+        : "default",
   };
   const checked = await capCheck(fallback, opts);
   routerStore.setState({

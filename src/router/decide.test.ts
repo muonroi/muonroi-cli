@@ -4,7 +4,7 @@ import { type StubHandle, startStubEEServer } from "../__test-stubs__/ee-server.
 import { createEEClient } from "../ee/client.js";
 import { setDefaultEEClient } from "../ee/intercept.js";
 import { loadCatalog } from "../models/registry.js";
-import { type DecideOpts, decide } from "./decide.js";
+import { clearRouteCache, type DecideOpts, decide, reportRouteOutcome } from "./decide.js";
 import { routerStore } from "./store.js";
 
 declare global {
@@ -29,6 +29,7 @@ vi.mock("../utils/settings.js", async (importOriginal) => {
     getRoleModel: () => undefined,
     getDefaultProvider: () => "anthropic",
     getRoutingPromoteMax: () => (globalThis as { routingPromoteMax?: string }).routingPromoteMax ?? "balanced",
+    getRoutingDemoteMin: () => (globalThis as { routingDemoteMin?: string }).routingDemoteMin ?? "fast",
     isCouncilMultiProviderPreferred: () => false,
     isProviderDisabled: (provider: string) => globalThis.disabledProvidersList.includes(provider),
     getPeakHourPolicy: () => ({ enabled: false, mode: "downgrade" as const }),
@@ -90,43 +91,25 @@ describe("decide()", () => {
       degraded: false,
       lastDecision: null,
       lastHealthCheckAtMs: 0,
+      recentFailures: 0,
     });
   });
 
-  it("falls through to warm when classifier abstains (stub classifier always abstains)", async () => {
+  it("serves the session default when nothing classifies the turn, without calling EE", async () => {
+    // EE's /api/route-model answered in ~4.8s against the old 250ms warm budget and
+    // /api/cold-route never existed, so the ladder no longer waits on either.
     const result = await decide(
       "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
       BASE_OPTS,
     );
-    expect(result.tier).toBe("warm");
-    expect(result.model).toMatch(/glm-/);
+    expect(result.tier).toBe("hot");
+    expect(result.model).toBe("glm-4.7");
+    expect(result.reason).toBe("default");
+    expect(result.taskHash).toMatch(/^[0-9a-f]{16}$/);
     expect(routerStore.getState().lastDecision).toEqual(result);
   });
 
-  it("falls through to cold when warm returns null", async () => {
-    const coldOnlyStub = await startStubEEServer({
-      routeModel: undefined,
-      coldRoute: () => ({
-        model: BASE_OPTS.defaultModel,
-        tier: "cold" as const,
-        reason: "ee-cold",
-        taskHash: "test-hash",
-      }),
-    });
-    setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${coldOnlyStub.port}` }));
-
-    const result = await decide(
-      "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
-      BASE_OPTS,
-    );
-    expect(result.tier).toBe("cold");
-    expect(result.model).toBe("glm-4.7");
-
-    setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
-    await coldOnlyStub.stop();
-  });
-
-  it("returns fallback when both warm and cold are unreachable", async () => {
+  it("serves the default when EE is unreachable", async () => {
     globalThis.disabledProvidersList = [];
     const deadStub = await startStubEEServer({});
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${deadStub.port}` }));
@@ -136,7 +119,7 @@ describe("decide()", () => {
       BASE_OPTS,
     );
     expect(typeof result.model).toBe("string");
-    expect(result.reason).toBe("fallback:ee-unreachable");
+    expect(result.reason).toBe("default");
 
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
     await deadStub.stop();
@@ -153,7 +136,7 @@ describe("decide()", () => {
       BASE_OPTS,
     );
     expect(result.tier).toBe("degraded");
-    expect(result.reason).toBe("fallback:ee-unreachable");
+    expect(result.reason).toBe("default");
 
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
     await deadStub.stop();
@@ -181,70 +164,30 @@ describe("provider constraint with PROVIDER_INHERIT", () => {
     });
   });
 
-  it("constrains warm-path model when its provider is disabled", async () => {
-    stub = await startStubEEServer({
-      routeModel: () => ({
-        model: "claude-sonnet-4-6",
-        tier: "balanced" as const,
-        confidence: 0.8,
-        reason: "ee-warm",
-        source: "brain",
-        taskHash: "test-hash",
-      }),
-    });
-    setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
-
-    const settingsMod = await import("../utils/settings.js");
-    vi.spyOn(settingsMod, "isProviderDisabled").mockImplementation((p) => p === "anthropic");
-    vi.spyOn(settingsMod, "getDefaultProvider").mockImplementation(() => "zai");
-
-    const result = await decide(
-      "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
-      {
-        tenantId: "default",
-        cwd: "/tmp",
-        defaultModel: "glm-4.7",
-        defaultProvider: "zai",
-        threshold: 0.55,
-      },
-    );
-
-    expect(result.model).not.toBe("claude-sonnet-4-6");
-    expect(result.reason).toContain("provider-constrained");
-  });
-
-  it("promotion cap: clamps cold premium pick to balanced by default; 'any' opt-in allows premium", async () => {
-    const coldPremium = await startStubEEServer({
-      routeModel: undefined,
-      coldRoute: () => ({
-        model: "glm-5.2",
-        tier: "premium" as const,
-        reason: "ee-cold-premium",
-        taskHash: "test-hash",
-      }),
-    });
+  it("promotion cap: clamps a premium pick to balanced by default; 'any' opt-in allows premium", async () => {
     globalThis.disabledProvidersList = ["deepseek", "openai", "xai"];
-    setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${coldPremium.port}` }));
+    const opts = {
+      ...BASE_OPTS,
+      pil: { domain: null, taskType: "plan", confidence: 0.75, gsdPhase: null } as DecideOpts["pil"],
+    };
 
     (globalThis as { routingPromoteMax?: string }).routingPromoteMax = "balanced";
-    const clamped = await decide("check và commit các file trong todo plan", BASE_OPTS);
+    clearRouteCache();
+    const clamped = await decide("design the billing ledger schema", opts);
     expect(clamped.model).toBe("glm-4.7");
     expect(clamped.reason).toContain("promo-cap");
 
     (globalThis as { routingPromoteMax?: string }).routingPromoteMax = "any";
-    routerStore.setState({ tier: "hot", degraded: false, lastDecision: null, lastHealthCheckAtMs: 0 });
-    const promoted = await decide("check và commit các file trong todo plan", BASE_OPTS);
+    clearRouteCache();
+    const promoted = await decide("design the billing ledger schema", opts);
     expect(promoted.model).toBe("glm-5.2");
     expect(promoted.reason).not.toContain("promo-cap");
 
     (globalThis as { routingPromoteMax?: string }).routingPromoteMax = "off";
-    routerStore.setState({ tier: "hot", degraded: false, lastDecision: null, lastHealthCheckAtMs: 0 });
-    const floored = await decide("check và commit các file trong todo plan", BASE_OPTS);
+    clearRouteCache();
+    const floored = await decide("design the billing ledger schema", opts);
     expect(floored.model).toBe("glm-4.7");
     expect(floored.reason).toContain("promo-cap");
-
-    setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
-    await coldPremium.stop();
   });
 });
 
@@ -282,7 +225,9 @@ describe("route cache is scoped to the active model/provider", () => {
     const a = await decide("tiếp tục", opts);
     const b = await decide("tiếp tục nhé", opts);
 
-    expect(b).toEqual(a);
+    // Same cached decision; each prompt still gets its own taskHash for feedback.
+    expect({ ...b, taskHash: undefined }).toEqual({ ...a, taskHash: undefined });
+    expect(b.taskHash).not.toBe(a.taskHash);
   });
 });
 
@@ -298,6 +243,7 @@ describe("PIL step-0 uses the real taskType→tier map", () => {
 
   beforeEach(() => {
     globalThis.disabledProvidersList = [];
+    clearRouteCache();
   });
 
   it("names the RESOLVED tier in the reason, not the raw taskType", async () => {
@@ -325,10 +271,9 @@ describe("PIL step-0 uses the real taskType→tier map", () => {
     expect(d.model).toBe("glm-5.2");
   });
 
-  it("never silently DOWNGRADES below the tier the user's chosen model sits at", async () => {
-    // documentation maps to "fast"; the user deliberately picked a balanced
-    // model. Undoing that pick is the same class of defect as the route-cache
-    // replay above — PIL may raise the tier, never quietly lower it.
+  it("keeps the session model when the catalog has no routable cheaper tier", async () => {
+    // documentation maps to "fast", but every zai fast model is tier_routing:false,
+    // so "fast" on zai resolves to glm-4.7 itself.
     const d = await decide("viết docs cho module này", {
       ...BASE_OPTS,
       defaultModel: "glm-4.7",
@@ -337,6 +282,99 @@ describe("PIL step-0 uses the real taskType→tier map", () => {
     });
 
     expect(d.model).toBe("glm-4.7");
+  });
+});
+
+describe("tier evidence: bounded demotion, route history, escalation", () => {
+  // openai resolves each tier to a distinct model: fast gpt-5.4-mini,
+  // balanced gpt-5.4, premium gpt-5.5.
+  const pilFor = (taskType: string) =>
+    ({ domain: null, taskType, confidence: 0.75, gsdPhase: null }) as DecideOpts["pil"];
+  const openai = (extra: Partial<DecideOpts> = {}): DecideOpts => ({
+    ...BASE_OPTS,
+    defaultModel: "gpt-5.4",
+    defaultProvider: "openai",
+    ...extra,
+  });
+
+  beforeEach(() => {
+    globalThis.disabledProvidersList = [];
+    (globalThis as { routingPromoteMax?: string }).routingPromoteMax = "any";
+    (globalThis as { routingDemoteMin?: string }).routingDemoteMin = "fast";
+    routerStore.setState({ recentFailures: 0 });
+    clearRouteCache();
+  });
+
+  it("demotes a documentation turn below the session model down to routingDemoteMin", async () => {
+    const d = await decide("write docs for the ledger module", openai({ pil: pilFor("documentation") }));
+    expect(d.model).toBe("gpt-5.4-mini");
+  });
+
+  it("routingDemoteMin=off keeps the session model as the floor", async () => {
+    (globalThis as { routingDemoteMin?: string }).routingDemoteMin = "off";
+    const d = await decide("write docs for the ledger module", openai({ pil: pilFor("documentation") }));
+    expect(d.model).toBe("gpt-5.4");
+    expect(d.reason).toContain("demote-floor");
+  });
+
+  it("route history can move a turn down to a tier that succeeded before", async () => {
+    const d = await decide(
+      "fix the flaky retry test",
+      openai({ pil: pilFor("debug"), history: { floorTier: null, suggestedTier: "fast" } }),
+    );
+    expect(d.model).toBe("gpt-5.4-mini");
+    expect(d.reason).toContain("history-down");
+  });
+
+  it("route history raises a turn above a tier similar tasks failed on", async () => {
+    const d = await decide(
+      "fix the flaky retry test",
+      openai({ pil: pilFor("debug"), history: { floorTier: "premium", suggestedTier: null } }),
+    );
+    expect(d.model).toBe("gpt-5.5");
+    expect(d.reason).toContain("history-floor");
+  });
+
+  it("a failed previous turn escalates the next decision one tier", async () => {
+    reportRouteOutcome("h-prev", "fail", 1000);
+    expect(routerStore.getState().recentFailures).toBe(1);
+    const d = await decide("fix the flaky retry test", openai({ pil: pilFor("debug") }));
+    expect(d.model).toBe("gpt-5.5");
+    expect(d.reason).toContain("escalate:prev-fail");
+    reportRouteOutcome(d.taskHash as string, "success", 1000);
+    expect(routerStore.getState().recentFailures).toBe(0);
+  });
+
+  it("evidence moves the tier even when no classifier spoke", async () => {
+    const d = await decide(
+      "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
+      openai({ history: { floorTier: "premium", suggestedTier: null } }),
+    );
+    expect(d.model).toBe("gpt-5.5");
+    expect(d.source).toBe("evidence");
+  });
+
+  it("the promotion cap never cuts a turn below the session model's own tier", async () => {
+    // Live log: `pil:general→premium | promo-cap(premium→balanced)` served a premium
+    // session a balanced model. A cap below the session tier is not a ceiling on promotion.
+    // anthropic: the session model claude-opus-5 is premium, while the premium tier
+    // routes to claude-fable-5 — a different model at the SAME tier, as step-5-preview
+    // and step-3.7-flash were in the log.
+    (globalThis as { routingPromoteMax?: string }).routingPromoteMax = "balanced";
+    const d = await decide(
+      "design the billing ledger schema",
+      openai({ defaultModel: "claude-opus-5", defaultProvider: "anthropic", pil: pilFor("plan") }),
+    );
+    expect(d.model).toBe("claude-fable-5");
+    expect(d.reason).not.toContain("promo-cap");
+  });
+
+  it("records the task and the served catalog tier, and sends both with the outcome", async () => {
+    const d = await decide("write docs for the ledger module", openai({ pil: pilFor("documentation") }));
+    const state = routerStore.getState();
+    expect(state.taskText).toBe("write docs for the ledger module");
+    expect(state.eeTier).toBe("fast");
+    expect(state.taskHash).toBe(d.taskHash);
   });
 });
 

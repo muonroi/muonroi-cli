@@ -426,6 +426,14 @@ export interface UserSettings {
    * ("session.model lie"). Default cap="balanced" prevents that silent leak.
    */
   routingPromoteMax?: "off" | "balanced" | "any";
+  /**
+   * Router tier-demotion floor, the counterpart of `routingPromoteMax`. The router
+   * may serve a cheaper tier than the session model down to this tier when the
+   * turn does not need more (chitchat, docs, a task that succeeded on a lower tier
+   * before). "off" keeps the session model as the floor (never demote).
+   * Default "fast".
+   */
+  routingDemoteMin?: "off" | "fast" | "balanced";
 }
 
 export interface ProjectSettings {
@@ -1675,6 +1683,15 @@ export function getCouncilLanguage(): string {
 export function getRoutingPromoteMax(): "off" | "balanced" | "any" {
   const raw = loadUserSettings().routingPromoteMax;
   return raw === "off" || raw === "balanced" || raw === "any" ? raw : "balanced";
+}
+
+/**
+ * Router tier-demotion floor. See UserSettings.routingDemoteMin. Default "fast";
+ * any unknown value falls back to it.
+ */
+export function getRoutingDemoteMin(): "off" | "fast" | "balanced" {
+  const raw = loadUserSettings().routingDemoteMin;
+  return raw === "off" || raw === "fast" || raw === "balanced" ? raw : "fast";
 }
 
 export function getDisabledProviders(): ProviderId[] {
