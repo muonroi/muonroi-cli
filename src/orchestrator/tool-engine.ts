@@ -4522,7 +4522,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         {
           const turnDuration = Date.now() - turnStartMs;
           if (taskHash) {
-            const tier = taskTypeToTier(pilCtx.taskType);
+            // The tier actually served. Every decision now carries a taskHash, so this
+            // path fires too, and the PIL task tier it used to send overwrote the served
+            // tier EE had just recorded (live: balanced → fast on the same hash).
+            const tier = routerStore.getState().eeTier ?? taskTypeToTier(pilCtx.taskType);
             void routeFeedback(
               taskHash,
               tier,
@@ -4818,7 +4821,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           {
             const turnDuration = Date.now() - turnStartMs;
             if (taskHash) {
-              const tier = taskTypeToTier(pilCtx.taskType);
+              const tier = routerStore.getState().eeTier ?? taskTypeToTier(pilCtx.taskType);
               void routeFeedback(taskHash, tier, runtime.modelId, "cancelled", 0, turnDuration);
             }
             const storeHash = routerStore.getState().taskHash;
@@ -4936,7 +4939,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         {
           const turnDuration = Date.now() - turnStartMs;
           if (taskHash) {
-            const tier = taskTypeToTier(pilCtx.taskType);
+            const tier = routerStore.getState().eeTier ?? taskTypeToTier(pilCtx.taskType);
             void routeFeedback(taskHash, tier, runtime.modelId, "fail", 0, turnDuration);
           }
           const storeHash = routerStore.getState().taskHash;
