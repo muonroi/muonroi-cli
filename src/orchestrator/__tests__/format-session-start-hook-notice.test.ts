@@ -220,3 +220,77 @@ describe("sanitizeHookOutput — round 12c (linear-pass rewrite)", () => {
     expect(out).toBe("Xin chào, đây là tiếng Việt 🎉🚀😀");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Round 12d — both truncation points that can cut hook-output text
+// (`sanitizeHookOutput`'s 256 KB raw-input cap, and
+// `formatSessionStartHookNotice`'s 16 KB post-sanitize bound) could slice
+// through the middle of a surrogate pair, leaving a lone high surrogate
+// that renders as U+FFFD downstream. `unicodeSafeSliceEnd` backs each cut
+// off by one code unit when that would happen, and the sanitizer itself
+// drops any lone surrogate (either kind) it encounters as a second net.
+// ---------------------------------------------------------------------------
+describe("sanitizeHookOutput / formatSessionStartHookNotice — round 12d: no lone surrogate at a cut", () => {
+  /** True if `s` contains a high surrogate with no valid following low surrogate, or a low surrogate with no valid preceding high surrogate. */
+  function hasLoneSurrogate(s: string): boolean {
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      if (c >= 0xd800 && c <= 0xdbff) {
+        const next = s.charCodeAt(i + 1);
+        if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+        i++; // skip the paired low surrogate — already validated
+      } else if (c >= 0xdc00 && c <= 0xdfff) {
+        return true; // a low surrogate reached without a preceding high one
+      }
+    }
+    return false;
+  }
+
+  const EMOJI = "\u{1F600}"; // 😀 — a two-code-unit surrogate pair
+
+  it("an emoji straddling sanitizeHookOutput's 256 KB raw-input cap is dropped whole — no lone surrogate, no U+FFFD", () => {
+    const CAP = 256 * 1024;
+    // High surrogate lands exactly at index CAP-1, low surrogate at CAP —
+    // precisely the position a naive raw.slice(0, CAP) would split.
+    const raw = `${"x".repeat(CAP - 1)}${EMOJI}y`;
+    const out = sanitizeHookOutput(raw);
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(out).not.toContain("�");
+    // The whole emoji (and the trailing "y" beyond the cap) is dropped —
+    // only the pre-boundary plain text survives.
+    expect(out).toBe("x".repeat(CAP - 1));
+  });
+
+  it("an emoji straddling formatSessionStartHookNotice's post-sanitize maxChars bound is dropped whole — no lone surrogate, no U+FFFD", () => {
+    // High surrogate at index 9, low surrogate at index 10 — exactly the
+    // position a naive joined.slice(0, 10) would split, with a custom small
+    // maxChars for a fast/deterministic test.
+    const input = `${"x".repeat(9)}${EMOJI}y`;
+    const out = formatSessionStartHookNotice([input], 10);
+    expect(out).not.toBeNull();
+    expect(hasLoneSurrogate(out ?? "")).toBe(false);
+    expect(out).not.toContain("�");
+    expect(out).toContain("x".repeat(9));
+    expect(out).toContain("truncated: showed 10 of 12 chars");
+  });
+
+  it("a lone high surrogate already present in the input (no pair) is dropped, not passed through", () => {
+    const highOnly = "\uD83D"; // the high half of 😀, with no low half following
+    const out = sanitizeHookOutput(`before${highOnly}after`);
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(out).toBe("beforeafter");
+  });
+
+  it("a lone low surrogate already present in the input (no pair) is dropped, not passed through", () => {
+    const lowOnly = "\uDE00"; // the low half of 😀, with no preceding high half
+    const out = sanitizeHookOutput(`before${lowOnly}after`);
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(out).toBe("beforeafter");
+  });
+
+  it("non-regression: a valid emoji pair NOT at a boundary still round-trips unchanged", () => {
+    const out = sanitizeHookOutput(`before${EMOJI}after`);
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(out).toBe(`before${EMOJI}after`);
+  });
+});

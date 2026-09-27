@@ -317,6 +317,24 @@ export const SESSION_START_SYSTEM_TAG = "[SessionStart hook output]";
  */
 const HOOK_OUTPUT_RAW_CAP = 256 * 1024;
 
+/**
+ * Round 12d — backs a slice-end index off by one when the code unit AT
+ * `end - 1` is a HIGH surrogate (0xD800-0xDBFF): cutting there would leave
+ * that lone high surrogate as the last kept code unit, which renders as
+ * U+FFFD instead of whatever emoji/astral character it was one half of.
+ * Used at BOTH truncation points that can slice hook-output text mid-pair
+ * — `sanitizeHookOutput`'s raw-input cap below, and
+ * `formatSessionStartHookNotice`'s post-sanitize 16 KB bound — so an emoji
+ * straddling either boundary is dropped whole rather than split in half.
+ */
+function unicodeSafeSliceEnd(str: string, end: number): number {
+  if (end > 0 && end <= str.length) {
+    const last = str.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) return end - 1;
+  }
+  return end;
+}
+
 function isCsiParamOrIntermediate(c: number): boolean {
   return c >= 0x20 && c <= 0x3f;
 }
@@ -422,7 +440,7 @@ function consumeControlStringBody(src: string, start: number, bellTerminates: bo
  * this is plain text being rendered into a log, not a terminal).
  */
 export function sanitizeHookOutput(raw: string): string {
-  const src = raw.length > HOOK_OUTPUT_RAW_CAP ? raw.slice(0, HOOK_OUTPUT_RAW_CAP) : raw;
+  const src = raw.length > HOOK_OUTPUT_RAW_CAP ? raw.slice(0, unicodeSafeSliceEnd(raw, HOOK_OUTPUT_RAW_CAP)) : raw;
   const len = src.length;
   let out = "";
   let i = 0;
@@ -505,7 +523,27 @@ export function sanitizeHookOutput(raw: string): string {
       continue;
     }
 
-    // --- ordinary text: ASCII/Latin/Vietnamese/surrogate halves/etc. ---
+    // --- ordinary text: ASCII/Latin/Vietnamese/surrogate pairs/etc. ---
+    // Round 12d — a HIGH surrogate is only kept paired with a valid
+    // following LOW surrogate; either half showing up alone (a genuinely
+    // malformed input, or exposed by `unicodeSafeSliceEnd` backing a cut
+    // off by one and leaving the OTHER half dangling) renders as U+FFFD,
+    // so a lone surrogate of either kind is dropped rather than emitted.
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const c2 = src.charCodeAt(i + 1);
+      if (c2 >= 0xdc00 && c2 <= 0xdfff) {
+        out += src[i] + src[i + 1];
+        i += 2;
+      } else {
+        i += 1; // lone high surrogate — dropped
+      }
+      continue;
+    }
+    if (c >= 0xdc00 && c <= 0xdfff) {
+      i += 1; // lone low surrogate — dropped
+      continue;
+    }
+
     out += src[i];
     i += 1;
   }
@@ -541,7 +579,10 @@ export function formatSessionStartHookNotice(contexts: readonly string[], maxCha
   if (!joined) return null;
   const body =
     joined.length > maxChars
-      ? `${joined.slice(0, maxChars)}\n[... truncated: showed ${maxChars} of ${joined.length} chars ...]`
+      ? // Round 12d: `unicodeSafeSliceEnd` keeps this cut from landing
+        // between the two halves of a surrogate pair (an emoji straddling
+        // the boundary) — see its doc comment.
+        `${joined.slice(0, unicodeSafeSliceEnd(joined, maxChars))}\n[... truncated: showed ${maxChars} of ${joined.length} chars ...]`
       : joined;
   return `${SESSION_START_SYSTEM_TAG}\n${body}`;
 }
