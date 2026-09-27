@@ -307,52 +307,210 @@ const _injectedGuidanceSha = new Map<string, string>();
 export const SESSION_START_SYSTEM_TAG = "[SessionStart hook output]";
 
 /**
- * Round 12b (F2 residual, MED) — strips ANSI/CSI/OSC terminal escape
- * sequences and C0/C1 control characters (except `\n` and `\t`) from a
- * SessionStart hook's raw stdout before it is ever bounded or rendered.
- * The TUI log is not a terminal emulator: an unsanitized colour code, a
- * cursor-move/clear-screen sequence, an OSC window-title/hyperlink
- * sequence, or a bare `\r` "progress bar" overwrite would corrupt the
- * log's own rendering or hide/replace text already printed above it, and a
- * NUL byte can break assumptions elsewhere in string handling entirely.
- *
- * `\r\n` is normalised to `\n` FIRST (so a Windows-authored hook script's
- * ordinary newlines are never mistaken for bare-`\r` overwrites); any
- * OTHER `\r` is then simply dropped — this is plain text being rendered
- * into a log, not a terminal, so there is no attempt to emulate an
- * overwrite. Escape sequences are removed in FULL here, BEFORE any
- * truncation happens later in `formatSessionStartHookNotice` — so
- * truncation there always cuts already-sanitized, escape-free text and
- * can never land "mid-escape" and leave a dangling ESC byte in the
- * rendered output. The final blanket C0/C1 sweep is the safety net for
- * any malformed/incomplete escape sequence the specific OSC/CSI/Fe
- * patterns above did not recognize — it also happens to catch a bare,
- * dangling ESC byte (`\x1B` is itself a C0 control byte), which is what
- * guarantees "no dangling ESC" unconditionally, not just for the
- * sequences this function knows how to name.
+ * Round 12c — hard cap on the RAW input scanned by `sanitizeHookOutput`,
+ * applied BEFORE the single linear pass below runs. Independent of, and
+ * ahead of, `formatSessionStartHookNotice`'s OWN 16 KB bound on the
+ * SANITIZED result: a huge amount of raw escape-sequence noise can
+ * sanitize down to well under 16 KB, so that later bound alone cannot cap
+ * the scanning cost here. 256 KB keeps even an adversarial multi-MB hook
+ * output a sub-millisecond scan.
  */
-function sanitizeHookOutput(raw: string): string {
-  let s = raw.replace(/\r\n/g, "\n").replace(/\r/g, "");
-  // OSC: ESC ] ... terminated by BEL or ST (ESC \) — window title, hyperlinks.
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: sanitizer — these ARE the control bytes being stripped.
-  s = s.replace(/\x1B\][\s\S]*?(?:\x07|\x1B\\)/g, "");
-  // CSI: ESC [ parameter-bytes intermediate-bytes final-byte(@-~) — colour,
-  // cursor movement, clear-screen/line, etc.
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: sanitizer — these ARE the control bytes being stripped.
-  s = s.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
-  // Charset designation: ESC ( X / ESC ) X (G0/G1 designation).
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: sanitizer — these ARE the control bytes being stripped.
-  s = s.replace(/\x1B[()][A-Za-z0-9]/g, "");
-  // Other Fe escape sequences: ESC followed by a single byte in 0x40-0x5F
-  // (save/restore cursor, reset, and any malformed/leftover CSI/OSC lead-in
-  // a pattern above did not fully match).
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: sanitizer — these ARE the control bytes being stripped.
-  s = s.replace(/\x1B[@-_]/g, "");
-  // Safety net: any remaining C0 control byte (except \t/\n, and \r already
-  // handled above) or C1 control byte — including a bare/dangling ESC.
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: sanitizer — these ARE the control bytes being stripped.
-  s = s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x80-\x9F]/g, "");
-  return s;
+const HOOK_OUTPUT_RAW_CAP = 256 * 1024;
+
+function isCsiParamOrIntermediate(c: number): boolean {
+  return c >= 0x20 && c <= 0x3f;
+}
+
+function isCsiFinalByte(c: number): boolean {
+  return c >= 0x40 && c <= 0x7e;
+}
+
+/**
+ * Consumes a CSI body (parameter/intermediate bytes 0x20-0x3F, up to and
+ * including a final byte 0x40-0x7E) starting at `start` — the index right
+ * AFTER the CSI introducer (`ESC [` or the single 8-bit byte `0x9B`) has
+ * already been dropped. Returns the index to resume the main scan at.
+ *
+ * On ABORT (a byte outside both ranges, or running off the end before a
+ * final byte), that byte is NOT consumed here — the caller resumes its own
+ * dispatch at the returned index, so an aborted CSI attempt only ever
+ * costs the (already-dropped) introducer; the byte that caused the abort
+ * gets ordinary treatment (kept if plain text, dropped if a control byte,
+ * or the start of a fresh escape attempt if it is itself ESC/a C1 byte).
+ */
+function consumeCsiBody(src: string, start: number): number {
+  const len = src.length;
+  let j = start;
+  while (j < len) {
+    const c = src.charCodeAt(j);
+    if (isCsiFinalByte(c)) return j + 1;
+    if (isCsiParamOrIntermediate(c)) {
+      j++;
+      continue;
+    }
+    return j; // abort — resync here, byte left untouched
+  }
+  return j; // ran off the end mid-CSI
+}
+
+/**
+ * Consumes a control-string body (OSC/DCS/SOS/PM/APC) starting at `start`
+ * — the index right after the introducer has already been dropped.
+ * `bellTerminates` is true only for OSC (a bare BEL also ends it, in
+ * addition to ST); DCS/SOS/PM/APC end ONLY at ST.
+ *
+ * Reaching `\r` or `\n` BEFORE any terminator ends the string right
+ * there, WITHOUT consuming the newline — the caller's own `\r`/`\n`
+ * handling then applies to it on the next iteration, so damage from an
+ * unterminated (or malformed, terminator-free) control string is capped
+ * to the ONE line it started on, never anything past it.
+ */
+function consumeControlStringBody(src: string, start: number, bellTerminates: boolean): number {
+  const len = src.length;
+  let j = start;
+  while (j < len) {
+    const c = src.charCodeAt(j);
+    if (c === 0x9c) return j + 1; // 8-bit ST
+    if (c === 0x1b && src.charCodeAt(j + 1) === 0x5c) return j + 2; // 7-bit ST (ESC \)
+    if (bellTerminates && c === 0x07) return j + 1; // BEL — OSC only
+    if (c === 0x0a || c === 0x0d) return j; // newline first — resync here, undropped
+    j++;
+  }
+  return j; // ran off the end mid-string
+}
+
+/**
+ * Round 12b (F2 residual, MED) / Round 12c (rewrite) — strips ANSI escape
+ * sequences (CSI, the OSC/DCS/SOS/PM/APC control strings, and other
+ * Fe/Fs/Fp/charset-designation forms — both the 7-bit `ESC`-prefixed and
+ * 8-bit C1 encodings of each) and C0/C1 control characters (except `\n`
+ * and `\t`) from a SessionStart hook's raw stdout before it is ever
+ * bounded or rendered. The TUI log is not a terminal emulator: an
+ * unsanitized colour code, a cursor-move/clear-screen sequence, an OSC
+ * window-title/hyperlink sequence, or a bare `\r` "progress bar" overwrite
+ * would corrupt the log's own rendering or hide/replace text already
+ * printed above it, and a NUL byte can break assumptions elsewhere in
+ * string handling entirely.
+ *
+ * Rewritten (round 12c) as a SINGLE linear pass over UTF-16 code units —
+ * no regex, no backtracking — after the refuter found the original
+ * regex-based version's OSC pattern (`\x1B\][\s\S]*?(?:\x07|\x1B\\)`) was
+ * O(n²) (a lazy `[\s\S]*?` inside a `.replace` re-scans from every
+ * possible OSC-introducer position), hanging for minutes on ~1 MB of
+ * repeated introducers in a call this codebase makes SYNCHRONOUSLY in
+ * pre-stream — directly blocking the event loop. The state machine below
+ * visits each input position a small constant number of times regardless
+ * of content (an "abort" always resumes strictly past where the failed
+ * attempt's own scan stopped), so it is O(n) even on adversarial input;
+ * `HOOK_OUTPUT_RAW_CAP` bounds `n` itself as a second, independent belt.
+ *
+ * The regex rewrite also closed three smaller gaps the original missed:
+ * an unterminated (or BEL-typo'd) OSC no longer eats legitimate text past
+ * its own line (`consumeControlStringBody`'s newline-first rule); DCS/PM/
+ * APC bodies are now actually stripped, not just their introducer; and
+ * the 8-bit C1 CSI introducer (`0x9B`) no longer leaks its own params and
+ * final byte once the introducer itself is gone.
+ *
+ * Because this scans by UTF-16 CODE UNIT, not byte, Unicode text round-
+ * trips unchanged: every control/escape byte class checked below sits at
+ * or below `0x9F`, while surrogate pairs (emoji, most CJK-supplementary
+ * text) start at `0xD800` and precomposed Vietnamese/Latin-Extended text
+ * sits at `0xA0` and up — neither can ever be mistaken for a control byte
+ * or an escape introducer.
+ *
+ * `\r\n` is normalised to `\n`; a bare `\r` is dropped (not emulated —
+ * this is plain text being rendered into a log, not a terminal).
+ */
+export function sanitizeHookOutput(raw: string): string {
+  const src = raw.length > HOOK_OUTPUT_RAW_CAP ? raw.slice(0, HOOK_OUTPUT_RAW_CAP) : raw;
+  const len = src.length;
+  let out = "";
+  let i = 0;
+
+  while (i < len) {
+    const c = src.charCodeAt(i);
+
+    // --- \r / \r\n normalisation ---
+    if (c === 0x0d) {
+      if (src.charCodeAt(i + 1) === 0x0a) {
+        out += "\n";
+        i += 2;
+      } else {
+        i += 1; // bare \r dropped
+      }
+      continue;
+    }
+    if (c === 0x0a || c === 0x09) {
+      out += src[i];
+      i += 1;
+      continue;
+    }
+
+    // --- 7-bit ESC-prefixed sequences ---
+    if (c === 0x1b) {
+      const b1 = src.charCodeAt(i + 1);
+      if (b1 === 0x5b) {
+        // CSI: ESC [
+        i = consumeCsiBody(src, i + 2);
+        continue;
+      }
+      if (b1 === 0x5d) {
+        // OSC: ESC ]
+        i = consumeControlStringBody(src, i + 2, true);
+        continue;
+      }
+      if (b1 === 0x50 || b1 === 0x58 || b1 === 0x5e || b1 === 0x5f) {
+        // DCS (ESC P) / SOS (ESC X) / PM (ESC ^) / APC (ESC _)
+        i = consumeControlStringBody(src, i + 2, false);
+        continue;
+      }
+      if (b1 >= 0x28 && b1 <= 0x2f) {
+        // Charset designation: ESC + intermediate(0x28-0x2F) + one final byte.
+        i = i + 2 < len ? i + 3 : i + 2;
+        continue;
+      }
+      if (b1 >= 0x30 && b1 <= 0x7e) {
+        // Other 2-byte Fe/Fs/Fp escape sequence (reset, save/restore cursor, etc.).
+        i += 2;
+        continue;
+      }
+      // Abort: nothing recognizable follows (end of input, or another
+      // control byte) — drop just the lone ESC, resync at b1 untouched.
+      i += 1;
+      continue;
+    }
+
+    // --- 8-bit C1 control codes (single code unit each) ---
+    if (c === 0x9b) {
+      i = consumeCsiBody(src, i + 1);
+      continue;
+    }
+    if (c === 0x9d) {
+      i = consumeControlStringBody(src, i + 1, true);
+      continue;
+    }
+    if (c === 0x90 || c === 0x98 || c === 0x9e || c === 0x9f) {
+      i = consumeControlStringBody(src, i + 1, false);
+      continue;
+    }
+    if (c >= 0x80 && c <= 0x9f) {
+      // Any other C1 control code, including a lone/out-of-context ST (0x9C).
+      i += 1;
+      continue;
+    }
+
+    // --- remaining C0 (ESC already handled above) — dropped ---
+    if (c <= 0x1f) {
+      i += 1;
+      continue;
+    }
+
+    // --- ordinary text: ASCII/Latin/Vietnamese/surrogate halves/etc. ---
+    out += src[i];
+    i += 1;
+  }
+
+  return out;
 }
 
 /**

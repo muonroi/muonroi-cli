@@ -7,7 +7,7 @@
  * script prints.
  */
 import { describe, expect, it } from "vitest";
-import { formatSessionStartHookNotice, SESSION_START_SYSTEM_TAG } from "../message-processor.js";
+import { formatSessionStartHookNotice, SESSION_START_SYSTEM_TAG, sanitizeHookOutput } from "../message-processor.js";
 
 describe("formatSessionStartHookNotice — round 12 (F2/G14)", () => {
   it("returns null when every context is blank or the array is empty", () => {
@@ -108,5 +108,115 @@ describe("formatSessionStartHookNotice — round 12b (F2 residual): sanitizes co
     expect(out).not.toContain("\x1B");
     expect(out).toContain("truncated: showed 7 of 25 chars");
     expect(out).toContain("XXXXXYY");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 12c — sanitizeHookOutput rewritten as a single linear-pass state
+// machine (no regex, no backtracking) after the refuter found the original
+// regex-based version had a HIGH-severity O(n²) hang (the OSC pattern's lazy
+// `[\s\S]*?` re-scans from every introducer position) plus three smaller
+// correctness gaps. Every test below carries a timing assertion — the whole
+// point of the rewrite is that even adversarial 1 MB inputs finish in well
+// under a second (in practice sub-millisecond, since raw input is also
+// hard-capped at 256 KB before the scan even starts).
+// ---------------------------------------------------------------------------
+describe("sanitizeHookOutput — round 12c (linear-pass rewrite)", () => {
+  const PERF_BUDGET_MS = 500;
+
+  function timed<T>(fn: () => T): { result: T; ms: number } {
+    const start = Date.now();
+    const result = fn();
+    return { result, ms: Date.now() - start };
+  }
+
+  it("HIGH repro: 1 MB of a repeated OSC introducer sanitizes well under a second (was: hung 120s+)", () => {
+    const big = "\x1b]".repeat(500_000); // 1,000,000 chars
+    const { result, ms } = timed(() => sanitizeHookOutput(big));
+    expect(ms).toBeLessThan(PERF_BUDGET_MS);
+    expect(result).toBe("");
+  });
+
+  it("MED-HIGH repro: an unterminated OSC ends at the first newline, never eating text past its own line", () => {
+    const input = "\x1b]0;title legit line 1\nlegit line 2 \x07 rest";
+    const out = sanitizeHookOutput(input);
+    // The OSC's own line ("0;title legit line 1") is dropped along with the
+    // introducer, but the newline is kept and everything after it is
+    // ordinary text again — the stray BEL is just a dropped C0 byte there,
+    // not a terminator for a control string that already ended.
+    expect(out).toBe("\nlegit line 2  rest");
+    expect(out).toContain("legit line 2");
+    expect(out).toContain("rest");
+    expect(out).not.toContain("title");
+    expect(out).not.toContain("0;");
+  });
+
+  it("MED repro: DCS, PM and APC bodies are stripped in full, not just their introducer", () => {
+    expect(sanitizeHookOutput("\x1bPsome-dcs-payload;1;2\x1b\\after")).toBe("after");
+    expect(sanitizeHookOutput("\x1b^some-pm-payload\x1b\\after")).toBe("after");
+    expect(sanitizeHookOutput("\x1b_some-apc-payload\x1b\\after")).toBe("after");
+  });
+
+  it("LOW-MED repro: the 8-bit C1 CSI introducer (0x9B) no longer leaks its params/final byte", () => {
+    const out = sanitizeHookOutput("before\x9b31mtext\x9b0mafter");
+    expect(out).toBe("beforetextafter");
+    expect(out).not.toContain("31m");
+    expect(out).not.toContain("0m");
+  });
+
+  it("1 MB of a repeated 7-bit CSI introducer (\\x1b[) sanitizes well under a second", () => {
+    const big = "\x1b[".repeat(500_000); // 1,000,000 chars
+    const { result, ms } = timed(() => sanitizeHookOutput(big));
+    expect(ms).toBeLessThan(PERF_BUDGET_MS);
+    expect(result).toBe("");
+  });
+
+  it("1 MB of a repeated 8-bit CSI introducer (\\x9b) sanitizes well under a second", () => {
+    const big = "\x9b".repeat(1_000_000);
+    const { result, ms } = timed(() => sanitizeHookOutput(big));
+    expect(ms).toBeLessThan(PERF_BUDGET_MS);
+    expect(result).toBe("");
+  });
+
+  it("1 MB of mixed random bytes (0-255) sanitizes well under a second and never throws", () => {
+    let mixed = "";
+    // Deterministic PRNG (mulberry32) — no external randomness dependency,
+    // reproducible across CI runs, still exercises every control/escape
+    // byte class the state machine handles.
+    let state = 0x2f6e2b1;
+    const next = () => {
+      state = (state + 0x6d2b79f5) | 0;
+      let t = state;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    for (let i = 0; i < 1_000_000; i++) {
+      mixed += String.fromCharCode(Math.floor(next() * 256));
+    }
+    let ms = 0;
+    expect(() => {
+      const t = timed(() => sanitizeHookOutput(mixed));
+      ms = t.ms;
+    }).not.toThrow();
+    expect(ms).toBeLessThan(PERF_BUDGET_MS);
+  });
+
+  it("strips a Kitty-style APC graphics payload in full, keeping only surrounding text", () => {
+    const input = `before\x1b_Gf=100,a=T,m=1;${"QUJDRA==".repeat(20)}\x1b\\after`;
+    const out = sanitizeHookOutput(input);
+    expect(out).toBe("beforeafter");
+  });
+
+  it("strips a DCS sequence terminated by ST (7-bit ESC \\\\), keeping only surrounding text", () => {
+    const input = 'lead\x1bP1$q"1;1"1$r0"q\x1b\\trail';
+    const out = sanitizeHookOutput(input);
+    expect(out).toBe("leadtrail");
+  });
+
+  it("Unicode fidelity: Vietnamese text and emoji round-trip unchanged around stripped escape codes", () => {
+    const input = "\x1b[31mXin chào, đây là tiếng Việt 🎉🚀😀\x1b[0m";
+    const out = sanitizeHookOutput(input);
+    expect(out).toBe("Xin chào, đây là tiếng Việt 🎉🚀😀");
   });
 });
