@@ -143,15 +143,12 @@ describe("decide()", () => {
   });
 });
 
-describe("provider constraint with PROVIDER_INHERIT", () => {
-  let stub: StubHandle;
-
+describe("promotion cap", () => {
   beforeAll(async () => {
     await loadCatalog();
   });
 
-  afterAll(async () => {
-    await stub?.stop();
+  afterAll(() => {
     vi.restoreAllMocks();
   });
 
