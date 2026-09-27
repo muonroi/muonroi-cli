@@ -471,6 +471,57 @@ export function getCompactionSummaryText(message: ModelMessage | undefined): str
   return message.content.slice(COMPACTION_SUMMARY_HEADER.length).trim();
 }
 
+/**
+ * Round 10 (G8 HIGH A follow-up): local-data-only file paths mentioned in
+ * tool-call arguments across a span of messages about to be dropped by
+ * compaction — no LLM involved, so this is safe to run even when EVERY
+ * summarizer model is failing. AI SDK v6 uses `input`; older snapshots used
+ * `args` — accept both (mirrors `convergence-mirror.ts`'s exact pattern).
+ * Order matches that module's diagnostic priority for a single arg per call;
+ * here every plausible path-shaped key is checked since a mechanical stub
+ * has no other signal to offer.
+ */
+function collectTouchedFilesFromMessages(messages: readonly ModelMessage[], cap = 8): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const message of messages) {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    for (const part of message.content as Array<Record<string, unknown>>) {
+      if (!part || part.type !== "tool-call") continue;
+      const args = (part.input ?? part.args ?? {}) as Record<string, unknown>;
+      for (const key of ["path", "file_path", "filePath", "file"]) {
+        const raw = args[key];
+        if (typeof raw !== "string") continue;
+        const p = raw.trim();
+        if (!p || seen.has(p)) continue;
+        seen.add(p);
+        out.push(p);
+        if (out.length >= cap) return out;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Round 10 (G8 HIGH A) — deterministic, NO-LLM fallback for when EVERY
+ * summarizer model has failed (see `compactForContext`'s retry chain: compact
+ * model, then the session's main model, then this). Compaction must never
+ * give up entirely — a persistent provider quirk on one model must not mean
+ * "context grows without bound forever" — so this always succeeds and always
+ * shrinks the kept window by the same amount a real summary would have,
+ * just with a plain, honest stub instead of a synthesized narrative.
+ */
+export function buildMechanicalCompactionStub(preparation: PreparedCompaction): string {
+  const dropped = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
+  const files = collectTouchedFilesFromMessages(dropped);
+  const filesLine = files.length > 0 ? ` Key files touched: ${files.join(", ")}.` : "";
+  return (
+    `[Mechanical compaction — no LLM available] ${dropped.length} earlier message(s) elided after every ` +
+    `summarizer model failed.${filesLine} Re-read any file above if its current contents matter for this turn.`
+  );
+}
+
 function messageToString(message: ModelMessage): string {
   switch (message.role) {
     case "user":

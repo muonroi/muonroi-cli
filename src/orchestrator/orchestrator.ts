@@ -161,6 +161,7 @@ import {
 } from "./batch-utils";
 import { getCompactionFocus } from "./compact-request.js";
 import {
+  buildMechanicalCompactionStub,
   type CompactionSettings,
   createCompactionSummaryMessage,
   DEFAULT_KEEP_RECENT_TOKENS,
@@ -176,6 +177,7 @@ import {
   shouldCompactContext,
 } from "./compaction";
 import { buildCompactionCustomInstructions } from "./compaction-consult.js";
+import { isCompactionModelCoolingDown, markCompactionModelCooldown } from "./compaction-model-cooldown.js";
 import { markProposerStalled } from "./compaction-stall-notice.js";
 import { getCouncilContinuationWatchdogMs } from "./council-continuation-budget.js";
 import { CouncilManager } from "./council-manager.js";
@@ -2161,27 +2163,80 @@ export class Agent {
     // straight out of this `await`, uncaught, all the way through
     // `compactForContext` and the sub-session's own turn — ending it
     // completely empty ("No assistant messages found to absorb"), raw
-    // `<tool_call>` markup left on screen. ANY failure here (leak, timeout,
-    // parse, provider error) must take the SAME non-fatal path: skip
-    // compaction for this turn (return false, exactly like a proposer that
-    // said "don't compact") rather than aborting the turn — and since
-    // nothing is persisted before this point succeeds, no malformed content
-    // ever reaches the transcript either.
+    // `<tool_call>` markup left on screen.
+    //
+    // Round 10 (G8 HIGH A): round 9's fix skipped compaction entirely on ANY
+    // failure — safe for one bad turn, but the compact model is resolved
+    // DETERMINISTICALLY (same tier lookup every time), so a PERSISTENT quirk
+    // (this exact model always leaking markup on this exact session's
+    // transcript shape) meant compaction would never succeed again for the
+    // rest of that session: unbounded context growth toward a real provider
+    // overflow, plus one wasted doomed network call every single turn. Fixed
+    // with a bounded retry chain that always eventually succeeds:
+    //   1. the compact model (unless already cooling down from a prior
+    //      failure this session — see compaction-model-cooldown.ts);
+    //   2. ONE retry with the session's OWN main model (`this.modelId`) —
+    //      skipped when it IS the compact model already, since retrying the
+    //      identical model/prompt would just reproduce the same failure;
+    //   3. a deterministic, NO-LLM mechanical stub
+    //      (`buildMechanicalCompactionStub`) that always succeeds and always
+    //      shrinks the kept window exactly like a real summary would.
+    // Whichever model fails is put on a per-session cooldown so a further
+    // compaction attempt THIS session does not re-attempt a model already
+    // known to be doomed — it goes straight to the next step in the chain.
     let summary: string;
     let compactUsage: { promptTokens: number; completionTokens: number };
-    try {
-      const result = await generateCompactionSummary(compactModelId, preparation, customInstructions, signal);
-      summary = result.summary;
-      compactUsage = result.usage;
-    } catch (err) {
+    let summaryModelId = compactModelId;
+    const sessionIdForCooldown = this.session.id;
+
+    const tryGenerateSummary = async (modelId: string) => {
+      if (isCompactionModelCoolingDown(sessionIdForCooldown, modelId)) {
+        throw new Error(`compaction model ${modelId} is cooling down after a recent failure this session`);
+      }
+      try {
+        return await generateCompactionSummary(modelId, preparation, customInstructions, signal);
+      } catch (err) {
+        markCompactionModelCooldown(sessionIdForCooldown, modelId);
+        throw err;
+      }
+    };
+
+    const logSummaryFailure = (stage: string, err: unknown): void => {
       const errMessage = err instanceof Error ? err.message : String(err);
       const errStack = err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined;
-      logger.warn("orchestrator", "Compaction summary failure — skipping compaction this turn", {
-        error: errMessage,
-        stack: errStack,
-      });
-      markProposerStalled(`Compaction failed (${errMessage.slice(0, 160)}) — continuing without it.`);
-      return false;
+      logger.warn("orchestrator", `Compaction summary failure (${stage})`, { error: errMessage, stack: errStack });
+    };
+
+    try {
+      const result = await tryGenerateSummary(compactModelId);
+      summary = result.summary;
+      compactUsage = result.usage;
+    } catch (firstErr) {
+      logSummaryFailure("compact model", firstErr);
+      if (this.modelId !== compactModelId) {
+        try {
+          const result = await tryGenerateSummary(this.modelId);
+          summary = result.summary;
+          compactUsage = result.usage;
+          summaryModelId = this.modelId;
+          markProposerStalled(
+            `Compaction fell back to the main model (${this.modelId}) after ${compactModelId} failed.`,
+          );
+        } catch (secondErr) {
+          logSummaryFailure("main model fallback", secondErr);
+          summary = buildMechanicalCompactionStub(preparation);
+          compactUsage = { promptTokens: 0, completionTokens: 0 };
+          markProposerStalled(
+            `Compaction summarizers failed (${compactModelId} and ${this.modelId}) — used a mechanical fallback (no LLM). Context still shrank.`,
+          );
+        }
+      } else {
+        summary = buildMechanicalCompactionStub(preparation);
+        compactUsage = { promptTokens: 0, completionTokens: 0 };
+        markProposerStalled(
+          `Compaction summarizer (${compactModelId}) failed — used a mechanical fallback (no LLM). Context still shrank.`,
+        );
+      }
     }
 
     // Record compaction usage in usage_events under a dedicated `compaction`
@@ -2190,19 +2245,23 @@ export class Agent {
     // tell how much a bloated context (e.g. redundant reads) cost to compact.
     // Measurement-first: overhead must be attributable, not hidden. It has its
     // own source so it never inflates the `message` bucket.
+    // Round 10: attribute usage/cost to whichever model actually produced the
+    // summary (`summaryModelId` — the compact model, the main-model fallback,
+    // or unchanged from `compactModelId` when the mechanical stub was used,
+    // where `compactUsage` is zero anyway so the id barely matters).
     this.recordUsage(
       { inputTokens: compactUsage.promptTokens, outputTokens: compactUsage.completionTokens },
       "compaction",
-      compactModelId,
+      summaryModelId,
     );
-    const compactProvider = detectProviderForModel(compactModelId);
+    const compactProvider = detectProviderForModel(summaryModelId);
     appendCostLog({
       ts: compactStartedAt,
       provider: compactProvider,
-      model: compactModelId,
+      model: summaryModelId,
       estimatedUsd: projectCostUSD(
         compactProvider,
-        compactModelId,
+        summaryModelId,
         compactUsage.promptTokens,
         compactUsage.completionTokens,
       ),
@@ -2307,7 +2366,7 @@ export class Agent {
 
     // Update status bar with current context size and compaction summary
     const fmtCompact = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n));
-    const modelSuffix = compactModelId !== this.modelId ? ` via ${compactModelId}` : "";
+    const modelSuffix = summaryModelId !== this.modelId ? ` via ${summaryModelId}` : "";
     const userMsgCount = this.messages.filter((m) => m.role === "user").length;
     const isLongSession = this._compactionStats.count >= 3 || userMsgCount >= 200;
     const sessionHint = isLongSession ? " ⚠ long session — consider /clear" : "";

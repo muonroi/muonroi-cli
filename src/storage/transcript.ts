@@ -143,6 +143,152 @@ function parseMessageRowsSafely(rows: readonly MessageRow[]): {
   return { messages, seqs, timestamps };
 }
 
+interface RawToolCallPart {
+  type: "tool-call";
+  toolCallId: string;
+  toolName: string;
+}
+
+interface RawToolResultPart {
+  type: "tool-result";
+  toolCallId: string;
+  toolName?: string;
+}
+
+function isRawToolCallPart(part: unknown): part is RawToolCallPart {
+  return (
+    !!part &&
+    typeof part === "object" &&
+    (part as { type?: unknown }).type === "tool-call" &&
+    typeof (part as { toolCallId?: unknown }).toolCallId === "string"
+  );
+}
+
+function isRawToolResultPart(part: unknown): part is RawToolResultPart {
+  return (
+    !!part &&
+    typeof part === "object" &&
+    (part as { type?: unknown }).type === "tool-result" &&
+    typeof (part as { toolCallId?: unknown }).toolCallId === "string"
+  );
+}
+
+/**
+ * Round 10 (G8 HIGH B) — a resumed transcript can carry an ORPHANED
+ * tool-call/tool-result pairing even after `parseMessageRowsSafely` (round
+ * 9) correctly skips a single malformed row: measured repro — a malformed
+ * assistant message carrying a `tool-call` part gets skipped, but the `tool`
+ * role message carrying ITS result survives (a separate row, itself
+ * well-formed), leaving `[..., tool, ...]` with a `toolCallId` the provider
+ * has never seen an assistant declare. Every OpenAI-compatible provider
+ * rejects that shape outright (measured: a 400 on the very next call) —
+ * round 9 made resume survive a bad row, but did not make the SURVIVING
+ * messages internally consistent.
+ *
+ * Sanitizes both directions, scoped to ONE already-assembled transcript (the
+ * caller always applies this per-session, never across a session boundary,
+ * so a parent's tool call is never "matched" by an unrelated child's result
+ * or vice versa):
+ *   - a tool-result whose `toolCallId` matches no assistant tool-call
+ *     ANYWHERE in this transcript is dropped (just that part; the whole
+ *     `tool` message too, if every part in it turns out orphaned);
+ *   - an assistant tool-call with no matching tool-result anywhere in this
+ *     transcript gets a SYNTHETIC one inserted right after its message,
+ *     rather than the tool-call being stripped from the assistant message.
+ *     Stripping risks leaving that message with no content at all (most
+ *     providers reject an empty assistant message too, trading one 400 for
+ *     another) and erases the model's own record that it tried to act.
+ *     Inserting a result uses the IDENTICAL `{type:"tool-result",
+ *     output:{type:"text", value}}` shape this codebase already sends to
+ *     production providers today for an ELIDED (not missing) result — see
+ *     `subagent-compactor.ts`'s stub construction — so this is a shape every
+ *     provider this codebase talks to already accepts.
+ */
+function sanitizeToolCallPairing<
+  T extends { messages: ModelMessage[]; seqs: ReadonlyArray<number | null>; timestamps: readonly Date[] },
+>(state: T): T {
+  const { messages, seqs, timestamps } = state;
+
+  const resultIdsPresent = new Set<string>();
+  for (const m of messages) {
+    if (m.role !== "tool" || !Array.isArray(m.content)) continue;
+    for (const part of m.content as unknown[]) {
+      if (isRawToolResultPart(part)) resultIdsPresent.add(part.toolCallId);
+    }
+  }
+
+  const callIdsPresent = new Set<string>();
+  for (const m of messages) {
+    if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
+    for (const part of m.content as unknown[]) {
+      if (isRawToolCallPart(part)) callIdsPresent.add(part.toolCallId);
+    }
+  }
+
+  const outMessages: ModelMessage[] = [];
+  const outSeqs: Array<number | null> = [];
+  const outTimestamps: Date[] = [];
+  let droppedResults = 0;
+  let synthesizedResults = 0;
+
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]!;
+    const seq = seqs[i] ?? null;
+    const ts = timestamps[i]!;
+
+    if (m.role === "tool" && Array.isArray(m.content)) {
+      const originalParts = m.content as unknown[];
+      const kept = originalParts.filter((part) => {
+        if (!isRawToolResultPart(part)) return true; // pass through anything else untouched
+        const ok = callIdsPresent.has(part.toolCallId);
+        if (!ok) droppedResults++;
+        return ok;
+      });
+      if (kept.length === 0) continue; // whole message became empty — drop it (skip pushing seq/timestamp too)
+      outMessages.push(kept.length === originalParts.length ? m : ({ ...m, content: kept } as ModelMessage));
+      outSeqs.push(seq);
+      outTimestamps.push(ts);
+      continue;
+    }
+
+    outMessages.push(m);
+    outSeqs.push(seq);
+    outTimestamps.push(ts);
+
+    if (m.role === "assistant" && Array.isArray(m.content)) {
+      const missing = (m.content as unknown[]).filter(
+        (part) => isRawToolCallPart(part) && !resultIdsPresent.has(part.toolCallId),
+      ) as RawToolCallPart[];
+      if (missing.length > 0) {
+        synthesizedResults += missing.length;
+        outMessages.push({
+          role: "tool",
+          content: missing.map((part) => ({
+            type: "tool-result",
+            toolCallId: part.toolCallId,
+            toolName: part.toolName,
+            output: {
+              type: "text",
+              value: "[tool result unavailable — could not be resumed for this session]",
+            },
+          })),
+        } as unknown as ModelMessage);
+        outSeqs.push(null);
+        outTimestamps.push(ts);
+      }
+    }
+  }
+
+  if (droppedResults > 0 || synthesizedResults > 0) {
+    logger.warn("storage", "Sanitized orphaned tool-call/tool-result pairing on resume", {
+      droppedResults,
+      synthesizedResults,
+    });
+  }
+
+  return { ...state, messages: outMessages, seqs: outSeqs, timestamps: outTimestamps };
+}
+
 function toPersistedCompaction(row: CompactionRow | undefined): PersistedCompaction | null {
   if (!row) return null;
   return {
@@ -170,7 +316,9 @@ export function loadLatestCompaction(sessionId: string): PersistedCompaction | n
 function buildEffectiveMessageRecords(sessionId: string): EffectiveMessageRecord[] {
   const rows = loadMessageRows(sessionId);
   const { messages, seqs, timestamps } = parseMessageRowsSafely(rows);
-  const transcript = buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sessionId));
+  const transcript = sanitizeToolCallPairing(
+    buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sessionId)),
+  );
 
   return transcript.messages.map((message, index) => ({
     message,
@@ -180,13 +328,14 @@ function buildEffectiveMessageRecords(sessionId: string): EffectiveMessageRecord
 }
 
 export function loadRawTranscript(sessionId: string): ModelMessage[] {
-  return parseMessageRowsSafely(loadMessageRows(sessionId)).messages;
+  const { messages, seqs, timestamps } = parseMessageRowsSafely(loadMessageRows(sessionId));
+  return sanitizeToolCallPairing({ messages, seqs, timestamps }).messages;
 }
 
 export function loadTranscriptState(sessionId: string): LoadedTranscriptState {
   const rows = loadMessageRows(sessionId);
   const { messages, seqs, timestamps } = parseMessageRowsSafely(rows);
-  return buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sessionId));
+  return sanitizeToolCallPairing(buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sessionId)));
 }
 
 export function loadTranscript(sessionId: string): ModelMessage[] {
@@ -223,7 +372,12 @@ export function loadSessionChainTranscriptState(sessionId: string): LoadedTransc
   for (const sid of chain) {
     const rows = loadMessageRows(sid);
     const { messages, seqs, timestamps } = parseMessageRowsSafely(rows);
-    const effective = buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sid));
+    // Sanitized PER SESSION, before merging into the flat cross-session
+    // `records` list — a tool call in one session must never be "matched"
+    // by an unrelated result from another session in the same chain.
+    const effective = sanitizeToolCallPairing(
+      buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sid)),
+    );
 
     for (let i = 0; i < effective.messages.length; i++) {
       records.push({

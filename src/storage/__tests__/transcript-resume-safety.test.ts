@@ -187,3 +187,171 @@ describe("transcript resume safety — round 9 (G11c)", () => {
     expect(state!.messages.map((m) => m.content)).toEqual(["parent msg", "child msg"]);
   });
 });
+
+/**
+ * Round 10 (G8 HIGH B) — round 9's per-row skip made resume survive a
+ * malformed row, but left the SURVIVING messages internally inconsistent:
+ * exact repro measured — a malformed assistant message carrying a
+ * `tool-call` part gets skipped (round 9), but the `tool` role message
+ * carrying ITS result is itself well-formed and survives, leaving
+ * `[user, tool, user]` with a `toolCallId` the provider has never seen an
+ * assistant declare. Every OpenAI-compatible provider rejects that shape —
+ * measured: a 400 on the very next call. `sanitizeToolCallPairing` fixes
+ * both directions after loading.
+ */
+describe("transcript resume safety — round 10 (G8 HIGH B): orphaned tool-call/tool-result pairing", () => {
+  beforeEach(() => {
+    sessionsDb.clear();
+    messagesDb.clear();
+    compactionsDb.clear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("EXACT REPRO: a malformed assistant tool-call row is skipped, and its surviving tool-result row is dropped too — never [user, tool, user]", () => {
+    sessionsDb.set("sess-3", { parent_session_id: null });
+    messagesDb.set("sess-3", [
+      {
+        session_id: "sess-3",
+        seq: 1,
+        role: "user",
+        message_json: JSON.stringify({ role: "user", content: "start" }),
+        created_at: "2026-01-01T00:00:00Z",
+      },
+      // The assistant message that DECLARED tool call "tc-1" is malformed
+      // and gets skipped by round 9's parseMessageRowsSafely.
+      {
+        session_id: "sess-3",
+        seq: 2,
+        role: "assistant",
+        message_json: '{"role":"assistant","content":[{"type":"tool-call","toolCallId":"tc-1"',
+        created_at: "2026-01-01T00:00:01Z",
+      },
+      // Its tool-result row is itself perfectly well-formed and survives.
+      {
+        session_id: "sess-3",
+        seq: 3,
+        role: "tool",
+        message_json: JSON.stringify({
+          role: "tool",
+          content: [
+            { type: "tool-result", toolCallId: "tc-1", toolName: "read_file", output: { type: "text", value: "ok" } },
+          ],
+        }),
+        created_at: "2026-01-01T00:00:02Z",
+      },
+      {
+        session_id: "sess-3",
+        seq: 4,
+        role: "user",
+        message_json: JSON.stringify({ role: "user", content: "continue" }),
+        created_at: "2026-01-01T00:00:03Z",
+      },
+    ]);
+    vi.spyOn(logger, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+    const state = loadTranscriptState("sess-3");
+
+    // The orphaned tool-result (seq 3) is gone — no [user, tool, user] shape
+    // with a toolCallId no assistant ever declared.
+    expect(state.messages.map((m) => m.role)).toEqual(["user", "user"]);
+    expect(state.messages.map((m) => m.content)).toEqual(["start", "continue"]);
+    expect(state.seqs).toEqual([1, 4]);
+    expect(warnSpy).toHaveBeenCalledWith(
+      "storage",
+      "Sanitized orphaned tool-call/tool-result pairing on resume",
+      expect.objectContaining({ droppedResults: 1 }),
+    );
+  });
+
+  it("an assistant tool-call with NO matching result anywhere gets a synthetic result inserted right after it", () => {
+    sessionsDb.set("sess-4", { parent_session_id: null });
+    messagesDb.set("sess-4", [
+      {
+        session_id: "sess-4",
+        seq: 1,
+        role: "user",
+        message_json: JSON.stringify({ role: "user", content: "start" }),
+        created_at: "2026-01-01T00:00:00Z",
+      },
+      {
+        session_id: "sess-4",
+        seq: 2,
+        role: "assistant",
+        message_json: JSON.stringify({
+          role: "assistant",
+          content: [{ type: "tool-call", toolCallId: "tc-2", toolName: "read_file", input: { path: "x.ts" } }],
+        }),
+        created_at: "2026-01-01T00:00:01Z",
+      },
+      // No tool-result row for tc-2 anywhere (dropped/never persisted).
+      {
+        session_id: "sess-4",
+        seq: 3,
+        role: "user",
+        message_json: JSON.stringify({ role: "user", content: "continue" }),
+        created_at: "2026-01-01T00:00:02Z",
+      },
+    ]);
+    vi.spyOn(logger, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+    const state = loadTranscriptState("sess-4");
+
+    expect(state.messages.map((m) => m.role)).toEqual(["user", "assistant", "tool", "user"]);
+    const synthetic = state.messages[2]! as { content: Array<{ toolCallId: string; type: string }> };
+    expect(Array.isArray(synthetic.content)).toBe(true);
+    expect(synthetic.content[0]?.toolCallId).toBe("tc-2");
+    expect(synthetic.content[0]?.type).toBe("tool-result");
+    // The synthetic message has no persisted seq — it never existed as a row.
+    expect(state.seqs).toEqual([1, 2, null, 3]);
+    expect(warnSpy).toHaveBeenCalledWith(
+      "storage",
+      "Sanitized orphaned tool-call/tool-result pairing on resume",
+      expect.objectContaining({ synthesizedResults: 1 }),
+    );
+  });
+
+  it("a well-paired transcript (normal case) is left completely untouched — no false positives", () => {
+    sessionsDb.set("sess-5", { parent_session_id: null });
+    messagesDb.set("sess-5", [
+      {
+        session_id: "sess-5",
+        seq: 1,
+        role: "assistant",
+        message_json: JSON.stringify({
+          role: "assistant",
+          content: [{ type: "tool-call", toolCallId: "tc-3", toolName: "read_file", input: { path: "y.ts" } }],
+        }),
+        created_at: "2026-01-01T00:00:00Z",
+      },
+      {
+        session_id: "sess-5",
+        seq: 2,
+        role: "tool",
+        message_json: JSON.stringify({
+          role: "tool",
+          content: [
+            { type: "tool-result", toolCallId: "tc-3", toolName: "read_file", output: { type: "text", value: "ok" } },
+          ],
+        }),
+        created_at: "2026-01-01T00:00:01Z",
+      },
+    ]);
+    vi.spyOn(logger, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+    const state = loadTranscriptState("sess-5");
+
+    expect(state.messages.map((m) => m.role)).toEqual(["assistant", "tool"]);
+    expect(state.seqs).toEqual([1, 2]);
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      "storage",
+      "Sanitized orphaned tool-call/tool-result pairing on resume",
+      expect.anything(),
+    );
+  });
+});

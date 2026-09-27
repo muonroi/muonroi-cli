@@ -147,8 +147,13 @@ describe("C2 — the agent's focus reaches the summarizing compaction", () => {
   it("is wired into Orchestrator.compactForContext", () => {
     const src = readFileSync(join(process.cwd(), "src/orchestrator/orchestrator.ts"), "utf8");
     expect(src).toContain("buildCompactionCustomInstructions({ isSubSession, agentFocus: getCompactionFocus() })");
-    // ...and the result is what generateCompactionSummary receives.
-    expect(src).toMatch(/generateCompactionSummary\(\s*compactModelId,\s*preparation,\s*customInstructions,/);
+    // ...and the result is what generateCompactionSummary receives, on EVERY
+    // model attempt in round 10's retry chain (compact model, then the main
+    // model, then a mechanical no-LLM fallback — see
+    // compaction-model-cooldown.ts and compactForContext's `tryGenerateSummary`
+    // helper): `customInstructions` is captured once, outside the per-model
+    // retry closure, so it cannot silently drop on a fallback attempt.
+    expect(src).toMatch(/generateCompactionSummary\(\s*modelId,\s*preparation,\s*customInstructions,/);
   });
 });
 
