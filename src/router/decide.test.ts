@@ -351,6 +351,36 @@ describe("tier evidence: bounded demotion, route history, escalation", () => {
     expect(d.source).toBe("evidence");
   });
 
+  // Parity round 11 — origin/develop's local tier-evidence feature merged in
+  // alongside project/router pins this branch already established. Confirms
+  // the project `model` pin (forcedModel) still wins over evidence that would
+  // otherwise escalate the tier — the SAME `history` shape the test above
+  // proves moves an un-pinned turn all the way to premium.
+  it("the project model pin (forcedModel) still overrides tier evidence that would otherwise escalate", async () => {
+    const d = await decide(
+      "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
+      openai({
+        forcedModel: "gpt-5.4-mini",
+        history: { floorTier: "premium", suggestedTier: null },
+      }),
+    );
+    expect(d.model).toBe("gpt-5.4-mini");
+    expect(d.reason).toBe("project-model-pin");
+    expect(d.source).toBe("project-pin");
+  });
+
+  it("the project model pin still wins even after a run of prior failures that would otherwise escalate", async () => {
+    reportRouteOutcome("h-pin-escalate", "fail", 1000);
+    expect(routerStore.getState().recentFailures).toBeGreaterThan(0);
+    try {
+      const d = await decide("fix the flaky retry test", openai({ forcedModel: "gpt-5.4-mini" }));
+      expect(d.model).toBe("gpt-5.4-mini");
+      expect(d.reason).toBe("project-model-pin");
+    } finally {
+      routerStore.setState({ recentFailures: 0 });
+    }
+  });
+
   it("the promotion cap never cuts a turn below the session model's own tier", async () => {
     // Live log: `pil:general→premium | promo-cap(premium→balanced)` served a premium
     // session a balanced model. A cap below the session tier is not a ceiling on promotion.

@@ -476,6 +476,77 @@ describe("_resolveModelForTask — round 3: the pin applies to delegated dispatc
   });
 });
 
+// Round 11 — origin/develop merged in router/decide.ts's local tier-evidence
+// feature (route history + recent-failure escalation, routerStore's new
+// `recentFailures`/`eeTier` fields). `_resolveModelForTask` (subAgentModel,
+// compaction's own tier table) has never imported router/decide.ts at all —
+// it resolves tiers via sub-agent-model-tier.ts's OWN `resolveModelForTask` +
+// peak-hour.ts's `getRoutedModelByTier`, a completely separate mechanism.
+// This pins that isolation: evidence state that would escalate a `decide()`
+// call several tiers must have ZERO effect here, for both a subAgentModel
+// pin (c) and compaction's cheap tier table (d).
+describe("_resolveModelForTask — round 11: immune to router/decide.ts's local tier-evidence feature", () => {
+  it("a subAgentModel pin (delegated dispatch) is unaffected by routerStore evidence that would otherwise escalate a decide() call", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-tierevidence-subagent-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    const MAIN_MODEL = "deepseek-v4-pro";
+    const SUB_AGENT_MODEL = "deepseek-v4-flash";
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ model: MAIN_MODEL, subAgentModel: SUB_AGENT_MODEL }),
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    const { routerStore } = await import("../../router/store.js");
+    const prevRouterState = routerStore.getState();
+    try {
+      // Evidence that would escalate a decide() call several tiers up (see
+      // decide.test.ts's "a failed previous turn escalates" /
+      // "evidence moves the tier" tests) — irrelevant here.
+      routerStore.setState({ recentFailures: 5, eeTier: "premium" });
+
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+      const resolveModelForTask = (
+        agent as unknown as { _resolveModelForTask(task: ModelTaskKind): string }
+      )._resolveModelForTask.bind(agent);
+
+      expect(resolveModelForTask("general")).toBe(SUB_AGENT_MODEL);
+      expect(resolveModelForTask("explore")).toBe(SUB_AGENT_MODEL);
+    } finally {
+      routerStore.setState(prevRouterState);
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("compaction's own tier table is unaffected by routerStore evidence that would otherwise escalate a decide() call", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-tierevidence-compact-"));
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    const { routerStore } = await import("../../router/store.js");
+    const prevRouterState = routerStore.getState();
+    try {
+      routerStore.setState({ recentFailures: 5, eeTier: "premium" });
+
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-pro", undefined, { persistSession: true });
+      const resolveModelForTask = (
+        agent as unknown as { _resolveModelForTask(task: ModelTaskKind): string }
+      )._resolveModelForTask.bind(agent);
+
+      // Compaction stays on TASK_TIER_PREFS.compact = ["fast","balanced"] —
+      // never premium, no matter what the router's evidence state says.
+      const compactModel = resolveModelForTask("compact");
+      expect(compactModel).not.toBe("deepseek-v4-pro");
+      const info = await import("../../models/registry.js").then((m) => m.getModelInfo(compactModel));
+      expect(info?.tier).not.toBe("premium");
+    } finally {
+      routerStore.setState(prevRouterState);
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+});
+
 // Round 9 (HR8, owner correction to round 2's G3): round 2 made every
 // SPAWN_SUB_SESSION child and delegated sub-agent task inherit the main
 // session's `model` pin unconditionally — the owner's own framework wants
