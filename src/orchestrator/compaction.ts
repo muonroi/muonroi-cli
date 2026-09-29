@@ -144,22 +144,41 @@ export async function proposeCompaction(
       logger.warn("orchestrator", "Failed to extract JSON from proposer output", { text });
       return null;
     }
-    const parsed: CompactionProposal = JSON.parse(jsonMatch[0]);
 
-    // Validate shape
-    if (typeof parsed.shouldCompact !== "boolean" || !Array.isArray(parsed.actions)) {
-      logger.warn("orchestrator", "Invalid JSON shape from proposer", { parsed });
-      return null;
-    }
-    // Validate each action
-    for (const action of parsed.actions) {
-      if (typeof action.messageIndex !== "number" || !["keep", "drop", "summarize"].includes(action.action)) {
-        logger.warn("orchestrator", "Invalid action shape from proposer", { action });
+    // Contract (see this function's docstring): ANY failure must yield `null`,
+    // never throw — the caller (`compactForContext`, orchestrator.ts:2074) has
+    // no try/catch of its own around this call, and ITS caller
+    // (tool-engine.ts:1221) only wraps it in the whole-turn catch, which
+    // surfaces a raw, uncustomized error instead of the documented graceful
+    // fallback. Measured failure mode: the greedy `/\{[\s\S]*\}/` regex above
+    // matches from the first `{` to the LAST `}` in the text, so prose like
+    // "I'll keep {message 1} and drop {message 2}" produces a non-JSON
+    // substring and `JSON.parse` throws a `SyntaxError` — previously bare,
+    // uncaught, here. Wrapping the shape-validation loop too, since a
+    // malformed-but-parseable payload (e.g. a null entry in `actions`) can
+    // throw a TypeError on property access the same way.
+    try {
+      const parsed: CompactionProposal = JSON.parse(jsonMatch[0]);
+
+      // Validate shape
+      if (typeof parsed.shouldCompact !== "boolean" || !Array.isArray(parsed.actions)) {
+        logger.warn("orchestrator", "Invalid JSON shape from proposer", { parsed });
         return null;
       }
-    }
+      // Validate each action
+      for (const action of parsed.actions) {
+        if (typeof action.messageIndex !== "number" || !["keep", "drop", "summarize"].includes(action.action)) {
+          logger.warn("orchestrator", "Invalid action shape from proposer", { action });
+          return null;
+        }
+      }
 
-    return parsed;
+      return parsed;
+    } catch (err) {
+      const errMessage = err instanceof Error ? err.message : String(err);
+      logger.warn("orchestrator", "Failed to parse or validate proposer JSON", { error: errMessage, text });
+      return null;
+    }
   }
   // Unreachable — every loop iteration either `return`s or `continue`s into
   // the next attempt, and the last attempt cannot `continue`.
