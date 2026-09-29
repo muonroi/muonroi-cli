@@ -11,6 +11,7 @@ import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type PilContextResponse, PilContextResponseSchema } from "../pil/schema.js";
+import { isEETier } from "../pil/task-tier-map.js";
 import { classifyEeError, logEeFailure, readTimeoutEnv, withEeTimeout } from "../utils/ee-logger.js";
 
 export type { WhoAmIDim, WhoAmIDimName, WhoAmIProfile } from "./who-am-i.js";
@@ -477,8 +478,18 @@ export async function routeHistoryAdvice(
   try {
     const { getDefaultEEClient } = await import("./intercept.js");
     const r = await getDefaultEEClient().routeHistory(task, timeoutMs);
-    if (!r || (!r.floorTier && !r.suggestedTier)) return null;
-    return { floorTier: r.floorTier, suggestedTier: r.suggestedTier };
+    if (!r) return null;
+    // `r` is only TYPE-cast to RouteHistoryResponse in client.ts (`resp.json() as
+    // RouteHistoryResponse`) — nothing validates the JSON body a remote EE server
+    // sends. Whitelist here, at the boundary, so an unrecognized/malformed tier
+    // (or a future EE server naming a new tier this client doesn't know) never
+    // reaches the router as if it were a real tier. Same convention as
+    // getRoutingPromoteMax/getRoutingDemoteMin whitelisting a config-sourced tier
+    // string (src/utils/settings.ts).
+    const floorTier = isEETier(r.floorTier) ? r.floorTier : null;
+    const suggestedTier = isEETier(r.suggestedTier) ? r.suggestedTier : null;
+    if (!floorTier && !suggestedTier) return null;
+    return { floorTier, suggestedTier };
   } catch (err) {
     logEeFailure("bridge.routeHistoryAdvice", classifyEeError(err), err, { budgetMs: timeoutMs });
     return null;

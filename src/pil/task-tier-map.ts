@@ -14,6 +14,30 @@ import type { ModelRole } from "../utils/settings.js";
 
 export type EETier = "fast" | "balanced" | "premium";
 
+/**
+ * Single canonical list of the three real EE routing tiers, in rank order
+ * (fast < balanced < premium). Shared by `router/decide.ts` (tier arithmetic)
+ * and `ee/bridge.ts` (validating a tier value that arrived over the network)
+ * so both sides can never drift apart on what counts as a "real" tier.
+ */
+export const EE_TIERS: readonly EETier[] = ["fast", "balanced", "premium"];
+
+/**
+ * True only for an exact, case-sensitive match against one of the three real
+ * tier literals. Anything else — an unrecognized string, a case mismatch, or a
+ * non-string value — is NOT a known tier and must be treated as absent (no
+ * signal), never as "lower than every real tier".
+ *
+ * Case-sensitive by design, matching the sibling whitelist convention in
+ * `getRoutingPromoteMax`/`getRoutingDemoteMin` (src/utils/settings.ts): these
+ * are machine-to-machine API contract values (an EE JSON response field), not
+ * user-typed free text, so silently normalizing a case mismatch would hide a
+ * real EE-side schema drift instead of surfacing it as "no advice".
+ */
+export function isEETier(value: unknown): value is EETier {
+  return typeof value === "string" && (EE_TIERS as readonly string[]).includes(value);
+}
+
 const MAP: Record<string, EETier> = {
   refactor: "balanced",
   debug: "balanced",

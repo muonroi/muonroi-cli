@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import type { RouteOutcome } from "../ee/types.js";
 import { getModelInfo, getTextModelsForProvider } from "../models/registry.js";
-import { type EETier, taskTypeToRole, taskTypeToTier } from "../pil/task-tier-map.js";
+import { EE_TIERS, type EETier, isEETier, taskTypeToRole, taskTypeToTier } from "../pil/task-tier-map.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import { ALL_PROVIDER_IDS } from "../providers/types.js";
@@ -201,7 +201,9 @@ function resolveTierModel(
   return undefined;
 }
 
-const TIER_ORDER: ReadonlyArray<EETier> = ["fast", "balanced", "premium"];
+// Single source of truth shared with ee/bridge.ts's boundary validation — see
+// isEETier's doc comment in task-tier-map.ts.
+const TIER_ORDER: ReadonlyArray<EETier> = EE_TIERS;
 
 export interface RouteHistoryAdvice {
   /** One tier above the highest tier a similar task failed on. */
@@ -230,15 +232,28 @@ export function resolveTurnTier(
   const notes: string[] = [];
   let tier = base;
   const history = opts.history;
-  if (history?.suggestedTier && tierRank(history.suggestedTier) < tierRank(tier)) {
+  // history.suggestedTier/floorTier originate from EE's /api/route-history JSON
+  // response (ee/bridge.ts routeHistoryAdvice) — a remote, untrusted value that
+  // reaches here through a type cast, not a runtime check. `isEETier` rejects
+  // anything outside the three real tiers so an unrecognized/malformed value is
+  // absent (no signal), never "lower than every real tier" (tierRank's -1
+  // sentinel for an unknown value used to be read that way, turning garbage
+  // into a silent demotion to "fast").
+  if (history?.suggestedTier && isEETier(history.suggestedTier) && tierRank(history.suggestedTier) < tierRank(tier)) {
     tier = history.suggestedTier;
     notes.push(`history-down→${tier}`);
   }
-  if (history?.floorTier && tierRank(history.floorTier) > tierRank(tier)) {
+  if (history?.floorTier && isEETier(history.floorTier) && tierRank(history.floorTier) > tierRank(tier)) {
     tier = history.floorTier;
     notes.push(`history-floor→${tier}`);
   }
-  if (recentFailures > 0 && tierRank(tier) < TIER_ORDER.length - 1) {
+  // `tier` is only ever assigned from `base` (internally computed, always a real
+  // tier) or from the two guarded branches above, so `isEETier(tier)` here is
+  // always true today — this is a defensive floor, not a live branch, kept so a
+  // future assignment path can never resurrect the TIER_ORDER[-1+1] ===
+  // TIER_ORDER[0] bug (an out-of-range base rank turning an escalation into a
+  // demotion to "fast"). See decide.test.ts's resolveTurnTier describe block.
+  if (recentFailures > 0 && isEETier(tier) && tierRank(tier) < TIER_ORDER.length - 1) {
     tier = TIER_ORDER[tierRank(tier) + 1];
     notes.push(`escalate:prev-fail×${recentFailures}→${tier}`);
   }

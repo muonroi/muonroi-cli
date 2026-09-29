@@ -4,7 +4,7 @@ import { type StubHandle, startStubEEServer } from "../__test-stubs__/ee-server.
 import { createEEClient } from "../ee/client.js";
 import { setDefaultEEClient } from "../ee/intercept.js";
 import { loadCatalog } from "../models/registry.js";
-import { clearRouteCache, type DecideOpts, decide, reportRouteOutcome } from "./decide.js";
+import { clearRouteCache, type DecideOpts, decide, reportRouteOutcome, resolveTurnTier } from "./decide.js";
 import { routerStore } from "./store.js";
 
 declare global {
@@ -396,12 +396,125 @@ describe("tier evidence: bounded demotion, route history, escalation", () => {
     expect(d.reason).not.toContain("promo-cap");
   });
 
+  it("an unrecognized tier value from EE route-history advice carries no signal (full decide() path)", async () => {
+    const d = await decide(
+      "fix the flaky retry test",
+      openai({ pil: pilFor("debug"), history: { floorTier: null, suggestedTier: "ultra" as never } }),
+    );
+    // "debug" maps to tier "balanced" — same as the session default (gpt-5.4). A
+    // garbage suggestedTier must not demote this to "fast" (gpt-5.4-mini).
+    expect(d.model).toBe("gpt-5.4");
+    expect(d.reason).not.toContain("history-down");
+  });
+
+  it("an unrecognized tier value from EE route-history advice still lets a prior failure escalate normally (full decide() path)", async () => {
+    reportRouteOutcome("h-garbage-escalate", "fail", 1000);
+    expect(routerStore.getState().recentFailures).toBeGreaterThan(0);
+    const d = await decide(
+      "fix the flaky retry test",
+      openai({ pil: pilFor("debug"), history: { floorTier: null, suggestedTier: "ultra" as never } }),
+    );
+    expect(d.model).toBe("gpt-5.5"); // escalated to premium — NOT demoted to fast
+    expect(d.reason).toContain("escalate:prev-fail");
+    reportRouteOutcome(d.taskHash as string, "success", 1000);
+  });
+
   it("records the task and the served catalog tier, and sends both with the outcome", async () => {
     const d = await decide("write docs for the ledger module", openai({ pil: pilFor("documentation") }));
     const state = routerStore.getState();
     expect(state.taskText).toBe("write docs for the ledger module");
     expect(state.eeTier).toBe("fast");
     expect(state.taskHash).toBe(d.taskHash);
+  });
+});
+
+describe("resolveTurnTier: an unrecognized EE tier value must not act as rank -1", () => {
+  // Measured against the pre-fix code: tierRank(t) = TIER_ORDER.indexOf(t) returns
+  // -1 for any string outside ["fast","balanced","premium"] (src/router/decide.ts:213).
+  // -1 compares as "lower than every real tier", so the demote/escalate comparisons
+  // in resolveTurnTier (decide.ts:233-243) silently forced "fast" — including on the
+  // ESCALATION path, where TIER_ORDER[tierRank(tier)+1] became TIER_ORDER[-1+1] =
+  // TIER_ORDER[0] = "fast" instead of promoting after a failure. The tier strings
+  // originate from routeHistoryAdvice's untyped `resp.json()` cast
+  // (src/ee/bridge.ts:471-485) — a remote, unvalidated value.
+  beforeAll(async () => {
+    await loadCatalog();
+  });
+
+  beforeEach(() => {
+    (globalThis as { routingDemoteMin?: string }).routingDemoteMin = "fast";
+  });
+
+  it("garbage suggestedTier + 0 failures leaves the base tier unaffected", () => {
+    const { tier, notes } = resolveTurnTier(
+      "premium",
+      { defaultModel: "gpt-5.4", history: { floorTier: null, suggestedTier: "ultra" as never } },
+      0,
+    );
+    expect(tier).toBe("premium");
+    expect(notes).toEqual([]);
+  });
+
+  it("garbage suggestedTier + 1 failure is a no-op at the ceiling (not a demotion to fast)", () => {
+    const { tier, notes } = resolveTurnTier(
+      "premium",
+      { defaultModel: "gpt-5.4", history: { floorTier: null, suggestedTier: "ultra" as never } },
+      1,
+    );
+    expect(tier).toBe("premium");
+    expect(notes).toEqual([]);
+  });
+
+  it("garbage suggestedTier + 1 failure, base=balanced: ESCALATES to premium (not demoted to fast) — the worst measured case", () => {
+    const { tier, notes } = resolveTurnTier(
+      "balanced",
+      { defaultModel: "gpt-5.4", history: { floorTier: null, suggestedTier: "ultra" as never } },
+      1,
+    );
+    expect(tier).toBe("premium");
+    expect(notes).toEqual(["escalate:prev-fail×1→premium"]);
+  });
+
+  it('case-mismatched suggestedTier ("Fast") is treated as unrecognized, not silently normalized', () => {
+    const { tier, notes } = resolveTurnTier(
+      "premium",
+      { defaultModel: "gpt-5.4", history: { floorTier: null, suggestedTier: "Fast" as never } },
+      0,
+    );
+    expect(tier).toBe("premium");
+    expect(notes).toEqual([]);
+  });
+
+  it("garbage floorTier does not force a floor raise", () => {
+    const { tier, notes } = resolveTurnTier(
+      "fast",
+      { defaultModel: "gpt-5.4-mini", history: { floorTier: "ultra" as never, suggestedTier: null } },
+      0,
+    );
+    expect(tier).toBe("fast");
+    expect(notes).toEqual([]);
+  });
+
+  it("undefined history is a no-op", () => {
+    const { tier, notes } = resolveTurnTier("balanced", { defaultModel: "gpt-5.4" }, 0);
+    expect(tier).toBe("balanced");
+    expect(notes).toEqual([]);
+  });
+
+  it("null history is a no-op", () => {
+    const { tier, notes } = resolveTurnTier("balanced", { defaultModel: "gpt-5.4", history: null }, 0);
+    expect(tier).toBe("balanced");
+    expect(notes).toEqual([]);
+  });
+
+  it("a VALID tier from history still routes correctly (regression guard — the demote path must keep working)", () => {
+    const { tier, notes } = resolveTurnTier(
+      "premium",
+      { defaultModel: "gpt-5.4", history: { floorTier: null, suggestedTier: "fast" } },
+      0,
+    );
+    expect(tier).toBe("fast");
+    expect(notes).toEqual(["history-down→fast"]);
   });
 });
 
