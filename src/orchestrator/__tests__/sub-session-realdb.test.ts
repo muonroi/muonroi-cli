@@ -18,6 +18,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { installMockModel, textOnlyStream } from "../../agent-harness/mock-model.js";
 import { loadCatalog } from "../../models/registry.js";
 import { closeDatabase, getDatabase } from "../../storage/db.js";
+import { SessionStore } from "../../storage/sessions.js";
 import { appendMessages, buildChatEntries } from "../../storage/transcript.js";
 import { Agent } from "../orchestrator.js";
 import type { ModelTaskKind } from "../sub-agent-model-tier.js";
@@ -703,6 +704,102 @@ describe("subAgentModel — round 9 (HR8): sub-agent/sub-session dispatch can ru
       }
       expect(capturedTurnModelIds.at(-1)?.modelId).toBe(MAIN_MODEL);
     } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  // Defect B: the test above ("does NOT leak past the sub-session's
+  // lifetime") only covers the HAPPY path — `isSubSessionForked` reaches
+  // `true` and the finally block's restore runs. This block covers the
+  // THROWING path: `this.session`/`this.modelId`/`this.messages` are
+  // switched to the child's values BEFORE `isSubSessionForked` is set
+  // (orchestrator.ts ~3961-3973), so a throw from `touchSession` (SQLITE_BUSY
+  // under concurrent write, say) between those writes and the flag leaves
+  // the flag false — and the finally block's restore-on-absorb path is
+  // gated on that same flag, so it never runs. The NEXT thing that executes
+  // (the turn body itself, since the catch only logs and falls through) then
+  // runs on the leaked child state.
+  it("touchSession throwing mid-RESUME-fork must not leak this.modelId/session/messages past the failed fork onto the very turn that failed to fork", async () => {
+    const MAIN_MODEL = "deepseek-v4-pro";
+    const SUB_AGENT_MODEL = "deepseek-v4-flash";
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subsess-throw-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ model: MAIN_MODEL, subAgentModel: SUB_AGENT_MODEL }),
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    let touchSpy: ReturnType<typeof vi.spyOn> | null = null;
+    try {
+      mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      // Turn 1: establishes an active child sub-session normally (fork, no
+      // throw) — this.modelId correctly switches to SUB_AGENT_MODEL for the
+      // child's own turn.
+      for await (const _ of agent.processMessage("review toàn bộ src/council và liệt kê silent catch")) {
+        // drain
+      }
+      expect(capturedTurnModelIds.at(-1)?.modelId).toBe(SUB_AGENT_MODEL);
+      const childBefore = getDatabase().prepare("SELECT id FROM sessions WHERE parent_session_id = ?").get(parentId) as
+        | { id: string }
+        | undefined;
+      expect(childBefore?.id).toBeTruthy();
+
+      // Turn 2: relatedness says RELATED — the RESUME branch runs
+      // (orchestrator.ts ~3961-3973): this.session, then this.modelId, are
+      // switched to the child's BEFORE touchSession is reached. Make
+      // touchSession throw for the CHILD id specifically (the parent's own
+      // touchSession calls elsewhere in the turn must keep working normally,
+      // or the test would be exercising a different failure entirely).
+      mockRelatedness.mockResolvedValueOnce({ related: true, confidence: 0.9, reason: "same task" });
+      const realTouchSession = SessionStore.prototype.touchSession;
+      touchSpy = vi.spyOn(SessionStore.prototype, "touchSession").mockImplementation(function (
+        this: SessionStore,
+        id: string,
+        cwd: string,
+      ) {
+        if (id !== parentId) {
+          throw new Error("SQLITE_BUSY: database is locked");
+        }
+        return realTouchSession.call(this, id, cwd);
+      });
+
+      for await (const _ of agent.processMessage("tiếp tục phân tích")) {
+        // drain
+      }
+
+      // The fork attempt threw and was caught (logged, "falling back to main
+      // session") — no SECOND child was created...
+      const children = getDatabase()
+        .prepare("SELECT id FROM sessions WHERE parent_session_id = ?")
+        .all(parentId) as Array<{ id: string }>;
+      expect(children).toHaveLength(1); // still just the turn-1 child — resume, not a new fork
+
+      // ...and this SAME turn (the one whose fork attempt failed) must have
+      // fallen all the way through to running on the PARENT session/model —
+      // not stranded on the child's, which is what `isSubSessionForked`
+      // staying false while `this.modelId`/`this.session` were already
+      // switched would otherwise leak.
+      expect(capturedTurnModelIds.at(-1)?.sessionId).toBe(parentId);
+      expect(capturedTurnModelIds.at(-1)?.modelId).toBe(MAIN_MODEL);
+      expect(agent.getSessionId()).toBe(parentId);
+
+      // And the leak must not persist to a THIRD, ordinary turn either.
+      touchSpy.mockRestore();
+      touchSpy = null;
+      mockClassify.mockResolvedValue({ action: "DIRECT_ANSWER", confidence: 0.95, reason: "informational" });
+      for await (const _ of agent.processMessage("tóm tắt lại giúp tôi")) {
+        // drain
+      }
+      expect(capturedTurnModelIds.at(-1)?.modelId).toBe(MAIN_MODEL);
+    } finally {
+      touchSpy?.mockRestore();
       process.chdir(prevCwd);
       fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }

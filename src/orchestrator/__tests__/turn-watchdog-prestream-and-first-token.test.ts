@@ -35,7 +35,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { StreamChunk } from "../../types/index.js";
+import { __resetInteractivePauseForTests, isInteractivePaused } from "../interactive-pause.js";
 import { preStreamPhase } from "../message-processor.js";
+import { __resetToolActivityForTests, isToolActivityLive } from "../tool-activity.js";
 import {
   __getActiveTurnGenerationsForTests,
   __resetTurnProgressForTests,
@@ -60,6 +62,8 @@ const PING_INTERVAL_MS = 20; // comfortably under IDLE_MS
 
 beforeEach(() => {
   __resetTurnProgressForTests();
+  __resetInteractivePauseForTests();
+  __resetToolActivityForTests();
   process.env.MUONROI_TURN_PROGRESS_PING_INTERVAL_MS = String(PING_INTERVAL_MS);
 });
 
@@ -67,6 +71,8 @@ afterEach(() => {
   delete process.env.MUONROI_TURN_PROGRESS_PING_INTERVAL_MS;
   delete process.env.MUONROI_FIRST_TOKEN_TIMEOUT_MS;
   delete process.env.MUONROI_PRESTREAM_PHASE_MAX_MS;
+  __resetInteractivePauseForTests();
+  __resetToolActivityForTests();
 });
 
 describe("round 5 (G8 HIGH #1) — preStreamPhase pings turn progress for its whole lifetime", () => {
@@ -422,4 +428,53 @@ describe("round 8 — the pinger must bind to the STACK'S TOP, not the monotonic
       stop();
     }
   });
+});
+
+describe("round 9 (Defect A) — council-continuation watchdog (orchestrator.ts ~2739) must wire the same progress/suppression guards as the top-level sibling (orchestrator.ts ~4111-4116)", () => {
+  // orchestrator.ts's council-continuation entry re-enters preStreamPhase
+  // (e.g. "gsdGate") via the nested `this.processMessage(...)` call, exactly
+  // like round 5's top-level scenario above — a leader-tier assessor can
+  // legitimately run past idleMs while pinging turn-progress the whole time.
+  // The top-level watchdog (~4102) survives this via `hasProgressSince`; the
+  // council-continuation watchdog did not wire it at all, so it was blind to
+  // every progress signal its sibling relies on.
+  it("RED — documents the bug: the OLD wiring (shouldSuppressFire: isInteractivePaused only, no hasProgressSince) kills a legitimately-pinging nested phase", async () => {
+    const phaseMs = IDLE_MS * 5;
+    async function* turn(): AsyncGenerator<StreamChunk, void, unknown> {
+      await preStreamPhase("gsdGate", "sess-defectA-old", () => new Promise((r) => setTimeout(r, phaseMs)));
+      yield { type: "done" } as StreamChunk;
+    }
+
+    // Literal shape of orchestrator.ts:2739-2744 BEFORE the fix.
+    await expect(
+      drain(
+        withTurnWatchdog(turn(), {
+          idleMs: IDLE_MS,
+          totalMs: 0,
+          label: "council continuation turn",
+          shouldSuppressFire: isInteractivePaused,
+        }),
+      ),
+    ).rejects.toMatchObject({ name: "TurnStallError", kind: "idle" });
+  }, 3000);
+
+  it("GREEN — post-fix wiring (shouldSuppressFire also covers isToolActivityLive, hasProgressSince wired to hasTurnProgressSince, matching orchestrator.ts ~4111-4116) keeps the same nested phase alive", async () => {
+    const phaseMs = IDLE_MS * 5;
+    async function* turn(): AsyncGenerator<StreamChunk, void, unknown> {
+      await preStreamPhase("gsdGate", "sess-defectA-fixed", () => new Promise((r) => setTimeout(r, phaseMs)));
+      yield { type: "done" } as StreamChunk;
+    }
+
+    // Literal shape of orchestrator.ts:2739-2744 AFTER the fix.
+    const out = await drain(
+      withTurnWatchdog(turn(), {
+        idleMs: IDLE_MS,
+        totalMs: 0,
+        label: "council continuation turn",
+        shouldSuppressFire: () => isInteractivePaused() || isToolActivityLive(),
+        hasProgressSince: (sinceMs) => hasTurnProgressSince(sinceMs),
+      }),
+    );
+    expect(out).toEqual([{ type: "done" }]);
+  }, 3000);
 });

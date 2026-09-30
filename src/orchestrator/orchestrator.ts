@@ -2740,7 +2740,20 @@ export class Agent {
               idleMs,
               totalMs,
               label: "council continuation turn",
-              shouldSuppressFire: isInteractivePaused,
+              // Defect A fix: this nested call used to wire ONLY
+              // shouldSuppressFire (and only isInteractivePaused at that),
+              // leaving it blind to the exact two progress signals the
+              // sibling top-level watchdog (~4111-4116) relies on —
+              // isToolActivityLive (an in-flight bash/task call) and
+              // hasProgressSince (a provider request issued inside the
+              // window that just elapsed). A council continuation re-enters
+              // preStreamPhase (e.g. "gsdGate"), whose leader-tier assessor
+              // pings hasTurnProgressSince for its whole lifetime — without
+              // this wiring that ping was invisible here and a healthy,
+              // still-working continuation could be killed at idleMs even
+              // though the sibling call guarantees it would not be.
+              shouldSuppressFire: () => isInteractivePaused() || isToolActivityLive(),
+              hasProgressSince: (sinceMs) => hasTurnProgressSince(sinceMs),
             });
           } catch (err) {
             if (err instanceof TurnStallError) {
@@ -3890,6 +3903,22 @@ export class Agent {
       yield { type: "toast", toastLevel: "info", content: "Đang khởi tạo sub-session ngầm để xử lý tác vụ..." };
       parentSessionId = this.session.id;
       breadcrumb("pre-stream.subSessionSpawn.start", { sessionId: parentSessionId });
+      // Defect B fix: snapshot the pre-fork state BEFORE any of the writes
+      // below, so a throw mid-fork (this.session/this.modelId — and, in the
+      // resume branch, this.messages/this.messageSeqs too — already switched
+      // to the CHILD's values, but before `isSubSessionForked` is set true)
+      // can be rolled back exactly in the catch, instead of relying on that
+      // flag: the flag is set AFTER the two throw-capable calls
+      // (loadSessionChainTranscriptState, touchSession), so a throw from
+      // either of them left it false and the finally block's restore (which
+      // is itself correctly gated on that flag — it also absorbs the
+      // child's output, which must NOT run when the fork never completed)
+      // never fires, silently leaking the child's model/session/messages
+      // onto every subsequent turn of this Agent instance.
+      const sessionBeforeFork = this.session;
+      const modelIdBeforeFork = this.modelId;
+      const messagesBeforeFork = this.messages;
+      const messageSeqsBeforeFork = this.messageSeqs;
       try {
         const { loadLatestCompaction, getNextMessageSequence, appendCompaction } = await import(
           "../storage/transcript.js"
@@ -4056,6 +4085,16 @@ export class Agent {
         }
       } catch (err) {
         logger.error("orchestrator", "Forking child sub-session failed, falling back to main session", { error: err });
+        // Defect B fix: restore from the pre-fork snapshot UNCONDITIONALLY —
+        // do not gate this on `isSubSessionForked`, which the throwing call
+        // itself prevented from ever being set. Cheap direct reference
+        // restores (no DB round-trip needed): safe even when nothing was
+        // actually mutated yet (the values are simply reassigned to
+        // themselves in that case).
+        this.session = sessionBeforeFork;
+        this.modelId = modelIdBeforeFork;
+        this.messages = messagesBeforeFork;
+        this.messageSeqs = messageSeqsBeforeFork;
       }
       breadcrumb("pre-stream.subSessionSpawn.end", { sessionId: subSessionId ?? parentSessionId });
     }
