@@ -73,12 +73,17 @@ describe("decideStepRouting", () => {
   // `opts.pinned` in step-router.ts.
   describe("opts.pinned (G3: a project pin holds for every step)", () => {
     it("never downgrades when pinned, even with an enabled config that would otherwise downgrade", () => {
-      const premiumModel = MODELS.find((m) => m.tier === "premium" && m.provider);
-      if (!premiumModel?.provider) return;
-
-      const withoutPin = decideStepRouting(premiumModel.id, premiumModel.provider, mockConfig());
+      // A premium model whose provider has a fast-tier model to downgrade to:
+      // the first premium entry in the catalog (e.g. deepseek-v4-pro) may sit
+      // on a provider with no fast model, where there is nothing to suppress.
+      const premiumModel = MODELS.find(
+        (m) => m.tier === "premium" && m.provider && decideStepRouting(m.id, m.provider, mockConfig()).phase2ModelId,
+      );
       // Sanity: this config DOES downgrade when not pinned, on this catalog —
       // otherwise the next assertion (pinned suppresses it) would be vacuous.
+      expect(premiumModel?.provider).toBeTruthy();
+      if (!premiumModel?.provider) return;
+      const withoutPin = decideStepRouting(premiumModel.id, premiumModel.provider, mockConfig());
       expect(withoutPin.phase2ModelId).not.toBeNull();
 
       const pinned = decideStepRouting(premiumModel.id, premiumModel.provider, mockConfig(), { pinned: true });

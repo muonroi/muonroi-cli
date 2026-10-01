@@ -19,7 +19,7 @@
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 // The REAL scenario planner — round 12 asserts against it directly (not a
 // stub) to prove self-verify's own planning, not just that some `bun`
@@ -27,6 +27,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { collectChangedFiles, planScenarios } from "../../src/self-qa/scenario-planner.js";
 
 const SCRIPT_PATH = join(__dirname, "..", "self-verify-pre-push.cjs");
+const IS_WIN = process.platform === "win32";
 
 let tmpRoot: string;
 
@@ -64,17 +65,28 @@ function commit(cwd: string, file: string, content: string, message: string): st
 /** A fake `bun` on PATH so `bun run src/index.ts self-verify ...` never actually runs — it just proves whether it WAS invoked. */
 function makeStubBun(exitCode: number): string {
   const binDir = mkdtempSync(join(tmpdir(), "svpp-bin-"));
-  const bunPath = join(binDir, "bun");
-  writeFileSync(bunPath, `#!/bin/sh\necho STUB_SELF_VERIFY_INVOKED\nexit ${exitCode}\n`);
-  chmodSync(bunPath, 0o755);
+  writeStubBun(binDir, exitCode);
   return binDir;
 }
 
+/** The stub `bun` itself: a `.cmd` on Windows (the script runs bun with shell:true there), a `#!/bin/sh` script elsewhere. */
+function writeStubBun(binDir: string, exitCode: number): void {
+  if (IS_WIN) {
+    writeFileSync(join(binDir, "bun.cmd"), `@echo STUB_SELF_VERIFY_INVOKED\r\n@exit /b ${exitCode}\r\n`);
+    return;
+  }
+  const bunPath = join(binDir, "bun");
+  writeFileSync(bunPath, `#!/bin/sh\necho STUB_SELF_VERIFY_INVOKED\nexit ${exitCode}\n`);
+  chmodSync(bunPath, 0o755);
+}
+
 function runScript(cwd: string, stdin: string, stubBinDir: string, extraEnv: Record<string, string> = {}) {
-  const env = { ...process.env, ...extraEnv };
+  const env: Record<string, string | undefined> = { ...process.env, ...extraEnv };
   delete env.SELF_VERIFY_PRE_PUSH;
   delete env.PRE_PUSH_REMOTE;
-  env.PATH = `${stubBinDir}:${env.PATH || ""}`;
+  // Windows spells the key `Path` and separates entries with `;` (path.delimiter), POSIX uses `PATH` and `:`.
+  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
+  env[pathKey] = `${stubBinDir}${delimiter}${env[pathKey] || ""}`;
   return spawnSync(process.execPath, [SCRIPT_PATH], { cwd, input: stdin, encoding: "utf8", env });
 }
 
@@ -87,6 +99,7 @@ function runScript(cwd: string, stdin: string, stubBinDir: string, extraEnv: Rec
  * indefinitely.
  */
 function makeHangingFetchShim(bunExitCode: number, fetchSleepMs: number): string {
+  if (IS_WIN) throw new Error("the hanging-fetch shim is a POSIX sh wrapper; skip these tests on Windows");
   const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
   const binDir = mkdtempSync(join(tmpdir(), "svpp-shim-"));
 
@@ -239,53 +252,66 @@ describe("self-verify-pre-push.cjs — round 9 fail-closed integration", () => {
 });
 
 describe("self-verify-pre-push.cjs — round 10: a hanging git fetch cannot hang the push", () => {
-  it("a git fetch that sleeps far longer than the configured timeout is killed, and the hook still returns quickly and fails closed", () => {
-    const bare = join(tmpRoot, "remote.git");
-    git(tmpRoot, ["init", "--quiet", "--bare", bare]);
+  // The shim is a POSIX `#!/bin/sh` wrapper around git (`sleep`, `which`); it cannot run on Windows.
+  it.skipIf(IS_WIN)(
+    "a git fetch that sleeps far longer than the configured timeout is killed, and the hook still returns quickly and fails closed",
+    () => {
+      const bare = join(tmpRoot, "remote.git");
+      git(tmpRoot, ["init", "--quiet", "--bare", bare]);
 
-    const seed = join(tmpRoot, "seed");
-    mkdirSync(seed, { recursive: true });
-    git(seed, ["init", "--quiet"]);
-    commit(seed, "base.txt", "v1\n", "base");
-    git(seed, ["remote", "add", "origin", bare]);
-    git(seed, ["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
-    git(seed, ["push", "--quiet", "origin", "HEAD:refs/heads/develop"]);
+      const seed = join(tmpRoot, "seed");
+      mkdirSync(seed, { recursive: true });
+      git(seed, ["init", "--quiet"]);
+      commit(seed, "base.txt", "v1\n", "base");
+      git(seed, ["remote", "add", "origin", bare]);
+      git(seed, ["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
+      git(seed, ["push", "--quiet", "origin", "HEAD:refs/heads/develop"]);
 
-    const work = join(tmpRoot, "work");
-    // Fetched with the REAL git (setup only) before the hanging shim is on PATH.
-    git(tmpRoot, ["clone", "--quiet", "--no-local", "--branch", "main", "--single-branch", bare, work]);
-    git(work, ["fetch", "--quiet", "origin", "+refs/heads/develop:refs/remotes/origin/develop"]);
+      const work = join(tmpRoot, "work");
+      // Fetched with the REAL git (setup only) before the hanging shim is on PATH.
+      git(tmpRoot, ["clone", "--quiet", "--no-local", "--branch", "main", "--single-branch", bare, work]);
+      git(work, ["fetch", "--quiet", "origin", "+refs/heads/develop:refs/remotes/origin/develop"]);
 
-    git(work, ["checkout", "-b", "local-branch"]);
-    const localSha = commit(work, "README.md", "no watched-dir change here\n", "docs only");
-    // Any remote sha not already present locally forces the ensureDiffable
-    // retry path — this one is real-looking but irrelevant; what matters
-    // is that the shim's `git fetch` never returns in time on its own.
-    const remoteSha = "a".repeat(40);
+      git(work, ["checkout", "-b", "local-branch"]);
+      const localSha = commit(work, "README.md", "no watched-dir change here\n", "docs only");
+      // Any remote sha not already present locally forces the ensureDiffable
+      // retry path — this one is real-looking but irrelevant; what matters
+      // is that the shim's `git fetch` never returns in time on its own.
+      const remoteSha = "a".repeat(40);
 
-    const timeoutMs = 1000;
-    const fetchSleepMs = 5000; // >> timeoutMs — proves the kill, not a lucky race
-    const shimBin = makeHangingFetchShim(0, fetchSleepMs);
-    const stdin = `refs/heads/local-branch ${localSha} refs/heads/feature ${remoteSha}\n`;
+      const timeoutMs = 1000;
+      const fetchSleepMs = 5000; // >> timeoutMs — proves the kill, not a lucky race
+      const shimBin = makeHangingFetchShim(0, fetchSleepMs);
+      const stdin = `refs/heads/local-branch ${localSha} refs/heads/feature ${remoteSha}\n`;
 
-    const startedAt = Date.now();
-    const result = runScript(work, stdin, shimBin, { SELF_VERIFY_PRE_PUSH_FETCH_TIMEOUT_MS: String(timeoutMs) });
-    const elapsedMs = Date.now() - startedAt;
+      const startedAt = Date.now();
+      const result = runScript(work, stdin, shimBin, { SELF_VERIFY_PRE_PUSH_FETCH_TIMEOUT_MS: String(timeoutMs) });
+      const elapsedMs = Date.now() - startedAt;
 
-    // Generous margin over the configured timeout for process-spawn/kill
-    // overhead, but nowhere near the shim's 5s sleep — this is the
-    // measurement that proves the timeout actually bounds the hang.
-    expect(elapsedMs).toBeLessThan(4000);
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain("STUB_SELF_VERIFY_INVOKED");
-    expect(result.stderr).toContain("fetching refs/heads/feature from origin to diff against it (timeout 1s)");
-    expect(result.stderr).toMatch(/fail(ing)? closed/i);
-  }, 10000);
+      // Generous margin over the configured timeout for process-spawn/kill
+      // overhead, but nowhere near the shim's 5s sleep — this is the
+      // measurement that proves the timeout actually bounds the hang.
+      expect(elapsedMs).toBeLessThan(4000);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("STUB_SELF_VERIFY_INVOKED");
+      expect(result.stderr).toContain("fetching refs/heads/feature from origin to diff against it (timeout 1s)");
+      expect(result.stderr).toMatch(/fail(ing)? closed/i);
+    },
+    10000,
+  );
 });
 
 /** Same as makeStubBun, but also echoes the exact args it received (as `STUB_ARGS:<args>`), so a test can assert whether `--since` was passed. */
 function makeStubBunEchoingArgs(exitCode: number): string {
   const binDir = mkdtempSync(join(tmpdir(), "svpp-bin-"));
+  if (IS_WIN) {
+    // `.cmd` on Windows: the script runs bun with shell:true there, and `%*` is cmd's "all args".
+    writeFileSync(
+      join(binDir, "bun.cmd"),
+      `@echo STUB_SELF_VERIFY_INVOKED\r\n@echo STUB_ARGS:%*\r\n@exit /b ${exitCode}\r\n`,
+    );
+    return binDir;
+  }
   const bunPath = join(binDir, "bun");
   writeFileSync(bunPath, `#!/bin/sh\necho STUB_SELF_VERIFY_INVOKED\necho STUB_ARGS:"$@"\nexit ${exitCode}\n`);
   chmodSync(bunPath, 0o755);

@@ -80,6 +80,8 @@ describe("git-effect-guard — detect and report, never mutate (round 4/5)", () 
     git(dir, ["init", "-q"]);
     git(dir, ["config", "user.email", "t@example.com"]);
     git(dir, ["config", "user.name", "t"]);
+    // Pin line endings: a machine-wide core.autocrlf=true (Windows default) would rewrite "\n" to "\r\n" on checkout/stash pop.
+    git(dir, ["config", "core.autocrlf", "false"]);
     writeFileSync(join(dir, "a.txt"), "one\n");
     git(dir, ["add", "a.txt"]);
     git(dir, ["commit", "-q", "-m", "initial"]);
