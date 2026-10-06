@@ -96,7 +96,7 @@ describe("N1 — executor arg guard", () => {
     expect((raw as BlockResult).success).toBe(false);
     expect(text).toContain("BLOCKED (missing-required-args)");
     expect(text).toContain("pattern");
-    expect((raw as BlockResult).output).toContain('{"pattern":"TODO"}');
+    expect((raw as BlockResult).output).toContain('{"pattern":"sample-pattern"}');
   });
 
   it("blocks grep called with the elision marker", async () => {

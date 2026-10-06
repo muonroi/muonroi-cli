@@ -103,17 +103,14 @@ import {
   isModelDisabled,
   isReservedSubagentName,
   loadMcpServers,
-  loadPaymentSettings,
   loadUserSettings,
   loadValidSubAgents,
   type McpRemoteTransport,
   type McpServerConfig,
-  type PaymentSettings,
   type SandboxMode,
   type SandboxSettings,
   saveApprovedTelegramUserId,
   saveMcpServers,
-  savePaymentSettings,
   saveProjectSettings,
   saveUserSettings,
   setDefaultProvider,
@@ -1149,7 +1146,7 @@ export function useAppLogic(props: AppLogicProps) {
   const [sandboxSettingsEditing, setSandboxSettingsEditing] = useState<string | null>(null);
   const [sandboxSettingsEditBuffer, setSandboxSettingsEditBuffer] = useState("");
   const [showWalletPicker, setShowWalletPicker] = useState(false);
-  const [walletSettings, setWalletSettings] = useState<Required<PaymentSettings>>(() => loadPaymentSettings());
+  const [walletSettings, setWalletSettings] = useState<Record<string, unknown>>({});
   const [walletFocusIndex, setWalletFocusIndex] = useState(0);
   const [walletDisplayInfo, setWalletDisplayInfo] = useState<WalletDisplayInfo>({
     address: null,
@@ -2308,14 +2305,9 @@ export function useAppLogic(props: AppLogicProps) {
     setShowSandboxPicker(true);
   }, []);
 
-  const applyWalletSettings = useCallback((next: Required<PaymentSettings>) => {
-    setWalletSettings(next);
-    savePaymentSettings(next);
-  }, []);
-
   const openWalletPicker = useCallback(() => {
     setWalletFocusIndex(0);
-    setWalletSettings(loadPaymentSettings());
+    setWalletSettings({});
     setShowWalletPicker(true);
     // Wallet UI disabled — Stripe billing pending.
     setWalletDisplayInfo({ address: null, ethBalance: null, usdcBalance: null });

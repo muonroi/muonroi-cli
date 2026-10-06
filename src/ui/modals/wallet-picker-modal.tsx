@@ -1,4 +1,3 @@
-import type { PaymentSettings } from "../../utils/settings.js";
 import { Dialog } from "../primitives/index.js";
 import { WALLET_ROWS } from "../constants.js";
 import type { Theme } from "../theme.js";
@@ -125,7 +124,7 @@ export function WalletPickerModal({
   focused,
 }: {
   t: Theme;
-  settings: Required<PaymentSettings>;
+  settings: Record<string, unknown>;
   walletInfo: WalletDisplayInfo;
   focusIndex: number;
   width: number;

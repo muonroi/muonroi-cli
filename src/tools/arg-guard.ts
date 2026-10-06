@@ -211,7 +211,7 @@ function sampleValue(key: string, declaredType: string | undefined): unknown {
   if (declaredType === "number" || declaredType === "integer") return 1;
   if (declaredType === "boolean") return true;
   if (/path|file/i.test(key)) return "src/foo.ts";
-  if (/pattern|query|search/i.test(key)) return "TODO";
+  if (/pattern|query|search/i.test(key)) return "sample-pattern";
   if (/command/i.test(key)) return "ls -la";
   return "<value>";
 }
