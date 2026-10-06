@@ -39,7 +39,13 @@ export function evaluateMutationGate(
     //   hard-blocking every default-tier bash/edit until a plan-review pass over-reaches
     //   ("hard thì mọi tier không tốt"). Only genuinely non-trivial work (heavy, incl. tasks
     //   the leader-tier assessor UPGRADES to heavy) earns the hard gate.
-    if (!depth || depth === "quick" || depth === "standard") return allow;
+    if (!depth || depth === "quick") return allow;
+    if (depth === "standard") {
+      console.warn(
+        `[gsd] advisory: depth=standard but plan-review not yet passed — ` + GATE_DIRECTIVE.slice(0, 120) + "...",
+      );
+      return { blocked: false, reason: GATE_DIRECTIVE };
+    }
     const gate = canExecute(cwd, depth);
     return gate.allowed ? allow : { blocked: true, reason: GATE_DIRECTIVE };
   } catch (err) {

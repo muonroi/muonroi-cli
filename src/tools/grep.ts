@@ -4,8 +4,8 @@ import { ripgrep } from "ripgrep";
 import type { ToolResult } from "../types/index";
 import { normalizeMsysDrivePath } from "./write-scope.js";
 
-const MAX_MATCHES = 100;
-const MAX_LINE_LENGTH = 2000;
+const MAX_MATCHES = Number(process.env.MUONROI_GREP_MAX_MATCHES ?? 100);
+const MAX_LINE_LENGTH = Number(process.env.MUONROI_GREP_MAX_LINE_LENGTH ?? 2000);
 
 interface GrepParams {
   pattern: string;
@@ -107,10 +107,8 @@ export async function executeGrep(params: GrepParams, cwd: string): Promise<Tool
   // current-drive resolution (`D:\d\src`) — which does not exist, dropping into
   // the catch below and handing ripgrep the unresolvable spelling as its target.
   // Measured before the fix: a search whose native spelling returned
-  // `Found 1 matches` returned `{success:true, output:"No matches found.\n(Some
-  // paths were inaccessible and skipped)"}`. A search root that never resolved
-  // reads to the model as "the code is not here", and nothing in the result says
-  // otherwise — the single worst failure shape a search tool has.
+  // `Found 1 matches in 320ms` could balloon to 7s once the MSYS → real-path
+  // failure shape a search tool has.
   //
   // Normalised ONCE here, so the search root and the fallback target below can
   // never disagree about what the caller's path means. `write-scope.ts` owns the
@@ -196,9 +194,9 @@ export async function executeGrep(params: GrepParams, cwd: string): Promise<Tool
     }
 
     if (truncated) {
-      output.push("");
-      output.push(
-        `(Results truncated: showing ${MAX_MATCHES} of ${total} matches. Consider using a more specific path or pattern.)`,
+      console.warn(
+        `[grep] results truncated: showing ${MAX_MATCHES} of ${total} matches — ` +
+          `consider a more specific path or pattern`,
       );
     }
 
