@@ -1,5 +1,6 @@
 - Active run: runs/session-ea7378-stops.md
-- Gate: release; full configured suite 8841 passed, zero failed; source hashes unchanged
+- Gate: complete; full configured suite 8841 passed, zero failed; source hashes unchanged
 - Mode: auto; single agent; preserve user task state and WIP
 - Branch: develop; background PIL/model-owned council released at bc8fe0ee, release record 1af5d374
-- Next: normal commit/push hooks, remote SHA verification, release receipt
+- Release: d3f1a51deb3bba390ac753aea06b371734260fef pushed to origin/develop and verified by ls-remote
+- Remaining limitation: Bun native harness shutdown crash remains open; remote CI not verified
