@@ -52,7 +52,7 @@ describe("evaluateMutationGate (delegates to canExecute, depth from SDK STATE)",
   });
   it("allows bounded background research and human clarification without unlocking mutations", () => {
     seed(cwd, "plan", "revise", "heavy");
-    for (const toolName of ["delegate", "ask_user", "delegation_kill"])
+    for (const toolName of ["delegate", "ask_user", "delegation_kill", "todo_write"])
       expect(evaluateMutationGate(cwd, { ...on, toolName }).blocked, toolName).toBe(false);
     for (const toolName of ["task", "bash", "write_file", "edit_file", "unknown_tool"])
       expect(evaluateMutationGate(cwd, { ...on, toolName }).blocked, toolName).toBe(true);

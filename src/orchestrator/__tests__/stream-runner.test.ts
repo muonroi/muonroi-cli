@@ -5,14 +5,16 @@
 // tests/harness/cost-leak-{f1,g1,b3,b4,c3}.spec.ts — those exercise real
 // streamText with MockLanguageModelV3.
 
+import { APICallError } from "@ai-sdk/provider";
 import type { ModelMessage } from "ai";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   getTestModelForProvider,
   getTestModels,
   getTestProviders,
   registerTestProviderFactories,
 } from "../../__test-helpers__/catalog-fixtures.js";
+import { installMockModel, textOnlyStream, toolCallStream } from "../../agent-harness/mock-model.js";
 import { loadCatalog } from "../../models/registry.js";
 import { computePromptCacheKey, type ResolvedModelRuntime } from "../../providers/runtime.js";
 import type { BashTool } from "../../tools/bash";
@@ -59,6 +61,97 @@ function makeDeps(overrides: Partial<StreamRunnerDeps> = {}): StreamRunnerDeps {
     ...overrides,
   };
 }
+
+describe("StreamRunner provider errors (steady-copper-badger)", () => {
+  it("fails final synthesis without replaying tools that already ran", async () => {
+    const error = new APICallError({
+      message: "Synthesis rate limited",
+      url: "https://provider.example.invalid",
+      requestBodyValues: {},
+      statusCode: 429,
+      isRetryable: true,
+    });
+    const handle = installMockModel({
+      fixture: {
+        stream: [
+          toolCallStream({ toolCallId: "todo", toolName: "todo_write", input: { todos: [] } }),
+          [{ type: "error", error }],
+        ],
+      },
+    });
+    try {
+      const result = await new StreamRunner(makeDeps()).run({
+        agent: "explore",
+        maxToolRounds: 1,
+        description: "Inspect",
+        prompt: "Read evidence",
+      });
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("HTTP 429: Synthesis rate limited");
+      expect(handle.model.doStreamCalls).toHaveLength(2);
+    } finally {
+      handle.uninstall();
+    }
+  });
+  it("retains partial output and does not replay a transient failure after text flowed", async () => {
+    const error = new APICallError({
+      message: "Retry later",
+      url: "https://provider.example.invalid",
+      requestBodyValues: {},
+      statusCode: 429,
+      isRetryable: true,
+    });
+    const parts = textOnlyStream("PARTIAL_EVIDENCE");
+    const handle = installMockModel({
+      fixture: { stream: [...parts.filter((part) => part.type !== "finish"), { type: "error", error }] },
+    });
+    try {
+      const result = await new StreamRunner(makeDeps()).run({
+        agent: "explore",
+        description: "Inspect",
+        prompt: "Read evidence",
+      });
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("PARTIAL_EVIDENCE");
+      expect(result.output).toContain("HTTP 429: Retry later");
+      expect(handle.model.doStreamCalls).toHaveLength(1);
+    } finally {
+      handle.uninstall();
+    }
+  });
+  it.each(
+    [400, 401, 429].flatMap((statusCode) => ["part", "throw"].map((kind) => ({ statusCode, kind }))),
+  )("preserves HTTP $statusCode errors emitted as $kind by the actual SDK", async ({ statusCode, kind }) => {
+    const error = new APICallError({
+      message: "Provider rejected the delegated request",
+      url: "https://provider.example.invalid/v1/responses",
+      requestBodyValues: {},
+      statusCode,
+      responseBody: '{"error":"fixture rejection"}',
+      isRetryable: statusCode === 429,
+    });
+    const handle = installMockModel({ fixture: { stream: [{ type: "error", error }] } });
+    const streamSpy = kind === "throw" ? vi.spyOn(handle.model, "doStream").mockRejectedValue(error) : undefined;
+    try {
+      const pending = new StreamRunner(makeDeps()).run({
+        agent: "explore",
+        description: "Inspect",
+        prompt: "Read evidence",
+      });
+      if (statusCode === 429) {
+        await expect(pending).rejects.toBe(error);
+      } else {
+        const result = await pending;
+        expect(result.success).toBe(false);
+        expect(result.output).toContain(error.message);
+        expect(result.output).not.toContain("No output generated");
+      }
+    } finally {
+      streamSpy?.mockRestore();
+      handle.uninstall();
+    }
+  });
+});
 
 describe("StreamRunner — setup short-circuit paths", () => {
   it("returns unknown-agent short-circuit when agent kind is not recognised", async () => {

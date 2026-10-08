@@ -1796,6 +1796,8 @@ export class Agent {
     onActivity?: (detail: string) => void,
     abortSignal?: AbortSignal,
   ): Promise<ToolResult> {
+    // Background jobs enter here without processMessage's auth initialization.
+    await this._initOAuthProvider();
     const provider = this.requireProvider();
     const deps: StreamRunnerDeps = {
       resolveModelForTask: (task) => this._resolveModelForTask(task),

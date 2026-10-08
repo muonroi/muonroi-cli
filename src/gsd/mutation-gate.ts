@@ -18,6 +18,8 @@ const NEVER_GATED = new Set([
   "delegate",
   "ask_user",
   "delegation_kill",
+  // Progress bookkeeping neither edits the workspace nor grants execution.
+  "todo_write",
 ]);
 function isNeverGated(t: string): boolean {
   return NEVER_GATED.has(t) || NEVER_GATED_PREFIXES.some((p) => t.startsWith(p));

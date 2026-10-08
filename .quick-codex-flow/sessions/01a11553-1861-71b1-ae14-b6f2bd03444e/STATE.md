@@ -1,7 +1,8 @@
-- Active run: runs/council-review-gate.md
-- Gate: done; phase P1 / wave W1 released; 8860 full units passed, zero failed
+- Active run: runs/delegation-runtime-errors.md
+- Gate: verified; P1/W1 and P2/W1 complete; 8869 full configured units passed, zero failed
 - Mode: auto; single agent; main owns plan/acceptance, helpers support research
-- Implementation c957f10b; remote history integrated and released at a5acbd28
-- Build clean; 228 focused units; 3 question TUI tests; native workspace smoke boot passed
-- Model missing JSON remains revise; main can research/ask; main and explore shell writes stay gated
-- Runtime next step: restart CLI and resume ea7378aab8f8; remote CI and live provider review not verified
+- Current implementation: helper OAuth init, original SDK errors, no replay after progress, todo gate exemption
+- Build clean; 125 focused units; 4 TUI fixture tests; native workspace smoke boot passed
+- Council currently returns genuine structured revise; user plan/verdict unchanged; shell/source writes stay gated
+- Remaining: normal commit/push, verify remote ref and tested source hashes
+- Runtime next step: restart CLI and resume ea7378aab8f8; historical helper HTTP detail was not persisted

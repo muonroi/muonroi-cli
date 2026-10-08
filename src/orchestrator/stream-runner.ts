@@ -67,7 +67,7 @@ import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import type { AgentMode, TaskRequest, ToolResult, VerifyRecipe } from "../types/index";
 import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
-import { logger } from "../utils/logger.js";
+import { logger, redactSecrets } from "../utils/logger.js";
 import { openUrl } from "../utils/open-url.js";
 import {
   getCurrentShellSettings,
@@ -604,6 +604,7 @@ export class StreamRunner {
     prepared: PreparedSubAgentCall,
     onActivity?: (detail: string) => void,
     signal?: AbortSignal,
+    progress?: { text: string; toolCalls: number },
   ): Promise<{
     output: string;
     lastActivity: string;
@@ -1064,10 +1065,15 @@ export class StreamRunner {
           });
         }
 
+        // Preserve the provider error before response rejects with the SDK's
+        // generic NoOutputGeneratedError (or an empty response looks successful).
+        if (part.type === "error") throw part.error;
+
         if (part.type === "text-delta") {
           stall.petProgress(); // real forward progress — reset the no-progress guard
           textDeltaCount++;
           assistantText += part.text;
+          if (progress) progress.text += part.text;
           // Task 2.6b — emit llm-token (agent-mode only; high-volume, default-off per Phase 4).
           try {
             const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
@@ -1089,6 +1095,7 @@ export class StreamRunner {
         if (part.type === "tool-call") {
           stall.petProgress(); // real forward progress — reset the no-progress guard
           toolCallCount++;
+          if (progress) progress.toolCalls++;
           lastActivity = formatSubagentActivity(part.toolName, part.input);
           onActivity?.(lastActivity);
           continue;
@@ -1240,11 +1247,19 @@ export class StreamRunner {
           ...(childProviderOptions ? { providerOptions: childProviderOptions } : {}),
         });
         for await (const part of synthResult.fullStream) {
-          if (part.type === "text-delta") synthesizedText += part.text ?? "";
+          if (part.type === "error") throw part.error;
+          if (part.type === "text-delta") {
+            synthesizedText += part.text;
+            if (progress) progress.text += part.text;
+          }
         }
         debugLog(`forced-synthesis: textLen=${synthesizedText.length}`);
       } catch (err) {
-        debugLog(`forced-synthesis failed: ${(err as Error)?.message}`);
+        logger.error("orchestrator", "[stream-runner] final synthesis failed", {
+          model: childRuntime.modelId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
       }
     }
 
@@ -1269,6 +1284,7 @@ export class StreamRunner {
     const prepared = outcome.prepared;
     let lastActivity = prepared.lastActivity;
     let assistantText = "";
+    const progress = { text: "", toolCalls: 0 };
 
     try {
       if (prepared.useBatchApi) {
@@ -1286,7 +1302,7 @@ export class StreamRunner {
         });
       }
 
-      const streamResult = await this.runStream(prepared, onActivity, signal);
+      const streamResult = await this.runStream(prepared, onActivity, signal, progress);
       lastActivity = streamResult.lastActivity;
       assistantText = streamResult.assistantText;
       if (streamResult.cancelled) {
@@ -1336,17 +1352,27 @@ export class StreamRunner {
       };
     } catch (err: unknown) {
       if (signal?.aborted) throw err;
+      assistantText = progress.text;
+      const providerError = err as { statusCode?: number; responseBody?: unknown } | null;
+      logger.error("orchestrator", "[stream-runner] delegated task failed", {
+        model: prepared.childRuntime.modelId,
+        agent: request.agent,
+        message: err instanceof Error ? err.message : String(err),
+        statusCode: providerError?.statusCode,
+        responseBody:
+          typeof providerError?.responseBody === "string" ? providerError.responseBody.slice(0, 2000) : undefined,
+      });
       // Re-throw transient network errors when no content has flowed so the
       // caller (runTask) can retry with withStreamRetry. Only re-throw when
       // assistantText is empty — if the agent produced partial output we must
       // NOT restart, as that would corrupt the task output.
-      if (!assistantText.trim()) {
+      if (!assistantText.trim() && progress.toolCalls === 0) {
         const { transient } = classifyStreamError(err);
         if (transient) {
           throw err;
         }
       }
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = redactSecrets(err instanceof Error ? err.message : String(err));
       // G1 diagnostic: surface the full error shape under
       // MUONROI_DEBUG_SUBAGENT=1 so we can see whether `msg` is "No output
       // generated" (AI SDK validation failure on empty assistant response)
@@ -1396,7 +1422,9 @@ export class StreamRunner {
         }
         if (e.stack) writeSubagentDebug(true, `stack: ${e.stack.split("\n").slice(0, 6).join(" | ")}`);
       }
-      const output = `Task failed: ${msg}`;
+      const status = typeof providerError?.statusCode === "number" ? `HTTP ${providerError.statusCode}: ` : "";
+      const failure = `Task failed: ${status}${msg}`;
+      const output = assistantText.trim() ? `${assistantText.trim()}\n\n${failure}` : failure;
       return {
         success: false,
         output,

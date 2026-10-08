@@ -58,6 +58,11 @@ describe("heavy plan gate research dispatch (ea7378aab8f8)", () => {
                 input: { question: "Which acceptance criterion?" },
               }),
               toolCallStream({
+                toolCallId: "progress",
+                toolName: "todo_write",
+                input: { todos: [{ id: "research", subject: "Inspect evidence", status: "in_progress" }] },
+              }),
+              toolCallStream({
                 toolCallId: "write",
                 toolName: "write_file",
                 input: { path: "forbidden.ts", content: "MUTATION" },
@@ -109,6 +114,7 @@ describe("heavy plan gate research dispatch (ea7378aab8f8)", () => {
       const transcript = JSON.stringify(handle.model.doStreamCalls);
       expect(transcript).toContain("RESEARCH_STARTED");
       expect(transcript).toContain("Use isolated fixtures");
+      expect(transcript.includes("Tracking 1 todo")).toBe(true);
       expect(transcript).toContain("BLOCKED: this task");
       expect(fs.existsSync(path.join(home, "forbidden.ts"))).toBe(false);
       expect(fs.readFileSync(path.join(home, ".planning", "PLAN-VERIFY.md"), "utf8")).toBe("verdict: revise\n");
