@@ -1,5 +1,7 @@
 - Active run: runs/background-pil-model-council.md
-- Gate: full configured unit suite passed 8827 tests / 0 failures; build/typecheck/native selfverify passed
+- Gate: complete; full configured unit suite passed 8827 tests / 0 failures; build/typecheck/native selfverify passed
 - Mode: auto; background informational PIL and model-owned council implemented
-- Branch: develop; previous push 103c693f confirmed
-- Next: normal commit/push hooks and verify remote SHA
+- Branch: develop; implementation bc8fe0ee61f0c9e48703b562554fe3e6c53af6bf pushed and remote SHA verified
+- Local CLI: global package junction targets this workspace; built dist is current; restart the CLI to load it
+- Remaining within this scope: none
+- Recorded limit: mounted assertions pass; Bun/opentui shutdown crash output is not resolved or claimed fixed
