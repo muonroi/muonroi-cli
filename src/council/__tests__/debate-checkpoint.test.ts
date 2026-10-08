@@ -121,7 +121,11 @@ describe("debate-checkpoint: file IO", () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), "debate-cp-"));
   });
   afterEach(async () => {
-    await fs.rm(dir, { recursive: true, force: true });
+    // Windows: the atomic write's rename can leave the directory handle briefly
+    // held, so a bare recursive rm intermittently throws ENOTEMPTY and fails the
+    // suite (observed on a full `bunx vitest run`, green in isolation). `force`
+    // does not cover ENOTEMPTY — retries do.
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 });
   });
 
   it("writes atomically and reads back an identical payload", async () => {

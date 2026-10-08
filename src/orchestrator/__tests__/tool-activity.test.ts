@@ -4,7 +4,9 @@ import {
   beginToolActivity,
   endToolActivity,
   isToolActivityLive,
+  noteToolActivityProgress,
   toolActivityBudgetMs,
+  withToolActivity,
 } from "../tool-activity.js";
 
 /**
@@ -76,5 +78,37 @@ describe("tool activity registry", () => {
 
   it("is inert when no tool is running", () => {
     expect(isToolActivityLive(Date.now())).toBe(false);
+  });
+
+  it("does not let another request's tool suppress an idle provider", () => {
+    const foreign = beginToolActivity(120_000, 1000);
+    expect(isToolActivityLive(2000, new Set())).toBe(false);
+    expect(isToolActivityLive(2000, new Set([foreign]))).toBe(true);
+  });
+
+  it("renews only the owning council idle budget on actual nested progress", async () => {
+    const t0 = 1_000_000;
+    const { defaultMs, graceMs } = toolActivityBudgetMs();
+    const owner = beginToolActivity(null, t0);
+    const foreign = beginToolActivity(null, t0);
+    await withToolActivity(owner, async () => {
+      await Promise.resolve();
+      noteToolActivityProgress(t0 + defaultMs - 1);
+    });
+    const afterInitialBudget = t0 + defaultMs + graceMs + 1;
+    expect(isToolActivityLive(afterInitialBudget, new Set([owner]))).toBe(true);
+    expect(isToolActivityLive(afterInitialBudget, new Set([foreign]))).toBe(false);
+    expect(isToolActivityLive(t0 + 2 * defaultMs + graceMs, new Set([owner]))).toBe(false);
+  });
+
+  it("never renews an explicit command deadline or revives expired work", () => {
+    const t0 = 1_000_000;
+    const explicit = beginToolActivity(1000, t0);
+    withToolActivity(explicit, () => noteToolActivityProgress(t0 + 900));
+    expect(isToolActivityLive(t0 + 1000 + toolActivityBudgetMs().graceMs + 1, new Set([explicit]))).toBe(false);
+    const expired = beginToolActivity(null, t0);
+    const later = t0 + toolActivityBudgetMs().defaultMs + toolActivityBudgetMs().graceMs + 1;
+    withToolActivity(expired, () => noteToolActivityProgress(later));
+    expect(isToolActivityLive(later, new Set([expired]))).toBe(false);
   });
 });

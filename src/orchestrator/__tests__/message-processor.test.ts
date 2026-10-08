@@ -5,6 +5,7 @@
 // invariants hold without running a real LLM turn. The full streaming
 // behaviour is covered by tests/harness/cost-leak-{f1,g1,b4,c3}.spec.ts.
 
+import { getEventListeners } from "node:events";
 import type { ModelMessage } from "ai";
 import { beforeAll, describe, expect, it } from "vitest";
 import { registerTestProviderFactories } from "../../__test-helpers__/catalog-fixtures.js";
@@ -13,7 +14,11 @@ import type { BashTool } from "../../tools/bash";
 import type { ProcessMessageObserver } from "../agent-options";
 import type { CompactionSettings } from "../compaction";
 import type { CouncilManager } from "../council-manager.js";
-import { MessageProcessor, type MessageProcessorDeps } from "../message-processor.js";
+import {
+  MessageProcessor,
+  type MessageProcessorDeps,
+  reinjectTaggedSessionStartAcrossCompaction,
+} from "../message-processor.js";
 
 function makeBashStub(): BashTool {
   return {
@@ -175,6 +180,338 @@ describe("MessageProcessor — DI surface invariants", () => {
     expect(batchCalled).toBe(true);
   });
 
+  // Gap (c): SessionStart hook output used to be fired-and-discarded
+  // (message-processor.ts's old `deps.fireHook(sessionStartInput, signal).catch(() => {})`
+  // never looked at the resolved value) — a no-tool DIRECT_ANSWER turn never
+  // reaches tool-engine.ts's PreToolUse content-yield path, so the hook's
+  // output could never reach the user on the very first reply of a session.
+  // Fixed by capturing fireHook's additionalContexts and yielding them as
+  // content chunks immediately, before PIL/routing runs.
+  it("yields the SessionStart hook's additionalContexts as content chunks on the first turn", async () => {
+    const deps = makeDeps({
+      batchApi: true, // short-circuits the turn right after the session-start block
+      getSessionStartHookFired: () => false,
+      fireHook: async (input: unknown) => {
+        const hookInput = input as { hook_event_name?: string };
+        if (hookInput.hook_event_name === "SessionStart") {
+          return {
+            blocked: false,
+            blockingErrors: [],
+            preventContinuation: false,
+            additionalContexts: ["=== BRIEFING OUTPUT ==="],
+            results: [],
+            eeMatches: [],
+          };
+        }
+        return {
+          blocked: false,
+          blockingErrors: [],
+          preventContinuation: false,
+          additionalContexts: [],
+          results: [],
+          eeMatches: [],
+        };
+      },
+      processMessageBatchTurn: async function* () {
+        yield { type: "done" };
+      },
+    });
+    const processor = new MessageProcessor(deps);
+    const chunks: Array<{ type: string; content?: string }> = [];
+    for await (const c of processor.run("bắt đầu", undefined)) {
+      chunks.push(c as { type: string; content?: string });
+    }
+    const contentChunks = chunks.filter((c) => c.type === "content");
+    expect(contentChunks.some((c) => c.content?.includes("=== BRIEFING OUTPUT ==="))).toBe(true);
+  });
+
+  // Round 12 (F2/G14): the content chunk is now a BOUNDED, TAGGED notice
+  // block (formatSessionStartHookNotice) — a distinct system/notice item in
+  // the log, not a bare, indistinguishable content chunk, and never
+  // unbounded regardless of what the hook script prints.
+  it("tags the rendered SessionStart notice and truncates a huge hook output instead of flooding the turn", async () => {
+    const HUGE = "\u001b[31m" + "Z".repeat(20_000) + "\u001b[0m";
+    const deps = makeDeps({
+      batchApi: true,
+      getSessionStartHookFired: () => false,
+      fireHook: async (input: unknown) => {
+        const hookInput = input as { hook_event_name?: string };
+        if (hookInput.hook_event_name === "SessionStart") {
+          return {
+            blocked: false,
+            blockingErrors: [],
+            preventContinuation: false,
+            additionalContexts: [HUGE],
+            results: [],
+            eeMatches: [],
+          };
+        }
+        return {
+          blocked: false,
+          blockingErrors: [],
+          preventContinuation: false,
+          additionalContexts: [],
+          results: [],
+          eeMatches: [],
+        };
+      },
+      processMessageBatchTurn: async function* () {
+        yield { type: "done" };
+      },
+    });
+    const processor = new MessageProcessor(deps);
+    const chunks: Array<{ type: string; content?: string }> = [];
+    for await (const c of processor.run("bắt đầu", undefined)) {
+      chunks.push(c as { type: string; content?: string });
+    }
+    const notice = chunks.find((c) => c.type === "content" && c.content?.includes("[SessionStart hook output]"));
+    expect(notice).toBeDefined();
+    expect(notice?.content).toContain("truncated: showed 16384 of 20000 chars");
+    // Never renders the full 20_000-char blast into one chunk.
+    expect(notice!.content!.length).toBeLessThan(20_000);
+    const modelNotice = deps.messages.find(
+      (m) => m.role === "system" && typeof m.content === "string" && m.content.startsWith("[SessionStart hook output]"),
+    );
+    expect(modelNotice).toBeDefined();
+    expect(modelNotice!.content).toContain("truncated: showed 16384 of 20000 chars");
+    expect(modelNotice!.content).not.toContain("\u001b");
+    expect(modelNotice!.content.length).toBeLessThan(17_000);
+    // The model gets exactly the bounded body displayed in the TUI, not raw hook stdout.
+    expect(modelNotice!.content).toContain(notice!.content!.trim().split("\n").slice(1).join("\n"));
+  });
+
+  // Parity fix (G1): the yield-loop above is UI-only — it never told the
+  // MODEL the hook already ran. Measured live: the model's own reasoning
+  // said "there's a system note about session start: run briefing.sh", then
+  // tried to re-run it itself on a turn with no tools, leaking raw
+  // tool-call markup as its answer (see FINDINGS.md G1/G2). Fixed by ALSO
+  // pushing a `role: "system"` message into `deps.messages` (mirrors the
+  // existing EE-guidance / recall-nudge injections in the same function),
+  // worded so the model knows the content was already shown and should not
+  // repeat or re-run it.
+  it("also injects the SessionStart hook's output as a system message the MODEL can see, ordered before this turn's user message", async () => {
+    const deps = makeDeps({
+      batchApi: true,
+      getSessionStartHookFired: () => false,
+      fireHook: async (input: unknown) => {
+        const hookInput = input as { hook_event_name?: string };
+        if (hookInput.hook_event_name === "SessionStart") {
+          return {
+            blocked: false,
+            blockingErrors: [],
+            preventContinuation: false,
+            additionalContexts: ["=== BRIEFING OUTPUT ==="],
+            results: [],
+            eeMatches: [],
+          };
+        }
+        return {
+          blocked: false,
+          blockingErrors: [],
+          preventContinuation: false,
+          additionalContexts: [],
+          results: [],
+          eeMatches: [],
+        };
+      },
+      processMessageBatchTurn: async function* () {
+        yield { type: "done" };
+      },
+    });
+    const processor = new MessageProcessor(deps);
+    for await (const _c of processor.run("bắt đầu", undefined)) {
+      // drain
+    }
+    const systemMsg = deps.messages.find(
+      (m) => m.role === "system" && typeof m.content === "string" && m.content.includes("=== BRIEFING OUTPUT ==="),
+    );
+    expect(systemMsg).toBeDefined();
+    expect(systemMsg?.content).toMatch(/already shown/i);
+    // Ordered before this turn's own user message, so it reads as prior
+    // context rather than something the user is asking the model about.
+    const systemIdx = deps.messages.indexOf(systemMsg as ModelMessage);
+    const userIdx = deps.messages.findIndex((m) => m.role === "user");
+    expect(systemIdx).toBeGreaterThanOrEqual(0);
+    expect(userIdx).toBeGreaterThan(systemIdx);
+  });
+
+  // Round 2 (G1 HIGH): `--resume` rehydrates deps.messages from the
+  // session's persisted transcript BEFORE run() ever executes, but
+  // getSessionStartHookFired() is a per-PROCESS flag — it resets to false
+  // on every new process, including a resumed one. Firing the hook again on
+  // resume is correct, but appending a SECOND copy of the same tagged
+  // system message on top of the one still sitting in the rehydrated
+  // history is not: the model would see the same briefing injected twice.
+  it("on resume, REPLACES a prior tagged SessionStart system message already in history instead of appending a second one", async () => {
+    const priorTagged: ModelMessage = {
+      role: "system",
+      content:
+        "[SessionStart hook output] — already shown to the user verbatim above; do not re-run it or repeat it\n=== OLD BRIEFING (prior process) ===",
+    };
+    const priorUser: ModelMessage = { role: "user", content: "earlier turn from a previous process" };
+    const priorAssistant: ModelMessage = { role: "assistant", content: "earlier reply" };
+    const messages: ModelMessage[] = [priorTagged, priorUser, priorAssistant];
+    const messageSeqs: Array<number | null> = [null, 1, 2];
+
+    const deps = makeDeps({
+      messages,
+      messageSeqs,
+      batchApi: true,
+      getSessionStartHookFired: () => false, // fresh process — resume re-fires the hook
+      fireHook: async (input: unknown) => {
+        const hookInput = input as { hook_event_name?: string };
+        if (hookInput.hook_event_name === "SessionStart") {
+          return {
+            blocked: false,
+            blockingErrors: [],
+            preventContinuation: false,
+            additionalContexts: ["=== NEW BRIEFING (resumed process) ==="],
+            results: [],
+            eeMatches: [],
+          };
+        }
+        return {
+          blocked: false,
+          blockingErrors: [],
+          preventContinuation: false,
+          additionalContexts: [],
+          results: [],
+          eeMatches: [],
+        };
+      },
+      processMessageBatchTurn: async function* () {
+        yield { type: "done" };
+      },
+    });
+    const processor = new MessageProcessor(deps);
+    for await (const _c of processor.run("continued after resume", undefined)) {
+      // drain
+    }
+
+    const taggedMessages = deps.messages.filter(
+      (m) => m.role === "system" && typeof m.content === "string" && m.content.startsWith("[SessionStart hook output]"),
+    );
+    expect(taggedMessages).toHaveLength(1);
+    expect(taggedMessages[0]?.content).toContain("=== NEW BRIEFING (resumed process) ===");
+    expect(taggedMessages[0]?.content).not.toContain("OLD BRIEFING");
+    // messages/messageSeqs must stay parallel (same length, same indices).
+    expect(deps.messages.length).toBe(deps.messageSeqs.length);
+    // Prior unrelated history (not tagged) must survive untouched.
+    expect(deps.messages).toContainEqual(priorUser);
+    expect(deps.messages).toContainEqual(priorAssistant);
+  });
+
+  // Round 3 (MEDIUM, G1-adjacent): compaction used to drop the tagged
+  // SessionStart message entirely (it is not a "pinned user message", so
+  // compaction's kept-tail window had no reason to preserve it) — a
+  // compact-then-resume session got a FRESH briefing injected with no
+  // tagged copy left in history to replace, silently reintroducing the
+  // exact double-inject shape the round-2 G1 fix closed. This composes
+  // BOTH halves of the fix in one scenario: orchestrator.ts's compaction
+  // rebuild (simulated here via `reinjectTaggedSessionStartAcrossCompaction`
+  // — the real thing is a private method making real LLM calls, not
+  // directly reachable from this test) carries the tag through compaction,
+  // then a resumed process's injection replaces that ONE carried copy —
+  // exactly one tagged message survives end to end.
+  it("compaction (carrying the tag through) THEN resume (replacing it) leaves exactly one tagged message — not zero, not two", async () => {
+    const oldTagged: ModelMessage = {
+      role: "system",
+      content:
+        "[SessionStart hook output] — already shown to the user verbatim above; do not re-run it or repeat it\n=== BRIEFING FROM BEFORE COMPACTION ===",
+    };
+    const oldUserTurn1: ModelMessage = { role: "user", content: "turn 1, summarized away by compaction" };
+    const keptTailUser: ModelMessage = { role: "user", content: "turn N, kept verbatim (recent tail)" };
+    const keptTailAssistant: ModelMessage = { role: "assistant", content: "reply N" };
+
+    // Simulate what orchestrator.ts's compaction rebuild actually produces:
+    // [compactionSummary, taggedReinjection (carried, per the helper under
+    // test), ...pinnedReinjections (none here), ...keptMessages].
+    const compactionSummary: ModelMessage = { role: "system", content: "[Context checkpoint summary]\n..." };
+    const keptMessages: ModelMessage[] = [keptTailUser, keptTailAssistant];
+    const allBeforeCompaction: ModelMessage[] = [oldTagged, oldUserTurn1, keptTailUser, keptTailAssistant];
+    const carried = reinjectTaggedSessionStartAcrossCompaction(allBeforeCompaction, keptMessages);
+    expect(carried).toBe(oldTagged); // sanity: the helper actually found it
+
+    const postCompactionMessages: ModelMessage[] = [
+      compactionSummary,
+      carried as ModelMessage,
+      keptTailUser,
+      keptTailAssistant,
+    ];
+    const postCompactionSeqs: Array<number | null> = [null, null, 3, 4];
+
+    // Now resume: a fresh process rehydrates this post-compaction history
+    // and re-fires the SessionStart hook.
+    const deps = makeDeps({
+      messages: postCompactionMessages,
+      messageSeqs: postCompactionSeqs,
+      batchApi: true,
+      getSessionStartHookFired: () => false,
+      fireHook: async (input: unknown) => {
+        const hookInput = input as { hook_event_name?: string };
+        if (hookInput.hook_event_name === "SessionStart") {
+          return {
+            blocked: false,
+            blockingErrors: [],
+            preventContinuation: false,
+            additionalContexts: ["=== BRIEFING AFTER RESUME ==="],
+            results: [],
+            eeMatches: [],
+          };
+        }
+        return {
+          blocked: false,
+          blockingErrors: [],
+          preventContinuation: false,
+          additionalContexts: [],
+          results: [],
+          eeMatches: [],
+        };
+      },
+      processMessageBatchTurn: async function* () {
+        yield { type: "done" };
+      },
+    });
+    const processor = new MessageProcessor(deps);
+    for await (const _c of processor.run("continued after compaction + resume", undefined)) {
+      // drain
+    }
+
+    const taggedMessages = deps.messages.filter(
+      (m) => m.role === "system" && typeof m.content === "string" && m.content.startsWith("[SessionStart hook output]"),
+    );
+    expect(taggedMessages).toHaveLength(1);
+    expect(taggedMessages[0]?.content).toContain("=== BRIEFING AFTER RESUME ===");
+    expect(taggedMessages[0]?.content).not.toContain("BEFORE COMPACTION");
+    // The compaction summary and the kept tail both survive untouched.
+    expect(deps.messages).toContainEqual(compactionSummary);
+    expect(deps.messages).toContainEqual(keptTailUser);
+    expect(deps.messages).toContainEqual(keptTailAssistant);
+  });
+
+  it("does NOT inject a system message when the SessionStart hook produced no additionalContexts (nothing to tell the model)", async () => {
+    const deps = makeDeps({
+      batchApi: true,
+      getSessionStartHookFired: () => false,
+      fireHook: async () => ({
+        blocked: false,
+        blockingErrors: [],
+        preventContinuation: false,
+        additionalContexts: [],
+        results: [],
+        eeMatches: [],
+      }),
+      processMessageBatchTurn: async function* () {
+        yield { type: "done" };
+      },
+    });
+    const processor = new MessageProcessor(deps);
+    for await (const _c of processor.run("bắt đầu", undefined)) {
+      // drain
+    }
+    expect(deps.messages.some((m) => m.role === "system")).toBe(false);
+  });
+
   it("delegates to deps.runCouncilV2 when auto-council gate is taken", async () => {
     let councilCalled = false;
     const deps = makeDeps({
@@ -295,5 +632,189 @@ describe("MessageProcessor — DI surface invariants", () => {
     // that the optional observer param does not throw at construction
     // / iteration setup.
     void observer;
+  });
+});
+
+// A1 — abort-controller ownership.
+//
+// `_buildMessageProcessorDeps()` (orchestrator.ts ~4058-4062) wires
+// `getAbortController`/`setAbortController` to ONE shared field
+// (`Agent.abortController`) — exactly what `Agent.abort()` (orchestrator.ts
+// ~995, `this.abortController?.abort()`) reads. `run()` used to always create
+// a brand-new AbortController on every call and unconditionally null it out
+// in its `finally` on completion, regardless of who "owns" the run. That
+// orphans a signal a caller captured earlier (e.g. `runProductLoopV1`'s S4
+// signal, orchestrator.ts ~2627-2631) the moment ANY nested `processMessage`
+// call completes — for example sprint-runner Step 4b's completeness re-check
+// calling `ctx.processMessageFn` (sprint-runner.ts ~2212-2240). After that,
+// Esc is a permanent no-op for the rest of the `/ideal` run.
+//
+// `makeControllerHolder()` below models that ONE shared field precisely —
+// both `getAbortController`/`setAbortController` read/write the same local
+// variable, just like the real wiring.
+describe("MessageProcessor — abort-controller ownership (A1)", () => {
+  beforeAll(async () => {
+    await loadCatalog();
+    registerTestProviderFactories();
+  });
+
+  function makeControllerHolder() {
+    let ctrl: AbortController | null = null;
+    return {
+      getAbortController: () => ctrl,
+      setAbortController: (c: AbortController | null) => {
+        ctrl = c;
+      },
+    };
+  }
+
+  function makeFastNestedDeps(
+    holder: ReturnType<typeof makeControllerHolder>,
+    onBatchTurn?: () => void | Promise<void>,
+  ) {
+    return makeDeps({
+      getAbortController: holder.getAbortController,
+      setAbortController: holder.setAbortController,
+      batchApi: true,
+      processMessageBatchTurn: async function* () {
+        await onBatchTurn?.();
+        yield { type: "done" };
+      },
+    });
+  }
+
+  it("BUG REPRO: an owner's captured signal survives a completed nested processMessage call, and a later abort() fires it", async () => {
+    const holder = makeControllerHolder();
+
+    // Owner takes the signal — mirrors `runProductLoopV1`'s
+    // `ownsController = !this.abortController` guard (orchestrator.ts:2627-2631).
+    const ownsController = !holder.getAbortController();
+    expect(ownsController).toBe(true);
+    holder.setAbortController(new AbortController());
+    const ownerSignal = holder.getAbortController()!.signal;
+    expect(ownerSignal.aborted).toBe(false);
+
+    // A nested processMessage call — e.g. sprint-runner Step 4b's
+    // completeness re-check calling `ctx.processMessageFn` — runs and
+    // completes, sharing the SAME holder `_buildMessageProcessorDeps()` would.
+    const processor = new MessageProcessor(makeFastNestedDeps(holder));
+    for await (const _c of processor.run("nested turn", undefined)) {
+      /* drain */
+    }
+
+    // Owner calls abort() the way `Agent.abort()` does (Esc key).
+    holder.getAbortController()?.abort();
+
+    // The owner's ORIGINAL captured signal must fire.
+    expect(ownerSignal.aborted).toBe(true);
+  });
+
+  it("Esc during a plain chat turn still aborts (top-level / owning call)", async () => {
+    const holder = makeControllerHolder();
+    const processor = new MessageProcessor(makeFastNestedDeps(holder));
+    const iter = processor.run("hi", undefined);
+
+    // Advance to the first yielded chunk — the controller must already exist
+    // by then, and the turn must still be in flight (not yet in `finally`).
+    await iter.next();
+    const signal = holder.getAbortController()?.signal;
+    expect(signal).toBeDefined();
+
+    holder.getAbortController()?.abort();
+    expect(signal?.aborted).toBe(true);
+
+    for await (const _c of iter) {
+      /* drain remainder so the generator's finally block runs cleanly */
+    }
+  });
+
+  it("Esc during a nested call aborts both the owner and the nested run (same signal object, not a copy)", async () => {
+    const holder = makeControllerHolder();
+    holder.setAbortController(new AbortController());
+    const ownerController = holder.getAbortController()!;
+
+    let observedInsideNested: boolean | undefined;
+    const deps = makeFastNestedDeps(holder, () => {
+      // Simulate Esc firing WHILE the nested call is in flight.
+      ownerController.abort();
+      observedInsideNested = deps.getAbortController()?.signal.aborted;
+    });
+    const processor = new MessageProcessor(deps);
+    for await (const _c of processor.run("nested turn", undefined)) {
+      /* drain */
+    }
+
+    expect(observedInsideNested).toBe(true);
+    expect(ownerController.signal.aborted).toBe(true);
+  });
+
+  it("the nested call completing does not abort the owner, nor clear the owner's controller", async () => {
+    const holder = makeControllerHolder();
+    holder.setAbortController(new AbortController());
+    const ownerController = holder.getAbortController()!;
+
+    const processor = new MessageProcessor(makeFastNestedDeps(holder));
+    for await (const _c of processor.run("nested turn", undefined)) {
+      /* drain */
+    }
+
+    expect(ownerController.signal.aborted).toBe(false);
+    // The owner's controller must still be the SAME live object — a nested
+    // call must never null it out from under the still-running owner.
+    expect(holder.getAbortController()).toBe(ownerController);
+  });
+
+  it("no listener leak: many completed nested calls leave 0 'abort' listeners on the owner's long-lived signal", async () => {
+    const holder = makeControllerHolder();
+    holder.setAbortController(new AbortController());
+    const ownerController = holder.getAbortController()!;
+
+    for (let i = 0; i < 25; i++) {
+      const processor = new MessageProcessor(makeFastNestedDeps(holder));
+      for await (const _c of processor.run(`nested turn ${i}`, undefined)) {
+        /* drain */
+      }
+    }
+
+    // Each nested run() attaches (and must detach) its own P0 "aborter"
+    // listener on the owner's shared signal — 25 completed nested calls must
+    // leave 0 behind, not 25.
+    expect(getEventListeners(ownerController.signal, "abort").length).toBe(0);
+  });
+});
+
+// Round 3 (MEDIUM, G1-adjacent): pure-function coverage for the compaction
+// carry-through decision itself, independent of the full
+// compaction-then-resume integration test above.
+describe("reinjectTaggedSessionStartAcrossCompaction", () => {
+  const tagged: ModelMessage = {
+    role: "system",
+    content: "[SessionStart hook output] — already shown...\n=== BRIEFING ===",
+  };
+  const untaggedSystem: ModelMessage = { role: "system", content: "[Some other system note]" };
+  const userMsg: ModelMessage = { role: "user", content: "hi" };
+
+  it("returns the tagged message when it fell outside the kept tail (the repro'd bug)", () => {
+    const allBefore = [tagged, userMsg];
+    const kept = [userMsg]; // tagged was summarized away
+    expect(reinjectTaggedSessionStartAcrossCompaction(allBefore, kept)).toBe(tagged);
+  });
+
+  it("returns null when the kept tail already has one — do not duplicate it", () => {
+    const allBefore = [tagged, userMsg];
+    const kept = [tagged, userMsg]; // tagged survived naturally (short session)
+    expect(reinjectTaggedSessionStartAcrossCompaction(allBefore, kept)).toBeNull();
+  });
+
+  it("returns null when there was never a tagged message at all", () => {
+    const allBefore = [untaggedSystem, userMsg];
+    const kept = [userMsg];
+    expect(reinjectTaggedSessionStartAcrossCompaction(allBefore, kept)).toBeNull();
+  });
+
+  it("does not mistake an untagged system message for the tagged one", () => {
+    const allBefore = [untaggedSystem, tagged, userMsg];
+    const kept = [untaggedSystem, userMsg]; // untagged survived, tagged did not
+    expect(reinjectTaggedSessionStartAcrossCompaction(allBefore, kept)).toBe(tagged);
   });
 });

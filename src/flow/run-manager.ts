@@ -69,10 +69,21 @@ export async function createRun(flowDir: string): Promise<RunState> {
   };
   await writeArtifact(path.join(flowDir, "runs", id), "iterations.md", iterationsMap);
 
-  // Initialize manifest.md
+  // Initialize manifest.md. It records `CreatedAt` here, with the directory,
+  // rather than leaving a heading and nothing else: a run directory must never
+  // exist alongside a manifest that says NOTHING.
+  //
+  // `## Manifest` + no fields serialized to exactly 14 bytes, and that is the
+  // shape found live in `qa-platform/.muonroi-flow/runs/muc126520fb1/` — from
+  // which "created 3 days ago and never given an idea" and "crashed between
+  // `createRun` and `writeManifest` a second ago" were indistinguishable. The
+  // timestamp is the one fact that is true at this instant either way; the idea
+  // genuinely is not known yet, so no placeholder is invented for it. Absence of
+  // `Idea:` is what keeps `readManifest` returning null (product-loop/artifact-io.ts),
+  // so this run is still not resumable and still not a product run.
   const manifestMap: SectionMap = {
     preamble: "",
-    sections: new Map([["Manifest", ""]]),
+    sections: new Map([["Manifest", `CreatedAt: ${new Date().toISOString()}`]]),
   };
   await writeArtifact(path.join(flowDir, "runs", id), "manifest.md", manifestMap);
 

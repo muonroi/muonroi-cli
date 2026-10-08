@@ -1,4 +1,26 @@
 // @ts-nocheck
+//
+// WRITE CONTROL BYTES IN THIS FILE AS ESCAPES (`\x00`, `\x1b`, `\x1f`), NEVER RAW.
+//
+// Until 2026-09-24 `stripControlBytes` (below) wrote its character classes with raw
+// bytes: the source literally held one 0x00, one 0x1b, one 0x1f and one 0x7f. A
+// single NUL makes ripgrep classify the whole file as BINARY and SILENTLY drop its
+// matches from any tree-wide search, while still looking authoritative:
+//
+//     $ rg --files-with-matches setAskUserHandler src/
+//     src/orchestrator/orchestrator.ts          ← this file was skipped
+//     $ rg -n setAskUserHandler src/ui/use-app-logic.tsx
+//     binary file matches (found "\0" byte around offset 16359)
+//
+// That cost a wrong conclusion: the tree-wide search "proved" the `ask_user` handler
+// was never wired and that every call returned the dismissed sentinel immediately.
+// Both were false — it is registered at `agent.setAskUserHandler(...)` in this file
+// and opens a real blocking card. Only a DB row that disagreed caught it.
+//
+// The classes are now escapes, which is semantically identical in a JS regex (proved
+// exhaustively over every UTF-16 code unit in
+// `src/ui/__tests__/strip-control-bytes.test.ts`, which also fails if a 0x00 byte
+// reappears anywhere under `src/`), so a default `rg` reads this file again.
 import * as path from "node:path";
 import type { AgentModeRuntime } from "@muonroi/agent-harness-opentui";
 import { Semantic, SemanticProvider, useAgentInputBridge } from "@muonroi/agent-harness-opentui";
@@ -29,7 +51,11 @@ import {
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "../orchestrator/safety-askcard.js";
 import { planSafetyAskcard } from "../orchestrator/safety-askcard.js";
 
+import { deriveHaltRecommendation } from "../product-loop/halt-recommendation.js";
 import type { HaltChunk, ProductStatusCardData, RecoveryOption } from "../product-loop/types.js";
+import { getProviderCapabilities } from "../providers/capabilities.js";
+import { saveProviderCredentials, workspaceIdError } from "../providers/credential-setup.js";
+import type { ApiKeyPromptState } from "./modals/model-picker-modal.js";
 import { getConfiguredProviders, setKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
 import { buildAdoptExistingContinuationPrompt, buildIdealContinuationPrompt } from "../scaffold/continuation-prompt.js";
@@ -80,17 +106,14 @@ import {
   isModelDisabled,
   isReservedSubagentName,
   loadMcpServers,
-  loadPaymentSettings,
   loadUserSettings,
   loadValidSubAgents,
   type McpRemoteTransport,
   type McpServerConfig,
-  type PaymentSettings,
   type SandboxMode,
   type SandboxSettings,
   saveApprovedTelegramUserId,
   saveMcpServers,
-  savePaymentSettings,
   saveProjectSettings,
   saveUserSettings,
   setDefaultProvider,
@@ -164,6 +187,14 @@ import { useTypeahead } from "./hooks/useTypeahead.js";
 import { Markdown } from "./markdown";
 import { buildMcpBrowseRows, McpBrowserModal, McpEditorModal } from "./mcp-modal";
 import { createEmptyMcpEditorDraft, type McpEditorDraft } from "./mcp-modal-types";
+import {
+  collectOpenModalSurfaces,
+  createModalOpenOrder,
+  type ModalSurfaceId,
+  modalOwnsKeyboard,
+  reconcileModalOpenOrder,
+  resolveModalKeyboardOwner,
+} from "./modal-focus.js";
 import { ApiKeyModal } from "./modals/api-key-modal.js";
 import { ConnectModal, TelegramPairModal, TelegramTokenModal } from "./modals/connect-modal.js";
 import { ModelPickerModal } from "./modals/model-picker-modal.js";
@@ -240,7 +271,6 @@ import {
   buildToolGroupEntry,
   buildToolResultEntry,
   buildUserEntry,
-  formatAnswerForLog,
   formatScheduleDetails,
   isCouncilStartPatch,
   mapCouncilCardKey,
@@ -278,6 +308,8 @@ import {
 } from "./lsp-setup-controller.js";
 import { sanitizeContent } from "./utils/text.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
+import { buildAskcardAnswerEntry } from "./askcard-transcript.js";
+import { buildSprintFailedHaltData } from "./sprint-failed-halt.js";
 
 /**
  * A — recovery options shown when an /ideal run breaks mid-sprint. Resume /
@@ -325,9 +357,9 @@ function stripControlBytes(raw: string): string {
   return (
     raw
       // biome-ignore lint/suspicious/noControlCharactersInRegex: strip terminal bracketed-paste guards (ESC[200~ / ESC[201~)
-      .replace(/?\[20[01]~/g, "")
+      .replace(/\x1b?\[20[01]~/g, "")
       // biome-ignore lint/suspicious/noControlCharactersInRegex: strip control bytes + DEL from typed/pasted secrets
-      .replace(/[ -]/g, "")
+      .replace(/[\x00-\x1f\x7f]/g, "")
   );
 }
 
@@ -950,44 +982,7 @@ export function useAppLogic(props: AppLogicProps) {
     };
   }, [setConfiguredProviders, refreshProvidersWithKey]);
 
-  const [apiKeyPrompt, setApiKeyPrompt] = useState<{
-    provider: ProviderId;
-    value: string;
-    error: string | null;
-    reveal?: boolean;
-  } | null>(null);
-  const submitProviderKey = useCallback(async () => {
-    if (!apiKeyPrompt) return;
-    const key = apiKeyPrompt.value.trim();
-    if (!key) {
-      setApiKeyPrompt({ ...apiKeyPrompt, error: "Key cannot be empty" });
-      return;
-    }
-    try {
-      const ok = await setKeyForProvider(apiKeyPrompt.provider, key);
-      if (!ok) {
-        setApiKeyPrompt({ ...apiKeyPrompt, error: "Could not store key. Try `export <PROVIDER>_API_KEY=…`." });
-        return;
-      }
-      // Same reason as the OAuth path: boot skips a provider with no
-      // credentials, so without this the key is stored but the provider stays
-      // unusable until the next start.
-      try {
-        const { rewarmProviderFactory } = await import("../providers/warm.js");
-        await rewarmProviderFactory(apiKeyPrompt.provider);
-      } catch (err) {
-        console.error(
-          `[providers] ${apiKeyPrompt.provider} key stored but its factory could not be rebuilt; a restart may be needed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-      await refreshProvidersWithKey();
-      setApiKeyPrompt(null);
-    } catch (e) {
-      setApiKeyPrompt({ ...apiKeyPrompt, error: (e as Error).message });
-    }
-  }, [apiKeyPrompt, refreshProvidersWithKey]);
+  const [apiKeyPrompt, setApiKeyPrompt] = useState<ApiKeyPromptState | null>(null);
 
   // ── OAuth subscription login (browser-based) for openai / xai ───────────
   // One auth mode per provider: a successful OAuth login clears any stored API
@@ -1016,64 +1011,6 @@ export function useAppLogic(props: AppLogicProps) {
       alive = false;
     };
   }, []);
-
-  const startProviderOAuth = useCallback(
-    async (provider: ProviderId) => {
-      oauthCancelRef.current = false;
-      // Abort the PREVIOUS attempt's server before starting another: the
-      // browser flow binds a loopback callback on a two-port set, so a
-      // still-running one would make this attempt fail to bind.
-      oauthAbortRef.current?.abort();
-      oauthAbortRef.current = new AbortController();
-      setOAuthLogin({ provider, error: null });
-      try {
-        const { getOAuthProviderConfig } = await import("../providers/auth/registry.js");
-        const cfg = await getOAuthProviderConfig(provider);
-        if (!cfg) {
-          setOAuthLogin({ provider, error: "OAuth is not available for this provider." });
-          return;
-        }
-        // No allowManualCodePaste here: OpenTUI owns stdin. A flow that reads
-        // it takes every keystroke from the TUI and its readline close() leaves
-        // stdin paused — the "TUI is dead after signing in" bug.
-        const tokens = await cfg.provider.login({ signal: oauthAbortRef.current?.signal });
-        if (oauthCancelRef.current) return;
-        const { saveTokens } = await import("../providers/auth/token-store.js");
-        await saveTokens(provider, tokens);
-        // Exclusivity: OAuth login clears any stored API key for this provider.
-        try {
-          const { clearEnvVar } = await import("../providers/env-store.js");
-          const { ENV_BY_PROVIDER } = await import("../providers/keychain.js");
-          clearEnvVar(ENV_BY_PROVIDER[provider]);
-        } catch (err) {
-          console.error(
-            `[providers] could not clear the stored ${provider} key after OAuth login: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
-        // The factory bakes in the auth it saw when it was built, so the tokens
-        // we just saved reach nothing until it is rebuilt — that is why signing
-        // in only took effect after restarting the session.
-        try {
-          const { rewarmProviderFactory } = await import("../providers/warm.js");
-          await rewarmProviderFactory(provider);
-        } catch (err) {
-          console.error(
-            `[providers] ${provider} signed in but its factory could not be rebuilt; a restart may be needed: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
-        await refreshProvidersWithKey();
-        setOAuthLogin(null);
-      } catch (e) {
-        if (oauthCancelRef.current) return;
-        setOAuthLogin({ provider, error: (e as Error).message });
-      }
-    },
-    [refreshProvidersWithKey],
-  );
 
   const cancelProviderOAuth = useCallback(() => {
     oauthCancelRef.current = true;
@@ -1117,7 +1054,7 @@ export function useAppLogic(props: AppLogicProps) {
   const [sandboxSettingsEditing, setSandboxSettingsEditing] = useState<string | null>(null);
   const [sandboxSettingsEditBuffer, setSandboxSettingsEditBuffer] = useState("");
   const [showWalletPicker, setShowWalletPicker] = useState(false);
-  const [walletSettings, setWalletSettings] = useState<Required<PaymentSettings>>(() => loadPaymentSettings());
+  const [walletSettings, setWalletSettings] = useState<Record<string, unknown>>({});
   const [walletFocusIndex, setWalletFocusIndex] = useState(0);
   const [walletDisplayInfo, setWalletDisplayInfo] = useState<WalletDisplayInfo>({
     address: null,
@@ -1446,11 +1383,25 @@ export function useAppLogic(props: AppLogicProps) {
     hasContent: boolean;
     error?: string;
   } | null>(null);
+  /**
+   * The ONE path that opens the halt recovery card. Both pieces of state move
+   * together here so no site can open the card with a pre-selection of its own:
+   * `deriveHaltRecommendation` decides the index, and `HaltRecoveryCard` renders
+   * the reason from the SAME call on the same chunk, which is what keeps the
+   * marked option and the reason shown for it from drifting apart (they did on
+   * the post-debate card — 109aeef7). Every site used to call
+   * `setHaltSelectedIndex(0)`, and on the CB-3 card index 0 is "Init new
+   * project" — a scaffold, pre-selected on a tree that already exists.
+   */
+  const openHaltCard = useCallback((halt: HaltChunk) => {
+    setActiveHaltCard(halt);
+    setHaltSelectedIndex(deriveHaltRecommendation(halt).index);
+  }, []);
   // TEST SEAM — inject a synthetic halt chunk on boot when --inject-halt is set.
   // This lets harness E2E specs verify the recovery card without a real CB-3 run.
   useEffect(() => {
     if (!startupConfig.injectHalt) return;
-    setActiveHaltCard({
+    openHaltCard({
       type: "halt",
       reason: "no_recipe",
       detail: "Injected by --inject-halt for E2E testing.",
@@ -1472,21 +1423,19 @@ export function useAppLogic(props: AppLogicProps) {
         },
       ],
     });
-    setHaltSelectedIndex(0);
-  }, [startupConfig.injectHalt]);
+  }, [startupConfig.injectHalt, openHaltCard]);
   // TEST SEAM (A) — inject a synthetic sprint-failed recovery card on boot when
   // --inject-halt-sprint is set, so E2E specs can verify the break-recovery card.
   useEffect(() => {
     if (!startupConfig.injectHaltSprint) return;
-    setActiveHaltCard({
+    openHaltCard({
       type: "halt",
       reason: "sprint_failed",
       sprintN: 3,
       detail: "Injected by --inject-halt-sprint for E2E testing.",
       recovery_options: [...SPRINT_FAILED_RECOVERY_OPTIONS],
     });
-    setHaltSelectedIndex(0);
-  }, [startupConfig.injectHaltSprint]);
+  }, [startupConfig.injectHaltSprint, openHaltCard]);
   // Reap completed status rows after their hold window so the row clears.
   useEffect(() => {
     if (councilStatuses.length === 0) return;
@@ -2264,14 +2213,9 @@ export function useAppLogic(props: AppLogicProps) {
     setShowSandboxPicker(true);
   }, []);
 
-  const applyWalletSettings = useCallback((next: Required<PaymentSettings>) => {
-    setWalletSettings(next);
-    savePaymentSettings(next);
-  }, []);
-
   const openWalletPicker = useCallback(() => {
     setWalletFocusIndex(0);
-    setWalletSettings(loadPaymentSettings());
+    setWalletSettings({});
     setShowWalletPicker(true);
     // Wallet UI disabled — Stripe billing pending.
     setWalletDisplayInfo({ address: null, ethBalance: null, usdcBalance: null });
@@ -2291,8 +2235,6 @@ export function useAppLogic(props: AppLogicProps) {
 
   const setAsDefaultProvider = useCallback(
     (provider: ProviderId) => {
-      // Disabled providers cannot be default — router would just skip them.
-      if (disabledProviders.includes(provider)) return;
       const pickModel = (id: ProviderId): string | null => {
         for (const tier of ["balanced", "fast", "premium"] as const) {
           const m = getModelByTier(tier, id);
@@ -2303,6 +2245,9 @@ export function useAppLogic(props: AppLogicProps) {
       };
       const modelId = pickModel(provider);
       if (!modelId) return;
+      // Enter/D explicitly selects this provider. Re-enable it before switching
+      // models so the router and picker honor the selection after OAuth login.
+      setDisabledProvidersState(setProviderDisabled(provider, false));
       setDefaultProvider(provider);
       setDefaultProviderState(provider);
       agent.setModel(modelId);
@@ -2311,7 +2256,134 @@ export function useAppLogic(props: AppLogicProps) {
       saveProjectSettings({ model: modelId });
       saveUserSettings({ defaultModel: modelId, defaultProvider: provider });
     },
-    [agent, disabledProviders, setDefaultProviderState, setModel],
+    [agent, setDisabledProvidersState, setDefaultProviderState, setModel],
+  );
+
+  const submitProviderKey = useCallback(async () => {
+    if (!apiKeyPrompt) return;
+    if (apiKeyPrompt.saving) return;
+    const step = apiKeyPrompt.step ?? "key";
+    const setup = getProviderCapabilities(apiKeyPrompt.provider).workspaceSetup();
+    const key = step === "key" ? apiKeyPrompt.value.trim() : apiKeyPrompt.apiKey!;
+    if (!key || key.length < 20) {
+      setApiKeyPrompt({ ...apiKeyPrompt, error: "API key must contain at least 20 characters" });
+      return;
+    }
+    if (step === "key" && setup) {
+      setApiKeyPrompt({
+        ...apiKeyPrompt,
+        apiKey: key,
+        value: "",
+        step: "scope",
+        workspaceScoped: false,
+        reveal: false,
+        error: null,
+      });
+      return;
+    }
+    if (step === "scope" && !apiKeyPrompt.workspaceScoped) {
+      setApiKeyPrompt({ ...apiKeyPrompt, step: "workspace", value: "", error: null });
+      return;
+    }
+    if (step === "workspace") {
+      const error = workspaceIdError(apiKeyPrompt.provider, apiKeyPrompt.value);
+      if (error) {
+        setApiKeyPrompt({ ...apiKeyPrompt, error });
+        return;
+      }
+    }
+    setApiKeyPrompt({ ...apiKeyPrompt, saving: true, error: null });
+    try {
+      const ok = await saveProviderCredentials(apiKeyPrompt.provider, {
+        apiKey: key,
+        ...(step === "workspace" ? { workspaceId: apiKeyPrompt.value.trim() } : {}),
+      });
+      if (!ok) {
+        setApiKeyPrompt({ ...apiKeyPrompt, saving: false, error: "Could not store credentials. Please retry setup." });
+        return;
+      }
+      // Same reason as the OAuth path: boot skips a provider with no
+      // credentials, so without this the key is stored but the provider stays
+      // unusable until the next start.
+      const { rewarmProviderFactory } = await import("../providers/warm.js");
+      if (!(await rewarmProviderFactory(apiKeyPrompt.provider))) {
+        throw new Error("Credentials saved, but the provider connection could not be rebuilt. Press Enter to retry.");
+      }
+      await refreshProvidersWithKey();
+      if (apiKeyPrompt.activateAfterSave) setAsDefaultProvider(apiKeyPrompt.provider);
+      setApiKeyPrompt(null);
+    } catch (e) {
+      console.error(`[providers] ${apiKeyPrompt.provider} credential setup failed: ${(e as Error).message}`);
+      setApiKeyPrompt({ ...apiKeyPrompt, saving: false, error: (e as Error).message });
+    }
+  }, [apiKeyPrompt, refreshProvidersWithKey, setAsDefaultProvider]);
+
+  const startProviderOAuth = useCallback(
+    async (provider: ProviderId, activateAfterLogin = false) => {
+      oauthCancelRef.current = false;
+      // Abort the PREVIOUS attempt's server before starting another: the
+      // browser flow binds a loopback callback on a two-port set, so a
+      // still-running one would make this attempt fail to bind.
+      oauthAbortRef.current?.abort();
+      const attempt = new AbortController();
+      oauthAbortRef.current = attempt;
+      setOAuthLogin({ provider, error: null });
+      try {
+        const { getOAuthProviderConfig } = await import("../providers/auth/registry.js");
+        const cfg = await getOAuthProviderConfig(provider);
+        if (!cfg) {
+          setOAuthLogin({ provider, error: "OAuth is not available for this provider." });
+          return;
+        }
+        // No allowManualCodePaste here: OpenTUI owns stdin. A flow that reads
+        // it takes every keystroke from the TUI and its readline close() leaves
+        // stdin paused — the "TUI is dead after signing in" bug.
+        const tokens = await cfg.provider.login({ signal: attempt.signal });
+        if (attempt.signal.aborted || oauthCancelRef.current) return;
+        const { saveTokens } = await import("../providers/auth/token-store.js");
+        await saveTokens(provider, tokens);
+        // Exclusivity: OAuth login clears any stored API key for this provider.
+        try {
+          const { clearEnvVar } = await import("../providers/env-store.js");
+          const { ENV_BY_PROVIDER } = await import("../providers/keychain.js");
+          clearEnvVar(ENV_BY_PROVIDER[provider]);
+        } catch (err) {
+          console.error(
+            `[providers] could not clear the stored ${provider} key after OAuth login: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        // The factory bakes in the auth it saw when it was built, so the tokens
+        // we just saved reach nothing until it is rebuilt — that is why signing
+        // in only took effect after restarting the session.
+        try {
+          const { rewarmProviderFactory } = await import("../providers/warm.js");
+          await rewarmProviderFactory(provider);
+        } catch (err) {
+          console.error(
+            `[providers] ${provider} signed in but its factory could not be rebuilt; a restart may be needed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        await refreshProvidersWithKey();
+        if (attempt.signal.aborted || oauthCancelRef.current) return;
+        if (activateAfterLogin) setAsDefaultProvider(provider);
+        setOAuthLogin(null);
+        pushToast(
+          "info",
+          activateAfterLogin
+            ? `Signed in to ${cfg.displayName}. Active model: ${agent.getModel()}.`
+            : `Signed in to ${cfg.displayName}. Select a model to use this provider.`,
+        );
+      } catch (e) {
+        if (attempt.signal.aborted || oauthCancelRef.current) return;
+        logger.warn("ui", "Provider OAuth sign-in failed", { providerId: provider, error: (e as Error).message });
+        setOAuthLogin({ provider, error: (e as Error).message });
+      }
+    },
+    [refreshProvidersWithKey, setAsDefaultProvider, pushToast, agent],
   );
 
   const toggleModelDisabled = useCallback(
@@ -4190,6 +4262,38 @@ export function useAppLogic(props: AppLogicProps) {
                   });
                 }
                 break;
+              case "council_question_withdrawn":
+                // The waiter that opened a card gave up before an answer
+                // arrived (timeout/abort/error). Withdraw it the instant this
+                // arrives — never leave a card on screen that looks live while
+                // nothing is listening behind it (session 697419024ec8: a card
+                // sat 46 minutes past its own timeout and a late answer
+                // vanished with no trace once it finally came in).
+                if (chunk.councilQuestionWithdrawn) {
+                  const cqw = chunk.councilQuestionWithdrawn;
+                  if (pendingCouncilQuestionRef.current?.questionId === cqw.questionId) {
+                    setPendingCouncilQuestionSync(null);
+                    setCouncilCardStateSync(null);
+                    clearInterCardHeartbeat();
+                  }
+                  applyLocalAssistantDelta(`\n  ⚠ ${cqw.notice}\n`);
+                  try {
+                    agentRuntime?.emitEvent({
+                      t: "event",
+                      kind: "askcard-withdrawn",
+                      questionId: cqw.questionId,
+                      reason: cqw.reason,
+                      notice: cqw.notice,
+                    });
+                  } catch {
+                    /* best-effort */
+                  }
+                  logUIInteraction(agent.getSessionId() ?? undefined, {
+                    subtype: "askcard_withdrawn",
+                    data: { questionId: cqw.questionId, reason: cqw.reason, notice: cqw.notice },
+                  });
+                }
+                break;
               case "council_preflight":
                 if (chunk.councilPreflight) {
                   applyLocalAssistantDelta(chunk.content || "");
@@ -4316,14 +4420,14 @@ export function useAppLogic(props: AppLogicProps) {
                 break;
               case "halt":
                 if (chunk.haltChunk) {
-                  setActiveHaltCard(chunk.haltChunk);
-                  setHaltSelectedIndex(0);
+                  openHaltCard(chunk.haltChunk);
                   logUIInteraction(agent.getSessionId() ?? undefined, {
                     subtype: "halt_card_open",
                     data: {
                       reason: chunk.haltChunk.reason,
                       optionCount: chunk.haltChunk.recovery_options.length,
                       optionIds: chunk.haltChunk.recovery_options.map((o) => o.id),
+                      recommended: deriveHaltRecommendation(chunk.haltChunk).optionId,
                     },
                   });
                 }
@@ -5042,6 +5146,18 @@ export function useAppLogic(props: AppLogicProps) {
                   return [...prev.slice(0, -1), { ...last, content: base.endsWith("\n") ? base : `${base}\n` }];
                 });
               };
+              // Mark the turn as processing for the lifetime of the product loop.
+              // Same shape (and same bug) as /council above: `/ideal` is dispatched
+              // via a DETACHED `dispatchSlash(...).then(...)` promise, so the submit
+              // handler has already returned — and already reset isProcessing — by
+              // the time this callback runs. Without re-arming the ref here,
+              // `interruptActiveRun` bails on `!isProcessingRef.current`
+              // (use-app-logic.tsx:3847) and Esc never reaches `agent.abort()`,
+              // leaving a multi-minute (or wedged) /ideal run uncancellable. Set the
+              // ref (read synchronously by the Esc handler) AND the state (drives the
+              // "esc to interrupt" affordance).
+              isProcessingRef.current = true;
+              setIsProcessing(true);
               try {
                 const gen = (agent as any).runProductLoopV1(payload);
                 for await (const chunk of gen) {
@@ -5094,6 +5210,39 @@ export function useAppLogic(props: AppLogicProps) {
                         optionLabels: cq2.options?.map((o: { label: string }) => o.label),
                         recommendedLabel: cq2.options?.[cq2.defaultIndex ?? 0]?.label,
                       },
+                    });
+                  }
+                  if (chunk.type === "council_question_withdrawn" && chunk.councilQuestionWithdrawn) {
+                    const cqw2 = chunk.councilQuestionWithdrawn;
+                    if (pendingCouncilQuestionRef.current?.questionId === cqw2.questionId) {
+                      setPendingCouncilQuestionSync(null);
+                      setCouncilCardStateSync(null);
+                      clearInterCardHeartbeat();
+                    }
+                    setMessages((prev) => {
+                      const last = prev[prev.length - 1];
+                      if (last?.type === "assistant") {
+                        return [
+                          ...prev.slice(0, -1),
+                          { ...last, content: `${last.content ?? ""}\n  ⚠ ${cqw2.notice}\n` },
+                        ];
+                      }
+                      return [...prev, buildAssistantEntry(`\n  ⚠ ${cqw2.notice}\n`)];
+                    });
+                    try {
+                      agentRuntime?.emitEvent({
+                        t: "event",
+                        kind: "askcard-withdrawn",
+                        questionId: cqw2.questionId,
+                        reason: cqw2.reason,
+                        notice: cqw2.notice,
+                      });
+                    } catch {
+                      /* best-effort */
+                    }
+                    logUIInteraction(agent.getSessionId() ?? undefined, {
+                      subtype: "askcard_withdrawn",
+                      data: { questionId: cqw2.questionId, reason: cqw2.reason, notice: cqw2.notice },
                     });
                   }
                   if (chunk.type === "council_preflight" && chunk.councilPreflight) {
@@ -5243,14 +5392,14 @@ export function useAppLogic(props: AppLogicProps) {
                     // emits halt when CB-1 / CB-3 trip (e.g. no verify recipe in
                     // the target directory). Without this branch the chunk was
                     // silently dropped and the TUI looked frozen.
-                    setActiveHaltCard(chunk.haltChunk);
-                    setHaltSelectedIndex(0);
+                    openHaltCard(chunk.haltChunk);
                     logUIInteraction(agent.getSessionId() ?? undefined, {
                       subtype: "halt_card_open",
                       data: {
                         reason: chunk.haltChunk.reason,
                         optionCount: chunk.haltChunk.recovery_options.length,
                         optionIds: chunk.haltChunk.recovery_options.map((o: { id: string }) => o.id),
+                        recommended: deriveHaltRecommendation(chunk.haltChunk).optionId,
                       },
                     });
                   }
@@ -5277,7 +5426,7 @@ export function useAppLogic(props: AppLogicProps) {
                 const brokenSprintN =
                   payload.subcommand === "resume" ? undefined : (lastProductSprintNRef.current ?? undefined);
                 setMessages((prev) => [...prev, buildAssistantEntry(`Product loop error: ${errMsg}`)]);
-                setActiveHaltCard({
+                openHaltCard({
                   type: "halt",
                   reason: "sprint_failed",
                   sprintN: brokenSprintN,
@@ -5285,10 +5434,14 @@ export function useAppLogic(props: AppLogicProps) {
                   detail: `The run broke: ${errMsg}`,
                   recovery_options: SPRINT_FAILED_RECOVERY_OPTIONS,
                 });
-                setHaltSelectedIndex(0);
+                // The screen already shows `errMsg` (above); persist it too — a
+                // halt_card_open row used to carry only {reason, trigger,
+                // sprintN}, so a post-mortem on a run that broke this way had no
+                // error text in the DB at all (session 1f9f57415170 / run
+                // mu3ks8zwe8d5 needed exactly this and could not get it).
                 logUIInteraction(agent.getSessionId() ?? undefined, {
                   subtype: "halt_card_open",
-                  data: { reason: "sprint_failed", trigger: "loop_throw", sprintN: brokenSprintN ?? null },
+                  data: buildSprintFailedHaltData(e, { trigger: "loop_throw", sprintN: brokenSprintN ?? null }),
                 });
               } finally {
                 if (!firstChunkSeen) clearHeartbeat();
@@ -5304,6 +5457,11 @@ export function useAppLogic(props: AppLogicProps) {
                 setCouncilStatuses([]);
                 councilDoneAtRef.current.clear();
                 setProductStatus(null);
+                // Release the processing flag re-armed before the run so the
+                // composer returns to idle and a subsequent turn isn't blocked.
+                // Mirrors the /council finally below.
+                isProcessingRef.current = false;
+                setIsProcessing(false);
               }
               return;
             }
@@ -5395,6 +5553,39 @@ export function useAppLogic(props: AppLogicProps) {
                         optionLabels: cq3.options?.map((o) => o.label),
                         recommendedLabel: cq3.options?.[cq3.defaultIndex ?? 0]?.label,
                       },
+                    });
+                  }
+                  if (chunk.type === "council_question_withdrawn" && chunk.councilQuestionWithdrawn) {
+                    const cqw3 = chunk.councilQuestionWithdrawn;
+                    if (pendingCouncilQuestionRef.current?.questionId === cqw3.questionId) {
+                      setPendingCouncilQuestionSync(null);
+                      setCouncilCardStateSync(null);
+                      clearInterCardHeartbeat();
+                    }
+                    setMessages((prev) => {
+                      const last = prev[prev.length - 1];
+                      if (last?.type === "assistant") {
+                        return [
+                          ...prev.slice(0, -1),
+                          { ...last, content: `${last.content ?? ""}\n  ⚠ ${cqw3.notice}\n` },
+                        ];
+                      }
+                      return [...prev, buildAssistantEntry(`\n  ⚠ ${cqw3.notice}\n`)];
+                    });
+                    try {
+                      agentRuntime?.emitEvent({
+                        t: "event",
+                        kind: "askcard-withdrawn",
+                        questionId: cqw3.questionId,
+                        reason: cqw3.reason,
+                        notice: cqw3.notice,
+                      });
+                    } catch {
+                      /* best-effort */
+                    }
+                    logUIInteraction(agent.getSessionId() ?? undefined, {
+                      subtype: "askcard_withdrawn",
+                      data: { questionId: cqw3.questionId, reason: cqw3.reason, notice: cqw3.notice },
                     });
                   }
                   if (chunk.type === "council_preflight" && chunk.councilPreflight) {
@@ -5899,6 +6090,76 @@ export function useAppLogic(props: AppLogicProps) {
     initNewForm !== null ||
     pointToExistingForm !== null;
 
+  // --- Modal keyboard ownership ------------------------------------------
+  // Exactly one open modal owns the keyboard: the most recently opened one.
+  // The SAME resolution feeds (a) the `handleKey` branch guards below and
+  // (b) the `focused` prop each card renders, so the `focus` flag published in
+  // the semantic tree can never disagree with where the keys actually go.
+  // See src/ui/modal-focus.ts for the measurement this fixes.
+  const modalOpenOrderRef = useRef(createModalOpenOrder());
+  const modalKeyboardOwner = useMemo<ModalSurfaceId | null>(() => {
+    // Flags mirror the RENDER conditions in app.tsx (1787-2291) exactly: only a
+    // card that is actually rendered can carry the published `focus` flag, so a
+    // surface hidden by a sibling condition (`showMcpModal && !showMcpEditor`)
+    // must not be counted open here.
+    const open = collectOpenModalSurfaces({
+      planQuestions: !!activePlan?.questions?.length,
+      paymentApproval: pendingPaymentApproval !== null,
+      haltCard: activeHaltCard !== null,
+      initNewForm: initNewForm !== null,
+      pointToExistingForm: pointToExistingForm !== null,
+      askcard: pendingCouncilQuestion !== null,
+      preflight: pendingCouncilPreflight !== null,
+      apiKeyModal: showApiKeyModal,
+      // `setShowUpdateModal(true)` only ever runs after `setUpdateInfo(result)`
+      // in the same `.then` (:3702, :3709, :3713), so `showUpdateModal` implies
+      // the `updateInfo` half of app.tsx's render condition.
+      updateModal: showUpdateModal,
+      mcpNeedsKeyCard: needsKeyQueue.length > 0,
+      eeConnectCard: eeConnectVisible && needsKeyQueue.length === 0,
+      lspSetupCard: lspSetupVisible && needsKeyQueue.length === 0 && !eeConnectVisible,
+      mcpModal: showMcpModal && !showMcpEditor,
+      mcpEditor: showMcpEditor,
+      scheduleModal: showScheduleModal,
+      subagentsModal: showAgentsModal && !showAgentsEditor,
+      subagentEditor: showAgentsEditor,
+      modelPicker: showModelPicker,
+      sessionPicker: showSessionPicker,
+      walletPicker: showWalletPicker,
+      sandboxPicker: showSandboxPicker,
+      connectModal: showConnectModal,
+      telegramTokenModal: showTelegramTokenModal,
+      telegramPairModal: showTelegramPairModal,
+    });
+    reconcileModalOpenOrder(modalOpenOrderRef.current, open);
+    return resolveModalKeyboardOwner(modalOpenOrderRef.current, open);
+  }, [
+    activeHaltCard,
+    initNewForm,
+    pointToExistingForm,
+    pendingCouncilQuestion,
+    pendingCouncilPreflight,
+    activePlan,
+    pendingPaymentApproval,
+    showApiKeyModal,
+    showUpdateModal,
+    needsKeyQueue,
+    eeConnectVisible,
+    lspSetupVisible,
+    showMcpModal,
+    showMcpEditor,
+    showScheduleModal,
+    showAgentsModal,
+    showAgentsEditor,
+    showModelPicker,
+    showSessionPicker,
+    showWalletPicker,
+    showSandboxPicker,
+    showConnectModal,
+    showTelegramTokenModal,
+    showTelegramPairModal,
+  ]);
+
   const showPlanPanel = !!activePlan?.questions?.length;
   const planQuestions = activePlan?.questions ?? [];
   const isSinglePlan = planQuestions.length === 1 && planQuestions[0]?.type !== "multiselect";
@@ -6176,8 +6437,53 @@ export function useAppLogic(props: AppLogicProps) {
         }
       }
 
-      // Point-to-existing form intercepts all input while open.
-      if (pointToExistingForm) {
+      // --- Modal keyboard ownership (see src/ui/modal-focus.ts) -----------
+      // Resolved synchronously here, not read off `modalKeyboardOwner`: a
+      // harness key burst can land before React commits the render that
+      // recomputed the memo, and the askcard branch below already reads
+      // `pendingCouncilQuestionRef` for exactly that reason. Reconcile is
+      // idempotent, so running it from both places is safe. The two can differ
+      // for at most one render (ref nulled, state not yet committed); routing
+      // always follows THIS resolution, and the published `focus` catches up on
+      // the commit that removes the card anyway.
+      // Flags mirror, expression for expression, the branch conditions below:
+      // a ref where the branch reads a ref, state where it reads state. Without
+      // that parity the guard and the branch it guards could disagree.
+      const openModalSurfacesNow = collectOpenModalSurfaces({
+        // `showPlanPanel` is exactly what the branch at the bottom tests; using
+        // the same identifier (not a re-derivation from `activePlan`) keeps the
+        // guard and the branch condition literally the same expression.
+        planQuestions: showPlanPanel,
+        paymentApproval: pendingPaymentApproval !== null,
+        haltCard: activeHaltCard !== null,
+        initNewForm: initNewForm !== null,
+        pointToExistingForm: pointToExistingForm !== null,
+        askcard: pendingCouncilQuestionRef.current !== null,
+        preflight: pendingCouncilPreflight !== null,
+        apiKeyModal: showApiKeyModalRef.current,
+        updateModal: showUpdateModalRef.current,
+        mcpNeedsKeyCard: needsKeyQueueRef.current.length > 0,
+        eeConnectCard: eeConnectVisibleRef.current && needsKeyQueueRef.current.length === 0,
+        lspSetupCard:
+          lspSetupVisibleRef.current && needsKeyQueueRef.current.length === 0 && !eeConnectVisibleRef.current,
+        mcpModal: showMcpModalRef.current && !showMcpEditorRef.current,
+        mcpEditor: showMcpEditorRef.current,
+        scheduleModal: showScheduleModalRef.current,
+        subagentsModal: showAgentsModalRef.current && !showAgentsEditorRef.current,
+        subagentEditor: showAgentsEditorRef.current,
+        modelPicker: showModelPicker,
+        sessionPicker: showSessionPicker,
+        walletPicker: showWalletPicker,
+        sandboxPicker: showSandboxPicker,
+        connectModal: showConnectModalRef.current,
+        telegramTokenModal: showTelegramTokenModalRef.current,
+        telegramPairModal: showTelegramPairModalRef.current,
+      });
+      reconcileModalOpenOrder(modalOpenOrderRef.current, openModalSurfacesNow);
+      const modalOwnerNow = resolveModalKeyboardOwner(modalOpenOrderRef.current, openModalSurfacesNow);
+
+      // Point-to-existing form intercepts all input while it owns the keyboard.
+      if (pointToExistingForm && modalOwnsKeyboard(modalOwnerNow, "point-to-existing-form")) {
         if (pointToExistingForm.step === "input") {
           if (isEscapeKey(key)) {
             setPointToExistingForm(null);
@@ -6285,7 +6591,7 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
       // Init-new form intercepts all input while open.
-      if (initNewForm) {
+      if (initNewForm && modalOwnsKeyboard(modalOwnerNow, "init-new-form")) {
         if (initNewForm.step === "name") {
           if (isEscapeKey(key)) {
             setInitNewForm(null);
@@ -6508,7 +6814,7 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
       // Halt recovery card intercepts all input until dismissed.
-      if (activeHaltCard) {
+      if (activeHaltCard && modalOwnsKeyboard(modalOwnerNow, "ideal-halt-card")) {
         if (isEscapeKey(key)) {
           setActiveHaltCard(null);
           setHaltSelectedIndex(0);
@@ -6523,6 +6829,10 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         if (key.name === "return") {
+          // `deriveHaltRecommendation` returns -1 when every offered option is
+          // destructive: nothing is pre-selected, so Enter must not stand in for
+          // a choice the user never made. ↑/↓ moves onto the list first.
+          if (haltSelectedIndex < 0) return;
           const chosen = activeHaltCard.recovery_options[haltSelectedIndex];
           if (chosen) {
             logUIInteraction(agent.getSessionId() ?? undefined, {
@@ -6606,7 +6916,7 @@ export function useAppLogic(props: AppLogicProps) {
       // setPendingCouncilQuestionSync so the handler sees the new question
       // immediately. (Mirror of councilCardStateRef pattern.)
       const pendingQuestion = pendingCouncilQuestionRef.current;
-      if (pendingQuestion && councilCardStateRef.current) {
+      if (pendingQuestion && councilCardStateRef.current && modalOwnsKeyboard(modalOwnerNow, "askcard")) {
         const cardKey = mapCouncilCardKey(key);
         if (cardKey) {
           // Mark the key consumed BEFORE mutating card state: the renderer's
@@ -6719,21 +7029,45 @@ export function useAppLogic(props: AppLogicProps) {
               ans.kind === "choice" || ans.kind === "freetext" ? cardOptions[cardIdx]?.label : undefined;
             setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
-            agent.respondToCouncilQuestion(qid, ans.text, pendingQuestion.question);
+            const respondResult = agent.respondToCouncilQuestion(qid, ans.text, pendingQuestion.question);
+            if (respondResult?.stale) {
+              // A race: the backend already withdrew this question (timeout,
+              // abort, or the run ending) before this keypress reached it —
+              // the card should already be gone by the time this can happen
+              // (the council_question_withdrawn handler clears it), so this is
+              // defense-in-depth, not the normal path. Never apply it silently
+              // (session 697419024ec8 measured exactly this vanishing): tell
+              // the user, log it distinctly, and stop before any of the
+              // normal echo/heartbeat/askcard-answered bookkeeping runs.
+              pushToast("warn", "This question was already withdrawn — your answer was not applied.");
+              logUIInteraction(agent.getSessionId() ?? undefined, {
+                subtype: "askcard_answered_stale",
+                data: {
+                  questionId: qid,
+                  answerKind: ans.kind ?? "choice",
+                  answerText: ans.text,
+                  reason: respondResult.staleReason,
+                },
+              });
+              return;
+            }
             // Suppress the transcript echo for no-op "Skip — leave as-is" choices:
             // they contribute nothing, and a post-debate refine over N sections
             // produces N blank "· Skip" user rows (transcript garbage — see the
             // 2217600e1f27 export). Every real answer / non-skip choice still echoes.
             const isNoopSkip = ans.kind === "choice" && !ans.text.trim() && /^skip\b/i.test(selectedOptionLabel ?? "");
             if (!isNoopSkip) {
+              // U1 — ONE transcript record pairing the question (muted
+              // sourceLabel) with the answer (content), instead of an
+              // answer-only bubble. The council generator's own echo is
+              // gated off for this questionId (QuestionResponder
+              // .wasAnsweredByCard) so the record is not duplicated.
               setMessages((prev) => [
                 ...prev,
-                buildUserEntry(
-                  formatAnswerForLog(ans, {
-                    selectedOptionLabel,
-                    questionId: pendingQuestion.question?.match(/^Question:\s*(\w+)/)?.[1],
-                  }),
-                ),
+                buildAskcardAnswerEntry(pendingQuestion, ans, {
+                  selectedOptionLabel,
+                  questionId: pendingQuestion.question?.match(/^Question:\s*(\w+)/)?.[1],
+                }),
               ]);
             }
             // E2 — start a heartbeat while we wait for the NEXT chunk from
@@ -6816,7 +7150,32 @@ export function useAppLogic(props: AppLogicProps) {
             // reads an empty submit as "take the recommended option" (that is the
             // fix for the answer silently vanishing); an Esc must stay a no-op,
             // and both used to be indistinguishable at the council side.
-            agent.respondToCouncilQuestion(qid, COUNCIL_ANSWER_DISMISSED, pendingQuestion.question);
+            // U1 — passing the question text here also marks this dismissal
+            // "answered via card" (QuestionResponder.wasAnsweredByCard), so a
+            // dismissed card now leaves NO transcript trace instead of the old
+            // blank "  ↳ " line — intended: nothing was actually answered.
+            const dismissResult = agent.respondToCouncilQuestion(
+              qid,
+              COUNCIL_ANSWER_DISMISSED,
+              pendingQuestion.question,
+            );
+            if (dismissResult?.stale) {
+              // The question was already withdrawn before this dismissal reached
+              // the backend — a no-op either way, but still recorded distinctly
+              // rather than folded into a normal askcard_cancel row (No Silent
+              // Catch: a stale gesture must be diagnosable, not indistinguishable
+              // from an ordinary dismissal).
+              logUIInteraction(agent.getSessionId() ?? undefined, {
+                subtype: "askcard_answered_stale",
+                data: {
+                  questionId: qid,
+                  answerKind: "dismiss",
+                  answerText: COUNCIL_ANSWER_DISMISSED,
+                  reason: dismissResult.staleReason,
+                },
+              });
+              return;
+            }
             // Task 2.4 — emit askcard-cancel harness event (agent-mode only).
             try {
               agentRuntime?.emitEvent({
@@ -6835,7 +7194,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
       }
-      if (showPlanPanel) {
+      if (showPlanPanel && modalOwnsKeyboard(modalOwnerNow, "plan-questions")) {
         const q = planQuestions[pqs.tab];
 
         // Escape always dismisses
@@ -6960,7 +7319,7 @@ export function useAppLogic(props: AppLogicProps) {
 
         return;
       }
-      if (showUpdateModalRef.current) {
+      if (showUpdateModalRef.current && modalOwnsKeyboard(modalOwnerNow, "update-modal")) {
         if (isEscapeKey(key)) {
           setShowUpdateModal(false);
           return;
@@ -6971,7 +7330,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showMcpEditorRef.current) {
+      if (showMcpEditorRef.current && modalOwnsKeyboard(modalOwnerNow, "mcp-editor")) {
         if (isEscapeKey(key)) {
           setShowMcpEditor(false);
           setMcpEditorError(null);
@@ -6996,7 +7355,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
       }
-      if (showAgentsEditorRef.current) {
+      if (showAgentsEditorRef.current && modalOwnsKeyboard(modalOwnerNow, "subagent-editor")) {
         if (isEscapeKey(key)) {
           setShowAgentsEditor(false);
           setAgentsEditorError(null);
@@ -7036,7 +7395,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
       }
-      if (showMcpModalRef.current) {
+      if (showMcpModalRef.current && modalOwnsKeyboard(modalOwnerNow, "mcp-modal")) {
         const row = mcpRows[mcpModalIndex];
         if (isEscapeKey(key)) {
           setShowMcpEditor(false);
@@ -7088,7 +7447,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showScheduleModalRef.current) {
+      if (showScheduleModalRef.current && modalOwnsKeyboard(modalOwnerNow, "schedule-modal")) {
         const row = scheduleRows[scheduleModalIndex];
         if (isEscapeKey(key)) {
           setShowScheduleModal(false);
@@ -7125,7 +7484,11 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showAgentsModalRef.current && !showAgentsEditorRef.current) {
+      if (
+        showAgentsModalRef.current &&
+        !showAgentsEditorRef.current &&
+        modalOwnsKeyboard(modalOwnerNow, "subagents-modal")
+      ) {
         const row = agentRows[agentsModalIndex];
         if (isEscapeKey(key)) {
           setShowAgentsModal(false);
@@ -7165,7 +7528,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (needsKeyQueueRef.current.length > 0) {
+      if (needsKeyQueueRef.current.length > 0 && modalOwnsKeyboard(modalOwnerNow, "mcp-needs-key-card")) {
         const server = needsKeyQueueRef.current[0];
         const mode = needsKeyModeRef.current;
         if (mode === "validating") return; // swallow input while the key probe runs
@@ -7199,7 +7562,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (eeConnectVisibleRef.current) {
+      if (eeConnectVisibleRef.current && modalOwnsKeyboard(modalOwnerNow, "ee-connect-card")) {
         const mode = eeConnectModeRef.current;
         if (mode === "validating") return; // swallow input while the probe runs
         if (mode === "input") {
@@ -7238,7 +7601,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (lspSetupVisibleRef.current) {
+      if (lspSetupVisibleRef.current && modalOwnsKeyboard(modalOwnerNow, "lsp-setup-card")) {
         // Multi-select card: this branch must consume EVERY key (including
         // Space) so nothing falls through to the composer behind the modal.
         const mode = lspSetupModeRef.current;
@@ -7290,7 +7653,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showTelegramTokenModalRef.current) {
+      if (showTelegramTokenModalRef.current && modalOwnsKeyboard(modalOwnerNow, "telegram-token-modal")) {
         if (isEscapeKey(key)) {
           setShowTelegramTokenModal(false);
           setTelegramTokenError(null);
@@ -7301,7 +7664,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showTelegramPairModalRef.current) {
+      if (showTelegramPairModalRef.current && modalOwnsKeyboard(modalOwnerNow, "telegram-pair-modal")) {
         if (isEscapeKey(key)) {
           setShowTelegramPairModal(false);
           setTelegramPairError(null);
@@ -7312,7 +7675,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showConnectModalRef.current) {
+      if (showConnectModalRef.current && modalOwnsKeyboard(modalOwnerNow, "connect-modal")) {
         if (isEscapeKey(key)) {
           setShowConnectModal(false);
           return;
@@ -7332,7 +7695,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showApiKeyModalRef.current) {
+      if (showApiKeyModalRef.current && modalOwnsKeyboard(modalOwnerNow, "api-key-modal")) {
         if (isEscapeKey(key)) {
           closeApiKeyModal();
           return;
@@ -7470,7 +7833,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showSessionPicker) {
+      if (showSessionPicker && modalOwnsKeyboard(modalOwnerNow, "session-picker")) {
         if (isEscapeKey(key)) {
           setShowSessionPicker(false);
           return;
@@ -7514,7 +7877,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showModelPicker) {
+      if (showModelPicker && modalOwnsKeyboard(modalOwnerNow, "model-picker")) {
         // Sub-modal: OAuth login in progress (browser-based). Only Esc (cancel)
         // is actionable — the flow completes via the browser/loopback callback.
         if (oauthLogin) {
@@ -7526,12 +7889,21 @@ export function useAppLogic(props: AppLogicProps) {
         }
         // Sub-modal: API key prompt for the focused provider.
         if (apiKeyPrompt) {
+          if (apiKeyPrompt.saving) return;
           if (isEscapeKey(key)) {
             setApiKeyPrompt(null);
             return;
           }
           if (key.name === "return") {
             void submitProviderKey();
+            return;
+          }
+          if (apiKeyPrompt.step === "scope") {
+            if (key.name === "up" || key.name === "1") {
+              setApiKeyPrompt((s) => (s ? { ...s, workspaceScoped: true } : s));
+            } else if (key.name === "down" || key.name === "2") {
+              setApiKeyPrompt((s) => (s ? { ...s, workspaceScoped: false } : s));
+            }
             return;
           }
           if (key.name === "backspace") {
@@ -7542,7 +7914,7 @@ export function useAppLogic(props: AppLogicProps) {
             return;
           }
           // Ctrl+R toggles plaintext reveal so the user can verify a pasted key.
-          if (key.name === "r" && key.ctrl && !key.meta) {
+          if (key.name === "r" && key.ctrl && !key.meta && (!apiKeyPrompt.step || apiKeyPrompt.step === "key")) {
             setApiKeyPrompt((s) => (s ? { ...s, reveal: !s.reveal } : s));
             return;
           }
@@ -7596,12 +7968,13 @@ export function useAppLogic(props: AppLogicProps) {
           // /login is gone, so this picker is the single auth surface: K adds a
           // key, Enter signs in via OAuth where the provider supports it.
           if (providersWithKey.has(p)) setAsDefaultProvider(p);
-          else if (oauthProviders.has(p)) void startProviderOAuth(p);
+          else if (oauthProviders.has(p)) void startProviderOAuth(p, true);
+          else setApiKeyPrompt({ provider: p, value: "", error: null, activateAfterSave: true });
           return;
         }
         return;
       }
-      if (pendingPaymentApproval) {
+      if (pendingPaymentApproval && modalOwnsKeyboard(modalOwnerNow, "payment-approval")) {
         if (isEscapeKey(key)) {
           setPendingPaymentApproval(null);
           return;
@@ -7624,7 +7997,11 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (pendingCouncilPreflight && preflightCardStateRef.current) {
+      if (
+        pendingCouncilPreflight &&
+        preflightCardStateRef.current &&
+        modalOwnsKeyboard(modalOwnerNow, "askcard-preflight")
+      ) {
         const cardKey = mapCouncilCardKey(key);
         if (cardKey) {
           const synthetic = buildPreflightQuestion(pendingCouncilPreflight);
@@ -7673,7 +8050,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (showWalletPicker) {
+      if (showWalletPicker && modalOwnsKeyboard(modalOwnerNow, "wallet-picker")) {
         if (isEscapeKey(key)) {
           setShowWalletPicker(false);
           return;
@@ -7698,7 +8075,7 @@ export function useAppLogic(props: AppLogicProps) {
             key.name === "right" ? options[Math.min(options.length - 1, idx + 1)] : options[Math.max(0, idx - 1)];
           if (next && next !== current && focusedWalletRow.apply) {
             const patch = focusedWalletRow.apply(walletSettings, next);
-            applyWalletSettings({ ...walletSettings, ...patch });
+            setWalletSettings({ ...walletSettings, ...patch });
           }
           return;
         }
@@ -7710,13 +8087,13 @@ export function useAppLogic(props: AppLogicProps) {
           const next = options[(idx + 1) % options.length];
           if (next && focusedWalletRow.apply) {
             const patch = focusedWalletRow.apply(walletSettings, next);
-            applyWalletSettings({ ...walletSettings, ...patch });
+            setWalletSettings({ ...walletSettings, ...patch });
           }
           return;
         }
         return;
       }
-      if (showSandboxPicker) {
+      if (showSandboxPicker && modalOwnsKeyboard(modalOwnerNow, "sandbox-picker")) {
         const visibleRows = getSandboxVisibleRows(sandboxMode);
 
         if (sandboxSettingsEditing) {
@@ -8074,7 +8451,7 @@ export function useAppLogic(props: AppLogicProps) {
       walletSettings,
       walletFocusIndex,
       walletDisplayInfo,
-      applyWalletSettings,
+      setWalletSettings,
       slashMenuIndex,
       submitApiKey,
       submitPlanAnswers,
@@ -8122,7 +8499,10 @@ export function useAppLogic(props: AppLogicProps) {
       if (apiKeyPrompt) {
         event.preventDefault();
         const pasted = sanitizeSecretInput(decodePasteBytes(event.bytes));
-        if (pasted) setApiKeyPrompt((s) => (s ? { ...s, value: s.value + pasted, error: null } : s));
+        if (pasted)
+          setApiKeyPrompt((s) =>
+            s && s.step !== "scope" && !s.saving ? { ...s, value: s.value + pasted, error: null } : s,
+          );
         return;
       }
 
@@ -8255,8 +8635,30 @@ export function useAppLogic(props: AppLogicProps) {
       const qid = pendingCouncilQuestion.questionId;
       setPendingCouncilQuestionSync(null);
       setCouncilCardStateSync(null);
-      agent.respondToCouncilQuestion(qid, message.trim(), pendingCouncilQuestion.question);
-      setMessages((prev) => [...prev, buildUserEntry(message.trim())]);
+      const freetextResult = agent.respondToCouncilQuestion(qid, message.trim(), pendingCouncilQuestion.question);
+      if (freetextResult?.stale) {
+        // Same race as the card-driven answer path: the question was already
+        // withdrawn before this legacy free-text answer reached the backend.
+        // Never apply it silently — tell the user and record it distinctly.
+        pushToast("warn", "This question was already withdrawn — your answer was not applied.");
+        logUIInteraction(agent.getSessionId() ?? undefined, {
+          subtype: "askcard_answered_stale",
+          data: {
+            questionId: qid,
+            answerKind: "freetext",
+            answerText: message.trim(),
+            reason: freetextResult.staleReason,
+          },
+        });
+        return;
+      }
+      // U1 — same paired question+answer record as the card-driven answer
+      // path above (this is the legacy fallback where the user typed the
+      // answer into the main composer instead of the card).
+      setMessages((prev) => [
+        ...prev,
+        buildAskcardAnswerEntry(pendingCouncilQuestion, { kind: "freetext", text: message.trim() }, {}),
+      ]);
       return;
     }
     // S5 — steer mode (ctrl+s). While a debate is live, what the user types goes
@@ -8308,6 +8710,7 @@ export function useAppLogic(props: AppLogicProps) {
     clearLiveTurnUi,
     handleCommand,
     processMessage,
+    pushToast,
     replacePasteBlocks,
     scrollToBottom,
     scrollToBottomForced,
@@ -8359,6 +8762,7 @@ export function useAppLogic(props: AppLogicProps) {
     apiKeyPrompt,
     blockPrompt,
     btwState,
+    modalKeyboardOwner,
     oauthLogin,
     oauthProviders,
     configuredProviders,

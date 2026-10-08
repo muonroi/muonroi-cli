@@ -213,6 +213,68 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
     expect(tr.output.value).toMatch(/elided by sub-agent compactor/);
   });
 
+  // Regression: an elided tool-call `input` is serialized into OpenAI
+  // `tool_calls[].function.arguments`, which the spec defines as a JSON string
+  // that parses to an OBJECT. A bare string parses to a JSON *string* and is
+  // malformed there — StepFun renders history through a Jinja chat template
+  // that does `arguments | fromjson` and iterates the result, so a non-object
+  // 400s the entire request with "No filter named 'fromjson' found"
+  // (measured 2026-09-03, step-3.7-flash). Every elided tool-call input must
+  // therefore stay an object, while remaining un-copyable as a tool schema.
+  it("elided tool-call args stay a JSON object (wire-valid arguments)", () => {
+    // Tool-call args are only elided above 80 chars, so buildHistory's tiny
+    // `{path}` inputs are left alone — give the calls a real payload.
+    const msgs = buildHistory(10, 10);
+    for (const m of msgs) {
+      if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
+      for (const part of m.content as unknown as Array<Record<string, unknown>>) {
+        if (part.type === "tool-call") {
+          part.input = JSON.stringify({ path: "/tmp/f.txt", contents: "y".repeat(500) });
+        }
+      }
+    }
+    const out = compactSubAgentMessages(msgs);
+
+    let checked = 0;
+    for (const m of out) {
+      if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
+      for (const part of m.content as unknown as ReadonlyArray<Record<string, unknown>>) {
+        if (part.type !== "tool-call") continue;
+        const input = part.input;
+        if (typeof input === "string" && !input.startsWith("[earlier call args elided")) continue;
+        // Elided inputs specifically: must be an object, never a bare marker string.
+        if (typeof input === "object" && input !== null) {
+          const note = (input as Record<string, unknown>).__elided_note;
+          if (typeof note !== "string") continue;
+          expect(note).toMatch(/elided by sub-agent compactor/);
+          // What actually goes on the wire must parse back to an object.
+          expect(JSON.parse(JSON.stringify(input))).toBeTypeOf("object");
+          expect(Array.isArray(JSON.parse(JSON.stringify(input)))).toBe(false);
+          checked++;
+        } else {
+          expect.unreachable(`elided tool-call input must be an object, got ${typeof input}`);
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(0); // the fixture must actually elide something
+  });
+
+  it("re-compacting an already-elided tool-call input is a no-op (idempotent)", () => {
+    const msgs = buildHistory(10, 10);
+    for (const m of msgs) {
+      if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
+      for (const part of m.content as unknown as Array<Record<string, unknown>>) {
+        if (part.type === "tool-call") {
+          part.input = JSON.stringify({ path: "/tmp/f.txt", contents: "y".repeat(500) });
+        }
+      }
+    }
+    const once = compactSubAgentMessages(msgs);
+    const twice = compactSubAgentMessages(once);
+    // Byte-stable: a second pass must not re-wrap the marker (cache-prefix churn).
+    expect(JSON.stringify(twice)).toBe(JSON.stringify(once));
+  });
+
   it("respects custom threshold (no compaction when threshold raised)", () => {
     const msgs = buildHistory(10, 10);
     const out = compactSubAgentMessages(msgs, { thresholdChars: 500_000 });

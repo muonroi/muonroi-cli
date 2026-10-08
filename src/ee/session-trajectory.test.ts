@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { bestEffortRemove } from "../__test-stubs__/cleanup";
 import {
   appendTrajectoryEvent,
   disableTrajectoryLogging,
@@ -20,7 +21,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await fs.rm(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {});
+  await bestEffortRemove(tmp, "src/ee/session-trajectory.test.ts");
 });
 
 describe("session-trajectory / append", () => {

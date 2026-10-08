@@ -61,6 +61,7 @@ export function McpBrowserModal({
   selectedIndex,
   searchQuery,
   rows,
+  focused,
 }: {
   t: Theme;
   width: number;
@@ -68,6 +69,12 @@ export function McpBrowserModal({
   selectedIndex: number;
   searchQuery: string;
   rows: McpBrowserRow[];
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   */
+  focused?: boolean;
 }) {
   const listRef = useRef<ScrollBoxRenderable>(null);
 
@@ -89,7 +96,7 @@ export function McpBrowserModal({
   const maxHeight = Math.floor(height * 0.68);
   const panelHeight = Math.min(contentHeight, maxHeight);
   return (
-    <Semantic id="mcp-modal" role="dialog" name="MCP Servers" isModal>
+    <Semantic id="mcp-modal" role="dialog" name="MCP Servers" focus={focused || undefined} isModal>
       <box
         position="absolute"
         left={0}
@@ -244,6 +251,7 @@ export function McpEditorModal({
   cwdRef,
   envRef,
   onSubmit,
+  focused,
 }: {
   t: Theme;
   width: number;
@@ -261,6 +269,12 @@ export function McpEditorModal({
   cwdRef: RefObject<TextareaRenderable | null>;
   envRef: RefObject<TextareaRenderable | null>;
   onSubmit: () => void;
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   */
+  focused?: boolean;
 }) {
   const panelHeight = Math.min(30, Math.floor(height * 0.82));
   const isRemote = draft.transport === "http" || draft.transport === "sse";
@@ -277,7 +291,7 @@ export function McpEditorModal({
   }, [draft, syncKey, labelRef, urlRef, headersRef, commandRef, argsRef, cwdRef, envRef]);
 
   return (
-    <Semantic id="mcp-editor" role="dialog" name={title} isModal>
+    <Semantic id="mcp-editor" role="dialog" name={title} focus={focused || undefined} isModal>
       <box
         position="absolute"
         left={0}

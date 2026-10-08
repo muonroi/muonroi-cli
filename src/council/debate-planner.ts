@@ -9,6 +9,7 @@ import { logger } from "../utils/logger.js";
 import { type CouncilExperienceMode, getProviderStallTimeoutMs } from "../utils/settings.js";
 import { tracedGenerate } from "./llm.js";
 import { buildDebatePlanPrompt } from "./prompts.js";
+import { differentiateOverlappingStances } from "./stance-overlap.js";
 import type {
   ClarifiedSpec,
   CouncilLLM,
@@ -154,6 +155,28 @@ function enforceAnalysisIntentShape(plan: DebatePlan, taskType?: string): Debate
   return { ...plan, outputShape: { ...plan.outputShape, kind: "evaluation" } };
 }
 
+/**
+ * Defect (a) — two seats on the same ground. The planner prompt asks for
+ * distinct lenses and `sanitizeStances` never checked, so run mttwpmu8ee5b
+ * seated a Researcher and a Cost-Controller who opened with the same claim and
+ * a panel of four argued three positions. This narrows the subsumed seat's lens
+ * (never drops the seat) and LOGS the overlap so it is visible rather than
+ * inferred from the transcript afterwards. See src/council/stance-overlap.ts.
+ */
+function differentiateOverlaps(plan: DebatePlan): DebatePlan {
+  const { stances, overlaps } = differentiateOverlappingStances(plan.stances);
+  if (overlaps.length === 0) return plan;
+  for (const o of overlaps) {
+    logger.warn(
+      "orchestrator",
+      `[debate-planner] stance overlap (${o.kind}): "${plan.stances[o.subsumedIndex]?.name}" adds nothing over ` +
+        `"${plan.stances[o.coveredByIndex]?.name}"${o.shared.length ? ` on ${o.shared.join("/")}` : ""}; ` +
+        "narrowing its lens so the seat still contributes",
+    );
+  }
+  return { ...plan, stances };
+}
+
 export async function* planDebate(
   spec: ClarifiedSpec,
   leaderModelId: string,
@@ -169,9 +192,12 @@ export async function* planDebate(
 
   // Every return path funnels through here: auditor + product-stance injection,
   // plus the deterministic analysis-intent backstop (applied first so a coerced
-  // shape doesn't get a spurious product stance injected for it).
+  // shape doesn't get a spurious product stance injected for it). The overlap
+  // pass runs LAST, so the injected seats are checked against the planner's too.
   const finalizePlan = (plan: DebatePlan): DebatePlan =>
-    ensureProductStance(injectAuditorStance(enforceAnalysisIntentShape(plan, taskType), eeWarnings, experienceMode));
+    differentiateOverlaps(
+      ensureProductStance(injectAuditorStance(enforceAnalysisIntentShape(plan, taskType), eeWarnings, experienceMode)),
+    );
 
   // Build calibration context from PIL metadata
   const pilCalibration: string[] = [];

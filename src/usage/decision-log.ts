@@ -19,6 +19,7 @@
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { redactSecrets } from "../utils/logger.js";
 
 export type DecisionKind =
   | "auto-council"
@@ -57,7 +58,20 @@ export async function appendDecisionLog(entry: DecisionLogEntry, homeOverride?: 
   try {
     const fp = logPath(homeOverride);
     await fs.mkdir(path.dirname(fp), { recursive: true });
-    await fs.appendFile(fp, `${JSON.stringify(entry)}\n`);
+    // Redact the SERIALIZED line, at the one choke point every caller shares,
+    // rather than per-caller: `meta` is typed `Record<string, unknown>` so no
+    // call site is structurally prevented from putting a credential in it, and
+    // one already does. `permission-mode.ts`'s `appendAudit` passes
+    // `meta: { context: event.context }` verbatim, and `context.command` is the
+    // raw shell command the MODEL proposed — `export DEEPSEEK_API_KEY=…` or a
+    // `curl -H "x-api-key: …"` landed here in plain text on every yolo /
+    // permission override.
+    //
+    // `redactSecrets` is span-level, so `reason`, `kind` and `taken` stay fully
+    // readable and the command still shows WHICH credential it touched. It is
+    // also JSON-safe by contract (see its doc comment), which matters here
+    // because `readDecisionLog` JSON.parses these lines back.
+    await fs.appendFile(fp, `${redactSecrets(JSON.stringify(entry))}\n`);
   } catch {
     // intentionally swallow — diagnostics must not break the turn
   }

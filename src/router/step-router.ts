@@ -196,6 +196,8 @@ export function getStepRouterConfig(): StepRouterConfig {
  * Decide whether to split the turn into two model phases.
  *
  * Returns phase2ModelId=null when step routing is NOT applicable:
+ *   - `opts.pinned` — the orchestrator turn's model is project-pinned
+ *     (checked FIRST, before `cfg.enabled`)
  *   - Config disabled
  *   - Execution model is the same as phase 1 model (no benefit)
  *   - No fast model available for the provider
@@ -205,9 +207,32 @@ export function decideStepRouting(
   phase1ModelId: string,
   defaultProvider: string,
   config?: StepRouterConfig,
+  opts?: { pinned?: boolean },
 ): StepRouterDecision {
   const cfg = config ?? getStepRouterConfig();
   const _phase1Provider = detectProviderForModel(phase1ModelId);
+
+  // Parity fix (G3): a project `model` pin (`isModelPinnedByProject()`,
+  // checked once by the caller and passed in — this module has no settings
+  // access of its own) is an explicit instruction that must hold for EVERY
+  // step of THIS orchestrator turn, not just the first LLM call. SAMR was
+  // unconditionally downgrading phase 2+ (every tool-continuation call
+  // after the first) to a cheap execution-tier model regardless of the pin
+  // — measured live: `stream_start` correctly requested the pinned model on
+  // call 2, but `call_accounting` for that same call billed a downgraded
+  // one, because THIS function had no awareness of the pin at all. Checked
+  // before `cfg.enabled`/the EE-guided on-the-fly override, so neither
+  // static config nor a runtime EE override can re-enable the downgrade for
+  // a pinned turn. Explicitly delegated subs (council, sub-sessions) call
+  // `decide()`/`routeModel()` through their own separate paths and are
+  // unaffected — they may still route/downgrade independently of the pin.
+  if (opts?.pinned) {
+    return {
+      phase1ModelId,
+      phase2ModelId: null,
+      reason: "phase 1 model is project-pinned — a pin holds for every step of the orchestrator turn",
+    };
+  }
 
   if (!cfg.enabled) {
     return {

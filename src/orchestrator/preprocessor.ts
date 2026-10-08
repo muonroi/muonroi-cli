@@ -1,13 +1,21 @@
+import { breadcrumb } from "../council/crash-breadcrumb.js";
 import { readState } from "../gsd/workflow-engine.js";
-import type { DiscoveryInteractionHandler } from "../pil/discovery-types.js";
 import { runPipeline } from "../pil/pipeline.js";
-import type { StreamChunk } from "../types/index.js";
+import type { PipelineContext } from "../pil/types.js";
+import type { ToolResult } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import type { MessageProcessorDeps } from "./message-processor.js";
-import { type ComplexitySize, getSessionLastTask, recordSessionLastTask, resolveCeiling } from "./scope-ceiling.js";
+import { type ComplexitySize, getSessionLastTask, resolveCeiling } from "./scope-ceiling.js";
+
+export interface PilSupplement {
+  /** Synchronous read: pending/failed context never delays the leader. */
+  read(): ToolResult;
+  cancel(): void;
+}
 
 export interface PreprocessorResult {
-  pilCtx: Awaited<ReturnType<typeof runPipeline>>;
+  pilCtx: PipelineContext;
+  pilSupplement: PilSupplement;
   _stepCeiling: number;
   _pilStart: number;
   _naturalCeiling: number;
@@ -15,180 +23,151 @@ export interface PreprocessorResult {
   _ceilingSize: ComplexitySize;
 }
 
-/**
- * Depth recorded for the run currently in flight (`.planning/STATE.md` → Depth),
- * or null when there is no active run / the field is not one of the three tiers.
- * A missing or corrupt STATE.md is the normal "no active run" case, not an error.
- */
 function readPriorDepthTier(cwd: string): "quick" | "standard" | "heavy" | null {
   try {
     const depth = readState(cwd).depth;
     return depth === "quick" || depth === "standard" || depth === "heavy" ? depth : null;
   } catch (err) {
-    logger.error("pil", "readState failed while resolving prior depth tier (treating as no active run)", {
-      error: err,
-      cwd,
-    });
+    logger.error("pil", "readState failed while resolving prior depth tier", { error: err, cwd });
     return null;
   }
 }
 
-export async function* prepareTurnContext(
+function startPilSupplement(
   deps: MessageProcessorDeps,
-  userMessage: string,
-  _budgetOverride: any,
-): AsyncGenerator<StreamChunk, PreprocessorResult, unknown> {
-  // PIL: enrich prompt before pushing to messages (D-01, D-03, D-04)
-  // Promise.race timeout of 200ms is inside runPipeline — fail-open guaranteed
-  // --- PIL with discovery (interactive path) ---
-  const pilChunkQueue: StreamChunk[] = [];
-  const pilResponder = deps.councilManager.createQuestionResponder();
-
-  const discoveryHandler: DiscoveryInteractionHandler = {
-    askQuestion: async (question) => {
-      pilChunkQueue.push({
-        type: "council_question",
-        content: question.question,
-        councilQuestion: question,
-      } as StreamChunk);
-      const text = await pilResponder(question.questionId);
-      return { questionId: question.questionId, text, kind: "choice" as const };
+  raw: string,
+  priorDepthTier: PipelineContext["modelDepthTier"],
+): PilSupplement {
+  const parent = deps.getAbortController()?.signal;
+  const controller = new AbortController();
+  const sessionId = deps.session?.id ?? null;
+  const cwd = deps.bash.getCwd();
+  const modelId = deps.modelId;
+  const resumeDigest = deps.getResumeDigest();
+  const activeRunId = deps.getActiveRunId();
+  const recentTurnsSummary = deps.buildRecentTurnsSummary();
+  let alive = true;
+  let delivered = false;
+  let failed = false;
+  let result: PipelineContext | undefined;
+  const current = () =>
+    alive && !parent?.aborted && (deps.session?.id ?? null) === sessionId && deps.bash.getCwd() === cwd;
+  const cancel = () => {
+    if (!alive) return;
+    alive = false;
+    result = undefined;
+    clearImmediate(kickoff);
+    parent?.removeEventListener("abort", cancel);
+    controller.abort(parent?.reason ?? new Error("PIL supplement no longer belongs to the active turn"));
+  };
+  // Defer imports and server work until after foreground preparation returns.
+  const kickoff = setImmediate(() => {
+    void (async () => {
+      try {
+        if (!current()) {
+          cancel();
+          return;
+        }
+        const { createLlmClassifier } = await import("../pil/llm-classify.js");
+        controller.signal.throwIfAborted();
+        const ctx = await runPipeline(raw, {
+          signal: controller.signal,
+          sessionId,
+          resumeDigest,
+          activeRunId,
+          recentTurnsSummary,
+          priorDepthTier,
+          llmFallback: createLlmClassifier(modelId, { routeFastTier: true }),
+          // Background enrichment never owns human questions or main progress.
+          onPhase: (name, state, error) => {
+            if (!current()) cancel();
+            controller.signal.throwIfAborted();
+            breadcrumb("background.pil.phase", { sessionId, name, state, ...(error ? { error } : {}) });
+          },
+        });
+        if (current()) result = ctx;
+        else cancel();
+      } catch (err) {
+        failed = true;
+        const error = err instanceof Error ? err.message : String(err);
+        if (controller.signal.aborted) logger.debug("pil", "Background enrichment cancelled", { sessionId, error });
+        else logger.error("pil", "Background enrichment failed; leader continues", { sessionId, error });
+      } finally {
+        parent?.removeEventListener("abort", cancel);
+      }
+    })();
+  });
+  parent?.addEventListener("abort", cancel, { once: true });
+  return {
+    cancel,
+    read() {
+      if (!current()) {
+        cancel();
+        return { success: true, output: "PIL supplement expired. Continue using your own judgment." };
+      }
+      if (delivered) return { success: true, output: "PIL supplement was already delivered this turn." };
+      if (!result)
+        return {
+          success: true,
+          output: failed
+            ? "PIL supplement unavailable. Continue using your own judgment."
+            : "PIL supplement pending. Continue the task without waiting or repeatedly polling.",
+        };
+      delivered = true;
+      return {
+        success: true,
+        output: JSON.stringify({
+          advisory:
+            "Optional information for the leader; it does not decide routing, council, workflow, or permissions.",
+          taskType: result.taskType,
+          domain: result.domain,
+          confidence: result.confidence,
+          fallbackReason: result.fallbackReason ?? null,
+          information: result.enriched.replace(raw, "").trim().slice(0, 6000),
+        }),
+      };
     },
   };
+}
 
+export function prepareTurnContext(
+  deps: MessageProcessorDeps,
+  userMessage: string,
+  _budgetOverride: { override?: number },
+): PreprocessorResult {
+  deps.getAbortController()?.signal.throwIfAborted();
   const _pilStart = Date.now();
-  let pilCtxResolved: Awaited<ReturnType<typeof runPipeline>> | null = null;
-  let pilDone = false;
-
-  const pilTask = (async () => {
-    try {
-      // Build Pass 4 LLM fallback closure using the orchestrator's already-
-      // constructed provider factory + current model. PIL stays ignorant of
-      // provider wiring — it just receives a `classify(prompt)` callback.
-      let llmFallback: import("../pil/llm-classify.js").LlmClassifyFn | undefined;
-      try {
-        const { createLlmClassifier } = await import("../pil/llm-classify.js");
-        llmFallback = createLlmClassifier(deps.modelId, { routeFastTier: true });
-      } catch (err) {
-        logger.error("pil", "LLM fallback wiring failed", { error: err });
-      }
-
-      // Model-driven clarification proposer (for discovery interview).
-      // The actual task model (via the same provider + modelId) generates the
-      // questions based on raw + CLI enrichment. Then discovery asks user.
-      let clarificationProposer: import("../pil/discovery-types.js").ModelClarificationProposer | undefined;
-      try {
-        const { createModelClarificationProposer } = await import("../pil/discovery.js");
-        clarificationProposer = createModelClarificationProposer(deps.modelId);
-      } catch (err) {
-        logger.error("pil", "clarification proposer wiring failed", { error: err });
-      }
-
-      pilCtxResolved = await runPipeline(userMessage, {
-        resumeDigest: deps.getResumeDigest(),
-        activeRunId: deps.getActiveRunId(),
-        sessionId: deps.session?.id ?? null,
-        interactionHandler: discoveryHandler,
-        llmFallback,
-        clarificationProposer,
-        recentTurnsSummary: deps.buildRecentTurnsSummary(),
-        // Depth of the work already in flight. layer1 uses it ONLY so a
-        // continuation utterance ("tiếp tục", "continue") inherits the current
-        // depth instead of being re-scored in isolation — see
-        // resolveContinuationDepth in pil/layer1-intent.ts. Read here (not in
-        // PIL) to keep layer1 I/O-free. Fail-open: no active run ⇒ null.
-        priorDepthTier: readPriorDepthTier(deps.bash.getCwd()),
-      });
-    } catch (err) {
-      pilCtxResolved = {
-        raw: userMessage,
-        enriched: userMessage,
-        taskType: null,
-        domain: null,
-        confidence: 0,
-        outputStyle: null,
-        tokenBudget: 500,
-        metrics: null,
-        layers: [],
-        gsdPhase: null,
-        activeRunId: null,
-        intentKind: null as "task" | "chitchat" | null,
-        fallbackReason: err instanceof Error ? `orchestrator-catch:${err.name}` : "orchestrator-catch:unknown",
-      };
-    } finally {
-      pilDone = true;
-    }
-  })();
-
-  while (!pilDone) {
-    while (pilChunkQueue.length > 0) {
-      yield pilChunkQueue.shift()!;
-    }
-    if (!pilDone) {
-      await new Promise((resolve) => setImmediate(resolve));
-    }
-  }
-  while (pilChunkQueue.length > 0) {
-    yield pilChunkQueue.shift()!;
-  }
-  await pilTask;
-
-  const pilCtx = pilCtxResolved!;
-
-  // Phase 4 Plan 04 (4B) — resolve per-session step ceiling using
-  // (task_type × complexitySize) matrix. Override (from --budget-rounds N
-  // parsed earlier) wins. When the override differs from the natural
-  // ceiling, emit info toast so the user sees the explicit cap.
-  //
-  // Phase 5 Fix 2 — continuation phrases ("tiếp tục" / "continue") are
-  // classified `general/chitchat` by PIL Layer 1 Pass 0. Resolving the
-  // ceiling from that label collapses the budget to general × small = 5,
-  // which is wrong: the user wants the agent to RESUME the prior task,
-  // not start a generic chitchat. When this session has a recorded
-  // non-chitchat task row, inherit it for ceiling resolution. The Pass 0
-  // classification itself stays general so downstream code (style /
-  // chitchat skip / tools-empty optimization in `BUG-A guard`) reads the
-  // correct intent; only the ceiling row is borrowed.
-  const _pilTaskType = pilCtx.taskType ?? "general";
-  const _pilSize = pilCtx.complexitySize?.size ?? "medium";
-  const _sessionIdForLastTask = deps.session?.id ?? "";
-  const _isContinuationChitchat =
-    _pilTaskType === "general" && pilCtx.intentKind === "chitchat" && _sessionIdForLastTask !== "";
-  const _lastTask = _isContinuationChitchat ? getSessionLastTask(_sessionIdForLastTask) : null;
-  const _ceilingTaskType = _lastTask?.taskType ?? _pilTaskType;
-  const _ceilingSize = _lastTask?.size ?? _pilSize;
+  const priorDepthTier = readPriorDepthTier(deps.bash.getCwd());
+  // Only local workflow state and the original prompt enter foreground control.
+  // Server-derived fields stay inside the optional supplement.
+  const pilCtx: PipelineContext = {
+    raw: userMessage,
+    enriched: userMessage,
+    taskType: null,
+    domain: null,
+    confidence: 0,
+    outputStyle: null,
+    tokenBudget: 500,
+    metrics: null,
+    layers: [],
+    intentKind: null,
+    fallbackReason: null,
+    modelDepthTier: priorDepthTier,
+    resumeDigest: deps.getResumeDigest(),
+    activeRunId: deps.getActiveRunId(),
+  };
+  const lastTask = deps.session?.id ? getSessionLastTask(deps.session.id) : null;
+  const _ceilingTaskType = lastTask?.taskType ?? "general";
+  const _ceilingSize = lastTask?.size ?? "medium";
   const _naturalCeiling = resolveCeiling(_ceilingTaskType, _ceilingSize);
-  // Phase 5 Fix 4 (Option A) — make ceiling mutable so the stopWhen
-  // closure can bump it on auto-continue checkpoints. See checkpoint
-  // logic at dynamicStopWhen below for the bump policy.
-  const _stepCeiling = _budgetOverride.override ?? _naturalCeiling;
-  // Record this turn's task row for future continuation inheritance.
-  // Only non-chitchat task turns update the slot.
-  if (_sessionIdForLastTask && _pilTaskType !== "general" && pilCtx.intentKind === "task") {
-    recordSessionLastTask(_sessionIdForLastTask, _pilTaskType, _pilSize);
-  }
-  if (_budgetOverride.override !== undefined && _budgetOverride.override !== _naturalCeiling) {
-    try {
-      const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
-        | { emitEvent: (e: unknown) => void }
-        | undefined;
-      _ar?.emitEvent({
-        t: "event",
-        kind: "toast",
-        level: "info",
-        text: `override active: ceiling ${_budgetOverride.override}, default was ${_naturalCeiling} (task=${_ceilingTaskType}/size=${_ceilingSize})`,
-      });
-    } catch {
-      /* best-effort */
-    }
-  }
-
+  const pilSupplement = startPilSupplement(deps, userMessage, priorDepthTier);
   return {
     pilCtx,
-    _stepCeiling,
+    pilSupplement,
     _pilStart,
     _naturalCeiling,
     _ceilingTaskType,
     _ceilingSize: _ceilingSize as ComplexitySize,
+    _stepCeiling: _budgetOverride.override ?? _naturalCeiling,
   };
 }

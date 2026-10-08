@@ -1,49 +1,77 @@
 /**
  * src/product-loop/cost-scoper.ts
  *
- * Wrapper around the ledger to support per-product budget namespaces.
- * Enforces two-cap semantics: halt on first cap hit (monthly OR per-product).
+ * Per-product spend METERING for `/ideal`.
+ *
+ * This module used to reserve projected spend against two caps — the per-run
+ * `--max-cost` and the monthly `cap.monthly_usd` — and refuse the call on the
+ * first breach, which surfaced inside a sprint as `Cost cap breached: …` thrown
+ * out of the planning/council LLM. `/ideal` has no spend cap (user decision), so
+ * nothing is reserved and nothing is refused.
+ *
+ * The spend is still MEASURED on both ledgers, after the call returns: the
+ * monthly `usage.json` (so the user's overall picture stays true) and the
+ * per-run JSONL ledger (per-callsite / per-role attribution).
  */
 
 import { projectCostUSD } from "../usage/estimator.js";
-import { reserve } from "../usage/ledger.js";
-import { getProductSpentUsd } from "../usage/product-ledger.js";
-import { CapBreachError, type ReservationToken } from "../usage/types.js";
+import { commitUnreserved } from "../usage/ledger.js";
+import { appendProductLedger, type CostMeta } from "../usage/product-ledger.js";
 
-/**
- * Reserve projected spend while enforcing TWO caps:
- * 1. The per-product run budget (productCapUsd)
- * 2. The user's monthly overall cap (enforced by ledger.reserve)
- *
- * Halt on FIRST cap hit — do not proceed to monthly check if per-product already breached.
- */
-export async function reserveForProduct(
-  args: {
+export async function recordProductSpend(
+  call: {
     provider: string;
     model: string;
-    estInputTokens: number;
-    estOutputTokens: number;
-    homeOverride?: string;
+    actualInputTokens: number;
+    actualOutputTokens: number;
+    estInputTokens?: number;
   },
   productRunId: string,
-  productCapUsd: number,
+  meta?: CostMeta,
   homeOverride?: string,
-): Promise<ReservationToken | CapBreachError> {
-  // 1. Check per-product cap first (pre-flight)
-  const spent = await getProductSpentUsd(productRunId, homeOverride);
-  const projected = projectCostUSD(args.provider, args.model, args.estInputTokens, args.estOutputTokens);
+): Promise<void> {
+  const actualUsd = projectCostUSD(call.provider, call.model, call.actualInputTokens, call.actualOutputTokens);
 
-  if (spent + projected > productCapUsd) {
-    return new CapBreachError(spent, 0, projected, productCapUsd);
+  // Metering must never break the call it measures — but a failure is logged,
+  // never swallowed, because an unmeasured run looks exactly like a free one.
+  try {
+    await commitUnreserved({
+      provider: call.provider,
+      model: call.model,
+      actualInputTokens: call.actualInputTokens,
+      actualOutputTokens: call.actualOutputTokens,
+      homeOverride,
+    });
+  } catch (err) {
+    console.error(`[cost-scoper] monthly ledger commit failed for run ${productRunId}: ${(err as Error)?.message}`, {
+      provider: call.provider,
+      model: call.model,
+      actualUsd,
+    });
   }
 
-  // 2. Check monthly cap via standard reserve
-  const result = await reserve({ ...args, homeOverride });
-
-  // 3. Tag token with productRunId if successful
-  if (!(result instanceof CapBreachError)) {
-    result.productRunId = productRunId;
+  try {
+    await appendProductLedger(
+      productRunId,
+      {
+        ts: Date.now(),
+        productRunId,
+        reservationId: "unreserved",
+        actualUsd,
+        model: call.model,
+        provider: call.provider,
+        estInputTokens: call.estInputTokens,
+        actualInputTokens: call.actualInputTokens,
+        actualOutputTokens: call.actualOutputTokens,
+        ...meta,
+      },
+      homeOverride,
+    );
+  } catch (err) {
+    console.error(`[cost-scoper] product ledger append failed for run ${productRunId}: ${(err as Error)?.message}`, {
+      provider: call.provider,
+      model: call.model,
+      actualUsd,
+    });
   }
-
-  return result;
 }

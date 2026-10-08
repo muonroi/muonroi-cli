@@ -79,4 +79,40 @@ describe("sub-agent model tier policy", () => {
   it("parent-tier cap: omitted parentTier preserves legacy behavior", () => {
     expect(resolveModelForTask("verify", "acme", "acme-premium", lookup)).toBe("acme-premium");
   });
+
+  // ── opts.pinned (round 2, G3 HIGH) ──────────────────────────────────────
+  // A project model pin holds for a delegated sub-agent task — the same
+  // class of bug SAMR had (step-router.ts's decideStepRouting) before its
+  // own opts.pinned fix. resolveModelForTask must never tier-walk away from
+  // the pinned parent model.
+  describe("opts.pinned", () => {
+    it("never downgrades when pinned, even for a task/provider combo that would otherwise downgrade", () => {
+      const withoutPin = resolveModelForTask("general", "acme", "acme-premium", lookup);
+      // Sanity: this combo DOES downgrade when not pinned — otherwise the
+      // next assertion (pinned suppresses it) would be vacuous.
+      expect(withoutPin).toBe("acme-balanced");
+
+      const pinned = resolveModelForTask("general", "acme", "acme-premium", lookup, { pinned: true });
+      expect(pinned).toBe("acme-premium");
+    });
+
+    it("pinned wins even for verify (premium-first) and explore (balanced-first) — always returns the fallback unchanged", () => {
+      expect(resolveModelForTask("verify", "acme", "acme-premium", lookup, { pinned: true })).toBe("acme-premium");
+      expect(resolveModelForTask("explore", "acme", "acme-premium", lookup, { pinned: true })).toBe("acme-premium");
+    });
+
+    it("pinned check runs BEFORE the parent-tier ceiling — both agree here, but pinned is not merely a side effect of the ceiling", () => {
+      const decision = resolveModelForTask("verify", "acme", "parent-flash", lookup, {
+        parentTier: "premium", // would normally ALLOW promotion to premium
+        pinned: true, // but pinned wins regardless — stays on the fallback
+      });
+      expect(decision).toBe("parent-flash");
+    });
+
+    it("unpinned (opts omitted, or pinned:false) behaves exactly as before — no regression for non-pinned projects", () => {
+      const withoutOpts = resolveModelForTask("general", "acme", "acme-premium", lookup);
+      const withFalsePin = resolveModelForTask("general", "acme", "acme-premium", lookup, { pinned: false });
+      expect(withFalsePin).toBe(withoutOpts);
+    });
+  });
 });

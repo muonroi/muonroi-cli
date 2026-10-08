@@ -21,7 +21,7 @@ async function getDelegationsDir(cwd: string): Promise<string> {
 }
 
 describe("DelegationManager.kill", () => {
-  it("terminates a running delegation and updates its status to error", async () => {
+  it("reconciles an already-exited delegation without claiming to terminate it", async () => {
     const tempCwd = path.join(os.tmpdir(), "muonroi-test-" + Math.random().toString(36).slice(2));
     const manager = new DelegationManager(() => tempCwd);
 
@@ -46,7 +46,7 @@ describe("DelegationManager.kill", () => {
       status: "running" as const,
       startedAt: new Date().toISOString(),
       outputPath,
-      pid: 99999, // dummy PID
+      pid: 2147483000, // non-existent PID; live termination has its own process test
     };
 
     await fs.writeFile(jobPath, JSON.stringify(record, null, 2), "utf8");
@@ -54,18 +54,18 @@ describe("DelegationManager.kill", () => {
     // Call cancel
     const result = await manager.kill(id);
     expect(result.success).toBe(true);
-    expect(result.output).toContain(`Delegation "${id}" (PID: 99999) has been terminated.`);
+    expect(result.output).toContain(`Delegation "${id}" already exited`);
 
     // Verify the record was updated
     const updatedRaw = await fs.readFile(jobPath, "utf8");
     const updated = JSON.parse(updatedRaw);
     expect(updated.status).toBe("error");
-    expect(updated.error).toBe("Cancelled by user.");
+    expect(updated.error).toContain("exited");
 
     // Cleanup
     await fs.rm(jobPath, { force: true });
     await fs.rm(outputPath, { force: true });
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("returns failure if the delegation ID is not found", async () => {
@@ -110,6 +110,6 @@ describe("DelegationManager.kill", () => {
 
     // Cleanup
     await fs.rm(jobPath, { force: true });
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 });

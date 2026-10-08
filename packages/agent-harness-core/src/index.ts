@@ -1,3 +1,4 @@
+export * from "./argv-contract.js";
 export * from "./driver.js";
 export * from "./idle.js";
 export * from "./mock-llm.js";

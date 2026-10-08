@@ -113,7 +113,38 @@ export interface VerifyRecipe {
   smokeTarget?: string;
   evidence: string[];
   notes: string[];
+  /**
+   * Test coverage as a 0..1 fraction.
+   *
+   * THREE-STATE, and the states are not interchangeable — see
+   * `src/product-loop/coverage-signal.ts`, which is the only place this field's
+   * meaning is defined:
+   *  - a number  → MEASURED. `<= 0` is a truthful "nothing is covered" and
+   *                blocks the engineering floor.
+   *  - null/absent → NOT MEASURED. Blocks nothing; reading it as 0 is the bug
+   *                that scored every .NET `/ideal` sprint 0 (run muauw6u93e1c).
+   */
   coverage?: number | null;
+  /**
+   * Where `coverage` came from. `"measured"` = parsed from the project's own test
+   * output by the deterministic verify floor; `"model-asserted"` = a number the
+   * verify sub-agent wrote into its recipe JSON. A measurement overwrites an
+   * assertion (see sprint-runner's floor merge). Absent on legacy records.
+   */
+  coverageSource?: "measured" | "model-asserted" | null;
+  /**
+   * Who named the commands in `testCommands`. `"model-asserted"` = the verify
+   * sub-agent wrote them into its recipe JSON; `"disk-derived"` = they came from
+   * the deterministic verify floor's own probe of the working tree
+   * (`resolveFloorCommands`), which is unspoofable from inside the turn;
+   * `"both"` = the array is the union of the two. The floor's set is UNIONED in,
+   * never substituted, so a model cannot disarm the gate by emitting `[]` and a
+   * model that knows a command the detector cannot see does not lose it — see
+   * `src/product-loop/test-command-signal.ts`, the only place this field's
+   * meaning is defined. Absent on legacy records and on recipes from paths that
+   * do not stamp.
+   */
+  testCommandsSource?: "model-asserted" | "disk-derived" | "both" | null;
 }
 
 export interface VerifyEnvironmentManifest {
@@ -320,6 +351,26 @@ export interface CouncilQuestionData {
   questionTotal?: number;
 }
 
+/**
+ * A previously-opened `council_question` that its waiter has GIVEN UP on —
+ * the deadline elapsed, the run aborted, or an error tore the turn down
+ * before an answer arrived. The UI must withdraw the matching card the
+ * instant this arrives (never leave it on screen looking live when nothing
+ * is listening any more) and show `notice` in its place.
+ *
+ * See `undebated-criteria-gate.ts`'s timeout branch for the canonical
+ * producer and `use-app-logic.tsx`'s `council_question` chunk handlers for
+ * the consumer.
+ */
+export interface CouncilQuestionWithdrawnData {
+  /** The `CouncilQuestionData.questionId` this withdraws. */
+  questionId: string;
+  /** Stable machine code naming why the waiter stopped waiting. */
+  reason: "timeout" | "aborted" | "run_ended" | "error";
+  /** Human-readable text to show in place of the withdrawn card. */
+  notice: string;
+}
+
 export type CouncilStatusPhase =
   | "clarify"
   | "panel_select"
@@ -465,6 +516,14 @@ export interface CouncilRoundRecord {
   state: "running" | "done";
   /** This round's focus, carried from the prior round's `nextRoundFocus`. */
   topic?: string;
+  /**
+   * C2 — the C1-selected item id this round argued (`DebatableItem.id`),
+   * when the debate was scoped to argue one item per round
+   * (`CouncilConfig.perRoundFocus`). Absent on an unscoped, whole-plan round,
+   * or on a round beyond the scoped item list (a leader-granted extension
+   * past every item falls back to arguing the whole plan).
+   */
+  itemId?: string;
   /** Role labels of the participants active this round. */
   participants: string[];
   /** Number of debate pairs exchanged this round. */
@@ -512,6 +571,17 @@ export interface CouncilRoundRecord {
    * Absent on round 1 (nothing was met going in).
    */
   prevCriteriaMet?: boolean[];
+  /**
+   * C2b — indices into the pinned criteria list (`ClarifiedSpec.successCriteria`)
+   * that this round's leader evaluation did NOT address. Their status/evidence
+   * in this round's aggregate (`criteriaMet`, `stanceRows`) was carried forward
+   * unchanged from the prior round rather than freshly judged — see
+   * `alignCriteriaField` in `src/council/debate.ts`. Lets a reader tell "still
+   * met" apart from "not looked at" instead of both looking identical. Absent
+   * when no criterion needed carrying this round (every pinned criterion had a
+   * match, or this is round 1 — no prior to carry from).
+   */
+  carriedCriteria?: number[];
 }
 
 /**
@@ -547,6 +617,14 @@ export interface CouncilStanceRow {
   stances: Record<string, CouncilStanceMark>;
   /** One-line reason the panel is split (contested rows only). */
   split?: string;
+  /**
+   * True when the leader marked this criterion settleable only by building —
+   * not by further debate (mirrors `LeaderEvaluation.criteriaStatus[].deferred`
+   * in `council/types.ts`). R4a: persisted here so downstream gates (e.g. the
+   * undebated-criteria gate) CAN see it; carrying the flag through does not by
+   * itself change what any gate decides — see `src/council/stance.ts`.
+   */
+  deferred?: boolean;
 }
 
 /**
@@ -644,6 +722,13 @@ export interface StreamChunk {
     | "tool_result"
     | "tool_approval_request"
     | "council_question"
+    /**
+     * The counterpart to `council_question`: the waiter that opened it gave up
+     * before an answer arrived. Carries `councilQuestionWithdrawn`. The UI must
+     * clear the matching pending card (if still showing) and render `notice` in
+     * its place — never leave a card on screen once nothing is listening.
+     */
+    | "council_question_withdrawn"
     | "council_preflight"
     | "council_status"
     | "council_phase"
@@ -682,6 +767,8 @@ export interface StreamChunk {
   isAuthError?: boolean;
   structuredResponse?: StructuredResponse;
   councilQuestion?: CouncilQuestionData;
+  /** Populated when type === "council_question_withdrawn". */
+  councilQuestionWithdrawn?: CouncilQuestionWithdrawnData;
   councilPreflight?: CouncilPreflightData;
   councilStatus?: CouncilStatusData;
   councilPhase?: CouncilPhaseEvent;
@@ -733,6 +820,27 @@ export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
 export type ModelTier = "fast" | "balanced" | "premium";
 
+/**
+ * Provider account limits for a model, as DECLARED by `catalog.json`'s
+ * `rate_limits` block. Runtime-facing (camelCase) mirror of `CatalogRateLimits`.
+ *
+ * `undefined` on any field means the catalog publishes no value for it — see
+ * `UNDECLARED_RATE_LIMITS` in src/providers/rate-limiter.ts for the policy that
+ * applies then. Never treat a missing field as zero.
+ */
+export interface ModelRateLimits {
+  /** Maximum simultaneous in-flight requests. */
+  concurrency?: number;
+  /** Maximum requests started per minute. */
+  requestsPerMinute?: number;
+  /**
+   * Maximum tokens per minute. Carried for completeness and forensics; NOT
+   * enforced by the pacer, because a call's token cost is not knowable before
+   * the response. See the SCOPE note in src/providers/rate-limiter.ts.
+   */
+  tokensPerMinute?: number;
+}
+
 export interface ModelInfo {
   id: string;
   name: string;
@@ -741,6 +849,8 @@ export interface ModelInfo {
   outputPrice: number;
   cachedInputPrice?: number;
   cacheWritePrice?: number;
+  /** Per-request prompt threshold; input multiplier also covers cache reads/writes. */
+  longContextPricing?: { inputTokenThreshold: number; inputMultiplier: number; outputMultiplier: number };
   reasoning: boolean;
   description: string;
   tier?: ModelTier;
@@ -750,6 +860,22 @@ export interface ModelInfo {
   multiAgent?: boolean;
   supportsClientTools?: boolean;
   supportsMaxOutputTokens?: boolean;
+  /**
+   * The model's declared maximum output tokens, from `catalog.json`'s
+   * `max_output_tokens`. This budget is SHARED with the model's thinking block
+   * on every reasoning model measured so far (StepFun, OpenAI Responses,
+   * Anthropic, DeepSeek all bill reasoning inside the output cap), which is why
+   * `resolveMaxOutputTokens` in src/providers/capabilities.ts sizes a reasoning
+   * request from this field instead of the caller's visible-output number.
+   *
+   * `undefined` when the catalog declares `0` — that is the "not published /
+   * not applicable" SENTINEL, not a ceiling of zero (see `step-3.7-flash`,
+   * whose own catalog description reads "The documented maximum output-token
+   * limit is not published", and the six StepFun audio/image models). Callers
+   * must treat undefined as "unknown ceiling" and fall back to a declared
+   * default; never as 0.
+   */
+  maxOutputTokens?: number;
   /**
    * When set, the provider rejects any temperature other than this exact value
    * (e.g. Moonshot/Kimi: "only 1 is allowed for this model"). Callers must send
@@ -766,8 +892,53 @@ export interface ModelInfo {
   /** Extra tiers this model may satisfy in getModelByTier (primary tier remains `tier`). */
   routingTiers?: ModelTier[];
   roles?: string[];
+  /**
+   * What the model physically accepts and returns. Distinct from `roles`, which
+   * says which JOBS a model may be assigned — a routing concept, not a modality
+   * one. Absent means text-in/text-out (see `canServeTextRequests`).
+   */
+  modalities?: ModelModalities;
   /** Part E — model has native online web research (its own web_search/browsing). */
   nativeWebResearch?: boolean;
+  /**
+   * Provider account limits declared by `catalog.json`'s `rate_limits`, mapped
+   * through `catalogModelToModelInfo`. Consumed by the request pacer in
+   * src/providers/rate-limiter.ts via the metered gate.
+   *
+   * `undefined` means the catalog declares nothing for this model — that model
+   * is dispatched unpaced (see `UNDECLARED_RATE_LIMITS`). Before this field
+   * existed the catalog's `rate_limits` block was validated, unit-tested, and
+   * then silently discarded here, so nine models published a 10 RPM ceiling that
+   * no production code could read.
+   */
+  rateLimits?: ModelRateLimits;
+  /**
+   * P0-5b — model emits its NATIVE tool-call markup as plain-text content when a
+   * request carries no tool schemas. Arms the provider-boundary output guard
+   * (`src/providers/tool-markup-guard.ts`) via
+   * `ProviderCapabilities.emitsNativeToolCallMarkup`. Absent → the provider's
+   * capability class decides (StepFun defaults on; everyone else off).
+   */
+  emitsNativeToolCallMarkup?: boolean;
+}
+
+/** A modality a model can accept as input or produce as output. */
+export type Modality = "text" | "image" | "audio";
+
+/**
+ * Declared input/output modalities for a catalog model.
+ *
+ * An input/output PAIR rather than a single label, because the catalog contains
+ * models that convert between modalities: a text-to-speech row is text-in but
+ * audio-out, and a speech-recognition row is audio-in but text-out. A single
+ * label cannot express either, yet both must be kept out of a text seat — for
+ * opposite reasons (one cannot return the answer, the other cannot read the
+ * question). The pair also covers the nine text+image models without needing a
+ * second concept alongside `supports_vision`.
+ */
+export interface ModelModalities {
+  input: Modality[];
+  output: Modality[];
 }
 
 export type AgentMode = "agent" | "plan" | "ask";

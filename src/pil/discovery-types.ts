@@ -70,6 +70,7 @@ export interface ClarifiedIntent {
 }
 
 export type ModelClarificationProposer = (input: {
+  signal?: AbortSignal;
   raw: string;
   l1: {
     taskType: TaskType | null;

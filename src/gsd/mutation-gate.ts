@@ -6,7 +6,21 @@ export interface MutationGateDecision {
 }
 
 const NEVER_GATED_PREFIXES = ["gsd_", "respond_"];
-const NEVER_GATED = new Set(["read_file", "grep", "glob", "bash_output_get", "gsd_status", "compact"]);
+const NEVER_GATED = new Set([
+  "read_file",
+  "grep",
+  "glob",
+  "bash_output_get",
+  "gsd_status",
+  "compact",
+  // Background delegation enforces explore-only. Research and human questions
+  // are prerequisites for reviewing a plan, not authorization to mutate code.
+  "delegate",
+  "ask_user",
+  "delegation_kill",
+  // Progress bookkeeping neither edits the workspace nor grants execution.
+  "todo_write",
+]);
 function isNeverGated(t: string): boolean {
   return NEVER_GATED.has(t) || NEVER_GATED_PREFIXES.some((p) => t.startsWith(p));
 }
@@ -39,7 +53,13 @@ export function evaluateMutationGate(
     //   hard-blocking every default-tier bash/edit until a plan-review pass over-reaches
     //   ("hard thì mọi tier không tốt"). Only genuinely non-trivial work (heavy, incl. tasks
     //   the leader-tier assessor UPGRADES to heavy) earns the hard gate.
-    if (!depth || depth === "quick" || depth === "standard") return allow;
+    if (!depth || depth === "quick") return allow;
+    if (depth === "standard") {
+      console.warn(
+        `[gsd] advisory: depth=standard but plan-review not yet passed — ` + GATE_DIRECTIVE.slice(0, 120) + "...",
+      );
+      return { blocked: false, reason: GATE_DIRECTIVE };
+    }
     const gate = canExecute(cwd, depth);
     return gate.allowed ? allow : { blocked: true, reason: GATE_DIRECTIVE };
   } catch (err) {

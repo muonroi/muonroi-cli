@@ -6,12 +6,13 @@
  */
 
 import type { ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createDriver, type Driver } from "@muonroi/agent-harness-core/driver";
 import type { LiveEvent, LiveFrame, VisualFrame } from "@muonroi/agent-harness-core/protocol";
 import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidechannel";
+import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { type SpawnResult, spawnAgentTui } from "../../src/agent-harness/test-spawn.js";
 
 export type HarnessContext = {
@@ -21,6 +22,8 @@ export type HarnessContext = {
 };
 
 export type SpawnHarnessOptions = {
+  /** Test-only bootstrap for local provider transports; defaults to the real CLI entry. */
+  entry?: string;
   /** Extra CLI args inserted after the entry point and --agent-mode. */
   extraArgs?: string[];
   /** Extra env vars forwarded to the child. Merged with process.env. */
@@ -54,7 +57,7 @@ const ENTRY = resolve("src/index.ts");
  */
 export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<HarnessContext> {
   const fixtures = opts.fixturesDir ?? DEFAULT_FIXTURES;
-  const args = [ENTRY, "--agent-mode", "--mock-llm", fixtures, ...(opts.extraArgs ?? [])];
+  const args = [opts.entry ?? ENTRY, "--agent-mode", "--mock-llm", fixtures, ...(opts.extraArgs ?? [])];
 
   let tempHome: string | undefined;
   let homeDir = opts.cwd;
@@ -148,11 +151,7 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
   const cleanup = () => {
     spawnCleanup();
     if (tempHome) {
-      try {
-        rmSync(tempHome, { recursive: true, force: true });
-      } catch {
-        /* best-effort */
-      }
+      bestEffortRemoveSync(tempHome, "tests/harness/helpers.ts");
     }
   };
 

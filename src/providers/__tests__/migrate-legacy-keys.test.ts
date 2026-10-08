@@ -32,7 +32,7 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.MUONROI_ENV_FILE;
   delete process.env.OPENAI_API_KEY;
-  rmSync(dir, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 // Built via concatenation so the pre-commit secret scanner's `apiKey: "…"`

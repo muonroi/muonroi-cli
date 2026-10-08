@@ -1,0 +1,28 @@
+{
+  "sessionId": "d78d41cab2b8",
+  "eventId": 53830,
+  "statusCode": 400,
+  "error": "messages.3.content.0: Invalid `signature` in `thinking` block",
+  "storedAssistantSeq": 4,
+  "thinkingTextLength": 0,
+  "storedSignatureLength": 51,
+  "storedSignatureWasImagePlaceholder": true,
+  "beforeFixProbe": {
+    "signatureLength": 4096,
+    "persistedLength": 51,
+    "wirePreserved": false
+  },
+  "afterFixProbe": {
+    "signatureLength": 4096,
+    "persistedLength": 4096,
+    "wirePreserved": true
+  },
+  "readonlySessionRepair": {
+    "messagesBefore": 5,
+    "messagesAfter": 5,
+    "thinkingBefore": 1,
+    "thinkingAfter": 0,
+    "databaseReadonly": true
+  },
+  "providerReference": "https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting"
+}

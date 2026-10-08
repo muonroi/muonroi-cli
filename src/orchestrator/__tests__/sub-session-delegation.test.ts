@@ -25,9 +25,15 @@ vi.mock("ai", async (importOriginal) => {
 
 // 1. Mock classifySubSessionAction
 const mockClassifySubSessionAction = vi.fn();
+// Round 4 (G9): relatedness classifier for the resume-vs-fork decision.
+// Defaults to "related" so a plain resume scenario still resumes without
+// every test in this file having to opt in explicitly; the two tests that
+// specifically exercise unrelated-forks-fresh override it per-case.
+const mockClassifySubSessionRelatedness = vi.fn().mockResolvedValue({ related: true, confidence: 0.9 });
 vi.mock("../../pil/llm-classify.js", () => {
   return {
     classifySubSessionAction: (...args: any[]) => (mockClassifySubSessionAction as any).apply(null, args),
+    classifySubSessionRelatedness: (...args: any[]) => (mockClassifySubSessionRelatedness as any).apply(null, args),
   };
 });
 
@@ -137,7 +143,7 @@ vi.mock("../../storage/index.js", () => {
         return {
           id,
           workspaceId: "workspace-1",
-          model: "dummy-model",
+          model: "deepseek-v4-flash",
           mode: "agent",
           cwdAtStart: "/dummy",
           cwdLast: "/dummy",
@@ -170,6 +176,15 @@ vi.mock("../message-processor.js", () => {
         this.deps = deps;
       }
       async *run(userMessage: string) {
+        if (
+          this.deps.messages.some((m: any) => m.role === "system" && String(m.content).startsWith("[Helper receipt"))
+        ) {
+          const answer = { role: "assistant", content: "Main accepted helper evidence" };
+          this.deps.appendCompletedTurn({ role: "user", content: userMessage }, [answer]);
+          yield { type: "content", content: answer.content };
+          yield { type: "done" };
+          return;
+        }
         if (userMessage === "trigger error") {
           throw new Error("Simulated MessageProcessor crash");
         }
@@ -307,23 +322,20 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
     // It should NOT contain:
     // - intermediate assistant: "Intermediate assistant prompt analysis"
     // - intermediate tool: "Intermediate tool result that should be ignored"
-    expect((agent as any).messages).toHaveLength(3); // Hello parent + absorbed assistant + absorbed tool
-    expect((agent as any).messages[1]).toEqual({
-      role: "assistant",
-      content: "Sub-session final structured response",
-    });
-    expect((agent as any).messages[2]).toEqual({
-      role: "tool",
-      content: "Final tool outcome (should be copied)",
-    });
+    expect((agent as any).messages).toHaveLength(3); // Parent history + helper receipt + main answer
+    expect((agent as any).messages[1].role).toBe("system");
+    expect((agent as any).messages[1].content).toContain("Sub-session final structured response");
+    expect((agent as any).messages[1].content).toContain("Final tool outcome (should be copied)");
+    expect((agent as any).messages[2]).toEqual({ role: "assistant", content: "Main accepted helper evidence" });
+    expect(JSON.stringify((agent as any).messages)).not.toContain("Intermediate tool result");
+    expect(chunks.filter((c) => c.type === "done")).toHaveLength(1);
 
     // 4. Verify appendMessages was called to persist the absorbed turn in the parent
     expect(mockAppendMessages).toHaveBeenCalledWith(
       "session-parent",
       expect.arrayContaining([
         expect.objectContaining({ role: "user", content: "Implement auth and write tests" }),
-        expect.objectContaining({ role: "assistant", content: "Sub-session final structured response" }),
-        expect.objectContaining({ role: "tool", content: "Final tool outcome (should be copied)" }),
+        expect.objectContaining({ role: "assistant", content: "Main accepted helper evidence" }),
       ]),
     );
   });
@@ -393,7 +405,8 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
       threw = true;
     }
 
-    expect(threw).toBe(true);
+    expect(threw).toBe(false); // Main receives a failed helper receipt and decides next steps.
+    expect(JSON.stringify((agent as any).messages)).toContain("Simulated MessageProcessor crash");
 
     // Verify parent session is restored even after crash
     expect(agent.getSessionId()).toBe("session-parent");
@@ -405,12 +418,23 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
       confidence: 0.98,
       reason: "requires sub-session",
     });
+    // Round 4 (G9): resume also requires a recorded goal that the relatedness
+    // classifier confirms is the SAME task — see shouldResumeSubSession.
+    mockClassifySubSessionRelatedness.mockResolvedValueOnce({
+      related: true,
+      confidence: 0.95,
+      reason: "same task, continuing",
+    });
 
     // Mock active sub-session row lookup
     mockDb.prepare.mockImplementation((sql: string) => {
       if (sql.includes("status = 'active'")) {
         return {
-          get: () => ({ id: "session-active-child" }),
+          get: () => ({
+            id: "session-active-child",
+            title: "Implement auth and write tests",
+            updated_at: new Date().toISOString(),
+          }),
           run: () => ({ changes: 1 }),
           all: () => [],
         };
@@ -460,6 +484,22 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
 
     // 3. Verify that loadTranscriptState was called with the resumed sub-session ID
     expect(mockLoadTranscriptState).toHaveBeenCalledWith("session-active-child");
+  });
+
+  it("retains the main session and original task when rotation returns an empty summary (ea7378aab8f8)", async () => {
+    mockClassifySubSessionAction.mockResolvedValue({ action: "ROTATE_SESSION", confidence: 0.9 });
+    mockDeliberateCompact.mockResolvedValueOnce({ summary: "   ", tokensBeforeCompress: 100 });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      session: "session-parent",
+    });
+    (agent as any).messages = [{ role: "user", content: "Implement the approved migration plan" }];
+    for await (const _chunk of agent.processMessage("continue")) {
+      /* drain */
+    }
+    expect(agent.getSessionId()).toBe("session-parent");
+    expect(JSON.stringify((agent as any).messages)).toContain("Implement the approved migration plan");
+    expect(mockAppendCompaction).not.toHaveBeenCalled();
   });
 
   it("triggers session rotation if the model decides ROTATE_SESSION", async () => {

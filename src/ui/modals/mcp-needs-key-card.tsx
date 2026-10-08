@@ -27,6 +27,7 @@ export function McpNeedsKeyCard({
   inputRef,
   error,
   onSubmitKey,
+  focused,
 }: {
   t: Theme;
   width: number;
@@ -38,6 +39,12 @@ export function McpNeedsKeyCard({
   inputRef: React.RefObject<TextareaRenderable | null>;
   error: string | null;
   onSubmitKey: () => void;
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   */
+  focused?: boolean;
 }) {
   const overlayBg = "#000000cc" as string;
   const panelWidth = Math.min(76, width - 6);
@@ -48,7 +55,15 @@ export function McpNeedsKeyCard({
   const top = bottomAlignedModalTop(height, panelHeight);
 
   return (
-    <Semantic id="mcp-needs-key-card" role="dialog" name={`${server.label} needs an API key`} isModal>
+    <Semantic
+      id="mcp-needs-key-card"
+      role="dialog"
+      name={`${server.label} needs an API key`}
+      // Focus lands on the key field in input mode (below) and on the card
+      // itself otherwise, so the card always publishes exactly one owner.
+      focus={(focused && mode !== "input") || undefined}
+      isModal
+    >
       <box
         position="absolute"
         left={0}
@@ -84,7 +99,12 @@ export function McpNeedsKeyCard({
             <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
               <text fg={t.textMuted}>{`Paste ${server.envVar}:`}</text>
               <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1} width="100%">
-                <Semantic id="mcp-needs-key-input" role="textbox" name={server.envVar} focus={mode === "input" || undefined}>
+                <Semantic
+                  id="mcp-needs-key-input"
+                  role="textbox"
+                  name={server.envVar}
+                  focus={(focused && mode === "input") || undefined}
+                >
                   <textarea
                     ref={inputRef}
                     focused={mode === "input"}

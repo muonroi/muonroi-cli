@@ -14,7 +14,7 @@ describe("ideal-trace (blocker-5 forensics tracer)", () => {
   afterEach(() => {
     if (prev === undefined) delete process.env.MUONROI_IDEAL_TRACE;
     else process.env.MUONROI_IDEAL_TRACE = prev;
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("is disabled and writes nothing when the env is unset", () => {

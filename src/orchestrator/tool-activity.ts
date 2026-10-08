@@ -23,7 +23,10 @@
  */
 
 /** In-flight tool calls → the wall-clock instant their suppression lapses. */
-const inFlight = new Map<number, number>();
+import { AsyncLocalStorage } from "node:async_hooks";
+
+const inFlight = new Map<number, { lapsesAt: number; refreshMs: number | null }>();
+const activityScope = new AsyncLocalStorage<number>();
 let nextId = 1;
 
 /**
@@ -54,7 +57,10 @@ export function beginToolActivity(declaredTimeoutMs: number | null | undefined, 
       ? declaredTimeoutMs
       : defaultMs;
   const id = nextId++;
-  inFlight.set(id, now + declared + graceMs);
+  inFlight.set(id, {
+    lapsesAt: now + declared + graceMs,
+    refreshMs: declared === declaredTimeoutMs ? null : declared + graceMs,
+  });
   return id;
 }
 
@@ -67,11 +73,23 @@ export function endToolActivity(id: number): void {
  * True when at least one in-flight tool call is still inside its own deadline —
  * i.e. the turn is working, not hung, and the idle watchdog should re-arm.
  */
-export function isToolActivityLive(now = Date.now()): boolean {
-  for (const lapsesAt of inFlight.values()) {
-    if (now <= lapsesAt) return true;
+export function isToolActivityLive(now = Date.now(), ownedIds?: ReadonlySet<number>): boolean {
+  for (const [id, activity] of inFlight) {
+    if ((!ownedIds || ownedIds.has(id)) && now <= activity.lapsesAt) return true;
   }
   return false;
+}
+
+/** Keep nested progress attached to its owning tool, including parallel calls. */
+export function withToolActivity<T>(id: number, fn: () => T): T {
+  return activityScope.run(id, fn);
+}
+
+/** Actual nested output renews an idle budget, never an explicit tool deadline. */
+export function noteToolActivityProgress(now = Date.now()): void {
+  const id = activityScope.getStore();
+  const activity = id === undefined ? undefined : inFlight.get(id);
+  if (activity?.refreshMs != null && now <= activity.lapsesAt) activity.lapsesAt = now + activity.refreshMs;
 }
 
 /** Test-only: drop all in-flight registrations. */

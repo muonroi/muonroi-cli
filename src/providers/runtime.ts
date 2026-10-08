@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
 import type { ModelInfo } from "../types/index.js";
 import { getReasoningEffortForModel, loadUserSettings } from "../utils/settings.js";
-import { getProviderCapabilities } from "./capabilities.js";
+import { getProviderCapabilities, resolveMaxOutputTokens } from "./capabilities.js";
 import { isProviderDefaultApiBase } from "./endpoints.js";
 import { ceilingForCall, type GateStage, wrapModelWithGate } from "./model-gate.js";
 import { getProviderStrategy } from "./strategies/registry.js";
+import { wrapModelWithToolMarkupGuard } from "./tool-markup-guard.js";
 import type { ProviderId } from "./types.js";
 
 /**
@@ -288,11 +289,39 @@ export function resolveModelRuntime(modelId: string, opts?: ResolveRuntimeOpts):
   // new object (never mutates), meter-only for now (no ceiling enforcement).
   // Universal: a new call site cannot get a model without this factory. Sites
   // that have not migrated a stage are metered as `unattributed` (H8).
+  // The gate is also where declared provider rate limits are ENFORCED. Limits
+  // travel the same route as `ceiling`: catalog data -> ModelInfo -> GateContext,
+  // so no call site names a provider or a number (Zero Hardcode). A model whose
+  // catalog entry declares no `rate_limits` gets `undefined` here and is
+  // dispatched unpaced — see UNDECLARED_RATE_LIMITS in ./rate-limiter.ts.
   resolved.model = wrapModelWithGate(resolved.model, {
     stage: opts?.stage ?? "unattributed",
     modelId: resolved.modelId,
     sessionId: opts?.sessionId,
     ceiling: ceilingForCall(resolved.modelInfo),
+    providerId: resolved.modelInfo?.provider,
+    // A MOCK model issues no network request, so there is no account budget to
+    // protect and pacing it would only make tests sleep against a real 60s
+    // window (and, worse, block on a concurrency slot held by a stream a test
+    // never drains). Metering still runs on the mock path — only enforcement of
+    // someone else's rate limit is skipped, because that limit cannot be reached.
+    rateLimits: mockModel ? undefined : resolved.modelInfo?.rateLimits,
+  });
+
+  // P0-5b — provider-boundary output guard. StepFun emits its native
+  // `<tool_call>` markup as plain-text content on any request with no tool
+  // schemas (measured 2026-09-04, SELF-IMPROVEMENT-PLAN §4.1), which reaches the
+  // user as the final answer on `forcedFinalize`, stall-rescue and the chitchat
+  // continuation. Armed by the capability layer (never by a provider-id compare
+  // here) and a no-op for every model without the quirk. Applied AFTER the
+  // metered gate so it still guards when `MUONROI_GATE=0` disables metering.
+  const _markupProvider = resolved.modelInfo?.provider ?? providerId;
+  resolved.model = wrapModelWithToolMarkupGuard(resolved.model, {
+    enabled: _markupProvider
+      ? getProviderCapabilities(_markupProvider).emitsNativeToolCallMarkup(resolved.modelInfo)
+      : false,
+    modelId: resolved.modelId,
+    sessionId: opts?.sessionId,
   });
 
   return resolved;
@@ -421,6 +450,30 @@ export function resolveTemperatureParam(runtime: ResolvedModelRuntime, desired: 
   const fixed = runtime.modelInfo?.fixedTemperature;
   if (typeof fixed === "number") return { temperature: fixed };
   return { temperature: desired };
+}
+
+/**
+ * Resolve the `maxOutputTokens` spread for a streamText/generateText call —
+ * the output-budget twin of `resolveTemperatureParam`.
+ *
+ * Returns `{}` when the param must be omitted (OAuth `unsupportedParams`, e.g.
+ * ChatGPT Codex 400s on `max_output_tokens`; or a catalog
+ * `supports_max_output_tokens: false`). Otherwise defers the VALUE to
+ * `resolveMaxOutputTokens` in ../providers/capabilities.ts, which treats
+ * `desired` as a visible-output budget and widens it to the model's declared
+ * ceiling on a reasoning model — where `max_tokens` is shared with the thinking
+ * block and a too-small budget yields a silent EMPTY completion.
+ *
+ * `desired` stays meaningful: it is what a non-reasoning model receives
+ * verbatim, and it still wins when it exceeds the declared ceiling.
+ */
+export function resolveMaxOutputTokensParam(
+  runtime: ResolvedModelRuntime,
+  desired: number,
+): { maxOutputTokens?: number } {
+  if (shouldDropParam(runtime, "maxOutputTokens")) return {};
+  const resolved = resolveMaxOutputTokens(runtime.modelInfo?.provider ?? "", runtime.modelInfo, desired);
+  return resolved === undefined ? {} : { maxOutputTokens: resolved };
 }
 
 export function detectProviderForModel(modelId: string): ProviderId {

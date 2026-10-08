@@ -501,15 +501,9 @@ function dedupByValue<T extends { value: any }>(arr: T[]): T[] {
   return out;
 }
 
-export const COUNCIL_HARD_FLOOR_USD = 2.5;
-export const ESTIMATED_NEXT_COUNCIL_COST_USD = 0.45;
-
-export function computeCostGuard(capUsd: number): number {
-  return Math.max(COUNCIL_HARD_FLOOR_USD, 0.15 * capUsd);
-}
-
-export function shouldFallbackToLeader(opts: { cumulative: number; capUsd: number }): boolean {
-  return opts.cumulative + ESTIMATED_NEXT_COUNCIL_COST_USD > computeCostGuard(opts.capUsd);
-}
+// The council→leader cost guard (computeCostGuard / shouldFallbackToLeader) was
+// removed: it downshifted discovery recommendations from the council to the
+// leader once spend neared a share of `--max-cost`, and `/ideal` has no spend cap
+// (user decision). It had no live caller left (gather.ts only `void`-referenced it).
 
 export { withRateLimitBackoff } from "../utils/rate-limit.js";

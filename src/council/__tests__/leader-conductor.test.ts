@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { StreamChunk } from "../../types/index.js";
 import {
   autoRemedyWantsExtend,
@@ -476,6 +476,34 @@ describe("runDebate escalation wiring (B4 integration)", () => {
         (c) => c.type === "content" && typeof c.content === "string" && c.content.includes("debate sufficient"),
       );
       expect(sufficient).toBeTruthy();
+    });
+  });
+
+  // D6 — a sprintPlanningMode debate (item-debate-runner.ts / sprint-runner.ts
+  // sprint-planning) hitting this exact stop-with-unmet boundary must NEVER
+  // call respondToQuestion — no human is present to answer it — and must
+  // resolve on its own, with the resolution recorded honestly on
+  // `DebateState.escalation` (`action: "accept", auto: true`) rather than
+  // silently vanishing. Regression guard for the 38h stall on run
+  // mu75rurpf9ec / session f52d9bfc50a2: `config.autoAcceptEscalation` is
+  // exactly the gate `council/index.ts` now also derives from
+  // `sprintPlanningMode` (previously only from `suppressPreDebateCards`).
+  it("D6: autoAcceptEscalation resolves the progress-limit boundary without ever asking, and records auto:true", async () => {
+    await withEscalationEnv(async () => {
+      const respondToQuestion = vi.fn(async () => "escalate_extend");
+      const config = { ...makeEscConfig(respondToQuestion), autoAcceptEscalation: true };
+
+      const { chunks, state } = await drainDebate(runDebate(makeEscSpec(), config, makeEscLLM()));
+
+      // No card opened, and the responder was never invoked — this is the
+      // condition that made the item debate hang for 38 hours: a blocking
+      // askcard with no human on the other end.
+      expect(chunks.some((c) => c.type === "council_question")).toBe(false);
+      expect(respondToQuestion).not.toHaveBeenCalled();
+      // Resolved silently, at the planned round, with the auto flag set so a
+      // persisted record can say honestly that no one answered this.
+      expect(state.escalation).toEqual({ action: "accept", auto: true });
+      expect(state.roundCount).toBe(1);
     });
   });
 });

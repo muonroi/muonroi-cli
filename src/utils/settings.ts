@@ -24,6 +24,7 @@ import { apiBaseFor, PROVIDER_ENDPOINTS } from "../providers/endpoints.js";
 import type { ProviderId } from "../providers/types.js";
 import { ALL_PROVIDER_IDS } from "../providers/types.js";
 import type { AgentMode, ReasoningEffort } from "../types/index";
+import { isIdealRunUnlimited } from "./ideal-run-scope.js";
 import { logger } from "./logger.js";
 import { normalizeShellSettings, type ShellSettings } from "./shell";
 
@@ -55,27 +56,6 @@ export function getCatalogDefaultModel(): string {
 
 export type TelegramStreamingMode = "off" | "partial";
 export type CouncilExperienceMode = "off" | "advisory" | "enforcing";
-
-/** @deprecated Phase 4 will replace with LemonSqueezy billing. Wallet UI only. */
-export type PaymentChain = "base" | "base-sepolia";
-
-/** @deprecated Phase 4 will replace with LemonSqueezy billing. Wallet UI only. */
-export interface PaymentApprovalSettings {
-  autoApprove?: boolean;
-}
-
-/** @deprecated Phase 4 will replace with LemonSqueezy billing. Wallet UI only. */
-export interface PaymentSettings {
-  enabled?: boolean;
-  chain?: PaymentChain;
-  approval?: PaymentApprovalSettings;
-}
-
-const DEFAULT_PAYMENT_SETTINGS: Required<PaymentSettings> = {
-  enabled: false,
-  chain: "base-sepolia",
-  approval: { autoApprove: false },
-};
 
 const DEFAULT_LSP_SETTINGS: NormalizedLspSettings = {
   enabled: true,
@@ -188,6 +168,8 @@ export interface ProviderKeyConfig {
    */
   apiKey?: string;
   baseURL?: string;
+  /** Anthropic workspace selection for API keys that are not workspace-scoped. */
+  workspaceId?: string;
 }
 
 export interface UserSettings {
@@ -222,8 +204,6 @@ export interface UserSettings {
   mcp?: McpSettings;
   subAgents?: CustomSubagentConfig[];
   hooks?: HooksConfig;
-  /** @deprecated Phase 4 will replace with LemonSqueezy billing. */
-  payments?: PaymentSettings;
   modeModels?: Partial<Record<AgentMode, string>>;
   ecosystem?: { name: string; patterns: string[] };
   autoCompactAfterTurn?: boolean;
@@ -239,40 +219,15 @@ export interface UserSettings {
   autoCompactAbsoluteFloorTokens?: number;
   roleModels?: Partial<Record<ModelRole, string>>;
   councilRounds?: number;
+  /** Allow the leader model to request council using convene_council. */
   autoCouncil?: boolean;
-  /**
-   * Minimum PIL confidence required to auto-trigger council for plan/analyze
-   * tasks. Default 0.85. Range 0.5-1.0. Lower values trigger council more
-   * eagerly (better debate coverage, higher cost); higher values restrict it
-   * to clearly-architectural prompts.
-   */
+  /** Legacy PIL trigger setting, retained for settings compatibility only. */
   autoCouncilConfidence?: number;
-  /**
-   * Minimum number of configured roleModels required before auto-council
-   * triggers. Default 2 — a "debate" needs at least two participants. Range 1-4.
-   * Set to 1 to allow single-model auto-council (degenerate; mostly useful for
-   * preserving legacy behavior).
-   */
+  /** Minimum configured roles before offering model-owned council. Default 2. */
   autoCouncilMinRoles?: number;
-  /**
-   * Whether an auto-triggered council/debate runs the pre-debate clarification
-   * interview (model-designed askcards) before debating, instead of jumping
-   * straight into the debate on the bare prompt. Default true — a broad request
-   * like "dùng debate mode thảo luận lên plan" is exactly the kind of ambiguous
-   * scope the interview is meant to chốt first (prevents the debate drifting /
-   * "lan man"). The clarifier is ROI-gated and returns 0 cards on already-detailed
-   * topics, so enabling it is safe. Set false (or env MUONROI_AUTOCOUNCIL_CLARIFY=0)
-   * to restore the old skip-clarification behaviour.
-   */
+  /** Legacy automatic-entry interview setting; main asks through ask_user. */
   autoCouncilClarify?: boolean;
-  /**
-   * When true (default), auto-council is skipped if the current session model is
-   * a reasoning model (catalog `reasoning: true`). Reasoning models already
-   * perform an internal self-debate via extended thinking, so running an
-   * explicit multi-role council on the same prompt is usually low-ROI and
-   * expensive. Set false (or env MUONROI_AUTOCOUNCIL_SKIP_REASONING=0) to force
-   * council even for reasoning models.
-   */
+  /** Legacy PIL trigger setting; reasoning models now decide council themselves. */
   autoCouncilSkipReasoning?: boolean;
   councilPreferMultiProvider?: boolean;
   /** EE involvement level in council debates. Default: advisory. CQ-19. */
@@ -425,12 +380,98 @@ export interface UserSettings {
    * ("session.model lie"). Default cap="balanced" prevents that silent leak.
    */
   routingPromoteMax?: "off" | "balanced" | "any";
+  /**
+   * Router tier-demotion floor, the counterpart of `routingPromoteMax`. The router
+   * may serve a cheaper tier than the session model down to this tier when the
+   * turn does not need more (chitchat, docs, a task that succeeded on a lower tier
+   * before). "off" keeps the session model as the floor (never demote).
+   * Default "fast".
+   */
+  routingDemoteMin?: "off" | "fast" | "balanced";
 }
 
 export interface ProjectSettings {
   model?: string;
   shell?: ShellSettings;
   lsp?: LspSettings;
+  /**
+   * Relocate GSD planning state (`STATE.md`, `config.json`, `phases/`, …) out
+   * of `.planning/` at the repo root. Some repos already use `.planning/` for
+   * their own unrelated plan folders (e.g. a Shipd/Olympus challenge repo),
+   * so every session writing GSD state there litters the working tree.
+   * Absolute, or relative to the repo root. See `gsd/paths.ts` `planningRoot`.
+   * Env override: `MUONROI_STATE_DIR` (wins over this setting).
+   */
+  stateDir?: string;
+  /**
+   * Per-project opt-out for the deterministic "task done -> commit" auto-commit
+   * (see `orchestrator/auto-commit.ts`). Only a disable is honoured here — a
+   * committed repo file can never turn auto-commit ON for a user who disabled
+   * it. `false` disables both the end-of-turn auto-commit and the `git_commit`
+   * tool; `MUONROI_AUTO_COMMIT=0` still works as the existing env-level
+   * opt-out and takes priority.
+   */
+  autoCommit?: boolean;
+  /**
+   * Opt-in: give the FIRST turn of a session the full tool set even when
+   * PIL classifies it as chitchat/direct-answer (which would otherwise give
+   * it zero, or read-only-only, tools). For a project whose own
+   * AGENTS.md/CLAUDE.md requires a tool call unconditionally at session
+   * start (e.g. a framework's "run this briefing script first"), a
+   * tool-less first turn leaves the model unable to follow that instruction
+   * — see `orchestrator/tool-engine.ts`'s `selectRawToolSet`.
+   *
+   * Explicit opt-in, not automatic on "this project has an instructions
+   * file": giving every project with an AGENTS.md/CLAUDE.md the full tool
+   * set on turn 1 is a real cost/latency change (more tool schemas in the
+   * first prompt) for every user of this CLI, most of whom have no
+   * session-start-script requirement at all. Default `false` — unset means
+   * unchanged behaviour.
+   */
+  firstTurnTools?: boolean;
+  /**
+   * Round 9 (HR8, owner correction to round 2's G3): the project `model` pin
+   * is the MAIN session's instruction only. Round 2 made
+   * `SPAWN_SUB_SESSION` children and delegated sub-agents (any
+   * `resolveModelForTask` call for a non-"compact" task) inherit that SAME
+   * pin — the owner's framework wants the orchestrator tier (main session)
+   * and worker tier (sub-sessions/sub-agents) to potentially run DIFFERENT
+   * models, e.g. an expensive reasoning model for the main session and a
+   * cheaper one for delegated work. When set, a non-empty `subAgentModel`
+   * is what sub-sessions/sub-agents use instead of the main `model` pin;
+   * when unset, behaviour is unchanged (sub-sessions/sub-agents inherit
+   * `model` exactly as round 2 left it). Never applies to `compact` tasks
+   * (compaction/summarization always route independently — see
+   * `resolveModelForTask`'s `opts.pinned` gate).
+   */
+  subAgentModel?: string;
+  /**
+   * Round 12 (G15) — a router `SPAWN_SUB_SESSION` decision (or reactive
+   * escalation from a tool-heavy prior turn) hands the user's RAW request to
+   * a WORKER-tier child with a generic "you have full access to tools,
+   * satisfy the user's request" overlay. For a project whose OWN framework
+   * requires the orchestrator-tier session itself to map the request to a
+   * stage/workflow, write a brief, and hold judgement across the whole task
+   * (not just delegate and disappear), that hand-off is a real behavioural
+   * break: the main model never sees the turn again, so there is no
+   * orchestrator step at all for that turn. Measured live: session
+   * 94bf4fe19937 forked to a sub-session that skipped every framework step
+   * (no stage mapping, no plan, no brief) and started editing a solution
+   * file directly, in violation of an explicit "tell me the plan before you
+   * change anything" instruction from the SAME turn.
+   *
+   * Default `true` (today's behaviour, unchanged) — every project that has
+   * not set this in `.muonroi-cli/settings.json` keeps forking/resuming
+   * sub-sessions exactly as before. `false` keeps the CURRENT turn on the
+   * main session, on the main model: neither a router `SPAWN_SUB_SESSION`
+   * decision nor reactive escalation forks or resumes a child for it. The
+   * main session still has its `task`/`delegate` tools for delegating work
+   * explicitly (those already honour `subAgentModel`, unaffected by this
+   * setting) — this only removes the IMPLICIT, invisible hand-off of the
+   * whole turn. `ROTATE_SESSION` / context-rotation is a distinct mechanism
+   * (anti-mù compaction, not delegation) and is unaffected either way.
+   */
+  routerSubSessions?: boolean;
 }
 
 function getUserSettingsPath(): string {
@@ -606,18 +647,6 @@ export function saveUserSettings(partial: Partial<UserSettings>): void {
           lsp: mergeLspSettings(current.lsp, partial.lsp),
         }
       : {}),
-    ...(partial.payments !== undefined
-      ? {
-          payments: {
-            ...current.payments,
-            ...partial.payments,
-            approval: {
-              ...current.payments?.approval,
-              ...partial.payments?.approval,
-            },
-          },
-        }
-      : {}),
   };
 
   writeJson(getUserSettingsPath(), next);
@@ -773,6 +802,64 @@ export function getCurrentModel(mode?: AgentMode): string {
 
   const user = loadUserSettings();
   return pickValid(user.defaultModel) ?? getCatalogDefaultModel();
+}
+
+/**
+ * True when the ACTIVE project (`.muonroi-cli/settings.json` at process.cwd())
+ * pins `model` explicitly. Gap (d): the per-turn router (`router/decide.ts`,
+ * called every turn from `orchestrator/message-processor.ts` for the MAIN
+ * conversation turn) is allowed to downgrade the session's default model to a
+ * cheaper tier for turns that look trivial (PIL-classified) — by design, see
+ * `applyPromotionCap`'s doc comment: "the router may downgrade per turn but
+ * may not silently promote". That is the right default for a user's own loose
+ * `defaultModel` pick, but a repo that ships its own `.muonroi-cli/settings.json`
+ * pin (e.g. so every agent — Claude Code, muonroi-cli, … — runs the same
+ * orchestrator model under a shared framework) means the pin IS the
+ * instruction, not a mere suggestion the router may second-guess. Callers use
+ * this to skip per-turn downgrade routing for the main turn only; cheap
+ * sub-tasks (tool-loop rounds, council sub-tasks) route independently and are
+ * unaffected.
+ */
+export function isModelPinnedByProject(): boolean {
+  return typeof loadProjectSettings().model === "string" && loadProjectSettings().model!.trim().length > 0;
+}
+
+/**
+ * Round 9 (HR8): the project's explicit sub-agent/sub-session model override
+ * (`ProjectSettings.subAgentModel`), trimmed, or `undefined` when unset or
+ * blank. Callers that resolve a model for a `SPAWN_SUB_SESSION` child or a
+ * delegated sub-agent task check this FIRST — when present, it wins over the
+ * main-session `model` pin for that call; when absent, behaviour is
+ * unchanged from before this setting existed.
+ */
+export function getProjectSubAgentModel(): string | undefined {
+  const raw = loadProjectSettings().subAgentModel;
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Round 12 (G15): whether a router `SPAWN_SUB_SESSION` decision (or reactive
+ * escalation) may fork/resume a child sub-session for this project. See
+ * `ProjectSettings.routerSubSessions`'s doc comment. Default `true`
+ * (today's behaviour) — only an explicit `false` disables it; any other
+ * value (missing key, non-boolean) falls back to `true` rather than
+ * silently changing behaviour on a typo.
+ */
+export function isRouterSubSessionsEnabled(): boolean {
+  const raw = loadProjectSettings().routerSubSessions;
+  return raw === false ? false : true;
+}
+
+/**
+ * Whether this project explicitly opted into giving the FIRST turn of a
+ * session the full tool set (see `ProjectSettings.firstTurnTools`'s doc
+ * comment). Default `false` — every project that has not set this in
+ * `.muonroi-cli/settings.json` keeps today's behaviour unchanged.
+ */
+export function isFirstTurnToolsEnabledByProject(): boolean {
+  return loadProjectSettings().firstTurnTools === true;
 }
 
 /**
@@ -1005,26 +1092,6 @@ export function saveMcpServers(servers: McpServerConfig[]): void {
   saveUserSettings({ mcp: { servers } });
 }
 
-/** @deprecated Phase 4 will replace with LemonSqueezy billing. Wallet UI only. */
-export function loadPaymentSettings(): Required<PaymentSettings> {
-  const payments = loadUserSettings().payments;
-  return {
-    enabled: payments?.enabled ?? DEFAULT_PAYMENT_SETTINGS.enabled,
-    chain:
-      payments?.chain === "base" || payments?.chain === "base-sepolia"
-        ? payments.chain
-        : DEFAULT_PAYMENT_SETTINGS.chain,
-    approval: {
-      autoApprove: payments?.approval?.autoApprove ?? DEFAULT_PAYMENT_SETTINGS.approval.autoApprove,
-    },
-  };
-}
-
-/** @deprecated Phase 4 will replace with LemonSqueezy billing. Wallet UI only. */
-export function savePaymentSettings(partial: PaymentSettings): void {
-  saveUserSettings({ payments: partial });
-}
-
 export function isAutoCompactAfterTurnEnabled(): boolean {
   return loadUserSettings().autoCompactAfterTurn ?? true;
 }
@@ -1061,6 +1128,11 @@ export function getAutoCompactMinNewTokens(): number {
  * disable the absolute cap, restoring pure window-relative behavior).
  */
 export function getAutoCompactAbsoluteFloorTokens(): number {
+  // `/ideal` has no limits (user decision). This floor is an absolute token count
+  // chosen for cost ("bounds windows > 200K"), not a property of the model's
+  // window, so it is off inside an `/ideal` run. The window-relative trigger
+  // (contextWindow × thresholdPct, orchestrator.ts) still applies there.
+  if (isIdealRunUnlimited()) return 0;
   const envRaw = process.env.MUONROI_AUTO_COMPACT_ABS_FLOOR;
   if (envRaw !== undefined && envRaw !== "") {
     const n = Number(envRaw);
@@ -1080,6 +1152,14 @@ export function getAutoCompactAbsoluteFloorTokens(): number {
  * schedule. Env override: MUONROI_SUB_AGENT_BUDGET_CHARS.
  */
 export function getSubAgentBudgetChars(): number {
+  // No budget inside an `/ideal` run (user decision: no limits). `Infinity` makes
+  // `wrapToolSetWithCap` pass every result through untouched (its tiers compare
+  // `cumulative / max`, which stays 0). This counter is not a context-window
+  // guard: it only ever grows — compaction removes results from the model's view
+  // but never decrements it — so it measures effort spent, not what is in context.
+  // Measured cost: run mtwnfp8p3869 logged "Tool-output budget reached for
+  // sub-agent (410846/240000 chars)" and the sub-agent stopped with the build red.
+  if (isIdealRunUnlimited()) return Number.POSITIVE_INFINITY;
   const envRaw = process.env.MUONROI_SUB_AGENT_BUDGET_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
@@ -1130,6 +1210,57 @@ export function getProviderProgressTimeoutMs(): number {
     if (Number.isFinite(n) && n >= 30_000 && n <= 1_800_000) return Math.floor(n);
   }
   return 300_000;
+}
+
+/**
+ * Round 5 (G8 HIGH #2): ceiling (ms) for treating "a provider request is in
+ * flight, awaiting its first byte" as turn-watchdog liveness — Claude Code
+ * parity, no 120s kill of a MAIN model call that is merely slow to first
+ * token (z.ai/glm-4.7 TTFT 10.6-11.4s plus retries has been measured to blow
+ * past 120s while still genuinely working; session trace showed `stream_start`
+ * land 2m19s after a top-level watchdog kill). `tool-engine.ts` re-pings turn
+ * progress on an interval for up to this long while awaiting the first
+ * `fullStream` part; past it, pinging stops and the ordinary 120s idle rule
+ * applies again as a backstop. This is deliberately well ABOVE
+ * `getProviderStallTimeoutMs()` (default 120_000, max 600_000): a genuinely
+ * dead provider is expected to be caught by that dedicated, re-promptable
+ * stall watchdog (own toast + retry) long before this ceiling matters — this
+ * is a backstop for "unusually slow but alive", not the primary guard.
+ * Range 500–1_800_000 (the low end exists only so tests can scale the whole
+ * watchdog down to fast real timers, matching the convention already used by
+ * `MUONROI_COMPACTION_PROPOSER_TIMEOUT_MS`); default 600_000 (10 min). Env
+ * override: MUONROI_FIRST_TOKEN_TIMEOUT_MS.
+ */
+export function getFirstTokenTimeoutMs(): number {
+  const envRaw = process.env.MUONROI_FIRST_TOKEN_TIMEOUT_MS;
+  if (envRaw !== undefined && envRaw !== "") {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 500 && n <= 1_800_000) return Math.floor(n);
+  }
+  return 600_000;
+}
+
+/**
+ * Round 6 (G8 HIGH A): ceiling (ms) for how long `preStreamPhase`'s periodic
+ * turn-progress ping (message-processor.ts) may vouch for a single
+ * pre-stream phase. Round 5's ping had NO ceiling — a phase that never
+ * settled pinged forever, so a genuinely wedged phase could no longer trip
+ * the idle watchdog at all (a regression a refuter caught on round 5's own
+ * fix). Past this ceiling, `preStreamPhase` stops pinging — the phase itself
+ * is NOT cancelled, only this mechanism's liveness grant for it — and the
+ * ordinary idle rule applies again; a `pre-stream.<name>.pingCeiling`
+ * breadcrumb records which phase this happened to.
+ * Range 500–1_800_000 (low end for fast scaled tests, same convention as the
+ * other timeout getters in this file); default 180_000 (3 min). Env
+ * override: MUONROI_PRESTREAM_PHASE_MAX_MS.
+ */
+export function getPrestreamPhaseMaxPingMs(): number {
+  const envRaw = process.env.MUONROI_PRESTREAM_PHASE_MAX_MS;
+  if (envRaw !== undefined && envRaw !== "") {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 500 && n <= 1_800_000) return Math.floor(n);
+  }
+  return 180_000;
 }
 
 /**
@@ -1206,7 +1337,15 @@ export function getSteerInjectionEnabled(): boolean {
  * into short summary stubs. Below the threshold compaction is a no-op.
  * Env override: MUONROI_SUBAGENT_COMPACT_THRESHOLD_CHARS.
  */
-export function getSubAgentCompactThresholdChars(): number {
+export function getSubAgentCompactThresholdChars(contextWindowTokens?: number): number {
+  // Inside an `/ideal` run the absolute 40K-char trigger is a budget (it was
+  // lowered from 80K to save money, see below), not a context-window guard. The
+  // compactor already takes min(threshold, window × fillRatio × 4), so Infinity
+  // leaves exactly the window-relative trigger. With no known window there is
+  // nothing else to guard against overflow with, so the absolute value stays.
+  if (isIdealRunUnlimited() && typeof contextWindowTokens === "number" && contextWindowTokens > 0) {
+    return Number.POSITIVE_INFINITY;
+  }
   const envRaw = process.env.MUONROI_SUBAGENT_COMPACT_THRESHOLD_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
@@ -1243,6 +1382,12 @@ export function getSubAgentCompactKeepLast(): number {
  * Env override: MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS.
  */
 export function getTopLevelCompactThresholdChars(contextWindowTokens?: number): number {
+  // Inside `/ideal` only the window-relative part applies (35% of the real
+  // window, in chars). The 200K-char absolute cap below is a budget that makes a
+  // large-window model compact long before its window is under any pressure.
+  if (isIdealRunUnlimited() && contextWindowTokens && contextWindowTokens > 0) {
+    return Math.floor(contextWindowTokens * 4 * 0.35);
+  }
   const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
@@ -1257,6 +1402,20 @@ export function getTopLevelCompactThresholdChars(contextWindowTokens?: number): 
     return Math.min(200_000, dynamicThreshold);
   }
   return 200_000;
+}
+
+/**
+ * The context window compaction should plan against for a turn.
+ *
+ * A sub-session clamps it to 45K tokens regardless of the model's real window
+ * (tool-engine.ts) — a budget, not a guard: a 256K model would compact as if it
+ * could only hold 45K. Inside an `/ideal` run (user decision: no limits) the real
+ * window is used. Normal chat is unchanged.
+ */
+export function effectiveCompactionWindowTokens(contextWindowTokens: number, isSubSession: boolean): number {
+  if (!(contextWindowTokens > 0)) return 0;
+  if (isSubSession && !isIdealRunUnlimited()) return Math.min(45_000, contextWindowTokens);
+  return contextWindowTokens;
 }
 
 /**
@@ -1316,6 +1475,13 @@ export function getTopLevelCompactKeepLast(contextWindowTokens?: number): number
  * results are large. 0 disables. Env: MUONROI_TOP_LEVEL_COMPACT_TAIL_BUDGET_CHARS.
  */
 export function getTopLevelCompactTailBudgetChars(contextWindowTokens?: number): number {
+  // Inside `/ideal` only the window-relative part applies (a tail of up to 20% of
+  // the real window, in chars). The 50K-char absolute default is a cost budget
+  // ("~7K tokens/call saved") that trims the verbatim tail even when the window
+  // has room. With no known window there is nothing to size it against: off.
+  if (isIdealRunUnlimited()) {
+    return contextWindowTokens && contextWindowTokens > 0 ? Math.floor(contextWindowTokens * 4 * 0.2) : 0;
+  }
   const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_TAIL_BUDGET_CHARS;
   if (envRaw !== undefined && envRaw.trim() !== "") {
     const n = Number(envRaw);
@@ -1344,6 +1510,13 @@ export function getTopLevelCompactTailBudgetChars(contextWindowTokens?: number):
  * MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS.
  */
 export function getTopLevelToolBudgetChars(maxRounds?: number, contextWindowTokens?: number): number {
+  // No budget inside an `/ideal` run (user decision: no limits). The small-window
+  // branch below describes itself as a window guard, but the counter it feeds
+  // only ever GROWS — compaction removes old results from the model's view and
+  // never decrements it — so it trims new results even when the window has room.
+  // Fitting the real window is compaction's job (getTopLevelCompactThresholdChars,
+  // pre-stream compaction, overflow recovery), all of which stay in force.
+  if (isIdealRunUnlimited()) return Number.POSITIVE_INFINITY;
   const envRaw = process.env.MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
@@ -1503,6 +1676,15 @@ export function getCouncilLanguage(): string {
 export function getRoutingPromoteMax(): "off" | "balanced" | "any" {
   const raw = loadUserSettings().routingPromoteMax;
   return raw === "off" || raw === "balanced" || raw === "any" ? raw : "balanced";
+}
+
+/**
+ * Router tier-demotion floor. See UserSettings.routingDemoteMin. Default "fast";
+ * any unknown value falls back to it.
+ */
+export function getRoutingDemoteMin(): "off" | "fast" | "balanced" {
+  const raw = loadUserSettings().routingDemoteMin;
+  return raw === "off" || raw === "fast" || raw === "balanced" ? raw : "fast";
 }
 
 export function getDisabledProviders(): ProviderId[] {

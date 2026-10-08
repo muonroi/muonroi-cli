@@ -1,6 +1,70 @@
 import type { UINode } from "./protocol.js";
 
-export type Op = "=" | "~=" | "*=" | "^=";
+/**
+ * Comparison operators, longest-first — `parseSegment` alternates over this
+ * array, so the order here IS the match precedence (`*=` must be tried before
+ * `=`). Declared as a value with {@link Op} derived from it so `tui.capabilities`
+ * can advertise the real operator set; a type-only union is invisible at runtime
+ * and the hand-written docs had already dropped `^=`.
+ */
+export const SELECTOR_OPS = ["*=", "~=", "^=", "="] as const;
+export type Op = (typeof SELECTOR_OPS)[number];
+
+/** Bare boolean flag tokens, e.g. `role=button focus`. Load-bearing: `parseSegment` builds its matcher from this. */
+export const SELECTOR_FLAGS = ["focus", "selected", "disabled"] as const;
+export type SelectorFlag = (typeof SELECTOR_FLAGS)[number];
+
+/** Node fields a term may compare against, besides dotted `props.<key>` access. Load-bearing in `readField`. */
+export const SELECTOR_FIELDS = ["id", "role", "name", "value", "state"] as const;
+export type SelectorField = (typeof SELECTOR_FIELDS)[number];
+
+/** Descend-into-children combinator. Load-bearing: `parseSelector` splits on it. */
+export const SELECTOR_CHILD_COMBINATOR = ">>";
+
+/** Prefix for dotted access into `UINode.props`. Load-bearing in `readField`. */
+export const SELECTOR_PROPS_PREFIX = "props.";
+
+/**
+ * Machine-readable description of the selector grammar, for the
+ * `tui.capabilities` handshake. `ops`, `flags`, `fields`, `childCombinator` and
+ * `propsPrefix` are the SAME values the parser below consumes, so they cannot
+ * drift from behaviour. `forms` and `examples` are prose: the shapes they
+ * describe (`[index=N]`, quoted values) are encoded in `parseSegment`'s regexes
+ * and have no value form to point at — they are restated, and live in this file
+ * so a parser change and its description are one edit apart.
+ */
+export const SELECTOR_GRAMMAR = {
+  ops: SELECTOR_OPS,
+  flags: SELECTOR_FLAGS,
+  fields: SELECTOR_FIELDS,
+  childCombinator: SELECTOR_CHILD_COMBINATOR,
+  propsPrefix: SELECTOR_PROPS_PREFIX,
+  forms: [
+    "<field><op><value> — value may be bare (up to the next space) or double-quoted to include spaces",
+    "props.<key><op><value> — dotted access into UINode.props",
+    "<flag> — bare token, matches when that boolean is true on the node",
+    "[index=N] — 0-based positional pick among the matches of the segment it appears in",
+    "<segment> >> <segment> — right-hand segment matches DIRECT CHILDREN of the left-hand matches",
+    "several terms separated by spaces AND together within one segment",
+  ],
+  opSemantics: {
+    "=": "exact string equality",
+    "~=": "case-insensitive substring",
+    "*=": "JavaScript RegExp test (unanchored)",
+    "^=": "string prefix",
+  },
+  examples: [
+    "role=textbox",
+    "id=composer",
+    'name~="council"',
+    'name*="Co.*l$"',
+    "role=listitem focus",
+    "role=listitem [index=0]",
+    "role=dialog >> role=button",
+    "id=log props.overflows=true",
+  ],
+} as const;
+
 export type Term = { key: string; op: Op; value: string };
 export type Selector = {
   terms: Term[];
@@ -8,11 +72,20 @@ export type Selector = {
   combinators: string[];
 };
 
-const _FLAGS = new Set(["focus", "selected", "disabled"]);
+/** Escape a literal for embedding in a RegExp source. */
+function reEscape(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const FLAG_RE = new RegExp(`^(${SELECTOR_FLAGS.map(reEscape).join("|")})(?:\\s|$)`);
+// Keys may contain dots (props.scrollTop). Operators are alternated in
+// SELECTOR_OPS order, which is longest-first so `*=` wins over `=`.
+const KV_RE = new RegExp(`^([\\w.]+)(${SELECTOR_OPS.map(reEscape).join("|")})`);
+const CHILD_COMBINATOR_RE = new RegExp(`\\s*${reEscape(SELECTOR_CHILD_COMBINATOR)}\\s*`);
 
 export function parseSelector(input: string): Selector {
-  // First, split by child combinator >>
-  const childCombinatorRegex = /\s*>>\s*/;
+  // First, split by the child combinator (>>)
+  const childCombinatorRegex = CHILD_COMBINATOR_RE;
   const rawSegments = input.split(childCombinatorRegex);
 
   // If there's only one segment and no >> was found, combinators = [" "]
@@ -22,7 +95,7 @@ export function parseSelector(input: string): Selector {
     combinators.push(" ");
   } else {
     for (let i = 0; i < rawSegments.length - 1; i++) {
-      combinators.push(">>");
+      combinators.push(SELECTOR_CHILD_COMBINATOR);
     }
   }
 
@@ -67,8 +140,8 @@ function parseSegment(input: string): Term[] {
       continue;
     }
 
-    // Check for flag tokens
-    const flagMatch = current.match(/^(focus|selected|disabled)(?:\s|$)/);
+    // Check for flag tokens (derived from SELECTOR_FLAGS)
+    const flagMatch = current.match(FLAG_RE);
     if (flagMatch) {
       terms.push({
         key: "__flag",
@@ -79,10 +152,10 @@ function parseSegment(input: string): Term[] {
       continue;
     }
 
-    // Check for key=value, key~=value, key*=value, or key^=value.
-    // Key can contain dots (e.g., props.scrollTop).
-    // Match longer operators first: *=, ~=, ^=, then =.
-    const kvMatch = current.match(/^([\w.]+)(\*=|~=|\^=|=)/);
+    // Check for key<op>value. Key can contain dots (e.g., props.scrollTop).
+    // Operator alternation comes from SELECTOR_OPS, which is ordered
+    // longest-first so `*=` is tried before `=`.
+    const kvMatch = current.match(KV_RE);
     if (kvMatch) {
       const key = kvMatch[1];
       const op = kvMatch[2] as Op;
@@ -127,15 +200,51 @@ function parseSegment(input: string): Term[] {
     break;
   }
 
+  // Round 12 (F3/G16): `current` still non-empty here means parsing stalled
+  // on syntax this grammar does not recognize (e.g. a bare `#id` — this
+  // grammar requires `id=value`, not CSS `#id`).
+  //
+  // Round 12b (F3 residual, MED-HIGH): checking `terms.length === 0` here
+  // (rather than just `current`, which is also `""` for a segment that was
+  // BLANK/whitespace-only from the very start — the `while (current)` loop
+  // above never even runs) covers that case too. An empty `terms` array —
+  // whether from a FAILED parse (leftover unparsed text) or a segment with
+  // NOTHING to parse in the first place (`""`, `"   "`, or a trailing empty
+  // segment from a malformed `>>` split, e.g. `"role=x >> "`) — looked
+  // identical to a deliberately unconstrained segment, and `termsMatch`'s
+  // `Array.prototype.every` on an empty array is vacuously `true` — so an
+  // unparseable OR blank selector segment silently matched EVERY node
+  // instead of none. Measured live: `tui.wait_for({selector:
+  // "#nonexistent"})` resolved immediately instead of timing out. A
+  // leftover/malformed/blank selector segment must match NOTHING, never
+  // everything — `termMatches` below always fails a `__unparsed` term, and
+  // (unlike `__index`) `termsMatch` does not filter it out of the `.every`
+  // check, so it drags the WHOLE segment's match down to false.
+  //
+  // This is safe for the two legitimate "no selector" paths: a `wait_for`
+  // call with NO `selector` field at all (idle/event-only waits) never
+  // calls into this module — driver.ts's condition builder only invokes
+  // `selectorMatches` when `"selector" in cond`, so an omitted field is
+  // unaffected. And no documented form in `SELECTOR_GRAMMAR` relies on a
+  // zero-term segment to mean "match everything" — every real form (a
+  // field comparison, a flag, `[index=N]`) always produces at least one
+  // term, so this can only ever fire on input that was blank or failed to
+  // parse.
+  if (terms.length === 0) {
+    terms.push({ key: "__unparsed", op: "=", value: current });
+  }
+
   return terms;
 }
 
 function termMatches(node: UINode, t: Term): boolean {
+  // Round 12 (F3/G16): a segment that failed to parse (see parseSegment's
+  // doc comment) must never match — this is what turns "unparseable" into
+  // "matches nothing" instead of "matches everything".
+  if (t.key === "__unparsed") return false;
   if (t.key === "__flag") {
-    if (t.value === "focus") return node.focus === true;
-    if (t.value === "selected") return node.selected === true;
-    if (t.value === "disabled") return node.disabled === true;
-    return false;
+    if (!(SELECTOR_FLAGS as readonly string[]).includes(t.value)) return false;
+    return node[t.value as SelectorFlag] === true;
   }
   if (t.key === "__index") return true;
   const v = readField(node, t.key);
@@ -149,13 +258,11 @@ function termMatches(node: UINode, t: Term): boolean {
 }
 
 function readField(node: UINode, key: string): unknown {
-  if (key === "role") return node.role;
-  if (key === "id") return node.id;
-  if (key === "name") return node.name;
-  if (key === "value") return node.value;
-  if (key === "state") return node.state;
-  if (key.startsWith("props.")) {
-    const dot = key.slice("props.".length);
+  if ((SELECTOR_FIELDS as readonly string[]).includes(key)) {
+    return node[key as SelectorField];
+  }
+  if (key.startsWith(SELECTOR_PROPS_PREFIX)) {
+    const dot = key.slice(SELECTOR_PROPS_PREFIX.length);
     return node.props?.[dot];
   }
   return undefined;

@@ -2,7 +2,7 @@ import type { ModelMessage } from "ai";
 import { getCompactionSummaryText } from "../orchestrator/compaction";
 import { getResponseTaskType, isResponseTool } from "../pil/response-tools";
 import type { ChatEntry, ToolCall, ToolResult } from "../types/index";
-import { logger } from "../utils/logger.js";
+import { logger, redactSecrets } from "../utils/logger.js";
 import { getDatabase, type SQLiteDatabase, withTransaction } from "./db";
 import { extractToolResultFromOutput, getOutputKind, isOutputSuccess } from "./tool-results";
 import { buildEffectiveTranscript, type LoadedTranscriptState, type PersistedCompaction } from "./transcript-view";
@@ -93,9 +93,200 @@ function loadMessageRows(sessionId: string): MessageRow[] {
   `)
     .all(sessionId) as MessageRow[];
   for (const row of rows) {
-    row.message_json = sanitizeBase64InMessageJson(row.message_json);
+    if (row.role === "tool") row.message_json = sanitizeBase64InMessageJson(row.message_json);
   }
   return rows;
+}
+
+/**
+ * Round 9 (G11c) — a single malformed `message_json` row must not take down
+ * the WHOLE session load. Measured live: a sub-session's turn aborted mid-
+ * stream (a `ToolCallMarkupLeakError` propagating uncaught out of an
+ * unguarded compaction summary call — see compaction.ts/orchestrator.ts),
+ * and the NEXT top-level turn on the resumed parent session failed instantly
+ * with a raw, uncustomized `JSON Parse error: Expected ']'` — every row this
+ * session ever persisted parsed cleanly on inspection, so the malformed JSON
+ * was constructed transiently during that turn's own processing, not
+ * corrupted at rest; the exact call site could not be pinned down from the
+ * available forensics (no error interaction_log row, no corrupted persisted
+ * data). Regardless of which future turn produces a bad row, resuming a
+ * session must survive it: each row is parsed independently here — a row
+ * that fails to parse is logged (session id + seq, for forensics) and
+ * OMITTED from the returned transcript rather than throwing and aborting the
+ * whole resume.
+ */
+function parseMessageRowsSafely(rows: readonly MessageRow[]): {
+  messages: ModelMessage[];
+  seqs: number[];
+  timestamps: Date[];
+} {
+  const messages: ModelMessage[] = [];
+  const seqs: number[] = [];
+  const timestamps: Date[] = [];
+  for (const row of rows) {
+    let message: ModelMessage;
+    try {
+      message = JSON.parse(row.message_json) as ModelMessage;
+    } catch (err) {
+      logger.error("storage", "Skipping unparseable message row on resume — the rest of the session still loads", {
+        sessionId: row.session_id,
+        seq: row.seq,
+        role: row.role,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+    messages.push(message);
+    seqs.push(row.seq);
+    timestamps.push(new Date(row.created_at));
+  }
+  return { messages, seqs, timestamps };
+}
+
+interface RawToolCallPart {
+  type: "tool-call";
+  toolCallId: string;
+  toolName: string;
+}
+
+interface RawToolResultPart {
+  type: "tool-result";
+  toolCallId: string;
+  toolName?: string;
+}
+
+function isRawToolCallPart(part: unknown): part is RawToolCallPart {
+  return (
+    !!part &&
+    typeof part === "object" &&
+    (part as { type?: unknown }).type === "tool-call" &&
+    typeof (part as { toolCallId?: unknown }).toolCallId === "string"
+  );
+}
+
+function isRawToolResultPart(part: unknown): part is RawToolResultPart {
+  return (
+    !!part &&
+    typeof part === "object" &&
+    (part as { type?: unknown }).type === "tool-result" &&
+    typeof (part as { toolCallId?: unknown }).toolCallId === "string"
+  );
+}
+
+/**
+ * Round 10 (G8 HIGH B) — a resumed transcript can carry an ORPHANED
+ * tool-call/tool-result pairing even after `parseMessageRowsSafely` (round
+ * 9) correctly skips a single malformed row: measured repro — a malformed
+ * assistant message carrying a `tool-call` part gets skipped, but the `tool`
+ * role message carrying ITS result survives (a separate row, itself
+ * well-formed), leaving `[..., tool, ...]` with a `toolCallId` the provider
+ * has never seen an assistant declare. Every OpenAI-compatible provider
+ * rejects that shape outright (measured: a 400 on the very next call) —
+ * round 9 made resume survive a bad row, but did not make the SURVIVING
+ * messages internally consistent.
+ *
+ * Sanitizes both directions, scoped to ONE already-assembled transcript (the
+ * caller always applies this per-session, never across a session boundary,
+ * so a parent's tool call is never "matched" by an unrelated child's result
+ * or vice versa):
+ *   - a tool-result whose `toolCallId` matches no assistant tool-call
+ *     ANYWHERE in this transcript is dropped (just that part; the whole
+ *     `tool` message too, if every part in it turns out orphaned);
+ *   - an assistant tool-call with no matching tool-result anywhere in this
+ *     transcript gets a SYNTHETIC one inserted right after its message,
+ *     rather than the tool-call being stripped from the assistant message.
+ *     Stripping risks leaving that message with no content at all (most
+ *     providers reject an empty assistant message too, trading one 400 for
+ *     another) and erases the model's own record that it tried to act.
+ *     Inserting a result uses the IDENTICAL `{type:"tool-result",
+ *     output:{type:"text", value}}` shape this codebase already sends to
+ *     production providers today for an ELIDED (not missing) result — see
+ *     `subagent-compactor.ts`'s stub construction — so this is a shape every
+ *     provider this codebase talks to already accepts.
+ */
+function sanitizeToolCallPairing<
+  T extends { messages: ModelMessage[]; seqs: ReadonlyArray<number | null>; timestamps: readonly Date[] },
+>(state: T): T {
+  const { messages, seqs, timestamps } = state;
+
+  const resultIdsPresent = new Set<string>();
+  for (const m of messages) {
+    if (m.role !== "tool" || !Array.isArray(m.content)) continue;
+    for (const part of m.content as unknown[]) {
+      if (isRawToolResultPart(part)) resultIdsPresent.add(part.toolCallId);
+    }
+  }
+
+  const callIdsPresent = new Set<string>();
+  for (const m of messages) {
+    if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
+    for (const part of m.content as unknown[]) {
+      if (isRawToolCallPart(part)) callIdsPresent.add(part.toolCallId);
+    }
+  }
+
+  const outMessages: ModelMessage[] = [];
+  const outSeqs: Array<number | null> = [];
+  const outTimestamps: Date[] = [];
+  let droppedResults = 0;
+  let synthesizedResults = 0;
+
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]!;
+    const seq = seqs[i] ?? null;
+    const ts = timestamps[i]!;
+
+    if (m.role === "tool" && Array.isArray(m.content)) {
+      const originalParts = m.content as unknown[];
+      const kept = originalParts.filter((part) => {
+        if (!isRawToolResultPart(part)) return true; // pass through anything else untouched
+        const ok = callIdsPresent.has(part.toolCallId);
+        if (!ok) droppedResults++;
+        return ok;
+      });
+      if (kept.length === 0) continue; // whole message became empty — drop it (skip pushing seq/timestamp too)
+      outMessages.push(kept.length === originalParts.length ? m : ({ ...m, content: kept } as ModelMessage));
+      outSeqs.push(seq);
+      outTimestamps.push(ts);
+      continue;
+    }
+
+    outMessages.push(m);
+    outSeqs.push(seq);
+    outTimestamps.push(ts);
+
+    if (m.role === "assistant" && Array.isArray(m.content)) {
+      const missing = (m.content as unknown[]).filter(
+        (part) => isRawToolCallPart(part) && !resultIdsPresent.has(part.toolCallId),
+      ) as RawToolCallPart[];
+      if (missing.length > 0) {
+        synthesizedResults += missing.length;
+        outMessages.push({
+          role: "tool",
+          content: missing.map((part) => ({
+            type: "tool-result",
+            toolCallId: part.toolCallId,
+            toolName: part.toolName,
+            output: {
+              type: "text",
+              value: "[tool result unavailable — could not be resumed for this session]",
+            },
+          })),
+        } as unknown as ModelMessage);
+        outSeqs.push(null);
+        outTimestamps.push(ts);
+      }
+    }
+  }
+
+  if (droppedResults > 0 || synthesizedResults > 0) {
+    logger.warn("storage", "Sanitized orphaned tool-call/tool-result pairing on resume", {
+      droppedResults,
+      synthesizedResults,
+    });
+  }
+
+  return { ...state, messages: outMessages, seqs: outSeqs, timestamps: outTimestamps };
 }
 
 function toPersistedCompaction(row: CompactionRow | undefined): PersistedCompaction | null {
@@ -124,10 +315,10 @@ export function loadLatestCompaction(sessionId: string): PersistedCompaction | n
 
 function buildEffectiveMessageRecords(sessionId: string): EffectiveMessageRecord[] {
   const rows = loadMessageRows(sessionId);
-  const messages = rows.map((row) => JSON.parse(row.message_json) as ModelMessage);
-  const seqs = rows.map((row) => row.seq);
-  const timestamps = rows.map((row) => new Date(row.created_at));
-  const transcript = buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sessionId));
+  const { messages, seqs, timestamps } = parseMessageRowsSafely(rows);
+  const transcript = sanitizeToolCallPairing(
+    buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sessionId)),
+  );
 
   return transcript.messages.map((message, index) => ({
     message,
@@ -137,17 +328,14 @@ function buildEffectiveMessageRecords(sessionId: string): EffectiveMessageRecord
 }
 
 export function loadRawTranscript(sessionId: string): ModelMessage[] {
-  return loadMessageRows(sessionId).map((row) => JSON.parse(row.message_json) as ModelMessage);
+  const { messages, seqs, timestamps } = parseMessageRowsSafely(loadMessageRows(sessionId));
+  return sanitizeToolCallPairing({ messages, seqs, timestamps }).messages;
 }
 
 export function loadTranscriptState(sessionId: string): LoadedTranscriptState {
   const rows = loadMessageRows(sessionId);
-  return buildEffectiveTranscript(
-    rows.map((row) => JSON.parse(row.message_json) as ModelMessage),
-    rows.map((row) => row.seq),
-    rows.map((row) => new Date(row.created_at)),
-    loadLatestCompaction(sessionId),
-  );
+  const { messages, seqs, timestamps } = parseMessageRowsSafely(rows);
+  return sanitizeToolCallPairing(buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sessionId)));
 }
 
 export function loadTranscript(sessionId: string): ModelMessage[] {
@@ -183,10 +371,13 @@ export function loadSessionChainTranscriptState(sessionId: string): LoadedTransc
   const records: ChainMessageRecord[] = [];
   for (const sid of chain) {
     const rows = loadMessageRows(sid);
-    const messages = rows.map((row) => JSON.parse(row.message_json) as ModelMessage);
-    const seqs = rows.map((row) => row.seq);
-    const timestamps = rows.map((row) => new Date(row.created_at));
-    const effective = buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sid));
+    const { messages, seqs, timestamps } = parseMessageRowsSafely(rows);
+    // Sanitized PER SESSION, before merging into the flat cross-session
+    // `records` list — a tool call in one session must never be "matched"
+    // by an unrelated result from another session in the same chain.
+    const effective = sanitizeToolCallPairing(
+      buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sid)),
+    );
 
     for (let i = 0; i < effective.messages.length; i++) {
       records.push({
@@ -706,9 +897,24 @@ export function markToolCallErrored(sessionId: string, toolCallId: string, error
         SET status = 'errored', completed_at = ?, args_json = COALESCE(args_json, ?)
         WHERE session_id = ? AND tool_call_id = ?
       `)
-      .run(now, JSON.stringify({ error: errorMessage.slice(0, 500) }), sessionId, toolCallId);
-  } catch {
-    /* fail-open */
+      // `errorMessage` is a caught error's `.message` copied verbatim
+      // (src/orchestrator/tool-engine.ts:3305-3310) and this row is persisted to
+      // ~/.muonroi-cli/muonroi.db, so it needs the same treatment
+      // `logInteraction` already gives the twin `tool_result` row it writes a
+      // few lines later at tool-engine.ts:3373. An MCP tool or a fetch-style
+      // tool that fails auth throws with the header or key in its message.
+      //
+      // Unlike `message_json` / a real `args_json`, this value is NOT functional
+      // state: the COALESCE only fills the column when the write-ahead never
+      // recorded the true arguments, making it a pure post-mortem breadcrumb.
+      // Redacting it therefore cannot change what the model is re-served.
+      .run(now, JSON.stringify({ error: redactSecrets(errorMessage).slice(0, 500) }), sessionId, toolCallId);
+  } catch (err) {
+    // Fail-open (this runs in the orchestrator hot path), but not silent.
+    logger.error("storage", `[transcript] markToolCallErrored failed: ${(err as Error)?.message}`, {
+      sessionId,
+      toolCallId,
+    });
   }
 }
 
@@ -870,12 +1076,24 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
   // where the user actually asked — and drop the child's, mirroring how the
   // child's duplicated user prompt is handled above.
   const absorbedByChild = new Map<string, string>();
+  const reviewedHelpers = new Set<string>();
   for (let i = 1; i < chain.length; i++) {
     const sid = chain[i];
     const parentId = sessionMeta.get(sid)?.parent_session_id;
     if (!parentId) continue;
     const parentRecords = recordsBySession.get(parentId);
     if (!parentRecords) continue;
+    if (
+      sid !== sessionId &&
+      parentRecords.some(
+        (r) =>
+          r.message.role === "system" &&
+          typeof r.message.content === "string" &&
+          r.message.content.startsWith(`[Helper receipt: ${sid}]`),
+      )
+    ) {
+      reviewedHelpers.add(sid);
+    }
     const text = lastAssistantText(recordsBySession.get(sid) ?? []);
     if (text && parentRecords.some((r) => r.message.role === "assistant" && assistantText(r.message) === text)) {
       absorbedByChild.set(sid, text);
@@ -919,7 +1137,7 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
           continue;
         }
         const content = summaryText ?? (typeof message.content === "string" ? message.content.trim() : "");
-        if (content && !isInternalCouncilMarker(content)) {
+        if (content && !isInternalCouncilMarker(content) && !content.startsWith("[Helper receipt:")) {
           entries.push(
             summaryText !== null
               ? { type: "assistant", content, timestamp, sourceLabel: "⋯ context checkpoint (auto-compacted)" }
@@ -935,6 +1153,7 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
         // message itself is skipped as an absorbed duplicate.
         const text = renderAssistantContent(message.content, callMap);
         if (text) {
+          if (reviewedHelpers.has(sid)) continue;
           if (absorbedPending !== undefined && text === absorbedPending) {
             absorbedPending = undefined;
             continue;
@@ -948,6 +1167,7 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
         for (const part of message.content) {
           if (part.type !== "tool-result") continue;
           if (isResponseTool(part.toolName)) {
+            if (reviewedHelpers.has(sid)) continue;
             renderedResponseCallIds.add(part.toolCallId);
             const rawOutput = part.output as unknown;
             const unwrapped =

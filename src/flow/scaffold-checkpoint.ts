@@ -20,6 +20,8 @@
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { redactSecrets } from "../utils/logger.js";
+import { runAnchoredStateRoot } from "./run-root.js";
 import { FLOW_DIR_NAME } from "./scaffold.js";
 
 export interface ScaffoldCheckpoint {
@@ -50,7 +52,7 @@ export interface ScaffoldCheckpoint {
 const CHECKPOINT_FILE = "scaffold-checkpoint.json";
 
 function runDir(cwd: string, runId: string): string {
-  return path.join(cwd, FLOW_DIR_NAME, "runs", runId);
+  return path.join(runAnchoredStateRoot(cwd), FLOW_DIR_NAME, "runs", runId);
 }
 
 function checkpointPath(cwd: string, runId: string): string {
@@ -87,6 +89,18 @@ export async function writeScaffoldCheckpoint(
     createdAt,
     updatedAt: now,
     ...patch,
+    // `errorMessage` is the caught scaffold failure copied verbatim, and this is
+    // the one field here that is pure diagnostics. Scaffold failures are
+    // `dotnet new` / `dotnet restore` / npm failures, and a restore error
+    // routinely quotes the private feed URL it authenticated against — which is
+    // where inline credentials live. The checkpoint sits in the PROJECT tree
+    // (`.muonroi-flow/runs/<runId>/`), not under `~`, so it is far more likely
+    // to be committed or shared than a home-directory log.
+    //
+    // `originalPrompt` and `inputs` are left verbatim on purpose: the retry path
+    // replays them to re-run the scaffold, so scrubbing them would change what
+    // gets built.
+    ...(patch.errorMessage === undefined ? {} : { errorMessage: redactSecrets(patch.errorMessage) }),
   };
   await fs.writeFile(filePath, JSON.stringify(checkpoint, null, 2), "utf8");
   return filePath;
@@ -113,7 +127,7 @@ export async function readScaffoldCheckpoint(cwd: string, runId: string): Promis
  * Returned newest-first. Used at TUI startup to offer cross-session resume.
  */
 export async function listResumableScaffoldCheckpoints(cwd: string): Promise<ScaffoldCheckpoint[]> {
-  const runsRoot = path.join(cwd, FLOW_DIR_NAME, "runs");
+  const runsRoot = path.join(runAnchoredStateRoot(cwd), FLOW_DIR_NAME, "runs");
   let entries: string[];
   try {
     entries = await fs.readdir(runsRoot);

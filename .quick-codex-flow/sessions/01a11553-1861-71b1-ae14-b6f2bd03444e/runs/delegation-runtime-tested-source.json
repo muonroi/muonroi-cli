@@ -1,0 +1,65 @@
+﻿{
+  "fullSuite": {
+    "command": "bun run test",
+    "passed": 8869,
+    "failed": 0,
+    "filesPassed": 947,
+    "filesSkipped": 6,
+    "testsSkipped": 14,
+    "todo": 2,
+    "durationSeconds": 781.37
+  },
+  "focused": {
+    "passed": 125,
+    "failed": 0
+  },
+  "tui": {
+    "passed": 4,
+    "failed": 0
+  },
+  "nativeSelfverify": {
+    "runId": "17ec813d-2bab-4753-b6b7-c20b30a4be2c",
+    "passed": 1,
+    "failed": 0,
+    "inconclusive": 0
+  },
+  "sourceSnapshot": {
+    "files": 1950,
+    "drift": 1,
+    "fixtureOnlyChangedAfterFullSuite": "src/orchestrator/__tests__/delegation-oauth-init.test.ts",
+    "followUpFocusedPassed": 125,
+    "unchangedProduction": true,
+    "hookFixtureNormalization": "Three edited fixture line endings normalized to CRLF; reconstructed pre-hook SHA256 matched exactly",
+    "committedFixtureTestPassed": 1
+  },
+  "changedSources": [
+    {
+      "path": "src/gsd/__tests__/mutation-gate.test.ts",
+      "sha256": "11F29D42FD2BF5A90FF0706B83E42FBC3019950AC666469B1C95B100D885C244"
+    },
+    {
+      "path": "src/gsd/mutation-gate.ts",
+      "sha256": "F3B132DF7C4A29BD3A20D4D51C7F7C62205284BEA28524D0C5CB2E87409E9133"
+    },
+    {
+      "path": "src/orchestrator/__tests__/delegation-oauth-init.test.ts",
+      "sha256": "6EDE2CD3F4ECD71B4374DD76639CD0A29FA3321B1E9A677BE68DEA08F56884DB"
+    },
+    {
+      "path": "src/orchestrator/__tests__/heavy-gate-research.test.ts",
+      "sha256": "4984853C29CB1486A42B738E44BBDA51403B6250DA39F4E56242B9F3FF31CDA8"
+    },
+    {
+      "path": "src/orchestrator/__tests__/stream-runner.test.ts",
+      "sha256": "3EBED92E46B2245250B278F78D908F054BBDD2072E17F3F25FD022FB680B2692"
+    },
+    {
+      "path": "src/orchestrator/orchestrator.ts",
+      "sha256": "95D74BF90F117C4D674D597A51006DD034958F72B09A29C8A8D373323A049AE3"
+    },
+    {
+      "path": "src/orchestrator/stream-runner.ts",
+      "sha256": "4ACBDF0E339A58F92ED1825FC7DB20731596AF2A9860F789C7F748848EF524CA"
+    }
+  ]
+}

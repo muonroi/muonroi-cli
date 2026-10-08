@@ -28,6 +28,13 @@ vi.mock("node:fs", () => ({
   promises: { access: mockAccess },
 }));
 
+// routeHistoryAdvice reaches EE via getDefaultEEClient() (`./intercept.js`), a
+// SEPARATE path from the createRequire-based `mockCore` above.
+const mockRouteHistory = vi.hoisted(() => vi.fn());
+vi.mock("./intercept.js", () => ({
+  getDefaultEEClient: () => ({ routeHistory: mockRouteHistory }),
+}));
+
 // ─── Import module under test (after mocks) ────────────────────────────────────
 
 import {
@@ -36,6 +43,7 @@ import {
   resetBridge,
   resetWhoAmIBrainWarm,
   routeFeedback,
+  routeHistoryAdvice,
   routeModel,
   searchCollection,
   warmWhoAmIFromBrain,
@@ -310,5 +318,58 @@ describe("bridge — warmWhoAmIFromBrain (thin-client boot contract)", () => {
   it("is fail-open on a non-thin box (no server configured) — resolves null, never throws", async () => {
     // No EE server / thin-client mode in this test env → warm degrades to null.
     await expect(warmWhoAmIFromBrain()).resolves.toBeNull();
+  });
+});
+
+describe("routeHistoryAdvice — validates the remote tier before it reaches the router", () => {
+  // routeHistory()'s result comes from `(await resp.json()) as RouteHistoryResponse`
+  // (src/ee/client.ts) — a TYPE CAST, not a runtime check. A malformed or
+  // unrecognized floorTier/suggestedTier used to pass straight through to
+  // resolveTurnTier (src/router/decide.ts), where tierRank() read it as rank -1 —
+  // "lower than every real tier" — silently demoting any turn to "fast". This
+  // boundary must reject anything outside ["fast","balanced","premium"] BEFORE it
+  // reaches the router, exactly like getRoutingPromoteMax/getRoutingDemoteMin
+  // (src/utils/settings.ts) whitelist their config-sourced tier strings.
+  beforeEach(() => {
+    mockRouteHistory.mockReset();
+  });
+
+  it("passes through two valid tiers unchanged", async () => {
+    mockRouteHistory.mockResolvedValue({ floorTier: "premium", suggestedTier: "fast", matches: 2, reason: "x" });
+    await expect(routeHistoryAdvice("fix the flaky retry test")).resolves.toEqual({
+      floorTier: "premium",
+      suggestedTier: "fast",
+    });
+  });
+
+  it("a garbage suggestedTier is treated as absent (null), not passed through", async () => {
+    mockRouteHistory.mockResolvedValue({ floorTier: "premium", suggestedTier: "ultra", matches: 2, reason: "x" });
+    await expect(routeHistoryAdvice("fix the flaky retry test")).resolves.toEqual({
+      floorTier: "premium",
+      suggestedTier: null,
+    });
+  });
+
+  it("a garbage floorTier is treated as absent (null), not passed through", async () => {
+    mockRouteHistory.mockResolvedValue({ floorTier: "ultra", suggestedTier: "fast", matches: 2, reason: "x" });
+    await expect(routeHistoryAdvice("fix the flaky retry test")).resolves.toEqual({
+      floorTier: null,
+      suggestedTier: "fast",
+    });
+  });
+
+  it('a case-mismatched tier ("Fast") is rejected as unrecognized, not normalized', async () => {
+    mockRouteHistory.mockResolvedValue({ floorTier: null, suggestedTier: "Fast", matches: 1, reason: "x" });
+    await expect(routeHistoryAdvice("fix the flaky retry test")).resolves.toBeNull();
+  });
+
+  it("both fields garbage resolves to null advice (matches the existing 'no advice' contract)", async () => {
+    mockRouteHistory.mockResolvedValue({ floorTier: "ultra", suggestedTier: 42, matches: 0, reason: "x" });
+    await expect(routeHistoryAdvice("fix the flaky retry test")).resolves.toBeNull();
+  });
+
+  it("null from routeHistory stays null", async () => {
+    mockRouteHistory.mockResolvedValue(null);
+    await expect(routeHistoryAdvice("fix the flaky retry test")).resolves.toBeNull();
   });
 });

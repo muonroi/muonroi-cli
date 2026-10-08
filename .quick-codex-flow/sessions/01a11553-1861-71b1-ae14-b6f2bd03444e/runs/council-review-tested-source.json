@@ -1,0 +1,86 @@
+{
+  "sourceFileCount": 1933,
+  "sourceManifestSha256": "D184B67E80DB4AA3425302DD65B76F6C775ADB878633DB68DAE8CD69ED3CC07F",
+  "changedCode": [
+    {
+      "path": "src/council/__tests__/synthesis-retry-budget.test.ts",
+      "sha256": "B14C602403CC8B33E688B4B7E859864BA9C7BD736A063FFB468E86492E527888"
+    },
+    {
+      "path": "src/council/index.ts",
+      "sha256": "2CED04AD6677B324E2F30FC640D56189E7E96DD07FA9F846364717E8EF0D4A76"
+    },
+    {
+      "path": "src/council/planner.ts",
+      "sha256": "8B3AF012B35D249C181E322BB3CAA88D576348F821204219117D14B302C0119A"
+    },
+    {
+      "path": "src/council/prompts.ts",
+      "sha256": "AD8FE4A417EA4824A3E09CAB95B4B05EA13900EC50D174AFDC8F9A6BB7006E03"
+    },
+    {
+      "path": "src/gsd/__tests__/mutation-gate.test.ts",
+      "sha256": "7887AA6DA33BB917DB7909B0385C4F801F064253593B2A5C3992B57241E8B308"
+    },
+    {
+      "path": "src/gsd/__tests__/workflow-tools.test.ts",
+      "sha256": "5EEB2059F3E489D1B85371BC7643F5FFBD2396BB1CDEEAB9D8CC0274FF6C9AF5"
+    },
+    {
+      "path": "src/gsd/loop-host.ts",
+      "sha256": "4DBF777B6882E5A5EC2C2BE906F431ABA777DA38CCCF93289815B9DDB5C19502"
+    },
+    {
+      "path": "src/gsd/mutation-gate.ts",
+      "sha256": "3F6211EB52FB92FB62C24E2E78A9A745A69A20CBCAEE5DCEA63775C27BFAFD9A"
+    },
+    {
+      "path": "src/gsd/plan-council.ts",
+      "sha256": "12A5BAE7316893511C85ECB11603D8B7B5599BAB7275E8D0FB87E9E6831208B6"
+    },
+    {
+      "path": "src/gsd/verify-council.ts",
+      "sha256": "74BCB29E17C6AC5779016B57AC83391527F87737869D1DF7789843D0293BA98F"
+    },
+    {
+      "path": "src/gsd/workflow-tools.ts",
+      "sha256": "42D1DCEECBA974B8EBA723F8E6C43496EBCDAF5A796092F6442EB0BC791FE848"
+    },
+    {
+      "path": "src/orchestrator/__tests__/heavy-gate-research.test.ts",
+      "sha256": "4B5F0AE0063D142FE4A1144CD49DD2C47B4298F98443D7C76DD4CD1FC52486CE"
+    },
+    {
+      "path": "src/orchestrator/__tests__/nested-council-stall.test.ts",
+      "sha256": "F4D645C2FA6B70EE44ED65446DF03681AF34D3298ABAD66750152D54E6771342"
+    },
+    {
+      "path": "src/orchestrator/orchestrator.ts",
+      "sha256": "2E02F1C40527E3A4C858BF2FC8FECC779992BC6EB066F943516DA8AD5F4E560E"
+    },
+    {
+      "path": "src/orchestrator/stream-runner.ts",
+      "sha256": "A4B84EE8670FBAB7BC527914B798A7CAA7E9FA081CCF8A991A19D51C8EE48D5D"
+    },
+    {
+      "path": "src/orchestrator/tool-engine.ts",
+      "sha256": "B59DE0D2984CCD41177E711B7A38471E450E876FA0588E5CD2530600D0C1FD41"
+    },
+    {
+      "path": "src/tools/registry.ts",
+      "sha256": "F34FF4F3F538B67156995AF0DE10775F7A0049C24E3346FBB34879C0BF49DC43"
+    }
+  ],
+  "nativeQaRunId": "1af75a8c-dee9-4c43-bb77-1353d55b5f82",
+  "focusedPassed": 228,
+  "tuiQuestionTestsPassed": 3,
+  "fullSuiteStatus": "passed",
+  "fullSuitePassed": 8860,
+  "fullSuiteFailed": 0,
+  "fullSuiteSkipped": 14,
+  "fullSuiteTodo": 2,
+  "fullSuiteDurationSeconds": 840.1,
+  "implementationCommit": "c957f10bdc93883cfb2bbc7394da03b8186e1a48",
+  "releasedMergeCommit": "a5acbd28364cf9643133d139c357bd98cb8100fe",
+  "remoteCiVerified": false
+}

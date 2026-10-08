@@ -1,24 +1,31 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildSprintContext, CONTEXT_CAPS, digestSprintIntoPhase, handoffPhaseToNext } from "../context-policy.js";
+import { buildSprintContext, digestSprintIntoPhase, handoffPhaseToNext } from "../context-policy.js";
+
+// The sprint context used to be squeezed into byte budgets (8,192 bytes total,
+// 4,096 for the phase digest, oldest entries dropped first, `[oversize:]` and
+// `[…truncated]` markers). Those were character budgets, not a context-window
+// guard, and `/ideal` has no limits (user decision). The tests that pinned the
+// truncation now pin the opposite: every block is kept whole, in order.
 
 const fakeProject = `## Project (permanent)\n${"x".repeat(200)}`;
+const basePhase = {
+  id: "phase-1",
+  name: "n",
+  goal: "g",
+  successCriteria: ["A"],
+  scope: "s",
+  exitCondition: { type: "criteria-threshold" as const, min: 0.8 },
+  dependsOn: [],
+  maxSprints: 2,
+};
 
 describe("buildSprintContext (subsystem E)", () => {
-  it("renders all blocks in order under cap", () => {
+  it("renders all blocks in order", () => {
     const out = buildSprintContext({
       projectContextFormatted: fakeProject,
       customerDecisions: [],
       phaseHistory: [],
-      currentPhase: {
-        id: "phase-1",
-        name: "n",
-        goal: "g",
-        successCriteria: ["A"],
-        scope: "s",
-        exitCondition: { type: "criteria-threshold", min: 0.8 },
-        dependsOn: [],
-        maxSprints: 2,
-      },
+      currentPhase: basePhase,
       phaseDigest: [],
       sprintTail: "## Sprint Tail\nrecent work",
     });
@@ -36,72 +43,43 @@ describe("buildSprintContext (subsystem E)", () => {
         { seq: 1, timestampUtc: "2026-05-13T00:00:00Z", phaseId: "phase-1", sprintN: 1, verdict: "accept" as const },
       ],
       phaseHistory: [],
-      currentPhase: {
-        id: "phase-1",
-        name: "n",
-        goal: "g",
-        successCriteria: ["A"],
-        scope: "s",
-        exitCondition: { type: "criteria-threshold" as const, min: 0.8 },
-        dependsOn: [],
-        maxSprints: 2,
-      },
+      currentPhase: basePhase,
       phaseDigest: [{ sprintN: 1, timestampUtc: "2026-05-13T00:00:00Z", lessonText: "L" }],
       sprintTail: "tail",
     };
-    const a = buildSprintContext(args);
-    const b = buildSprintContext(args);
-    expect(a).toBe(b);
+    expect(buildSprintContext(args)).toBe(buildSprintContext(args));
   });
 
-  it("over cap with essentials fitting: trims sprintTail first", () => {
+  it("a large sprint tail is kept whole (was trimmed to fit 8,192 bytes)", () => {
     const tail = "T".repeat(20000);
     const out = buildSprintContext({
       projectContextFormatted: fakeProject,
       customerDecisions: [],
       phaseHistory: [],
-      currentPhase: {
-        id: "phase-1",
-        name: "n",
-        goal: "g",
-        successCriteria: ["A"],
-        scope: "s",
-        exitCondition: { type: "criteria-threshold", min: 0.8 },
-        dependsOn: [],
-        maxSprints: 2,
-      },
+      currentPhase: basePhase,
       phaseDigest: [],
       sprintTail: tail,
     });
-    expect(out.length).toBeLessThanOrEqual(CONTEXT_CAPS.SPRINT_CONTEXT_BYTES + 200);
-    expect(out).toMatch(/\[…truncated \d+ bytes\]/);
+    expect(out).toContain(tail);
+    expect(out).not.toMatch(/truncated/);
   });
 
-  it("project alone over cap → oversize marker", () => {
+  it("a large project context keeps every other block too (was an [oversize:] marker)", () => {
     const huge = `## Project\n${"x".repeat(9000)}`;
     const out = buildSprintContext({
       projectContextFormatted: huge,
       customerDecisions: [],
       phaseHistory: [],
-      currentPhase: {
-        id: "phase-1",
-        name: "n",
-        goal: "g",
-        successCriteria: ["A"],
-        scope: "s",
-        exitCondition: { type: "criteria-threshold", min: 0.8 },
-        dependsOn: [],
-        maxSprints: 2,
-      },
+      currentPhase: basePhase,
       phaseDigest: [],
       sprintTail: "",
     });
-    expect(out).toContain("[oversize:");
-    expect(out).not.toContain("Sprint Tail");
+    expect(out).toContain(huge);
+    expect(out).toContain("Sprint Tail");
+    expect(out).not.toContain("[oversize:");
   });
 
-  it("project + customer decisions together over cap → both intact + oversize marker", () => {
-    const proj = `## Project\n${"x".repeat(5000)}`;
+  it("every customer decision is kept verbatim", () => {
     const decisions = Array.from({ length: 50 }, (_, i) => ({
       seq: i + 1,
       timestampUtc: "2026-05-13T00:00:00Z",
@@ -111,40 +89,18 @@ describe("buildSprintContext (subsystem E)", () => {
       feedback: "Y".repeat(80),
     }));
     const out = buildSprintContext({
-      projectContextFormatted: proj,
+      projectContextFormatted: `## Project\n${"x".repeat(5000)}`,
       customerDecisions: decisions,
       phaseHistory: [],
-      currentPhase: {
-        id: "phase-1",
-        name: "n",
-        goal: "g",
-        successCriteria: ["A"],
-        scope: "s",
-        exitCondition: { type: "criteria-threshold", min: 0.8 },
-        dependsOn: [],
-        maxSprints: 2,
-      },
+      currentPhase: basePhase,
       phaseDigest: [],
       sprintTail: "tail",
     });
-    expect(out).toContain("[oversize:");
     for (let i = 1; i <= 50; i++) expect(out).toContain(`seq ${i}`);
+    expect(out).not.toContain("[oversize:");
   });
-});
 
-describe("buildSprintContext truncOldestFirst history path (subsystem E)", () => {
-  const basePhase = {
-    id: "phase-1",
-    name: "n",
-    goal: "g",
-    successCriteria: ["A"],
-    scope: "s",
-    exitCondition: { type: "criteria-threshold" as const, min: 0.8 },
-    dependsOn: [],
-    maxSprints: 2,
-  };
-
-  it("large phaseHistory is truncated oldest-first within cap", () => {
+  it("a large phase history is kept whole, oldest entry included", () => {
     const bigHistory = Array.from({ length: 100 }, (_, i) => ({
       phaseId: `phase-${i}`,
       exitedAtUtc: "2026-05-13T00:00:00Z",
@@ -160,67 +116,34 @@ describe("buildSprintContext truncOldestFirst history path (subsystem E)", () =>
       phaseDigest: [],
       sprintTail: "",
     });
-    // should contain truncation marker and be under total cap with some slack
-    expect(out).toMatch(/\[…truncated \d+ oldest entries\]/);
-    expect(Buffer.byteLength(out, "utf8")).toBeLessThanOrEqual(CONTEXT_CAPS.SPRINT_CONTEXT_BYTES + 300);
-  });
-
-  it("single-entry history that is oversized: truncOldestFirst keeps one entry", () => {
-    const singleBig = [
-      {
-        phaseId: "phase-big",
-        exitedAtUtc: "2026-05-13T00:00:00Z",
-        exitSummary: "X".repeat(9000),
-        sprintsExecuted: 1,
-        criteriaMetCount: 1,
-      },
-    ];
-    const out = buildSprintContext({
-      projectContextFormatted: fakeProject,
-      customerDecisions: [],
-      phaseHistory: singleBig,
-      currentPhase: basePhase,
-      phaseDigest: [],
-      sprintTail: "",
-    });
-    // single-entry path: while loop condition `lines.length > 1` exits early, entry stays
-    expect(out).toContain("phase-big");
+    expect(out).toContain("phase-0 (exited");
+    expect(out).toContain("phase-99 (exited");
+    expect(out).not.toMatch(/truncated/);
   });
 });
 
 describe("digestSprintIntoPhase (subsystem E)", () => {
-  it("appends entry when under cap", () => {
-    const out = digestSprintIntoPhase([], { sprintN: 1, timestampUtc: "t", lessonText: "L" });
-    expect(out).toHaveLength(1);
+  it("appends an entry", () => {
+    expect(digestSprintIntoPhase([], { sprintN: 1, timestampUtc: "t", lessonText: "L" })).toHaveLength(1);
   });
 
-  it("drops oldest when over cap, adds pruned marker", () => {
-    const big: any[] = [];
-    for (let i = 0; i < 200; i++) {
-      big.push({ sprintN: i, timestampUtc: "2026-05-13T00:00:00Z", lessonText: "X".repeat(40) });
-    }
+  it("never prunes: every earlier entry stays and the newest is last (was pruned to 4,096 bytes)", () => {
+    const big = Array.from({ length: 200 }, (_, i) => ({
+      sprintN: i,
+      timestampUtc: "2026-05-13T00:00:00Z",
+      lessonText: "X".repeat(40),
+    }));
     const out = digestSprintIntoPhase(big, { sprintN: 999, timestampUtc: "t", lessonText: "new" });
-    expect(out.length).toBeLessThan(big.length + 1);
-    expect(out[0].lessonText).toMatch(/digest pruned/);
+    expect(out).toHaveLength(201);
+    expect(out[0].sprintN).toBe(0);
     expect(out[out.length - 1].sprintN).toBe(999);
+    expect(out.some((e) => /digest pruned/.test(e.lessonText))).toBe(false);
   });
 
-  it("preserves order: newest stays last after pruning", () => {
-    const existing = [
-      { sprintN: 1, timestampUtc: "t", lessonText: "A".repeat(2000) },
-      { sprintN: 2, timestampUtc: "t", lessonText: "B".repeat(2000) },
-    ];
-    const out = digestSprintIntoPhase(existing, { sprintN: 3, timestampUtc: "t", lessonText: "C" });
-    expect(out[out.length - 1].sprintN).toBe(3);
-  });
-
-  it("single oversize entry dropped, adds marker + new entry", () => {
+  it("an oversized entry is kept alongside the new one", () => {
     const huge = [{ sprintN: 1, timestampUtc: "t", lessonText: "X".repeat(5000) }];
     const out = digestSprintIntoPhase(huge, { sprintN: 2, timestampUtc: "t", lessonText: "tiny" });
-    expect(out.length).toBe(2);
-    expect(out[0].sprintN).toBe(-1);
-    expect(out[0].lessonText).toMatch(/digest pruned/);
-    expect(out[1].sprintN).toBe(2);
+    expect(out.map((e) => e.sprintN)).toEqual([1, 2]);
   });
 });
 
@@ -235,30 +158,10 @@ describe("handoffPhaseToNext (subsystem E)", () => {
       criteriaMet: 3,
       totalCriteria: 3,
       leader,
-      capUsd: 10,
-      remainingUsd: 1,
       backoffDelays: [1, 1, 1],
     });
     expect(out.exitSummary.length).toBeLessThanOrEqual(300);
     expect(out.usedFallback).toBe(false);
-  });
-
-  it("falls back to deterministic when remainingUsd below floor", async () => {
-    const leader = { generate: vi.fn() };
-    const out = await handoffPhaseToNext({
-      phaseId: "phase-1",
-      sprintsExecuted: 2,
-      criteriaMet: 1,
-      totalCriteria: 3,
-      leader,
-      capUsd: 10,
-      remainingUsd: 0.01,
-      backoffDelays: [1, 1, 1],
-    });
-    expect(leader.generate).not.toHaveBeenCalled();
-    expect(out.usedFallback).toBe(true);
-    expect(out.exitSummary).toContain("phase-1");
-    expect(out.exitSummary).toContain("1/3");
   });
 
   it("falls back on 3 429s", async () => {
@@ -271,10 +174,10 @@ describe("handoffPhaseToNext (subsystem E)", () => {
       criteriaMet: 2,
       totalCriteria: 2,
       leader,
-      capUsd: 10,
-      remainingUsd: 1,
       backoffDelays: [1, 1, 1],
     });
     expect(out.usedFallback).toBe(true);
+    expect(out.exitSummary).toContain("phase-2");
+    expect(out.exitSummary).toContain("2/2");
   });
 });

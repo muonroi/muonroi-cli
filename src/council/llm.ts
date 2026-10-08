@@ -8,16 +8,19 @@ import type { McpToolBundle } from "../mcp/runtime.js";
 import { buildMcpToolSet } from "../mcp/runtime.js";
 import { getModelInfo } from "../models/registry.js";
 import { isAuthenticationError, summarizeApiErrorForLog } from "../orchestrator/error-utils.js";
+import { createNoProgressStopWhen } from "../orchestrator/no-progress-guard.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "../orchestrator/stall-watchdog.js";
+import { noteToolActivityProgress } from "../orchestrator/tool-activity.js";
 import { combineAbortSignals } from "../orchestrator/tool-utils.js";
+import { pingTurnProgress, startPeriodicTurnProgressPing } from "../orchestrator/turn-progress.js";
 import { getProviderCapabilities, resolveTemperature } from "../providers/capabilities.js";
 import { loadKeyForProvider, ProviderKeyMissingError } from "../providers/keychain.js";
 import {
   createProviderFactoryAsync,
   detectProviderForModel,
   type ResolvedModelRuntime,
+  resolveMaxOutputTokensParam,
   resolveModelRuntime,
-  shouldDropParam,
 } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import { wireDebug } from "../providers/wire-debug.js";
@@ -28,10 +31,12 @@ import { createBuiltinTools as createTools } from "../tools/registry.js";
 import type { AgentMode, CouncilStatusPhase, StreamChunk } from "../types/index.js";
 import { appendCostLog } from "../usage/cost-log.js";
 import { projectCostUSD } from "../usage/estimator.js";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
-import { getProviderStallTimeoutMs, loadMcpServers } from "../utils/settings.js";
+import { getFirstTokenTimeoutMs, getProviderStallTimeoutMs, loadMcpServers } from "../utils/settings.js";
 import { withVisibleRetry } from "../utils/visible-retry.js";
+import { beginCouncilCall, breadcrumb, setBreadcrumbSession } from "./crash-breadcrumb.js";
 import {
   blockModel,
   consumeBlockNotification,
@@ -42,7 +47,14 @@ import {
 } from "./model-blocklist.js";
 import { buildResearchSystemPrompt } from "./prompts.js";
 import { stripThinkBlocks } from "./strip-think.js";
-import type { CouncilLLM, CouncilStats, ToolTraceEmitter, UsageCallback } from "./types.js";
+import type {
+  CouncilGenerateDiagnostics,
+  CouncilLLM,
+  CouncilStats,
+  GenerateDiagnosticsCallback,
+  ToolTraceEmitter,
+  UsageCallback,
+} from "./types.js";
 
 /**
  * Register a provider factory for a council sub-call, OAuth-aware.
@@ -62,7 +74,7 @@ import type { CouncilLLM, CouncilStats, ToolTraceEmitter, UsageCallback } from "
  * refreshes the stored OAuth bearer token. Only the expected missing-key case
  * is swallowed; unexpected errors propagate.
  */
-async function ensureCouncilFactory(providerId: ProviderId): Promise<void> {
+async function ensureCouncilFactoryUnbounded(providerId: ProviderId): Promise<void> {
   let apiKey: string | undefined;
   try {
     apiKey = await loadKeyForProvider(providerId);
@@ -70,7 +82,61 @@ async function ensureCouncilFactory(providerId: ProviderId): Promise<void> {
     if (!(err instanceof ProviderKeyMissingError)) throw err;
     // OAuth-only provider — createProviderFactoryAsync injects the bearer token.
   }
+  // Note: when the caller (ensureCouncilFactory below) times this call out via
+  // withDeadlineRace, THIS promise is not cancelled — it keeps running (see
+  // withDeadlineRace's own doc in utils/llm-deadline.ts) and can still reach
+  // `providerFactoryRegistry.set(providerId, factory)` (providers/runtime.ts
+  // createProviderFactory) after the caller has already failed/moved on. That
+  // write is a plain Map.set keyed by providerId and is idempotent — it just
+  // overwrites the entry with a freshly-built factory for the same provider —
+  // so a late write here changes no behavior and needs no cancellation.
   await createProviderFactoryAsync(providerId, apiKey ? { apiKey } : {});
+}
+
+/**
+ * Wall-clock backstop for {@link ensureCouncilFactoryUnbounded}: credential
+ * resolution (keychain read + `createProviderFactoryAsync`, which for an
+ * OAuth-capable provider also does a token refresh network call gated by a
+ * mutex) ran with NO bound at all — ahead of, and separate from, the deadline
+ * signal `generate()`/`debate()`/`research()` combine further down via
+ * `withTimeoutSignal`. A stuck refresh or a held mutex therefore hung the
+ * ENTIRE call regardless of the caller's own deadline: e.g. the GSD
+ * complexity-assessor's `AbortSignal.timeout(PIL_GATE_DEADLINE_MS=2500)`
+ * never even started ticking while this awaited.
+ *
+ * CONFIRMED live (session 697419024ec8, 2026-09-22): the assessor's leader
+ * call (`stage=council`, model=step-3.7-flash, 656 est input tokens — a
+ * small, ordinary prompt) took 64.5s wall clock end-to-end despite the
+ * caller passing a 2500ms `AbortSignal.timeout`. That is consistent with
+ * this credential-resolution gap consuming most of the time BEFORE the
+ * caller's deadline signal was even combined — a small-prompt call has no
+ * other plausible source of tens of seconds of latency. The sibling session
+ * 1e9db4d68da0 hit the same phase and, instead of merely running long, never
+ * returned at all: the top-level 120s turn watchdog fired with zero
+ * interaction_logs / call_accounting rows anywhere in the pre-stream window.
+ * `MUONROI_COUNCIL_FACTORY_TIMEOUT_MS` overrides; clamped 1s..60s.
+ */
+export function getCouncilFactoryDeadlineMs(): number {
+  const raw = Number(process.env.MUONROI_COUNCIL_FACTORY_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw >= 1_000 && raw <= 60_000) return raw;
+  return 10_000;
+}
+
+async function ensureCouncilFactory(providerId: ProviderId): Promise<void> {
+  // Durable phase breadcrumb: distinguishes "credential resolution is slow/
+  // hung" from "the actual model call is slow/hung" the next time this fires
+  // — see the CONFIRMED evidence above. A `.start` with no matching `.end`
+  // in `~/.muonroi-cli/council-breadcrumbs.jsonl` pins the hang to THIS gap.
+  breadcrumb("pre-stream.ensureCouncilFactory.start", { providerId });
+  try {
+    await withDeadlineRace(
+      () => ensureCouncilFactoryUnbounded(providerId),
+      getCouncilFactoryDeadlineMs(),
+      `ensureCouncilFactory(${providerId})`,
+    );
+  } finally {
+    breadcrumb("pre-stream.ensureCouncilFactory.end", { providerId });
+  }
 }
 
 // ── Debug logging (off unless MUONROI_COUNCIL_DEBUG_LOG points at a writable file) ──
@@ -350,12 +416,34 @@ function getMockLlm(): { complete(req: { prompt: string }): Promise<{ text: stri
  * Range 60_000–1_800_000 ms. Default 300_000 (5 minutes) — generous enough
  * for reasoning models that take 2-3 min on long prompts, tight enough that
  * a truly dead socket fails fast and `debateWithRetry` can fall back.
+ *
+ * `0` = no wall-clock deadline, which is what an `/ideal` run gets (user
+ * decision: no limits). That is safe here and ONLY here because the thing this
+ * deadline was added for — "a stuck TCP connection … makes a single call hang
+ * forever" — is covered by a guard that did not exist when it was written:
+ * `collectStreamText` below arms `createStallWatchdog(getProviderStallTimeoutMs())`
+ * (120s default) and re-arms it on EVERY chunk, reasoning-delta included, so a
+ * dead socket still fails in ~2 minutes while a slow-but-alive reasoning model
+ * is no longer cut at 5. A caller's own `abortSignal` (Esc/Ctrl-C) is unchanged.
+ *
+ * A read, not a module const: the `/ideal` switch is an AsyncLocalStorage scope,
+ * so it can only be observed per call.
  */
-const COUNCIL_LLM_TIMEOUT_MS = (() => {
+export function councilLlmTimeoutMs(): number {
+  if (isIdealRunUnlimited()) return 0;
   const raw = Number.parseInt(process.env.MUONROI_COUNCIL_LLM_TIMEOUT_MS ?? "", 10);
   if (Number.isFinite(raw) && raw >= 60_000 && raw <= 1_800_000) return raw;
   return 300_000;
-})();
+}
+
+/**
+ * The caller-side race budget for a council call: the signal deadline plus a 5s
+ * grace, so the SDK's own abort wins when it works. `0` in, `0` out — a disabled
+ * deadline must not reappear as a 5-second one.
+ */
+function councilRaceDeadlineMs(base: number): number {
+  return base > 0 ? base + 5_000 : 0;
+}
 
 // withTimeoutSignal + withDeadlineRace moved to ../utils/llm-deadline.js so all
 // pre-flight LLM call sites (council, debate-planner, scope-ceiling) share one
@@ -395,9 +483,26 @@ const COUNCIL_LLM_TIMEOUT_MS = (() => {
  * generate on a Codex-OAuth session was failing wholesale. Mirrors the
  * orchestrator + classify paths, which already gate this param via
  * `shouldDropParam`.
+ *
+ * This is the SINGLE choke-point for the council's output budget: all three
+ * wire sites in this file (generate / debate / research) route through it, and
+ * every product-loop `leader.generate({maxTokens})` adapter funnels into
+ * `CouncilLLM.generate`. So `n` — whatever literal a caller passed — is a
+ * *visible-output* budget here, and `resolveMaxOutputTokensParam` widens it to
+ * the model's catalog-declared ceiling on a reasoning model, where `max_tokens`
+ * is shared with the thinking block.
+ *
+ * That distinction is exactly what the old literals got wrong. `maxTokens:
+ * 1024` at clarifier.ts (spec synthesis) burned all 1024 tokens inside
+ * step-3.5-flash's thinking block — measured `finish_reason:"length"`, 0 chars
+ * of content, 5134 chars of reasoning — so `stripThinkBlocks` returned `""`,
+ * every candidate model reported `empty-completion`, and `/ideal` died at spec
+ * synthesis. The `6144` literal below carries a comment describing the same
+ * failure being papered over by raising the number; sizing from the catalog
+ * replaces that guess.
  */
 function maxOutSpread(runtime: ResolvedModelRuntime, n: number): { maxOutputTokens?: number } {
-  return shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: n };
+  return resolveMaxOutputTokensParam(runtime, n);
 }
 
 /**
@@ -418,6 +523,7 @@ let councilLastDeltaAt = 0;
 /** Record `chars` of streamed output (text OR reasoning) against the live window. */
 export function noteCouncilStreamDelta(chars: number): void {
   if (chars <= 0) return;
+  noteToolActivityProgress();
   councilStreamedCharsTotal += chars;
   councilLastDeltaAt = Date.now();
 }
@@ -637,6 +743,9 @@ export function createCouncilLLM(
   sessionId: string | undefined,
   stats: CouncilStats,
 ): CouncilLLM {
+  // Stamp every subsequent breadcrumb with this session so a crash trail can be
+  // tied back to the run in interaction_logs / usage_events.
+  setBreadcrumbSession(sessionId);
   return {
     isModelBlocked(modelId: string): boolean {
       return isModelBlockedInScope(sessionId, modelId);
@@ -654,37 +763,110 @@ export function createCouncilLLM(
       maxTokens = 4096,
       onUsage?: UsageCallback,
       signal?: AbortSignal,
+      onDiagnostics?: GenerateDiagnosticsCallback,
     ): Promise<string> {
+      // G2 forensics. Every field below is OBSERVED, never inferred: `diag` is
+      // mutated at the exact points the events happen, so `requestIssued:false`
+      // on an empty completion is proof the "" came from a short-circuit before
+      // the network rather than from the provider.
+      const diagStart = Date.now();
+      const diag: CouncilGenerateDiagnostics = {
+        durationMs: 0,
+        viaMock: false,
+        requestIssued: false,
+        sdkAttempts: 0,
+        streamedChars: 0,
+        rawTextChars: 0,
+        textChars: 0,
+        signalAbortedAtStart: signal?.aborted === true,
+        signalAbortedAtEnd: false,
+      };
+      const emitDiagnostics = (): void => {
+        if (!onDiagnostics) return;
+        diag.durationMs = Date.now() - diagStart;
+        diag.signalAbortedAtEnd = signal?.aborted === true;
+        try {
+          onDiagnostics(diag);
+        } catch (diagErr) {
+          logger.error("orchestrator", "[council.generate] onDiagnostics callback threw", {
+            modelId,
+            message: diagErr instanceof Error ? diagErr.message : String(diagErr),
+          });
+        }
+      };
       const mock = getMockLlm();
       if (mock) {
         stats.calls++;
         const result = await mock.complete({ prompt });
-        return stripThinkBlocks(result.text);
+        const mockText = stripThinkBlocks(result.text);
+        diag.viaMock = true;
+        diag.rawTextChars = (result.text ?? "").length;
+        diag.textChars = mockText.length;
+        emitDiagnostics();
+        return mockText;
       }
       const providerId = detectProviderForModel(modelId);
       await ensureCouncilFactory(providerId);
       const runtime = resolveModelRuntime(modelId, { stage: "council", sessionId });
+      // Resolve once so the debug record reports the budget actually sent, not
+      // the caller's pre-resolution `maxTokens` argument.
+      const genMaxOut = maxOutSpread(runtime, maxTokens);
       const t0 = Date.now();
       // Combine the user-abort signal (when threaded from runCouncil) with the
       // per-call wall-clock deadline. Without the parent signal, an Esc/Ctrl-C
       // during the longest generate calls (8192-token synthesis, clarify, leader
       // eval) was a no-op — the call ran to completion or hit the 5-min timeout.
-      const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(signal, COUNCIL_LLM_TIMEOUT_MS);
+      // Read the budget ONCE per call: it is `0` (no deadline) inside an `/ideal`
+      // run, and the signal and the race must agree on that.
+      const councilTimeoutMs = councilLlmTimeoutMs();
+      const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(signal, councilTimeoutMs);
+      // Round 6 (G8 HIGH B): a `generate()` call is invisible to the
+      // top-level turn watchdog exactly like a sub-agent's — it runs inside
+      // ONE tool/phase call from the parent turn's perspective, and nothing
+      // it does gets yielded up as a StreamChunk. `onDelta` below already
+      // fires on every streamed chunk (was: cost/diagnostics only) — also
+      // ping turn progress there, and run a bounded pinger for the pre-first-
+      // byte wait, bounded by THIS call's own timeout.
+      //
+      // Round 7 (LOW-MEDIUM): `councilTimeoutMs` is `0` inside an `/ideal`
+      // run (isIdealRunUnlimited() — no wall-clock deadline at all, since
+      // legitimate reasoning work there must not be cut short). Round 6
+      // read that as "no ceiling" for the PRE-FIRST-BYTE pinger too, which
+      // let a genuinely dead connection (zero bytes, ever) ping forever in
+      // that mode — a dead socket is not "budget being spent", it is exactly
+      // the class of hang this mechanism exists to stop propping up. So the
+      // pre-first-byte pinger is bounded by `getFirstTokenTimeoutMs()` even
+      // when `councilTimeoutMs` is 0; PER-CHUNK pings (`onDelta` below) stay
+      // genuinely unbounded in `/ideal` mode, since those ARE real, measured
+      // progress, not an unconditional grant.
+      const councilGeneratePingCeilingMs = councilTimeoutMs > 0 ? councilTimeoutMs : getFirstTokenTimeoutMs();
+      const stopCouncilGeneratePing = startPeriodicTurnProgressPing({
+        maxMs: councilGeneratePingCeilingMs,
+        onCeiling: () => {
+          breadcrumb("council.generate.pingCeiling", { modelId, maxMs: councilGeneratePingCeilingMs });
+        },
+      });
       try {
         const result = await withDeadlineRace(
           () =>
             withVisibleRetry(
-              () =>
+              () => {
+                // Observed, not inferred: we are past runtime/key resolution and
+                // are entering the SDK call right now. This is the single flag
+                // that separates "the provider returned nothing" from "we never
+                // called the provider" on an empty-completion record.
+                diag.requestIssued = true;
+                diag.sdkAttempts++;
                 // Stream + collect (NOT generateText). The codex/oauth endpoint
                 // 400s on non-stream requests ("Stream must be set to true"),
                 // which nulled every council eval/clarify/synthesis on a codex
                 // session → the opaque "evaluation unavailable" card. See
                 // collectStreamText's doc for the full diagnosis.
-                collectStreamText({
+                return collectStreamText({
                   model: runtime.model,
                   system,
                   prompt,
-                  ...maxOutSpread(runtime, maxTokens),
+                  ...genMaxOut,
                   // Never hardcode temperature: some upstreams (Moonshot/Kimi via
                   // opencode-go) reject any value but their pinned one, which
                   // failed every clarify/spec call on a Kimi session. resolveTemperature
@@ -692,15 +874,25 @@ export function createCouncilLLM(
                   temperature: resolveTemperature(providerId, runtime.modelInfo, 0.7),
                   providerOptions: runtime.providerOptions as Record<string, unknown> | undefined,
                   abortSignal: timedSignal,
-                  onDelta: noteCouncilStreamDelta,
-                }),
+                  onDelta: (chars: number) => {
+                    if (chars > 0) diag.streamedChars += chars;
+                    noteCouncilStreamDelta(chars);
+                    // Round 6 (G8 HIGH B): every real chunk from this call is
+                    // proof of life the top-level turn watchdog otherwise
+                    // never sees — ping on every one, mirroring the
+                    // sub-agent stream's per-chunk ping in stream-runner.ts.
+                    pingTurnProgress();
+                  },
+                });
+              },
               { label: "council.generate" },
             ),
-          COUNCIL_LLM_TIMEOUT_MS + 5_000,
+          councilRaceDeadlineMs(councilTimeoutMs),
           "council.generate",
           signal,
         );
         cleanupTimeout();
+        stopCouncilGeneratePing();
         stats.calls++;
         const durMs = Date.now() - t0;
         const callUsage = logCouncilCost({
@@ -722,7 +914,7 @@ export function createCouncilLLM(
           provider: providerId,
           systemChars: system.length,
           promptChars: prompt.length,
-          maxTokens,
+          maxTokens: genMaxOut.maxOutputTokens ?? maxTokens,
           durationMs: durMs,
           ok: true,
           textChars: (result.text ?? "").length,
@@ -732,9 +924,17 @@ export function createCouncilLLM(
           finishReason: (result as { finishReason?: string }).finishReason,
           usage: (result as { usage?: unknown }).usage,
         });
-        return stripThinkBlocks(result.text);
+        const finalText = stripThinkBlocks(result.text);
+        diag.rawTextChars = (result.text ?? "").length;
+        diag.textChars = finalText.length;
+        diag.finishReason = (result as { finishReason?: string }).finishReason;
+        diag.outputTokens = callUsage.outputTokens;
+        emitDiagnostics();
+        return finalText;
       } catch (err) {
         cleanupTimeout();
+        stopCouncilGeneratePing();
+        emitDiagnostics();
         // Capture the provider-side detail (status code + response body +
         // request param shape) that `err.message` alone drops — a generic
         // "Bad Request" on the council path was previously undiagnosable
@@ -749,7 +949,7 @@ export function createCouncilLLM(
           provider: providerId,
           systemChars: system.length,
           promptChars: prompt.length,
-          maxTokens,
+          maxTokens: genMaxOut.maxOutputTokens ?? maxTokens,
           durationMs: Date.now() - t0,
           ok: false,
           textChars: 0,
@@ -802,6 +1002,11 @@ export function createCouncilLLM(
       const providerId = detectProviderForModel(modelId);
       await ensureCouncilFactory(providerId);
       const runtime = resolveModelRuntime(modelId, { stage: "council", sessionId });
+      // Resolve ONCE so the request and the debug record cannot disagree. The
+      // record used to log the raw `6144` literal while the wire may now carry
+      // the model's declared ceiling — a forensics trap of exactly the kind
+      // this budget bug was hidden behind.
+      const debateMaxOut = maxOutSpread(runtime, 6144);
 
       // Verification tools — re-introduced after the no-tools fix (session
       // a7a5690d2049). The original failure was stepCountIs(4) + full toolset
@@ -855,7 +1060,10 @@ export function createCouncilLLM(
       const debateCaps = getProviderCapabilities(providerId);
 
       const t0 = Date.now();
-      const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(signal, COUNCIL_LLM_TIMEOUT_MS);
+      // Read the budget ONCE per call: it is `0` (no deadline) inside an `/ideal`
+      // run, and the signal and the race must agree on that.
+      const councilTimeoutMs = councilLlmTimeoutMs();
+      const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(signal, councilTimeoutMs);
       try {
         const result = await withDeadlineRace(
           () =>
@@ -875,7 +1083,7 @@ export function createCouncilLLM(
                   // text. E2E showed 2048 caused finishReason=length on 3KB debate
                   // prompts. 6144 leaves ~4000 tokens for text after typical reasoning
                   // overhead and avoids cuts mid-thought.
-                  ...maxOutSpread(runtime, 6144),
+                  ...debateMaxOut,
                   // See generate(): capability-aware temperature (omit / clamp).
                   temperature: resolveTemperature(providerId, runtime.modelInfo, 0.7),
                   providerOptions: runtime.providerOptions as Record<string, unknown> | undefined,
@@ -887,7 +1095,11 @@ export function createCouncilLLM(
                   ...(verificationTools && Object.keys(verificationTools).length > 0
                     ? {
                         tools: verificationTools,
-                        stopWhen: stepCountIs(2),
+                        // Normal council: one verification call, then forced text.
+                        // Inside `/ideal` there is no step count (user decision: no
+                        // limits); the turn ends on the model's own stop, or when
+                        // steps only repeat earlier calls with the same results.
+                        stopWhen: isIdealRunUnlimited() ? createNoProgressStopWhen() : stepCountIs(2),
                         prepareStep: ({ stepNumber, messages }) => {
                           if (stepNumber < 1) return {};
                           const stripped = debateCaps.sanitizeHistory(messages as never) as typeof messages;
@@ -898,7 +1110,7 @@ export function createCouncilLLM(
                 }),
               { label: "council.debate" },
             ),
-          COUNCIL_LLM_TIMEOUT_MS + 5_000,
+          councilRaceDeadlineMs(councilTimeoutMs),
           "council.debate",
           signal,
         );
@@ -936,7 +1148,7 @@ export function createCouncilLLM(
           provider: providerId,
           systemChars: system.length,
           promptChars: prompt.length,
-          maxTokens: 6144,
+          maxTokens: debateMaxOut.maxOutputTokens ?? 6144,
           durationMs: Date.now() - t0,
           ok: true,
           textChars: (result.text ?? "").length,
@@ -963,7 +1175,7 @@ export function createCouncilLLM(
           provider: providerId,
           systemChars: system.length,
           promptChars: prompt.length,
-          maxTokens: 6144,
+          maxTokens: debateMaxOut.maxOutputTokens ?? 6144,
           durationMs: Date.now() - t0,
           ok: false,
           textChars: 0,
@@ -1012,6 +1224,9 @@ export function createCouncilLLM(
       const providerId = detectProviderForModel(modelId);
       await ensureCouncilFactory(providerId);
       const runtime = resolveModelRuntime(modelId, { stage: "council", sessionId });
+      // Resolve once — see the same hoist in debate(): request and debug record
+      // must report the identical budget.
+      const researchMaxOut = maxOutSpread(runtime, 4096);
 
       const builtinTools = createTools(bash, mode);
 
@@ -1062,7 +1277,8 @@ export function createCouncilLLM(
 
       const t0 = Date.now();
       // Research is multi-step tool-using so give it 2x the standard deadline.
-      const researchTimeoutMs = Math.min(COUNCIL_LLM_TIMEOUT_MS * 2, 1_800_000);
+      const councilTimeoutMs = councilLlmTimeoutMs();
+      const researchTimeoutMs = councilTimeoutMs > 0 ? Math.min(councilTimeoutMs * 2, 1_800_000) : 0;
       const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(signal, researchTimeoutMs);
       try {
         const result = await withDeadlineRace(
@@ -1083,13 +1299,15 @@ export function createCouncilLLM(
                   system: systemPrompt,
                   prompt: userPrompt,
                   tools: allTools,
-                  stopWhen: stepCountIs(15),
+                  // No step count inside `/ideal` (user decision: no limits);
+                  // stop instead when steps only repeat earlier calls.
+                  stopWhen: isIdealRunUnlimited() ? createNoProgressStopWhen() : stepCountIs(15),
                   prepareStep: ({ stepNumber, messages }) => {
                     if (stepNumber < 1) return {};
                     const stripped = researchCaps.sanitizeHistory(messages as never) as typeof messages;
                     return stripped === messages ? {} : { messages: stripped };
                   },
-                  ...maxOutSpread(runtime, 4096),
+                  ...researchMaxOut,
                   // See generate(): capability-aware temperature (omit / clamp).
                   ...(() => {
                     const t = resolveTemperature(providerId, runtime.modelInfo, 0.3);
@@ -1106,7 +1324,7 @@ export function createCouncilLLM(
                 }),
               { label: "council.research" },
             ),
-          researchTimeoutMs + 5_000,
+          councilRaceDeadlineMs(researchTimeoutMs),
           "council.research",
           signal,
         );
@@ -1132,7 +1350,7 @@ export function createCouncilLLM(
           provider: providerId,
           systemChars: systemPrompt.length,
           promptChars: userPrompt.length,
-          maxTokens: 4096,
+          maxTokens: researchMaxOut.maxOutputTokens ?? 4096,
           durationMs: Date.now() - t0,
           ok: true,
           textChars: (result.text ?? "").length,
@@ -1186,7 +1404,7 @@ export function createCouncilLLM(
           provider: providerId,
           systemChars: systemPrompt.length,
           promptChars: userPrompt.length,
-          maxTokens: 4096,
+          maxTokens: researchMaxOut.maxOutputTokens ?? 4096,
           durationMs: Date.now() - t0,
           ok: false,
           textChars: 0,
@@ -1245,6 +1463,12 @@ interface TracedGenerateArgs {
    * real "leader" line instead of a fabricated zero.
    */
   onUsage?: UsageCallback;
+  /**
+   * Per-call forensics sink (see {@link CouncilGenerateDiagnostics}). Diagnostics
+   * only: `tracedGenerateWithFallback` uses it to tell an empty completion that
+   * came from the provider apart from one that never reached the network.
+   */
+  onDiagnostics?: GenerateDiagnosticsCallback;
 }
 
 /**
@@ -1264,90 +1488,260 @@ export async function* tracedGenerate(
   const start = Date.now();
   const tickInterval = args.tickIntervalMs ?? 1000;
 
-  yield {
-    type: "council_status",
-    councilStatus: {
-      statusId,
-      state: "start",
-      phase: args.phase,
-      label: args.label,
-      detail: args.detail,
-      role: args.role,
-      elapsedMs: 0,
-    },
-  };
-
-  // Race generate vs ticks: drain ticks between generate slices using Promise.race.
-  let resolved = false;
-  let resultText = "";
-  let resultErr: unknown = null;
-
-  const generatePromise = (async () => {
-    try {
-      resultText = await llm.generate(args.modelId, args.system, args.prompt, args.maxTokens, args.onUsage);
-    } catch (err) {
-      resultErr = err;
-    } finally {
-      resolved = true;
-    }
-  })();
-
-  while (!resolved) {
-    if (tickInterval <= 0) {
-      await generatePromise;
-      break;
-    }
-    const tickPromise = new Promise<void>((resolve) => setTimeout(resolve, tickInterval));
-    await Promise.race([generatePromise, tickPromise]);
-    if (resolved) break;
+  // G1 — the measured crash left a 7m11s hole in debug.log with no line at all.
+  // The enter/exit pair plus the heartbeat armed below turn that hole into a
+  // timestamped series carrying rss/heap at every sample.
+  breadcrumb("council.phase.enter", {
+    phase: args.phase,
+    label: args.label,
+    modelId: args.modelId,
+    role: args.role,
+    statusId,
+    maxTokens: args.maxTokens,
+    systemChars: args.system.length,
+    promptChars: args.prompt.length,
+  });
+  const endHeartbeat = beginCouncilCall(`council.${args.phase}`, {
+    label: args.label,
+    modelId: args.modelId,
+    statusId,
+  });
+  // finally: an abandoned generator (consumer stops iterating / calls .return())
+  // must not leave this call registered as in flight — the heartbeat would keep
+  // reporting a call that is over. The timer itself is unref'd and can never
+  // hold the process open; this guards the noise, not the lifetime.
+  try {
     yield {
       type: "council_status",
       councilStatus: {
         statusId,
-        state: "tick",
+        state: "start",
         phase: args.phase,
         label: args.label,
         detail: args.detail,
         role: args.role,
-        elapsedMs: Date.now() - start,
+        elapsedMs: 0,
       },
     };
-  }
 
-  await generatePromise;
+    // Race generate vs ticks: drain ticks between generate slices using Promise.race.
+    let resolved = false;
+    let resultText = "";
+    let resultErr: unknown = null;
 
-  if (resultErr) {
-    const errMsg = resultErr instanceof Error ? resultErr.message : String(resultErr);
-    yield {
-      type: "council_status",
-      councilStatus: {
-        statusId,
-        state: "error",
+    const generatePromise = (async () => {
+      try {
+        resultText = await llm.generate(
+          args.modelId,
+          args.system,
+          args.prompt,
+          args.maxTokens,
+          args.onUsage,
+          undefined,
+          args.onDiagnostics,
+        );
+      } catch (err) {
+        resultErr = err;
+      } finally {
+        resolved = true;
+      }
+    })();
+
+    while (!resolved) {
+      if (tickInterval <= 0) {
+        await generatePromise;
+        break;
+      }
+      const tickPromise = new Promise<void>((resolve) => setTimeout(resolve, tickInterval));
+      await Promise.race([generatePromise, tickPromise]);
+      if (resolved) break;
+      yield {
+        type: "council_status",
+        councilStatus: {
+          statusId,
+          state: "tick",
+          phase: args.phase,
+          label: args.label,
+          detail: args.detail,
+          role: args.role,
+          elapsedMs: Date.now() - start,
+        },
+      };
+    }
+
+    await generatePromise;
+
+    endHeartbeat();
+
+    if (resultErr) {
+      const errMsg = resultErr instanceof Error ? resultErr.message : String(resultErr);
+      breadcrumb("council.phase.exit", {
         phase: args.phase,
         label: args.label,
-        detail: args.detail,
-        role: args.role,
+        modelId: args.modelId,
+        statusId,
         elapsedMs: Date.now() - start,
+        outcome: "error",
         errorMessage: errMsg,
-      },
-    };
-    throw resultErr;
-  }
+      });
+      yield {
+        type: "council_status",
+        councilStatus: {
+          statusId,
+          state: "error",
+          phase: args.phase,
+          label: args.label,
+          detail: args.detail,
+          role: args.role,
+          elapsedMs: Date.now() - start,
+          errorMessage: errMsg,
+        },
+      };
+      throw resultErr;
+    }
 
-  yield {
-    type: "council_status",
-    councilStatus: {
-      statusId,
-      state: "done",
+    breadcrumb("council.phase.exit", {
       phase: args.phase,
       label: args.label,
-      detail: args.detail,
-      role: args.role,
+      modelId: args.modelId,
+      statusId,
       elapsedMs: Date.now() - start,
-    },
-  };
+      outcome: "done",
+      textChars: resultText.length,
+    });
 
-  return resultText;
+    yield {
+      type: "council_status",
+      councilStatus: {
+        statusId,
+        state: "done",
+        phase: args.phase,
+        label: args.label,
+        detail: args.detail,
+        role: args.role,
+        elapsedMs: Date.now() - start,
+      },
+    };
+
+    return resultText;
+  } finally {
+    endHeartbeat();
+  }
+}
+
+/**
+ * One candidate's failure inside a council model-fallback chain.
+ *
+ * `reason` separates the three ways a chain advances, which a bare `catch {}`
+ * had collapsed into "something happened, we moved on":
+ *  - "error"            — the call threw; `statusCode` / `errorMessage` say why
+ *  - "empty-completion" — the call SUCCEEDED and was billed but returned no
+ *                         usable text (e.g. the whole output budget spent inside
+ *                         <think>, stripped to "")
+ *  - "blocked"          — skipped; the model was blocklisted earlier this session
+ */
+export interface CouncilCandidateFailure {
+  fromModel: string;
+  /** Next candidate to be tried, or null when the chain is exhausted. */
+  toModel: string | null;
+  reason: "error" | "empty-completion" | "blocked";
+  /** 1-based index of this candidate. */
+  attempt: number;
+  totalCandidates: number;
+  provider?: string;
+  errorName?: string;
+  errorMessage?: string;
+  statusCode?: number;
+  /** Truncated provider response body, for the log only — never the wire. */
+  responseBodyTrunc?: string;
+  /** True on the single terminal record emitted when every candidate failed. */
+  exhausted?: boolean;
+  /**
+   * Wall-clock ms this candidate took, measured around the `tracedGenerate`
+   * delegation. G2: the crash record showed three `empty-completion`s inside
+   * 5ms, which no real network call can produce — but the record could not say
+   * so, because it carried no duration at all. Now it does.
+   */
+  elapsedMs?: number;
+  /**
+   * `signal.aborted` sampled the instant this attempt began.
+   *
+   * Where it is meaningful (verified 2026-09-09): `tracedGenerate` itself passes
+   * `undefined` for `CouncilLLM.generate`'s `signal`, so the value depends
+   * entirely on the wrapper in front of the LLM. `withCouncilSignal`
+   * (src/council/index.ts) substitutes the run's signal when the caller's is
+   * undefined, so `/council` and the orchestrator product loop DO have one;
+   * `createProductLlm` (src/product-loop/sprint-runner.ts) forwards no signal at
+   * all, so it reads `false` there. Left absent rather than defaulted, so an
+   * unknown is never dressed up as a `false`.
+   */
+  signalAbortedAtStart?: boolean;
+  /**
+   * Full per-call forensics from `CouncilLLM.generate` — in particular
+   * `requestIssued`, which is what finally separates "the provider returned
+   * nothing" from "we never called the provider". Absent when the candidate was
+   * skipped (blocked) or when the LLM implementation does not report them.
+   */
+  diagnostics?: CouncilGenerateDiagnostics;
+}
+
+/**
+ * Provider id for a model, or undefined when it cannot be derived.
+ *
+ * Deliberately returns `undefined` rather than defaulting to a provider string:
+ * per the Zero Hardcode Rule a provider must come from `detectProviderForModel`
+ * or not be claimed at all — a wrong-but-plausible provider on a failure record
+ * is worse than an absent one, because it misdirects the next investigation.
+ */
+function safeDetectProvider(modelId: string): string | undefined {
+  try {
+    return detectProviderForModel(modelId);
+  } catch (err) {
+    logger.error("orchestrator", "[council.generateWithFallback] provider detection failed", {
+      modelId,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
+}
+
+/**
+ * Emit the `model-fallback` LiveEvent for one candidate failure.
+ *
+ * Uses the SAME `globalThis.__muonroiAgentRuntime.emitEvent` channel the
+ * orchestrator already uses for `stream-retry` / `toast` (tool-engine.ts:980-997)
+ * — no parallel channel, and no dependency from council code onto the UI layer.
+ * Telemetry must never break a council run, so the emit is guarded; per the
+ * No-Silent-Catch rule the guard still logs.
+ */
+function emitModelFallbackEvent(failure: CouncilCandidateFailure, label?: string): void {
+  try {
+    const runtime = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    if (!runtime?.emitEvent) return;
+    runtime.emitEvent({
+      t: "event",
+      kind: "model-fallback",
+      fromModel: failure.fromModel,
+      toModel: failure.toModel,
+      reason: failure.reason,
+      attempt: failure.attempt,
+      totalCandidates: failure.totalCandidates,
+      ...(failure.exhausted ? { exhausted: true } : {}),
+      ...(label ? { label } : {}),
+      ...(failure.provider ? { provider: failure.provider } : {}),
+      ...(typeof failure.statusCode === "number" ? { statusCode: failure.statusCode } : {}),
+      ...(failure.errorName ? { errorName: failure.errorName } : {}),
+      ...(failure.errorMessage ? { errorMessage: failure.errorMessage } : {}),
+      ts: Date.now(),
+    });
+  } catch (emitErr) {
+    logger.error("orchestrator", "[council.generateWithFallback] model-fallback telemetry failed", {
+      modelId: failure.fromModel,
+      message: emitErr instanceof Error ? emitErr.message : String(emitErr),
+    });
+  }
 }
 
 /**
@@ -1360,12 +1754,88 @@ export async function* tracedGenerate(
  */
 export async function* tracedGenerateWithFallback(
   llm: CouncilLLM,
-  args: Omit<TracedGenerateArgs, "modelId"> & { models: string[] },
+  args: Omit<TracedGenerateArgs, "modelId"> & {
+    models: string[];
+    /**
+     * Called once per candidate that fails, and once more with `toModel: null`
+     * when the chain is exhausted. This is how the reason SURVIVES to the caller:
+     * the generator's `null` return says only "no text", so a terminal
+     * `run-finished` / `sprint-halt` reason built from it could say nothing better
+     * than "check provider reachability and API keys" — which reads identically
+     * for a 429 (rate/credit limit → back off) and a 401 (bad key → stop), two
+     * failures that call for opposite responses.
+     */
+    onCandidateFailure?: (failure: CouncilCandidateFailure) => void;
+  },
 ): AsyncGenerator<StreamChunk, string | null, unknown> {
   const seen = new Set<string>();
   const models = args.models.filter((m) => m && !seen.has(m) && (seen.add(m), true));
+  const failures: CouncilCandidateFailure[] = [];
+  const chainStart = Date.now();
+  const chainElapsedMs = (): number => Date.now() - chainStart;
+
+  /** Log + record + emit one structured switch. Never throws. */
+  const noteFailure = (failure: CouncilCandidateFailure): void => {
+    failures.push(failure);
+    // No-Silent-Catch: name the module, the operation, the model, the reason,
+    // and — for an API error — the HTTP status and truncated response body.
+    logger.error("orchestrator", "[council.generateWithFallback] candidate did not produce a completion", {
+      label: args.label,
+      modelId: failure.fromModel,
+      provider: failure.provider,
+      reason: failure.reason,
+      attempt: failure.attempt,
+      totalCandidates: failure.totalCandidates,
+      nextModel: failure.toModel,
+      statusCode: failure.statusCode,
+      errorName: failure.errorName,
+      message: failure.errorMessage,
+      responseBody: failure.responseBodyTrunc,
+      // G2 — the fields that make an "empty completion" interpretable.
+      elapsedMs: failure.elapsedMs,
+      signalAbortedAtStart: failure.signalAbortedAtStart,
+      requestIssued: failure.diagnostics?.requestIssued,
+      sdkAttempts: failure.diagnostics?.sdkAttempts,
+      streamedChars: failure.diagnostics?.streamedChars,
+      rawTextChars: failure.diagnostics?.rawTextChars,
+      finishReason: failure.diagnostics?.finishReason,
+      // outputTokens is deliberately NOT logged here: logger.redactObject()
+      // replaces any key containing "token" with "[REDACTED]" (measured), so it
+      // would only add noise. It is preserved verbatim in the breadcrumb JSONL,
+      // which does not pass through the redactor.
+      viaMock: failure.diagnostics?.viaMock,
+    });
+    breadcrumb("council.candidate.failed", {
+      label: args.label,
+      modelId: failure.fromModel,
+      provider: failure.provider,
+      reason: failure.reason,
+      attempt: failure.attempt,
+      totalCandidates: failure.totalCandidates,
+      nextModel: failure.toModel,
+      exhausted: failure.exhausted === true,
+      elapsedMs: failure.elapsedMs,
+      statusCode: failure.statusCode,
+      errorMessage: failure.errorMessage,
+      diagnostics: failure.diagnostics,
+    });
+    try {
+      args.onCandidateFailure?.(failure);
+    } catch (cbErr) {
+      logger.error("orchestrator", "[council.generateWithFallback] onCandidateFailure callback threw", {
+        modelId: failure.fromModel,
+        message: cbErr instanceof Error ? cbErr.message : String(cbErr),
+      });
+    }
+    emitModelFallbackEvent(failure, args.label);
+  };
+
   for (let i = 0; i < models.length; i++) {
     const modelId = models[i];
+    // Resolve once per candidate: safeDetectProvider LOGS on an unresolvable id,
+    // so calling it from both the start breadcrumb and the failure record
+    // doubled that line (observed while driving the instrumentation).
+    const candidateProvider = safeDetectProvider(modelId);
     // Fix 2 — skip a candidate that already failed non-retryably (401/403 +
     // SDK isRetryable:false) earlier in this session instead of burning the
     // same rejected call again. Surface the reason once per model (not once
@@ -1376,20 +1846,151 @@ export async function* tracedGenerateWithFallback(
       if (warning) {
         yield { type: "toast", toastLevel: "warn", content: warning };
       }
+      noteFailure({
+        fromModel: modelId,
+        toModel: models[i + 1] ?? null,
+        reason: "blocked",
+        attempt: i + 1,
+        totalCandidates: models.length,
+        provider: candidateProvider,
+        elapsedMs: 0,
+      });
       continue;
     }
+    // G2 — a candidate had no START record at all: only failures were logged,
+    // so an attempt that vanished mid-flight was indistinguishable from one that
+    // never began. Record entry, then time the attempt.
+    const attemptStart = Date.now();
+    const attemptProvider = candidateProvider;
+    breadcrumb("council.candidate.start", {
+      label: args.label,
+      phase: args.phase,
+      modelId,
+      attempt: i + 1,
+      totalCandidates: models.length,
+      provider: attemptProvider,
+    });
+    let diagnostics: CouncilGenerateDiagnostics | undefined;
+    const captureDiagnostics: GenerateDiagnosticsCallback = (d) => {
+      diagnostics = d;
+    };
     try {
       const raw = yield* tracedGenerate(llm, {
         ...args,
         modelId,
         label: i > 0 ? `${args.label} (fallback: ${modelId})` : args.label,
+        onDiagnostics: captureDiagnostics,
       });
-      if (raw?.trim()) return raw;
-    } catch {
-      /* try the next candidate */
+      if (raw?.trim()) {
+        breadcrumb("council.candidate.ok", {
+          label: args.label,
+          modelId,
+          attempt: i + 1,
+          elapsedMs: Date.now() - attemptStart,
+          textChars: raw.length,
+          diagnostics,
+        });
+        return raw;
+      }
+      // The call SUCCEEDED and was billed, but produced nothing usable. This is
+      // not a hypothetical: a reasoning model given a small maxTokens budget can
+      // spend the entire budget inside <think>, so `stripThinkBlocks` returns "".
+      // Before this branch was instrumented it advanced to the next model in
+      // total silence — no throw, no log, no event — which is how a StepFun-only
+      // run ended up executing on two other vendors with no record of why.
+      noteFailure({
+        fromModel: modelId,
+        toModel: models[i + 1] ?? null,
+        reason: "empty-completion",
+        attempt: i + 1,
+        totalCandidates: models.length,
+        provider: attemptProvider,
+        elapsedMs: Date.now() - attemptStart,
+        signalAbortedAtStart: diagnostics?.signalAbortedAtStart,
+        diagnostics,
+      });
+    } catch (err) {
+      // NOT a bare catch. The provider-side detail (status + body) is the whole
+      // difference between "429 — out of credit, stop asking" and "401 — bad key":
+      // identical-looking failures that call for opposite responses.
+      const forensics = summarizeApiErrorForLog(err);
+      noteFailure({
+        fromModel: modelId,
+        toModel: models[i + 1] ?? null,
+        reason: "error",
+        attempt: i + 1,
+        totalCandidates: models.length,
+        provider: attemptProvider,
+        errorName: err instanceof Error ? err.name : typeof err,
+        errorMessage: err instanceof Error ? err.message : String(err),
+        statusCode: typeof forensics?.statusCode === "number" ? forensics.statusCode : undefined,
+        responseBodyTrunc: typeof forensics?.responseBodyTrunc === "string" ? forensics.responseBodyTrunc : undefined,
+        elapsedMs: Date.now() - attemptStart,
+        signalAbortedAtStart: diagnostics?.signalAbortedAtStart,
+        diagnostics,
+      });
     }
   }
+
+  // Chain exhausted. Emit one terminal record so the caller — and the terminal
+  // run-finished / sprint-halt reason built from it — can name the ACTUAL cause
+  // instead of a generic "check provider reachability and API keys".
+  if (models.length > 0) {
+    const last = failures[failures.length - 1];
+    noteFailure({
+      fromModel: last?.fromModel ?? models[models.length - 1],
+      toModel: null,
+      reason: last?.reason ?? "error",
+      attempt: models.length,
+      totalCandidates: models.length,
+      exhausted: true,
+      provider: last?.provider,
+      errorName: last?.errorName,
+      errorMessage: last?.errorMessage ?? summarizeCandidateFailures(failures),
+      statusCode: last?.statusCode,
+      elapsedMs: chainElapsedMs(),
+      signalAbortedAtStart: last?.signalAbortedAtStart,
+      diagnostics: last?.diagnostics,
+    });
+    breadcrumb("council.fallback.exhausted", {
+      label: args.label,
+      phase: args.phase,
+      totalCandidates: models.length,
+      elapsedMs: chainElapsedMs(),
+      summary: summarizeCandidateFailures(failures),
+      perCandidate: failures
+        .filter((f) => !f.exhausted)
+        .map((f) => ({
+          modelId: f.fromModel,
+          reason: f.reason,
+          elapsedMs: f.elapsedMs,
+          requestIssued: f.diagnostics?.requestIssued,
+          streamedChars: f.diagnostics?.streamedChars,
+          statusCode: f.statusCode,
+        })),
+    });
+  }
   return null;
+}
+
+/**
+ * One-line human summary of an exhausted fallback chain, e.g.
+ * `step-3.5-flash: empty completion; glm-5.2: HTTP 429 Insufficient balance…`.
+ *
+ * This is the string a terminal reason should carry instead of the generic
+ * "council bailed before synthesis — check provider reachability and API keys",
+ * which was the only thing available while the reasons were being swallowed.
+ */
+export function summarizeCandidateFailures(failures: readonly CouncilCandidateFailure[]): string {
+  const parts = failures
+    .filter((f) => !f.exhausted)
+    .map((f) => {
+      if (f.reason === "empty-completion") return `${f.fromModel}: empty completion`;
+      if (f.reason === "blocked") return `${f.fromModel}: skipped (blocked earlier this session)`;
+      const status = typeof f.statusCode === "number" ? `HTTP ${f.statusCode} ` : "";
+      return `${f.fromModel}: ${status}${(f.errorMessage ?? "unknown error").slice(0, 160)}`;
+    });
+  return parts.length > 0 ? parts.join("; ") : "no candidates were attempted";
 }
 
 interface TracedAsyncArgs {
@@ -1437,46 +2038,106 @@ export async function* tracedAsync<T>(
     }
   };
 
-  yield {
-    type: "council_status",
-    councilStatus: {
-      statusId,
-      state: "start",
-      phase: args.phase,
-      label: args.label,
-      detail: args.detail,
-      role: args.role,
-      elapsedMs: 0,
-    },
-  };
-
-  let resolved = false;
-  let result: T | undefined;
-  let err: unknown = null;
-
-  const work = (async () => {
-    try {
-      result = await fn();
-    } catch (e) {
-      err = e;
-    } finally {
-      resolved = true;
-    }
-  })();
-
-  while (!resolved) {
-    if (tickInterval <= 0) {
-      await work;
-      break;
-    }
-    const tick = new Promise<void>((resolve) => setTimeout(resolve, tickInterval));
-    await Promise.race([work, tick]);
-    if (resolved) break;
+  // Same G1 coverage as tracedGenerate, for the phases that do NOT go through
+  // `llm.generate` — research, debate rounds, and any Promise.all fan-out.
+  breadcrumb("council.phase.enter", {
+    phase: args.phase,
+    label: args.label,
+    role: args.role,
+    statusId,
+    via: "tracedAsync",
+  });
+  const endHeartbeat = beginCouncilCall(`council.${args.phase}`, {
+    label: args.label,
+    role: args.role,
+    statusId,
+    via: "tracedAsync",
+  });
+  try {
     yield {
       type: "council_status",
       councilStatus: {
         statusId,
-        state: "tick",
+        state: "start",
+        phase: args.phase,
+        label: args.label,
+        detail: args.detail,
+        role: args.role,
+        elapsedMs: 0,
+      },
+    };
+
+    let resolved = false;
+    let result: T | undefined;
+    let err: unknown = null;
+
+    const work = (async () => {
+      try {
+        result = await fn();
+      } catch (e) {
+        err = e;
+      } finally {
+        resolved = true;
+      }
+    })();
+
+    while (!resolved) {
+      if (tickInterval <= 0) {
+        await work;
+        break;
+      }
+      const tick = new Promise<void>((resolve) => setTimeout(resolve, tickInterval));
+      await Promise.race([work, tick]);
+      if (resolved) break;
+      yield {
+        type: "council_status",
+        councilStatus: {
+          statusId,
+          state: "tick",
+          phase: args.phase,
+          label: args.label,
+          detail: args.detail,
+          role: args.role,
+          elapsedMs: Date.now() - start,
+          ...livenessFields(),
+        },
+      };
+    }
+
+    await work;
+
+    if (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      yield {
+        type: "council_status",
+        councilStatus: {
+          statusId,
+          state: "error",
+          phase: args.phase,
+          label: args.label,
+          detail: args.detail,
+          role: args.role,
+          elapsedMs: Date.now() - start,
+          errorMessage: errMsg,
+        },
+      };
+      breadcrumb("council.phase.exit", {
+        phase: args.phase,
+        label: args.label,
+        statusId,
+        via: "tracedAsync",
+        elapsedMs: Date.now() - start,
+        outcome: "error",
+        errorMessage: errMsg,
+      });
+      throw err;
+    }
+
+    yield {
+      type: "council_status",
+      councilStatus: {
+        statusId,
+        state: "done",
         phase: args.phase,
         label: args.label,
         detail: args.detail,
@@ -1485,41 +2146,17 @@ export async function* tracedAsync<T>(
         ...livenessFields(),
       },
     };
-  }
 
-  await work;
-
-  if (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    yield {
-      type: "council_status",
-      councilStatus: {
-        statusId,
-        state: "error",
-        phase: args.phase,
-        label: args.label,
-        detail: args.detail,
-        role: args.role,
-        elapsedMs: Date.now() - start,
-        errorMessage: errMsg,
-      },
-    };
-    throw err;
-  }
-
-  yield {
-    type: "council_status",
-    councilStatus: {
-      statusId,
-      state: "done",
+    breadcrumb("council.phase.exit", {
       phase: args.phase,
       label: args.label,
-      detail: args.detail,
-      role: args.role,
+      statusId,
+      via: "tracedAsync",
       elapsedMs: Date.now() - start,
-      ...livenessFields(),
-    },
-  };
-
-  return result as T;
+      outcome: "done",
+    });
+    return result as T;
+  } finally {
+    endHeartbeat();
+  }
 }

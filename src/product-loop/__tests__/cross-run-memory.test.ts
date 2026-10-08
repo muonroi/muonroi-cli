@@ -29,7 +29,6 @@ async function seedRun(
   const createdAt = new Date(Date.now() - (opts.daysOld ?? 0) * 24 * 60 * 60 * 1000);
   await writeManifest(flowDir, runId, {
     idea,
-    capUsd: 50,
     maxSprints: 8,
     doneThreshold: 0.9,
     createdAt,

@@ -11,6 +11,7 @@ import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type PilContextResponse, PilContextResponseSchema } from "../pil/schema.js";
+import { isEETier } from "../pil/task-tier-map.js";
 import { classifyEeError, logEeFailure, readTimeoutEnv, withEeTimeout } from "../utils/ee-logger.js";
 
 export type { WhoAmIDim, WhoAmIDimName, WhoAmIProfile } from "./who-am-i.js";
@@ -466,18 +467,43 @@ export function resetPilContextCircuit(): void {
 }
 
 /**
+ * Routing advice from the outcomes of similar past tasks (EE /api/route-history:
+ * one vector search, no LLM). Never throws; null when EE is unreachable or has no
+ * advice. Started alongside intent classification so it costs no turn latency.
+ */
+export async function routeHistoryAdvice(
+  task: string,
+  timeoutMs = 1500,
+): Promise<import("../router/decide.js").RouteHistoryAdvice | null> {
+  try {
+    const { getDefaultEEClient } = await import("./intercept.js");
+    const r = await getDefaultEEClient().routeHistory(task, timeoutMs);
+    if (!r) return null;
+    // `r` is only TYPE-cast to RouteHistoryResponse in client.ts (`resp.json() as
+    // RouteHistoryResponse`) — nothing validates the JSON body a remote EE server
+    // sends. Whitelist here, at the boundary, so an unrecognized/malformed tier
+    // (or a future EE server naming a new tier this client doesn't know) never
+    // reaches the router as if it were a real tier. Same convention as
+    // getRoutingPromoteMax/getRoutingDemoteMin whitelisting a config-sourced tier
+    // string (src/utils/settings.ts).
+    const floorTier = isEETier(r.floorTier) ? r.floorTier : null;
+    const suggestedTier = isEETier(r.suggestedTier) ? r.suggestedTier : null;
+    if (!floorTier && !suggestedTier) return null;
+    return { floorTier, suggestedTier };
+  } catch (err) {
+    logEeFailure("bridge.routeHistoryAdvice", classifyEeError(err), err, { budgetMs: timeoutMs });
+    return null;
+  }
+}
+
+/**
  * Unified PIL brain call. One round-trip returns classification +
  * experience retrieval. Returns null on any failure (timeout, schema reject,
  * circuit open, brain unreachable). Caller falls back to legacy multi-call path.
  */
 export async function pilContext(
   prompt: string,
-  options: {
-    localeHint?: string;
-    projectCtx?: Record<string, unknown>;
-    budgetMs?: number;
-    signal?: AbortSignal;
-  } = {},
+  options: import("./types.js").PilContextOptions = {},
 ): Promise<PilContextResponse | null> {
   if (pilShouldShortCircuit()) return null;
 

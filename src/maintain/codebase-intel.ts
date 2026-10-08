@@ -10,6 +10,7 @@
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { isCodeFile } from "../product-loop/language-registry.js";
 import { ensureRepoMap } from "./repo-map.js";
 import type { CandidateFile, CodebaseIntel, MaintenanceTask } from "./types.js";
 
@@ -17,7 +18,24 @@ import type { CandidateFile, CodebaseIntel, MaintenanceTask } from "./types.js";
 // Constants
 // ---------------------------------------------------------------------------
 
-const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".py", ".cs", ".go", ".rs", ".java", ".kt", ".rb"]);
+/**
+ * "Which files are source code" is `language-registry.ts`'s question, not this
+ * module's.
+ *
+ * This file used to hold its own `SOURCE_EXTENSIONS` naming 11 of the registry's
+ * 36 extensions — no `.fs`/`.vb`, no C/C++, no `.php`/`.swift`/`.scala`, not even
+ * `.mjs`/`.cjs`. Both walks below use it as their ONLY file filter, so an
+ * unlisted language was invisible twice over: `rankCandidates` could never
+ * propose one of its files as the file to change, and `findImpactRadius` could
+ * never report one as affected. The P15 task-runner then planned against a repo
+ * it had been told was almost empty — the same shape as the defect the registry
+ * was built to end (`repo-audit.ts` reporting "Source files: 1" for a 506-file C#
+ * repository, recorded in its header).
+ *
+ * `fileImportsAny` keeps its own per-language import patterns and falls back to a
+ * generic `import|require|using` scan, so a newly registered language degrades to
+ * the generic path rather than being dropped.
+ */
 
 /** Max bytes to read per file when scoring body keyword hits. */
 const MAX_FILE_READ_BYTES = 100 * 1024; // 100 KB
@@ -270,8 +288,7 @@ async function rankCandidates(cwd: string, keywords: string[], maxCandidates: nu
         if (SKIP_DIRS.has(name)) continue;
         await visit(path.join(dir, name));
       } else {
-        const ext = path.extname(name).toLowerCase();
-        if (!SOURCE_EXTENSIONS.has(ext)) continue;
+        if (!isCodeFile(name)) continue;
         const fullPath = path.join(dir, name);
         const rel = path.relative(cwd, fullPath).replace(/\\/g, "/");
         const score = await scoreFile(rel, fullPath, name, keywords);
@@ -378,8 +395,8 @@ async function findImpactRadius(cwd: string, candidates: CandidateFile[], maxImp
         if (SKIP_DIRS.has(name)) continue;
         await visit(path.join(dir, name));
       } else {
+        if (!isCodeFile(name)) continue;
         const ext = path.extname(name).toLowerCase();
-        if (!SOURCE_EXTENSIONS.has(ext)) continue;
         const fullPath = path.join(dir, name);
         const rel = path.relative(cwd, fullPath).replace(/\\/g, "/");
         // Skip if the file itself is a candidate

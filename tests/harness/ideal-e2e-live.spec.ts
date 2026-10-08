@@ -132,7 +132,7 @@ async function spawnLive(opts: {
 async function rmRetry(dir: string, attempts = 6): Promise<void> {
   for (let i = 0; i < attempts; i++) {
     try {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       return;
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
@@ -369,6 +369,11 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
   // -------------------------------------------------------------------------
 
   it("stage 3: Enter on Init new opens form at step=name", async () => {
+    // The card no longer opens on "Init new project" — it is destructive, and
+    // deriveHaltRecommendation pre-selects "Point to existing project" for a
+    // no_recipe halt. This stage drives the init_new path deliberately, so move
+    // the cursor up to index 0 first (Up clamps at 0, so this is idempotent).
+    driver.press("Up");
     driver.press("Enter");
     await driver.wait_for({ selector: "id=init-new-form", timeoutMs: 10_000 });
     expect(driver.query("id=ideal-halt-card")).toBeNull();

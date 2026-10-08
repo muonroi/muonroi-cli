@@ -4,6 +4,7 @@ import { mkdirSync } from "fs";
 import { createRequire } from "module";
 import { dirname, isAbsolute, join, resolve } from "path";
 import type { ComputerToolMetadata, ToolResult } from "../types/index";
+import { normalizeMsysDrivePath } from "./write-scope.js";
 
 const COMPUTER_ARTIFACT_DIR = ".muonroi-cli/computer";
 const DEFAULT_SCREENSHOT_NAME = "computer-shot";
@@ -471,8 +472,25 @@ function buildClickArgs(input: ComputerClickInput): string[] | null {
   return null;
 }
 
+/**
+ * Where an artifact the model named actually lands.
+ *
+ * The MSYS spelling is normalised first for the same reason the write path does
+ * it (`src/tools/write-scope.ts` owns the function): `isAbsolute("/c/x/s.png")`
+ * is TRUE on win32, so the branch below returned that string VERBATIM — not even
+ * run through `resolve` — and `mkdirSync` then created the current-drive
+ * resolution. Measured before the fix: `buildScreenshotPath(cwd, "/c/Users/.../
+ * shots/s.png")` created `D:\c\Users\phila\AppData\Local\Temp\...\shots`, did
+ * NOT create the real directory, and returned the MSYS string. Because
+ * `mkdirSync` is recursive it SUCCEEDS at the bogus location, so the write does
+ * not fail loudly — the screenshot lands where nobody looks and the tool reports
+ * success with a path that names somewhere else.
+ *
+ * Identity on POSIX, where `/d/x` is an ordinary absolute path.
+ */
 function resolveOutputPath(cwd: string, outputPath: string): string {
-  const resolved = isAbsolute(outputPath) ? outputPath : resolve(cwd, outputPath);
+  const spelled = normalizeMsysDrivePath(outputPath);
+  const resolved = isAbsolute(spelled) ? spelled : resolve(cwd, spelled);
   mkdirSync(dirname(resolved), { recursive: true });
   return resolved;
 }

@@ -11,7 +11,9 @@ import {
 } from "../state/council-steer.js";
 import { logInteraction } from "../storage/index.js";
 import type { CouncilPanelLedgerEntry, CouncilQuestionOption, CouncilStanceRow, StreamChunk } from "../types/index.js";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
+import { logger } from "../utils/logger.js";
 import { getCouncilLanguage } from "../utils/settings.js";
 import {
   buildDebateCheckpoint,
@@ -31,7 +33,9 @@ import {
   buildOpeningPrompt,
   buildResponsePrompt,
   buildRoundSummaryPrompt,
+  type LeaderPriorVerdict,
 } from "./prompts.js";
+import { buildResearchSourcePreference, decideInternetFirst } from "./research-mode.js";
 import { buildStanceRows } from "./stance.js";
 import type {
   ClarifiedSpec,
@@ -84,8 +88,48 @@ function makeToolBudget(): ToolBudget {
 }
 const MAX_EMPTY_WITH_TOOLS = 2;
 
-/** Hard ceiling — leader can extend `plannedRounds` up to but not past this. */
+/**
+ * Hard ceiling — leader can extend `plannedRounds` up to but not past this.
+ * A normal `/council` only: inside an `/ideal` run there is no round ceiling
+ * (user decision: no limits) — see `absoluteMaxRounds()`.
+ */
 const ABSOLUTE_MAX_ROUNDS = 8;
+
+/** The absolute round ceiling in effect: 8 for a normal council, none inside `/ideal`. */
+function absoluteMaxRounds(): number {
+  return isIdealRunUnlimited() ? Number.POSITIVE_INFINITY : ABSOLUTE_MAX_ROUNDS;
+}
+
+/** `now 5/8` in a normal council, `now 5` inside `/ideal` (no ceiling to show). */
+function roundOfCeiling(current: number, ceiling: number): string {
+  return Number.isFinite(ceiling) ? `${current}/${ceiling}` : `${current}`;
+}
+
+/**
+ * Whether a leader-requested or auto-remedy extension may add rounds at the last
+ * planned round.
+ *
+ * Normal council: only below the ceiling (unchanged). Inside `/ideal` the ceiling
+ * is gone, so the grant additionally requires PROGRESS — a criterion newly met
+ * within the last 2 rounds (`roundsSinceProgress < 2`). Auto-remedy already
+ * requires that; a leader's own `extendRounds` did not, and without a ceiling a
+ * leader that keeps asking would keep a debate going forever on criteria nobody
+ * is moving.
+ */
+export function shouldGrantRoundExtension(opts: {
+  round: number;
+  maxRounds: number;
+  effectiveCeiling: number;
+  leaderAskedExtend: boolean;
+  autoRemedy: boolean;
+  roundsSinceProgress: number;
+}): boolean {
+  if (opts.round !== opts.maxRounds) return false;
+  if (!(opts.maxRounds < opts.effectiveCeiling)) return false;
+  if (!opts.leaderAskedExtend && !opts.autoRemedy) return false;
+  if (isIdealRunUnlimited() && opts.roundsSinceProgress >= 2) return false;
+  return true;
+}
 /** Default initial round budget when the planner does not propose one. */
 const DEFAULT_PLANNED_ROUNDS = 3;
 
@@ -115,18 +159,103 @@ export function resolveDebateRoundBudget(
   planKind: string | undefined,
   plannedRounds: number | undefined,
 ): { maxRounds: number; effectiveCeiling: number; kindCapped: boolean } {
+  const planned = Math.max(
+    1,
+    typeof plannedRounds === "number" && plannedRounds > 0 ? plannedRounds : DEFAULT_PLANNED_ROUNDS,
+  );
+  // Inside `/ideal` the planner's round count stays the plan, but there is no
+  // kind cap and no absolute ceiling (user decision: no limits). What still ends
+  // such a debate: the leader's stop, convergence, the planned count unless an
+  // extension is granted — and an extension needs progress (shouldGrantRoundExtension).
+  if (isIdealRunUnlimited()) {
+    return { maxRounds: planned, effectiveCeiling: Number.POSITIVE_INFINITY, kindCapped: false };
+  }
   const kindCap = planKind !== undefined ? KIND_MAX_ROUNDS[planKind] : undefined;
   const effectiveCeiling = Math.min(ABSOLUTE_MAX_ROUNDS, kindCap ?? ABSOLUTE_MAX_ROUNDS);
-  const maxRounds = Math.min(
-    effectiveCeiling,
-    Math.max(1, typeof plannedRounds === "number" && plannedRounds > 0 ? plannedRounds : DEFAULT_PLANNED_ROUNDS),
-  );
+  const maxRounds = Math.min(effectiveCeiling, planned);
   return { maxRounds, effectiveCeiling, kindCapped: kindCap !== undefined };
 }
 /** Cap on the size of a single archived position. Anything longer is
  * trimmed and reported via `length`. Mirrors the goal of keeping the
  * follow-up memory record small enough to be reloaded cheaply. */
 const ARCHIVE_EXCERPT_CHARS = 400;
+
+// ── B2: the leader's judging bundle ──────────────────────────────────────────
+//
+// The judge was handed `exchangeLogs.flat().slice(-8)` and nothing else — a tail,
+// not a view of the debate. Every panelist got `runningSummary` (the LLM-condensed
+// state of rounds 1..N-1) via buildFollowupPrompt; the one participant grading the
+// run did not. So evidence that satisfied a criterion in round 2 was invisible by
+// round 4, and the verdict regressed for a reason that had nothing to do with the
+// debate.
+//
+// Sizing, against numbers already in this repo rather than taste: council caps a
+// single assembled context payload at MAX_CONTEXT_CHARS = 32_000 (context.ts:144)
+// and the mechanical debate summary at TOTAL_CHARS = 16_000 (debate-summary.ts:22).
+// The judging bundle is held under both at 6_000 (summary) + 18_000 (verbatim
+// window) = 24_000 chars ≈ 6k est tokens by this repo's chars/4 estimator
+// (CLAUDE.md → "The metered gate"), i.e. ~12k real provider tokens — a bounded
+// add per round on a call that was previously unbounded in chars.
+const LEADER_SUMMARY_CHARS = 6_000;
+const LEADER_EXCHANGE_WINDOW_CHARS = 18_000;
+/**
+ * Today's window, kept as a FLOOR. The char budget extends the view backwards
+ * from here; it must never shrink it, or a debate with long turns would hand the
+ * judge less evidence than it gets today.
+ */
+const LEADER_MIN_TAIL_CHUNKS = 8;
+
+/**
+ * Assemble what the leader judges on: the condensed state of the debate so far
+ * plus the widest verbatim tail that fits the char budget.
+ *
+ * Pure and total — it never throws — so the caller's fail-open path is only ever
+ * needed for a fault in its own inputs.
+ */
+export function buildLeaderEvidenceBundle(opts: {
+  /** Exchange chunks, oldest → newest. */
+  exchanges: readonly string[];
+  /** LLM-condensed state through the previous round; "" / undefined on round 1. */
+  runningSummary?: string;
+  minTailChunks?: number;
+  maxExchangeChars?: number;
+  maxSummaryChars?: number;
+}): string {
+  const minTail = opts.minTailChunks ?? LEADER_MIN_TAIL_CHUNKS;
+  const maxExchange = opts.maxExchangeChars ?? LEADER_EXCHANGE_WINDOW_CHARS;
+  const maxSummary = opts.maxSummaryChars ?? LEADER_SUMMARY_CHARS;
+
+  const chunks = opts.exchanges.filter((c) => typeof c === "string" && c.trim().length > 0);
+  // Floor first: exactly what the judge sees today, never less.
+  const floorStart = Math.max(0, chunks.length - minTail);
+  const picked = chunks.slice(floorStart);
+  let used = picked.reduce((n, c) => n + c.length + 2, 0);
+  // Then widen backwards while the budget allows.
+  for (let i = floorStart - 1; i >= 0; i--) {
+    const cost = chunks[i].length + 2;
+    if (used + cost > maxExchange) break;
+    picked.unshift(chunks[i]);
+    used += cost;
+  }
+  const omitted = chunks.length - picked.length;
+
+  const summaryRaw = (opts.runningSummary ?? "").trim();
+  const summary =
+    summaryRaw.length > maxSummary ? `${summaryRaw.slice(0, maxSummary)}\n[… summary truncated]` : summaryRaw;
+
+  const parts: string[] = [];
+  if (summary) {
+    parts.push(`### Discussion state so far (condensed, all earlier rounds)\n${summary}`);
+  }
+  if (picked.length > 0) {
+    const header =
+      omitted > 0
+        ? `### Recent exchanges, verbatim (${picked.length} shown, ${omitted} earlier turn(s) covered by the condensed state above)`
+        : `### Exchanges, verbatim (complete)`;
+    parts.push(`${header}\n${picked.join("\n\n")}`);
+  }
+  return parts.join("\n\n");
+}
 
 function makeExcerpt(text: string): { excerpt: string; length: number } {
   const trimmed = text.trim();
@@ -452,9 +581,11 @@ async function runResearchIsolated(
     conversationContext.length > 4000
       ? `${conversationContext.slice(0, 4000)}\n…[context truncated]`
       : conversationContext;
-  const sourcePref = options.internetFirst
-    ? "This is a greenfield task with little/no local source: PREFER web + documentation sources (use web_search / fetch tools if available), then any local files."
-    : "PREFER grounding every claim in THIS repo's code — cite concrete file:line. Use web sources only to fill genuine gaps.";
+  // Shared with buildResearchSystemPrompt (prompts.ts) — see research-mode.ts.
+  // The old local copy named web_search only in the greenfield branch, so the
+  // repo-first branch (the one that runs on every existing repo) pointed at no
+  // external tool at all.
+  const sourcePref = buildResearchSourcePreference(options.internetFirst === true);
   const prompt =
     `You are grounding a council debate with EVIDENCE. Research the question below and return concise, sourced findings.\n\n` +
     `## Question\n${topic}\n\n` +
@@ -717,7 +848,11 @@ export async function* runDebate(
   const turnCorrelationId = config.runId ?? "council";
   const researchSkipOverride = config.researchSkipOverride === true;
   const leaderNeedsResearch = config.leaderNeedsResearch;
-  const internetFirst = config.internetFirst === true;
+  // HINT only — "is there local source to prefer?". The research MODE is
+  // resolved per research call by decideInternetFirst, against the accurate,
+  // blocklist-aware web tier pickResearchWebModel reports there. See
+  // research-mode.ts for why neither signal decides this alone.
+  const repoIsEmpty = config.repoIsEmpty === true;
   const externalTopic = config.externalTopic === true;
   const costAware = config.costAware === true;
   // Feature B — resolved council debate language. The chosen language IS the
@@ -812,6 +947,10 @@ export async function* runDebate(
           `Configure a native-web model or a Tavily API key for grounded web research.\n`,
       } as StreamChunk;
     }
+    // Resolved HERE, not upstream: webTier is the blocklist-aware answer to
+    // "can we actually research the web on this call?", and repoIsEmpty is the
+    // hint about whether anything local exists to prefer.
+    const internetFirst = decideInternetFirst({ webCapable: webTier !== "none", repoIsEmpty });
     yield phaseStart({
       phaseId: "phase:research",
       kind: "research",
@@ -1080,9 +1219,38 @@ export async function* runDebate(
     kindCapped,
   } = resolveDebateRoundBudget(planKind, debatePlan?.plannedRounds);
   let maxRounds = plannedMaxRounds;
+  // C2 — per-round item scoping (CouncilConfig.perRoundFocus). Resolved right
+  // after the normal round-budget resolution and BEFORE anything below reads
+  // `maxRounds`, so the no-override path (field absent, or every entry
+  // filtered out) never touches it: `perRoundFocus.length` stays 0 and every
+  // line below this block runs byte-identical to today. An entry whose text
+  // is empty/whitespace-only is dropped here (skipped, with a status note
+  // below) rather than sent as an empty-focus round.
+  const rawPerRoundFocus = config.perRoundFocus ?? [];
+  const skippedFocusIds: string[] = [];
+  const perRoundFocus = rawPerRoundFocus.filter((f) => {
+    if (f.text.trim().length > 0) return true;
+    skippedFocusIds.push(f.id);
+    return false;
+  });
+  // More items than this debate's round ceiling allows: argue the first
+  // `effectiveCeiling` items and drop the rest (with a status note below)
+  // rather than silently ignore the ceiling this debate otherwise enforces.
+  const perRoundFocusTruncated = perRoundFocus.length > effectiveCeiling;
+  // roundEmergent below reads this instead of `plannedMaxRounds` so a scoped
+  // debate's own rounds are never misreported as "beyond the planned budget"
+  // — only a round past the scoped item list (e.g. a leader-granted
+  // extension) counts as emergent, same as the unscoped meaning of the flag.
+  let effectivePlannedRounds = plannedMaxRounds;
+  if (perRoundFocus.length > 0) {
+    maxRounds = Math.min(perRoundFocus.length, effectiveCeiling);
+    effectivePlannedRounds = maxRounds;
+  }
   const ceilingNote = kindCapped
     ? ` (hard ceiling ${effectiveCeiling} for ${planKind})`
-    : ` (hard ceiling ${ABSOLUTE_MAX_ROUNDS})`;
+    : Number.isFinite(absoluteMaxRounds())
+      ? ` (hard ceiling ${ABSOLUTE_MAX_ROUNDS})`
+      : " (no round ceiling)";
   yield {
     type: "content",
     content: `\n> Leader-proposed debate budget: ${maxRounds} round${maxRounds === 1 ? "" : "s"}${ceilingNote}.\n`,
@@ -1094,9 +1262,29 @@ export async function* runDebate(
     type: "council_meta",
     councilMeta: {
       roundBudget: maxRounds,
-      roundCeiling: kindCapped ? effectiveCeiling : ABSOLUTE_MAX_ROUNDS,
+      // Inside `/ideal` there is no ceiling: omit it rather than send Infinity to
+      // the UI (app.tsx renders any number as "up to N").
+      roundCeiling: kindCapped
+        ? effectiveCeiling
+        : Number.isFinite(absoluteMaxRounds())
+          ? ABSOLUTE_MAX_ROUNDS
+          : undefined,
     },
   };
+  if (skippedFocusIds.length > 0) {
+    yield {
+      type: "content",
+      content: `\n> Skipping empty-focus item${skippedFocusIds.length === 1 ? "" : "s"} (${skippedFocusIds.join(", ")}) — no text to argue.\n`,
+    };
+  }
+  if (perRoundFocusTruncated) {
+    yield {
+      type: "content",
+      content:
+        `\n> ${perRoundFocus.length} items selected but this debate's round ceiling allows only ${maxRounds} — ` +
+        `arguing the first ${maxRounds}.\n`,
+    };
+  }
 
   // Pairs that fail twice in a row are dropped from subsequent rounds so the
   // remaining participants don't keep retrying a broken model and inflating
@@ -1117,11 +1305,35 @@ export async function* runDebate(
   // only AFTER the debate. Kept beside lastCriteriaMet so the escalation
   // boundary, the round receipt and the post-debate card all read one source.
   let lastCriteriaDeferred: boolean[] = [];
+  // B1 — the REASON the leader gave for each criterion's last verdict, index-
+  // aligned to spec.successCriteria. Fed back into the next round's evaluation so
+  // the judge grades against what it already concluded instead of re-deriving
+  // every criterion from a tail of the transcript. Not restored from a checkpoint
+  // (the checkpoint carries the flags, not the prose) — a resumed run simply
+  // shows "(no reason recorded)" until the first fresh evaluation refills it.
+  let lastCriteriaEvidence: string[] = [];
   // Latest per-criterion stance rows, refreshed after each leader evaluation.
   // Carried out of the loop so the closing synthesis can name who ended the run
   // still opposing (the conclusion card's Dissent section) — a converged verdict
   // otherwise erases the position the council existed to hear argued.
   let lastStanceRows: CouncilStanceRow[] = [];
+  // C2b fix — a SEPARATE, NEVER-carried deferred projection, refreshed
+  // alongside `lastStanceRows` from the same (pinned, criteriaStatus) pair.
+  // `lastCriteriaDeferred` below carries a prior round's `deferred:true`
+  // forward when a round omits a criterion (continuity for the leader's
+  // prompt, `pinnedUnmet`, the escalation open-lists, and the final
+  // `finalCriteriaDeferred` output — all of which ask "is this criterion
+  // still considered closable only after the debate", where persisting the
+  // flag until explicitly revised is correct). `zeroEngagementCriteria` asks
+  // a DIFFERENT question — "did THIS round's leader grade this criterion
+  // deferred" — and needs an answer that resets to false on omission exactly
+  // like `lastStanceRows`' all-null row does, or a criterion deferred once
+  // would mask every later round's zero-engagement row as "excluded, not a
+  // coverage miss", defeating the undebated-criteria gate F8 built. Fed only
+  // to `zeroEngagementCriteria`'s two call sites below — nowhere else.
+  let lastRoundOwnDeferred: boolean[] = [];
+  // Defect (b) — the coverage extension is granted at most once per debate.
+  let coverageExtensionUsed = false;
   // S5 — announce this run as the one accepting steering. The UI has no other
   // way to learn the key: /council uses the session id, /ideal's loop-driver
   // passes its own run id.
@@ -1162,6 +1374,21 @@ export async function* runDebate(
   // loop's round budget via closure; returns whether the debate should keep
   // going. Caller must have already checked the gate (responder wired, flag on,
   // not yet escalated, criteria unmet).
+  //
+  // Debt 3 reachability audit: `runEscalationPrompt`'s `respondToQuestion`
+  // await (below) has no deadline, but it is not reachable from an unattended
+  // run. Every call site is gated on `config.respondToQuestion &&` before this
+  // function is even entered (see the three call sites in this file); /ideal's
+  // sprint-internal `runCouncil` calls set `sprintPlanningMode: true`, which
+  // council/index.ts:1555 folds into `autoAcceptEscalation` — the `if` right
+  // below short-circuits before ever calling the responder. /ideal's own
+  // initial (CB-1) debate and the discovery-council-runner call `runDebate`
+  // directly and never set `config.respondToQuestion` at all, so the
+  // `config.respondToQuestion &&` gate at every call site is false and this
+  // function never runs. Agent-convened councils set `suppressPreDebateCards:
+  // true`, which also feeds `autoAcceptEscalation`. Only the interactive
+  // `/council` slash command and the CLI-heuristic auto-council leave this
+  // live, both with a human present — correct to wait.
   async function* escalateStop(
     stuck: boolean,
     pinnedUnmet: number,
@@ -1173,7 +1400,10 @@ export async function* runDebate(
     // with the best synthesis so far) without emitting the card. Mirrors the
     // "empty/failed answer → accept" fallback runEscalationPrompt already uses.
     if (config.autoAcceptEscalation) {
-      escalation = { action: "accept" };
+      // D6 — `auto: true` records that NO card was shown, so a persisted
+      // artifact can say honestly "auto-accepted" instead of implying a
+      // human made this choice.
+      escalation = { action: "accept", auto: true };
       return "stop";
     }
     const dec = yield* runEscalationPrompt({
@@ -1181,7 +1411,7 @@ export async function* runDebate(
       openCriteria: openList,
       pinnedUnmet,
       stuck,
-      atAbsoluteMax: maxRounds >= ABSOLUTE_MAX_ROUNDS,
+      atAbsoluteMax: maxRounds >= absoluteMaxRounds(),
       currentMax: maxRounds,
     });
     escalation = { action: dec.action, grantedRounds: dec.grantedRounds || undefined };
@@ -1269,8 +1499,13 @@ export async function* runDebate(
     // slot + sigil by that key, so any divergence would paint a matrix column in
     // a different color from the speaker bar it refers to.
     const stanceRoster = active.map((p) => p.stance?.name ?? p.role);
-    const roundEmergent = round > plannedMaxRounds;
+    const roundEmergent = round > effectivePlannedRounds;
     const roundTopic = nextTopic;
+    // C2 — this round's item scoping, when the debate was scoped
+    // (CouncilConfig.perRoundFocus). undefined once every entry has already
+    // been argued (e.g. the leader extended past the scoped rounds) — those
+    // rounds fall back to arguing the whole plan, same as an unscoped debate.
+    const roundItemFocus = perRoundFocus[round - 1];
     const roundRec = (
       state: "running" | "done",
       patch: Partial<import("../types/index.js").CouncilRoundRecord> = {},
@@ -1280,6 +1515,7 @@ export async function* runDebate(
         round,
         state,
         topic: roundTopic,
+        itemId: roundItemFocus?.id,
         participants: roundParticipants,
         pairCount: pairs.length,
         // Each surviving pair exchanges twice (a→b, then b→a), so this is the
@@ -1309,11 +1545,18 @@ export async function* runDebate(
     const steerNow = drainCouncilSteer(config.runId);
     const steerBlock = formatSteerBlock(steerNow);
     let roundDirective: string | undefined;
+    // The leader half, kept apart from `roundDirective` (which is the display /
+    // round-record composition of human steer + leader directive). Speakers must
+    // receive the two LABELLED SEPARATELY, so the round prompt takes them as two
+    // fields rather than one blob — a human instruction and the leader conducting
+    // are different kinds of authority and must not read as one voice.
+    let leaderDirectiveBlock = "";
     if (steerBlock || (leaderConductorEnabled() && spec.successCriteria.length > 0)) {
       const base =
         leaderConductorEnabled() && spec.successCriteria.length > 0
           ? buildLeaderDirective(round, spec.successCriteria, lastCriteriaMet, roundTopic)
           : "";
+      leaderDirectiveBlock = base;
       roundDirective = [steerBlock, base].filter(Boolean).join("\n\n");
       yield {
         type: "council_message" as const,
@@ -1360,6 +1603,7 @@ export async function* runDebate(
                   partnerPosition: b.position,
                   spec,
                   language: debateLanguage,
+                  focus: roundItemFocus?.text,
                 });
                 const aTraces: string[] = [];
                 const aResult = await debateWithRetry(
@@ -1396,6 +1640,7 @@ export async function* runDebate(
                   partnerPosition: aResponse,
                   spec,
                   language: debateLanguage,
+                  focus: roundItemFocus?.text,
                 });
                 const bTraces: string[] = [];
                 const bResult = await debateWithRetry(
@@ -1439,6 +1684,8 @@ export async function* runDebate(
                   spec,
                   language: debateLanguage,
                   steering: steerBlock || undefined,
+                  leaderDirective: leaderDirectiveBlock || undefined,
+                  focus: roundItemFocus?.text,
                 });
                 const aTraces: string[] = [];
                 const aResult = await debateWithRetry(
@@ -1478,6 +1725,8 @@ export async function* runDebate(
                   spec,
                   language: debateLanguage,
                   steering: steerBlock || undefined,
+                  leaderDirective: leaderDirectiveBlock || undefined,
+                  focus: roundItemFocus?.text,
                 });
                 const bTraces: string[] = [];
                 const bResult = await debateWithRetry(
@@ -1692,7 +1941,35 @@ export async function* runDebate(
     if (panelLedger.hasEntries()) {
       yield { type: "council_meta" as const, councilMeta: { panelLedger: panelLedger.snapshot() } };
     }
-    const allExchangeText = [...exchangeLogs.values()].flat().slice(-8).join("\n\n");
+    const flatExchanges = [...exchangeLogs.values()].flat();
+    // B2 — the judge gets the condensed state of the debate PLUS the widest
+    // verbatim tail that fits the budget, not just the last 8 chunks. Fail open:
+    // any fault here degrades to exactly today's bundle rather than failing the
+    // round (a lost evaluation costs the whole round's outcome).
+    let allExchangeText: string;
+    try {
+      allExchangeText = buildLeaderEvidenceBundle({ exchanges: flatExchanges, runningSummary });
+    } catch (err) {
+      // logger, not console.error: in TUI mode console output goes nowhere a
+      // user or a later investigation can read, and this is exactly the line
+      // someone will look for when a round grades oddly. logger writes
+      // synchronously to ~/.muonroi-cli/debug.log.
+      logger.error(
+        "orchestrator",
+        `[council] leader evidence bundle failed on round ${round}, falling back to the 8-chunk tail: ${(err as Error)?.message}`,
+        { round, error: err, stack: (err as Error)?.stack?.split("\n").slice(0, 3) },
+      );
+      allExchangeText = flatExchanges.slice(-8).join("\n\n");
+    }
+    // B1 — the leader's OWN verdict entering this round, read BEFORE the
+    // assignment below overwrites it. Empty on round 1 (and whenever no criteria
+    // are pinned), which renders nothing.
+    const priorVerdicts = buildPriorVerdicts(
+      spec.successCriteria,
+      lastCriteriaMet,
+      lastCriteriaDeferred,
+      lastCriteriaEvidence,
+    );
     let evaluation = yield* evaluateDebate(
       spec,
       allExchangeText,
@@ -1704,6 +1981,8 @@ export async function* runDebate(
       debateLanguage,
       stanceRoster,
       (usage, modelUsed) => panelLedger.recordUsage(LEADER_LEDGER_ROLE, modelUsed, usage, `evaluate r${round}`),
+      priorVerdicts,
+      roundItemFocus?.text,
     );
     panelLedger.recordTurn(LEADER_LEDGER_ROLE, leaderModelId);
     // Eval robustness: the leader's cost-tier eval model can be on a flaky proxy
@@ -1740,6 +2019,8 @@ export async function* runDebate(
             debateLanguage,
             stanceRoster,
             (usage, modelUsed) => panelLedger.recordUsage(LEADER_LEDGER_ROLE, modelUsed, usage, `evaluate r${round}`),
+            priorVerdicts,
+            roundItemFocus?.text,
           );
           if (evaluation) break;
         }
@@ -1760,9 +2041,59 @@ export async function* runDebate(
       // Snapshot the met-set as it stood ENTERING this round, before the
       // assignment below overwrites it. This is the round receipt's delta base.
       const prevRoundMet = lastCriteriaMet.slice();
-      const aligned = hasPinned ? alignCriteriaMet(spec.successCriteria, evaluation.criteriaStatus) : [];
-      const alignedDeferred = hasPinned ? alignCriteriaDeferred(spec.successCriteria, evaluation.criteriaStatus) : [];
+      // C2b — thread THIS round's entering state through as `prior` so a
+      // criterion the reply never touches carries forward instead of resetting
+      // (see alignCriteriaField). `lastCriteriaMet`/`lastCriteriaDeferred`/
+      // `lastCriteriaEvidence` still hold the PRIOR round's values here — the
+      // reassignments below happen after these reads. Called through
+      // `alignCriteriaField` directly (not the `alignCriteriaMet` wrapper) so
+      // `metResult.carried` is available for the round-record's observability
+      // field; deferred/evidence share the identical carried set (same
+      // pinned/status pair drives the match), so only `metResult.carried` is
+      // surfaced downstream.
+      const metResult = hasPinned
+        ? alignCriteriaField(
+            spec.successCriteria,
+            evaluation.criteriaStatus,
+            (s) => s?.met === true,
+            lastCriteriaMet.length > 0 ? lastCriteriaMet : undefined,
+          )
+        : undefined;
+      const aligned = metResult ? metResult.values : [];
+      const carriedCriteria = metResult
+        ? metResult.carried.reduce<number[]>((acc, wasCarried, i) => {
+            if (wasCarried) acc.push(i);
+            return acc;
+          }, [])
+        : [];
+      const alignedDeferred = hasPinned
+        ? alignCriteriaDeferred(
+            spec.successCriteria,
+            evaluation.criteriaStatus,
+            lastCriteriaDeferred.length > 0 ? lastCriteriaDeferred : undefined,
+          )
+        : [];
       if (hasPinned) lastCriteriaDeferred = alignedDeferred;
+      // C2b fix — recompute WITHOUT a prior: this is deliberately the same
+      // call `alignCriteriaDeferred` made pre-C2b, so `lastRoundOwnDeferred`
+      // answers "did this round's own reply grade it deferred" and never
+      // inherits an earlier round's carried flag. See the declaration above
+      // for why `zeroEngagementCriteria` needs this instead of `alignedDeferred`.
+      const thisRoundOwnDeferred = hasPinned
+        ? alignCriteriaDeferred(spec.successCriteria, evaluation.criteriaStatus)
+        : [];
+      if (hasPinned) lastRoundOwnDeferred = thisRoundOwnDeferred;
+      // B1 — carry the leader's stated REASON per criterion into the next round's
+      // prompt, so a verdict can be defended or explicitly revised rather than
+      // silently re-rolled. C2b: also carries forward an omitted criterion's own
+      // prior evidence text (rather than resetting to "") for the same reason.
+      if (hasPinned) {
+        lastCriteriaEvidence = alignCriteriaEvidence(
+          spec.successCriteria,
+          evaluation.criteriaStatus,
+          lastCriteriaEvidence.length > 0 ? lastCriteriaEvidence : undefined,
+        );
+      }
       // Count of pinned criteria still open this round AND still movable by more
       // debate — used by both auto-remedy and the interactive escalation
       // boundaries below. Criteria the leader marked `deferred` are excluded on
@@ -1785,7 +2116,22 @@ export async function* runDebate(
           type: "council_meta" as const,
           councilMeta: { criteriaMet: aligned, stanceRows },
         };
-        lastCriteriaMet = aligned; // B5: feed next round's directive + final unmet-flag
+        // B5: feed next round's directive + final unmet-flag.
+        //
+        // B1 — this stays a REPLACEMENT, deliberately. The obvious fix for the
+        // observed regression (a criterion MET in round 2 reading unmet in round
+        // 3) is an OR-accumulation ratchet here: `aligned[i] || lastCriteriaMet[i]`.
+        // Rejected. A ratchet makes a genuine regression inexpressible — once a
+        // criterion latched true, a panelist demolishing it in a later round could
+        // never be recorded, and the run would report criteria met that the debate
+        // had since disproved. That is a worse failure than the one being fixed,
+        // and it would hide it: the leader would keep mis-grading and the ratchet
+        // would paper over the symptom. The regression is fixed at its cause
+        // instead — the judge now sees its own prior verdict and the evidence that
+        // produced it (B1 + B2), and is instructed that reversing MET requires
+        // naming what un-did it. Regression stays possible; it just has to be
+        // argued.
+        lastCriteriaMet = aligned;
         // B4: track progress against the PINNED criteria. A round that meets a new
         // criterion resets the stuck counter; a round that meets nothing new
         // increments it. Auto-remedy reads these to decide extend-vs-give-up.
@@ -1849,6 +2195,9 @@ export async function* runDebate(
         // what THIS round moved rather than the running total.
         stanceRows: lastStanceRows.length > 0 ? lastStanceRows : undefined,
         prevCriteriaMet: prevRoundMet.length > 0 ? prevRoundMet : undefined,
+        // C2b — which pinned criteria (by index) this round's evaluation did
+        // NOT address, so their status above was carried rather than judged.
+        carriedCriteria: carriedCriteria.length > 0 ? carriedCriteria : undefined,
       });
       nextTopic = evaluation.nextRoundFocus;
 
@@ -1890,7 +2239,7 @@ export async function* runDebate(
               enrichedContext,
               signal,
               (t) => midTraces.push(t),
-              {},
+              { internetFirst: decideInternetFirst({ webCapable: midWebTier !== "none", repoIsEmpty }) },
               fallbackPool,
               config.runIsolatedTask,
             ),
@@ -1933,7 +2282,60 @@ export async function* runDebate(
         }
       }
 
-      if (!evaluation.shouldContinue) {
+      // ── Coverage extension (defect (b)) ──────────────────────────────────
+      //
+      // A pinned criterion NO panelist has spoken to in ANY round is a coverage
+      // miss, and until now the leader could see it and do nothing about it: in
+      // run mttwpmu8ee5b it wrote "chưa có thảo luận nào về đóng gói NuGet" and
+      // the debate still ended on its budget with that criterion open, closing
+      // with a request the code could not honour ("re-run with an extended round
+      // budget"). Every other extension path was shut: auto-remedy and a
+      // leader-requested `extendRounds` both need `maxRounds < effectiveCeiling`
+      // (so neither can fire at the kind cap), the interactive escalation needs a
+      // `respondToQuestion` channel, and all three sit AFTER the stop-break
+      // below — so a leader that says "stop" reaches none of them.
+      //
+      // This runs BEFORE the stop-break for that reason, and is deliberately
+      // allowed past the KIND cap (never past ABSOLUTE_MAX_ROUNDS) — the same
+      // licence `ESCALATION_EXTEND_ROUNDS` already has, because a bound that
+      // stops at the kind cap is a no-op in exactly the configuration that
+      // produced the defect. See COVERAGE_EXTEND_ROUNDS for the bound's defence.
+      let coverageExtendedThisRound = false;
+      const debateWouldEndNow = !evaluation.shouldContinue || round >= maxRounds;
+      if (
+        debateWouldEndNow &&
+        hasPinned &&
+        !coverageExtensionUsed &&
+        coverageExtensionEnabled() &&
+        maxRounds < absoluteMaxRounds()
+      ) {
+        // C2b fix — `lastRoundOwnDeferred`, not the carried `lastCriteriaDeferred`
+        // (see its declaration above): this gate needs THIS round's own verdict.
+        const untouched = zeroEngagementCriteria(lastStanceRows, lastRoundOwnDeferred);
+        if (untouched.length > 0) {
+          coverageExtensionUsed = true;
+          coverageExtendedThisRound = true;
+          const newMax = Math.min(absoluteMaxRounds(), Math.max(maxRounds, round) + COVERAGE_EXTEND_ROUNDS);
+          const granted = newMax - maxRounds;
+          maxRounds = newMax;
+          const names = untouched.map((i) => shortCriterion(spec.successCriteria[i], 56));
+          const noun = names.length === 1 ? "criterion" : "criteria";
+          nextTopic = `No panelist has argued these yet — take them head-on: ${names.join("; ")}`;
+          yield {
+            type: "content",
+            content:
+              `\n> Leader extending debate by ${granted} round (now ${roundOfCeiling(maxRounds, absoluteMaxRounds())}) — ` +
+              `${names.length} pinned ${noun} had zero engagement from the whole panel: ${names.join("; ")}.\n`,
+          };
+          logger.info("orchestrator", "[council] coverage extension granted", {
+            round,
+            newMax,
+            criteria: names,
+          });
+        }
+      }
+
+      if (!evaluation.shouldContinue && !coverageExtendedThisRound) {
         // B4 escalation site 1 — the leader is declaring the debate done. If
         // pinned criteria are still unmet and we have an interactive channel,
         // ask the user before accepting a partial outcome (the "3/5 → stop,
@@ -1990,7 +2392,7 @@ export async function* runDebate(
       const canExitEarly = (round >= 2 && lockRatio >= 0.8) || (round === 1 && lockRatio >= 0.8 && skepticClean);
       // A user "extend" at this round's stop boundary overrides a convergence
       // break — the user explicitly asked for more rounds to close open criteria.
-      if (canExitEarly && !userExtendedThisRound) {
+      if (canExitEarly && !userExtendedThisRound && !coverageExtendedThisRound) {
         const reason =
           round === 1
             ? `round 1 converged early (lock=${Math.round(lockRatio * 100)}%, no unresolved points)`
@@ -2015,7 +2417,16 @@ export async function* runDebate(
       // implementation_plan cap of 3 to 4).
       const leaderAskedExtend = typeof evaluation.extendRounds === "number" && evaluation.extendRounds > 0;
       const autoRemedy = leaderAutoRemedyEnabled() && autoRemedyWantsExtend(pinnedUnmet, roundsSinceProgress);
-      if (round === maxRounds && maxRounds < effectiveCeiling && (leaderAskedExtend || autoRemedy)) {
+      if (
+        shouldGrantRoundExtension({
+          round,
+          maxRounds,
+          effectiveCeiling,
+          leaderAskedExtend,
+          autoRemedy,
+          roundsSinceProgress,
+        })
+      ) {
         const requested = leaderAskedExtend ? Math.max(1, Math.floor(evaluation.extendRounds as number)) : 1;
         const newMax = Math.min(effectiveCeiling, maxRounds + requested);
         const grantedExtra = newMax - maxRounds;
@@ -2025,7 +2436,7 @@ export async function* runDebate(
             : `${pinnedUnmet} pinned criteri${pinnedUnmet === 1 ? "on" : "a"} still unmet`;
           yield {
             type: "content",
-            content: `\n> Leader extending debate by ${grantedExtra} round${grantedExtra === 1 ? "" : "s"} (now ${newMax}/${ABSOLUTE_MAX_ROUNDS}) — ${why}.\n`,
+            content: `\n> Leader extending debate by ${grantedExtra} round${grantedExtra === 1 ? "" : "s"} (now ${roundOfCeiling(newMax, absoluteMaxRounds())}) — ${why}.\n`,
           };
           maxRounds = newMax;
           // Steer the extra round at the open criteria when auto-remedy fired and
@@ -2192,7 +2603,19 @@ export async function* runDebate(
           ? "you accepted these as open — synthesis proceeds with them noted as unresolved."
           : escalation?.action === "rescope"
             ? "you asked to narrow the scope — re-run the council on just these criteria with a tighter problem statement."
-            : diagnoseUnmetRemedy({ stuck, atCeiling, effectiveCeiling, roundsSinceProgress });
+            : diagnoseUnmetRemedy({
+                stuck,
+                atCeiling,
+                effectiveCeiling,
+                roundsSinceProgress,
+                // Only "exhausted" when the extra round was actually spent AND
+                // the criteria it targeted are still untouched. C2b fix —
+                // `lastRoundOwnDeferred`, not the carried `lastCriteriaDeferred`
+                // (see its declaration above): this gate needs the LAST round's
+                // own verdict, not whichever round first marked it deferred.
+                coverageExhausted:
+                  coverageExtensionUsed && zeroEngagementCriteria(lastStanceRows, lastRoundOwnDeferred).length > 0,
+              });
       yield {
         type: "council_message" as const,
         councilMessage: {
@@ -2425,6 +2848,19 @@ async function* evaluateDebate(
    * the "leader" row rather than to any debater.
    */
   onLeaderUsage?: (usage: CouncilCallUsage, modelUsed: string) => void,
+  /**
+   * B1 — the leader's own per-criterion verdict from the PREVIOUS round, with the
+   * reason it gave. Without this the judge re-derived every criterion from a tail
+   * of the transcript each round, so a criterion it had already marked MET could
+   * regress once the supporting exchange scrolled out of view.
+   */
+  priorVerdicts?: readonly LeaderPriorVerdict[],
+  /**
+   * C2 — this round's item-scoped focus text (`CouncilConfig.perRoundFocus`),
+   * when the debate was scoped to argue one item per round. Threaded straight
+   * to `buildLeaderEvaluationPrompt`'s own `focus` field.
+   */
+  itemFocusText?: string,
 ): AsyncGenerator<StreamChunk, LeaderEvaluation | null, unknown> {
   try {
     const { system, prompt } = buildLeaderEvaluationPrompt({
@@ -2433,6 +2869,8 @@ async function* evaluateDebate(
       round,
       language: debateLanguage,
       participants: participantRoles,
+      priorVerdicts,
+      focus: itemFocusText,
     });
     const modelId = modelOverride ?? pickCouncilTaskModel("evaluate_round", leaderModelId, costAware);
     const raw = yield* tracedGenerate(llm, {
@@ -2555,41 +2993,116 @@ export function extractEvalJson(raw: string): string | null {
  * returning a boolean[] index-aligned to `pinned` (B2/B3). The eval prompt asks
  * for one entry per criterion in order, so index alignment is the primary path;
  * when the model drifts (wrong count/order) we fall back to a case-insensitive
- * substring match either direction, defaulting unmatched criteria to not-met so
- * a hallucinated "all met" never silently marks an untouched criterion done.
+ * substring match either direction. An unmatched criterion carries forward
+ * `priorMet[i]` when a prior verdict exists (C2b — see `alignCriteriaField`);
+ * with no prior (round 1) it defaults to not-met, so a hallucinated "all met"
+ * still never silently marks an untouched criterion done.
  */
-export function alignCriteriaMet(pinned: string[], status: Array<{ criterion?: string; met?: boolean }>): boolean[] {
-  return alignCriteriaField(pinned, status, (s) => s?.met === true);
+export function alignCriteriaMet(
+  pinned: string[],
+  status: Array<{ criterion?: string; met?: boolean }>,
+  priorMet?: readonly boolean[],
+): boolean[] {
+  return alignCriteriaField(pinned, status, (s) => s?.met === true, priorMet).values;
 }
 
 /**
  * Same projection as `alignCriteriaMet`, but for the leader's `deferred` flag —
  * "this criterion is only closable after the debate (code landed / tests run)".
- * Defaults to FALSE on any drift: mis-labelling a debatable criterion as deferred
- * would silently retire it from the debate's goals, which is the worse failure.
+ * An unmatched criterion carries forward `priorDeferred[i]` when a prior exists
+ * (C2b); with no prior it defaults to FALSE, since mis-labelling a debatable
+ * criterion as deferred would silently retire it from the debate's goals, which
+ * is the worse failure.
  */
 export function alignCriteriaDeferred(
   pinned: string[],
   status: Array<{ criterion?: string; deferred?: boolean }>,
+  priorDeferred?: readonly boolean[],
 ): boolean[] {
-  return alignCriteriaField(pinned, status, (s) => s?.deferred === true);
+  return alignCriteriaField(pinned, status, (s) => s?.deferred === true, priorDeferred).values;
 }
 
-function alignCriteriaField<T extends { criterion?: string }>(
+/**
+ * B1 — same projection, for the leader's per-criterion `evidence` prose. An
+ * unmatched criterion carries forward `priorEvidence[i]` when a prior exists
+ * (C2b); with no prior it defaults to "" so a mismatched entry renders "(no
+ * reason recorded)" rather than attributing another criterion's reasoning to
+ * this one.
+ */
+export function alignCriteriaEvidence(
+  pinned: string[],
+  status: Array<{ criterion?: string; evidence?: string }>,
+  priorEvidence?: readonly string[],
+): string[] {
+  return alignCriteriaField(pinned, status, (s) => (typeof s?.evidence === "string" ? s.evidence : ""), priorEvidence)
+    .values;
+}
+
+/**
+ * B1 — assemble the previous round's verdict for the leader's next evaluation.
+ * Returns [] when nothing is pinned or no evaluation has landed yet (round 1),
+ * which renders as an empty block.
+ */
+export function buildPriorVerdicts(
+  criteria: string[],
+  met: readonly boolean[],
+  deferred: readonly boolean[],
+  evidence: readonly string[],
+): LeaderPriorVerdict[] {
+  if (criteria.length === 0 || met.length === 0) return [];
+  return criteria.map((criterion, i) => ({
+    criterion,
+    met: met[i] === true,
+    deferred: deferred[i] === true,
+    evidence: evidence[i] ?? "",
+  }));
+}
+
+/**
+ * C2b — carry-forward for a pinned criterion this round's reply never touched.
+ *
+ * When the count matches, index alignment is the primary path and every pinned
+ * criterion is treated as addressed (unchanged from before C2b) — a leader that
+ * reports the right number of entries is assumed to have graded all of them,
+ * even a fresh "not met". Only the substring-fallback branch (count mismatch)
+ * can produce a true omission, and per-round item scoping (`perRoundFocus`)
+ * makes that branch common: a leader asked about item 2 has every reason to
+ * report on item 2 alone.
+ *
+ * On an unmatched criterion: if `prior` holds a value at that index, carry it
+ * forward (mark `carried[i] = true`) instead of resetting to `pick(undefined)`.
+ * This is a plain copy, never a merge — a carried "met" stays whatever it was
+ * (met or unmet) last round, so an unmet criterion can never be upgraded by
+ * carrying, and a criterion the leader DID match this round always takes the
+ * fresh value (carry never overrides a real match). No prior (round 1, or a
+ * caller that omits the argument) behaves exactly as before: `pick(undefined)`.
+ */
+function alignCriteriaField<T extends { criterion?: string }, V>(
   pinned: string[],
   status: T[],
-  pick: (s: T | undefined) => boolean,
-): boolean[] {
+  pick: (s: T | undefined) => V,
+  prior?: readonly V[],
+): { values: V[]; carried: boolean[] } {
   const aligned = status.length === pinned.length;
-  return pinned.map((crit, i) => {
-    if (aligned) return pick(status[i]);
+  const carried: boolean[] = [];
+  const values = pinned.map((crit, i) => {
+    if (aligned) {
+      carried.push(false);
+      return pick(status[i]);
+    }
     const norm = crit.trim().toLowerCase();
     const hit = status.find((s) => {
       const sc = (s.criterion ?? "").trim().toLowerCase();
       return sc.length > 0 && (sc.includes(norm) || norm.includes(sc));
     });
+    if (!hit && prior && i < prior.length) {
+      carried.push(true);
+      return prior[i];
+    }
+    carried.push(false);
     return pick(hit);
   });
+  return { values, carried };
 }
 
 /**
@@ -2690,6 +3203,57 @@ export function autoRemedyWantsExtend(pinnedUnmet: number, roundsSinceProgress: 
 }
 
 /**
+ * Defect (b) — coverage extension. Default ON under the conductor; opt out with
+ * MUONROI_COUNCIL_COVERAGE_EXTEND=0.
+ */
+export function coverageExtensionEnabled(): boolean {
+  return leaderConductorEnabled() && process.env.MUONROI_COUNCIL_COVERAGE_EXTEND !== "0";
+}
+
+/**
+ * How many rounds a coverage miss buys. ONE, once per debate.
+ *
+ * Defence of the bound. Zero engagement is a COVERAGE failure, not an argument
+ * deadlock: nobody has taken the criterion yet, so a single directed round is
+ * the smallest thing that can change the observation, and it is also the largest
+ * thing worth spending. If a whole round aimed squarely at the criterion still
+ * ends with every seat null, the panel structurally cannot reach it (wrong
+ * lenses, or it is only closable after the debate) and further rounds buy
+ * nothing — the same reasoning `autoRemedyWantsExtend` already uses when it
+ * refuses to chase a stuck criterion. Capping at one grant per debate also fixes
+ * the worst case at exactly +1 round no matter how many criteria are untouched,
+ * because the extra round is aimed at all of them at once.
+ */
+const COVERAGE_EXTEND_ROUNDS = 1;
+
+/**
+ * Pinned criteria that NO panelist has spoken to, from the leader's own
+ * per-criterion stance map.
+ *
+ * Conservative by construction, because acting on this spends a round:
+ *   - a criterion already met, or marked `deferred` (closable only after the
+ *     debate), is never reported — more debate cannot help either one;
+ *   - a row with no roster columns is never reported;
+ *   - and if the leader emitted NO marks anywhere in the round, nothing is
+ *     reported at all. `buildStanceRows` renders both "the leader said nobody
+ *     spoke" and "the leader's model omitted the stances field" as an all-null
+ *     row; requiring at least one mark somewhere in the round is what separates
+ *     evidence of silence from absence of evidence.
+ */
+export function zeroEngagementCriteria(rows: readonly CouncilStanceRow[], deferred: readonly boolean[]): number[] {
+  const leaderGradedStances = rows.some((r) => Object.values(r.stances).some((m) => m !== null));
+  if (!leaderGradedStances) return [];
+  const out: number[] = [];
+  rows.forEach((r, i) => {
+    if (r.met || deferred[i] === true) return;
+    const marks = Object.values(r.stances);
+    if (marks.length === 0) return;
+    if (marks.every((m) => m === null)) out.push(i);
+  });
+  return out;
+}
+
+/**
  * B4: the diagnostic closing-remedy line for a debate that ended with unmet
  * pinned criteria — distinguishes a stuck criterion (needs evidence/rescope)
  * from a genuine ceiling hit (needs a higher budget) from an ordinary early
@@ -2700,7 +3264,21 @@ export function diagnoseUnmetRemedy(opts: {
   atCeiling: boolean;
   effectiveCeiling: number;
   roundsSinceProgress: number;
+  /**
+   * Defect (b) — the coverage extension has already been spent and criteria are
+   * STILL untouched. "Re-run with a bigger budget" is then a lie: a round aimed
+   * squarely at them changed nothing, so the panel's lenses do not reach them
+   * and only a different panel or a narrower scope can. Optional so existing
+   * callers and their pinned strings are unaffected.
+   */
+  coverageExhausted?: boolean;
 }): string {
+  if (opts.coverageExhausted) {
+    return (
+      `no panelist argued these even after a round aimed at them — the panel's lenses do not ` +
+      `reach them, so re-run with a stance that owns this ground, or drop them from the criteria.`
+    );
+  }
   if (opts.stuck) {
     return (
       `these made no progress across the last ${opts.roundsSinceProgress} rounds — ` +
@@ -2826,30 +3404,44 @@ export async function* runEscalationPrompt(opts: {
     });
     answer = "";
   }
+  // U1 — consume once, right after the answer settles (success or the
+  // caught-error fallback above). Reused by the bare "↳ <choice>" echoes
+  // below — this card reuses `phase: "post-debate"` to ride the same UI
+  // renderer as the post-debate card, so it is subject to the same
+  // duplicate-echo defect (project_askcard_transcript_qa_pairing). The
+  // "extend" branch's own line is NOT gated by this — it reports
+  // `grantedRounds`/the new round ceiling, information the UI's paired
+  // question+answer record does not have, so it is not a literal duplicate.
+  const answeredByCard = respondToQuestion.wasAnsweredByCard?.(questionId) ?? false;
 
   if (answer === "escalate_extend" && !atAbsoluteMax) {
-    const newMax = Math.min(ABSOLUTE_MAX_ROUNDS, currentMax + ESCALATION_EXTEND_ROUNDS);
+    // `absoluteMaxRounds()` is Infinity inside `/ideal` (user decision: no limits).
+    const newMax = Math.min(absoluteMaxRounds(), currentMax + ESCALATION_EXTEND_ROUNDS);
     const grantedRounds = Math.max(0, newMax - currentMax);
     if (grantedRounds > 0) {
       yield {
         type: "content",
-        content: `\n> User extended debate by ${grantedRounds} round${grantedRounds === 1 ? "" : "s"} (now ${newMax}/${ABSOLUTE_MAX_ROUNDS}) — pushing past the budget to close the open criteria.\n`,
+        content: `\n> User extended debate by ${grantedRounds} round${grantedRounds === 1 ? "" : "s"} (now ${roundOfCeiling(newMax, absoluteMaxRounds())}) — pushing past the budget to close the open criteria.\n`,
       };
       return { action: "extend", grantedRounds };
     }
     // No headroom left even though the option showed — fall through to accept.
   }
   if (answer === "escalate_rescope") {
-    yield {
-      type: "content",
-      content: `\n  ↳ Narrow the scope — ending the debate; synthesis will note the open criteria for a re-scoped follow-up.\n`,
-    };
+    if (!answeredByCard) {
+      yield {
+        type: "content",
+        content: `\n  ↳ Narrow the scope — ending the debate; synthesis will note the open criteria for a re-scoped follow-up.\n`,
+      };
+    }
     return { action: "rescope", grantedRounds: 0 };
   }
-  yield {
-    type: "content",
-    content: `\n  ↳ Accepted the current outcome with ${noun} open.\n`,
-  };
+  if (!answeredByCard) {
+    yield {
+      type: "content",
+      content: `\n  ↳ Accepted the current outcome with ${noun} open.\n`,
+    };
+  }
   return { action: "accept", grantedRounds: 0 };
 }
 

@@ -29,6 +29,7 @@
 
 import * as fs from "node:fs";
 import { loadUserSettings } from "../utils/settings.js";
+import { isCodeFile, matchManifest } from "./language-registry.js";
 
 /**
  * Default ON. Reads `userSettings.discoveryEcosystemBias` — only `false`
@@ -78,42 +79,36 @@ export interface EcosystemBiasDetection {
  *      inspection — the user's rule is binary on folder state, not stack.
  *   3. cwd-probe fallback (sync, ~1ms) when detection is unavailable. Treats
  *      cwd as greenfield only when no source files AND no manifests are
- *      present at the top level. Any of `package.json`, `Cargo.toml`,
- *      `go.mod`, `pyproject.toml`, `pom.xml`, `build.gradle`, `*.csproj`,
- *      `*.sln`, `Directory.Build.props`, or any source extension at the
- *      top level disqualifies. Probe errors are swallowed and treated as
+ *      present at the top level. WHAT counts as either is not restated here:
+ *      `language-registry.ts` decides it, via `isCodeFile` and `matchManifest`
+ *      (see `probeCwdIsGreenfield`). Probe errors are swallowed and treated as
  *      "not greenfield" (better to suppress bias than to over-bias on
  *      uncertainty for existing-project workflows).
  *   4. If neither detection nor cwd is provided, default to true
  *      (legacy behaviour — most discovery call sites pass detection).
  */
-const _MANIFEST_FILENAMES = new Set([
-  "package.json",
-  "cargo.toml",
-  "go.mod",
-  "pyproject.toml",
-  "pom.xml",
-  "build.gradle",
-  "directory.build.props",
-]);
-const _SOURCE_EXTS = new Set([
-  ".ts",
-  ".tsx",
-  ".js",
-  ".jsx",
-  ".mjs",
-  ".cjs",
-  ".rs",
-  ".go",
-  ".py",
-  ".cs",
-  ".java",
-  ".kt",
-  ".swift",
-  ".rb",
-  ".php",
-]);
-
+/**
+ * "Is there any source file or any project manifest here" — asked of
+ * `language-registry.ts`, not of two hand-written lists.
+ *
+ * This probe used to carry BOTH lists itself, and both had drifted from the
+ * registry: the source set named 15 of the registry's 36 extensions (no `.fs`,
+ * `.vb`, `.scala`, C/C++, `.dart`, …) and the manifest set named 7 filenames plus
+ * an `endsWith(".csproj" | ".sln")` special case, missing
+ * `Directory.Packages.props`, `global.json`, `build.gradle.kts`, `.slnx`,
+ * `.fsproj` and `.vbproj` — every one of which `MANIFEST_SPECS` already knows.
+ *
+ * It is the same defect the registry was built to end (its header records
+ * `repo-audit.ts` reporting "Source files: 1" for a 506-file C# repository), and
+ * the cost here is the mirror image: a repo whose only language the probe cannot
+ * see reads as GREENFIELD, so the council is handed .NET / BaseTemplate defaults
+ * for an existing codebase in another stack — the regression cited above from
+ * session cfc711c57df0.
+ *
+ * `matchManifest` subsumes the `.csproj`/`.sln` special case (it matches on
+ * extension as well as exact name) and, like the code it replaces, does not care
+ * whether the entry is a file or a directory.
+ */
 function probeCwdIsGreenfield(cwd: string): boolean {
   let entries: string[];
   try {
@@ -123,11 +118,8 @@ function probeCwdIsGreenfield(cwd: string): boolean {
   }
   for (const name of entries) {
     if (name.startsWith(".")) continue;
-    const lower = name.toLowerCase();
-    if (_MANIFEST_FILENAMES.has(lower)) return false;
-    if (lower.endsWith(".csproj") || lower.endsWith(".sln")) return false;
-    const dot = lower.lastIndexOf(".");
-    if (dot > 0 && _SOURCE_EXTS.has(lower.slice(dot))) return false;
+    if (matchManifest(name)) return false;
+    if (isCodeFile(name)) return false;
   }
   return true;
 }

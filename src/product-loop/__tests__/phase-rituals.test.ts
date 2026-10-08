@@ -4,6 +4,13 @@ import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { generateSprintReview, runRetro, runStandup, shouldRunStandup } from "../phase-rituals.js";
 
+// Removed with `/ideal`'s spend cap (user decision: no limits): the tests that
+// pinned "deterministic fallback when remainingUsd below floor", "throws
+// RetroSkippedBudget when remaining below floor", "standup returns null when
+// remaining below floor" and "standup hard-cap (3) reached". Those floors and the
+// cap no longer exist; the replacement behaviour (every ritual runs, a 4th standup
+// runs) is pinned in ideal-no-limits.test.ts.
+
 describe("generateSprintReview (subsystem E)", () => {
   const sprintState = {
     sprintN: 1,
@@ -19,8 +26,6 @@ describe("generateSprintReview (subsystem E)", () => {
       sprintState,
       phase: { id: "phase-1" } as any,
       leader,
-      capUsd: 10,
-      remainingUsd: 1,
       backoffDelays: [1, 1, 1],
     });
     expect(out.summary).toContain("X");
@@ -33,8 +38,6 @@ describe("generateSprintReview (subsystem E)", () => {
       sprintState,
       phase: { id: "phase-1" } as any,
       leader,
-      capUsd: 10,
-      remainingUsd: 1,
       backoffDelays: [1, 1, 1],
     });
     expect(out.usedFallback).toBe(true);
@@ -42,20 +45,6 @@ describe("generateSprintReview (subsystem E)", () => {
     expect(out.summary).toContain("0.30");
     expect(out.summary).toContain("0.75");
     expect(out.summary).toContain("3/4");
-  });
-
-  it("deterministic fallback when remainingUsd below floor", async () => {
-    const leader = { generate: vi.fn() };
-    const out = await generateSprintReview({
-      sprintState,
-      phase: { id: "phase-1" } as any,
-      leader,
-      capUsd: 10,
-      remainingUsd: 0.05,
-      backoffDelays: [1, 1, 1],
-    });
-    expect(leader.generate).not.toHaveBeenCalled();
-    expect(out.usedFallback).toBe(true);
   });
 
   it("429 backoff exhausted → fallback", async () => {
@@ -66,8 +55,6 @@ describe("generateSprintReview (subsystem E)", () => {
       sprintState,
       phase: { id: "phase-1" } as any,
       leader,
-      capUsd: 10,
-      remainingUsd: 1,
       backoffDelays: [1, 1, 1],
     });
     expect(out.usedFallback).toBe(true);
@@ -88,26 +75,17 @@ describe("runRetro (subsystem E)", () => {
         costUsd: 0.05,
       }),
     };
-    const out = await runRetro({ sprintState, leader, capUsd: 10, remainingUsd: 1, backoffDelays: [1, 1, 1] });
+    const out = await runRetro({ sprintState, leader, backoffDelays: [1, 1, 1] });
     expect(out.wentWell.length).toBeLessThanOrEqual(5);
     expect(out.toImprove[0].length).toBeLessThanOrEqual(200);
     expect(out.nextSprintFocus.length).toBeLessThanOrEqual(300);
-  });
-
-  it("throws RetroSkippedBudget when remaining below floor", async () => {
-    const leader = { generate: vi.fn() };
-    await expect(
-      runRetro({ sprintState, leader, capUsd: 10, remainingUsd: 0.01, backoffDelays: [1, 1, 1] }),
-    ).rejects.toThrow(/RetroSkippedBudget/);
   });
 
   it("throws on 3 429s (caller marks Retro Skipped)", async () => {
     const err: any = new Error("rate");
     err.status = 429;
     const leader = { generate: vi.fn().mockRejectedValue(err) };
-    await expect(
-      runRetro({ sprintState, leader, capUsd: 10, remainingUsd: 1, backoffDelays: [1, 1, 1] }),
-    ).rejects.toThrow();
+    await expect(runRetro({ sprintState, leader, backoffDelays: [1, 1, 1] })).rejects.toThrow();
   });
 });
 
@@ -167,20 +145,6 @@ describe("runStandup (subsystem E)", () => {
     await fs.mkdir(path.join(flowDir, "runs", runId), { recursive: true });
   });
 
-  it("returns null when remaining below floor", async () => {
-    const leader = { generate: vi.fn() };
-    const out = await runStandup({ flowDir, runId, leader, capUsd: 10, remainingUsd: 0.05, backoffDelays: [1, 1, 1] });
-    expect(out).toBeNull();
-    expect(leader.generate).not.toHaveBeenCalled();
-  });
-
-  it("returns null when standup hard-cap (3) reached", async () => {
-    await fs.writeFile(path.join(flowDir, "runs", runId, "state.md"), "## Standup Count\n\n3\n");
-    const leader = { generate: vi.fn() };
-    const out = await runStandup({ flowDir, runId, leader, capUsd: 10, remainingUsd: 5, backoffDelays: [1, 1, 1] });
-    expect(out).toBeNull();
-  });
-
   it("returns StandupOutcome on successful leader response (council stub)", async () => {
     const leader = {
       generate: vi.fn().mockResolvedValue({
@@ -198,8 +162,14 @@ describe("runStandup (subsystem E)", () => {
       path.join(flowDir, "runs", runId, "state.md"),
       `## Phase Plan State\n\n${JSON.stringify(state)}\n`,
     );
-    const out = await runStandup({ flowDir, runId, leader, capUsd: 10, remainingUsd: 5, backoffDelays: [1, 1, 1] });
+    const out = await runStandup({ flowDir, runId, leader, backoffDelays: [1, 1, 1] });
     expect(out).not.toBeNull();
     expect(out!.blockers).toEqual(["B1"]);
+  });
+
+  it("returns null (and logs) when the leader reply is not valid JSON", async () => {
+    const leader = { generate: vi.fn().mockResolvedValue({ content: "not json", costUsd: 0 }) };
+    const out = await runStandup({ flowDir, runId, leader, backoffDelays: [1, 1, 1] });
+    expect(out).toBeNull();
   });
 });

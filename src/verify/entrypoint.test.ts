@@ -157,7 +157,10 @@ describe("verify entrypoint helpers", () => {
     const profile = inferVerifyProjectProfile(dir);
     expect(profile.recipe.ecosystem).toBe("python");
     expect(profile.recipe.installCommands[0]).toContain("pip");
-    expect(profile.recipe.testCommands[0]).toBe("pytest");
+    // Asserts the runner, not the exact argv: the command is now the documented
+    // `python -m pytest` form, which adds the CWD to sys.path (see
+    // src/verify/pytest-detect.ts). The subject here is the recipe's shape.
+    expect(profile.recipe.testCommands[0]).toContain("pytest");
     expect(profile.recipe.smokeKind).toBe("none");
   });
 
@@ -187,11 +190,22 @@ describe("verify entrypoint helpers", () => {
       ),
     );
 
-    const prompt = buildVerifyTaskPrompt(dir, {
-      from: "web-env",
-      allowNet: true,
-      allowedHosts: ["registry.npmjs.org"],
-    });
+    // The browser-QA branch is now gated on a MEASURED host probe (see
+    // host-capabilities.ts), so this assertion has to name which branch it is
+    // about instead of depending on whether the machine running the suite happens
+    // to have `agent-browser` installed. The absent-tool branch is covered in
+    // entrypoint-host-capability.test.ts.
+    const prompt = buildVerifyTaskPrompt(
+      dir,
+      {
+        from: "web-env",
+        allowNet: true,
+        allowedHosts: ["registry.npmjs.org"],
+      },
+      null,
+      "shuru",
+      { hasHostExecutable: () => true },
+    );
 
     expect(prompt).toContain("Detected app type: Next.js.");
     expect(prompt).toContain("Recipe ecosystem: node.");
@@ -231,7 +245,8 @@ describe("verify entrypoint helpers", () => {
     const profile = inferVerifyProjectProfile(dir);
     // Guard the precondition: this recipe genuinely has no http smoke target.
     expect(profile.recipe.smokeKind).toBe("none");
-    expect(profile.recipe.testCommands[0]).toBe("pytest");
+    // The runner, not the exact argv — see the generic-python-recipe test above.
+    expect(profile.recipe.testCommands[0]).toContain("pytest");
 
     const prompt = buildVerifyTaskPrompt(dir);
 
@@ -310,7 +325,14 @@ describe("verify entrypoint helpers", () => {
     };
     const runtime = createVerifyRuntimeConfig(dir, {}, overrideRecipe);
     expect(runtime.profile.recipe.ecosystem).toBe("custom");
-    expect(runtime.sandboxSettings.shellInit).toEqual(["export FOO=bar"]);
+    // The override's own shell init reaches the sandbox, FIRST. It is no longer the
+    // only entry: `inferVerifyProjectProfile` merges the override with the live
+    // disk derivation (`src/verify/recipe-merge.ts`), and `shellInitCommands` is
+    // one of the unioned fields — an empty temp dir derives
+    // `defaultShellInit()`. Unioning exports is what `buildRuntimeSandboxSettings`
+    // (orchestrator.ts:41) already does one layer up, through a `Set`.
+    expect(runtime.sandboxSettings.shellInit?.[0]).toBe("export FOO=bar");
+    expect(runtime.sandboxSettings.shellInit).toContain("export DEBIAN_FRONTEND=noninteractive");
   });
 
   it("adds notes for unknown projects instead of pretending it knows the recipe", () => {

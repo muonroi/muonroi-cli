@@ -1,4 +1,5 @@
 import type { Plan, PlanQuestion } from "../types/index";
+import { Dialog } from "./primitives/index.js";
 import type { Theme } from "./theme";
 
 export type PlanAnswers = Record<string, string | string[]>;
@@ -93,89 +94,97 @@ interface PlanQuestionsPanelProps {
   t: Theme;
   questions: PlanQuestion[];
   state: PlanQuestionsState;
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   */
+  focused?: boolean;
 }
 
-export function PlanQuestionsPanel({ t, questions, state }: PlanQuestionsPanelProps) {
+export function PlanQuestionsPanel({ t, questions, state, focused }: PlanQuestionsPanelProps) {
   const isSingle = questions.length === 1 && questions[0]?.type !== "multiselect";
   const isConfirmTab = !isSingle && state.tab === questions.length;
   const q = questions[state.tab];
 
   return (
-    <box
-      flexDirection="column"
-      border={["left"]}
-      customBorderChars={SPLIT}
-      borderColor={t.planBorder}
-      marginTop={1}
-      paddingLeft={2}
-      paddingRight={2}
-      paddingTop={1}
-      paddingBottom={1}
-      backgroundColor={t.backgroundPanel}
-    >
-      {/* Tabs */}
-      {!isSingle && (
-        <box flexDirection="row" gap={2} marginBottom={1} flexShrink={0}>
-          {questions.map((q, i) => {
-            const isActive = i === state.tab;
-            const isAnswered = hasAnswer(state.answers, q);
-            const label = tabLabel(q);
-            return (
-              <text key={q.id}>
-                <span
-                  style={{
-                    fg: isActive ? t.planTitle : isAnswered ? t.planOptionCheck : t.textMuted,
-                  }}
-                >
-                  {isActive ? <b>{label}</b> : label}
-                  {isAnswered && !isActive ? " ✓" : ""}
-                </span>
-              </text>
-            );
-          })}
+    <Dialog id="plan-questions" name="Plan questions" focused={focused}>
+      <box
+        flexDirection="column"
+        border={["left"]}
+        customBorderChars={SPLIT}
+        borderColor={t.planBorder}
+        marginTop={1}
+        paddingLeft={2}
+        paddingRight={2}
+        paddingTop={1}
+        paddingBottom={1}
+        backgroundColor={t.backgroundPanel}
+      >
+        {/* Tabs */}
+        {!isSingle && (
+          <box flexDirection="row" gap={2} marginBottom={1} flexShrink={0}>
+            {questions.map((q, i) => {
+              const isActive = i === state.tab;
+              const isAnswered = hasAnswer(state.answers, q);
+              const label = tabLabel(q);
+              return (
+                <text key={q.id}>
+                  <span
+                    style={{
+                      fg: isActive ? t.planTitle : isAnswered ? t.planOptionCheck : t.textMuted,
+                    }}
+                  >
+                    {isActive ? <b>{label}</b> : label}
+                    {isAnswered && !isActive ? " ✓" : ""}
+                  </span>
+                </text>
+              );
+            })}
+            <text>
+              <span
+                style={{
+                  fg: isConfirmTab ? t.planTitle : t.textMuted,
+                }}
+              >
+                {isConfirmTab ? <b>{"Confirm"}</b> : "Confirm"}
+              </span>
+            </text>
+          </box>
+        )}
+
+        {/* Question body */}
+        {isConfirmTab ? (
+          <ConfirmView t={t} questions={questions} answers={state.answers} />
+        ) : q ? (
+          <QuestionBody t={t} question={q} state={state} />
+        ) : null}
+
+        {/* Footer hints */}
+        <box flexDirection="row" gap={3} marginTop={1} flexShrink={0}>
+          {!isSingle && (
+            <text>
+              <span style={{ fg: t.text }}>{"⇆"}</span>
+              <span style={{ fg: t.planHint }}>{" tab"}</span>
+            </text>
+          )}
           <text>
-            <span
-              style={{
-                fg: isConfirmTab ? t.planTitle : t.textMuted,
-              }}
-            >
-              {isConfirmTab ? <b>{"Confirm"}</b> : "Confirm"}
+            <span style={{ fg: t.text }}>{"↑↓"}</span>
+            <span style={{ fg: t.planHint }}>{" select"}</span>
+          </text>
+          <text>
+            <span style={{ fg: t.text }}>{"enter"}</span>
+            <span style={{ fg: t.planHint }}>
+              {isConfirmTab ? " submit" : q?.type === "multiselect" ? " toggle" : isSingle ? " submit" : " confirm"}
             </span>
           </text>
-        </box>
-      )}
-
-      {/* Question body */}
-      {isConfirmTab ? (
-        <ConfirmView t={t} questions={questions} answers={state.answers} />
-      ) : q ? (
-        <QuestionBody t={t} question={q} state={state} />
-      ) : null}
-
-      {/* Footer hints */}
-      <box flexDirection="row" gap={3} marginTop={1} flexShrink={0}>
-        {!isSingle && (
           <text>
-            <span style={{ fg: t.text }}>{"⇆"}</span>
-            <span style={{ fg: t.planHint }}>{" tab"}</span>
+            <span style={{ fg: t.text }}>{"esc"}</span>
+            <span style={{ fg: t.planHint }}>{" dismiss"}</span>
           </text>
-        )}
-        <text>
-          <span style={{ fg: t.text }}>{"↑↓"}</span>
-          <span style={{ fg: t.planHint }}>{" select"}</span>
-        </text>
-        <text>
-          <span style={{ fg: t.text }}>{"enter"}</span>
-          <span style={{ fg: t.planHint }}>
-            {isConfirmTab ? " submit" : q?.type === "multiselect" ? " toggle" : isSingle ? " submit" : " confirm"}
-          </span>
-        </text>
-        <text>
-          <span style={{ fg: t.text }}>{"esc"}</span>
-          <span style={{ fg: t.planHint }}>{" dismiss"}</span>
-        </text>
+        </box>
       </box>
-    </box>
+    </Dialog>
   );
 }
 

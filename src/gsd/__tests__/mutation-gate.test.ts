@@ -34,17 +34,28 @@ describe("evaluateMutationGate (delegates to canExecute, depth from SDK STATE)",
     seed(cwd, "plan", "revise", "quick");
     expect(evaluateMutationGate(cwd, { ...on, toolName: "edit_file" }).blocked).toBe(false);
   });
-  it("never gates standard depth — advisory only, hard gate is heavy-only", () => {
+  it("standard depth is advisory (not blocked) but carries GATE_DIRECTIVE in reason", () => {
     // standard is the default tier; hard-blocking every default bash/edit until a
     // plan-review pass over-reaches. The directive still nudges; the gate does not block.
     seed(cwd, "plan", "revise", "standard");
-    expect(evaluateMutationGate(cwd, { ...on, toolName: "edit_file" }).blocked).toBe(false);
-    expect(evaluateMutationGate(cwd, { ...on, toolName: "bash" }).blocked).toBe(false);
+    const editGate = evaluateMutationGate(cwd, { ...on, toolName: "edit_file" });
+    expect(editGate.blocked).toBe(false);
+    expect(editGate.reason).toContain("GSD requires a reviewed plan");
+    const bashGate = evaluateMutationGate(cwd, { ...on, toolName: "bash" });
+    expect(bashGate.blocked).toBe(false);
+    expect(bashGate.reason).toContain("GSD requires a reviewed plan");
   });
   it("never gates gsd_*/respond_*/read tools", () => {
     seed(cwd, "plan", "revise", "heavy");
     for (const t of ["gsd_plan", "respond_report", "read_file", "grep"])
       expect(evaluateMutationGate(cwd, { ...on, toolName: t }).blocked).toBe(false);
+  });
+  it("allows bounded background research and human clarification without unlocking mutations", () => {
+    seed(cwd, "plan", "revise", "heavy");
+    for (const toolName of ["delegate", "ask_user", "delegation_kill", "todo_write"])
+      expect(evaluateMutationGate(cwd, { ...on, toolName }).blocked, toolName).toBe(false);
+    for (const toolName of ["task", "bash", "write_file", "edit_file", "unknown_tool"])
+      expect(evaluateMutationGate(cwd, { ...on, toolName }).blocked, toolName).toBe(true);
   });
   it("never gates when disabled or directAnswer", () => {
     seed(cwd, "plan", "revise", "heavy");

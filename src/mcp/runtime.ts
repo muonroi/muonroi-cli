@@ -5,6 +5,7 @@ import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotoc
 import type { ToolSet } from "ai";
 import type { McpServerConfig } from "../utils/settings.js";
 import { capMcpToolResult } from "./cap-tool-result.js";
+import { MCP_FULL_INPUT_SCHEMA } from "./full-schema.js";
 import {
   MCP_KEY_REQUIREMENTS,
   type MissingKeyServer,
@@ -59,14 +60,108 @@ const LAZY_MCP_INPUT_SCHEMA = {
   additionalProperties: true,
 };
 
+/** Unwrap `jsonSchema(x)` → `x`; pass a bare JSON Schema object through. */
+function unwrapJsonSchema(schema: unknown): Record<string, unknown> | null {
+  if (!schema || typeof schema !== "object") return null;
+  const inner = (schema as { jsonSchema?: unknown }).jsonSchema;
+  if (inner && typeof inner === "object") return inner as Record<string, unknown>;
+  return schema as Record<string, unknown>;
+}
+
+/**
+ * Minimal JSON Schema type stub for one property: `type` only (plus `items.type`
+ * for arrays). Descriptions, enums, patterns and length bounds are dropped -
+ * they are what made the eager schema 1-5 KB per tool, and the server revalidates
+ * all of them anyway.
+ */
+function minimalPropSchema(prop: unknown): Record<string, unknown> {
+  const p = (prop ?? {}) as Record<string, unknown>;
+  const type = typeof p.type === "string" ? p.type : undefined;
+  if (type === undefined) return {};
+  if (type !== "array") return { type };
+  const items = p.items as Record<string, unknown> | undefined;
+  const itemType = typeof items?.type === "string" ? items.type : undefined;
+  return itemType ? { type, items: { type: itemType } } : { type };
+}
+
+/**
+ * The schema actually advertised to the model: the lazy placeholder PLUS a
+ * type-only stub for each REQUIRED property.
+ *
+ * M1's premise was that "the real schema only matters at execution time, which
+ * the MCP server already enforces". That is empirically false for required
+ * parameters, and the cost is total rather than marginal - a tool whose required
+ * argument the model cannot see is not called badly, it is uncallable.
+ *
+ * Measured against `tui.start` (required `args: string[]`) with `step-3.7-flash`:
+ *  - placeholder only .................. `{}` x5, `{"args":"[]"}` x2, 12 calls, 0 accepted
+ *  - placeholder + prose in description . `{"args":"[]"}` x3, 0 accepted
+ *    (naming the parameter in prose gets the field emitted; only the schema
+ *     gets its TYPE right)
+ *  - required-property stubs (this) ..... see mcp-schema-discoverability.spec
+ *
+ * Optional parameters stay out, and `additionalProperties: true` keeps them
+ * callable; `describe_tool` serves the full schema on demand
+ * (MCP_FULL_INPUT_SCHEMA). So the M1 saving is preserved for everything except
+ * the handful of bytes without which the call cannot be made at all.
+ */
+export function buildAdvertisedSchema(schema: unknown): Record<string, unknown> {
+  const js = unwrapJsonSchema(schema);
+  const required = Array.isArray(js?.required) ? js.required.filter((k): k is string => typeof k === "string") : [];
+  if (required.length === 0) return LAZY_MCP_INPUT_SCHEMA;
+  const props = (js?.properties ?? {}) as Record<string, unknown>;
+  const properties: Record<string, unknown> = {};
+  for (const key of required) properties[key] = minimalPropSchema(props[key]);
+  return { type: "object", properties, required, additionalProperties: true };
+}
+
+/**
+ * One-line signature of a tool's REQUIRED parameters, e.g. `args: string[]`.
+ *
+ * Mirrors `buildAdvertisedSchema` in prose for `describe_tool`-less surfaces and
+ * for models that read descriptions more reliably than schemas. Measured on its
+ * own it is NOT sufficient (see buildAdvertisedSchema) - it is belt to that
+ * braces, not a substitute.
+ */
+export function requiredParamSignature(schema: unknown): string | null {
+  const js = unwrapJsonSchema(schema);
+  const required = js?.required;
+  if (!Array.isArray(required) || required.length === 0) return null;
+  const props = (js?.properties ?? {}) as Record<string, Record<string, unknown> | undefined>;
+  const parts: string[] = [];
+  for (const key of required) {
+    if (typeof key !== "string") continue;
+    const p = props[key];
+    const type = typeof p?.type === "string" ? (p.type as string) : "any";
+    if (type === "array") {
+      const items = p?.items as { type?: unknown } | undefined;
+      const itemType = typeof items?.type === "string" ? items.type : "any";
+      parts.push(`${key}: ${itemType}[]`);
+    } else {
+      parts.push(`${key}: ${type}`);
+    }
+  }
+  return parts.length > 0 ? parts.join(", ") : null;
+}
+
 function stripMcpInputSchema<T extends { inputSchema?: unknown; description?: string }>(tool: T): T {
   // Replace the full schema with a permissive placeholder. We keep `description`
   // and `execute` (and any other fields) intact. Many MCP tools also have an
   // `outputSchema`; we leave that alone since the AI SDK uses it only to parse
   // structured tool results — it doesn't ship to the model.
+  //
+  // Two corrections to the original strip:
+  //  - the advertised schema keeps a type-only stub for each REQUIRED property
+  //    (buildAdvertisedSchema), because a required argument the model cannot see
+  //    makes the tool uncallable, not merely awkward;
+  //  - the real schema is NOT discarded - it rides along on MCP_FULL_INPUT_SCHEMA
+  //    so `describe_tool` can still answer "what are this tool's parameters?".
+  //    Before this, describe_tool returned the empty placeholder too, leaving no
+  //    in-CLI path at all by which a model could learn a required argument existed.
   return {
     ...tool,
-    inputSchema: jsonSchema(LAZY_MCP_INPUT_SCHEMA),
+    inputSchema: jsonSchema(buildAdvertisedSchema(tool.inputSchema)),
+    [MCP_FULL_INPUT_SCHEMA]: unwrapJsonSchema(tool.inputSchema),
   };
 }
 
@@ -217,12 +312,20 @@ export async function connectOneServer(rawServer: McpServerConfig, opts?: McpBui
     const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "_");
     const prefixedName = `${prefix}__${safeName}`;
     const stripped = stripMcpInputSchema(tool as { inputSchema?: unknown; description?: string });
+    // The advertised schema is the empty placeholder, so a tool with a REQUIRED
+    // parameter reads to the model as parameterless and is uncallable. Name the
+    // required parameters (types only — not the full schema) so the first call
+    // can be well-formed, and point at describe_tool for the rest.
+    const signature = requiredParamSignature((tool as { inputSchema?: unknown }).inputSchema);
+    const paramNote = signature
+      ? ` Required parameters (schema not inlined — call describe_tool({name:"${prefixedName}"}) for the full schema): ${signature}.`
+      : "";
     // Cap MCP tool output the same way built-in tools are capped so the raw
     // server payload doesn't stream into context uncapped. See cap-tool-result.ts.
     const baseExecute = (stripped as { execute?: (args: unknown, options: unknown) => Promise<unknown> }).execute;
     tools[prefixedName] = {
       ...(stripped as object),
-      description: `[MCP ${server.label}] ${tool.description ?? name}`,
+      description: `[MCP ${server.label}] ${tool.description ?? name}${paramNote}`,
       ...(typeof baseExecute === "function"
         ? { execute: async (args: unknown, options: unknown) => capMcpToolResult(await baseExecute(args, options)) }
         : {}),

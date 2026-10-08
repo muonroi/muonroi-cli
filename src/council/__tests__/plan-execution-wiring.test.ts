@@ -193,7 +193,7 @@ describe("implement -> plan draft -> review -> post-plan card -> execute_plan", 
   afterEach(() => {
     if (prevEscalate === undefined) delete process.env.MUONROI_COUNCIL_ESCALATE;
     else process.env.MUONROI_COUNCIL_ESCALATE = prevEscalate;
-    if (cwd) rmSync(cwd, { recursive: true, force: true });
+    if (cwd) rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     vi.restoreAllMocks();
   });
 

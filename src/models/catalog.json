@@ -1,7 +1,7 @@
 {
-  "version": "2.18",
-  "updated_at": "2026-08-18",
-  "description": "Local fallback catalog: anthropic + deepseek + zai + opencode-go + xai + stepfun. routing.council multi-provider debate; routing.vision_proxy Z.ai/xai backend for text-only models (deepseek etc.). provider_policies.peak_hour from vendor docs. Anthropic rows verified against platform.claude.com/docs/en/about-claude/pricing and /models/overview on 2026-07-29. StepFun model contracts, pricing, and V0 limits verified against platform.stepfun.ai documentation on 2026-08-18. Other pricing APPROXIMATE.",
+  "version": "2.20",
+  "updated_at": "2026-10-08",
+  "description": "Local fallback catalog: anthropic + deepseek + zai + opencode-go + xai + stepfun. routing.council multi-provider debate; routing.vision_proxy Z.ai/xai backend for text-only models (deepseek etc.). provider_policies.peak_hour from vendor docs. Anthropic rows verified against platform.claude.com/docs/en/about-claude/pricing and /models/overview on 2026-07-29. StepFun model contracts, pricing, and V0 limits verified against platform.stepfun.ai documentation on 2026-08-18, plus step-5-preview added and re-verified against platform.stepfun.ai documentation on 2026-09-23. Other pricing APPROXIMATE. Current OpenAI GPT6/6.1 and Claude Fable5.1/Opus5.5/Sonnet5.5/Haiku5.5 contracts and pricing verified against official model pages on2026-10-08; long_context_pricing scales the whole request above the input threshold.",
   "models": [
     {
       "id": "deepseek-v4-flash",
@@ -21,6 +21,10 @@
       "aliases": ["deepseek-flash-native"],
       "supports_vision": false,
       "roles": ["research", "implement", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -42,6 +46,10 @@
       "aliases": ["deepseek-pro-native"],
       "supports_vision": false,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -64,6 +72,10 @@
       "description": "StepFun reasoning model with documented tool calling and 256K context. Uses the OpenAI-compatible chat-completions API.",
       "supports_vision": false,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -86,6 +98,10 @@
       "description": "Versioned StepFun reasoning model with documented tool calling and 256K context. Uses the OpenAI-compatible chat-completions API.",
       "supports_vision": false,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -107,6 +123,35 @@
       "description": "StepFun's multimodal reasoning model with documented tool calling, 256K context, and image/video understanding. The documented maximum output-token limit is not published.",
       "supports_vision": true,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
+      "native_web_research": false,
+      "web_research_kind": null
+    },
+    {
+      "id": "step-5-preview",
+      "name": "Step 5 Preview (StepFun)",
+      "provider": "stepfun",
+      "tier": "premium",
+      "context_window": 1000000,
+      "max_output_tokens": 64000,
+      "input_price_per_million": 1.0,
+      "output_price_per_million": 2.7,
+      "cached_input_price_per_million": 0.05,
+      "rate_limits": { "concurrency": 5, "requests_per_minute": 10, "tokens_per_minute": 5000000 },
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": true,
+      "default_reasoning_effort": "medium",
+      "description": "StepFun's flagship agentic model, released 2026-09-20 (600B-total/27B-active sparse MoE; weights due 2026-10-15). 1M-token context, documented tool calling, JSON Schema output, prompt caching, text/image/video input (video not representable in this catalog's modality enum). Configurable reasoning effort low/medium/high; no documented default, so 'medium' is used conservatively. Catalog default premium route for stepfun stays step-3.7-flash (unchanged) — this entry is addressable by id but not auto-selected. Verified against platform.stepfun.ai documentation on 2026-09-23.",
+      "supports_vision": true,
+      "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -116,6 +161,10 @@
       "provider": "stepfun",
       "tier": "balanced",
       "tier_routing": false,
+      "modalities": {
+        "input": ["text", "audio"],
+        "output": ["text", "audio"]
+      },
       "context_window": 0,
       "max_output_tokens": 0,
       "input_price_per_million": 1.5,
@@ -134,6 +183,10 @@
       "provider": "stepfun",
       "tier": "balanced",
       "tier_routing": false,
+      "modalities": {
+        "input": ["text", "audio"],
+        "output": ["text", "audio"]
+      },
       "context_window": 0,
       "max_output_tokens": 0,
       "input_price_per_million": 1.5,
@@ -152,6 +205,10 @@
       "provider": "stepfun",
       "tier": "fast",
       "tier_routing": false,
+      "modalities": {
+        "input": ["text"],
+        "output": ["audio"]
+      },
       "context_window": 0,
       "max_output_tokens": 0,
       "input_price_per_million": 0,
@@ -171,6 +228,10 @@
       "provider": "stepfun",
       "tier": "fast",
       "tier_routing": false,
+      "modalities": {
+        "input": ["audio"],
+        "output": ["text"]
+      },
       "context_window": 0,
       "max_output_tokens": 0,
       "input_price_per_million": 0,
@@ -190,6 +251,10 @@
       "provider": "stepfun",
       "tier": "fast",
       "tier_routing": false,
+      "modalities": {
+        "input": ["audio"],
+        "output": ["text"]
+      },
       "context_window": 0,
       "max_output_tokens": 0,
       "input_price_per_million": 0,
@@ -209,6 +274,10 @@
       "provider": "stepfun",
       "tier": "balanced",
       "tier_routing": false,
+      "modalities": {
+        "input": ["image"],
+        "output": ["image"]
+      },
       "context_window": 0,
       "max_output_tokens": 0,
       "input_price_per_million": 0,
@@ -221,6 +290,130 @@
       "supports_vision": false,
       "native_web_research": false,
       "web_research_kind": null
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "name": "GPT-6.1 Sol",
+      "provider": "openai",
+      "tier": "balanced",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_price_per_million": 2,
+      "output_price_per_million": 10,
+      "cached_input_price_per_million": 0.1,
+      "cache_write_price_per_million": 2.5,
+      "long_context_pricing": {
+        "input_token_threshold": 272000,
+        "input_multiplier": 2,
+        "output_multiplier": 1.5
+      },
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": true,
+      "default_reasoning_effort": "medium",
+      "supports_vision": true,
+      "tier_routing": true,
+      "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
+      "native_web_research": true,
+      "web_research_kind": "web-tool",
+      "description": "GPT-6.1 Sol: text/image input, text output, tool calling through Responses API. Standard API USD/MTok prices; prompts over272K input tokens charge2x all input/cache rates and1.5x output for the whole request. ChatGPT OAuth availability and subscription billing depend on account entitlement. Verified2026-10-08: https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+    },
+    {
+      "id": "gpt-6-astra",
+      "name": "GPT-6 Astra",
+      "provider": "openai",
+      "tier": "premium",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_price_per_million": 10,
+      "output_price_per_million": 50,
+      "cached_input_price_per_million": 1,
+      "cache_write_price_per_million": 12.5,
+      "long_context_pricing": {
+        "input_token_threshold": 272000,
+        "input_multiplier": 2,
+        "output_multiplier": 1.5
+      },
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": true,
+      "default_reasoning_effort": null,
+      "supports_vision": true,
+      "tier_routing": true,
+      "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
+      "native_web_research": true,
+      "web_research_kind": "web-tool",
+      "description": "GPT-6 Astra: text/image input, text output, tool calling through Responses API. Standard API USD/MTok prices; prompts over272K input tokens charge2x all input/cache rates and1.5x output for the whole request. ChatGPT OAuth availability and subscription billing depend on account entitlement. Verified2026-10-08: https://developers.openai.com/api/docs/models/gpt-6-astra"
+    },
+    {
+      "id": "gpt-6-luna",
+      "name": "GPT-6 Luna",
+      "provider": "openai",
+      "tier": "fast",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_price_per_million": 0.1,
+      "output_price_per_million": 0.5,
+      "cached_input_price_per_million": 0.01,
+      "cache_write_price_per_million": 0.125,
+      "long_context_pricing": {
+        "input_token_threshold": 272000,
+        "input_multiplier": 2,
+        "output_multiplier": 1.5
+      },
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": true,
+      "default_reasoning_effort": "medium",
+      "supports_vision": true,
+      "tier_routing": true,
+      "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
+      "native_web_research": true,
+      "web_research_kind": "web-tool",
+      "description": "GPT-6 Luna: text/image input, text output, tool calling through Responses API. Standard API USD/MTok prices; prompts over272K input tokens charge2x all input/cache rates and1.5x output for the whole request. ChatGPT OAuth availability and subscription billing depend on account entitlement. Verified2026-10-08: https://developers.openai.com/api/docs/models/gpt-6-luna"
+    },
+    {
+      "id": "gpt-6-sol",
+      "name": "GPT-6 Sol",
+      "provider": "openai",
+      "tier": "balanced",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_price_per_million": 2,
+      "output_price_per_million": 10,
+      "cached_input_price_per_million": 0.2,
+      "cache_write_price_per_million": 2.5,
+      "long_context_pricing": {
+        "input_token_threshold": 272000,
+        "input_multiplier": 2,
+        "output_multiplier": 1.5
+      },
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": true,
+      "default_reasoning_effort": "medium",
+      "supports_vision": true,
+      "tier_routing": false,
+      "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
+      "native_web_research": true,
+      "web_research_kind": "web-tool",
+      "description": "GPT-6 Sol: text/image input, text output, tool calling through Responses API. Standard API USD/MTok prices; prompts over272K input tokens charge2x all input/cache rates and1.5x output for the whole request. ChatGPT OAuth availability and subscription billing depend on account entitlement. Verified2026-10-08: https://developers.openai.com/api/docs/models/gpt-6-sol"
     },
     {
       "id": "gpt-5.5",
@@ -239,8 +432,13 @@
       "aliases": ["gpt-5.5-oauth"],
       "supports_vision": false,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
-      "web_research_kind": "web-tool"
+      "web_research_kind": "web-tool",
+      "tier_routing": false
     },
     {
       "id": "gpt-5.4",
@@ -259,8 +457,13 @@
       "aliases": ["gpt-5.4-oauth"],
       "supports_vision": false,
       "roles": ["implement", "verify", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
-      "web_research_kind": "web-tool"
+      "web_research_kind": "web-tool",
+      "tier_routing": false
     },
     {
       "id": "gpt-5.4-mini",
@@ -279,8 +482,13 @@
       "aliases": ["gpt-5.4-mini-oauth"],
       "supports_vision": false,
       "roles": ["research", "implement", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
-      "web_research_kind": "web-tool"
+      "web_research_kind": "web-tool",
+      "tier_routing": false
     },
     {
       "id": "grok-4.5",
@@ -300,6 +508,10 @@
       "aliases": ["grok-4.5", "grok-4.5-latest", "grok-latest", "grok-4"],
       "supports_vision": true,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-search"
     },
@@ -320,6 +532,10 @@
       "aliases": ["composer-2.5", "composer-2.5-fast", "composer", "grok-composer-2.5", "grok-build-0.1"],
       "supports_vision": false,
       "roles": ["implement", "research", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-search"
     },
@@ -329,6 +545,10 @@
       "provider": "zai",
       "tier": "fast",
       "tier_routing": false,
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0.3,
@@ -361,6 +581,10 @@
       "aliases": ["glm-4-flash", "glm-4-flashx", "glm-4.7-flashx"],
       "supports_vision": false,
       "roles": ["research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -382,6 +606,10 @@
       "aliases": ["glm-4.5-airx"],
       "supports_vision": false,
       "roles": ["research", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -403,6 +631,10 @@
       "aliases": [],
       "supports_vision": false,
       "roles": ["leader", "implement"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -423,6 +655,10 @@
       "aliases": [],
       "supports_vision": false,
       "roles": ["implement", "research", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -432,6 +668,10 @@
       "provider": "zai",
       "tier": "balanced",
       "tier_routing": false,
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0.3,
@@ -464,6 +704,10 @@
       "aliases": [],
       "supports_vision": false,
       "roles": ["leader", "implement", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -484,6 +728,10 @@
       "aliases": ["glm-5.2[1m]"],
       "supports_vision": true,
       "roles": ["leader", "implement", "verify"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -505,6 +753,10 @@
       "aliases": [],
       "supports_vision": false,
       "roles": ["implement", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": true,
       "web_research_kind": "web-tool"
     },
@@ -526,6 +778,10 @@
       "aliases": ["kimi-k2.7-code-go"],
       "supports_vision": false,
       "roles": ["implement", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -547,6 +803,10 @@
       "aliases": ["kimi-k2.6-go"],
       "supports_vision": false,
       "roles": ["research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -567,6 +827,10 @@
       "aliases": ["glm-5.2-go"],
       "supports_vision": false,
       "roles": ["leader", "implement", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -587,6 +851,10 @@
       "aliases": ["glm-5.1-go"],
       "supports_vision": false,
       "roles": ["implement", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -595,6 +863,10 @@
       "name": "MiniMax M3 (OpenCode Go)",
       "provider": "opencode-go",
       "tier": "balanced",
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0,
@@ -614,6 +886,10 @@
       "name": "MiniMax M2.7 (OpenCode Go)",
       "provider": "opencode-go",
       "tier": "balanced",
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0,
@@ -645,6 +921,10 @@
       "aliases": ["qwen-3.7-max-go"],
       "supports_vision": false,
       "roles": ["leader", "implement", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -665,6 +945,10 @@
       "aliases": ["qwen-3.7-plus-go"],
       "supports_vision": false,
       "roles": ["implement", "verify", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -673,6 +957,10 @@
       "name": "Qwen 3.6 Plus (OpenCode Go)",
       "provider": "opencode-go",
       "tier": "balanced",
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0,
@@ -704,6 +992,10 @@
       "aliases": ["deepseek-v4-pro-go"],
       "supports_vision": false,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -724,6 +1016,10 @@
       "aliases": ["deepseek-v4-flash-go"],
       "supports_vision": false,
       "roles": ["research", "implement", "verify"],
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "native_web_research": false,
       "web_research_kind": null
     },
@@ -732,6 +1028,10 @@
       "name": "MiMo V2.5 (OpenCode Go)",
       "provider": "opencode-go",
       "tier": "fast",
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0,
@@ -751,6 +1051,10 @@
       "name": "MiMo V2.5 Pro (OpenCode Go)",
       "provider": "opencode-go",
       "tier": "balanced",
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0,
@@ -764,6 +1068,115 @@
       "supports_vision": false,
       "native_web_research": false,
       "web_research_kind": null
+    },
+    {
+      "id": "claude-opus-5-5",
+      "name": "Claude Opus 5.5",
+      "provider": "anthropic",
+      "tier": "premium",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_million": 4,
+      "output_price_per_million": 20,
+      "cached_input_price_per_million": 0.2,
+      "cache_write_price_per_million": 5,
+      "reasoning": true,
+      "thinking_type": "adaptive",
+      "supports_effort": true,
+      "default_reasoning_effort": "medium",
+      "supports_vision": true,
+      "aliases": ["opus", "opus-5.5"],
+      "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
+      "native_web_research": true,
+      "web_research_kind": "web-search",
+      "description": "Claude Opus 5.5: adaptive thinking, text/image input, text output. Standard API USD/MTok; cache write price is5-minute retention (1-hour writes cost2x base input). Omit temperature/top_p/top_k. Verified2026-10-08: https://platform.claude.com/docs/en/models/opus-5-5/overview No long-context surcharge. Forced tool choice is not supported."
+    },
+    {
+      "id": "claude-fable-5-1",
+      "name": "Claude Fable 5.1",
+      "provider": "anthropic",
+      "tier": "premium",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_million": 10,
+      "output_price_per_million": 50,
+      "cached_input_price_per_million": 0.25,
+      "cache_write_price_per_million": 12.5,
+      "reasoning": true,
+      "thinking_type": "adaptive",
+      "supports_effort": true,
+      "default_reasoning_effort": "high",
+      "supports_vision": true,
+      "aliases": ["fable", "fable-5.1"],
+      "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
+      "native_web_research": true,
+      "web_research_kind": "web-search",
+      "description": "Claude Fable 5.1: adaptive thinking, text/image input, text output. Standard API USD/MTok; cache write price is5-minute retention (1-hour writes cost2x base input). Omit temperature/top_p/top_k. Verified2026-10-08: https://platform.claude.com/docs/en/models/fable-5-1/overview No long-context surcharge. Forced tool choice is not supported."
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "name": "Claude Sonnet 5.5",
+      "provider": "anthropic",
+      "tier": "balanced",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_million": 2,
+      "output_price_per_million": 10,
+      "cached_input_price_per_million": 0.1,
+      "cache_write_price_per_million": 2.5,
+      "reasoning": true,
+      "thinking_type": "adaptive",
+      "supports_effort": true,
+      "default_reasoning_effort": "high",
+      "supports_vision": true,
+      "aliases": ["sonnet", "sonnet-5.5"],
+      "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
+      "native_web_research": true,
+      "web_research_kind": "web-search",
+      "description": "Claude Sonnet 5.5: adaptive thinking, text/image input, text output. Standard API USD/MTok; cache write price is5-minute retention (1-hour writes cost2x base input). Omit temperature/top_p/top_k. Verified2026-10-08: https://platform.claude.com/docs/en/models/sonnet-5-5/overview No long-context surcharge. Forced tool choice is not supported."
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "name": "Claude Haiku 5.5",
+      "provider": "anthropic",
+      "tier": "fast",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_million": 0.1,
+      "output_price_per_million": 0.5,
+      "cached_input_price_per_million": 0.01,
+      "cache_write_price_per_million": 0.125,
+      "reasoning": true,
+      "thinking_type": "adaptive",
+      "supports_effort": true,
+      "default_reasoning_effort": "medium",
+      "supports_vision": true,
+      "aliases": ["haiku", "haiku-5.5"],
+      "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
+      "native_web_research": true,
+      "web_research_kind": "web-search",
+      "description": "Claude Haiku 5.5: adaptive thinking, text/image input, text output. Standard API USD/MTok; cache write price is5-minute retention (1-hour writes cost2x base input). Omit temperature/top_p/top_k. Verified2026-10-08: https://platform.claude.com/docs/en/models/haiku-5-5/overview Above100K prompt tokens,5x all token rates apply to the whole request.",
+      "long_context_pricing": {
+        "input_token_threshold": 100000,
+        "input_multiplier": 5,
+        "output_multiplier": 5
+      }
     },
     {
       "id": "claude-fable-5",
@@ -780,11 +1193,16 @@
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "Anthropic's most capable widely released model (GA 2026-06-09). Adaptive thinking always on — does NOT accept thinking.type=enabled or the effort parameter. Knowledge cutoff Jan 2026. Safeguards routing: some flagged queries are silently answered by Opus 5 instead (<5% of sessions). Costs exactly 2x Opus 5 on both meters — reserve for measured workloads.",
-      "aliases": ["fable-5", "fable", "claude-fable-5-latest"],
+      "aliases": ["fable-5", "claude-fable-5-latest"],
       "supports_vision": true,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "native_web_research": true,
-      "web_research_kind": "web-search"
+      "web_research_kind": "web-search",
+      "tier_routing": false
     },
     {
       "id": "claude-opus-5",
@@ -801,11 +1219,16 @@
       "supports_effort": true,
       "default_reasoning_effort": "high",
       "description": "Released 2026-07-24. Default premium route for the anthropic provider — complex agentic coding and enterprise work. Adaptive thinking; effort defaults to high on the Claude API and Claude Code. Knowledge cutoff May 2026 (newest of the family). Fast mode research preview available at 2x price ($10/$50) — see provider_policies.anthropic.fast_mode.",
-      "aliases": ["opus-5", "opus", "claude-opus-5-latest"],
+      "aliases": ["opus-5", "claude-opus-5-latest"],
       "supports_vision": true,
       "roles": ["leader", "implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "native_web_research": true,
-      "web_research_kind": "web-search"
+      "web_research_kind": "web-search",
+      "tier_routing": false
     },
     {
       "id": "claude-sonnet-5",
@@ -822,12 +1245,17 @@
       "thinking_type": "adaptive",
       "supports_effort": true,
       "default_reasoning_effort": "high",
-      "description": "Released 2026-06-30. Best speed/intelligence balance; primary balanced model and also routes as fast-tier for compaction/title. PRICING IS INTRODUCTORY: $2/$10 per MTok through 2026-08-31, then $3/$15 (cache hit $0.20 -> $0.30). Update this row on 2026-09-01. Knowledge cutoff Jan 2026.",
-      "aliases": ["sonnet-5", "sonnet", "claude-sonnet-5-latest"],
+      "description": "Claude Sonnet5 legacy selectable model. Standard API input/output $2/$10 perMTok, cached input $0.20. Verified2026-10-08: https://platform.claude.com/docs/en/about-claude/pricing",
+      "aliases": ["sonnet-5", "claude-sonnet-5-latest"],
       "supports_vision": true,
       "roles": ["implement", "verify", "research"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "native_web_research": true,
-      "web_research_kind": "web-search"
+      "web_research_kind": "web-search",
+      "tier_routing": false
     },
     {
       "id": "claude-haiku-4-5-20251001",
@@ -844,11 +1272,16 @@
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "Fastest Anthropic model with near-frontier intelligence. Different shape from the 5-series: 200k context (not 1M), 64k max output, extended thinking via thinking.type=enabled (not adaptive), no effort parameter, knowledge cutoff Feb 2025. Good for file ops, compaction, and background work.",
-      "aliases": ["claude-haiku-4-5", "haiku-4.5", "haiku"],
+      "aliases": ["claude-haiku-4-5", "haiku-4.5"],
       "supports_vision": true,
       "roles": ["research", "verify"],
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "native_web_research": true,
-      "web_research_kind": "web-search"
+      "web_research_kind": "web-search",
+      "tier_routing": false
     }
   ],
   "routing": {
@@ -883,7 +1316,7 @@
         },
         {
           "provider": "anthropic",
-          "model_id": "claude-sonnet-5"
+          "model_id": "claude-sonnet-5-5"
         }
       ]
     },
@@ -917,20 +1350,19 @@
       "api_key_env": "ANTHROPIC_API_KEY",
       "auth_modes": ["api_key", "subscription_oauth"],
       "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
-      "source_verified_at": "2026-07-29",
-      "policy_note": "No peak/off-peak pricing. Per-token rates are flat 24/7 on the Claude API. Subscription (Pro/Max) access through Claude Code uses rolling 5-hour + weekly session limits instead of per-token billing — model rows keep list prices for cost estimation only.",
+      "source_verified_at": "2026-10-08",
+      "policy_note": "No peak/off-peak token pricing. Model rows contain standard API prices; subscription billing and account entitlement are separate. Haiku5.5 has per-request prompt-length pricing above100K, recorded in long_context_pricing.",
       "tier_defaults": {
-        "fast": "claude-haiku-4-5-20251001",
-        "balanced": "claude-sonnet-5",
-        "premium": "claude-opus-5"
+        "fast": "claude-haiku-5-5",
+        "balanced": "claude-sonnet-5-5",
+        "premium": "claude-opus-5-5"
       },
-      "fallback_model_id": "claude-sonnet-5",
+      "fallback_model_id": "claude-sonnet-5-5",
       "switch_fallback_providers": ["deepseek", "zai", "opencode-go", "xai"],
       "cache_multipliers": {
-        "note": "Multipliers relative to base input price. cached_input_price_per_million in the model rows already reflects cache_read.",
+        "note": "Writes:5m=1.25x,1h=2x base input. Read rates vary by model; use cached_input_price_per_million from each row.",
         "cache_write_5m": 1.25,
-        "cache_write_1h": 2,
-        "cache_read": 0.1
+        "cache_write_1h": 2
       },
       "batch_discount": {
         "note": "Batch API applies 50% off both input and output. Stacks with prompt caching. Not available with fast mode.",
@@ -952,16 +1384,6 @@
         "code_execution_free_hours_per_month": 1550,
         "code_execution_price_per_container_hour": 0.05
       },
-      "scheduled_price_changes": [
-        {
-          "model_id": "claude-sonnet-5",
-          "effective_date": "2026-09-01",
-          "input_price_per_million": 3,
-          "output_price_per_million": 15,
-          "cached_input_price_per_million": 0.3,
-          "note": "Introductory $2/$10 pricing ends 2026-08-31."
-        }
-      ],
       "tokenizer_note": "Claude 4.7 and later use a newer tokenizer producing roughly 30% more tokens for the same text. Budget accordingly when comparing $/MTok against non-Anthropic providers.",
       "excluded_models": [
         {

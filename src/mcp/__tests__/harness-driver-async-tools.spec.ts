@@ -42,6 +42,7 @@ function makeStubDriver(opts: StubOpts = {}): Driver {
     press_sequence: () => {},
     type: () => {},
     focus: () => {},
+    focus_verified: async () => ({ ok: false as const, reason: "not_focusable" as const, message: "stub" }),
     wait_for: async () => {
       if (opts.waitRejects) throw new Error("wait_for timeout after 30ms");
     },

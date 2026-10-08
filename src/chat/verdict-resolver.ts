@@ -10,8 +10,6 @@ import {
   MAX_LEADER_FAILURES_BEFORE_FALLBACK,
   MAX_MESSAGES_PER_POLL,
   MAX_UNKNOWN_INTENT_BEFORE_FALLBACK,
-  maxVerdictMessages,
-  verdictFloor,
 } from "./verdict-constants.js";
 
 export interface DiscordAwaitVerdictArgs {
@@ -23,8 +21,6 @@ export interface DiscordAwaitVerdictArgs {
   channelId: string;
   client: ChatClient;
   leader: LeaderLike;
-  capUsd: number;
-  remainingUsd: () => Promise<number>;
   reviewSummary: string;
   backoffDelays?: number[];
   pollIntervalMs?: number;
@@ -80,25 +76,15 @@ export async function discordAwaitVerdict(
   const sleep = args.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const now = args.now ?? Date.now;
 
-  const floor = verdictFloor(args.capUsd);
-  const msgCap = maxVerdictMessages(args.capUsd);
-
-  // Check budget before doing anything
-  if ((await args.remainingUsd()) < floor) {
-    await publish({
-      client: args.client,
-      channelId: args.channelId,
-      type: "phase-event",
-      content: "Budget exhausted; deferring decision to terminal.",
-    }).catch(() => {});
-    return { verdict: "abort", feedback: "budget-exhausted" };
-  }
+  // No spend floor and no cost-derived message cap: `/ideal`, the only caller,
+  // has no spend limit (user decision). The loop still ends on a verdict, on
+  // repeated leader / unknown-intent failures, on a 403/404, or on `timeoutMs`
+  // with nobody answering.
 
   // Load existing cursor or use empty string to poll from the beginning of channel history
   let lastSeenId = (await loadCursor(args.flowDir, args.runId, args.phaseId, args.sprintN)) ?? "";
 
   const startedAt = now();
-  let msgCount = 0;
   let leaderFailures = 0;
   let unknownIntents = 0;
   const priorTurns: ConvoTurn[] = [];
@@ -109,28 +95,6 @@ export async function discordAwaitVerdict(
     // Timeout check
     if (now() - startedAt > timeoutMs) {
       return { verdict: "abort", feedback: "[timeout-24h]" };
-    }
-
-    // Budget check
-    if ((await args.remainingUsd()) < floor) {
-      await publish({
-        client: args.client,
-        channelId: args.channelId,
-        type: "phase-event",
-        content: "Budget exhausted; aborting verdict capture.",
-      }).catch(() => {});
-      return { verdict: "abort", feedback: "budget-exhausted" };
-    }
-
-    // Message cap check
-    if (msgCount >= msgCap) {
-      await publish({
-        client: args.client,
-        channelId: args.channelId,
-        type: "phase-event",
-        content: "Reached per-sprint message cap; deferring to terminal.",
-      }).catch(() => {});
-      return args.fallback();
     }
 
     // Poll for new messages
@@ -155,19 +119,6 @@ export async function discordAwaitVerdict(
     }
 
     for (const m of msgs) {
-      // Check caps before processing each message
-      if (msgCount >= msgCap) {
-        await publish({
-          client: args.client,
-          channelId: args.channelId,
-          type: "phase-event",
-          content: "Reached per-sprint message cap; deferring to terminal.",
-        }).catch(() => {});
-        return args.fallback();
-      }
-
-      msgCount += 1;
-
       // Call leader to classify the message
       let raw: { content: string; costUsd: number };
       try {

@@ -25,6 +25,7 @@
 import { appendFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { redactSecrets } from "../utils/logger.js";
 
 /**
  * Resolve the trace sink for the CURRENT env value, or null when disabled.
@@ -51,7 +52,13 @@ export function idealTrace(marker: string, extra?: Record<string, unknown>): voi
   const file = tracePath();
   if (!file) return;
   const record = { ts: new Date().toISOString(), marker, ...extra };
-  const line = JSON.stringify(record);
+  // `extra` is an untyped `Record<string, unknown>` and real call sites put a
+  // raw caught message in it — `idealTrace("council.postDebate.threw", { err:
+  // (err as Error)?.message })` (src/council/index.ts:2837, :2940, :3017) — plus
+  // the post-debate `answer`. Redacting the serialized line covers every present
+  // and future `extra` key at once. `marker` and the scalar context stay intact,
+  // which is the whole point of the trace: the LAST marker is the hang.
+  const line = redactSecrets(JSON.stringify(record));
   try {
     appendFileSync(file, `${line}\n`, "utf8");
   } catch (err) {

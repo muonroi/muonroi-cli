@@ -87,26 +87,26 @@ describe("withImplIdleWatchdog", () => {
 
 describe("withIsolatedImplDeadline", () => {
   it("returns the task result when it resolves before the deadline", async () => {
-    const result = await withIsolatedImplDeadline(Promise.resolve({ ok: true }), 1000, 1);
+    const result = await withIsolatedImplDeadline(async () => ({ ok: true }), 1000, 1);
     expect(result).toEqual({ ok: true });
   });
 
-  it("rejects with a stall error when the isolated task hangs past the deadline", async () => {
-    // A task that never resolves — mimics the post-finish JS-side wedge on the
-    // isolated impl path (run mrhc43f0fb9b: wrote files, went silent 30+ min).
-    const neverResolves = new Promise<{ ok: boolean }>(() => {});
+  it("rejects when the isolated task hangs past the deadline", async () => {
+    const neverResolves = () => new Promise<{ ok: boolean }>(() => {});
     await expect(withIsolatedImplDeadline(neverResolves, 40, 7)).rejects.toThrow(
-      /exceeded .* total watchdog and was treated as stalled \(sprint 7\)/,
+      /exceeded .* total watchdog \(sprint 7\) and was CANCELLED/,
     );
   });
 
   it("propagates the task's own rejection (does not mask a real failure)", async () => {
-    const failing = Promise.reject(new Error("real impl failure"));
+    const failing = async () => {
+      throw new Error("real impl failure");
+    };
     await expect(withIsolatedImplDeadline(failing, 1000, 2)).rejects.toThrow(/real impl failure/);
   });
 
   it("disables the guard when totalMs <= 0 (returns the task unchanged)", async () => {
-    const result = await withIsolatedImplDeadline(Promise.resolve("done"), 0, 3);
+    const result = await withIsolatedImplDeadline(async () => "done", 0, 3);
     expect(result).toBe("done");
   });
 });

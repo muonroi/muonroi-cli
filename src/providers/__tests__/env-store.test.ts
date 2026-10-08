@@ -15,7 +15,7 @@ afterEach(() => {
   delete process.env.MUONROI_ENV_FILE;
   delete process.env.TEST_KEY_A;
   delete process.env.TEST_KEY_B;
-  rmSync(dir, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("env-store", () => {

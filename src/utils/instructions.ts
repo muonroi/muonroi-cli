@@ -31,6 +31,40 @@ function readNonEmptyFile(filePath: string): string | null {
   }
 }
 
+/**
+ * Parity fix (G4): Claude Code also loads parent-directory CLAUDE.md files
+ * ABOVE the project's own root, up to $HOME (and `~/.claude/CLAUDE.md`) —
+ * this loader previously reached only from the git root DOWN to `cwd`.
+ * Measured (FINDINGS.md G4): a Vietnamese request got an all-English reply
+ * because the "reply in the user's own language" rule lives in
+ * `~/Personal/Core/CLAUDE.md`, one directory above the git root
+ * `~/Personal/Core/shipd-challenges` — a file this loader never reached.
+ *
+ * Ceiling on the total bytes loaded from ancestor directories, independent
+ * of the (uncapped, pre-existing) git-root-down and muonroi-home segments —
+ * an ancestor chain can be many levels deep on some machines and this is
+ * new, previously-untested surface, so it gets its own explicit budget
+ * rather than silently inflating every turn's system prompt.
+ */
+export const MAX_ANCESTOR_INSTRUCTIONS_BYTES = 32 * 1024;
+
+/**
+ * Directories from `home` down to (but EXCLUDING) `gitRoot` itself — the
+ * git root's own instruction files are already the first entry of the
+ * `directoryChain(root, canonicalCwd)` loop below, so including it here
+ * would double-load it.
+ *
+ * Returns `[]` when `gitRoot` is not inside `home` at all (a repo checked
+ * out somewhere like /tmp or /opt has no meaningful "ancestors up to
+ * $HOME" to walk) or IS `home` itself (nothing sits between them).
+ */
+export function ancestorDirsAboveGitRoot(home: string, gitRoot: string): string[] {
+  const rel = path.relative(home, gitRoot);
+  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return [];
+  const parent = path.dirname(gitRoot);
+  return directoryChain(home, parent);
+}
+
 function directoryChain(fromRoot: string, toCwd: string): string[] {
   const rel = path.relative(fromRoot, toCwd);
   if (rel === "") return [fromRoot];
@@ -73,16 +107,84 @@ function readSegmentWithHeader(dir: string, filename: string, label?: string): s
   return `<!-- ${label ?? filename} -->\n${text}`;
 }
 
+/**
+ * Root of the muonroi home.
+ *
+ * Priority: MUONROI_CLI_HOME env → os.homedir()/.muonroi-cli — the same
+ * `muonroiHome()` convention already used by src/storage/config.ts,
+ * src/usage/ledger.ts, src/chat/channel-manager.ts et al.
+ *
+ * Resolved LAZILY on every call, never as a module-level `const`: a const is
+ * evaluated once at import, so a test importing this module normally could
+ * never redirect it (`src/lsp/npm-cache.ts:20-28` records what that cost).
+ * Reading the env var per call is what lets the suite-wide pin in
+ * `src/__test-stubs__/vitest-setup.ts` reach this loader, instead of it reading
+ * the developer's real `~/.muonroi-cli/AGENTS.md` into every test's prompt.
+ */
+function muonroiHome(): string {
+  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+}
+
 function loadAgentsSegments(canonicalCwd: string): string[] {
   const segments: string[] = [];
 
-  const homeDir = path.join(os.homedir(), ".muonroi-cli");
+  const homeDir = muonroiHome();
   for (const fname of INSTRUCTION_FILENAMES) {
     const seg = readSegmentWithHeader(homeDir, fname, `~/.muonroi-cli/${fname}`);
     if (seg) segments.push(seg);
   }
 
   const root = findGitRoot(canonicalCwd) ?? canonicalCwd;
+
+  // Parity fix (G4): see `ancestorDirsAboveGitRoot`'s doc comment. Loaded
+  // BEFORE the git-root-down loop so priority mirrors distance from the
+  // project: most general (closest to $HOME) first, most specific
+  // (the project's own root and cwd) last — same ordering logic as the
+  // muonroi-home segment above already using.
+  //
+  // Round 2 (G4 HIGH — cap starvation): `ancestorDirsAboveGitRoot` walks
+  // BROADEST (home) first. The original cap loop walked candidates in that
+  // SAME order and `break`-ed on the first one that would exceed the
+  // budget — so one oversized file FARTHEST from the project (most likely:
+  // a broad, growing `$HOME/AGENTS.md`) starved out every closer, smaller,
+  // more project-relevant file, even ones trivially small. Repro'd: a 40KB
+  // `$HOME/AGENTS.md` alone exceeds `MAX_ANCESTOR_INSTRUCTIONS_BYTES`
+  // (32KB), so the loop broke on the very first candidate and
+  // `loadCustomInstructions` returned `null` even though a real 44-byte
+  // `~/Personal/Core/CLAUDE.md` sat right next to the project root.
+  //
+  // Fixed by separating admission from emission: collect every ancestor
+  // candidate broadest-first (unchanged order), decide which ones fit the
+  // cap by walking that same list CLOSEST-first (reversed) — skipping
+  // (never breaking) any single file that alone would exceed the
+  // remaining budget, so one oversized far-away file can never block a
+  // smaller, nearer one — then emit the ACCEPTED segments back in the
+  // original broadest-first order, so the "general first, specific last"
+  // ordering intent is unaffected by which candidates happened to fit.
+  const home = os.homedir();
+  const ancestorCandidates: Array<{ seg: string; bytes: number }> = [];
+  for (const dir of ancestorDirsAboveGitRoot(home, root)) {
+    for (const fname of INSTRUCTION_FILENAMES) {
+      const rel = path.relative(home, dir);
+      const label = rel === "" ? path.join("~", fname) : path.join("~", rel, fname);
+      const seg = readSegmentWithHeader(dir, fname, label);
+      if (!seg) continue;
+      ancestorCandidates.push({ seg, bytes: Buffer.byteLength(seg, "utf-8") });
+    }
+  }
+  const acceptedAncestorIndices = new Set<number>();
+  let ancestorBytesUsed = 0;
+  for (let i = ancestorCandidates.length - 1; i >= 0; i--) {
+    const candidate = ancestorCandidates[i];
+    if (!candidate) continue;
+    if (ancestorBytesUsed + candidate.bytes > MAX_ANCESTOR_INSTRUCTIONS_BYTES) continue; // skip, never break
+    acceptedAncestorIndices.add(i);
+    ancestorBytesUsed += candidate.bytes;
+  }
+  for (let i = 0; i < ancestorCandidates.length; i++) {
+    if (acceptedAncestorIndices.has(i)) segments.push(ancestorCandidates[i]!.seg);
+  }
+
   for (const dir of directoryChain(root, canonicalCwd)) {
     const overridePath = path.join(dir, "AGENTS.override.md");
     if (fs.existsSync(overridePath)) {

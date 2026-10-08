@@ -20,8 +20,26 @@
  *
  * Modelled on sprint-runner's proven `withImplIdleWatchdog`, generalised so any
  * turn generator can be guarded without coupling to the product loop.
+ *
+ * Round 6 (G8 HIGH A): each call to `withTurnWatchdog` marks the start of a
+ * new turn generation (`turn-progress.ts`'s `beginTurnGeneration`) — this is
+ * what lets a `startPeriodicTurnProgressPing` pinger tell "my turn is still
+ * active" from "my turn has ended, I am orphaned, stop pinging". Without it,
+ * an interval left running by a killed/finished turn could keep writing
+ * `lastPingMs` forever and mask a LATER turn's genuine idleness.
+ *
+ * Round 7: paired with `endTurnGeneration` in this function's own `finally`
+ * (below), so the generation is popped on EVERY exit path — normal
+ * completion, a thrown/rethrown `TurnStallError`, or early abandonment via
+ * the caller's own `.return()`/`break`. Push-on-entry/pop-in-finally is what
+ * makes NESTING safe: `orchestrator.ts`'s council-continuation path calls
+ * `withTurnWatchdog` again on `this.processMessage(...)` from INSIDE an
+ * outer turn already wrapped by it — the outer generation stays pushed the
+ * whole time the inner one is active, so the outer turn's own pinger is
+ * never mistaken for orphaned just because a nested turn began.
  */
 import type { StreamChunk } from "../types/index.js";
+import { beginTurnGeneration, endTurnGeneration } from "./turn-progress.js";
 
 export class TurnStallError extends Error {
   constructor(
@@ -69,6 +87,10 @@ export async function* withTurnWatchdog(
   opts: TurnWatchdogOptions,
 ): AsyncGenerator<StreamChunk, void, unknown> {
   const { idleMs, totalMs, label, shouldSuppressFire, hasProgressSince } = opts;
+  // New turn generation, pushed for the duration of this call — popped in
+  // the `finally` below on every exit path (see turn-progress.ts's module
+  // doc comment and beginTurnGeneration/endTurnGeneration).
+  const myTurnGeneration = beginTurnGeneration();
   const it = gen[Symbol.asyncIterator]();
 
   let totalTimer: ReturnType<typeof setTimeout> | undefined;
@@ -154,5 +176,6 @@ export async function* withTurnWatchdog(
     }
   } finally {
     if (totalTimer) clearTimeout(totalTimer);
+    endTurnGeneration(myTurnGeneration);
   }
 }

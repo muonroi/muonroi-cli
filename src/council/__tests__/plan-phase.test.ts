@@ -158,7 +158,7 @@ describe("runPlannerPhase", () => {
   let cwd: string;
 
   afterEach(() => {
-    if (cwd) rmSync(cwd, { recursive: true, force: true });
+    if (cwd) rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("writes .planning/PLAN.md and returns its phases when the planner emits a gateable phase", async () => {
@@ -418,7 +418,7 @@ describe("runPlanReview", () => {
   let cwd: string;
 
   afterEach(() => {
-    if (cwd) rmSync(cwd, { recursive: true, force: true });
+    if (cwd) rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     vi.restoreAllMocks();
   });
 
@@ -924,7 +924,7 @@ describe("runPlanReview — PLAN-VERIFY.md (the artifact the GSD mutation gate r
   let cwd: string;
 
   afterEach(() => {
-    if (cwd) rmSync(cwd, { recursive: true, force: true });
+    if (cwd) rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     vi.restoreAllMocks();
   });
 

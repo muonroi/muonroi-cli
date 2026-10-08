@@ -1,0 +1,557 @@
+/**
+ * F8 — the undebated-criteria gate.
+ *
+ * The defect being pinned (run `mttwpmu8ee5b`, sessions 18cd54cdb9c9 /
+ * c712c4cb6908 / 9d9f363c14fa): the leader closed the debate saying in plain
+ * words that nobody had discussed the NuGet-packaging criterion, and 23 seconds
+ * later the loop entered scoping and planned a sprint around exactly that
+ * criterion.
+ *
+ * The distinction this suite exists to defend is between:
+ *   - a criterion the panel ARGUED and failed to resolve  → normal, no gate;
+ *   - a criterion NO panelist ever addressed              → gate.
+ */
+
+import { describe, expect, it, vi } from "vitest";
+import { COUNCIL_ANSWER_DISMISSED, type QuestionResponder } from "../../council/types.js";
+import type { CouncilStanceRow, StreamChunk } from "../../types/index.js";
+import {
+  buildUndebatedQuestion,
+  findUndebatedCriteria,
+  resolveUndebatedGateTimeoutMs,
+  runUndebatedCriteriaGate,
+  UNDEBATED_GATE_DEFAULT_TIMEOUT_MS,
+  UNDEBATED_OPTION_ACCEPT,
+  UNDEBATED_OPTION_COUNCIL,
+  UNDEBATED_OPTION_NARROW,
+  type UndebatedGateDecision,
+} from "../undebated-criteria-gate.js";
+
+const ROSTER = ["architect", "engineer", "researcher"];
+
+function row(criterion: string, met: boolean, marks: Array<"+" | "-" | "~" | null>): CouncilStanceRow {
+  const stances: CouncilStanceRow["stances"] = {};
+  ROSTER.forEach((r, i) => {
+    stances[r] = marks[i] ?? null;
+  });
+  return { criterion, met, stances };
+}
+
+// The two criteria the measured run actually carried past the gate.
+const NUGET = "Bộ analyzer có thể được đóng gói thành NuGet package TCIS.CodeStandards.Analyzers";
+const VS_WARNING = "Visual Studio hiển thị warning khi parameter, argument không đúng chuẩn";
+
+describe("findUndebatedCriteria — the signal", () => {
+  it("fires on a criterion every panelist left null (the NuGet case)", () => {
+    const rows = [row(NUGET, false, [null, null, null])];
+    expect(findUndebatedCriteria(rows)).toEqual([{ index: 0, criterion: NUGET }]);
+  });
+
+  it("does NOT fire on an argued-but-unmet criterion", () => {
+    // Panel fought over it and did not converge. That is a normal debate
+    // outcome, not silence — the leader's closing verdict already covers it.
+    const rows = [row(VS_WARNING, false, ["+", "-", "~"])];
+    expect(findUndebatedCriteria(rows)).toEqual([]);
+  });
+
+  it("does NOT fire when a single panelist spoke and the rest stayed silent", () => {
+    const rows = [row(VS_WARNING, false, [null, "-", null])];
+    expect(findUndebatedCriteria(rows)).toEqual([]);
+  });
+
+  it("does NOT fire when every criterion was engaged", () => {
+    const rows = [row(VS_WARNING, true, ["+", "+", "+"]), row("Another", false, ["-", "~", null])];
+    expect(findUndebatedCriteria(rows)).toEqual([]);
+  });
+
+  it("does NOT fire on a MET criterion, even with no stances recorded", () => {
+    expect(findUndebatedCriteria([row(NUGET, true, [null, null, null])])).toEqual([]);
+  });
+
+  it("treats an EMPTY stance map as missing data, not silence", () => {
+    // No roster was passed to the leader, so nothing is known about who spoke.
+    // Firing here would turn "we don't know" into "nobody spoke" — the exact
+    // fabrication src/council/stance.ts exists to prevent.
+    const rows: CouncilStanceRow[] = [{ criterion: NUGET, met: false, stances: {} }];
+    expect(findUndebatedCriteria(rows)).toEqual([]);
+  });
+
+  it("returns [] when the debate produced no stance rows at all", () => {
+    expect(findUndebatedCriteria(undefined)).toEqual([]);
+    expect(findUndebatedCriteria([])).toEqual([]);
+  });
+
+  it("reports the criterion INDEX so the caller can drop the right one", () => {
+    const rows = [
+      row(VS_WARNING, false, ["+", "-", null]),
+      row("engaged", true, ["+", "+", "+"]),
+      row(NUGET, false, [null, null, null]),
+    ];
+    expect(findUndebatedCriteria(rows)).toEqual([{ index: 2, criterion: NUGET }]);
+  });
+});
+
+describe("buildUndebatedQuestion — names the criteria, not a count", () => {
+  it("puts the full criterion text in the card context", () => {
+    const card = buildUndebatedQuestion([
+      { index: 0, criterion: NUGET },
+      { index: 3, criterion: VS_WARNING },
+    ]);
+    // "2 of 5 unmet" is what the old closing message said, and it is why nobody
+    // acted on it. The text itself must be present.
+    expect(card.context).toContain(NUGET);
+    expect(card.context).toContain(VS_WARNING);
+    expect(card.content).toContain("Bộ analyzer");
+  });
+
+  it("offers debate-further / narrow / accept as real choices", () => {
+    const card = buildUndebatedQuestion([{ index: 0, criterion: NUGET }]);
+    expect(card.options.map((o) => o.value)).toEqual([
+      UNDEBATED_OPTION_COUNCIL,
+      UNDEBATED_OPTION_NARROW,
+      UNDEBATED_OPTION_ACCEPT,
+    ]);
+  });
+});
+
+describe("resolveUndebatedGateTimeoutMs", () => {
+  it("defaults to the generous human deadline", () => {
+    expect(resolveUndebatedGateTimeoutMs({})).toBe(UNDEBATED_GATE_DEFAULT_TIMEOUT_MS);
+    expect(resolveUndebatedGateTimeoutMs({ MUONROI_UNDEBATED_GATE_TIMEOUT_MS: "  " })).toBe(
+      UNDEBATED_GATE_DEFAULT_TIMEOUT_MS,
+    );
+    expect(resolveUndebatedGateTimeoutMs({ MUONROI_UNDEBATED_GATE_TIMEOUT_MS: "nonsense" })).toBe(
+      UNDEBATED_GATE_DEFAULT_TIMEOUT_MS,
+    );
+  });
+
+  it("honours 0 so CI resolves immediately instead of stalling ten minutes", () => {
+    expect(resolveUndebatedGateTimeoutMs({ MUONROI_UNDEBATED_GATE_TIMEOUT_MS: "0" })).toBe(0);
+  });
+});
+
+async function drain(
+  gen: ReturnType<typeof runUndebatedCriteriaGate>,
+): Promise<{ chunks: StreamChunk[]; decision: UndebatedGateDecision }> {
+  const chunks: StreamChunk[] = [];
+  while (true) {
+    const { value, done } = await gen.next();
+    if (done) return { chunks, decision: value as UndebatedGateDecision };
+    chunks.push(value as StreamChunk);
+  }
+}
+
+describe("runUndebatedCriteriaGate — the askcard", () => {
+  const undebated = [{ index: 0, criterion: NUGET }];
+
+  it("emits a council_question (the surface that becomes askcard-open)", async () => {
+    const respondToQuestion = vi.fn().mockResolvedValue(UNDEBATED_OPTION_ACCEPT);
+    const { chunks, decision } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion, timeoutMs: 5_000 }),
+    );
+    const card = chunks.find((c) => c.type === "council_question");
+    expect(card).toBeDefined();
+    expect(card?.councilQuestion?.options?.length).toBe(3);
+    expect(card?.councilQuestion?.context).toContain(NUGET);
+    expect(respondToQuestion).toHaveBeenCalledTimes(1);
+    expect(decision).toMatchObject({ action: "accept", unattended: false });
+  });
+
+  it("maps each option to its action", async () => {
+    for (const [answer, action] of [
+      [UNDEBATED_OPTION_COUNCIL, "council"],
+      [UNDEBATED_OPTION_NARROW, "narrow"],
+      [UNDEBATED_OPTION_ACCEPT, "accept"],
+    ] as const) {
+      const { decision } = await drain(
+        runUndebatedCriteriaGate({
+          undebated,
+          respondToQuestion: vi.fn().mockResolvedValue(answer),
+          timeoutMs: 5_000,
+        }),
+      );
+      expect(decision).toMatchObject({ action, unattended: false });
+    }
+  });
+
+  it.each([
+    ["an unrecognized value (UI drift)", "whatever"],
+    ["an empty submit", ""],
+    ["an Escape dismissal", COUNCIL_ANSWER_DISMISSED],
+  ])("stops on %s — proceeding must be asked for by name", async (_label, answer) => {
+    const { decision } = await drain(
+      runUndebatedCriteriaGate({
+        undebated,
+        respondToQuestion: vi.fn().mockResolvedValue(answer),
+        timeoutMs: 5_000,
+      }),
+    );
+    expect(decision).toMatchObject({ action: "council", unattended: false });
+  });
+
+  it("an UNATTENDED run stops rather than proceeding blind", async () => {
+    // Nobody ever answers — the promise never settles, exactly as
+    // CouncilManager.createQuestionResponder behaves with no UI attached.
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+    const { chunks, decision } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: neverAnswers, timeoutMs: 20 }),
+    );
+    expect(decision).toMatchObject({ action: "council", unattended: true, answer: "" });
+    // Still emitted the card first, so an event-stream watcher saw askcard-open.
+    expect(chunks.some((c) => c.type === "council_question")).toBe(true);
+  });
+
+  it("timeoutMs=0 resolves immediately to the unattended default", async () => {
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+    const { decision } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: neverAnswers, timeoutMs: 0 }),
+    );
+    expect(decision).toMatchObject({ action: "council", unattended: true });
+    expect(neverAnswers).not.toHaveBeenCalled();
+  });
+
+  it("a THROWING responder applies the unattended default instead of crashing", async () => {
+    const { decision } = await drain(
+      runUndebatedCriteriaGate({
+        undebated,
+        respondToQuestion: vi.fn().mockRejectedValue(new Error("channel dead")),
+        timeoutMs: 5_000,
+      }),
+    );
+    expect(decision).toMatchObject({ action: "council", unattended: true });
+  });
+});
+
+/**
+ * Session 697419024ec8 (2026-09-22) — the card stayed on screen for 46 minutes
+ * after the gate's own timeout resolved the run to a halt. Nothing ever told
+ * the UI the question was no longer being awaited, so the user believed they
+ * were still answering it; the late answer they gave then vanished with no
+ * trace. Fixed generically: on timeout the gate withdraws the questionId
+ * (removing the dangling resolver) AND yields a `council_question_withdrawn`
+ * chunk carrying the notice the UI must show in the card's place.
+ */
+describe("runUndebatedCriteriaGate — withdrawal on timeout (session 697419024ec8)", () => {
+  const undebated = [{ index: 0, criterion: NUGET }];
+
+  it("calls respondToQuestion.withdraw with reason 'timeout' when nobody answers", async () => {
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {})) as unknown as QuestionResponder;
+    const withdraw = vi.fn();
+    neverAnswers.withdraw = withdraw;
+    await drain(runUndebatedCriteriaGate({ undebated, respondToQuestion: neverAnswers, timeoutMs: 20 }));
+    expect(withdraw).toHaveBeenCalledTimes(1);
+    const [qid, reason] = withdraw.mock.calls[0]!;
+    expect(typeof qid).toBe("string");
+    expect(reason).toBe("timeout");
+  });
+
+  it("does NOT call withdraw when a real answer arrives before the deadline", async () => {
+    const withdraw = vi.fn();
+    const responder = vi.fn().mockResolvedValue(UNDEBATED_OPTION_ACCEPT) as unknown as QuestionResponder;
+    responder.withdraw = withdraw;
+    await drain(runUndebatedCriteriaGate({ undebated, respondToQuestion: responder, timeoutMs: 5_000 }));
+    expect(withdraw).not.toHaveBeenCalled();
+  });
+
+  it("yields a council_question_withdrawn chunk naming the SAME questionId as the card", async () => {
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+    const { chunks } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: neverAnswers, timeoutMs: 20 }),
+    );
+    const card = chunks.find((c) => c.type === "council_question");
+    const withdrawnChunk = chunks.find((c) => c.type === "council_question_withdrawn");
+    expect(card?.councilQuestion?.questionId).toBeDefined();
+    expect(withdrawnChunk?.councilQuestionWithdrawn?.questionId).toBe(card?.councilQuestion?.questionId);
+    expect(withdrawnChunk?.councilQuestionWithdrawn?.reason).toBe("timeout");
+  });
+
+  it("the withdrawn notice names the deadline and that resume will ask again", async () => {
+    // Real 60s of setTimeout would make this test itself time out — fake timers
+    // let the gate's internal deadline elapse instantly while still exercising
+    // the exact Math.round(timeoutMs / 60000) formatting the notice text uses.
+    vi.useFakeTimers();
+    try {
+      const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+      const gen = runUndebatedCriteriaGate({
+        undebated,
+        respondToQuestion: neverAnswers,
+        timeoutMs: 60_000,
+        runId: "run-abc123",
+      });
+      const chunks: StreamChunk[] = [];
+      let done = false;
+      let decision: UndebatedGateDecision | undefined;
+      // Drain up to the point the generator awaits the setTimeout, then fire it.
+      const stepPromise = (async () => {
+        while (!done) {
+          const step = await gen.next();
+          if (step.done) {
+            done = true;
+            decision = step.value as UndebatedGateDecision;
+          } else {
+            chunks.push(step.value as StreamChunk);
+          }
+        }
+      })();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await stepPromise;
+      expect(decision).toMatchObject({ unattended: true });
+      const notice = chunks.find((c) => c.type === "council_question_withdrawn")?.councilQuestionWithdrawn?.notice;
+      expect(notice).toBeDefined();
+      expect(notice).toMatch(/not answered within 1 minute/i);
+      expect(notice).toContain("/ideal resume run-abc123");
+      expect(notice?.toLowerCase()).toMatch(/ask again/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("omitting runId still produces a valid notice naming the bare resume command", async () => {
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+    const { chunks } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: neverAnswers, timeoutMs: 20 }),
+    );
+    const notice = chunks.find((c) => c.type === "council_question_withdrawn")?.councilQuestionWithdrawn?.notice;
+    expect(notice).toContain("/ideal resume");
+    expect(notice).not.toContain("/ideal resume undefined");
+  });
+
+  it("the existing 'No answer within' content echo is UNCHANGED — only ADDED to, not reworded", async () => {
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+    const { chunks } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: neverAnswers, timeoutMs: 20 }),
+    );
+    const text = chunks
+      .filter((c) => c.type === "content")
+      .map((c) => c.content ?? "")
+      .join("");
+    expect(text).toContain("No answer within");
+    expect(text).toContain("/ideal resume will ask this again");
+  });
+
+  it("withdraw is safe to omit — a plain mock with no withdraw method does not throw", async () => {
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+    await expect(
+      drain(runUndebatedCriteriaGate({ undebated, respondToQuestion: neverAnswers, timeoutMs: 20 })),
+    ).resolves.toBeDefined();
+  });
+});
+
+/**
+ * U1 — this card reuses `phase: "post-debate"` to ride the same UI renderer
+ * as the post-debate card, so it fired the SAME duplicate-echo defect
+ * (project_askcard_transcript_qa_pairing) as the original U1 slice: the
+ * interactive UI already renders one paired question+answer transcript
+ * record via `buildAskcardAnswerEntry` (`use-app-logic.tsx`), and this
+ * module's own `\n  ↳ <answer>\n` echo duplicated it. Fixed by gating every
+ * echo on `QuestionResponder.wasAnsweredByCard` (council/types.ts) — the same
+ * mechanism the original U1 clarify/post-debate/refine/plan-confirm sites use.
+ */
+describe("U1 — undebated-gate echo suppression (headless vs card-answered)", () => {
+  const undebated = [{ index: 0, criterion: NUGET }];
+
+  it.each([
+    ["council (stop)", UNDEBATED_OPTION_COUNCIL, "Run stopped before scoping"],
+    ["narrow", UNDEBATED_OPTION_NARROW, "Dropped 1 undebated criterion"],
+    ["accept", UNDEBATED_OPTION_ACCEPT, "Proceeding with 1 undebated criterion"],
+  ] as const)("headless-style responder (no wasAnsweredByCard) keeps the ↳ echo on %s — its only record of the answer", async (_label, answer, expectedSnippet) => {
+    const headlessResponder = vi.fn().mockResolvedValue(answer);
+    const { chunks } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: headlessResponder, timeoutMs: 5_000 }),
+    );
+    const text = chunks
+      .filter((c) => c.type === "content")
+      .map((c) => c.content ?? "")
+      .join("");
+    expect(text).toContain("↳");
+    expect(text).toContain(expectedSnippet);
+  });
+
+  it.each([
+    ["council (stop)", UNDEBATED_OPTION_COUNCIL],
+    ["narrow", UNDEBATED_OPTION_NARROW],
+    ["accept", UNDEBATED_OPTION_ACCEPT],
+  ] as const)("card-answered responder (wasAnsweredByCard → true) suppresses the ↳ echo on %s", async (_label, answer) => {
+    const cardResponder = vi.fn().mockResolvedValue(answer) as unknown as QuestionResponder;
+    cardResponder.wasAnsweredByCard = vi.fn().mockReturnValue(true);
+    const { chunks, decision } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: cardResponder, timeoutMs: 5_000 }),
+    );
+    const text = chunks
+      .filter((c) => c.type === "content")
+      .map((c) => c.content ?? "")
+      .join("");
+    expect(text).not.toContain("↳");
+    // The decision itself is unaffected — only the transcript echo is gated.
+    expect(decision.action).toBeDefined();
+    expect(cardResponder.wasAnsweredByCard).toHaveBeenCalledTimes(1);
+  });
+
+  it("the unattended-timeout echo is NOT gated — nobody answered, so there is no card record to avoid duplicating", async () => {
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+    const { chunks } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: neverAnswers, timeoutMs: 20 }),
+    );
+    const text = chunks
+      .filter((c) => c.type === "content")
+      .map((c) => c.content ?? "")
+      .join("");
+    expect(text).toContain("No answer within");
+  });
+
+  it("a late answer arriving AFTER a timeout drains wasAnsweredByCard instead of leaking it", async () => {
+    // The dangling responder promise (no cancel channel) can still resolve
+    // after runUndebatedCriteriaGate has already returned on the timeout path.
+    let resolveLate!: (v: string) => void;
+    const lateResponder = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveLate = resolve;
+        }),
+    ) as unknown as QuestionResponder;
+    const wasAnsweredByCard = vi.fn().mockReturnValue(true);
+    lateResponder.wasAnsweredByCard = wasAnsweredByCard;
+    const { decision } = await drain(
+      runUndebatedCriteriaGate({ undebated, respondToQuestion: lateResponder, timeoutMs: 20 }),
+    );
+    expect(decision.unattended).toBe(true);
+    expect(wasAnsweredByCard).not.toHaveBeenCalled();
+    resolveLate(UNDEBATED_OPTION_ACCEPT);
+    // Let the dangling .then() microtask run.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(wasAnsweredByCard).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * The UX defect measured in session `2bd02af6e46f` / run `mtwjytbg20f2`.
+ *
+ *   06:22:24  askcard_open  optionLabels:["Take it back to the council", …]
+ *                           defaultIndex:0, recommendedLabel:"Take it back to the council"
+ *   06:29:45  askcard_answered  selectedOptionLabel:"Take it back to the council"
+ *   06:29:45  undebated_criteria_gate {"stage":"gate-resolved","action":"council"}
+ *   — last row of the session —
+ *
+ * The user read the RECOMMENDED label as "the system will now convene a council"
+ * and got a stop: *"leader có vẻ quyết định stop … đá tôi ra màn hình chat"*.
+ * The halt is correct; the words around it were not. Two separate defects:
+ *
+ *   1. the label named an action the system does not perform, and
+ *   2. it was the recommendation — while being the ONLY option with no forward
+ *      path, since `enforceUndebatedCriteriaGate` HONOURS a prior `council`
+ *      answer, so `/ideal resume` stops instantly and never re-asks
+ *      (pinned in undebated-criteria-record.test.ts).
+ */
+describe("the gate's words match what it does (session 2bd02af6e46f)", () => {
+  const two = [
+    { index: 0, criterion: NUGET },
+    { index: 3, criterion: VS_WARNING },
+  ];
+
+  function joinContent(chunks: StreamChunk[]): string {
+    return chunks.map((c) => (c.type === "content" ? (c.content ?? "") : "")).join("");
+  }
+
+  it("keeps the three option VALUES — they are already in persisted forensics rows", () => {
+    expect([UNDEBATED_OPTION_COUNCIL, UNDEBATED_OPTION_NARROW, UNDEBATED_OPTION_ACCEPT]).toEqual([
+      "undebated_council",
+      "undebated_narrow",
+      "undebated_accept",
+    ]);
+    expect(buildUndebatedQuestion(two).options.map((o) => o.value)).toEqual([
+      "undebated_council",
+      "undebated_narrow",
+      "undebated_accept",
+    ]);
+  });
+
+  it("the halt option's LABEL says the run stops — it does not promise a council", () => {
+    const council = buildUndebatedQuestion(two).options.find((o) => o.value === UNDEBATED_OPTION_COUNCIL);
+    expect(council).toBeDefined();
+    // The measured label. It reads as an action the system takes; it is not one.
+    expect(council?.label).not.toBe("Take it back to the council");
+    expect(council?.label.toLowerCase()).toContain("stop");
+    // …and it must not re-smuggle the same promise into the label either.
+    expect(council?.label.toLowerCase()).not.toMatch(/take .* back to .* council/);
+  });
+
+  it("the halt option NAMES the next command instead of gesturing at one", () => {
+    const council = buildUndebatedQuestion(two).options.find((o) => o.value === UNDEBATED_OPTION_COUNCIL);
+    expect(council?.description).toContain("/council");
+    // Resume is the one thing a user will reach for, and it is the one thing
+    // that does not work here. Silence about it sends them into the loop.
+    expect(council?.description).toContain("/ideal resume");
+  });
+
+  it("recommends the option that HAS a forward path, not the halt", () => {
+    // The attended recommendation and the unattended default are different
+    // questions. `narrow` is the only answer that both keeps the gate's
+    // guarantee (no sprint planned on an unargued goal) and lets the run move.
+    const card = buildUndebatedQuestion(two);
+    expect(card.options[card.defaultIndex]?.value).toBe(UNDEBATED_OPTION_NARROW);
+  });
+
+  it("emits that recommendation on the askcard the TUI renders", async () => {
+    const { chunks } = await drain(
+      runUndebatedCriteriaGate({
+        undebated: two,
+        respondToQuestion: vi.fn().mockResolvedValue(UNDEBATED_OPTION_NARROW),
+        timeoutMs: 5_000,
+      }),
+    );
+    const q = chunks.find((c) => c.type === "council_question")?.councilQuestion;
+    expect(q?.options?.length).toBe(3);
+    expect(q?.options?.[q.defaultIndex ?? -1]?.value).toBe(UNDEBATED_OPTION_NARROW);
+  });
+
+  it("the attended halt line reports the stop and names the way out", async () => {
+    const { chunks, decision } = await drain(
+      runUndebatedCriteriaGate({
+        undebated: two,
+        respondToQuestion: vi.fn().mockResolvedValue(UNDEBATED_OPTION_COUNCIL),
+        timeoutMs: 5_000,
+      }),
+    );
+    expect(decision).toMatchObject({ action: "council", unattended: false });
+    const text = joinContent(chunks);
+    // The measured line: an instruction to the human, phrased as a report.
+    expect(text).not.toContain("take the undebated criteria back to a council");
+    expect(text.toLowerCase()).toContain("stop");
+    expect(text).toContain("/council");
+    // This answer is persisted and honoured, so a resume will NOT continue.
+    expect(text).toContain("/ideal resume");
+  });
+
+  it("the UNATTENDED timeout still halts — and says the next resume will ask again", async () => {
+    // Must not regress: auto-accepting with nobody watching reproduces the exact
+    // defect the gate exists to catch. But an unattended halt writes NO
+    // resolution, so unlike the attended halt a later resume DOES re-ask — the
+    // two lines describe genuinely different situations and must not be shared.
+    const neverAnswers = vi.fn(() => new Promise<string>(() => {}));
+    const { chunks, decision } = await drain(
+      runUndebatedCriteriaGate({ undebated: two, respondToQuestion: neverAnswers, timeoutMs: 20 }),
+    );
+    expect(decision).toMatchObject({ action: "council", unattended: true, answer: "" });
+    const text = joinContent(chunks);
+    expect(text).toContain("/ideal resume");
+    expect(text.toLowerCase()).toMatch(/ask(s| this| you)? again|asked again/);
+    expect(text).not.toContain("/council");
+  });
+
+  it("an explicit narrow / accept still proceeds, and neither line claims a council ran", async () => {
+    for (const [answer, action] of [
+      [UNDEBATED_OPTION_NARROW, "narrow"],
+      [UNDEBATED_OPTION_ACCEPT, "accept"],
+    ] as const) {
+      const { chunks, decision } = await drain(
+        runUndebatedCriteriaGate({
+          undebated: two,
+          respondToQuestion: vi.fn().mockResolvedValue(answer),
+          timeoutMs: 5_000,
+        }),
+      );
+      expect(decision).toMatchObject({ action, unattended: false });
+      expect(joinContent(chunks).toLowerCase()).not.toContain("council");
+    }
+  });
+});

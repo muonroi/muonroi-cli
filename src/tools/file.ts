@@ -1,9 +1,11 @@
 import { createTwoFilesPatch } from "diff";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { dirname, isAbsolute, resolve } from "path";
-import { summarizeDiagnostics, syncFileWithLsp } from "../lsp/runtime";
+import { LSP_DETAIL_MAX_ACK } from "../lsp/manager";
+import { describeDiagnostics, syncFileWithLsp } from "../lsp/runtime";
 import type { LspDiagnosticFile } from "../lsp/types";
 import type { FileTracker } from "./file-tracker.js";
+import { blockWriteIfOutOfScope, normalizeMsysDrivePath } from "./write-scope.js";
 
 export interface FileDiff {
   filePath: string;
@@ -20,8 +22,22 @@ export interface FileResult {
   lspDiagnostics?: LspDiagnosticFile[];
 }
 
+/**
+ * The one boundary every file tool routes its target through.
+ *
+ * The MSYS normalisation happens HERE, before containment, so `write-scope.ts`
+ * and this module cannot disagree about what a path means. `write-scope.ts` owns
+ * the function (it already owns `canonicalize`, i.e. "what does this path really
+ * mean") and applies it inside `canonicalize` too — the same one-owner shape the
+ * two guards already use for `getCommitRunRoot()`.
+ *
+ * Without it, `isAbsolute("/d/x")` is true on win32 and the path passed through
+ * UNCHANGED: never joined to cwd, never corrected, and `path.resolve` downstream
+ * prefixed the current drive (`D:\d\x`, which does not exist).
+ */
 function resolvePath(filePath: string, cwd: string): string {
-  return isAbsolute(filePath) ? filePath : resolve(cwd, filePath);
+  const spelled = normalizeMsysDrivePath(filePath);
+  return isAbsolute(spelled) ? spelled : resolve(cwd, spelled);
 }
 
 function computeDiff(filePath: string, before: string, after: string): FileDiff {
@@ -121,6 +137,11 @@ export async function writeFile(
 ): Promise<FileResult> {
   try {
     const full = resolvePath(filePath, cwd);
+    // Containment BEFORE anything is created: `full` is the post-resolution
+    // target, so this one check covers both a relative path riding a drifted
+    // tool cwd and an absolute path that bypassed the cwd entirely.
+    const scopeBlock = blockWriteIfOutOfScope(filePath, full);
+    if (scopeBlock) return { success: false, output: scopeBlock };
     const exists = existsSync(full);
     const before = exists ? readFileSync(full, "utf-8") : "";
 
@@ -144,7 +165,10 @@ export async function writeFile(
     const diff = computeDiff(filePath, before, content);
     const verb = before === "" ? "Created" : "Updated";
     const lspDiagnostics = await syncFileWithLsp(cwd, full, content, true, true).catch(() => [] as LspDiagnosticFile[]);
-    const lspSummary = summarizeDiagnostics(lspDiagnostics);
+    // Name the diagnostics, don't just count them: the measured blind-edit loop
+    // (/ideal run muc2joffe506) STARTED at an edit ack that said only
+    // "6 LSP issues · 6 errors". Errors sort first, warnings are labelled.
+    const lspSummary = describeDiagnostics(lspDiagnostics, { cwd, max: LSP_DETAIL_MAX_ACK });
     return {
       success: true,
       output: `${verb} ${filePath} (+${diff.additions} -${diff.removals})${lspSummary ? `\n${lspSummary}` : ""}`,
@@ -166,6 +190,11 @@ export async function editFile(
 ): Promise<FileResult> {
   try {
     const full = resolvePath(filePath, cwd);
+    // Containment first — refuse before disclosing whether the out-of-scope file
+    // exists, and before any write. Covers relative-path cwd drift and absolute
+    // paths alike (both have already collapsed into `full`).
+    const scopeBlock = blockWriteIfOutOfScope(filePath, full);
+    if (scopeBlock) return { success: false, output: scopeBlock };
     if (!existsSync(full)) {
       return { success: false, output: `File not found: ${filePath}` };
     }
@@ -224,7 +253,7 @@ export async function editFile(
 
     const diff = computeDiff(filePath, before, after);
     const lspDiagnostics = await syncFileWithLsp(cwd, full, after, true, true).catch(() => [] as LspDiagnosticFile[]);
-    const lspSummary = summarizeDiagnostics(lspDiagnostics);
+    const lspSummary = describeDiagnostics(lspDiagnostics, { cwd, max: LSP_DETAIL_MAX_ACK });
     return {
       success: true,
       output: `Edited ${filePath} (+${diff.additions} -${diff.removals})${lspSummary ? `\n${lspSummary}` : ""}`,

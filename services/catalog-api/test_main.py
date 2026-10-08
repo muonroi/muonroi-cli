@@ -11,6 +11,22 @@ from fastapi.testclient import TestClient
 import main as catalog_main
 
 
+def test_model_contract_retains_modalities_and_context_pricing(client):
+    row = catalog_main.load_catalog(str(catalog_main.catalog_path())).models[0]
+    payload = row.model_dump(exclude_none=True)
+    payload.update(
+        modalities={"input": ["text", "image"], "output": ["text"]},
+        long_context_pricing={"input_token_threshold": 100000, "input_multiplier": 5, "output_multiplier": 5},
+    )
+    catalog = json.loads(catalog_main.catalog_path().read_text())
+    catalog["models"][0] = payload
+    catalog_main.catalog_path().write_text(json.dumps(catalog))
+    catalog_main.load_catalog.cache_clear()
+    served = client.get("/api/v1/models").json()["models"][0]
+    assert served["modalities"] == payload["modalities"]
+    assert served["long_context_pricing"] == payload["long_context_pricing"]
+
+
 @pytest.fixture(autouse=True)
 def _reset_cache():
     catalog_main.load_catalog.cache_clear()
@@ -311,6 +327,7 @@ def test_real_catalog_serves_every_stepfun_model_with_billing_and_limits(monkeyp
         "step-3.5-flash",
         "step-3.5-flash-2603",
         "step-3.7-flash",
+        "step-5-preview",
         "stepaudio-2.5-chat",
         "stepaudio-2.5-realtime",
         "stepaudio-2.5-tts",

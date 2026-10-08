@@ -63,17 +63,14 @@ import {
   isModelDisabled,
   isReservedSubagentName,
   loadMcpServers,
-  loadPaymentSettings,
   loadUserSettings,
   loadValidSubAgents,
   type McpRemoteTransport,
   type McpServerConfig,
-  type PaymentSettings,
   type SandboxMode,
   type SandboxSettings,
   saveApprovedTelegramUserId,
   saveMcpServers,
-  savePaymentSettings,
   saveProjectSettings,
   saveUserSettings,
   setDefaultProvider,
@@ -622,6 +619,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     apiKeyPrompt,
     blockPrompt,
     btwState,
+    modalKeyboardOwner,
     oauthLogin,
     oauthProviders,
     configuredProviders,
@@ -1783,8 +1781,21 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       !pendingCouncilQuestion &&
                       !pendingCouncilPreflight && <ShimmerText t={t} text="Planning next moves" />}
                     {/* Plan questions panel — inline, OpenCode-style */}
-                    {showPlanPanel && <PlanQuestionsPanel t={t} questions={planQuestions} state={pqs} />}
-                    {pendingPaymentApproval && <PaymentApprovalPanel t={t} payment={pendingPaymentApproval} />}
+                    {showPlanPanel && (
+                      <PlanQuestionsPanel
+                        t={t}
+                        questions={planQuestions}
+                        state={pqs}
+                        focused={modalKeyboardOwner === "plan-questions"}
+                      />
+                    )}
+                    {pendingPaymentApproval && (
+                      <PaymentApprovalPanel
+                        t={t}
+                        payment={pendingPaymentApproval}
+                        focused={modalKeyboardOwner === "payment-approval"}
+                      />
+                    )}
                     {/* Modals/wizards anchored to the bottom so sticky-bottom
                       auto-scroll keeps them in view even when councilMessages
                       fill the scrollbox. */}
@@ -1794,11 +1805,24 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         selectedIndex={haltSelectedIndex}
                         terminalCols={width}
                         theme={t}
+                        focused={modalKeyboardOwner === "ideal-halt-card"}
                       />
                     )}
-                    {initNewForm && <InitNewFormCard state={initNewForm} terminalCols={width} theme={t} />}
+                    {initNewForm && (
+                      <InitNewFormCard
+                        state={initNewForm}
+                        terminalCols={width}
+                        theme={t}
+                        focused={modalKeyboardOwner === "init-new-form"}
+                      />
+                    )}
                     {pointToExistingForm && (
-                      <PointToExistingFormCard state={pointToExistingForm} terminalCols={width} theme={t} />
+                      <PointToExistingFormCard
+                        state={pointToExistingForm}
+                        terminalCols={width}
+                        theme={t}
+                        focused={modalKeyboardOwner === "point-to-existing-form"}
+                      />
                     )}
                     {councilProgress && (
                       <Semantic id="continue-as-council-progress" role="log" name="Council brainstorm">
@@ -1823,13 +1847,20 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       anchors to the pending question (moved here from above
                       streamContent/councilProgress — see fix/tui-askcard-anchor). */}
                     {pendingCouncilQuestion && councilCardState && (
-                      <CouncilQuestionCard question={pendingCouncilQuestion} theme={t} state={councilCardState} />
+                      <CouncilQuestionCard
+                        question={pendingCouncilQuestion}
+                        theme={t}
+                        state={councilCardState}
+                        focused={modalKeyboardOwner === "askcard"}
+                      />
                     )}
                     {pendingCouncilPreflight && preflightCardState && (
                       <CouncilQuestionCard
                         question={buildPreflightQuestion(pendingCouncilPreflight)}
                         theme={t}
                         state={preflightCardState}
+                        focused={modalKeyboardOwner === "askcard-preflight"}
+                        semanticId="askcard-preflight"
                       />
                     )}
                   </scrollbox>
@@ -1891,6 +1922,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     showPlanQuestions={showPlanPanel}
                     showApiKeyModal={showApiKeyModal}
                     blockPrompt={blockPrompt}
+                    modalOwnsKeyboard={modalKeyboardOwner !== null}
                     onSubmit={handleSubmit}
                     onPaste={handlePaste}
                     pasteBlocks={pasteBlocks}
@@ -2006,6 +2038,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   showPlanQuestions={showPlanPanel}
                   showApiKeyModal={showApiKeyModal}
                   blockPrompt={blockPrompt}
+                  modalOwnsKeyboard={modalKeyboardOwner !== null}
                   onSubmit={handleSubmit}
                   onPaste={handlePaste}
                   pasteBlocks={pasteBlocks}
@@ -2068,6 +2101,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showApiKeyModal && (
           <ApiKeyModal
+            focused={modalKeyboardOwner === "api-key-modal"}
             t={t}
             width={width}
             height={height}
@@ -2078,6 +2112,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showUpdateModal && updateInfo && (
           <UpdateModal
+            focused={modalKeyboardOwner === "update-modal"}
             t={t}
             width={width}
             height={height}
@@ -2088,6 +2123,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {needsKeyQueue.length > 0 && needsKeyQueue[0] && (
           <McpNeedsKeyCard
+            focused={modalKeyboardOwner === "mcp-needs-key-card"}
             t={t}
             width={width}
             height={height}
@@ -2102,6 +2138,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {eeConnectVisible && needsKeyQueue.length === 0 && (
           <EeConnectCard
+            focused={modalKeyboardOwner === "ee-connect-card"}
             t={t}
             width={width}
             height={height}
@@ -2115,6 +2152,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {lspSetupVisible && needsKeyQueue.length === 0 && !eeConnectVisible && (
           <LspSetupCard
+            focused={modalKeyboardOwner === "lsp-setup-card"}
             t={t}
             width={width}
             height={height}
@@ -2128,6 +2166,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showMcpModal && !showMcpEditor && (
           <McpBrowserModal
+            focused={modalKeyboardOwner === "mcp-modal"}
             t={t}
             width={width}
             height={height}
@@ -2138,6 +2177,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showMcpEditor && (
           <McpEditorModal
+            focused={modalKeyboardOwner === "mcp-editor"}
             t={t}
             width={width}
             height={height}
@@ -2158,6 +2198,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showScheduleModal && (
           <ScheduleBrowserModal
+            focused={modalKeyboardOwner === "schedule-modal"}
             t={t}
             width={width}
             height={height}
@@ -2168,6 +2209,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showAgentsModal && !showAgentsEditor && (
           <SubagentsBrowserModal
+            focused={modalKeyboardOwner === "subagents-modal"}
             t={t}
             width={width}
             height={height}
@@ -2178,6 +2220,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showAgentsEditor && (
           <SubagentEditorModal
+            focused={modalKeyboardOwner === "subagent-editor"}
             key={`subagent-editor-${agentsEditorSyncKey}`}
             t={t}
             width={width}
@@ -2195,6 +2238,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showModelPicker && (
           <ModelPickerModal
+            focused={modalKeyboardOwner === "model-picker"}
             t={t}
             currentModel={model}
             selectedIndex={modelPickerIndex}
@@ -2217,6 +2261,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showSessionPicker && (
           <SessionPickerModal
+            focused={modalKeyboardOwner === "session-picker"}
             t={t}
             sessions={sessionPickerList}
             focusIndex={sessionPickerIndex}
@@ -2226,6 +2271,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showWalletPicker && (
           <WalletPickerModal
+            focused={modalKeyboardOwner === "wallet-picker"}
             t={t}
             settings={walletSettings}
             walletInfo={walletDisplayInfo}
@@ -2236,6 +2282,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showSandboxPicker && (
           <SandboxPickerModal
+            focused={modalKeyboardOwner === "sandbox-picker"}
             t={t}
             currentMode={sandboxMode}
             settings={sandboxSettings}
@@ -2248,6 +2295,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showConnectModal && (
           <ConnectModal
+            focused={modalKeyboardOwner === "connect-modal"}
             t={t}
             width={width}
             height={height}
@@ -2257,6 +2305,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showTelegramTokenModal && (
           <TelegramTokenModal
+            focused={modalKeyboardOwner === "telegram-token-modal"}
             t={t}
             width={width}
             height={height}
@@ -2267,6 +2316,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showTelegramPairModal && (
           <TelegramPairModal
+            focused={modalKeyboardOwner === "telegram-pair-modal"}
             t={t}
             width={width}
             height={height}

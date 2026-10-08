@@ -8,7 +8,8 @@ import {
 } from "../council/debate-checkpoint.js";
 import { resolveDebateSummary } from "../council/debate-summary.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
-import { phaseStart } from "../council/phase-events.js";
+import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
+import { extractJsonObject } from "../council/planner.js";
 import { runPreflight } from "../council/preflight.js";
 import { makeStanceRecall } from "../council/stance-recall.js";
 import type { ClarifiedSpec, CouncilLLM, CouncilParticipant, DebateState } from "../council/types.js";
@@ -17,7 +18,8 @@ import { getDefaultEEClient } from "../ee/intercept.js";
 import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import { ensureRunScoped } from "../flow/hierarchy.js";
-import { renderResumeDigest, writeContextDoc, writeResearchDoc } from "../flow/run-artifacts.js";
+import { renderResumeDigest, writeContextDoc, writeResearchDoc, writeSpecLayoutCheck } from "../flow/run-artifacts.js";
+import { DEFAULT_TOKEN_BUDGET, truncateToBudget } from "../pil/budget.js";
 import { logInteraction } from "../storage/index.js";
 import type { CouncilInfoCard, StreamChunk } from "../types/index.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
@@ -27,11 +29,14 @@ import { type DiscoveryResult, discoverProject } from "./discover.js";
 import { formatProjectContextForPrompt } from "./discovery-context-format.js";
 import { readProjectContext } from "./discovery-persistence.js";
 import { clarifiedSpecFromContext, runGatherPhase } from "./gather.js";
+import { formatLayoutConvention, type LayoutConvention, scanLayoutConvention } from "./layout-convention.js";
 import { recordPhaseEnd, recordPhaseStart } from "./phase-budget.js";
 import { additionalPrefills, auditAsContextBlock, auditRepo, type RepoAudit } from "./repo-audit.js";
 import { SEED_DIMENSIONS } from "./seed-questions.js";
+import { checkSpecLayout } from "./spec-layout-check.js";
 import { deriveTasksFromSpec, writeTasks } from "./typed-artifacts.js";
 import type { DriverContext, DriverResult, ProductSpec, ProductStatusCardData, Stage } from "./types.js";
+import { enforceUndebatedCriteriaGate, undebatedHaltDetail } from "./undebated-criteria-gate.js";
 
 // Council usage_events recording (source="council") now happens at the single
 // source of truth inside createCouncilLLM (src/council/llm.ts → recordCouncilUsage),
@@ -75,6 +80,46 @@ function logLoopEvent(
     console.error(
       `[loop-driver] logLoopEvent failed for subtype "${subtype}": ${err instanceof Error ? err.message : String(err)}`,
     );
+  }
+}
+
+/**
+ * Parse the scoping-synthesis completion into a ProductSpec.
+ *
+ * Uses the SAME string/escape-aware scanner the council synthesizer already
+ * relies on (`extractJsonObject`, src/council/planner.ts) instead of a greedy
+ * `/\{[\s\S]*\}/` match. Two things the regex could not do:
+ *
+ *  - It cannot tell "the model ignored the format" from "the completion was CUT
+ *    OFF at the provider's output ceiling" — opposite failures needing opposite
+ *    retries (ask for LESS vs ask again).
+ *  - On a truncated object it still matches first-`{`..last-`}` and hands
+ *    JSON.parse a fragment, which throws.
+ *
+ * Measured on run `mtmrm9c667d4` (interaction_logs 2026-09-04T09:55:29.507Z):
+ * `step-3.5-flash` returned exactly 4096 output tokens — its ceiling — and the
+ * object was cut mid-string, so `JSON.parse` threw `Unterminated string` and
+ * the whole /ideal run ended there.
+ */
+function parseProductSpec(raw: string): { spec: ProductSpec | null; truncated: boolean; error: string | null } {
+  const { json, truncated } = extractJsonObject(raw);
+  if (!json) {
+    return {
+      spec: null,
+      truncated,
+      error: truncated
+        ? "JSON object was cut off before it closed (provider output ceiling)"
+        : "completion contained no JSON object",
+    };
+  }
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { spec: null, truncated, error: "parsed JSON was not an object" };
+    }
+    return { spec: parsed as ProductSpec, truncated: false, error: null };
+  } catch (err) {
+    return { spec: null, truncated, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -257,6 +302,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           flowDir: ctx.flowDir,
           runId: ctx.runId,
           phase: "discover",
+          sessionId: ctx.sessionId,
         });
 
         // Run shallow manifest probe and deep repo audit in parallel.
@@ -334,11 +380,10 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         const discoverWarn = await recordPhaseEnd({
           flowDir: ctx.flowDir,
           runId: ctx.runId,
-          capUsd: ctx.flags.maxCost,
           marker: phaseMarker_discover,
         });
         if (discoverWarn) {
-          yield { type: "content", content: `\n> [budget] ${discoverWarn}\n` } as StreamChunk;
+          yield { type: "content", content: `\n> [spend] ${discoverWarn}\n` } as StreamChunk;
         }
 
         // Emit an initial product_status_card so the UI shows the status panel
@@ -348,7 +393,6 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           sprintN: 0,
           totalSprints: ctx.flags.maxSprints,
           costSpent: 0,
-          costCap: ctx.flags.maxCost,
           criteriaMet: 0,
           criteriaPartial: 0,
           criteriaUnmet: 0,
@@ -370,6 +414,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           flowDir: ctx.flowDir,
           runId: ctx.runId,
           phase: "gather",
+          sessionId: ctx.sessionId,
         });
 
         // Write Resume Digest to state.md
@@ -396,18 +441,10 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         let gatherResult: Awaited<ReturnType<typeof runGatherPhase>> | undefined;
         const gatherTask = (async () => {
           try {
-            gatherResult = await runGatherPhase(
-              ctx.flowDir,
-              ctx.runId,
-              ctx.idea,
-              ctx.flags.maxCost,
-              ctx.llm,
-              ctx.sessionModelId,
-              {
-                emit: (chunk) => gatherEmitted.push(chunk),
-                respondToQuestion: ctx.respondToQuestion,
-              },
-            );
+            gatherResult = await runGatherPhase(ctx.flowDir, ctx.runId, ctx.idea, ctx.llm, ctx.sessionModelId, {
+              emit: (chunk) => gatherEmitted.push(chunk),
+              respondToQuestion: ctx.respondToQuestion,
+            });
           } catch (err) {
             gatherError = err;
           } finally {
@@ -495,11 +532,10 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           const gatherWarn = await recordPhaseEnd({
             flowDir: ctx.flowDir,
             runId: ctx.runId,
-            capUsd: ctx.flags.maxCost,
             marker: phaseMarker_gather,
           });
           if (gatherWarn) {
-            yield { type: "content", content: `\n> [budget] ${gatherWarn}\n` } as StreamChunk;
+            yield { type: "content", content: `\n> [spend] ${gatherWarn}\n` } as StreamChunk;
           }
 
           state = "research";
@@ -538,6 +574,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           flowDir: ctx.flowDir,
           runId: ctx.runId,
           phase: "research",
+          sessionId: ctx.sessionId,
         });
 
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
@@ -738,6 +775,34 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
                 cwd: ctx.flowDir,
                 sourceSession: ctx.sessionId ?? ctx.runId,
               }),
+              // Without this, runGroundingVerify (src/council/debate.ts:2511-2517)
+              // is gated on a config field /ideal never set, so the debate's only
+              // citation-enforcement check was silently dead here — how the
+              // council cited Microsoft.CodeAnalysis.Testing@1.1.1 (a NuGet
+              // package that 404s) in a plan. /council already passes this
+              // (src/council/index.ts:1499); this makes /ideal match.
+              runIsolatedTask: ctx.runIsolatedTask,
+              // R3 — feeds research-mode.ts's decideInternetFirst (debate.ts:855
+              // defaults this to false when unset). Without it /ideal always ran
+              // research codebase-first, even against a truly empty repo, where
+              // the model was told to grep nothing instead of reading docs/web —
+              // a plan built from no sources is how a hallucinated dependency
+              // gets in.
+              //
+              // Content-based `audit.hasProject`, NOT `discovery.hasProject`:
+              // discover.ts's hand-maintained MANIFESTS list has no .NET entry,
+              // so discoverProject on a real 506-file C# repo reports
+              // hasProject === false — false-empty for whole stacks.
+              //
+              // `audit` is only assigned in the "discover" case. The C-v2
+              // cross-session resume path above (readDebateCheckpoint) skips
+              // discovery entirely and jumps straight here, so `audit` can be
+              // `undefined`. `!audit?.hasProject` would collapse that to `true`,
+              // declaring a real, populated repo "empty" purely because
+              // discovery never ran on THIS process. Leave the field unset when
+              // there is no evidence — `undefined` restores today's (safe)
+              // default rather than guessing.
+              repoIsEmpty: audit ? !audit.hasProject : undefined,
             },
             ctx.llm,
           );
@@ -925,11 +990,60 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         const researchWarn = await recordPhaseEnd({
           flowDir: ctx.flowDir,
           runId: ctx.runId,
-          capUsd: ctx.flags.maxCost,
           marker: phaseMarker_research,
         });
         if (researchWarn) {
-          yield { type: "content", content: `\n> [budget] ${researchWarn}\n` } as StreamChunk;
+          yield { type: "content", content: `\n> [spend] ${researchWarn}\n` } as StreamChunk;
+        }
+
+        // F8 — the undebated-criteria gate. THIS is the transition that ran 23
+        // seconds after the leader's closing verdict in run `mttwpmu8ee5b`
+        // (council_message 09:54:12 → phase_start{"phase":"scoping"} 09:54:35),
+        // carrying a criterion the leader had said in plain words nobody had
+        // discussed ("chưa có thảo luận nào về đóng gói NuGet") straight into
+        // sprint planning. Nothing may reach `state = "scoping"` without passing
+        // through here first. See src/product-loop/undebated-criteria-gate.ts for
+        // why an all-null stance row is the council's own record of silence and
+        // why the unattended default is to stop.
+        //
+        // F8b — this is no longer the ONLY gated transition, and the call also
+        // PERSISTS `finalStanceRows` against the run. A `/ideal resume` never
+        // reaches this case (measured: sprint stages with zero phase_start rows),
+        // so `runResume` consults the same gate off the same record before it
+        // enters sprint work. Passing the rows here is what puts them on disk.
+        const gate = yield* enforceUndebatedCriteriaGate({
+          runDir,
+          respondToQuestion: ctx.respondToQuestion,
+          stanceRows: debateState.finalStanceRows,
+          audit: (data) =>
+            logLoopEvent(ctx, "undebated_criteria_gate", {
+              phase: "research",
+              // `?? []` on purpose: the type says required, but specs
+              // reconstructed from an older debate-inputs.json have arrived
+              // without it, and the gate must never crash the FSM.
+              pinnedTotal: (clarifiedSpec?.successCriteria ?? []).length,
+              ...data,
+            }),
+        });
+        if (!gate.proceed) {
+          return {
+            runId: ctx.runId,
+            stage: "halted",
+            success: false,
+            reason: "undebated_criteria",
+            detail: undebatedHaltDetail(gate.undebated),
+          };
+        }
+        if (gate.action === "narrow") {
+          // Drop the undebated criteria from the spec the scoping synthesis
+          // reads (`JSON.stringify(clarifiedSpec)` below), so the roadmap
+          // cannot be built around a goal nobody examined. Replaced, not
+          // mutated — the persisted debate-inputs.json keeps the original.
+          const dropped = new Set(gate.undebated.map((u) => u.index));
+          clarifiedSpec = {
+            ...clarifiedSpec,
+            successCriteria: (clarifiedSpec.successCriteria ?? []).filter((_, i) => !dropped.has(i)),
+          };
         }
 
         state = "scoping";
@@ -957,6 +1071,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           flowDir: ctx.flowDir,
           runId: ctx.runId,
           phase: "scoping",
+          sessionId: ctx.sessionId,
         });
 
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
@@ -986,13 +1101,38 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           },
         } as StreamChunk;
 
+        // S7 — ground the spec in the repo's OWN observed layout, the same
+        // evidence sprint-runner.ts already gives the per-sprint planner
+        // (scanLayoutConvention, ~sprint-runner.ts:1677). Prompt text alone
+        // is not enough by itself (see spec-layout-check.ts for the
+        // deterministic post-check below), but the spec was being synthesized
+        // BLIND to this evidence at all — on a .NET repo whose real convention
+        // is `src/src/<Name>` + `src/tests/<Name>.Tests`, a spec proposing
+        // `src/<Name>` matches neither observed root.
+        // ADDITION ONLY, and only when a convention was actually observed:
+        // when `layoutConvention` is null the block below is "" and
+        // `synthesisPrompt` is byte-identical to before this change (pinned
+        // by scoping-layout-convention.test.ts).
+        let layoutConvention: LayoutConvention | null = null;
+        try {
+          layoutConvention = await scanLayoutConvention(ctx.cwd);
+        } catch (err) {
+          console.error(
+            `[loop-driver] layout-convention scan failed for "${ctx.cwd}": ${err instanceof Error ? err.message : String(err)}`,
+            err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+          );
+        }
+        const layoutConventionBlock = layoutConvention
+          ? `${truncateToBudget(formatLayoutConvention(layoutConvention), DEFAULT_TOKEN_BUDGET)}\nfolderStructure MUST follow this observed convention, not an invented path. If a solution/workspace index is listed above, a new project MUST be registered in it.`
+          : "";
+
         // Synthesize ProductSpec
         const synthesisPrompt = `Synthesize a ProductSpec JSON based on the following:
 Idea: ${ctx.idea}
 Clarified Spec: ${JSON.stringify(clarifiedSpec)}
 Debate Summary: ${resolvedDebateSummary || debateState.runningSummary}
 Research Findings: ${debateState.researchFindings ?? "N/A"}
-
+${layoutConventionBlock}
 Output ONLY a JSON object matching this interface:
 interface ProductSpec {
   idea: string;
@@ -1046,18 +1186,108 @@ interface ProductSpec {
           });
           throw err;
         }
-        try {
-          const match = rawSpec.match(/\{[\s\S]*\}/);
-          productSpec = match ? JSON.parse(match[0]) : ({} as ProductSpec);
-          productSpec!.createdAt = new Date();
-        } catch (err) {
+        let parsedSpec = parseProductSpec(rawSpec);
+        if (!parsedSpec.spec) {
+          // Attempt 1 did not parse. Mirror the recovery the council
+          // synthesizer already proved out (src/council/planner.ts:96-155):
+          // announce it, then retry ONCE asking for a SMALLER object. Repeating
+          // the same oversized request cannot fix a completion that was cut off
+          // at the provider's output ceiling — it truncates identically.
           logLoopEvent(ctx, "council_error", {
             phase: "scoping",
             stage: "synthesis-parse",
-            error: err instanceof Error ? err.message : String(err),
+            attempt: 1,
+            truncated: parsedSpec.truncated,
+            error: parsedSpec.error ?? "unparseable",
+            rawSpecExcerpt: rawSpec.slice(0, 800),
+            severity: "warn",
+          });
+          yield {
+            type: "content",
+            content: `\n> Spec synthesis attempt 1 did not parse (${
+              parsedSpec.truncated ? "output cut off at the provider's ceiling" : "no parseable JSON object"
+            }). Retrying once with a compact prompt…\n`,
+          } as StreamChunk;
+          const retrySystem =
+            "You are a Product Owner synthesizing a technical specification.\n\n" +
+            "## Retry directive\n" +
+            "Your previous attempt did not parse. Emit ONLY the JSON object — no preamble, no code fence, " +
+            "no commentary after it — and keep it SMALL: every string at most 200 characters, `mvp` and " +
+            "`phase2` at most 3 entries each. Completing the JSON object matters more than covering every point.";
+          try {
+            const retryRaw = await ctx.llm.generate(leaderModelId, retrySystem, synthesisPrompt);
+            rawSpec = retryRaw;
+            parsedSpec = parseProductSpec(retryRaw);
+          } catch (err) {
+            // Retry itself failed (provider error/abort). Keep attempt 1's
+            // parse verdict and fall through to the announced bail below.
+            logLoopEvent(ctx, "council_error", {
+              phase: "scoping",
+              stage: "synthesis-retry-llm",
+              error: err instanceof Error ? err.message : String(err),
+              elapsedMs: Date.now() - scopingPhaseStartMs,
+            });
+          }
+        }
+
+        if (!parsedSpec.spec) {
+          const detail = `Spec synthesis produced no parseable ProductSpec after 2 attempts (${
+            parsedSpec.error ?? "unparseable"
+          }).`;
+          logLoopEvent(ctx, "council_error", {
+            phase: "scoping",
+            stage: "synthesis-parse",
+            attempt: 2,
+            truncated: parsedSpec.truncated,
+            error: parsedSpec.error ?? "unparseable",
             rawSpecExcerpt: rawSpec.slice(0, 800),
           });
-          return { runId: ctx.runId, stage: "error", success: false, reason: "failed_to_synthesize_spec" };
+          // Close `loop:scoping`. Without this the phase stays `state:"active"`
+          // for the rest of the process and the run's last observable signal is
+          // "synthesis in progress" — indistinguishable from a hang to anything
+          // driving the TUI. That is exactly what run mtmrm9c667d4 looked like:
+          // a council_error row in the DB and nothing at all on the wire.
+          yield phaseError({
+            phaseId: "loop:scoping",
+            kind: "synthesis",
+            label: "Scoping & Synthesis",
+            startedAt: scopingPhaseStartMs,
+            errorMessage: detail,
+          });
+          return { runId: ctx.runId, stage: "error", success: false, reason: "failed_to_synthesize_spec", detail };
+        }
+
+        productSpec = parsedSpec.spec;
+        productSpec.createdAt = new Date();
+
+        // S7 — deterministic post-check on the EMITTED spec. Prompt text
+        // alone already failed on this exact bug class (see spec-layout-
+        // check.ts), so validate the model's actual
+        // `folderStructure` against the same `layoutConvention` used to build
+        // the prompt above, rather than trusting the model followed it.
+        // Report-only against the spec text itself — roadmap.md is never
+        // rewritten. On "mismatch" the finding is persisted next to the spec
+        // (spec-layout-check.json) so sprint-runner.ts can fold a correction
+        // line into the per-sprint planner's context.
+        try {
+          const specLayoutResult = checkSpecLayout(productSpec.folderStructure, layoutConvention);
+          if (specLayoutResult.status === "mismatch") {
+            console.error(
+              `[loop-driver] spec-layout-check: folderStructure mismatched the observed layout convention (run ${ctx.runId})`,
+              specLayoutResult.findings,
+            );
+          }
+          logLoopEvent(ctx, "spec_layout_check", {
+            phase: "scoping",
+            status: specLayoutResult.status,
+            findingsCount: specLayoutResult.findings.length,
+          });
+          await writeSpecLayoutCheck(ctx.flowDir, ctx.runId, specLayoutResult);
+        } catch (err) {
+          console.error(
+            `[loop-driver] spec-layout-check failed for run ${ctx.runId}: ${err instanceof Error ? err.message : String(err)}`,
+            err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+          );
         }
 
         // Write ProductSpec to roadmap.md (human-readable surface).
@@ -1141,14 +1371,23 @@ interface ProductSpec {
           yield value as StreamChunk;
         }
 
+        // Symmetry with the bail above: `loop:scoping` must reach a terminal
+        // state on EVERY exit, approved or rejected, or the phase list keeps
+        // showing an active synthesis after the run has moved on.
+        yield phaseDone({
+          phaseId: "loop:scoping",
+          kind: "synthesis",
+          label: "Scoping & Synthesis",
+          startedAt: scopingPhaseStartMs,
+        });
+
         const scopingWarn = await recordPhaseEnd({
           flowDir: ctx.flowDir,
           runId: ctx.runId,
-          capUsd: ctx.flags.maxCost,
           marker: phaseMarker_scoping,
         });
         if (scopingWarn) {
-          yield { type: "content", content: `\n> [budget] ${scopingWarn}\n` } as StreamChunk;
+          yield { type: "content", content: `\n> [spend] ${scopingWarn}\n` } as StreamChunk;
         }
 
         if (approved) {

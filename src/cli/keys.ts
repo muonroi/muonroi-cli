@@ -18,6 +18,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { type ChatSecretId, getChatSecret, listChatSecrets, setChatSecret } from "../chat/chat-keychain.js";
 import { type McpKeyId, setMcpKey } from "../mcp/mcp-keychain.js";
+import { promptProviderCredentials, saveProviderCredentials } from "../providers/credential-setup.js";
 import {
   deleteKeyForProvider,
   KEYCHAIN_PROVIDER_IDS,
@@ -122,27 +123,22 @@ export async function runKeysSet(provider: string, _options: KeysSetOptions = {}
     console.error(`Unknown provider '${provider}'. Valid: ${KEYCHAIN_PROVIDER_IDS.join(", ")}`);
     process.exit(1);
   }
-  const key = (await promptHidden(`Paste ${provider} API key (hidden): `)).trim();
-  if (!key) {
-    console.error("Aborted (empty key).");
-    process.exit(1);
-  }
-
   try {
-    const ok = await setKeyForProvider(norm, key);
+    const credentials = await promptProviderCredentials(norm, promptHidden);
+    if (!credentials) {
+      console.error("Aborted (empty key).");
+      process.exit(1);
+    }
+    const ok = await saveProviderCredentials(norm, credentials);
     if (!ok) {
-      console.error("OS keychain unavailable (keytar failed to load or secret service backend unavailable).");
-      console.error("Common on Linux: install the runtime library, e.g.");
-      console.error("  Fedora:   sudo dnf install libsecret");
-      console.error("  Ubuntu:   sudo apt-get install libsecret-1-0");
-      console.error("Then ensure you have an active graphical session or keyring daemon (gnome-keyring).");
-      console.error("Falling back: set environment variable instead (still works at runtime):");
-      console.error(`  export ${provider.toUpperCase()}_API_KEY='<your key>'`);
+      console.error(`Could not store ${norm} credentials in the environment store.`);
       process.exit(2);
     }
-    console.log(`Stored ${provider} key in OS keychain.`);
+    console.log(
+      `Configured ${norm}; key saved in the environment store${credentials.workspaceId ? "; workspace ID saved in user settings" : ""}.`,
+    );
   } catch (e) {
-    console.error(`Failed: ${(e as Error).message}`);
+    console.error(`Failed to configure ${norm}: ${(e as Error).message}`);
     process.exit(1);
   }
 }

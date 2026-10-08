@@ -12,15 +12,15 @@
 // transposition where the field/method originally lived on Agent.
 
 import { type ModelMessage, stepCountIs } from "ai";
-import type { IntentKind } from "../council/types.js";
-import { getModelsForProvider } from "../models/registry.js";
+import type { IntentKind, QuestionResponder } from "../council/types.js";
+import { getTextModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {
   createProviderFactory,
   detectProviderForModel,
+  resolveMaxOutputTokensParam,
   resolveModelRuntime,
   resolveTemperatureParam,
-  shouldDropParam,
 } from "../providers/runtime.js";
 import { generateTextStreamed } from "../providers/streamed-generate.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
@@ -29,10 +29,46 @@ import { appendSystemMessage } from "../storage/index.js";
 import type { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import type { AgentMode, StreamChunk } from "../types/index";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
+import { logger } from "../utils/logger.js";
 import { isProviderDisabled, type ModelRole } from "../utils/settings";
 import { COUNCIL_COLOR_BG, COUNCIL_COLOR_RESET, COUNCIL_ROLE_COLORS, type CouncilOutcome } from "./agent-options";
 import { extractUserContent, getCompactionSummaryText, isCompactionSummaryMessage } from "./compaction";
 import { beginInteractivePause, endInteractivePause } from "./interactive-pause.js";
+import { createNoProgressStopWhen } from "./no-progress-guard.js";
+
+/**
+ * U1 — defense-in-depth bound on `_cardAnsweredQuestionIds` (see its JSDoc).
+ * Generous: a single `/ideal` run realistically answers on the order of tens
+ * of cards, not hundreds. Exported only so the leak-prevention regression
+ * test can drive the eviction path deterministically without a magic number.
+ */
+export const MAX_CARD_ANSWERED_IDS = 200;
+
+/**
+ * Defense-in-depth bound on `_withdrawnQuestionIds`, mirroring
+ * {@link MAX_CARD_ANSWERED_IDS}. A withdrawn id is only ever ADDED (on
+ * timeout/abort/error) and never explicitly drained the way an answered id
+ * is, so without a bound a long-running process that withdraws many cards
+ * would grow this set forever. Generous for the same reason: realistically
+ * tens of withdrawn cards per run, not hundreds.
+ */
+export const MAX_WITHDRAWN_QUESTION_IDS = 200;
+
+/** Result of `CouncilManager.respondToQuestion` — what actually happened to the answer. */
+export interface RespondToQuestionResult {
+  /** True iff a live resolver consumed the answer this call (the normal path). */
+  applied: boolean;
+  /**
+   * True iff `questionId` was already WITHDRAWN (its waiter gave up — timeout,
+   * abort, or the run ending) before this answer arrived. The answer was
+   * logged and NOT applied to anything; callers must show the user a notice
+   * rather than treating this as a normal accepted answer.
+   */
+  stale: boolean;
+  /** Present when `stale` — the withdrawal reason recorded by `withdrawQuestion`. */
+  staleReason?: string;
+}
 
 /**
  * Dependency callbacks the CouncilManager needs to reach back into Agent state
@@ -88,6 +124,38 @@ export class CouncilManager {
   private _preflightResolvers = new Map<string, (approved: boolean) => void>();
   private _bufferedQuestionAnswers = new Map<string, string>();
   private _bufferedPreflightApprovals = new Map<string, boolean>();
+  /**
+   * U1 — questionIds answered WITH their question text, i.e. via the
+   * interactive UI askcard (only `use-app-logic.tsx`'s answer handler passes
+   * `questionText` to {@link respondToQuestion}; headless's
+   * `handleCouncilChunk` never does). Consumed exactly once by
+   * `wasAnsweredByCard` right after the generator's `await
+   * respondToQuestion(id)` resolves, so the council echo sites know the UI
+   * already rendered a paired question+answer transcript record and must not
+   * echo the answer again.
+   *
+   * Every KNOWN card-answering site that never echoes (and therefore never
+   * calls `wasAnsweredByCard`) actively drains its own questionId right after
+   * receiving the answer — see `collectSpecEdit` / the launch-card edit loop
+   * in `council/index.ts` and `buildLiveTuiAsk` in `product-loop/gather.ts`.
+   * `MAX_CARD_ANSWERED_IDS` below is a defense-in-depth bound, not the primary
+   * mechanism: it protects against a FUTURE non-echoing call site that forgets
+   * to drain, at the cost of that one entry going stale rather than growing
+   * this set unbounded across a long-running process.
+   */
+  private _cardAnsweredQuestionIds = new Set<string>();
+  /**
+   * questionIds whose waiter has GIVEN UP (timeout, abort, or the run
+   * ending) before an answer arrived — see `withdrawQuestion`. Once a
+   * questionId lands here, a LATE `respondToQuestion` call for it is
+   * reported as stale (logged, not applied) instead of either resolving a
+   * dangling promise nobody is listening to (the session 697419024ec8 defect:
+   * an answer that arrived 46 minutes after the gate timed out vanished with
+   * no trace) or silently buffering into `_bufferedQuestionAnswers` forever.
+   * Bounded the same way as `_cardAnsweredQuestionIds` — see
+   * `MAX_WITHDRAWN_QUESTION_IDS`.
+   */
+  private _withdrawnQuestionIds = new Map<string, { reason: string; at: number }>();
   /** One-shot watchdog-pause releasers for cards currently awaiting a human. */
   private _pauseReleasers = new Set<() => void>();
   /** Council telemetry — counts API calls and tracks debate start time. */
@@ -125,7 +193,7 @@ export class CouncilManager {
   }
 
   // ---- Public responder API (delegated from Agent.respondToCouncilQuestion etc) ----
-  respondToQuestion(questionId: string, answer: string, questionText?: string): void {
+  respondToQuestion(questionId: string, answer: string, questionText?: string): RespondToQuestionResult {
     if (process.env.MUONROI_DEBUG_LEADER === "1") {
       process.stderr.write(
         `[responder] respondToCouncilQuestion: ${JSON.stringify({
@@ -135,6 +203,35 @@ export class CouncilManager {
           pendingResolverCount: this._questionResolvers.size,
         })}\n`,
       );
+    }
+    // Stale-answer check FIRST, before anything else touches state: a
+    // withdrawn questionId must never mark `_cardAnsweredQuestionIds`, never
+    // resolve a resolver (there is none left — `withdrawQuestion` removed
+    // it), and never fall into the headless-buffer branch. See the JSDoc on
+    // `_withdrawnQuestionIds`.
+    const withdrawn = this._withdrawnQuestionIds.get(questionId);
+    if (withdrawn) {
+      logger.warn("orchestrator", "[council-manager] stale council answer — question no longer awaited", {
+        questionId,
+        withdrawnReason: withdrawn.reason,
+        withdrawnAgoMs: Date.now() - withdrawn.at,
+        answerPreview: answer.slice(0, 80),
+      });
+      return { applied: false, stale: true, staleReason: withdrawn.reason };
+    }
+    // U1 — record BEFORE resolving/buffering so `wasAnsweredByCard` sees it
+    // regardless of which branch below fires. Only the interactive UI card
+    // passes `questionText` (see the JSDoc on `_cardAnsweredQuestionIds`).
+    if (questionText) {
+      // Defense-in-depth bound (see the JSDoc on `_cardAnsweredQuestionIds`):
+      // evict the OLDEST entry (Set iteration order = insertion order) before
+      // adding, so a call site that forgets to drain cannot grow this set
+      // unbounded across a long-running process.
+      if (this._cardAnsweredQuestionIds.size >= MAX_CARD_ANSWERED_IDS) {
+        const oldest = this._cardAnsweredQuestionIds.values().next().value;
+        if (oldest !== undefined) this._cardAnsweredQuestionIds.delete(oldest);
+      }
+      this._cardAnsweredQuestionIds.add(questionId);
     }
     const resolver = this._questionResolvers.get(questionId);
     if (resolver) {
@@ -148,11 +245,59 @@ export class CouncilManager {
           })
           .catch(() => {});
       }
-    } else {
-      // Headless auto-answer: response arrived before the generator registered
-      // its resolver. Buffer it; `createQuestionResponder` will drain it.
-      this._bufferedQuestionAnswers.set(questionId, answer);
+      return { applied: true, stale: false };
     }
+    // Headless auto-answer: response arrived before the generator registered
+    // its resolver. Buffer it; `createQuestionResponder` will drain it.
+    this._bufferedQuestionAnswers.set(questionId, answer);
+    return { applied: false, stale: false };
+  }
+
+  /**
+   * U1 — consume-on-read: true iff `questionId`'s answer was passed with its
+   * question text (i.e. answered via the interactive UI card). Deletes the
+   * entry so a stale flag can never leak into a LATER, unrelated question that
+   * happens to reuse an id (ids are `crypto.randomUUID()`, so reuse is not
+   * expected in practice, but consuming keeps this correct either way).
+   */
+  private wasAnsweredByCard(questionId: string): boolean {
+    return this._cardAnsweredQuestionIds.delete(questionId);
+  }
+
+  /**
+   * Test-only. Asserts the U1 leak-prevention contract: every card-answered
+   * questionId is eventually consumed (by an echo site or an explicit drain)
+   * or evicted by the `MAX_CARD_ANSWERED_IDS` bound — this set must not grow
+   * unbounded across a run. See `_cardAnsweredQuestionIds`'s JSDoc.
+   */
+  _cardAnsweredCountForTests(): number {
+    return this._cardAnsweredQuestionIds.size;
+  }
+
+  /**
+   * A waiter gave up on `questionId` before an answer arrived — deadline
+   * elapsed, the run aborted, or an error tore the turn down. Removes any
+   * resolver still registered (so a LATE answer can no longer silently
+   * resolve a promise nobody is listening to any more) and records the
+   * withdrawal so `respondToQuestion` reports that late answer as stale
+   * instead of swallowing it. See the JSDoc on `_withdrawnQuestionIds`.
+   *
+   * Does NOT release the interactive-pause watchdog hold — that is handled
+   * uniformly by `releasePendingWaits()` in the council run's `finally`
+   * (orchestrator.ts), which fires once the whole turn ends, not per-card.
+   */
+  withdrawQuestion(questionId: string, reason: string): void {
+    this._questionResolvers.delete(questionId);
+    if (this._withdrawnQuestionIds.size >= MAX_WITHDRAWN_QUESTION_IDS) {
+      const oldestKey = this._withdrawnQuestionIds.keys().next().value;
+      if (oldestKey !== undefined) this._withdrawnQuestionIds.delete(oldestKey);
+    }
+    this._withdrawnQuestionIds.set(questionId, { reason, at: Date.now() });
+  }
+
+  /** Test-only. Asserts `_withdrawnQuestionIds` obeys its bound. */
+  _withdrawnCountForTests(): number {
+    return this._withdrawnQuestionIds.size;
   }
 
   respondToPreflight(preflightId: string, approved: boolean): void {
@@ -165,9 +310,13 @@ export class CouncilManager {
     }
   }
 
-  createQuestionResponder(): (questionId: string) => Promise<string> {
-    return (questionId: string) =>
-      new Promise<string>((resolve) => {
+  createQuestionResponder(signal?: AbortSignal): QuestionResponder {
+    const responder: QuestionResponder = (questionId: string) =>
+      new Promise<string>((resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
         const buffered = this._bufferedQuestionAnswers.get(questionId);
         if (buffered !== undefined) {
           if (process.env.MUONROI_DEBUG_LEADER === "1") {
@@ -193,11 +342,26 @@ export class CouncilManager {
         // the killed turn never reached appendMessages. Only the `ask_user` TOOL
         // path was bracketed; every council card was not.
         const release = this.holdWatchdogOpen();
+        const abort = () => {
+          this.withdrawQuestion(questionId, "turn cancelled");
+          release();
+          reject(signal?.reason);
+        };
+        signal?.addEventListener("abort", abort, { once: true });
         this._questionResolvers.set(questionId, (answer) => {
+          signal?.removeEventListener("abort", abort);
           release();
           resolve(answer);
         });
       });
+    // U1 — side-channel so the echo sites can tell (right after `await`) that
+    // this questionId was answered via the interactive card. See the JSDoc on
+    // `QuestionResponder.wasAnsweredByCard` in council/types.ts.
+    responder.wasAnsweredByCard = (questionId: string) => this.wasAnsweredByCard(questionId);
+    // Withdrawal — see the JSDoc on `QuestionResponder.withdraw` in
+    // council/types.ts and `withdrawQuestion` above.
+    responder.withdraw = (questionId: string, reason: string) => this.withdrawQuestion(questionId, reason);
+    return responder;
   }
 
   createPreflightResponder(): (preflightId: string) => Promise<boolean> {
@@ -263,7 +427,11 @@ export class CouncilManager {
       model: runtime.model,
       system,
       prompt,
-      ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: maxTokens }),
+      // `maxTokens` is a VISIBLE-output budget. On a reasoning model the
+      // provider's max_tokens is shared with the thinking block, so a literal
+      // sized for the answer alone is spent before any answer is emitted (see
+      // resolveMaxOutputTokens). Callers below pass 2048 / 1024 / 256.
+      ...resolveMaxOutputTokensParam(runtime, maxTokens),
       ...resolveTemperatureParam(runtime, 0.7),
       ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     });
@@ -316,8 +484,10 @@ export class CouncilManager {
         system: systemPrompt,
         prompt: userPrompt,
         tools: researchTools,
-        stopWhen: stepCountIs(10),
-        ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 4096 }),
+        // No step count inside `/ideal` (user decision: no limits); stop instead
+        // when steps only repeat earlier calls with the same results.
+        stopWhen: isIdealRunUnlimited() ? createNoProgressStopWhen() : stepCountIs(10),
+        ...resolveMaxOutputTokensParam(runtime, 4096),
         ...resolveTemperatureParam(runtime, 0.3),
         ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
         ...(signal ? { abortSignal: signal } : {}),
@@ -615,7 +785,7 @@ export class CouncilManager {
           // Guard: getModelByTier may return a model from a different provider
           // when the preferred provider has no model for the requested tier.
           if (m && m.provider === p) return { modelId: m.id };
-          const models = getModelsForProvider(p);
+          const models = getTextModelsForProvider(p);
           if (models.length > 0) return { modelId: models[0].id };
         }
       }
@@ -633,7 +803,7 @@ export class CouncilManager {
       .catch(() => false);
     if (!canReach) return [];
 
-    const providerModels = getModelsForProvider(providerId);
+    const providerModels = getTextModelsForProvider(providerId);
     if (providerModels.length === 0) {
       return roles.map((role) => ({ role, model: this.deps.getModelId() }));
     }

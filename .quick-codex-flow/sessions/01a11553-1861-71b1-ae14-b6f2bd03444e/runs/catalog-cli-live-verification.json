@@ -1,0 +1,13 @@
+{
+  "source": "authenticated public endpoint through built CLI fetchCatalogDocument",
+  "requests": [
+    {
+      "url": "https://catalog.muonroi.com/api/v1/models?release=2.20-a95fbfe00871",
+      "status": 200
+    }
+  ],
+  "version": "2.20",
+  "models": 51,
+  "active_provider_contracts_verified": 7,
+  "context_pricing_preserved": 5
+}

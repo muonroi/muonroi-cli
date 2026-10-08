@@ -46,7 +46,7 @@ export function projectCostUSD(
   estInputTokens: number,
   estOutputTokens: number,
 ): number {
-  const p = lookupPricing(provider, model);
+  const p = lookupPricing(provider, model, estInputTokens);
   if (!p) return 0;
   const inUSD = (estInputTokens / 1_000_000) * p.input_per_million_usd;
   const outUSD = (estOutputTokens / 1_000_000) * p.output_per_million_usd;
@@ -68,7 +68,7 @@ export function projectCostUSDWithCache(
   estInputHitTokens: number,
   estOutputTokens: number,
 ): number {
-  const p = lookupPricing(provider, model);
+  const p = lookupPricing(provider, model, estInputMissTokens + estInputHitTokens);
   if (!p) return 0;
   const missUSD = (estInputMissTokens / 1_000_000) * p.input_per_million_usd;
   const hitRate = p.cached_input_per_million_usd ?? p.input_per_million_usd;

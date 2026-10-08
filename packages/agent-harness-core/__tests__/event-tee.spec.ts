@@ -25,7 +25,7 @@ beforeEach(() => {
   logPath = join(dir, "events.jsonl");
 });
 afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 function readLines(): Array<Record<string, unknown>> {

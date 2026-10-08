@@ -1,6 +1,8 @@
 // Multi-provider wired — runtime dispatch via providers/runtime.ts.
 
+import { randomUUID } from "node:crypto";
 import type { ModelMessage, ToolSet } from "ai";
+import { breadcrumb, getLastOpenPhase } from "../council/crash-breadcrumb.js";
 import { extractSession } from "../ee/extract-session.js";
 import {
   bootstrapEEClient,
@@ -11,6 +13,7 @@ import {
 import { getTenantId } from "../ee/tenant.js";
 import { emitTranscriptToDisk } from "../ee/transcript-emit.js";
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
+import { runAnchoredStateRoot } from "../flow/run-root.js";
 import { ensureFlowDir } from "../flow/scaffold.js";
 import {
   isContextRailEnabled,
@@ -87,6 +90,7 @@ import type {
 import { appendCostLog } from "../usage/cost-log.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { projectCostUSD, sanitizeInputTokens } from "../usage/estimator.js";
+import { scopeGeneratorToIdealRun } from "../utils/ideal-run-scope.js";
 import { logger } from "../utils/logger.js";
 import type { PermissionMode } from "../utils/permission-mode.js";
 import {
@@ -98,13 +102,16 @@ import {
   getCurrentModel,
   getCurrentShellSettings,
   getModeSpecificModel,
+  getProjectSubAgentModel,
   getRoleModel,
   getRoleModels,
   getSubAgentCompactKeepLast,
   getSubAgentCompactThresholdChars,
   isAutoCompactAfterTurnEnabled,
   isCouncilMultiProviderPreferred,
+  isModelPinnedByProject,
   isProviderDisabled,
+  isRouterSubSessionsEnabled,
   loadUserSettings,
   type ModelRole,
   type SandboxMode,
@@ -154,7 +161,9 @@ import {
   parseToolArgumentsOrRaw,
   toLocalToolCall,
 } from "./batch-utils";
+import { getCompactionFocus } from "./compact-request.js";
 import {
+  buildMechanicalCompactionStub,
   type CompactionSettings,
   createCompactionSummaryMessage,
   DEFAULT_KEEP_RECENT_TOKENS,
@@ -169,13 +178,24 @@ import {
   proposeCompaction,
   shouldCompactContext,
 } from "./compaction";
+import { buildCompactionCustomInstructions } from "./compaction-consult.js";
+import { isCompactionModelCoolingDown, markCompactionModelCooldown } from "./compaction-model-cooldown.js";
+import { markProposerStalled } from "./compaction-stall-notice.js";
+import { getCouncilContinuationWatchdogMs } from "./council-continuation-budget.js";
 import { CouncilManager } from "./council-manager.js";
 import { CrossTurnDedup, isCrossTurnDedupEnabled } from "./cross-turn-dedup.js";
 import { DelegationManager } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
+import { buildHelperReceipt } from "./helper-receipt.js";
 import { beginInteractivePause, endInteractivePause, isInteractivePaused } from "./interactive-pause.js";
-import { MessageProcessor, type MessageProcessorDeps } from "./message-processor.js";
+import {
+  MessageProcessor,
+  type MessageProcessorDeps,
+  reinjectTaggedSessionStartAcrossCompaction,
+} from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
+import { createNoProgressGuard } from "./no-progress-guard.js";
+import { estimateProjectSizeAt, type ProjectSize } from "./project-size.js";
 import { buildSystemPrompt, HARD_MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS } from "./prompts";
 import { getReactiveDelegationThresholdChars, shouldReactivelyEscalate } from "./reactive-delegation.js";
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
@@ -183,13 +203,15 @@ import { withStreamRetry } from "./retry-stream.js";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
 import { salvageSubSessionOutput } from "./salvage-sub-session-output.js";
 import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
+import { noteElidedForCap, type SubAgentCapState } from "./sub-agent-cap.js";
 import { type ModelTaskKind, resolveModelForTask } from "./sub-agent-model-tier.js";
+import { shouldResumeSubSession } from "./sub-session-resume.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
 import { isToolActivityLive } from "./tool-activity.js";
 import { getToolLimitAutoRecoverCap } from "./tool-limit-auto-recover.js";
 import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
-import { firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
+import { combineAbortSignals, firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
 import { hasTurnProgressSince } from "./turn-progress.js";
 
 // ---------------------------------------------------------------------------
@@ -363,6 +385,8 @@ export class Agent {
   private baseURL: string | null = null;
   private bash: BashTool;
   private delegations: DelegationManager;
+  private _helperParentSessionId: string | null = null;
+  private _helperParentCwd: string | null = null;
   private schedules: ScheduleManager;
   private sessionStore: SessionStore | null = null;
   private workspace: WorkspaceInfo | null = null;
@@ -415,6 +439,111 @@ export class Agent {
   private pendingCalls: import("./pending-calls.js").PendingCallsLog | null = null;
   /** Active permission mode — controls which tool calls auto-approve vs require user confirmation. */
   private permissionMode: PermissionMode = "safe";
+  /**
+   * Read-only view of the effective permission mode.
+   *
+   * The field is `private` and the only other accessor is the getter inside
+   * `_buildMessageProcessorDeps()` — itself private — so the security-relevant
+   * invariant "the session is not left elevated after the work that justified
+   * the elevation has ended" was not assertable from outside the class at all.
+   * A test could only reach it by casting `private` away, which would keep
+   * passing if the field were renamed or removed; that is exactly the kind of
+   * test this repo has been burned by. This getter is the contract instead.
+   *
+   * Deliberately read-only: exposing a setter would create a new way to elevate
+   * permissions from outside the class, which is the opposite of the point.
+   * @testonly-seam (production reads go through `_buildMessageProcessorDeps`)
+   */
+  get effectivePermissionMode(): PermissionMode {
+    return this.permissionMode;
+  }
+  /**
+   * Number of autonomous-execution elevation scopes currently open. See
+   * `beginAutonomousElevation`.
+   *
+   * Instance state, NOT module state and NOT a closure inside
+   * `runProductLoopV1`: the counter must be scoped to exactly the thing it
+   * guards, which is this instance's `permissionMode`. Module scope would make
+   * two Agents share one counter; a `runProductLoopV1`-local counter would
+   * start a fresh one per run, and `/ideal` re-enters (the `enter_ideal` tool
+   * dispatches `runProductLoopV1` from inside a `processMessage` turn), so a
+   * per-run counter would reintroduce exactly this bug across nested runs.
+   */
+  private permissionElevationDepth = 0;
+  /**
+   * The mode to put back when the LAST scope closes — set only when a scope
+   * actually promoted `safe` -> `auto-edit`, so the mechanism is a strict no-op
+   * for a session that was already `auto-edit` or `yolo`.
+   */
+  private permissionElevationRestoreTo: PermissionMode | null = null;
+
+  /**
+   * Open an autonomous-execution elevation scope (`/ideal` only).
+   *
+   * `/ideal`'s consent boundary is the preflight plan-approval askcard; once the
+   * PO approves, the sprint's implement turn must apply file mutations without a
+   * per-tool prompt, because in the driven product-loop context nothing answers
+   * a `tool_approval_request` and the turn wedges forever. Elevating
+   * `safe` -> `auto-edit` for the duration of that work is the fix; catastrophic
+   * bash stays hard-blocked by permission-mode's CATASTROPHIC_PATTERNS in every
+   * mode, and `yolo` is left alone.
+   *
+   * WHY DEPTH-COUNTED rather than the per-call `const prev = permissionMode;
+   * ... finally { permissionMode = prev }` this replaces: that pattern is
+   * correct only while the scopes strictly nest, and here they provably do not.
+   * `sprint-runner.ts` races the isolated implement child against a wall-clock
+   * deadline (`runIsolatedImplWithDeadline` -> `withIsolatedImplDeadline` ->
+   * `Promise.race([work, deadline])`, sprint-runner.ts:1088). When the deadline
+   * wins, the caller moves on while `work` is STILL LIVE — `controller.abort()`
+   * is best-effort, and the abandoned child was measured still streaming and
+   * billing for 220s / 32 steps / 29.8% of a run's spend after the run had been
+   * declared dead. Its `finally` therefore lands at an arbitrary point inside a
+   * later turn's elevation scope. With save/restore, the later scope captures
+   * the ALREADY-ELEVATED `auto-edit` as its `prev`, the abandoned child restores
+   * `safe` first, and the later scope's restore then puts `auto-edit` BACK —
+   * leaving the session able to write files without asking, after every piece of
+   * work that justified it has ended. Depth counting is order-independent:
+   * whoever closes last restores the mode captured by whoever opened first.
+   *
+   * Both `/ideal` elevation sites (`processMessageFn` and `runIsolatedTask` in
+   * `runProductLoopV1`) MUST go through this pair. A fix applied to only one of
+   * them leaves the leak alive across the cross-site interleaving, which is the
+   * reachable one. Covered by `permission-elevation.test.ts`.
+   *
+   * Pair every call with `endAutonomousElevation()` in a `finally`.
+   */
+  private beginAutonomousElevation(): void {
+    if (this.permissionElevationDepth === 0 && this.permissionMode === "safe") {
+      this.permissionElevationRestoreTo = this.permissionMode;
+      this.permissionMode = "auto-edit";
+    }
+    this.permissionElevationDepth += 1;
+  }
+
+  /** Close an elevation scope; restores the original mode when the last one closes. */
+  private endAutonomousElevation(): void {
+    if (this.permissionElevationDepth === 0) {
+      // Unbalanced release — a `finally` ran without its `begin`. Never let the
+      // counter go negative: a negative depth would make the NEXT begin fail its
+      // 0-check and silently skip the elevation, so a bookkeeping bug would turn
+      // into a permission bug. Loud, because this is security-adjacent state.
+      logger.error("orchestrator", "endAutonomousElevation called with no open elevation scope", {
+        permissionMode: this.permissionMode,
+      });
+      return;
+    }
+    this.permissionElevationDepth -= 1;
+    if (this.permissionElevationDepth > 0) return;
+    const restoreTo = this.permissionElevationRestoreTo;
+    this.permissionElevationRestoreTo = null;
+    // Only restore when we actually promoted. If a future code path gains the
+    // ability to change permissionMode mid-flight, an unconditional restore
+    // could push the session BACK UP to a mode the user had just left (e.g. we
+    // captured `yolo`, the user switched to `safe`, we restore `yolo`) — failing
+    // open. Restoring only a promotion we made can only ever move the session
+    // toward MORE restrictive, which is the safe direction to be wrong in.
+    if (restoreTo !== null) this.permissionMode = restoreTo;
+  }
   /** Flow run init promise — awaited before first message turn. */
   private _flowReady: Promise<void> | null = null;
   /** Active .muonroi-flow/ run ID for this session. */
@@ -491,7 +620,12 @@ export class Agent {
       sandboxSettings: options.sandboxSettings,
       shellSettings: options.shellSettings ?? getCurrentShellSettings(),
     });
-    this.delegations = new DelegationManager(() => this.bash.getCwd());
+    const transientOwnerId = randomUUID();
+    this.delegations = new DelegationManager(
+      () => this.bash.getCwd(),
+      () => this._helperParentSessionId ?? this.session?.id ?? transientOwnerId,
+      () => this._helperParentCwd ?? this.bash.getCwd(),
+    );
     // Phase 12.1-02: council state + helpers live in CouncilManager. DI via
     // getter callbacks so the manager reads live Agent state without holding
     // a circular reference to the Agent instance.
@@ -1005,6 +1139,43 @@ export class Agent {
     this._compactionStats = { count: 0, totalSaved: 0 };
     this._lastCompactionTokensAfter = null;
     this._pinnedSeqs.clear();
+    // Reactive-escalation counter (see `shouldReactivelyEscalate` /
+    // "Reactive escalation to sub-session" above) is scoped to ONE session's
+    // prior turn, not the process. Without this reset, session
+    // 697419024ec8 — a BRAND NEW session with no turn of its own yet —
+    // logged `prevTurnToolChars: 621952`, the exact value left over from a
+    // PRIOR session (1e9db4d68da0) that ran in the same long-lived Agent
+    // instance, and reactively spawned a sub-session it never needed.
+    this._lastTurnToolChars = 0;
+    // Same leak shape, sibling field: the cold-first-turn ordinal (see its
+    // field doc above) gates `coldFirstTurn: self._turnLoadOrdinal === 1` at
+    // the top-level-tool-load report site — the code's own evidence for "is
+    // this the session's first turn". Left unreset, a process serving several
+    // sessions undercounts cold-first-turns for every session after the
+    // first (ordinal keeps climbing from the PRIOR session instead of
+    // restarting at 0).
+    this._turnLoadOrdinal = 0;
+    // Same shape again: both are explicitly SESSION-scoped accumulators (see
+    // their field docs — "surfaced earlier in THIS session" / per-session EE
+    // guidance) injected into every turn's prompt
+    // ("[EE Session Guidance — avoid these patterns...]" in
+    // message-processor.ts). Left unreset, a brand-new session's first turn
+    // would see stale warning ids / guidance carried over from an unrelated
+    // prior session in the same long-lived Agent instance.
+    this._priorWarningIdsInSession.clear();
+    this._sessionEEGuidance.clear();
+    // Same shape again: CrossTurnDedup's own module doc says "One CrossTurnDedup
+    // instance lives on the Orchestrator for the lifetime of the session", but
+    // nothing enforced that — the cache, hit/stub counters, and turn ordinal all
+    // survived a session boundary on this long-lived Agent instance. Left
+    // unreset, a brand-new session's dedup stats (logged tagged with the NEW
+    // session id in message-processor.ts) would carry hits/content from an
+    // unrelated prior session, corrupting the per-session cost-leak attribution
+    // the class exists to make falsifiable. ReadPathBudget documents the same
+    // "per session" / "session-lifetime budget object" contract for the same
+    // reason (re-read cap keyed by path) and had the identical gap.
+    this._crossTurnDedup?.clear();
+    this._readBudget?.clear();
 
     if (!this.sessionStore) {
       this.messages = [];
@@ -1276,7 +1447,9 @@ export class Agent {
     const breakdown = source === "message" ? (this._lastPromptBreakdown ?? undefined) : undefined;
     // Sanitize actualInputTokens for providers that return
     // implausibly low prompt_tokens (e.g. 10) regardless of prompt size.
-    const estIn = breakdown ? Math.ceil(((breakdown.systemChars ?? 0) + (breakdown.messagesChars ?? 0)) / 4) : 0;
+    const estIn = breakdown
+      ? Math.ceil(((breakdown.systemChars ?? 0) + (breakdown.messagesChars ?? 0) + (breakdown.toolsChars ?? 0)) / 4)
+      : 0;
     const actualInput = sanitizeInputTokens(totalInput, estIn);
     appendCostLog({
       ts: Date.now(),
@@ -1298,6 +1471,9 @@ export class Agent {
   }
 
   async consumeBackgroundNotifications(): Promise<string[]> {
+    // The manager's owner remains main while this Agent temporarily executes
+    // a child. Leave notifications unclaimed until main's context is restored.
+    if (this._helperParentSessionId && this.session?.id !== this._helperParentSessionId) return [];
     try {
       const notifications = await this.delegations.consumeNotifications();
       for (const notification of notifications) {
@@ -1314,10 +1490,16 @@ export class Agent {
           session_id: this.session?.id,
           cwd: this.bash.getCwd(),
         };
-        this.fireHook(notifInput).catch(() => {});
+        this.fireHook(notifInput).catch((err) => {
+          logger.warn("orchestrator", "Background notification hook failed", { error: String(err) });
+        });
       }
       return notifications.map((notification) => notification.message);
-    } catch {
+    } catch (err) {
+      logger.error("orchestrator", "Background notification delivery failed", {
+        sessionId: this.session?.id,
+        error: String(err),
+      });
       return [];
     }
   }
@@ -1398,6 +1580,7 @@ export class Agent {
     childTools: ToolSet;
     maxSteps: number;
     initialDetail: string;
+    subAgentCapState: SubAgentCapState;
     onActivity?: (detail: string) => void;
     signal?: AbortSignal;
   }): Promise<ToolResult> {
@@ -1409,6 +1592,7 @@ export class Agent {
       childTools,
       maxSteps,
       initialDetail,
+      subAgentCapState,
       onActivity,
       signal,
     } = args;
@@ -1437,10 +1621,16 @@ export class Agent {
     // batch loop the re-sent history balloons exactly like the stream path did
     // before B3. Apply the same compactor here (round >= 1, mirroring the
     // stream path's `stepNumber >= 1` gate). High-value results stay verbatim.
-    const batchCompactThreshold = getSubAgentCompactThresholdChars();
-    const batchCompactKeepLast = getSubAgentCompactKeepLast();
     const batchChildCtxWindow = childRuntime.modelInfo?.contextWindow ?? 0;
+    const batchCompactThreshold = getSubAgentCompactThresholdChars(batchChildCtxWindow);
+    const batchCompactKeepLast = getSubAgentCompactKeepLast();
     const batchIsReasoningModel = childRuntime.modelInfo?.reasoning === true;
+    // `maxSteps` is Infinity only inside an `/ideal` run (no limits, user decision;
+    // see StreamRunner.setup). Such a loop ends when the model stops calling tools,
+    // or when consecutive rounds only repeat calls it already made with the same
+    // results (no-progress-guard.ts).
+    const batchNoProgress = Number.isFinite(maxSteps) ? null : createNoProgressGuard();
+    const batchRounds: unknown[] = [];
     for (let round = 0; round < maxSteps; round++) {
       const batchRequestId = `task-${Date.now()}-${round + 1}`;
       const roundMessages =
@@ -1452,6 +1642,12 @@ export class Agent {
               contextWindowTokens: batchChildCtxWindow,
               contextFillRatio: batchIsReasoningModel ? 0.3 : undefined,
               stripOldReasoning: batchIsReasoningModel,
+              // Keep both dedup ledgers honest: anything elided here left the
+              // model's view, so no pointer from either layer may name it any more.
+              onElide: (ids) => {
+                noteElidedForCap(subAgentCapState, ids);
+                this._crossTurnDedup?.noteElided(ids);
+              },
             });
       await addBatchRequests({
         ...this.getBatchClientOptions(signal),
@@ -1541,6 +1737,34 @@ export class Agent {
       if (toolMessage) {
         turnMessages.push(toolMessage);
       }
+
+      if (batchNoProgress) {
+        batchRounds.push({
+          toolCalls: toolParts.map((p) => ({
+            toolCallId: p.toolCall.id,
+            toolName: p.toolCall.function.name,
+            input: p.input,
+          })),
+          toolResults: toolParts.map((p) => ({ toolCallId: p.toolCall.id, output: p.toolResult })),
+        });
+        if (batchNoProgress(batchRounds)) {
+          console.error(
+            `[orchestrator] batch sub-agent stopped after ${round + 1} rounds: rounds only repeated earlier calls with identical results (no progress)`,
+            { agent: request.agent, model: childRuntime.modelId },
+          );
+          if (hasUsage(totalUsage)) {
+            this.recordUsage(totalUsage, "task", childRuntime.modelId);
+          }
+          const output =
+            assistantText.trim() ||
+            `Task stopped: no progress after ${round + 1} batch rounds. Last action: ${lastActivity}`;
+          return {
+            success: false,
+            output,
+            task: { agent: request.agent, description: request.description, summary: output, activity: lastActivity },
+          };
+        }
+      }
     }
 
     if (hasUsage(totalUsage)) {
@@ -1572,6 +1796,8 @@ export class Agent {
     onActivity?: (detail: string) => void,
     abortSignal?: AbortSignal,
   ): Promise<ToolResult> {
+    // Background jobs enter here without processMessage's auth initialization.
+    await this._initOAuthProvider();
     const provider = this.requireProvider();
     const deps: StreamRunnerDeps = {
       resolveModelForTask: (task) => this._resolveModelForTask(task),
@@ -1694,7 +1920,7 @@ export class Agent {
         model: this.modelId,
         sandboxMode: this.bash.getSandboxMode(),
         sandboxSettings: this.bash.getSandboxSettings(),
-        maxToolRounds: this.maxToolRounds,
+        maxToolRounds: request.maxToolRounds ?? this.maxToolRounds,
         maxTokens: this.maxTokens,
         batchApi: this.batchApi,
       });
@@ -1818,8 +2044,39 @@ export class Agent {
 
   private _resolveModelForTask(task: ModelTaskKind): string {
     const parentTier = getModelInfo(this.modelId)?.tier;
-    return resolveModelForTask(task, this.providerId, this.modelId, undefined, {
+    // Round 2 (G3 HIGH) / round 3 (MEDIUM correction): a project model pin
+    // holds for automatic task-model resolution through this SHARED
+    // resolver — see `resolveModelForTask`'s `opts.pinned` doc comment in
+    // sub-agent-model-tier.ts — but NOT for `task === "compact"`.
+    // Round 2 applied the pin unconditionally here, which pinned
+    // compaction too: compaction is deliberately on its own cheap tier
+    // table (`TASK_TIER_PREFS.compact = ["fast","balanced"]`) precisely so
+    // a session summarization pass never rides the expensive pinned model —
+    // the pin exists to keep JUDGEMENT turns (the sub-agent dispatch this
+    // resolver otherwise serves: explore/general/verify) on the pinned
+    // model, not to make every internal housekeeping call as expensive as
+    // the orchestrator's own turns. `task !== "compact"` is the only
+    // exclusion needed: stream-runner.ts's sub-agent dispatch never passes
+    // "compact" (that task kind is only ever requested by
+    // `_resolveCompactModel` below), so this one condition fully separates
+    // "delegated sub-agent/sub-session dispatch" (pinned) from
+    // "compaction" (never pinned) without threading a second parameter
+    // through the DI interface.
+    //
+    // Round 9 (HR8, owner correction to round 2's G3): making sub-agent
+    // dispatch inherit the main session's `model` pin unconditionally was
+    // the owner's own mistake to fix, not a bug in the pin mechanism itself
+    // — the owner's framework wants the orchestrator tier (main session) and
+    // worker tier (sub-agents/sub-sessions) to be able to run DIFFERENT
+    // models. `subAgentModel`, when set, is what delegated (non-"compact")
+    // dispatch pins to INSTEAD of `this.modelId` — same "pinned" bypass of
+    // tier resolution, just aimed at a different model string. Unset means
+    // exactly today's behaviour (falls through to `this.modelId` +
+    // `isModelPinnedByProject()`, unchanged).
+    const subAgentModel = task !== "compact" ? getProjectSubAgentModel() : undefined;
+    return resolveModelForTask(task, this.providerId, subAgentModel ?? this.modelId, undefined, {
       parentTier,
+      pinned: task !== "compact" && (subAgentModel !== undefined || isModelPinnedByProject()),
     });
   }
 
@@ -1900,16 +2157,110 @@ export class Agent {
       }
     })();
 
-    const customInstructions = isSubSession
-      ? "This is a temporary sub-session. Under sub-sessions, it is CRITICAL to preserve active files being worked on, compiler/linter error states, and exact line coordinates in the summary. Do not omit details of files edited, tests run, or compiler diagnostics, as the model needs this specific context to continue working without re-reading the files."
-      : undefined;
+    // C2 — the summarizing compaction is performed by a DIFFERENT model
+    // (`proposeCompaction` / `generateCompactionSummary`) that only sees a
+    // serialized transcript; it cannot know which files the working agent still
+    // needs open. When the main-context agent HAS said what must survive (the
+    // `focus` argument of the `compact` tool), hand that to the summarizer as a
+    // hard requirement, MERGED with (never replacing) the sub-session
+    // instruction. Measured harm without it: interaction_logs id=6313
+    // (session e28336959a62, 2026-09-09T02:30:54.991Z, 61472 -> 24470 tokens),
+    // after which the agent re-read the files it was working on.
+    let customInstructions: string | undefined;
+    try {
+      customInstructions = buildCompactionCustomInstructions({ isSubSession, agentFocus: getCompactionFocus() });
+    } catch (err) {
+      // Fail open — a fault in the consult path must never block a compaction.
+      logger.warn("orchestrator", "[compactForContext] agent focus lookup failed", {
+        error: (err as Error)?.message,
+      });
+      customInstructions = buildCompactionCustomInstructions({ isSubSession, agentFocus: null });
+    }
 
-    const { summary, usage: compactUsage } = await generateCompactionSummary(
-      compactModelId,
-      preparation,
-      customInstructions,
-      signal,
-    );
+    // Round 9 (G11a): `generateCompactionSummary` (via `summarizeConversation`)
+    // makes a tool-less auxiliary LLM call — the SAME quirk-prone shape as
+    // `proposeCompaction` above (which already treats ANY failure as
+    // non-fatal). This call had NO caller-side catch at all: measured live,
+    // step-3.5-flash's `ToolCallMarkupLeakError` (the tool-markup guard fires
+    // on every tool-less call, not just proposeCompaction's) propagated
+    // straight out of this `await`, uncaught, all the way through
+    // `compactForContext` and the sub-session's own turn — ending it
+    // completely empty ("No assistant messages found to absorb"), raw
+    // `<tool_call>` markup left on screen.
+    //
+    // Round 10 (G8 HIGH A): round 9's fix skipped compaction entirely on ANY
+    // failure — safe for one bad turn, but the compact model is resolved
+    // DETERMINISTICALLY (same tier lookup every time), so a PERSISTENT quirk
+    // (this exact model always leaking markup on this exact session's
+    // transcript shape) meant compaction would never succeed again for the
+    // rest of that session: unbounded context growth toward a real provider
+    // overflow, plus one wasted doomed network call every single turn. Fixed
+    // with a bounded retry chain that always eventually succeeds:
+    //   1. the compact model (unless already cooling down from a prior
+    //      failure this session — see compaction-model-cooldown.ts);
+    //   2. ONE retry with the session's OWN main model (`this.modelId`) —
+    //      skipped when it IS the compact model already, since retrying the
+    //      identical model/prompt would just reproduce the same failure;
+    //   3. a deterministic, NO-LLM mechanical stub
+    //      (`buildMechanicalCompactionStub`) that always succeeds and always
+    //      shrinks the kept window exactly like a real summary would.
+    // Whichever model fails is put on a per-session cooldown so a further
+    // compaction attempt THIS session does not re-attempt a model already
+    // known to be doomed — it goes straight to the next step in the chain.
+    let summary: string;
+    let compactUsage: { promptTokens: number; completionTokens: number };
+    let summaryModelId = compactModelId;
+    const sessionIdForCooldown = this.session.id;
+
+    const tryGenerateSummary = async (modelId: string) => {
+      if (isCompactionModelCoolingDown(sessionIdForCooldown, modelId)) {
+        throw new Error(`compaction model ${modelId} is cooling down after a recent failure this session`);
+      }
+      try {
+        return await generateCompactionSummary(modelId, preparation, customInstructions, signal);
+      } catch (err) {
+        markCompactionModelCooldown(sessionIdForCooldown, modelId);
+        throw err;
+      }
+    };
+
+    const logSummaryFailure = (stage: string, err: unknown): void => {
+      const errMessage = err instanceof Error ? err.message : String(err);
+      const errStack = err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined;
+      logger.warn("orchestrator", `Compaction summary failure (${stage})`, { error: errMessage, stack: errStack });
+    };
+
+    try {
+      const result = await tryGenerateSummary(compactModelId);
+      summary = result.summary;
+      compactUsage = result.usage;
+    } catch (firstErr) {
+      logSummaryFailure("compact model", firstErr);
+      if (this.modelId !== compactModelId) {
+        try {
+          const result = await tryGenerateSummary(this.modelId);
+          summary = result.summary;
+          compactUsage = result.usage;
+          summaryModelId = this.modelId;
+          markProposerStalled(
+            `Compaction fell back to the main model (${this.modelId}) after ${compactModelId} failed.`,
+          );
+        } catch (secondErr) {
+          logSummaryFailure("main model fallback", secondErr);
+          summary = buildMechanicalCompactionStub(preparation);
+          compactUsage = { promptTokens: 0, completionTokens: 0 };
+          markProposerStalled(
+            `Compaction summarizers failed (${compactModelId} and ${this.modelId}) — used a mechanical fallback (no LLM). Context still shrank.`,
+          );
+        }
+      } else {
+        summary = buildMechanicalCompactionStub(preparation);
+        compactUsage = { promptTokens: 0, completionTokens: 0 };
+        markProposerStalled(
+          `Compaction summarizer (${compactModelId}) failed — used a mechanical fallback (no LLM). Context still shrank.`,
+        );
+      }
+    }
 
     // Record compaction usage in usage_events under a dedicated `compaction`
     // source. Previously this was cost-log-ONLY ("overhead, not user spend"),
@@ -1917,19 +2268,23 @@ export class Agent {
     // tell how much a bloated context (e.g. redundant reads) cost to compact.
     // Measurement-first: overhead must be attributable, not hidden. It has its
     // own source so it never inflates the `message` bucket.
+    // Round 10: attribute usage/cost to whichever model actually produced the
+    // summary (`summaryModelId` — the compact model, the main-model fallback,
+    // or unchanged from `compactModelId` when the mechanical stub was used,
+    // where `compactUsage` is zero anyway so the id barely matters).
     this.recordUsage(
       { inputTokens: compactUsage.promptTokens, outputTokens: compactUsage.completionTokens },
       "compaction",
-      compactModelId,
+      summaryModelId,
     );
-    const compactProvider = detectProviderForModel(compactModelId);
+    const compactProvider = detectProviderForModel(summaryModelId);
     appendCostLog({
       ts: compactStartedAt,
       provider: compactProvider,
-      model: compactModelId,
+      model: summaryModelId,
       estimatedUsd: projectCostUSD(
         compactProvider,
-        compactModelId,
+        summaryModelId,
         compactUsage.promptTokens,
         compactUsage.completionTokens,
       ),
@@ -1967,8 +2322,33 @@ export class Agent {
       pinnedReinjectionSeqs.push(null);
     }
 
-    this.messages = [createCompactionSummaryMessage(summary), ...pinnedReinjections, ...preparation.keptMessages];
-    this.messageSeqs = [null, ...pinnedReinjectionSeqs, ...keptSeqs];
+    // Round 3 (MEDIUM, G1-adjacent): the tagged SessionStart system message
+    // (SESSION_START_SYSTEM_TAG — message-processor.ts) is NOT a "pinned
+    // user message" — the mechanism just above only ever looks at
+    // `role === "user"` — so compaction's kept-tail window had no reason to
+    // preserve it. A tagged message that fell outside that window (the
+    // ordinary case: it is injected once, at/near session start, so any
+    // compaction far enough into a session summarizes it away like any
+    // other old message) lost the exact tag string that is the ONLY thing
+    // a later `--resume` can find-and-replace on — the resumed process then
+    // injects a fresh briefing with no tagged copy left to replace, and the
+    // round-2 G1 fix's own guarantee (exactly one tagged message) quietly
+    // stopped holding for any session that had ever compacted. Carried
+    // verbatim here, the same way a pinned user message is, right after the
+    // compaction summary — see `reinjectTaggedSessionStartAcrossCompaction`'s
+    // doc comment for the "already in the kept tail" no-duplicate case.
+    const taggedSessionStartReinjection = reinjectTaggedSessionStartAcrossCompaction(
+      this.messages,
+      preparation.keptMessages,
+    );
+
+    this.messages = [
+      createCompactionSummaryMessage(summary),
+      ...(taggedSessionStartReinjection ? [taggedSessionStartReinjection] : []),
+      ...pinnedReinjections,
+      ...preparation.keptMessages,
+    ];
+    this.messageSeqs = [null, ...(taggedSessionStartReinjection ? [null] : []), ...pinnedReinjectionSeqs, ...keptSeqs];
 
     // EE anti-mù (Phase 1 of docs/ee-anti-mu-compaction-plan.md): immediately extract the fresh structured checkpoint summary
     // so pilContext / layer3 search / ee.query can recall exact prior ✔ DONE items + progress for the rest of this long session
@@ -2009,7 +2389,7 @@ export class Agent {
 
     // Update status bar with current context size and compaction summary
     const fmtCompact = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n));
-    const modelSuffix = compactModelId !== this.modelId ? ` via ${compactModelId}` : "";
+    const modelSuffix = summaryModelId !== this.modelId ? ` via ${summaryModelId}` : "";
     const userMsgCount = this.messages.filter((m) => m.role === "user").length;
     const isLongSession = this._compactionStats.count >= 3 || userMsgCount >= 200;
     const sessionHint = isLongSession ? " ⚠ long session — consider /clear" : "";
@@ -2118,8 +2498,12 @@ export class Agent {
   // hooks used by orchestrator.agent.test.ts).
   // ========================================================================
 
-  respondToCouncilQuestion(questionId: string, answer: string, questionText?: string): void {
-    this.councilManager.respondToQuestion(questionId, answer, questionText);
+  respondToCouncilQuestion(
+    questionId: string,
+    answer: string,
+    questionText?: string,
+  ): import("./council-manager.js").RespondToQuestionResult {
+    return this.councilManager.respondToQuestion(questionId, answer, questionText);
   }
 
   respondToCouncilPreflight(preflightId: string, approved: boolean): void {
@@ -2160,6 +2544,12 @@ export class Agent {
        * round-trip. Undefined falls through to runCouncil's own self-classify.
        */
       externalTopic?: boolean;
+      /** Model-convened council must not reintroduce a foreground PIL wait. */
+      skipPil?: boolean;
+      /** Caller-owned final output format, independent of spec inference. */
+      synthesisOutputContract?: string;
+      /** Cancellation of the SDK tool that owns a nested council. */
+      abortSignal?: AbortSignal;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const { runCouncil, buildNeutralPostCouncilContinuation, extractReadableSynthesis } = await import(
@@ -2184,7 +2574,8 @@ export class Agent {
     if (ownsController) {
       this.abortController = new AbortController();
     }
-    const signal = this.abortController?.signal;
+    const controllerSignal = this.abortController?.signal;
+    const signal = combineAbortSignals(controllerSignal, options?.abortSignal);
 
     // B1: Resolve a run directory so runCouncil persists decisions.lock.md after
     // synthesis. The auto-council/sprint paths get a runDir from their own flow
@@ -2247,6 +2638,8 @@ export class Agent {
           // Gate A — thread the caller's already-classified scope so runCouncil
           // doesn't pay for a second self-classify round-trip.
           externalTopic: options?.externalTopic,
+          skipPil: options?.skipPil,
+          synthesisOutputContract: options?.synthesisOutputContract,
           // When the Context Rail is active it carries leader/panel/cost as
           // ambient sidebar rows, so suppress the duplicate inline summary.
           suppressInlineMeta: isContextRailEnabled(),
@@ -2303,6 +2696,9 @@ export class Agent {
           yield result.value;
         }
       } while (!result.done);
+
+      // A cancelled tool must not commit a late council result to the main session.
+      if (signal?.aborted) return;
 
       const synthesis = result.value;
       // Keep lastSynthesis FULL (the raw JSON is needed for output-kind detection
@@ -2370,14 +2766,28 @@ export class Agent {
           // working… elapsed 0s" with no rescue. On fire we abort the turn and
           // surface a toast instead of hanging forever.
           const { withTurnWatchdog, TurnStallError } = await import("./turn-watchdog.js");
-          const idleMs = Number(process.env.MUONROI_COUNCIL_CONTINUATION_IDLE_MS ?? 120_000);
-          const totalMs = Number(process.env.MUONROI_COUNCIL_CONTINUATION_TOTAL_MS ?? 600_000);
+          // Inside an `/ideal` run `totalMs` comes back 0 (guard disabled) while
+          // `idleMs` is unchanged — see council-continuation-budget.ts.
+          const { idleMs, totalMs } = getCouncilContinuationWatchdogMs();
           try {
             yield* withTurnWatchdog(this.processMessage(continuationPrompt, options?.observer), {
               idleMs,
               totalMs,
               label: "council continuation turn",
-              shouldSuppressFire: isInteractivePaused,
+              // Defect A fix: this nested call used to wire ONLY
+              // shouldSuppressFire (and only isInteractivePaused at that),
+              // leaving it blind to the exact two progress signals the
+              // sibling top-level watchdog (~4111-4116) relies on —
+              // isToolActivityLive (an in-flight bash/task call) and
+              // hasProgressSince (a provider request issued inside the
+              // window that just elapsed). A council continuation re-enters
+              // preStreamPhase (e.g. "gsdGate"), whose leader-tier assessor
+              // pings hasTurnProgressSince for its whole lifetime — without
+              // this wiring that ping was invisible here and a healthy,
+              // still-working continuation could be killed at idleMs even
+              // though the sibling call guarantees it would not be.
+              shouldSuppressFire: () => isInteractivePaused() || isToolActivityLive(),
+              hasProgressSince: (sinceMs) => hasTurnProgressSince(sinceMs),
             });
           } catch (err) {
             if (err instanceof TurnStallError) {
@@ -2402,7 +2812,7 @@ export class Agent {
       // beginInteractivePause() would leak and suppress the turn watchdog for the
       // rest of the process. Runs on every exit path — normal, throw, unwind.
       this.councilManager.releasePendingWaits();
-      if (ownsController && this.abortController?.signal === signal) {
+      if (ownsController && this.abortController?.signal === controllerSignal) {
         this.abortController = null;
       }
     }
@@ -2418,9 +2828,12 @@ export class Agent {
       idea?: string;
       runId?: string;
       flags: {
-        maxCost: number;
-        maxSprints: number;
+        /** @deprecated Ignored — `/ideal` has no spend cap. */
+        maxCost?: number;
+        /** Sprint ceiling only when the user typed `--max-sprints N`; absent = none. */
+        maxSprints?: number;
         doneThreshold: number;
+        /** @deprecated Ignored — `/ideal` has no token budget. */
         budgetTokens?: number;
         stack?: string;
         noCustomerDebate?: boolean;
@@ -2437,34 +2850,56 @@ export class Agent {
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const { runProductLoop } = await import("../product-loop/index.js");
     const { createCouncilLLM } = await import("../council/llm.js");
+    const { withCouncilSignal } = await import("../council/index.js");
     const nodePath = await import("node:path");
+
+    // P0-4 remainder — make Esc reach a PENDING council on the `/ideal` path.
+    // Re-arming `isProcessingRef` (use-app-logic.tsx) got the keypress as far as
+    // `agent.abort()`, but abort() is `this.abortController?.abort()` (:882) and
+    // the `/ideal` SLASH path never created one: unlike the auto-council path,
+    // it does NOT run inside processMessage (which sets it at :4262) — the TUI
+    // calls `agent.runProductLoopV1(payload)` directly. So `abort()` hit a null
+    // controller and was a total no-op, and the two `runIsolatedTask` sites
+    // below that already read `this.abortController?.signal` got `undefined`.
+    // Identical defect and identical fix to `runCouncilV2` (:2183-2187); only
+    // tear down a controller we own.
+    const ownsController = !this.abortController;
+    if (ownsController) {
+      this.abortController = new AbortController();
+    }
+    const signal = this.abortController?.signal;
 
     const productStats = {
       calls: 0,
       startMs: Date.now(),
       phases: [] as Array<{ name: string; durationMs: number }>,
     };
-    const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, productStats);
-    // Autonomous-execution permission for the product loop. /ideal's consent
-    // boundary is the preflight plan-approval askcard; once the PO approves the
-    // plan, the sprint IMPLEMENT turn must apply its own file-op mutations without
-    // a per-tool approval prompt. In `safe` mode a Write/Edit surfaces a
-    // tool_approval_request and awaits respondToToolApproval — but in the driven
-    // product-loop context nothing answers it and no approval askcard renders, so
-    // the impl turn wedges forever right after finishReason:tool-calls (observed
-    // live 2026-07-14: 0 files written across grok/opencode/deepseek + isolated &
-    // streamed paths — tool-engine.ts:2997). Elevating safe→auto-edit for the turn
-    // auto-approves file ops (yolo stays yolo); catastrophic bash stays hard-blocked
-    // by permission-mode's CATASTROPHIC_PATTERNS regardless of mode.
+    // Second half of the same defect: even WITH a controller, no product-loop
+    // call site passes a signal — `llm.generate(...)` (loop-driver, sprint-
+    // planner, done-gate, gather, backlog-builder, criteria-seed, cross-run-
+    // memory, assumption-ledger), `runDebate(spec, config, ctx.llm)` with no
+    // `config.signal` (loop-driver.ts:761 vs debate.ts:692) and the sprint-
+    // planning `runCouncil` with no `options.signal` (sprint-runner.ts:821).
+    // `withCouncilSignal` is the council's existing one-place injector for
+    // exactly this; reuse it rather than threading a signal through ten
+    // product-loop modules. `runCouncil` re-wraps with its own (undefined)
+    // signal downstream, which is a no-op passthrough that keeps ours.
+    const llm = withCouncilSignal(createCouncilLLM(this.bash, this.mode, this.session?.id, productStats), signal);
+    // Autonomous-execution permission for the product loop. Both closures below
+    // elevate through the SAME depth-counted pair — rationale, the live evidence
+    // for it (impl turn wedging at tool_approval_request; the abandoned child
+    // that outlives the sprint deadline) and why it must not be per-call
+    // save/restore all live on `beginAutonomousElevation`. Keep it one
+    // mechanism: fixing only one of these two sites leaves the leak alive across
+    // the cross-site interleaving, which is the reachable one.
     const self = this;
     const processMessageFn = (m: string): AsyncGenerator<StreamChunk, void, unknown> =>
       (async function* () {
-        const prev = self.permissionMode;
-        if (self.permissionMode === "safe") self.permissionMode = "auto-edit";
+        self.beginAutonomousElevation();
         try {
           yield* self.processMessage(m, options?.observer);
         } finally {
-          self.permissionMode = prev;
+          self.endAutonomousElevation();
         }
       })();
     // Isolated bounded task-runner bridge for the sprint implement stage: a fresh
@@ -2472,9 +2907,15 @@ export class Agent {
     // NOT inherit this turn's council-debate history — the root fix for the live
     // ctx-overflow wedge. Returns a compact ToolResult (absorbed, no parent bloat).
     // Same autonomous-permission elevation as the streamed path above.
-    const runIsolatedTask = async (request: import("../types/index.js").TaskRequest) => {
-      const prev = self.permissionMode;
-      if (self.permissionMode === "safe") self.permissionMode = "auto-edit";
+    const runIsolatedTask = async (
+      request: import("../types/index.js").TaskRequest,
+      // N3 — per-call cancellation + activity relay. Without `abortSignal` the
+      // sprint's total-elapsed deadline could only stop AWAITING the child; the
+      // child itself kept streaming and billing (measured: 220s / 32 steps /
+      // 29.8% of a run's spend after the run was declared dead).
+      opts?: { abortSignal?: AbortSignal; onActivity?: (detail: string) => void },
+    ) => {
+      self.beginAutonomousElevation();
       try {
         // Live activity bridge: the isolated implement stage absorbs its own
         // stream (compact ToolResult only at the END), which left the main
@@ -2486,15 +2927,25 @@ export class Agent {
           (detail) => {
             if (this.abortController?.signal.aborted) return;
             self.emitSubagentStatus({ agent: request.agent, description: request.description, detail });
+            opts?.onActivity?.(detail);
           },
-          this.abortController?.signal,
+          combineAbortSignals(this.abortController?.signal, opts?.abortSignal),
         );
       } finally {
+        // Release the permission FIRST. `emitSubagentStatus` synchronously calls
+        // externally-registered UI listeners (`subagentStatusListeners`) with no
+        // guard, so one throwing listener propagates out of this `finally` — and
+        // in the previous order that skipped the restore entirely, stranding the
+        // session in `auto-edit` for the rest of its life. Clearing a status line
+        // is cosmetic; dropping back out of an elevated permission mode is not,
+        // so it must not be downstream of anything that can throw.
+        self.endAutonomousElevation();
         self.emitSubagentStatus(null);
-        self.permissionMode = prev;
       }
     };
-    const flowDir = nodePath.join(this.bash.getCwd(), ".muonroi-flow");
+    // F7 — the flow dir belongs to the RUN, not to the tool cwd, which the bash
+    // `cd` handler mutates permanently. See src/flow/run-root.ts.
+    const flowDir = nodePath.join(runAnchoredStateRoot(this.bash.getCwd()), ".muonroi-flow");
 
     // P2.7 (LLM-first — no-regex routing): the work-depth tier that decides
     // /ideal's route is judged by the MODEL (the same depthTier the PIL Layer-1
@@ -2611,43 +3062,87 @@ export class Agent {
         ? (this._buildRecentTurnsSummary() ?? undefined)
         : undefined;
 
-    const gen = runProductLoop({
-      subcommand: payload.subcommand,
-      idea: payload.idea ?? "",
-      runId: payload.runId,
-      flowDir,
-      sessionModelId: this.modelId,
-      llm,
-      flags: {
-        maxCost: payload.flags.maxCost,
-        maxSprints: payload.flags.maxSprints,
-        doneThreshold: payload.flags.doneThreshold,
-        budgetTokens: payload.flags.budgetTokens,
-        stack: payload.flags.stack,
-        forceCouncil: routeForceCouncil,
-      },
-      respondToQuestion: this.councilManager.createQuestionResponder(),
-      respondToPreflight: this.councilManager.createPreflightResponder(),
-      cwd: this.bash.getCwd(),
-      processMessageFn,
-      runIsolatedTask,
-      // Mode C — wire verify-recipe detector so runProductLoop auto-detect can probe cwd.
-      detectVerifyRecipe: () => this.detectVerifyRecipe(),
-      skipPriorContext: payload.flags.noPriorContext === true,
-      conversationContext,
-      complexity,
-      needsClarification,
-      sufficiencyMissing,
-      // Mode C explicit override + gh pr create opt-in (see .planning/MAINTAIN-MODE.md).
-      mode: payload.flags.mode,
-      ghPr: payload.flags.ghPr === true,
-      // Chat session id — used as the FK key for interaction_logs telemetry.
-      // The /ideal runId is NOT a sessions.id and would silently fail FK insert.
-      sessionId: this.session?.id,
-    } as Parameters<typeof runProductLoop>[0]);
+    // The run-scoped "no limits" switch (src/utils/ideal-run-scope.ts). Every
+    // resumption of the product loop — and everything it reaches through
+    // processMessageFn, runIsolatedTask and the council LLM — runs inside the
+    // scope. This method's own `for await` below does not, so neither does the
+    // TUI that drives it, nor any chat turn it starts concurrently or afterwards.
+    const gen = scopeGeneratorToIdealRun(
+      runProductLoop({
+        subcommand: payload.subcommand,
+        idea: payload.idea ?? "",
+        runId: payload.runId,
+        flowDir,
+        sessionModelId: this.modelId,
+        llm,
+        // No maxCost / budgetTokens: `/ideal` has no spend cap and no token budget
+        // (user decision). maxSprints is set only when the user typed it.
+        flags: {
+          maxSprints: payload.flags.maxSprints,
+          doneThreshold: payload.flags.doneThreshold,
+          stack: payload.flags.stack,
+          forceCouncil: routeForceCouncil,
+        },
+        respondToQuestion: this.councilManager.createQuestionResponder(),
+        respondToPreflight: this.councilManager.createPreflightResponder(),
+        cwd: this.bash.getCwd(),
+        processMessageFn,
+        runIsolatedTask,
+        // Mode C — wire verify-recipe detector so runProductLoop auto-detect can probe cwd.
+        detectVerifyRecipe: () => this.detectVerifyRecipe(),
+        skipPriorContext: payload.flags.noPriorContext === true,
+        conversationContext,
+        complexity,
+        needsClarification,
+        sufficiencyMissing,
+        // Mode C explicit override + gh pr create opt-in (see .planning/MAINTAIN-MODE.md).
+        mode: payload.flags.mode,
+        ghPr: payload.flags.ghPr === true,
+        // Chat session id — used as the FK key for interaction_logs telemetry.
+        // The /ideal runId is NOT a sessions.id and would silently fail FK insert.
+        sessionId: this.session?.id,
+        // S4 — the SAME controller that already gates `runIsolatedTask` (via
+        // `combineAbortSignals` above) and this method's own `for await`
+        // teardown below. Threaded into DriverContext so the sprint-level
+        // verify-fix loop can check `.aborted` directly instead of only
+        // learning about an abort indirectly through a failed isolated call.
+        abortSignal: signal,
+      } as Parameters<typeof runProductLoop>[0]),
+      `ideal:${payload.subcommand}`,
+    );
 
-    for await (const chunk of gen) {
-      yield chunk;
+    try {
+      for await (const chunk of gen) {
+        yield chunk;
+        // Hard-stop guard, same shape as runCouncil's `userAborted()` phase
+        // check (council/index.ts). Aborting the in-flight model call is not by
+        // itself enough to end the turn: every product-loop phase wraps its work
+        // in fail-open try/catch (e.g. the debate retry at loop-driver.ts:1119),
+        // so a swallowed AbortError would let the loop march into the NEXT phase
+        // and keep spending. Breaking here unwinds `gen` via its `return()`, so
+        // the TUI's own `for await` ends and the turn is actually cancelled.
+        // Latency is bounded by one in-flight sub-call.
+        if (signal?.aborted) break;
+      }
+    } finally {
+      // Release the controller we created above so the next turn starts clean.
+      // Guarded on ownsController + identity so an abort during a nested run
+      // cannot null out a controller that belongs to an enclosing processMessage
+      // turn. Mirrors runCouncilV2 (:2405-2407).
+      if (ownsController && this.abortController?.signal === signal) {
+        this.abortController = null;
+      }
+      // Same invariant runCouncilV2 already enforces (:2404). `/ideal` uses the
+      // SAME `createQuestionResponder` / `createPreflightResponder` closures, and
+      // those bracket every open card with `beginInteractivePause()`. A card
+      // abandoned mid-run — the user hits Esc, the UI breaks out of its
+      // `for await` (which unwinds this generator via `gen.return()`), or the
+      // run throws while a card is open — never resolves, so its pause would
+      // leak. `pauseDepth` is process-global, so ONE leak permanently disarms
+      // `shouldSuppressFire` for the top-level turn watchdog (:3568) and the
+      // provider stall watchdog (tool-engine.ts:1977) for every LATER chat turn
+      // in the process. Runs on every exit path — normal, throw, unwind.
+      this.councilManager.releasePendingWaits();
     }
   }
 
@@ -3275,6 +3770,7 @@ export class Agent {
     logger.debug("orchestrator", "Checking silent session rotation threshold", { currentChars, threshold });
 
     // 1. Run classifier to decide execution route
+    breadcrumb("pre-stream.subSessionClassify.start", { sessionId: this.session?.id });
     let routeAction: import("../pil/llm-classify.js").SubSessionAction = "DIRECT_ANSWER";
     const isMockMode =
       process.argv.includes("--mock-llm") ||
@@ -3309,6 +3805,7 @@ export class Agent {
         logger.error("orchestrator", "Routing classification failed, falling back to DIRECT_ANSWER", { error: err });
       }
     }
+    breadcrumb("pre-stream.subSessionClassify.end", { sessionId: this.session?.id, routeAction });
 
     // Reactive escalation — override a DIRECT_ANSWER route (the router's blind
     // spot on read-heavy analysis, and its silent-degrade to DIRECT on classify
@@ -3370,12 +3867,15 @@ export class Agent {
       const parentSessionId = this.session.id;
       try {
         const path = await import("node:path");
-        const flowDir = path.join(this.bash.getCwd(), ".muonroi-flow");
+        const flowDir = path.join(runAnchoredStateRoot(this.bash.getCwd()), ".muonroi-flow");
         const { deliberateCompact } = await import("../flow/compaction/index.js");
         const { getDatabase } = await import("../storage/db.js");
         const { appendCompaction, getNextMessageSequence } = await import("../storage/transcript.js");
 
         const cr = await deliberateCompact(flowDir, this.messages, "", 4096, this.modelId);
+        if (!cr.summary.trim()) {
+          throw new Error("Compaction returned an empty summary; retaining the main session and history");
+        }
 
         const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
         const db = getDatabase();
@@ -3404,10 +3904,60 @@ export class Agent {
     let isSubSessionForked = false;
     let parentSessionId: string | null = null;
     let subSessionId: string | null = null;
+    // Round 9 (G13): `this.bash` is ONE shared BashTool instance for the
+    // whole Agent lifetime — forking a sub-session swaps `this.session` /
+    // `this.messages` but NEVER creates a new BashTool, so a `cd` the child
+    // runs (into a challenge/repo subdirectory, say) mutates the SAME cwd
+    // the parent will resume into. Measured live: debug.log's
+    // "[flow/run-root] flow-state dir re-anchored to the run root (tool cwd
+    // had drifted)" firing repeatedly, and the TUI status bar's path ending
+    // inside a challenge subdirectory after a sub-session turn. Captured
+    // here (before the fork) and restored in this function's own `finally`
+    // below, so the child's cwd changes never leak back to the parent —
+    // "isolate per session" without the cost of a second BashTool.
+    const parentCwdAtFork = this.bash.getCwd();
+    const previousHelperOwner = this._helperParentSessionId;
+    const previousHelperCwd = this._helperParentCwd;
 
-    if (routeAction === "SPAWN_SUB_SESSION" && this.session && this.sessionStore) {
+    // Round 12 (G15): `routerSubSessions: false` keeps the CURRENT turn on
+    // the main session/main model — router SPAWN_SUB_SESSION and reactive
+    // escalation (both converge on `routeAction === "SPAWN_SUB_SESSION"`,
+    // the ONLY thing this block's condition reads) hand the turn to a
+    // WORKER-tier child by construction, which is exactly what a project
+    // whose OWN framework requires the orchestrator tier to hold the whole
+    // turn (stage mapping, a written brief, judgement) cannot afford. Gating
+    // this single entry condition — rather than each upstream setter of
+    // `routeAction` — covers every path uniformly: nothing downstream of
+    // this block reads `routeAction` again, so skipping it here falls
+    // straight through to the ordinary (non-forked) turn body below,
+    // unchanged. Logged ONCE per turn, only when the router/escalation
+    // actually wanted to fork and was overridden — not on every turn.
+    if (routeAction === "SPAWN_SUB_SESSION" && this.session && this.sessionStore && !isRouterSubSessionsEnabled()) {
+      logger.info("orchestrator", "routerSubSessions disabled — keeping this turn on the main session", {
+        sessionId: this.session.id,
+      });
+    }
+
+    if (routeAction === "SPAWN_SUB_SESSION" && this.session && this.sessionStore && isRouterSubSessionsEnabled()) {
       yield { type: "toast", toastLevel: "info", content: "Đang khởi tạo sub-session ngầm để xử lý tác vụ..." };
       parentSessionId = this.session.id;
+      breadcrumb("pre-stream.subSessionSpawn.start", { sessionId: parentSessionId });
+      // Defect B fix: snapshot the pre-fork state BEFORE any of the writes
+      // below, so a throw mid-fork (this.session/this.modelId — and, in the
+      // resume branch, this.messages/this.messageSeqs too — already switched
+      // to the CHILD's values, but before `isSubSessionForked` is set true)
+      // can be rolled back exactly in the catch, instead of relying on that
+      // flag: the flag is set AFTER the two throw-capable calls
+      // (loadSessionChainTranscriptState, touchSession), so a throw from
+      // either of them left it false and the finally block's restore (which
+      // is itself correctly gated on that flag — it also absorbs the
+      // child's output, which must NOT run when the fork never completed)
+      // never fires, silently leaking the child's model/session/messages
+      // onto every subsequent turn of this Agent instance.
+      const sessionBeforeFork = this.session;
+      const modelIdBeforeFork = this.modelId;
+      const messagesBeforeFork = this.messages;
+      const messageSeqsBeforeFork = this.messageSeqs;
       try {
         const { loadLatestCompaction, getNextMessageSequence, appendCompaction } = await import(
           "../storage/transcript.js"
@@ -3418,29 +3968,55 @@ export class Agent {
         // Check if there is already an active child session for this parent session
         const activeSubSession = db
           .prepare(
-            "SELECT id, updated_at FROM sessions WHERE parent_session_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
+            "SELECT id, title, updated_at FROM sessions WHERE parent_session_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
           )
-          .get(parentSessionId) as { id: string; updated_at: string } | undefined;
+          .get(parentSessionId) as { id: string; title: string | null; updated_at: string } | undefined;
 
         let shouldResume = false;
         if (activeSubSession) {
           const updatedAt = new Date(activeSubSession.updated_at).getTime();
           const now = Date.now();
           const diffMins = (now - updatedAt) / (60 * 1000);
-          if (diffMins > 15) {
-            // Stale: mark as abandoned
+          // Round 4 (G9): recency alone used to be sufficient to resume — an
+          // unrelated request within the 15-minute window resumed the OLD
+          // sub-session's context regardless of what it was actually about
+          // (measured live: session 69e68c766fcf's "hunt/stage0" request
+          // resumed the SEAL challenge sub-session's 29-message context).
+          // `shouldResumeSubSession` adds a relatedness check on top of the
+          // existing staleness check — see its own doc comment for the
+          // fail-CLOSED (fork fresh) default on every uncertain path.
+          const decision = await shouldResumeSubSession({
+            diffMins,
+            activeGoal: activeSubSession.title,
+            newRequest: userMessage,
+            classify: async (newRequest, activeGoal) => {
+              if (isMockMode && !forceClassify) return null; // unreachable in plain mock mode — routeAction never becomes SPAWN_SUB_SESSION without classification
+              try {
+                const { classifySubSessionRelatedness } = await import("../pil/llm-classify.js");
+                return await classifySubSessionRelatedness(this.modelId, newRequest, activeGoal);
+              } catch (err) {
+                logger.error("orchestrator", "Sub-session relatedness classification failed", { error: err });
+                return null;
+              }
+            },
+          });
+
+          if (decision.resume) {
+            shouldResume = true;
+            subSessionId = activeSubSession.id;
+          } else {
+            // Stale OR unrelated: mark as abandoned either way — the decision
+            // object's own `reason` already distinguishes them in the log.
             db.prepare("UPDATE sessions SET status = 'abandoned', updated_at = ? WHERE id = ?").run(
               new Date().toISOString(),
               activeSubSession.id,
             );
-            logger.info("orchestrator", "Stale sub-session found, marked as abandoned", {
+            logger.info("orchestrator", "Active sub-session not resumed — marked as abandoned", {
               parentSessionId,
               subSessionId: activeSubSession.id,
               diffMins,
+              reason: decision.reason,
             });
-          } else {
-            shouldResume = true;
-            subSessionId = activeSubSession.id;
           }
         }
 
@@ -3451,20 +4027,52 @@ export class Agent {
             content: "Phát hiện sub-session trước đó bị gián đoạn, đang khôi phục...",
           };
           this.session = this.sessionStore.getRequiredSession(subSessionId);
+          // Round 9 (HR8, latent gap exposed by subAgentModel): a resumed
+          // session's OWN turn must run with ITS OWN stored model, not
+          // whatever `this.modelId` currently holds from the parent —
+          // previously harmless (round 2/3 always made the child inherit the
+          // SAME value as the parent), but subAgentModel can genuinely
+          // differ.
+          this.modelId = this.session.model;
           const childState = loadSessionChainTranscriptState(subSessionId);
           this.messages = childState.messages;
           this.messageSeqs = childState.seqs;
           this.sessionStore.touchSession(subSessionId, this.bash.getCwd());
           isSubSessionForked = true;
+          this._helperParentSessionId = previousHelperOwner ?? parentSessionId;
+          this._helperParentCwd = previousHelperCwd ?? parentCwdAtFork;
           logger.info("orchestrator", "Resumed child sub-session successfully", {
             parentSessionId,
             subSessionId,
           });
         } else {
           const latest = loadLatestCompaction(parentSessionId);
-          const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
+          // Round 9 (HR8): a SPAWN_SUB_SESSION child gets the project's
+          // `subAgentModel` override when set (owner correction to round 2's
+          // G3 mistake of making every sub-session inherit the main
+          // session's `model` pin unconditionally) — unset means unchanged
+          // behaviour (the child inherits `this.modelId` exactly as before).
+          // Computed once and reused below for `this.modelId` too: the
+          // `sessions` row alone is not what the child's OWN turn actually
+          // dispatches with — `this.modelId` is a separate Agent-instance
+          // field that round 2/3 never had to touch (the child always
+          // inherited the SAME value), but subAgentModel can genuinely
+          // differ from the main session's model, so it must be updated
+          // here or the child's turn silently keeps running on the parent's
+          // model despite its own `sessions.model` row saying otherwise.
+          const subAgentModelOverride = getProjectSubAgentModel();
+          const newSession = this.sessionStore.createSession(
+            subAgentModelOverride ?? this.modelId,
+            this.mode,
+            this.bash.getCwd(),
+          );
           this.sessionStore.linkChild(newSession.id, parentSessionId, "subagent");
           subSessionId = newSession.id;
+          // Round 4 (G9): record the ORIGINAL goal this sub-session was forked
+          // for, so a LATER request deciding whether to resume it (see
+          // `shouldResumeSubSession` above) has something real to compare
+          // against instead of resuming purely by recency.
+          this.sessionStore.setTitle(newSession.id, userMessage);
 
           // Seed the child with the parent's CURRENT working set — after a
           // compaction that is already [summary, ...kept raw tail] (see the
@@ -3490,12 +4098,13 @@ export class Agent {
             role: "system",
             content:
               `You are executing a sub-task delegated by the Main Session in an isolated, temporary Sub-Session.\n` +
-              `Your goal is to satisfy the user's request: "${userMessage}"\n\n` +
+              `Your assignment is to gather evidence and perform the scoped work needed for: "${userMessage}"\n` +
+              `The Main Session owns the goal, acceptance decision and final user-facing answer. Return a concise deliverable to main, not a final answer on its behalf.\n\n` +
               `Your Operating Boundaries & Rules:\n` +
               `1. You have full access to tools (bash, edit_file, read_file, grep, etc.). Execute them as needed to build, debug, and verify the work.\n` +
               `2. Stay strictly focused on completing the request. Do not engage in social chat or pleasantries.\n` +
               `3. Once the goal is achieved and verified, you MUST return your final response using the 'respond_general' (or final answer) tool.\n` +
-              `4. Your final response MUST contain a structured summary (Key Changes, Verification Details, Result Summary).\n` +
+              `4. Your final response MUST contain a structured summary: Key Changes (file paths), Verification Details (commands and observed results), Remaining Blockers, and Result Summary. Cite tool/artifact IDs where available so main can retrieve full evidence.\n` +
               `5. All intermediate tool calls, raw tool outputs, and diagnostic traces will remain isolated inside this sub-session and will not bloat the parent session.`,
           };
           seedMessages.push(overlayMessage);
@@ -3505,8 +4114,14 @@ export class Agent {
           this.messages = seedMessages;
           this.messageSeqs = seedSeqs;
           this.sessionStore.touchSession(subSessionId, this.bash.getCwd());
+          // Round 9 (HR8): keep `this.modelId` in sync with the child's own
+          // `sessions.model` row — this is the field MessageProcessorDeps
+          // actually reads (see `_buildMessageProcessorDeps`), not the row.
+          if (subAgentModelOverride) this.modelId = subAgentModelOverride;
 
           isSubSessionForked = true;
+          this._helperParentSessionId = previousHelperOwner ?? parentSessionId;
+          this._helperParentCwd = previousHelperCwd ?? parentCwdAtFork;
           logger.info("orchestrator", "Forked child sub-session successfully", {
             parentSessionId,
             subSessionId,
@@ -3514,7 +4129,18 @@ export class Agent {
         }
       } catch (err) {
         logger.error("orchestrator", "Forking child sub-session failed, falling back to main session", { error: err });
+        // Defect B fix: restore from the pre-fork snapshot UNCONDITIONALLY —
+        // do not gate this on `isSubSessionForked`, which the throwing call
+        // itself prevented from ever being set. Cheap direct reference
+        // restores (no DB round-trip needed): safe even when nothing was
+        // actually mutated yet (the values are simply reassigned to
+        // themselves in that case).
+        this.session = sessionBeforeFork;
+        this.modelId = modelIdBeforeFork;
+        this.messages = messagesBeforeFork;
+        this.messageSeqs = messageSeqsBeforeFork;
       }
+      breadcrumb("pre-stream.subSessionSpawn.end", { sessionId: subSessionId ?? parentSessionId });
     }
 
     let processor = new MessageProcessor(this._buildMessageProcessorDeps());
@@ -3545,6 +4171,19 @@ export class Agent {
     const { withTurnWatchdog, TurnStallError } = await import("./turn-watchdog.js");
     const turnIdleMs = Number(process.env.MUONROI_TURN_IDLE_MS ?? 120_000);
     const turnTotalMs = Number(process.env.MUONROI_TURN_TOTAL_MS ?? 0);
+    // One controller owns helper execution AND main's acceptance step. Nested
+    // processors must not clear it between those two parts of the same turn.
+    const ownsHelperController = isSubSessionForked && !this.abortController;
+    if (ownsHelperController) this.abortController = new AbortController();
+    const helperController = isSubSessionForked ? this.abortController : null;
+    const forwardHelperAbort = () => helperController?.abort(this.externalAbortContext?.reason());
+    if (ownsHelperController && this.externalAbortContext) {
+      if (this.externalAbortContext.signal.aborted) forwardHelperAbort();
+      else this.externalAbortContext.signal.addEventListener("abort", forwardHelperAbort, { once: true });
+    }
+    let helperTurnSettled = false;
+    let helperFailure: string | undefined;
+    let helperReceipt: string | null = null;
 
     try {
       let attempts = 0;
@@ -3556,7 +4195,7 @@ export class Agent {
         try {
           attempts++;
           try {
-            yield* withTurnWatchdog(processor.run(userMessage, observer, images), {
+            const stream = withTurnWatchdog(processor.run(userMessage, observer, images), {
               idleMs: turnIdleMs,
               totalMs: turnTotalMs,
               label: "assistant turn",
@@ -3572,6 +4211,18 @@ export class Agent {
               // single 120s budget. See turn-progress.ts.
               hasProgressSince: (sinceMs) => hasTurnProgressSince(sinceMs),
             });
+            for await (const chunk of stream) {
+              if (isSubSessionForked) {
+                if (chunk.type === "error") {
+                  helperFailure = chunk.content ?? "Helper reported an error";
+                  yield { type: "toast", toastLevel: "warn", content: helperFailure };
+                  continue;
+                }
+                // Helper prose is evidence for main, not the user's final answer.
+                if (["content", "reasoning", "structured_response", "done"].includes(chunk.type)) continue;
+              }
+              yield chunk;
+            }
           } catch (stallErr) {
             // A hung turn is NOT a transient error — retrying it (below) would
             // just hang again. Abort, surface a toast, and terminate the turn.
@@ -3593,11 +4244,31 @@ export class Agent {
               //   3. an `error` chunk, not a toast — the UI folds `error` content
               //      into the transcript, while a toast auto-dismisses.
               const stallMessage = `Turn ended by watchdog: ${stallErr.message}`;
+              // Attribute the hang to the phase that STARTED without a closing
+              // breadcrumb — see the `preStreamPhase` helper in
+              // message-processor.ts and the coarse "pre-stream.toolEngine"
+              // pair in tool-engine.ts. Scoped to THIS turn's session id:
+              // `getLastOpenPhase` tracks open phases per session, so a
+              // concurrent nested run (a forked sub-session, an `/ideal`
+              // sprint) can no longer shadow the run that actually hung. A
+              // session with nothing open yields null — the honest answer, and
+              // still far better than the prior "no evidence at all" state
+              // (session 1e9db4d68da0: a watchdog kill with zero
+              // interaction_logs / call_accounting rows anywhere in the
+              // 120s window).
+              let lastOpenPhase: string | null = null;
+              try {
+                lastOpenPhase = getLastOpenPhase(this.session?.id);
+              } catch (breadcrumbErr) {
+                logger.error("orchestrator", "watchdog lastPhase lookup failed", {
+                  error: (breadcrumbErr as Error)?.message,
+                });
+              }
               if (this.session) {
                 try {
                   logInteraction(this.session.id, "error", {
                     eventSubtype: "watchdog",
-                    data: { message: stallMessage.slice(0, 200), kind: stallErr.kind },
+                    data: { message: stallMessage.slice(0, 200), kind: stallErr.kind, lastPhase: lastOpenPhase },
                   });
                 } catch (logErr) {
                   logger.error("orchestrator", "watchdog error-log failed", { error: logErr });
@@ -3630,11 +4301,20 @@ export class Agent {
             this.messages = [...messagesSnapshot];
             this.messageSeqs = [...seqsSnapshot];
             processor = new MessageProcessor(this._buildMessageProcessorDeps());
+          } else if (isSubSessionForked && !helperController?.signal.aborted) {
+            helperFailure = err instanceof Error ? err.message : String(err);
+            logger.error("orchestrator", "Helper failed; returning control to main", {
+              subSessionId,
+              error: helperFailure,
+            });
+            yield { type: "toast", toastLevel: "warn", content: helperFailure };
+            break;
           } else {
             throw err;
           }
         }
       }
+      helperTurnSettled = true;
 
       if (autoCommitOn) {
         const auto = await maybeAutoCommitTurn({ cwd, dirtyBefore, userMessage }).catch((err) => {
@@ -3646,41 +4326,110 @@ export class Agent {
             type: "content",
             content: `\n✓ Auto-committed ${auto.fileCount} file(s) → ${auto.sha} (${AUTO_COMMIT_ATTRIBUTION})\n`,
           };
+        } else if (auto.reason === "outside-run-root") {
+          // A silently-skipped commit is exactly the "reported success for
+          // something that did not happen" shape this repo exists to remove —
+          // so a containment refusal is always visible, never just logged.
+          yield {
+            type: "content",
+            content: `\n⚠ Auto-commit REFUSED — ${auto.detail ?? "commit target is outside this run's directory."}\n`,
+          };
         }
       }
     } finally {
-      if (isSubSessionForked && parentSessionId && this.sessionStore) {
-        try {
-          const finalMessages = salvageSubSessionOutput(this.messages, preTurnMessageCount);
+      try {
+        if (isSubSessionForked && parentSessionId && this.sessionStore) {
+          try {
+            const finalMessages = salvageSubSessionOutput(this.messages, preTurnMessageCount);
 
-          // Restore parent session
-          this.session = this.sessionStore.getRequiredSession(parentSessionId);
+            // Restore parent session
+            this.session = this.sessionStore.getRequiredSession(parentSessionId);
+            // Round 9 (HR8): `this.modelId` may have been switched to
+            // `subAgentModel` for the child's own turn (see the fork branch
+            // above) — restore it to the PARENT's own model so the main
+            // session's NEXT turn keeps running on `model`, never leaking the
+            // sub-agent override past the sub-session's lifetime.
+            this.modelId = this.session.model;
+            // Round 9 (G13): restore the cwd the PARENT actually had before
+            // the fork — undoes whatever `cd` the child ran, so the child's
+            // tool-cwd changes never leak into the parent's next turn (see
+            // `parentCwdAtFork`'s doc comment above). Best-effort: a path that
+            // no longer exists (rare — the child deleted its own cwd) must not
+            // block absorbing the child's output, so this never throws past
+            // the finally's own try/catch either way.
+            try {
+              this.bash.setCwd(parentCwdAtFork);
+            } catch (cwdErr) {
+              logger.warn("orchestrator", "Failed to restore parent cwd after sub-session absorb", {
+                parentCwdAtFork,
+                error: cwdErr instanceof Error ? cwdErr.message : String(cwdErr),
+              });
+            }
 
-          const { loadTranscriptState } = await import("../storage/transcript.js");
-          const parentState = loadTranscriptState(parentSessionId);
-          this.messages = parentState.messages;
-          this.messageSeqs = parentState.seqs;
+            const { loadTranscriptState } = await import("../storage/transcript.js");
+            const parentState = loadTranscriptState(parentSessionId);
+            this.messages = parentState.messages;
+            this.messageSeqs = parentState.seqs;
 
-          const userModelMessage: ModelMessage = {
-            role: "user",
-            content: userMessage,
-          };
-
-          if (finalMessages.length > 0) {
-            this.appendCompletedTurn(userModelMessage, finalMessages);
-            logger.info("orchestrator", "Absorbed sub-session outcome into parent session", {
-              parentSessionId,
-              subSessionId,
-              absorbedMessagesCount: finalMessages.length,
-            });
-          } else {
-            logger.warn("orchestrator", "No assistant messages found to absorb from sub-session", {
-              parentSessionId,
-              subSessionId,
-            });
+            this._helperParentSessionId = previousHelperOwner;
+            this._helperParentCwd = previousHelperCwd;
+            if (helperTurnSettled && !helperController?.signal.aborted) {
+              helperReceipt = buildHelperReceipt(subSessionId!, finalMessages, helperFailure);
+              const receiptMessage: ModelMessage = { role: "system", content: helperReceipt };
+              const receiptSeqs = appendMessages(parentSessionId, [receiptMessage]);
+              this.messages.push(receiptMessage);
+              this.messageSeqs.push(...receiptSeqs);
+              logger.info("orchestrator", "Returned helper evidence to main for acceptance", {
+                parentSessionId,
+                subSessionId,
+                absorbedMessagesCount: finalMessages.length,
+              });
+            }
+          } catch (err) {
+            logger.error("orchestrator", "Failed to absorb sub-session final summary", { error: err });
           }
-        } catch (err) {
-          logger.error("orchestrator", "Failed to absorb sub-session final summary", { error: err });
+        }
+        if (
+          helperReceipt &&
+          helperTurnSettled &&
+          !helperController?.signal.aborted &&
+          this.session?.id === parentSessionId
+        ) {
+          yield { type: "toast", toastLevel: "info", content: "Main đang đánh giá kết quả từ helper..." };
+          const mainProcessor = new MessageProcessor(this._buildMessageProcessorDeps());
+          try {
+            yield* withTurnWatchdog(mainProcessor.run(userMessage, observer, images, { retainModel: true }), {
+              idleMs: turnIdleMs,
+              totalMs: turnTotalMs,
+              label: "main acceptance turn",
+              shouldSuppressFire: () => isInteractivePaused() || isToolActivityLive(),
+              hasProgressSince: (sinceMs) => hasTurnProgressSince(sinceMs),
+            });
+          } catch (err) {
+            logger.error("orchestrator", "Main helper acceptance failed", { parentSessionId, error: String(err) });
+            if (err instanceof TurnStallError) {
+              helperController?.abort(new DOMException(err.message, "TimeoutError"));
+              if (this.session) {
+                logInteraction(this.session.id, "error", {
+                  eventSubtype: "watchdog",
+                  data: { message: err.message, phase: "main-acceptance" },
+                });
+                markLatestPendingMessageErrored(this.session.id);
+              }
+              yield { type: "error", content: `Turn ended by watchdog: ${err.message}`, isAuthError: false };
+              yield { type: "done" };
+            } else {
+              // biome-ignore lint/correctness/noUnsafeFinally: Main acceptance is a new turn; propagate its failure after the nested ownership cleanup.
+              throw err;
+            }
+          }
+        }
+      } finally {
+        this._helperParentSessionId = previousHelperOwner;
+        this._helperParentCwd = previousHelperCwd;
+        if (ownsHelperController) {
+          this.externalAbortContext?.signal.removeEventListener("abort", forwardHelperAbort);
+          if (this.abortController === helperController) this.abortController = null;
         }
       }
     }
@@ -3913,7 +4662,8 @@ export class Agent {
           `Provide clear, actionable guidance to resolve the child's query.`;
 
         const { generateTextStreamed } = await import("../providers/streamed-generate.js");
-        const modelId = self.modelId;
+        const modelId = self.sessionStore?.getRequiredSession(parentSessionId).model;
+        if (!modelId) throw new Error(`Parent session model is unavailable: ${parentSessionId}`);
         const runtime = resolveModelRuntime(modelId);
 
         // Stream + collect (NOT generateText): codex/oauth 400s non-stream requests.
@@ -3921,6 +4671,7 @@ export class Agent {
           model: runtime.model,
           system: systemPrompt,
           prompt: `Child Sub-session is stuck. Question:\n${question}`,
+          abortSignal: combineAbortSignals(self.abortController?.signal, AbortSignal.timeout(30_000)),
           ...resolveTemperatureParam(runtime, 0.2),
           ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
         });
@@ -4050,27 +4801,28 @@ export class Agent {
     return parts.length > 0 ? parts.join(" | ") : null;
   }
 
-  private _estimateProjectSize(): "small" | "medium" | "large" | null {
+  /**
+   * How much source code is in this working tree, as a ROUTING input — the bucket
+   * reaches the EE router's classify prompt as `project=<size>` via
+   * `message-processor.ts` → `decide(...)`.
+   *
+   * The walk itself lives in `project-size.ts`, which owns the full rationale: the
+   * predicate used to be an inline extension regex with no `.cs`, so
+   * `tcis-libraries/src` (1717 `.cs`) was reported `small`. It now asks
+   * `language-registry.ts`.
+   */
+  private _estimateProjectSize(): ProjectSize | null {
     try {
-      const fs = require("fs");
-      const path = require("path");
-      const cwd = this.bash.getCwd();
-      const srcDir = path.join(cwd, "src");
-      if (!fs.existsSync(srcDir)) return null;
-      let count = 0;
-      const walk = (dir: string) => {
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-          if (entry.name === "node_modules" || entry.name === ".git") continue;
-          if (entry.isDirectory()) walk(path.join(dir, entry.name));
-          else if (/\.(ts|tsx|js|jsx|py|go|rs)$/.test(entry.name)) count++;
-          if (count > 200) return;
-        }
-      };
-      walk(srcDir);
-      if (count <= 20) return "small";
-      if (count <= 100) return "medium";
-      return "large";
-    } catch {
+      return estimateProjectSizeAt(this.bash.getCwd());
+    } catch (err) {
+      // No Silent Catch: this used to be a bare `catch { return null; }`, so an
+      // unreadable directory produced the same null as "there is no src/" and the
+      // router simply got no size signal with nothing anywhere saying why.
+      logger.warn("orchestrator", "[orchestrator] project-size estimate failed — routing gets no size signal", {
+        operation: "_estimateProjectSize",
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
       return null;
     }
   }
@@ -4244,6 +4996,25 @@ export class Agent {
     return null;
   }
 
+  // A1 audit (2026-09-18): this method unconditionally creates AND unconditionally
+  // nulls `this.abortController` — the same defect class fixed in
+  // message-processor.ts's `run()` and tool-engine.ts's `executeToolEngine()`
+  // (both now guard on an `ownsController` flag so a nested call never
+  // replaces/clears an owner's controller). It is left AS-IS here because,
+  // verified by a repo-wide search, `runVerify(` has ZERO call sites anywhere
+  // in this repository outside its own definition — the `/verify` slash name
+  // is reserved in src/ui/app.tsx's command list but nothing dispatches to
+  // this method, and both the sprint-runner verify stage
+  // (`runVerifyWithWatchdog` → `runVerifyOrchestration` directly, its OWN local
+  // `AbortController`) and the `/verify` CLI path go straight to
+  // `runVerifyOrchestration` without ever going through `Agent.runVerify()`.
+  // `continueAsCouncil`'s regression test (src/scaffold/__tests__/continue-as-council.spec.ts)
+  // independently confirms this method was deliberately severed from that
+  // caller to avoid re-entering CB-3. INVARIANT: if this method is ever wired
+  // up as a nested call under an owned run (e.g. called from within
+  // `runProductLoopV1`/`processMessage`), it MUST adopt the same
+  // `ownsController` guard used in message-processor.ts/tool-engine.ts before
+  // that wiring ships — otherwise it will orphan the owner's abort signal.
   async runVerify(onProgress?: (detail: string) => void, abortSignal?: AbortSignal): Promise<ToolResult> {
     this.abortController = new AbortController();
     const signal = abortSignal ?? this.abortController.signal;

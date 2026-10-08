@@ -1,6 +1,7 @@
 import type { CouncilLLM, PreflightResponder } from "../council/types.js";
 import type { WorkflowKind } from "../gsd/types.js";
 import type { ToolResult, VerifyRecipe } from "../types/index.js";
+import type { VerifyVerdict } from "./verify-result.js";
 
 export type { WorkflowKind };
 
@@ -77,8 +78,13 @@ export interface DoneVerdict {
 
 export interface ProductRunManifest {
   idea: string;
-  capUsd: number;
-  maxSprints: number;
+  /**
+   * Only when the user typed `--max-sprints N`. Absent = no sprint ceiling:
+   * `/ideal` has no limits (user decision). There is no spend cap field —
+   * manifests written before that change still carry a `CapUsd:` line, which
+   * `readManifest` ignores.
+   */
+  maxSprints?: number;
   doneThreshold: number;
   stack?: string;
   createdAt: Date;
@@ -89,9 +95,10 @@ export interface ProductRunManifest {
 
 export interface ProductStatusCardData {
   sprintN: number;
-  totalSprints: number;
+  /** Only when the user typed `--max-sprints N`; `/ideal` has no sprint ceiling otherwise. */
+  totalSprints?: number;
+  /** Measured spend so far. There is no cap to show it against: `/ideal` has no spend limit. */
   costSpent: number;
-  costCap: number;
   criteriaMet: number;
   criteriaPartial: number;
   criteriaUnmet: number;
@@ -124,10 +131,13 @@ export interface DriverContext {
   sessionModelId: string;
   llm: import("../council/types.js").CouncilLLM;
   flags: {
-    maxCost: number;
-    maxSprints: number;
+    /** @deprecated Ignored — `/ideal` has no spend cap. Still accepted so existing callers type-check. */
+    maxCost?: number;
+    /** Sprint ceiling only when the user typed `--max-sprints N`; absent = none. */
+    maxSprints?: number;
     doneThreshold: number;
     stack?: string;
+    /** @deprecated Ignored — `/ideal` has no token budget. */
     budgetTokens?: number;
   };
   respondToQuestion: import("../council/types.js").QuestionResponder;
@@ -165,6 +175,17 @@ export interface DriverContext {
    */
   runIsolatedTask?: (
     request: import("../types/index.js").TaskRequest,
+    opts?: {
+      /**
+       * Per-call cancellation. The sprint's total-elapsed deadline
+       * (`withIsolatedImplDeadline`) aborts this when it gives up, so the child
+       * actually STOPS instead of running on un-awaited — the measured leak was
+       * 220s / 32 extra steps / 29.8% of a run's spend after it was declared dead.
+       */
+      abortSignal?: AbortSignal;
+      /** Per-tool activity from the child; the deadline uses it to report what it observed. */
+      onActivity?: (detail: string) => void;
+    },
   ) => Promise<import("../types/index.js").ToolResult>;
   /**
    * Optional bridge for verify-recipe detection. Mirrors `Orchestrator.detectVerifyRecipe`.
@@ -201,6 +222,17 @@ export interface DriverContext {
    * user's literal text; this rides a separate channel.
    */
   conversationContext?: string;
+  /**
+   * S4 — the run's real abort signal: `this.abortController.signal` from
+   * `Orchestrator.runProductLoopV1` (`orchestrator.ts`), the SAME controller
+   * that already gates `ctx.runIsolatedTask` calls (merged internally via
+   * `combineAbortSignals`) and the top-level `/ideal` generator's own
+   * `for await` teardown. Optional because legacy/test drivers omit it, in
+   * which case anything gated on it (the S4 verify-fix loop) simply never
+   * observes an abort through this channel — it still tears down normally
+   * when the generator chain itself is torn down by the consumer.
+   */
+  abortSignal?: AbortSignal;
 }
 
 export interface DriverResult {
@@ -208,10 +240,32 @@ export interface DriverResult {
   stage: Stage;
   success: boolean;
   reason?: string;
+  /**
+   * Human-readable expansion of `reason`, for the terminal chunk the caller
+   * yields before returning. `reason` stays a stable machine code (callers and
+   * forensics match on it); `detail` carries the sentence a user can act on
+   * (e.g. which provider ceiling truncated the synthesis). Optional — bails
+   * without one fall back to `reason`.
+   */
+  detail?: string;
 }
 
 export interface DoneGateContext {
   lastVerify?: ToolResult;
+  /**
+   * The ALREADY-ADJUDICATED verify verdict, when the caller has one.
+   *
+   * `lastVerify` is the raw sub-agent ToolResult, and re-parsing it here reads
+   * only the model's narration — it cannot see the deterministic verify floor's
+   * exit codes, which run afterwards in sprint-runner. That blind spot is why
+   * an upgraded verdict (floor green, model silent) has to travel as a value:
+   * without it the floor could upgrade the sprint's verdict and the done-gate
+   * would still score `engineering_floor` from the same un-adjudicated string.
+   *
+   * Optional so legacy callers (tests, scripts) keep the parse-it-yourself
+   * behaviour unchanged.
+   */
+  verifyVerdict?: VerifyVerdict;
   recipe: VerifyRecipe | null;
   criteria: Criterion[];
   history: IterationState[];
@@ -401,7 +455,14 @@ export interface PhasePlanArtifact {
   phases: Phase[];
 }
 
-export type PhaseStatus = "pending" | "in-progress" | "done" | "blocked";
+/**
+ * N4(c) — "failed" is distinct from "blocked". `blocked` means a dependency has
+ * not cleared; `failed` means this phase ran its sprints and ended BELOW its own
+ * `exitCondition.min`. Before this existed, `runPhases` marked every phase
+ * "done" once its sprint loop ended for any reason, so a phase that scored 0.00
+ * with verify FAIL on both sprints still satisfied `dependsOn` for the next one.
+ */
+export type PhaseStatus = "pending" | "in-progress" | "done" | "blocked" | "failed";
 
 export interface PhasePlanState {
   version: 1;
@@ -487,6 +548,17 @@ export interface HaltChunk {
   runId?: string;
   /** A — the sprint number that broke, for the "Sprint N failed" card title. */
   sprintN?: number;
+  /**
+   * The `deriveNextAction` verdict this halt was phrased from, when the producer
+   * has one. Carried so the card's recommendation is DERIVED rather than
+   * guessed: `deriveHaltRecommendation` (halt-recommendation.ts) reads `locus`
+   * to decide which offered option actually performs the fix, and the card's
+   * pre-selected index, its "recommended" marker and its reason line are all
+   * fields of that one result. Producers that set it MUST pass the same advice
+   * object `detail` was phrased from — a second `deriveNextAction` call with
+   * different inputs would reintroduce exactly the divergence this prevents.
+   */
+  advice?: import("./next-action.js").NextActionAdvice;
   /** Actionable choices. UI renders these as buttons / list items. */
   recovery_options: RecoveryOption[];
 }
@@ -499,8 +571,6 @@ export interface RunPhasesOptions {
   projectContext: ProjectContext;
   leader: import("./discovery-prompt-parser.js").LeaderLike;
   leaderModelId: string;
-  capUsd: number;
-  remainingUsd: () => Promise<number>;
   awaitCustomerVerdict: (args: {
     flowDir: string;
     runId: string;
@@ -566,6 +636,22 @@ export interface Backlog {
 
 export type SprintStatus = "planned" | "active" | "done" | "abandoned";
 
+/**
+ * S1 — the done-gate verdict recorded once a sprint has finished executing.
+ * `status: "done"` on `Sprint` means "ran to completion" (win or lose);
+ * `verdict.pass` is the win/lose bit. Mirrors `flow/run-artifacts.ts`
+ * `SprintOutcome`, which is the authoritative record `sprint-runner.ts`
+ * already writes per sprint — this is the same shape, kept intentionally
+ * parallel rather than re-derived, so the two never disagree.
+ */
+export interface SprintVerdictRecord {
+  pass: boolean;
+  score?: number;
+  verify?: string;
+  failedCondition?: string;
+  reason?: string;
+}
+
 export interface Sprint {
   id: string; // "sprint-1", "sprint-2", ...
   number: number; // 1, 2, 3
@@ -574,6 +660,8 @@ export interface Sprint {
   status: SprintStatus;
   startedAtUtc?: string;
   endedAtUtc?: string;
+  /** Present once the sprint has finished (see `SprintVerdictRecord`). */
+  verdict?: SprintVerdictRecord;
 }
 
 export interface SprintPlan {

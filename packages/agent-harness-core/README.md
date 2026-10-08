@@ -40,6 +40,7 @@ The `browser` export condition strips Node-only modules (`mcp-server.ts`, `trans
 | `createWebSocketTransport` | Browser-safe WebSocket transport with envelope validation |
 | `createSidechannelTransport` | Node-only fd 3/4 + named-pipe transport |
 | `createMcpHarnessServer` | Node-only MCP server (`tui.start` etc.) — accepts `HarnessSpawn` injection |
+| `ARGV_CONTRACT`, `ARGV_ALLOW_RE`, `validateStartArgs` | The `tui.start` argv allowlist — the regex is assembled from the same declaration `tui.capabilities` publishes as `argv`, so enforcement and documentation cannot drift |
 | `findUnwrappedComponents` | Node-only lint helper for `lint:semantic` |
 | `PROTOCOL_VERSION`, `UINode`, `LiveFrame`, `LiveEvent` | Protocol types |
 
@@ -53,6 +54,7 @@ serialized as JSONL on the sidechannel (fd 3 / named pipe) and ingested by
 
 | kind | Payload fields | Volume | Default emitted |
 |---|---|---|---|
+| `input-ready` | `flushed`, `dropped`, `ts` — **the TUI can now receive input**; fires once, when the React input bridge registers. The transport accepts commands ~120 ms after process start but the bridge mounts 445–745 ms later; commands sent in between are buffered (cap 256) and replayed, `flushed` counts them and `dropped` counts any lost to overflow. Gate on this, not on `idle` — `idle` resolves on an empty pre-mount frame | low | yes |
 | `route-decision` | `path` ("hot-path"\|"council"), `complexity`, `forceCouncil`, `runId` | low | yes |
 | `council-step` | `phaseId`, `phaseKind`, `state`, `label`, `elapsedMs?` | low | yes |
 | `council-speaker` | `role`, `status` ("start"\|"done"), `round?`, `correlationId` | low | yes |
@@ -61,10 +63,13 @@ serialized as JSONL on the sidechannel (fd 3 / named pipe) and ingested by
 | `askcard-cancel` | `questionId` | low | yes |
 | `sprint-stage` | `sprintIndex`, `stage` ("planning"\|"implementation"\|"verification"\|"judgment"), `runId` | low | yes |
 | `sprint-halt` | `sprintN`, `reason`, `runId` | low | yes |
+| `run-finished` | `runId`, `subcommand`, `outcome` ("approved"\|"halted"\|"error"\|"threw"\|"abandoned"), `success`, `reason`, `sprintsRun`, `shipped`, `ts` — **the terminal event of a `/ideal` run, success included**; wait on it instead of guessing from `idle` | low | yes |
 | `llm-token` | `correlationId`, `delta`, `tokenIndex` | **HIGH** (80-120/sec) | **no** — opt-in only |
 | `llm-done` | `correlationId`, `totalChars`, `finishReason` | low | yes |
 | `toast` | `level` ("info"\|"warn"\|"error"), `text`, `ttlMs?` | low | yes |
 | `stream.delta` | `target`, `text` | medium | yes |
+| `model-fallback` | `fromModel`, `toModel` (null when exhausted), `reason` ("error"\|"empty-completion"\|"blocked"), `attempt`, `totalCandidates`, `exhausted?`, `label?`, `provider?`, `statusCode?`, `errorName?`, `errorMessage?`, `ts` — **a council fallback chain switched model**; the structured signal that a model policy was violated. Not `stream-retry`: that is the SAME model retried with a backoff and carries no model identity. Filter the terminal record on `exhausted === true`, not `toModel === null` | low | yes |
+| `rate-limit-wait` | `provider`, `modelId`, `stage`, `limitKind` ("requests-per-minute"\|"concurrency"), `limit`, `waitMs`, `ts` — **a call was deliberately held to stay inside a catalog-declared provider limit**. Emitted only when a wait was actually incurred. Not `stream-retry`: that means an error happened and the call is being re-attempted; here no error occurred, no attempt was consumed, and the request has not been sent yet. Without this, a paced call and a hung one look identical to a driver | low | yes |
 
 ### correlationId
 

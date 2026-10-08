@@ -55,4 +55,66 @@ describe("discoverSkills", () => {
     const skills = discoverSkills(nested);
     expect(skills.find((skill) => skill.name === "agent-browser")?.description).toBe("Nested browser skill");
   });
+
+  // Round 4 (G10): a `Dirent` for a symlink is not a directory
+  // (`e.isDirectory()` is false even when the link resolves to one), so
+  // `.agents/skills/<name>` as a SYMLINK (e.g. Shipd's
+  // `.agents/skills/shipd-challenge -> ../../shipd-verify/skill`, matching
+  // Claude Code's own support for symlinked skill dirs) was silently
+  // invisible — `listSkillDirectories` skipped it outright.
+  it("discovers a symlinked skill directory, with its frontmatter name/description", () => {
+    const repoRoot = makeTempDir("muonroi-skills-symlink-");
+    fs.mkdirSync(path.join(repoRoot, ".git"));
+
+    // The real target lives OUTSIDE .agents/skills/, mirroring
+    // shipd-verify/skill being the real directory and
+    // .agents/skills/shipd-challenge being a symlink pointing at it.
+    const realTarget = path.join(repoRoot, "shipd-verify-skill");
+    fs.mkdirSync(realTarget, { recursive: true });
+    fs.writeFileSync(
+      path.join(realTarget, "SKILL.md"),
+      "---\nname: shipd-challenge\ndescription: Author a Shipd challenge\n---\n\n# shipd-challenge\n",
+      "utf8",
+    );
+
+    const skillsDir = path.join(repoRoot, ".agents", "skills");
+    fs.mkdirSync(skillsDir, { recursive: true });
+    fs.symlinkSync(realTarget, path.join(skillsDir, "shipd-challenge"), "dir");
+
+    const skills = discoverSkills(repoRoot);
+    const found = skills.find((skill) => skill.name === "shipd-challenge");
+    expect(found).toBeDefined();
+    expect(found?.description).toBe("Author a Shipd challenge");
+    expect(found?.scope).toBe("project");
+  });
+
+  it("skips a dangling symlink without throwing", () => {
+    const repoRoot = makeTempDir("muonroi-skills-dangling-");
+    fs.mkdirSync(path.join(repoRoot, ".git"));
+
+    const skillsDir = path.join(repoRoot, ".agents", "skills");
+    fs.mkdirSync(skillsDir, { recursive: true });
+    // Points at a target that does not exist.
+    fs.symlinkSync(path.join(repoRoot, "does-not-exist"), path.join(skillsDir, "ghost-skill"), "dir");
+
+    expect(() => discoverSkills(repoRoot)).not.toThrow();
+    const skills = discoverSkills(repoRoot);
+    expect(skills.find((skill) => skill.name === "ghost-skill")).toBeUndefined();
+  });
+
+  it("skips a symlink that resolves to a plain FILE, not a directory", () => {
+    const repoRoot = makeTempDir("muonroi-skills-file-symlink-");
+    fs.mkdirSync(path.join(repoRoot, ".git"));
+
+    const realFile = path.join(repoRoot, "not-a-skill.txt");
+    fs.writeFileSync(realFile, "just a file, not a skill directory", "utf8");
+
+    const skillsDir = path.join(repoRoot, ".agents", "skills");
+    fs.mkdirSync(skillsDir, { recursive: true });
+    fs.symlinkSync(realFile, path.join(skillsDir, "file-skill"), "file");
+
+    expect(() => discoverSkills(repoRoot)).not.toThrow();
+    const skills = discoverSkills(repoRoot);
+    expect(skills.find((skill) => skill.name === "file-skill")).toBeUndefined();
+  });
 });

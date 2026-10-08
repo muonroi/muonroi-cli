@@ -9,10 +9,12 @@
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
 import { isIdealToolEntryEnabled } from "../gsd/flags.js";
 import { registerGsdWorkflowTools } from "../gsd/workflow-tools.js";
+import { MCP_FULL_INPUT_SCHEMA } from "../mcp/full-schema.js";
 import type { AskUserAskInfo, AskUserOption } from "../orchestrator/ask-user.js";
 import { requestProactiveCompact } from "../orchestrator/compact-request.js";
 import { requestCouncilConvene } from "../orchestrator/council-request.js";
 import { canonicalizeBashCommand } from "../orchestrator/tool-args-hash.js";
+import { isUnattendedTurn } from "../orchestrator/unattended-turn.js";
 import {
   analyzeImageFromSource,
   askVisionProxy,
@@ -24,16 +26,20 @@ import { needsVisionProxy } from "../providers/vision-proxy.js";
 import { mostRecentVisionSessionId } from "../providers/vision-session.js";
 import type { AgentMode, TaskRequest, ToolResult } from "../types/index.js";
 import { loadMcpServers } from "../utils/settings.js";
+import { installArgGuards } from "./arg-guard.js";
 import type { BashTool } from "./bash.js";
 import { type BashSliceMode, bashOutputNotFoundMessage, getBashRun, sliceBashOutput } from "./bash-output-cache.js";
+import { countUncommittedChanges, emptyLedgerRefusalMessage } from "./commit-ledger-refusal.js";
 import { editFile, readFile, readFiles, writeFile } from "./file.js";
 import { FileTracker } from "./file-tracker.js";
+import { beginGitEffectGuard, effectViolationMessage } from "./git-effect-guard.js";
 import {
   analyzeGitCommand,
   checkDestructiveOp,
   checkPushGate,
   checkSensitiveStaging,
   commitBlockedMessage,
+  detectBlockedGitSubcommand,
   pushBlockedMessage,
   recordCommandOutcome,
   stagingWarning,
@@ -68,7 +74,7 @@ interface ToolRegistryOpts {
    * isolated state (legacy per-closure behaviour).
    */
   sessionId?: string;
-  runDebate?: (topic: string) => Promise<string>;
+  runDebate?: (topic: string, abortSignal?: AbortSignal, synthesisOutputContract?: string) => Promise<string>;
   /**
    * When true, the `convene_council` tool is registered so the agent can
    * convene the multi-model council on demand mid-turn. Set by the tool-engine
@@ -77,6 +83,8 @@ interface ToolRegistryOpts {
    * tool is absent so the model never calls a council that cannot convene.
    */
   councilConfigured?: boolean;
+  /** Optional turn-local background information; never waits for PIL. */
+  readPilContext?: () => ToolResult;
   /**
    * When provided, the `ask_user` tool is registered so the agent can ask the
    * human a question mid-turn and receive their answer AS the tool result. The
@@ -179,6 +187,40 @@ function formatResult(result: ToolResult): string {
   return truncateOutput(`ERROR: ${result.error ?? result.output ?? "Unknown error"}`);
 }
 
+/**
+ * Round 3 — EFFECT-BASED backstop for `autoCommit: false`. String-parsing a
+ * shell command line for "does this write git history" is an arms race (see
+ * git-safety.ts's `detectBlockedGitSubcommand` module comment); this wraps
+ * EVERY `bash.execute()` call — including a pre-approved safety-override
+ * retry, which skips every pre-execution gate — with a before/after ref
+ * snapshot, regardless of how the command spelled "git". A violation
+ * restores the ref(s) and turns the result into an error; the command's own
+ * stdout/stderr is preserved so the model still sees what actually ran.
+ *
+ * Only pays the extra `git` subprocess calls when the project has disabled
+ * auto-commit (lazy-imported — keeps the LSP-heavy auto-commit module off
+ * the hot bash path when it is not needed, mirroring the G1 commit-gate
+ * import below). `push` is NOT covered here — a push cannot be undone once a
+ * remote has it, so it is still caught pre-execution by the string detector.
+ */
+async function runBashWithEffectGuard(
+  bash: BashTool,
+  command: string,
+  timeout: number,
+  abortSignal: AbortSignal | undefined,
+): Promise<ToolResult> {
+  const { isAutoCommitDisabledByProject } = await import("../orchestrator/auto-commit.js");
+  const guard = isAutoCommitDisabledByProject() ? beginGitEffectGuard(bash.getCwd()) : null;
+  const result = await bash.execute(command, timeout, abortSignal);
+  if (guard) {
+    const violation = guard.finish();
+    if (violation) {
+      return { ...result, success: false, error: effectViolationMessage(violation) };
+    }
+  }
+  return result;
+}
+
 // ee_query routing: tool-artifact rehydration ("tool-artifact id=<id>" / "full
 // tool result id=<id>") is an exact-lookup of a persisted elided output and
 // must stay on /api/search (raw single-collection vector lookup). Every other
@@ -188,6 +230,31 @@ function formatResult(result: ToolResult): string {
 // feedback-closing pipeline.
 export function isToolArtifactQuery(query: string): boolean {
   return /\b(?:tool-artifact|full tool result)\b/i.test(query) && /\bid\s*=/i.test(query);
+}
+
+/**
+ * The tool set the model was actually shown this turn - builtins PLUS the MCP
+ * tools merged in downstream by the tool engine.
+ *
+ * `list_tools` and `describe_tool` close over `createBuiltinTools`' local
+ * `tools` object, which is built BEFORE any MCP server is connected and is
+ * replaced (not mutated) by the engine's `{...rawToolSet, ...mcpTools}` merge.
+ * So both tools were structurally blind to every `mcp_*` tool. Measured in the
+ * 2026-09-08 graduation session: `list_tools({category:"mcp"})` returned
+ * `{"mcp_count":0,"mcp":[]}` in a run where 21 `mcp_muonroi-harness__*` tools
+ * were live and the very next call to one of them succeeded - and
+ * `describe_tool`, whose own description advertises
+ * `name='mcp_context7__something'`, would have answered "Tool not found".
+ *
+ * Single-orchestrator-at-a-time holds (see the EE render-sink note in
+ * src/index.ts), so one slot is enough: the engine publishes the assembled set
+ * for the call it is about to make, and that is the set the model can ask about.
+ */
+let liveToolSet: ToolSet | null = null;
+
+/** Publish the fully-assembled tool set for `list_tools` / `describe_tool`. */
+export function setLiveToolSet(next: ToolSet | null): void {
+  liveToolSet = next;
 }
 
 export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolRegistryOpts): ToolSet {
@@ -298,6 +365,14 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // tool_result, and restarts the step so the model reads the conclusion as the
   // result and continues. Registered only when the council is usable so the
   // model never calls a council that cannot convene.
+  if (opts?.readPilContext) {
+    tools.read_pil_context = dynamicTool({
+      description:
+        "Read optional PIL information prepared in the background for this turn. Returns immediately with available information or pending/unavailable status. You own task, routing, and council decisions. If pending, continue without waiting or repeatedly polling. Ask human questions through ask_user.",
+      inputSchema: jsonSchema({ type: "object", properties: {} }),
+      execute: async () => formatResult(opts.readPilContext!()),
+    });
+  }
   if (opts?.councilConfigured) {
     tools.convene_council = dynamicTool({
       description:
@@ -331,8 +406,16 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // go/no-go before implementing). The CLI does NOT synthesise options or decide
   // the branch: question, options, and default all come from the model's input.
   // execute() BLOCKS until the human answers; the answer becomes the tool result.
-  // Registered only when a UI answerer is wired (opts.askUser present).
-  if (opts?.askUser) {
+  // Registered only when a UI answerer is wired (opts.askUser present) AND the
+  // turn is not a machine-driven stage. `isUnattendedTurn()` is the second half
+  // of the same contract the field doc states: a card nobody is watching can
+  // never be answered, so the tool must not be offered. `/ideal`'s verify stage
+  // runs as a normal top-level turn (sprint-runner.buildVerifyAgent →
+  // ctx.processMessageFn), so `opts.askUser` is a live closure there — the scope
+  // is what distinguishes it from a chat turn. See unattended-turn.ts for the
+  // measured incident (run muc2joffe506: one ask_user cost a 600s budget and
+  // discarded three verified phases).
+  if (opts?.askUser && !isUnattendedTurn()) {
     const askUser = opts.askUser;
     tools.ask_user = dynamicTool({
       description:
@@ -472,10 +555,14 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         _eb++;
         _emptyBashStreak.set(_ebKey, _eb);
         if (_eb >= 3) {
+          // NOTE: this text deliberately names NO other tool. The previous
+          // wording ("use read_file, grep, or other tools instead") redirected
+          // a confused sub-agent into the two tools that had no arg guard at
+          // all, and every call from step 103 to 175 was malformed.
           return (
             'BLOCKED (empty-bash): the `bash` tool has been called with an empty/missing "command" 3+ times in a row. ' +
-            "Bash is now DISABLED for the remainder of this session — use read_file, grep, or other tools instead. " +
-            "If you need to run a shell command, state the blocker explicitly and the CLI will enable it again on the next turn."
+            "Bash is now DISABLED for the remainder of this session. Do not retry it. " +
+            "State the blocker in plain text and continue with what you already know; the CLI will enable it again on the next turn."
           );
         }
         if (_eb >= 2) {
@@ -505,7 +592,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         if (_approvalEntry.kind === "once") {
           _approvedMap.delete(_approvalKey!);
         }
-        const result = await bash.execute(input.command, input.timeout ?? 30000, extra?.abortSignal);
+        const result = await runBashWithEffectGuard(bash, input.command, input.timeout ?? 30000, extra?.abortSignal);
         return formatResult(result);
       }
 
@@ -529,6 +616,31 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       }
 
       const gitShape = analyzeGitCommand(cmd);
+
+      // Gap (b): a project's `.muonroi-cli/settings.json` `{"autoCommit": false}`
+      // disables the CLI's own auto-commit — honour the same policy for a raw
+      // history/ref-writing git subcommand reached via the bash tool (commit,
+      // merge, cherry-pick, rebase, am, revert, commit-tree, update-ref, tag,
+      // push, pull, or a user alias resolving to one of those), otherwise the
+      // model just routes around the setting. `detectBlockedGitSubcommand`
+      // scans the RAW command (quotes included, so `sh -c "git commit ..."`
+      // cannot hide from it — round-2 refuter finding) — see its own doc
+      // comment in git-safety.ts. Pre-execution, any permission mode.
+      {
+        const { isAutoCommitDisabledByProject } = await import("../orchestrator/auto-commit.js");
+        if (isAutoCommitDisabledByProject()) {
+          const blocked = detectBlockedGitSubcommand(cmd, bash.getCwd());
+          if (blocked.blocked) {
+            return _prefixBlock(
+              "git-safety",
+              `this project's .muonroi-cli/settings.json sets "autoCommit": false — ` +
+                `\`git ${blocked.subcommand}\`${blocked.viaAlias ? ` (via alias \`git ${blocked.viaAlias}\`)` : ""} ` +
+                "via the bash tool is disabled to match. Ask the user before committing/pushing despite this setting.",
+            );
+          }
+        }
+      }
+
       // Hard-block broad staging when sensitive files are present.
       // This runs PRE-EXECUTION (before bash.execute) regardless of permission mode.
       if (gitShape.isBroadStage) {
@@ -597,7 +709,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       const repeatedIntent = canonical !== "" && canonical === entry.lastCanonical && entry.lastRunId !== null;
       const prevRunId = entry.lastRunId;
 
-      const result = await bash.execute(input.command, input.timeout ?? 30000, extra?.abortSignal);
+      const result = await runBashWithEffectGuard(bash, input.command, input.timeout ?? 30000, extra?.abortSignal);
       const formatted = formatResult(result);
 
       // Record verification outcome so a later `git push` can be gated on it.
@@ -825,10 +937,11 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         }
         const written = fileTracker.writtenPaths();
         if (written.length === 0) {
+          // The ledger being empty says nothing about the repository — say so,
+          // report the repo's real state, and name the route that works.
           return {
             success: false,
-            output:
-              "Nothing to commit — you have not created or edited any file via write_file/edit_file this session.",
+            output: emptyLedgerRefusalMessage(await countUncommittedChanges(bash.getCwd())),
           };
         }
         try {
@@ -843,7 +956,12 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             const detail =
               result.reason === "lsp-errors"
                 ? `\nStaged files have errors — fix them and call git_commit again:\n${result.detail ?? ""}`
-                : "";
+                : result.reason === "outside-run-root"
+                  ? // Containment refusal — tell the agent WHY and what to do. Do NOT
+                    // advertise the MUONROI_COMMIT_SCOPE bypass (a user escape hatch).
+                    `\n${result.detail ?? ""}\nYour shell cwd left the directory this run was launched in. ` +
+                    `\`cd\` back into it before writing files or committing.`
+                  : "";
             return { success: false, output: `No commit made (${result.reason}).${detail}` };
           }
           return { success: true, output: `Committed ${result.fileCount} file(s) → ${result.sha}` };
@@ -879,10 +997,9 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           required: ["agent", "description", "prompt"],
         }),
         execute: async (input: any) => {
-          // Auto-route long research (explore agent or high round count) to true background delegation
-          // to prevent blocking the main turn and causing stall timeouts.
-          const isLongResearch =
-            input.agent === "explore" || (typeof input.maxToolRounds === "number" && input.maxToolRounds > 25);
+          // Background workers accept only read-only explore. A round budget
+          // does not change an editing/verification task into research.
+          const isLongResearch = input.agent === "explore";
 
           const executor = isLongResearch && runDelegationFn ? runDelegationFn : runTaskFn;
 
@@ -1662,7 +1779,8 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       const cat = (input?.category as string) || "all";
       const grouped: { native: string[]; mcp: string[] } = { native: [], mcp: [] };
 
-      for (const [name, tool] of Object.entries(tools)) {
+      const visible = liveToolSet ?? tools;
+      for (const [name, tool] of Object.entries(visible)) {
         const t = tool as { description?: string };
         const shortDesc = (t.description || "").split("\n")[0].slice(0, 140);
         const entry = `${name}: ${shortDesc}`;
@@ -1678,7 +1796,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
       return JSON.stringify(
         {
-          total: Object.keys(tools).length,
+          total: Object.keys(liveToolSet ?? tools).length,
           native_count: grouped.native.length,
           mcp_count: grouped.mcp.length,
           ...grouped,
@@ -1711,7 +1829,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       const name = typeof input?.name === "string" ? input.name.trim() : "";
       if (!name) return "ERROR: name is required";
 
-      const tool = (tools as any)[name];
+      const tool = ((liveToolSet ?? tools) as any)[name];
       if (!tool) {
         return JSON.stringify(
           {
@@ -1723,8 +1841,13 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         );
       }
 
-      const t = tool as { description?: string; inputSchema?: unknown };
-      const schema = t.inputSchema || (tool as any).parameters || null;
+      const t = tool as { description?: string; inputSchema?: unknown; [MCP_FULL_INPUT_SCHEMA]?: unknown };
+      // MCP tools ship a permissive placeholder schema to the model (Phase M1
+      // lazy schema loading, src/mcp/runtime.ts). Serving that placeholder here
+      // made describe_tool useless for exactly the tools it exists for: a model
+      // asking "what are this MCP tool's parameters?" got `{properties:{}}` and
+      // then guessed. Prefer the real schema the MCP server advertised.
+      const schema = t[MCP_FULL_INPUT_SCHEMA] || t.inputSchema || (tool as any).parameters || null;
 
       // Provide a minimal example note for common tools
       const examples: Record<string, string> = {
@@ -1747,6 +1870,14 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       );
     },
   });
+
+  // N1 — executor-side malformed-args guard, applied to EVERY builtin after all
+  // register* helpers have contributed, so a tool added later cannot miss it.
+  // The provider does not enforce the schemas it is shown (`grep` declares
+  // required:["pattern"] and still received 94 keyless calls), so this is the
+  // only layer that can stop a keyless / elision-marker call before it runs.
+  // See src/tools/arg-guard.ts for the measured failure it exists for.
+  installArgGuards(tools, gitSafetyKey);
 
   return tools;
 }

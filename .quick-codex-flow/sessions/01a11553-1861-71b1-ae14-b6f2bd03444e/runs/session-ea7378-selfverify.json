@@ -1,0 +1,172 @@
+{
+  "workspace": "D:\\sources\\Core\\muonroi-cli",
+  "startedAt": "2026-10-08T06:59:24.771Z",
+  "start": {
+    "runId": "d29c9fbb-1105-4b64-8f4e-bd97fdd6cfe8"
+  },
+  "status": {
+    "runId": "d29c9fbb-1105-4b64-8f4e-bd97fdd6cfe8",
+    "status": "done",
+    "kind": "tier1",
+    "startedAt": 1791442766364,
+    "finishedAt": 1791442767810,
+    "elapsedMs": 1446,
+    "logTail": [
+      "[self-verify] Planned 1 scenario(s): 1 drivable, 0 skipped",
+      "[self-qa] → smoke-boot: CLI boots and reaches idle within budget",
+      "[self-verify] Summary: 1/1 passed, 0 failed, 0 inconclusive, 0 skipped"
+    ],
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    }
+  },
+  "result": {
+    "scenarios": [
+      {
+        "id": "smoke-boot",
+        "description": "CLI boots and reaches idle within budget",
+        "derivedFrom": {
+          "files": [
+            ".quick-codex-flow/sessions/01a11553-1861-71b1-ae14-b6f2bd03444e/STATE.md",
+            "src/council/__tests__/convene-path.test.ts",
+            "src/council/index.ts",
+            "src/council/llm.ts",
+            "src/gsd/__tests__/plan-council.test.ts",
+            "src/gsd/__tests__/workflow-tools.test.ts",
+            "src/gsd/loop-host.ts",
+            "src/gsd/plan-council.ts",
+            "src/gsd/verify-council.ts",
+            "src/gsd/workflow-tools.ts",
+            "src/orchestrator/__tests__/sub-session-delegation.test.ts",
+            "src/orchestrator/__tests__/tool-activity.test.ts",
+            "src/orchestrator/orchestrator.ts",
+            "src/orchestrator/tool-activity.ts",
+            "src/orchestrator/tool-engine.ts",
+            "src/tools/registry.ts"
+          ],
+          "semanticIds": []
+        },
+        "steps": [
+          {
+            "op": "wait_for",
+            "idle": true,
+            "timeoutMs": 60000
+          }
+        ],
+        "expectations": [
+          {
+            "kind": "idleReached",
+            "withinMs": 60000
+          },
+          {
+            "kind": "noErrorToast"
+          }
+        ],
+        "budgetMs": 90000
+      }
+    ],
+    "runs": [
+      {
+        "scenario": {
+          "id": "smoke-boot",
+          "description": "CLI boots and reaches idle within budget",
+          "derivedFrom": {
+            "files": [
+              ".quick-codex-flow/sessions/01a11553-1861-71b1-ae14-b6f2bd03444e/STATE.md",
+              "src/council/__tests__/convene-path.test.ts",
+              "src/council/index.ts",
+              "src/council/llm.ts",
+              "src/gsd/__tests__/plan-council.test.ts",
+              "src/gsd/__tests__/workflow-tools.test.ts",
+              "src/gsd/loop-host.ts",
+              "src/gsd/plan-council.ts",
+              "src/gsd/verify-council.ts",
+              "src/gsd/workflow-tools.ts",
+              "src/orchestrator/__tests__/sub-session-delegation.test.ts",
+              "src/orchestrator/__tests__/tool-activity.test.ts",
+              "src/orchestrator/orchestrator.ts",
+              "src/orchestrator/tool-activity.ts",
+              "src/orchestrator/tool-engine.ts",
+              "src/tools/registry.ts"
+            ],
+            "semanticIds": []
+          },
+          "steps": [
+            {
+              "op": "wait_for",
+              "idle": true,
+              "timeoutMs": 60000
+            }
+          ],
+          "expectations": [
+            {
+              "kind": "idleReached",
+              "withinMs": 60000
+            },
+            {
+              "kind": "noErrorToast"
+            }
+          ],
+          "budgetMs": 90000
+        },
+        "events": [],
+        "finalFrame": {
+          "mode": "live",
+          "version": "0.4.0",
+          "seq": 0,
+          "ts": 1791442767749,
+          "nodes": []
+        },
+        "startedAt": 1791442766503,
+        "endedAt": 1791442767810,
+        "timedOut": false,
+        "crashed": false,
+        "idleObserved": 1,
+        "syncTimeouts": [],
+        "mounted": true,
+        "childAlive": true,
+        "stderrTail": "[mock-model] loadMockModelFromDir: D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\council.json has no \"model\" top-level key — skipping\n[mock-model] loadMockModelFromDir: D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\default.json has no \"model\" top-level key — skipping\n[mock-model] loadMockModelFromDir: installed mock from D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\discovery-model.json (provider=mock, modelId=mock-discovery)\n"
+      }
+    ],
+    "results": [
+      {
+        "verdict": "pass",
+        "scenarioId": "smoke-boot",
+        "durationMs": 1307,
+        "checks": [
+          {
+            "expectation": {
+              "kind": "idleReached",
+              "withinMs": 60000
+            },
+            "passed": true,
+            "reason": "Idle reached in 1307ms after 1 idle sentinel(s) (budget 60000ms)"
+          },
+          {
+            "expectation": {
+              "kind": "noErrorToast"
+            },
+            "passed": true,
+            "reason": "No error-level toasts observed"
+          }
+        ]
+      }
+    ],
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    },
+    "skipped": [],
+    "emittedSpecs": [],
+    "durationMs": 1436
+  },
+  "stderrTail": "",
+  "finishedAt": "2026-10-08T06:59:28.400Z"
+}

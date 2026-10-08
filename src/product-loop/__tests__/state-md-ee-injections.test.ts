@@ -46,7 +46,6 @@ async function makeTmpDir(): Promise<string> {
 async function seedRun(flowDir: string, runId: string, idea: string): Promise<void> {
   await writeManifest(flowDir, runId, {
     idea,
-    capUsd: 50,
     maxSprints: 8,
     doneThreshold: 0.9,
     createdAt: new Date(),

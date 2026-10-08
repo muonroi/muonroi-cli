@@ -1,0 +1,41 @@
+{
+  "runtime": "bun",
+  "cases": [
+    {
+      "scenario": "slow",
+      "passed": true,
+      "elapsedMs": 2973,
+      "mainCalls": 1,
+      "receipt": true,
+      "content": "MAIN_FINAL",
+      "errors": ""
+    },
+    {
+      "scenario": "retry",
+      "passed": true,
+      "elapsedMs": 10967,
+      "mainCalls": 2,
+      "receipt": true,
+      "content": "MAIN_FINAL",
+      "errors": ""
+    },
+    {
+      "scenario": "unresponsive",
+      "passed": true,
+      "elapsedMs": 20921,
+      "mainCalls": 2,
+      "receipt": true,
+      "content": "",
+      "errors": "Model not responding — no output received within the stall timeout. The provider may be out of balance, rate-limited, or unreachable. Tune MUONROI_PROVIDER_STALL_TIMEOUT_MS (0 disables) or switch model/provider."
+    },
+    {
+      "scenario": "cancel",
+      "passed": true,
+      "elapsedMs": 414,
+      "mainCalls": 1,
+      "receipt": true,
+      "content": "\n\n[Cancelled]",
+      "errors": ""
+    }
+  ]
+}

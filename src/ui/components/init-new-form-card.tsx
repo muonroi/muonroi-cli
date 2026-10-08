@@ -147,17 +147,24 @@ export interface InitNewFormCardProps {
   state: InitNewFormState;
   terminalCols: number;
   theme: Theme;
+  /**
+   * True when this card is the modal that owns the keyboard (see
+   * src/ui/modal-focus.ts). Mirrored to the Semantic node's `focus` flag so a
+   * harness driver can read `tui.query "focus"` and learn which of several
+   * stacked cards its keypresses will reach.
+   */
+  focused?: boolean;
 }
 
 const MAX_CARD_COLS = 90;
 const FALLBACK_THRESHOLD = 60;
 
-export function InitNewFormCard({ state, terminalCols, theme: t }: InitNewFormCardProps) {
+export function InitNewFormCard({ state, terminalCols, theme: t, focused }: InitNewFormCardProps) {
   const fallback = terminalCols < FALLBACK_THRESHOLD;
   const width = fallback ? terminalCols : Math.min(terminalCols - 2, MAX_CARD_COLS);
 
   return (
-    <Semantic id="init-new-form" role="dialog" name="Init new project">
+    <Semantic id="init-new-form" role="dialog" name="Init new project" focus={focused || undefined} isModal>
       <box flexDirection="column" marginBottom={1}>
         <box
           width={width}

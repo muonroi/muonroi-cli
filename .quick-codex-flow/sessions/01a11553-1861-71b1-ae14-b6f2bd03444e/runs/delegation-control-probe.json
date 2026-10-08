@@ -1,0 +1,20 @@
+{
+  "syntheticPidExists": false,
+  "pidCheckError": "kill() failed: ESRCH: no such process",
+  "deadPidListed": {
+    "id": "probe",
+    "agent": "explore",
+    "description": "synthetic control probe",
+    "summary": "Running in the background.",
+    "status": "running"
+  },
+  "otherManagerNotifications": [
+    {
+      "id": "probe",
+      "message": "Background agent complete: `probe`\nTitle: synthetic control probe\nSummary: synthetic complete\nUse `delegation_read(\"probe\")` to retrieve the full result."
+    }
+  ],
+  "originalManagerNotifications": [],
+  "longGeneralRoute": "ERROR: Background delegations are read-only. Use `delegate` with the `explore` agent, or use `task` for foreground work that may edit files.",
+  "routed": ["background"]
+}

@@ -6,17 +6,28 @@
  */
 
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { loadUserSettings } from "../../utils/settings.js";
 import { getProviderCapabilities, type ProviderCapabilities } from "../capabilities.js";
 import type { ProviderFactory } from "../runtime.js";
 import type { ProviderId } from "../types.js";
 import { BaseProviderStrategy, type CreateFactoryOpts } from "./base.strategy.js";
 
 export class AnthropicStrategy extends BaseProviderStrategy {
-  readonly id: ProviderId = "anthropic";
+  readonly id = "anthropic" satisfies ProviderId;
   readonly capabilities: ProviderCapabilities = getProviderCapabilities("anthropic");
 
   createFactory(opts: CreateFactoryOpts): ProviderFactory {
-    const p = createAnthropic({ apiKey: opts.apiKey, baseURL: opts.baseURL });
+    const workspaceId = loadUserSettings()?.providers?.[this.id]?.workspaceId?.trim();
+    const headers = new Headers(opts.headers);
+    const workspaceHeader = this.capabilities.workspaceSetup()?.header;
+    if (workspaceId && workspaceHeader && !headers.has(workspaceHeader)) {
+      headers.set(workspaceHeader, workspaceId);
+    }
+    const p = createAnthropic({
+      apiKey: opts.apiKey,
+      baseURL: opts.baseURL,
+      headers: Object.fromEntries(headers),
+    });
     const factory: ProviderFactory = (modelId: string) => p(modelId);
     // biome-ignore lint/suspicious/noExplicitAny: ai-sdk responses() typed any
     factory.responses = (modelId: string) => (p as any).responses(modelId);

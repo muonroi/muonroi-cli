@@ -1,15 +1,18 @@
 import { type ChildProcess, spawn } from "child_process";
 import { createReadStream, createWriteStream, existsSync } from "fs";
-import { mkdtemp, rm, stat, unlink } from "fs/promises";
+import { mkdtemp, stat, unlink } from "fs/promises";
 import os from "os";
 import path from "path";
 import { executeEventHooks } from "../hooks/index";
 import type { CwdChangedHookInput } from "../hooks/types";
 import type { ToolResult } from "../types/index";
+import { removeTreeLoggingFailure } from "../utils/fs-cleanup.js";
+import { logger } from "../utils/logger.js";
 import { checkCatastrophicCommand, type SafetyBlockResult } from "../utils/permission-mode.js";
 import type { SandboxMode, SandboxSettings } from "../utils/settings.js";
 import { posixToNative, type ResolvedShell, resolveShell, type ShellSettings } from "../utils/shell";
 import { nextBashRunId, recordBashRun, stripAnsi } from "./bash-output-cache.js";
+import { describeCwdDrift, normalizeMsysDrivePath } from "./write-scope.js";
 
 const MAX_TAIL_BYTES = 8_192;
 const MAX_BACKGROUND_PROCESSES = 8;
@@ -159,6 +162,11 @@ export class BashTool {
         const dir = rawDir.replace(/^["']|["']$/g, "").replace(process.platform === "win32" ? /\\$/ : /(?!x)x/, "");
         let cdSucceeded = false;
         let cdError: ToolResult | null = null;
+        // Set when the new cwd leaves the run root. `cd` is NOT refused — escape
+        // #1's drifting command was `cd <parent> && git log`, a harmless read, and
+        // cross-repo inspection is normal work here. What made it dangerous was
+        // that the move was silent and permanent. See src/tools/write-scope.ts.
+        let driftWarning: string | null = null;
         try {
           const translated = this.resolvedShell.isPosix ? posixToNative(dir) : dir;
           const nextCwd = path.resolve(this.cwd, translated);
@@ -169,6 +177,15 @@ export class BashTool {
             const oldCwd = this.cwd;
             this.cwd = nextCwd;
             cdSucceeded = true;
+            try {
+              driftWarning = describeCwdDrift(nextCwd);
+              if (driftWarning) console.error(`[bash] cwd drift: ${oldCwd} -> ${nextCwd}`);
+            } catch (err) {
+              // Never let the advisory break a legitimate cd; the hard guard on
+              // the write path is what actually protects the tree.
+              console.error(`[bash] cwd drift check failed for ${nextCwd}: ${(err as Error)?.message}`);
+              driftWarning = null;
+            }
 
             const cwdInput: CwdChangedHookInput = {
               hook_event_name: "CwdChanged",
@@ -183,18 +200,28 @@ export class BashTool {
           cdError = { success: false, error: `Cannot change directory: ${msg}` };
         }
 
+        const cdOk = (): ToolResult => ({
+          success: true,
+          output: `Changed directory to: ${this.cwd}${driftWarning ? `\n${driftWarning}` : ""}`,
+        });
+
         if (!remainder) {
-          return cdSucceeded ? { success: true, output: `Changed directory to: ${this.cwd}` } : cdError!;
+          return cdSucceeded ? cdOk() : cdError!;
         }
 
         const shouldRunRemainder =
           chainOp === ";" || (chainOp === "&&" && cdSucceeded) || (chainOp === "||" && !cdSucceeded);
 
         if (!shouldRunRemainder) {
-          return cdSucceeded ? { success: true, output: `Changed directory to: ${this.cwd}` } : cdError!;
+          return cdSucceeded ? cdOk() : cdError!;
         }
 
-        return await this.execute(remainder, timeout, abortSignal);
+        const chained = await this.execute(remainder, timeout, abortSignal);
+        // `cd X && <cmd>` returns the REMAINDER's result, so without this the
+        // warning would be dropped for exactly the command shape that caused
+        // escape #1 (`cd <parent-repo> && git log --oneline -5`).
+        if (!driftWarning) return chained;
+        return { ...chained, output: `${driftWarning}\n${chained.output ?? ""}` };
       }
 
       if (abortSignal?.aborted) {
@@ -580,23 +607,46 @@ export class BashTool {
       if (entry.alive) {
         try {
           entry.child.kill("SIGTERM");
-        } catch {
-          /* */
+        } catch (err) {
+          logger.warn("orchestrator", "bash.cleanup: SIGTERM to background child failed — it may outlive the CLI", {
+            pid: entry.child.pid,
+            message: (err as Error)?.message,
+          });
         }
       }
       try {
         await unlink(entry.logPath);
-      } catch {
-        /* */
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        // ENOENT is the normal path — the log was already removed or never written.
+        if (code !== "ENOENT") {
+          logger.warn("orchestrator", "bash.cleanup: background log unlink failed — a stale log file is left behind", {
+            target: entry.logPath,
+            code,
+            message: (err as Error)?.message,
+          });
+        }
       }
     }
     this.bgProcesses.clear();
     if (this.tmpDir) {
-      try {
-        await rm(this.tmpDir, { recursive: true, force: true });
-      } catch {
-        /* */
-      }
+      // DECISION (Defect 3, site 1/10): log, do NOT retry.
+      //
+      // Nothing here may fail the CLI's shutdown: the target is a `muonroi-bg-*`
+      // scratch tree under os.tmpdir() holding background-process logs, and the
+      // OS reclaims it. But it must not be silent either — that was a bare
+      // `catch { /* *\/ }` (No Silent Catch), so a leak had no record at all.
+      //
+      // No retries, deliberately: the likely cause is a background child that has
+      // not released its log handle after the SIGTERM above, and a held handle was
+      // measured to return EPERM/EBUSY in 1-2ms WITHOUT node entering the retry
+      // loop. Passing maxRetries here would claim a protection that does not
+      // apply; the log line is what actually makes the leak visible.
+      await removeTreeLoggingFailure(this.tmpDir, {
+        module: "bash.cleanup",
+        namespace: "orchestrator",
+        consequence: "the background temp dir is left behind under os.tmpdir()",
+      });
     }
   }
 
@@ -604,14 +654,34 @@ export class BashTool {
     return this.cwd;
   }
 
+  /**
+   * Move the tool cwd — the anchor every later relative path in the session
+   * resolves against, and the value `stream-runner.ts` propagates to sub-agents.
+   *
+   * The MSYS spelling is normalised FIRST because `path.isAbsolute("/c/x")` is
+   * TRUE on win32: the guard below passed such a path through untouched, and
+   * `existsSync` then tested the CURRENT-drive resolution instead. Measured: a
+   * `setCwd("/c/Users/.../msys-probe-X")` naming a directory that exists threw
+   * `path does not exist` because what got tested was `D:\c\Users\...`. The
+   * in-band `cd` handler above never had this hole — it runs `posixToNative`
+   * (utils/shell.ts:171) whenever the resolved shell is POSIX — but `setCwd` is
+   * called straight from the orchestrator (`orchestrator.ts:889`, reached from
+   * `use-app-logic.tsx` on project adoption) and bypasses that path entirely.
+   *
+   * Neither guard's CONDITION changes: on win32 both spellings were already
+   * `isAbsolute`-true, and on POSIX `normalizeMsysDrivePath` is identity, so
+   * `/d/x` stays an ordinary absolute path. What changes is only WHICH path the
+   * existence check tests, which path is stored, and which path a refusal names.
+   */
   setCwd(next: string): void {
-    if (!path.isAbsolute(next)) {
+    const spelled = normalizeMsysDrivePath(next);
+    if (!path.isAbsolute(spelled)) {
       throw new Error(`setCwd: path must be absolute, got: ${next}`);
     }
-    if (!existsSync(next)) {
-      throw new Error(`setCwd: path does not exist: ${next}`);
+    if (!existsSync(spelled)) {
+      throw new Error(`setCwd: path does not exist: ${spelled}`);
     }
-    this.cwd = next;
+    this.cwd = spelled;
   }
 
   getToolDescription(): string {

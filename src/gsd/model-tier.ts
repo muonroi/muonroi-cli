@@ -1,4 +1,4 @@
-import { getModelByTier, getModelInfo, getModelsForProvider } from "../models/registry.js";
+import { getModelByTier, getModelInfo, getTextModelsForProvider } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { BuiltinSubagentId, TaskRequest } from "../types/index.js";
 import type { PlanPerspective, PlanPerspectiveId } from "./plan-council-prompts.js";
@@ -14,7 +14,7 @@ const TIER_RANK: Record<"fast" | "balanced" | "premium", number> = { fast: 0, ba
 export function resolveGsdPremiumModel(sessionModelId: string): string {
   const providerId = detectProviderForModel(sessionModelId);
   let best: { id: string; tier: "fast" | "balanced" | "premium" } | undefined;
-  for (const m of getModelsForProvider(providerId)) {
+  for (const m of getTextModelsForProvider(providerId)) {
     if (m.tierRouting === false) continue;
     if (!m.tier) continue;
     if (!best || TIER_RANK[m.tier] > TIER_RANK[best.tier]) {

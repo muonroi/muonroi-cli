@@ -39,7 +39,7 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from typing_extensions import Self
 
 
@@ -62,6 +62,17 @@ def catalog_path() -> Path:
 # --------------------------------------------------------------------------- #
 # Schema — mirrors CatalogModel in src/models/catalog-client.ts
 # --------------------------------------------------------------------------- #
+class CatalogModalities(BaseModel):
+    input: list[str]
+    output: list[str]
+
+
+class CatalogLongContextPricing(BaseModel):
+    input_token_threshold: int = Field(gt=0)
+    input_multiplier: float = Field(gt=0)
+    output_multiplier: float = Field(gt=0)
+
+
 class CatalogModel(BaseModel):
     id: str
     name: str
@@ -73,6 +84,8 @@ class CatalogModel(BaseModel):
     output_price_per_million: float
     cached_input_price_per_million: Optional[float] = None
     cache_write_price_per_million: Optional[float] = None
+    long_context_pricing: Optional[CatalogLongContextPricing] = None
+    modalities: Optional[CatalogModalities] = None
     pricing_unit: Optional[str] = None
     unit_price: Optional[float] = None
     rate_limits: Optional["CatalogRateLimits"] = None
@@ -273,6 +286,16 @@ KNOWN_PRICING: dict[str, dict[str, float | None]] = {
     "opencode/deepseek-v4-flash": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
     "opencode/mimo-v2.5": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
     "opencode/mimo-v2.5-pro": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    # StepFun (api.stepfun.ai) — this service has NO live pricing fetcher for
+    # stepfun (only _fetch_deepseek_pricing exists, and even that only
+    # validates the DeepSeek model list rather than setting prices), and none
+    # of the other 8 stepfun catalog rows carry a KNOWN_PRICING entry either —
+    # their price is served straight from src/models/catalog.json with no
+    # overlay. This row is therefore NOT load-bearing today: it duplicates the
+    # catalog.json numbers rather than backstopping a missing live source.
+    # Verified against platform.stepfun.ai/docs/en/guides/models/step-5-preview
+    # and platform.stepfun.ai/docs/en/guides/pricing/details on 2026-09-23.
+    "step-5-preview": {"input": 1.0, "output": 2.7, "cachedInput": 0.05, "cacheWrite": None},
 }
 
 

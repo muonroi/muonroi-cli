@@ -165,7 +165,7 @@ export async function spawnCostLeakHarness(
       }
       ctx.cleanup?.();
       try {
-        rmSync(workDir, { recursive: true, force: true });
+        rmSync(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       } catch {
         // ignore
       }

@@ -4,43 +4,52 @@ export const PROTOCOL_VERSION = "0.4.0" as const;
  * Known accessibility-style roles for semantic blocks. Closed vocabulary —
  * `Role` (below) additionally admits namespaced `x-*` custom roles so new UI
  * surfaces can be introduced without a protocol version bump (additive-only).
+ *
+ * Declared as a runtime array and the {@link KnownRole} type derived FROM it,
+ * not the other way round: `tui.capabilities` has to hand a driving agent the
+ * role vocabulary, and a type-only union is invisible at runtime. Deriving in
+ * this direction makes a role that exists in the type but not in the advertised
+ * vocabulary unrepresentable.
  */
-export type KnownRole =
-  | "dialog"
-  | "textbox"
-  | "listbox"
-  | "listitem"
-  | "button"
-  | "checkbox"
-  | "radio"
-  | "radiogroup"
-  | "tab"
-  | "tablist"
-  | "tree"
-  | "treeitem"
-  | "table"
-  | "row"
-  | "cell"
-  | "progressbar"
-  | "spinner"
-  | "log"
-  | "statusbar"
-  | "menu"
-  | "menuitem"
-  | "toast"
-  | "tooltip"
-  | "region"
+export const KNOWN_ROLES = [
+  "dialog",
+  "textbox",
+  "listbox",
+  "listitem",
+  "button",
+  "checkbox",
+  "radio",
+  "radiogroup",
+  "tab",
+  "tablist",
+  "tree",
+  "treeitem",
+  "table",
+  "row",
+  "cell",
+  "progressbar",
+  "spinner",
+  "log",
+  "statusbar",
+  "menu",
+  "menuitem",
+  "toast",
+  "tooltip",
+  "region",
   // ARIA landmark / live-region / grouping roles (council surface sections)
-  | "status"
-  | "complementary"
-  | "group"
-  | "banner"
-  | "article"
+  "status",
+  "complementary",
+  "group",
+  "banner",
+  "article",
   // IDE / editor surfaces (added for the desktop frontend; harmless in the TUI)
-  | "editor"
-  | "diff"
-  | "gutter"
-  | "panel";
+  "editor",
+  "diff",
+  "gutter",
+  "panel",
+] as const;
+
+export type KnownRole = (typeof KNOWN_ROLES)[number];
 
 /**
  * A semantic role. Either a well-known {@link KnownRole} or a namespaced
@@ -242,6 +251,21 @@ export type LiveEvent =
       kind: "askcard-cancel";
       questionId: string;
     }
+  // The counterpart to askcard-open: the waiter that opened `questionId` gave
+  // up before an answer arrived (deadline elapsed, the run aborted, or an
+  // error tore the turn down). Without this, a driver watching only
+  // askcard-open cannot tell "still waiting for a human" apart from "nobody
+  // is listening any more" — the exact ambiguity a real run sat inside for
+  // 46 minutes (session 697419024ec8) before a late answer vanished with no
+  // trace. `notice` mirrors the text rendered in place of the withdrawn card.
+  | {
+      t: "event";
+      kind: "askcard-withdrawn";
+      questionId: string;
+      /** Stable machine code naming why the waiter stopped waiting. */
+      reason: string;
+      notice: string;
+    }
   | {
       t: "event";
       kind: "sprint-stage";
@@ -258,6 +282,41 @@ export type LiveEvent =
       /** Halt reason as surfaced by the CB gate that fired. */
       reason: string;
       runId: string;
+    }
+  // The terminal event of a `/ideal` run — the SUCCESS counterpart to
+  // `sprint-halt`. A failing run has announced itself since Phase 0
+  // (`sprint-halt reason=…`, `announceDriverBail`), but a run that finished
+  // FINE emitted nothing at all, so "approved" and "hung" were the same
+  // observation to a driver watching the event stream. Emitted from the single
+  // choke point every `/ideal` subcommand returns through
+  // (`runProductLoop` in src/product-loop/index.ts), in a `finally`, so it also
+  // covers the two exits that never produce a result: an exception escaping the
+  // generator, and the consumer tearing the generator down mid-run.
+  | {
+      t: "event";
+      kind: "run-finished";
+      /** The `/ideal` run id. `""` when the run died before `createRun`. */
+      runId: string;
+      /** Which `/ideal` subcommand ended (start | status | resume | abort | ship | review). */
+      subcommand: string;
+      /**
+       * How the run ENDED, named so a driver can act without parsing prose:
+       *  - `approved`  — reached the approved stage (the success case)
+       *  - `halted`    — stopped at a gate or by user action; `reason` says which
+       *  - `error`     — returned a failure result; `reason` says which
+       *  - `threw`     — an exception escaped the run; `reason` is its message
+       *  - `abandoned` — the consumer tore the generator down before it returned
+       */
+      outcome: "approved" | "halted" | "error" | "threw" | "abandoned";
+      /** Mirrors `ProductLoopResult.success`; always false for `threw` / `abandoned`. */
+      success: boolean;
+      /** Stable machine code (e.g. "shipped", "not_found", "budget exhausted"). */
+      reason: string;
+      /** Sprints actually executed; 0 when none ran or the count is unknown. */
+      sprintsRun: number;
+      /** Whether the run reached the shipped state. */
+      shipped: boolean;
+      ts: number;
     }
   | {
       t: "event";
@@ -338,6 +397,92 @@ export type LiveEvent =
       errorMessage: string;
       nextDelayMs: number;
     }
+  // A call was deliberately HELD to stay inside a provider limit the catalog
+  // declares (`rate_limits` in catalog.json). Emitted by the request pacer
+  // (src/providers/rate-limiter.ts) via the metered gate, only when a wait was
+  // actually incurred — a call that fits the budget emits nothing.
+  //
+  // Deliberately NOT folded into `stream-retry`, for the same reason
+  // `model-fallback` is not: `stream-retry` means an error already happened and
+  // the SAME call is being re-attempted, and it carries `attempt`/`maxAttempts`/
+  // `errorName`/`errorMessage` to say which error and which try. A pacing wait is
+  // the opposite — no error occurred, no attempt was consumed, and the request
+  // has not been sent yet. Reusing the kind would mean fabricating an error name
+  // and an attempt number for a healthy call, corrupting exactly the retry metric
+  // that comment protects, and making "attempt 2 of 3" ambiguous between "the
+  // provider rejected us" and "we chose to wait".
+  //
+  // A driving agent needs this: without it a paced call is indistinguishable from
+  // a hung one, which is the precise failure shape ("reported success for
+  // something that did not happen") this protocol exists to eliminate.
+  | {
+      t: "event";
+      kind: "rate-limit-wait";
+      /** Provider whose account-level budget produced the wait. */
+      provider: string;
+      /** Model the held call was going to. */
+      modelId: string;
+      /** Pipeline stage of the held call (main / council / subagent / …). */
+      stage: string;
+      /** Which declared budget bound: the per-minute request count, or in-flight concurrency. */
+      limitKind: "requests-per-minute" | "concurrency";
+      /** The declared ceiling that produced the wait, verbatim from the catalog. */
+      limit: number;
+      /** How long the call was held, in ms. */
+      waitMs: number;
+      ts: number;
+    }
+  // A council model-fallback chain advanced to a DIFFERENT model, or ran out of
+  // candidates. Distinct from `stream-retry` on purpose: that kind means the SAME
+  // model is retried after a transient error with a backoff, and carries no model
+  // identity. Here the model itself is substituted, there is no backoff, and the
+  // trigger is frequently NOT an error at all (`empty-completion` — a reasoning
+  // model that spends its whole output budget inside <think> and returns nothing).
+  // Folding the two together would make "attempt 2 of 3" ambiguous between "same
+  // model, second try" and "second different model", silently corrupting any
+  // retry metric built on stream-retry.
+  //
+  // Before this existed, the ONLY trace of a provider switch was the human-readable
+  // label string `"<label> (fallback: <modelId>)"` on a council-speaker event — a
+  // driving agent had to regex a display label to learn the model policy had been
+  // violated, and the reason was destroyed by a bare `catch {}`.
+  | {
+      t: "event";
+      kind: "model-fallback";
+      /** The model that just failed or returned nothing. */
+      fromModel: string;
+      /** The next candidate to be tried, or null when the chain is exhausted. */
+      toModel: string | null;
+      /**
+       * Why the chain advanced:
+       *  - "error"            — the call threw (see statusCode / errorMessage)
+       *  - "empty-completion" — the call SUCCEEDED and was billed, but produced
+       *                         no usable text after think-block stripping
+       *  - "blocked"          — candidate skipped; already blocklisted this session
+       */
+      reason: "error" | "empty-completion" | "blocked";
+      /** 1-based index of the candidate that just failed. */
+      attempt: number;
+      /** Total candidates in the deduped chain. */
+      totalCandidates: number;
+      /**
+       * True on the single terminal record emitted when EVERY candidate failed.
+       * The last candidate's own record also carries `toModel: null` (there was
+       * no next model), so this flag — not a null check — is what a driver
+       * filters on to detect an exhausted chain without double-counting.
+       */
+      exhausted?: boolean;
+      /** Phase label, e.g. "Inferring spec from topic". */
+      label?: string;
+      /** Provider id backing `fromModel`, when resolvable. */
+      provider?: string;
+      /** HTTP status when the failure was an API error (429 vs 401 want opposite responses). */
+      statusCode?: number;
+      errorName?: string;
+      /** Provider-side message. Capped + scrubbed by event-redact. */
+      errorMessage?: string;
+      ts: number;
+    }
   // Summary-phase grounding check — emitted at turn finalize when the model's
   // final synthesis asserts counts / file:line refs that do NOT appear in this
   // turn's tool outputs (possible hallucination). Soft-flag only; the turn is
@@ -374,7 +519,84 @@ export type LiveEvent =
       sessionId: string;
       ts: number;
     }
+  // Emitted exactly once per process, at the moment the React input bridge
+  // registers its command handler — i.e. the first instant a `type`/`press`
+  // can actually reach the UI.
+  //
+  // Before this existed there was no way to ask "is this TUI ready for input?".
+  // The transport accepts commands ~120 ms after process start, but nothing
+  // consumed them until the bridge mounted 445-745 ms later (measured), and
+  // everything sent inside that window was discarded by an empty handler array
+  // with no error and no event. Those commands are now buffered across the
+  // window (`agent-mode.ts`), and this event is how a driver LEARNS the window
+  // closed — and, via `dropped`, whether anything was lost after all.
+  //
+  // Gate on `wait_for({event:"input-ready"})`, not `wait_for({idle:true})`: the
+  // event condition is replay-safe (the driver scans its buffered ring), while
+  // `idle` is captured-start based and resolves on an empty pre-mount frame.
+  | {
+      t: "event";
+      kind: "input-ready";
+      /** Pre-mount commands replayed into the bridge at registration. */
+      flushed: number;
+      /** Commands discarded because the pre-mount buffer overflowed (normally 0). */
+      dropped: number;
+      ts: number;
+    }
   | { t: "idle" };
+
+/** The `kind` discriminant of every non-sentinel {@link LiveEvent} member. */
+export type LiveEventKind = Extract<LiveEvent, { t: "event" }>["kind"];
+
+/**
+ * Runtime list of every {@link LiveEvent} kind, excluding the `{t:"idle"}`
+ * sentinel (which carries no `kind`).
+ *
+ * The `LiveEvent` union is type-only, so nothing downstream — the
+ * `tui.last_event` MCP enum, the `tui.capabilities` payload — could enumerate it
+ * at runtime; both maintained hand-written copies instead, and the MCP enum
+ * drifted to 21 of 22 (`resume-request` was missing, so that call was rejected
+ * at the boundary). This array is that runtime projection, and the two
+ * assertions below make it exhaustive at COMPILE time in both directions: a new
+ * union member that is not listed here, or an entry here that no union member
+ * declares, fails `tsc`. Zero runtime cost.
+ */
+export const LIVE_EVENT_KINDS = [
+  "stream.delta",
+  "toast",
+  "llm-token",
+  "llm-done",
+  "council-step",
+  "council-speaker",
+  "council-turn-length",
+  "askcard-open",
+  "askcard-answered",
+  "askcard-cancel",
+  "askcard-withdrawn",
+  "sprint-stage",
+  "sprint-halt",
+  "run-finished",
+  "sprint-plan-committed",
+  "route-decision",
+  "usage",
+  "ee-timeout",
+  "ee-error",
+  "disconnect",
+  "stream-retry",
+  "rate-limit-wait",
+  "model-fallback",
+  "grounding-flag",
+  "steer-inject",
+  "resume-request",
+  "input-ready",
+] as const;
+
+/** Fails to compile unless `T` is `never`. */
+type AssertNever<T extends never> = T;
+/** A LiveEvent kind exists that LIVE_EVENT_KINDS does not list. */
+export type _LiveEventKindsMissing = AssertNever<Exclude<LiveEventKind, (typeof LIVE_EVENT_KINDS)[number]>>;
+/** LIVE_EVENT_KINDS lists a kind no LiveEvent member declares. */
+export type _LiveEventKindsExtra = AssertNever<Exclude<(typeof LIVE_EVENT_KINDS)[number], LiveEventKind>>;
 
 export type StatePatch = { id: string } & Partial<Omit<UINode, "children" | "id">>;
 

@@ -183,6 +183,137 @@ describe("wait_for with match predicate", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Round 12 (F3/G16) — wait_for({selector}) must block until match or timeout,
+// never resolve immediately for a selector that never matches. Root cause:
+// `#nonexistent` is CSS syntax this grammar does not speak (it requires
+// `id=value`) — parseSegment silently produced ZERO terms for it, and an
+// empty terms array vacuously matched EVERY node via Array.prototype.every,
+// so an unparseable selector behaved as "match everything" instead of
+// "match nothing". Measured live: `tui.wait_for({selector: "#nonexistent"})`
+// returned "ok" immediately.
+// ---------------------------------------------------------------------------
+
+describe("wait_for selector — round 12 (F3/G16)", () => {
+  function ingestFrame(driver: ReturnType<typeof makeDriver>, nodes: Array<{ id: string; role: string }>) {
+    driver._ingest({
+      kind: "frame",
+      frame: { mode: "live", version: 1, seq: 1, ts: Date.now(), nodes } as never,
+    });
+  }
+
+  it("an unparseable CSS-style selector (#nonexistent) times out instead of resolving immediately", async () => {
+    const driver = makeDriver();
+    ingestFrame(driver, [{ id: "composer", role: "textbox" }]);
+
+    const start = Date.now();
+    await expect(driver.wait_for({ selector: "#nonexistent", timeoutMs: 200 })).rejects.toThrow("wait_for timeout");
+    // Genuinely waited close to the timeout — not an instant reject either.
+    expect(Date.now() - start).toBeGreaterThanOrEqual(180);
+  });
+
+  it("a well-formed selector that matches no node ALSO times out (not just the CSS-syntax case)", async () => {
+    const driver = makeDriver();
+    ingestFrame(driver, [{ id: "composer", role: "textbox" }]);
+
+    await expect(driver.wait_for({ selector: "id=nonexistent", timeoutMs: 200 })).rejects.toThrow("wait_for timeout");
+  });
+
+  it("a selector that appears LATER resolves once the matching frame arrives, before the timeout", async () => {
+    const driver = makeDriver();
+    ingestFrame(driver, [{ id: "composer", role: "textbox" }]);
+
+    const p = driver.wait_for({ selector: "id=late-node", timeoutMs: 2000 });
+    // Not yet present — give the event loop a tick to prove it is still pending.
+    await new Promise((r) => setTimeout(r, 20));
+
+    ingestFrame(driver, [
+      { id: "composer", role: "textbox" },
+      { id: "late-node", role: "button" },
+    ]);
+
+    await expect(p).resolves.toBeUndefined();
+  });
+
+  it("resolves immediately when the selector already matches the current frame", async () => {
+    const driver = makeDriver();
+    ingestFrame(driver, [{ id: "already-here", role: "button" }]);
+
+    await driver.wait_for({ selector: "id=already-here", timeoutMs: 200 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 12b (F3 residual, MED-HIGH) — an EMPTY or whitespace-only selector
+// segment ("", "   ", "\t\n"), or a trailing empty segment from a malformed
+// `>>` split ("id=x >> "), used to produce ZERO terms too — just as
+// vacuously "matches everything" via Array.prototype.every on an empty
+// array as the round-12 CSS-syntax bug. Must ALSO match nothing. Two
+// non-regression checks alongside: a wait_for with NO selector field at
+// all (idle-only wait) must still resolve normally (it never reaches the
+// selector grammar at all — driver.ts only calls selectorMatches when
+// "selector" in cond), and an ordinary `>>` split with two well-formed
+// segments must still work.
+// ---------------------------------------------------------------------------
+
+describe("wait_for selector — round 12b (F3 residual): blank/whitespace segments match nothing", () => {
+  function ingestFrame(driver: ReturnType<typeof makeDriver>, nodes: Array<{ id: string; role: string }>) {
+    driver._ingest({
+      kind: "frame",
+      frame: { mode: "live", version: 1, seq: 1, ts: Date.now(), nodes } as never,
+    });
+  }
+
+  it('an empty-string selector ("") times out instead of matching every node', async () => {
+    const driver = makeDriver();
+    ingestFrame(driver, [{ id: "composer", role: "textbox" }]);
+
+    await expect(driver.wait_for({ selector: "", timeoutMs: 200 })).rejects.toThrow("wait_for timeout");
+  });
+
+  it('a whitespace-only selector ("   ") times out instead of matching every node', async () => {
+    const driver = makeDriver();
+    ingestFrame(driver, [{ id: "composer", role: "textbox" }]);
+
+    await expect(driver.wait_for({ selector: "   ", timeoutMs: 200 })).rejects.toThrow("wait_for timeout");
+  });
+
+  it('a trailing empty segment from a malformed ">>" split ("id=x >> ") times out instead of matching every child, even though the FIRST segment (id=x) does match', async () => {
+    const driver = makeDriver();
+    ingestFrame(driver, [
+      {
+        id: "x",
+        role: "textbox",
+        // @ts-expect-error — test fixture only needs `children` for this node, not the full UINode shape.
+        children: [{ id: "child-a", role: "button" }],
+      },
+    ]);
+
+    await expect(driver.wait_for({ selector: "id=x >> ", timeoutMs: 200 })).rejects.toThrow("wait_for timeout");
+  });
+
+  it("non-regression: wait_for with NO selector field (idle-only wait) still resolves normally", async () => {
+    const driver = makeDriver();
+    const p = driver.wait_for({ idle: true, timeoutMs: 500 });
+    driver._ingest({ kind: "idle" });
+    await expect(p).resolves.toBeUndefined();
+  });
+
+  it('non-regression: an ordinary well-formed ">>" split still resolves when both segments match', async () => {
+    const driver = makeDriver();
+    ingestFrame(driver, [
+      {
+        id: "x",
+        role: "textbox",
+        // @ts-expect-error — test fixture only needs `children` for this node, not the full UINode shape.
+        children: [{ id: "y", role: "button" }],
+      },
+    ]);
+
+    await driver.wait_for({ selector: "id=x >> id=y", timeoutMs: 200 });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 3.4 — driver.events() async iterable
 // ---------------------------------------------------------------------------
 

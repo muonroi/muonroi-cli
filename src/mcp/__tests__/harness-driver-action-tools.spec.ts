@@ -24,7 +24,10 @@ function makeFakeServer() {
 
 type Calls = { presses: string[]; sequences: string[][]; types: string[]; focuses: string[] };
 
-function makeStubDriver(calls: Calls, opts: { focusThrows?: boolean } = {}): Driver {
+function makeStubDriver(
+  calls: Calls,
+  opts: { focusThrows?: boolean; focusMoves?: boolean; ambiguous?: boolean } = {},
+): Driver {
   return {
     snapshot: () => null,
     changes_since: () => null,
@@ -40,6 +43,21 @@ function makeStubDriver(calls: Calls, opts: { focusThrows?: boolean } = {}): Dri
     focus: (s: string) => {
       if (opts.focusThrows) throw new Error("focus: expected 1 match, got 2");
       calls.focuses.push(s);
+    },
+    focus_verified: async (s: string) => {
+      if (opts.focusThrows) throw new Error("focus: expected 1 match, got 2");
+      calls.focuses.push(s);
+      if (opts.ambiguous) {
+        return { ok: false as const, reason: "ambiguous" as const, matches: 2, message: "expected 1 match, got 2" };
+      }
+      if (opts.focusMoves) return { ok: true as const, id: "btn" };
+      return {
+        ok: false as const,
+        reason: "not_focusable" as const,
+        id: "btn",
+        focusHolder: null,
+        message: "no frame reported it focused",
+      };
     },
     wait_for: async () => {},
     query: () => null,
@@ -92,15 +110,44 @@ describe("registerActionTools", () => {
     expect(calls.types).toEqual(["hello world"]);
   });
 
-  it("tui.focus dispatches to driver.focus", async () => {
+  it("tui.focus dispatches to driver.focus_verified and reports ok when focus really moved", async () => {
+    const calls: Calls = { presses: [], sequences: [], types: [], focuses: [] };
+    const fake = makeFakeServer();
+    registerActionTools(fake.server, () => makeStubDriver(calls, { focusMoves: true }));
+    const r: any = await fake.invoke("tui.focus", { selector: "role=button" });
+    expect(calls.focuses).toEqual(["role=button"]);
+    expect(r.isError).toBeFalsy();
+    expect(JSON.parse(r.content[0].text)).toMatchObject({ ok: true, id: "btn" });
+  });
+
+  // Regression pin (2026-09-05): tui.focus used to return the bare string "ok"
+  // whether or not focus moved. `__focus__:` is dropped by the OpenTUI input
+  // bridge, so that "ok" was a lie for every surface that does not already hold
+  // focus — and a driver stuck between two stacked modals had no way to learn
+  // its recovery attempt had failed.
+  it("tui.focus returns isError when focus did NOT move", async () => {
     const calls: Calls = { presses: [], sequences: [], types: [], focuses: [] };
     const fake = makeFakeServer();
     registerActionTools(fake.server, () => makeStubDriver(calls));
-    await fake.invoke("tui.focus", { selector: "role=button" });
-    expect(calls.focuses).toEqual(["role=button"]);
+    const r: any = await fake.invoke("tui.focus", { selector: "id=askcard-option-escalate_accept" });
+    expect(r.isError).toBe(true);
+    const body = JSON.parse(r.content[0].text);
+    expect(body.error).toBe("not_focusable");
+    expect(body.ok).toBe(false);
+    expect(String(body.message)).toContain("focused");
   });
 
   it("tui.focus returns isError on ambiguous selector", async () => {
+    const fake = makeFakeServer();
+    registerActionTools(fake.server, () =>
+      makeStubDriver({ presses: [], sequences: [], types: [], focuses: [] }, { ambiguous: true }),
+    );
+    const r: any = await fake.invoke("tui.focus", { selector: "role=listitem" });
+    expect(r.isError).toBe(true);
+    expect(JSON.parse(r.content[0].text).error).toBe("ambiguous");
+  });
+
+  it("tui.focus surfaces a thrown driver error as focus_failed", async () => {
     const fake = makeFakeServer();
     registerActionTools(fake.server, () =>
       makeStubDriver({ presses: [], sequences: [], types: [], focuses: [] }, { focusThrows: true }),

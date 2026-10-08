@@ -62,4 +62,46 @@ describe("modal focus E2E", () => {
   it.todo(
     "/council does not open a modal picker: it calls agent.runCouncilRound() directly; there is no dismissible dialog to press Esc on in the harness",
   );
+
+  // --- tui.focus honesty (2026-09-05) -------------------------------------
+  // Appended BELOW the it.todo on purpose: scripts/.harness-skips-allow.json
+  // pins that todo by file:line, so new cases must not shift it.
+  //
+  // `driver.focus()` dispatches `__focus__:<id>`, which the OpenTUI input
+  // bridge drops on purpose (input-bridge.tsx: focus routing is owned by
+  // individual components). The MCP `tui.focus` tool nevertheless answered the
+  // bare string "ok" for every selector, so a driver could not tell a
+  // successful recovery from a no-op — which is how a live /ideal run stuck
+  // between two stacked modals became undiagnosable. `focus_verified` reports
+  // what actually happened.
+
+  it("focus_verified reports ok for a node that already holds focus", async () => {
+    const outcome = await driver.focus_verified("id=composer");
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.id).toBe("composer");
+      expect(outcome.alreadyFocused).toBe(true);
+    }
+  });
+
+  it("focus_verified FAILS on a node that cannot take focus (was a false ok)", async () => {
+    // The status bar is real, unique and unfocusable — exactly the class of
+    // selector that used to answer "ok" while moving nothing.
+    expect(driver.query("id=status")).not.toBeNull();
+    const outcome = await driver.focus_verified("id=status", 300);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("not_focusable");
+      expect(outcome.id).toBe("status");
+      expect(outcome.message).toContain("press");
+    }
+    // And focus did not silently move: the composer still owns it.
+    expect(driver.query("id=composer")?.focus).toBe(true);
+  });
+
+  it("focus_verified reports no_match instead of pretending to succeed", async () => {
+    const outcome = await driver.focus_verified("id=definitely-not-a-node", 100);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.reason).toBe("no_match");
+  });
 });

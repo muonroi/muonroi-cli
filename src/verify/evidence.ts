@@ -33,7 +33,23 @@ export function buildReadinessGuidance(profile: VerifyProjectProfile): string[] 
   ];
 }
 
-export function buildBrowserGuidance(profile: VerifyProjectProfile): string[] {
+/**
+ * Browser-QA instructions for the verify sub-agent.
+ *
+ * `browserToolAvailable` is a MEASURED probe of the host (see
+ * `host-capabilities.ts`), not an assumption. When it is false the step-by-step
+ * `agent-browser` script below is removed entirely: it is what sent run
+ * `muc2joffe506`'s verify stage hunting for substitutes (PowerShell `Get-Command`,
+ * `browseruse`, `playwright`, `npx playwright install chromium`) and then to
+ * `ask_user`, at the cost of the whole stage budget. `buildMissingBrowserToolGuidance`
+ * in entrypoint.ts states the absence and how to report it instead.
+ */
+export function buildBrowserGuidance(profile: VerifyProjectProfile, browserToolAvailable = true): string[] {
+  if (profile.recipe.smokeKind === "http" && profile.recipe.smokeTarget && !browserToolAvailable) {
+    // Nothing to say here — the caller emits the could-not-run guidance for the
+    // phase. Returning the script for a binary that is absent is the defect.
+    return [];
+  }
   if (profile.recipe.smokeKind === "http" && profile.recipe.smokeTarget) {
     return [
       `- REQUIRED: After the dev server is running, you MUST run browser smoke tests against ${profile.recipe.smokeTarget}.`,

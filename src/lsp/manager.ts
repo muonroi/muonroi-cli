@@ -675,3 +675,134 @@ export function summarizeLspDiagnostics(diagnostics: LspDiagnosticFile[]): strin
   if (counts.infos > 0) parts.push(`${counts.infos} info`);
   return parts.join(" · ");
 }
+
+/**
+ * Cap for the BLOCKING commit gate (`gateStagedPaths`). It fires once per commit
+ * and its text is the ONLY channel that tells the agent what to fix, so it must
+ * be able to carry a whole file's realistic error set — the measured case was 4.
+ * 20 lines × ≤260 chars ≈ 5 KB, bounded regardless of how broken the file is.
+ */
+export const LSP_DETAIL_MAX_GATE = 20;
+
+/**
+ * Cap for the write_file / edit_file acks. Deliberately smaller than the gate's:
+ * an ack fires after EVERY write (many per turn) and blocks nothing, so it is an
+ * early warning — enough to see the shape and start fixing — while the gate,
+ * which fires once and halts progress, carries the full fix list.
+ */
+export const LSP_DETAIL_MAX_ACK = 5;
+
+/** Per-diagnostic message budget, so one pathological message cannot flood a turn. */
+const LSP_DETAIL_MAX_MESSAGE_CHARS = 200;
+
+export interface LspDiagnosticDetailOptions {
+  /** Base directory diagnostic paths are rendered relative to. */
+  cwd: string;
+  /** Maximum diagnostic lines rendered before truncating. */
+  max: number;
+}
+
+function severityLabel(severity: number | undefined): string {
+  switch (severity ?? 1) {
+    case 1:
+      return "error";
+    case 2:
+      return "warning";
+    case 3:
+      return "info";
+    default:
+      return "hint";
+  }
+}
+
+/**
+ * Render a diagnostic's file path relative to `cwd` with forward slashes. Falls
+ * back to the path as given when it lies OUTSIDE cwd, because a `../../..` climb
+ * is noise rather than an improvement over the absolute path.
+ */
+function relativeDiagnosticPath(filePath: string, cwd: string): string {
+  try {
+    const rel = path.relative(cwd, filePath);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return filePath.replace(/\\/g, "/");
+    return rel.replace(/\\/g, "/");
+  } catch {
+    return filePath;
+  }
+}
+
+function firstLine(message: string): string {
+  const line = message.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  return line.length > LSP_DETAIL_MAX_MESSAGE_CHARS ? `${line.slice(0, LSP_DETAIL_MAX_MESSAGE_CHARS)}…` : line;
+}
+
+/**
+ * The formatter the BLOCKING commit gate and the write/edit acks render: per
+ * diagnostic, `<repo-relative path>:<line>:<col> <severity> [<code>] <message>`,
+ * under a `summarizeLspDiagnostics` count header.
+ *
+ * `summarizeLspDiagnostics` (above) returns only that header. That was the whole
+ * defect: /ideal run `muc2joffe506` (session `bf39c59e4dd1`) showed the model
+ * "6 LSP issues · 6 errors" on four consecutive blocked commits over ten
+ * minutes, so it edited blind and the count went 6 → 6 → 6 → 7. Every one of the
+ * four real diagnostics was a one-line fix it was never shown.
+ *
+ * Bounded by `opts.max`, errors sorted ahead of warnings so a cap can never hide
+ * an error behind a warning, and a truncation note that names both the omitted
+ * count and the tool that lists the rest — a SILENT cut would reproduce the very
+ * blindness this fixes. Returns null when there is nothing to report, matching
+ * `summarizeLspDiagnostics`.
+ */
+export function describeLspDiagnostics(
+  diagnostics: LspDiagnosticFile[],
+  opts: LspDiagnosticDetailOptions,
+): string | null {
+  const header = summarizeLspDiagnostics(diagnostics);
+  if (!header) return null;
+
+  // flatMap already returns a fresh array, so sorting it in place mutates nothing
+  // the caller owns.
+  const candidates = diagnostics.flatMap((file) =>
+    file.diagnostics.map((diagnostic) => ({ filePath: file.filePath, diagnostic })),
+  );
+  candidates.sort((a, b) => {
+    const sev = (a.diagnostic.severity ?? 1) - (b.diagnostic.severity ?? 1);
+    if (sev !== 0) return sev;
+    if (a.filePath !== b.filePath) return a.filePath < b.filePath ? -1 : 1;
+    const line = a.diagnostic.range.start.line - b.diagnostic.range.start.line;
+    if (line !== 0) return line;
+    return a.diagnostic.range.start.character - b.diagnostic.range.start.character;
+  });
+
+  const max = Math.max(0, opts.max);
+  const shown = candidates.slice(0, max);
+  const lines = [header];
+  for (const { filePath, diagnostic } of shown) {
+    const rel = relativeDiagnosticPath(filePath, opts.cwd);
+    // LSP ranges are 0-based; a human/agent-facing location is 1-based.
+    const where = `${rel}:${diagnostic.range.start.line + 1}:${diagnostic.range.start.character + 1}`;
+    const code = diagnostic.code ? ` [${diagnostic.code}]` : "";
+    const message = firstLine(diagnostic.message);
+    lines.push(`  ${where} ${severityLabel(diagnostic.severity)}${code}${message ? ` ${message}` : ""}`);
+  }
+
+  const omitted = candidates.slice(max);
+  if (omitted.length > 0) {
+    const counts = { errors: 0, warnings: 0, infos: 0 };
+    for (const { diagnostic } of omitted) {
+      const severity = diagnostic.severity ?? 1;
+      if (severity === 1) counts.errors += 1;
+      else if (severity === 2) counts.warnings += 1;
+      else counts.infos += 1;
+    }
+    const breakdown: string[] = [];
+    if (counts.errors > 0) breakdown.push(`${counts.errors} error${counts.errors === 1 ? "" : "s"}`);
+    if (counts.warnings > 0) breakdown.push(`${counts.warnings} warning${counts.warnings === 1 ? "" : "s"}`);
+    if (counts.infos > 0) breakdown.push(`${counts.infos} info`);
+    lines.push(
+      `  … ${omitted.length} more not shown (${breakdown.join(", ")}) — ` +
+        `call wait_for_diagnostics on the file for the full list`,
+    );
+  }
+
+  return lines.join("\n");
+}

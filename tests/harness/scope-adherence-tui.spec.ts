@@ -97,7 +97,7 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
   });
 
   // ---- Assertion 2: soft-warn fires at floor(6 * 0.7) = 4 + carries prefix ----
-  it("soft-warn: shouldInjectSoftWarn at step 4 / ceiling 6 + 'approaching ceiling' prefix", () => {
+  it("soft-warn: shouldInjectSoftWarn at step 4 / ceiling 6 + a prefix that does NOT read as a quota", () => {
     expect(softWarnStep(6)).toBe(4);
     // Use a fresh sessionId so the one-shot Map doesn't carry between tests:
     const sid = `scope-adh-soft-warn-${Date.now()}`;
@@ -107,9 +107,26 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
     expect(shouldInjectSoftWarn(4, 6, sid)).toBe(false);
 
     // Verify the soft-warn handoff wires the prefix as documented:
-    // Source: src/orchestrator/tool-engine.ts (search "approaching ceiling")
+    // Source: src/orchestrator/tool-engine.ts (search "scope check").
+    //
+    // The prefix used to be "[approaching ceiling]" and the strong form opened
+    // "[past natural budget — step N/M]". Nothing here halts anything — the
+    // matrix ceiling stopped being a halt source in Phase 5 Fix 5 — but the
+    // model cannot know that, and the text repeats at cadence. Measured
+    // 2026-09-09 (session e28336959a62, ceiling 10, 74 tool calls): the agent
+    // stopped mid-task and reported "hết budget" with no budget configured and
+    // `loop_cap_auto` having already auto-answered `continue`. So the wording
+    // is now asserted the other way round: it must name itself a scope check
+    // and must NOT use quota language.
     const msgProc = readFileSync(resolve("src/orchestrator/tool-engine.ts"), "utf8");
-    expect(msgProc).toContain("approaching ceiling");
+    // Scope the check to lines that actually BUILD a model-facing prefix
+    // (a template literal opening with `[), so the explanatory comment above
+    // the fix — which quotes the old wording on purpose — does not trip it.
+    const NL = String.fromCharCode(10);
+    const emitted = msgProc.split(NL).filter((l) => l.includes("`["));
+    expect(emitted.some((l) => l.includes("scope check"))).toBe(true);
+    expect(emitted.some((l) => l.includes("past natural budget"))).toBe(false);
+    expect(msgProc).toContain("This is NOT a limit and nothing will stop you");
   });
 
   // ---- Assertion 4: --budget-rounds override path ----

@@ -15,6 +15,7 @@ import { summarizeApiErrorForLog } from "../../orchestrator/error-utils.js";
 import {
   blockModel,
   clearModelBlocklist,
+  clearAuthBlocksWhere,
   consumeBlockNotification,
   formatBlockedModelWarning,
   getBlockedModel,
@@ -151,5 +152,51 @@ describe("clearModelBlocklist", () => {
     clearModelBlocklist();
     expect(isModelBlocked("sess-1", "m1")).toBe(false);
     expect(isModelBlocked("sess-2", "m1")).toBe(false);
+  });
+});
+
+describe("clearAuthBlocksWhere — a credential change must not leave stale blocks", () => {
+  // Regression for a measured session (2026-09-09, 478bb611a315): a wrong key
+  // blocked step-3.5-flash at 01:57; the user fixed the key at 01:59 and the
+  // council still logged `reason: "blocked"` for it at 02:05. Only a restart
+  // cleared it. `clearModelBlocklist` existed but had no production caller.
+  beforeEach(() => clearModelBlocklist());
+
+  it("clears matching blocks across EVERY session scope, because a credential change is global", () => {
+    blockModel("sess-A", "step-3.5-flash", { statusCode: 401, reason: "Incorrect API key provided" });
+    blockModel("sess-B", "step-3.7-flash", { statusCode: 401, reason: "Incorrect API key provided" });
+
+    const cleared = clearAuthBlocksWhere((i) => i.modelId.startsWith("step-"));
+
+    expect(cleared).toBe(2);
+    expect(isModelBlocked("sess-A", "step-3.5-flash")).toBe(false);
+    expect(isModelBlocked("sess-B", "step-3.7-flash")).toBe(false);
+  });
+
+  it("leaves a block the predicate does not match — scoped, not a blanket wipe", () => {
+    blockModel("sess-A", "step-3.5-flash", { statusCode: 401, reason: "bad key" });
+    blockModel("sess-A", "glm-5.2", { statusCode: 403, reason: "unrelated provider" });
+
+    clearAuthBlocksWhere((i) => i.modelId.startsWith("step-"));
+
+    expect(isModelBlocked("sess-A", "step-3.5-flash")).toBe(false);
+    expect(isModelBlocked("sess-A", "glm-5.2")).toBe(true);
+  });
+
+  it("forgets the one-shot notification too, so a later re-block warns again", () => {
+    blockModel("sess-A", "step-3.5-flash", { statusCode: 401, reason: "bad key" });
+    expect(consumeBlockNotification("sess-A", "step-3.5-flash")).toBe(true);
+    expect(consumeBlockNotification("sess-A", "step-3.5-flash")).toBe(false);
+
+    clearAuthBlocksWhere((i) => i.modelId.startsWith("step-"));
+    blockModel("sess-A", "step-3.5-flash", { statusCode: 401, reason: "bad key again" });
+
+    expect(consumeBlockNotification("sess-A", "step-3.5-flash")).toBe(true);
+  });
+
+  it("reports zero and changes nothing when no block matches", () => {
+    blockModel("sess-A", "glm-5.2", { statusCode: 403, reason: "unrelated" });
+    expect(clearAuthBlocksWhere((i) => i.modelId.startsWith("step-"))).toBe(0);
+    expect(isModelBlocked("sess-A", "glm-5.2")).toBe(true);
   });
 });

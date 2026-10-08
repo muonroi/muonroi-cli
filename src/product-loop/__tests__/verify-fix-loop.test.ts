@@ -1,0 +1,1460 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { StreamChunk, TaskRequest, ToolResult, VerifyRecipe } from "../../types/index.js";
+import type { FloorDelta } from "../verify-baseline.js";
+import {
+  computeFailureKey,
+  computeVerifyFixTrigger,
+  DEFAULT_VERIFY_FIX_DEADLINE_MS,
+  DEFAULT_VERIFY_FIX_FIXER_DEADLINE_MS,
+  DEFAULT_VERIFY_FIX_ROUNDS,
+  deriveFailureIdentity,
+  type FloorRecheckOutcome,
+  getVerifyFixDeadlineMs,
+  getVerifyFixFixerDeadlineMs,
+  getVerifyFixRoundLimit,
+  isCheapRecheckEligible,
+  isCheapRecheckEnabled,
+  isFailureKeyUndecidable,
+  type RunVerifyFixLoopArgs,
+  runVerifyFixLoop,
+  type VerifyPassOutcome,
+} from "../verify-fix-loop.js";
+import type { FloorCheck } from "../verify-floor.js";
+
+async function drain<T>(gen: AsyncGenerator<StreamChunk, T, unknown>): Promise<T> {
+  while (true) {
+    const n = await gen.next();
+    if (n.done) return n.value;
+  }
+}
+
+function recipe(overrides: Partial<VerifyRecipe> = {}): VerifyRecipe {
+  return {
+    ecosystem: "node",
+    appKind: "cli",
+    appLabel: "app",
+    shellInitCommands: [],
+    bootstrapCommands: [],
+    installCommands: [],
+    buildCommands: [],
+    testCommands: ["npm test"],
+    smokeKind: "none",
+    evidence: [],
+    notes: [],
+    coverage: 80,
+    ...overrides,
+  };
+}
+
+function outcome(overrides: Partial<VerifyPassOutcome> & Pick<VerifyPassOutcome, "verifyVerdict">): VerifyPassOutcome {
+  return {
+    verifyResult: { success: overrides.verifyVerdict === "PASS", output: "verify output" },
+    recipeFromVerify: recipe(),
+    ...overrides,
+  };
+}
+
+const buildFailedFloor: FloorDelta = {
+  verdict: "fail",
+  failureKind: "build-failed",
+  failedCommand: "dotnet build",
+  newlyFailing: [],
+  preExisting: [],
+  fixed: [],
+  buildAlreadyBroken: true,
+  buildAttribution: "run-introduced",
+  rule: "delta",
+  runIdVerified: true,
+};
+
+const preExistingBuildFloor: FloorDelta = {
+  ...buildFailedFloor,
+  buildAttribution: "pre-existing",
+};
+
+function testRegressionFloor(newlyFailing: string[]): FloorDelta {
+  return {
+    verdict: "fail",
+    failureKind: "test-regression",
+    failedCommand: "npm test",
+    newlyFailing,
+    preExisting: [],
+    fixed: [],
+    buildAlreadyBroken: false,
+    rule: "delta",
+    runIdVerified: true,
+  };
+}
+
+const passingFloor: FloorDelta = {
+  verdict: "pass",
+  newlyFailing: [],
+  preExisting: [],
+  fixed: [],
+  buildAlreadyBroken: false,
+  rule: "delta",
+  runIdVerified: true,
+};
+
+function buildCheck(overrides: Partial<FloorCheck> = {}): FloorCheck {
+  return {
+    kind: "build",
+    command: "dotnet build",
+    exitCode: 1,
+    ok: false,
+    timedOut: false,
+    outputTail: "",
+    elapsedMs: 100,
+    errorSet: [],
+    ...overrides,
+  };
+}
+
+/** A `runFloorRecheck` stub that returns a fixed sequence of outcomes, one per call. */
+function sequenceFloorRecheck(...outcomes: FloorRecheckOutcome[]): {
+  fn: (roundLabel: string) => Promise<FloorRecheckOutcome>;
+  calls: string[];
+} {
+  const calls: string[] = [];
+  let i = 0;
+  async function fn(roundLabel: string): Promise<FloorRecheckOutcome> {
+    calls.push(roundLabel);
+    const next = outcomes[Math.min(i, outcomes.length - 1)];
+    i++;
+    return next;
+  }
+  return { fn, calls };
+}
+
+const noopArgsBase: Omit<RunVerifyFixLoopArgs, "initial" | "runVerifyPass"> = {
+  sprintN: 1,
+  planSynthesis: "the approved plan",
+  openTasks: ["[step1] wire up the widget"],
+  fixModelId: "fix-model",
+};
+
+/** A `runVerifyPass` stub that returns a fixed sequence of outcomes, one per call. */
+function sequencePass(...outcomes: VerifyPassOutcome[]): {
+  fn: (roundLabel: string) => AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown>;
+  calls: string[];
+} {
+  const calls: string[] = [];
+  let i = 0;
+  // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+  async function* gen(roundLabel: string): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+    calls.push(roundLabel);
+    const next = outcomes[Math.min(i, outcomes.length - 1)];
+    i++;
+    return next;
+  }
+  return { fn: gen, calls };
+}
+
+describe("getVerifyFixRoundLimit", () => {
+  const KEY = "MUONROI_IDEAL_VERIFY_FIX_ROUNDS";
+  let prev: string | undefined;
+
+  beforeEach(() => {
+    prev = process.env[KEY];
+  });
+  afterEach(() => {
+    if (prev === undefined) delete process.env[KEY];
+    else process.env[KEY] = prev;
+  });
+
+  it("defaults to 2 when unset", () => {
+    delete process.env[KEY];
+    expect(getVerifyFixRoundLimit()).toBe(DEFAULT_VERIFY_FIX_ROUNDS);
+    expect(DEFAULT_VERIFY_FIX_ROUNDS).toBe(2);
+  });
+
+  it("0 disables the loop", () => {
+    process.env[KEY] = "0";
+    expect(getVerifyFixRoundLimit()).toBe(0);
+  });
+
+  it("honours an explicit positive integer", () => {
+    process.env[KEY] = "5";
+    expect(getVerifyFixRoundLimit()).toBe(5);
+  });
+
+  it("falls back to the default (logged) on an invalid value", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      process.env[KEY] = "-1";
+      expect(getVerifyFixRoundLimit()).toBe(DEFAULT_VERIFY_FIX_ROUNDS);
+      process.env[KEY] = "abc";
+      expect(getVerifyFixRoundLimit()).toBe(DEFAULT_VERIFY_FIX_ROUNDS);
+      process.env[KEY] = "1.5";
+      expect(getVerifyFixRoundLimit()).toBe(DEFAULT_VERIFY_FIX_ROUNDS);
+      expect(errSpy).toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});
+
+describe("computeVerifyFixTrigger / deriveFailureIdentity / computeFailureKey", () => {
+  it("triggers on a run-introduced build failure", () => {
+    const r = computeVerifyFixTrigger({
+      verifyVerdict: "FAIL",
+      floorDelta: buildFailedFloor,
+      recipe: recipe(),
+      verifyOutput: "NU1107 conflict",
+    });
+    expect(r.shouldRun).toBe(true);
+    expect(r.identity?.reason).toBe("build_run_introduced");
+  });
+
+  it("skips a build failure the floor could only call pre-existing", () => {
+    const r = computeVerifyFixTrigger({
+      verifyVerdict: "FAIL",
+      floorDelta: preExistingBuildFloor,
+      recipe: recipe(),
+      verifyOutput: "NU1107 conflict",
+    });
+    expect(r.shouldRun).toBe(false);
+    expect(r.skippedReason).toBe("pre_existing_build_only");
+  });
+
+  it("triggers on a test regression", () => {
+    const r = computeVerifyFixTrigger({
+      verifyVerdict: "FAIL",
+      floorDelta: testRegressionFloor(["MyTests.Foo"]),
+      recipe: recipe(),
+      verifyOutput: "1 failing",
+    });
+    expect(r.shouldRun).toBe(true);
+    expect(r.identity?.reason).toBe("test_regression");
+  });
+
+  it("triggers on a MEASURED zero coverage even when verify itself PASSED", () => {
+    const r = computeVerifyFixTrigger({
+      verifyVerdict: "PASS",
+      recipe: recipe({ testCommands: ["dotnet test"], coverage: 0, coverageSource: "measured" }),
+      verifyOutput: "",
+    });
+    expect(r.shouldRun).toBe(true);
+    expect(r.identity?.reason).toBe("zero_coverage");
+  });
+
+  // The other half of the same fixture. `coverage: 0` with NO `coverageSource` is
+  // the ambiguous state `coverage-signal.ts` exists to disambiguate: nothing
+  // proves anything measured it, so it is "unmeasured", and an unmeasured suite is
+  // not an uncovered one. Spending a fix round on it sends the fixer after
+  // coverage that may already exist — measured on qa-platform, where the sprint's
+  // own gates went GREEN.
+  it("does NOT trigger on an UNSTAMPED zero coverage — nothing proves it was measured", () => {
+    const r = computeVerifyFixTrigger({
+      verifyVerdict: "PASS",
+      recipe: recipe({ testCommands: ["dotnet test"], coverage: 0 }),
+      verifyOutput: "",
+    });
+    expect(r.shouldRun).toBe(false);
+    expect(r.identity).toBeUndefined();
+  });
+
+  it("does NOT trigger on a MODEL-ASSERTED zero coverage — a filled-in box, not a finding", () => {
+    const r = computeVerifyFixTrigger({
+      verifyVerdict: "PASS",
+      recipe: recipe({ testCommands: ["dotnet test"], coverage: 0, coverageSource: "model-asserted" }),
+      verifyOutput: "",
+    });
+    expect(r.shouldRun).toBe(false);
+    expect(r.identity).toBeUndefined();
+  });
+
+  // The case this slice newly created: before the disk-derived test commands were
+  // unioned in, qa-platform's recipe carried `testCommands: []` so the
+  // zero_coverage branch was unreachable. Afterwards `hasTests` is true and
+  // `coverage` is null, so without the provenance check a sprint whose gates went
+  // GREEN would burn a fix round on coverage nobody measured.
+  it("does NOT trigger on disk-derived test commands with NO coverage figure at all", () => {
+    const r = computeVerifyFixTrigger({
+      verifyVerdict: "PASS",
+      recipe: recipe({
+        testCommands: ['cd backend && ".venv/Scripts/python.exe" -m pytest'],
+        testCommandsSource: "disk-derived",
+        coverage: null,
+        coverageSource: null,
+      }),
+      verifyOutput: "",
+    });
+    expect(r.shouldRun).toBe(false);
+    expect(r.identity).toBeUndefined();
+  });
+
+  it("does not trigger on a clean PASS with real coverage", () => {
+    const r = computeVerifyFixTrigger({
+      verifyVerdict: "PASS",
+      recipe: recipe({ testCommands: ["npm test"], coverage: 80 }),
+      verifyOutput: "",
+    });
+    expect(r.shouldRun).toBe(false);
+    expect(r.skippedReason).toBeUndefined();
+  });
+
+  it("triggers on an actionable verify FAIL with no floor evidence", () => {
+    const r = computeVerifyFixTrigger({
+      verifyVerdict: "FAIL",
+      recipe: recipe(),
+      verifyOutput: "assertion failed at line 12",
+    });
+    expect(r.shouldRun).toBe(true);
+    expect(r.identity?.reason).toBe("FAIL");
+  });
+
+  it("does not trigger on FAIL with empty output (nothing actionable)", () => {
+    const r = computeVerifyFixTrigger({ verifyVerdict: "FAIL", recipe: recipe(), verifyOutput: "   " });
+    expect(r.shouldRun).toBe(false);
+    expect(r.skippedReason).toBe("not_actionable");
+  });
+
+  it("does not trigger on infra failures (spawn error / timeout — nothing a code fixer can act on)", () => {
+    const infra: FloorDelta = {
+      verdict: "fail",
+      failureKind: "infra",
+      failedCommand: "npm test",
+      newlyFailing: [],
+      preExisting: [],
+      fixed: [],
+      buildAlreadyBroken: false,
+      rule: "absolute",
+      runIdVerified: true,
+    };
+    const r = computeVerifyFixTrigger({
+      verifyVerdict: "ERROR",
+      floorDelta: infra,
+      recipe: recipe(),
+      verifyOutput: "",
+    });
+    expect(r.shouldRun).toBe(false);
+  });
+
+  it("computeFailureKey is stable regardless of errorSet input order", () => {
+    const a = deriveFailureIdentity({
+      verifyVerdict: "FAIL",
+      floorDelta: testRegressionFloor(["b", "a"]),
+      recipe: recipe(),
+      verifyOutput: "",
+    });
+    const b = deriveFailureIdentity({
+      verifyVerdict: "FAIL",
+      floorDelta: testRegressionFloor(["a", "b"]),
+      recipe: recipe(),
+      verifyOutput: "",
+    });
+    expect(computeFailureKey(a)).toBe(computeFailureKey(b));
+  });
+
+  it("computeFailureKey differs when the newly-failing set differs", () => {
+    const a = deriveFailureIdentity({
+      verifyVerdict: "FAIL",
+      floorDelta: testRegressionFloor(["a"]),
+      recipe: recipe(),
+      verifyOutput: "",
+    });
+    const b = deriveFailureIdentity({
+      verifyVerdict: "FAIL",
+      floorDelta: testRegressionFloor(["b"]),
+      recipe: recipe(),
+      verifyOutput: "",
+    });
+    expect(computeFailureKey(a)).not.toBe(computeFailureKey(b));
+  });
+});
+
+describe("runVerifyFixLoop", () => {
+  it("FAIL then the fix works: re-verify passes, judgment sees the pass", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const fixed = outcome({ verifyVerdict: "PASS" });
+    const { fn: runVerifyPass } = sequencePass(fixed);
+    const fixerCalls: TaskRequest[] = [];
+    const runIsolatedTask = async (req: TaskRequest): Promise<ToolResult> => {
+      fixerCalls.push(req);
+      return { success: true, output: "applied the fix" };
+    };
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, maxRounds: 2 }),
+    );
+
+    expect(result.enabled).toBe(true);
+    expect(result.triggered).toBe(true);
+    expect(result.stopReason).toBe("pass");
+    expect(result.rounds).toHaveLength(1);
+    expect(result.rounds[0].verifyVerdictAfter).toBe("PASS");
+    expect(result.final.verifyVerdict).toBe("PASS");
+    expect(fixerCalls).toHaveLength(1);
+    expect(fixerCalls[0].modelId).toBe("fix-model");
+  });
+
+  it("FAIL with the same error set twice: stopReason is no_progress after round 1", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const stillFailing = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const { fn: runVerifyPass } = sequencePass(stillFailing);
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "tried a fix" });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, maxRounds: 5 }),
+    );
+
+    expect(result.stopReason).toBe("no_progress");
+    expect(result.rounds).toHaveLength(1);
+  });
+
+  it("reaches the round cap when the failure keeps changing without ever passing", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.A"]) });
+    const round1 = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.B"]) });
+    const round2 = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.C"]) });
+    const { fn: runVerifyPass } = sequencePass(round1, round2);
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "tried a fix" });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, maxRounds: 2 }),
+    );
+
+    expect(result.stopReason).toBe("round_cap");
+    expect(result.rounds).toHaveLength(2);
+  });
+
+  it("skips a pre-existing-only build failure and records the skip", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: preExistingBuildFloor });
+    let verifyPassCalls = 0;
+    let fixerCalls = 0;
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      verifyPassCalls++;
+      return initial;
+    }
+    const runIsolatedTask = async (): Promise<ToolResult> => {
+      fixerCalls++;
+      return { success: true, output: "" };
+    };
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, maxRounds: 2 }),
+    );
+
+    expect(result.triggered).toBe(false);
+    expect(result.skippedReason).toBe("pre_existing_build_only");
+    expect(result.stopReason).toBe("not_triggered");
+    expect(result.rounds).toEqual([]);
+    expect(verifyPassCalls).toBe(0);
+    expect(fixerCalls).toBe(0);
+  });
+
+  it("MUONROI_IDEAL_VERIFY_FIX_ROUNDS=0 is byte-identical to today: nothing runs", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    let verifyPassCalls = 0;
+    let fixerCalls = 0;
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      verifyPassCalls++;
+      return initial;
+    }
+    const runIsolatedTask = async (): Promise<ToolResult> => {
+      fixerCalls++;
+      return { success: true, output: "" };
+    };
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, maxRounds: 0 }),
+    );
+
+    expect(result.enabled).toBe(false);
+    expect(result.stopReason).toBe("disabled");
+    expect(result.rounds).toEqual([]);
+    expect(result.final).toBe(initial);
+    expect(verifyPassCalls).toBe(0);
+    expect(fixerCalls).toBe(0);
+  });
+
+  it("the fixer throws: stopReason is error and the sprint continues with the last verify", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    let verifyPassCalls = 0;
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      verifyPassCalls++;
+      return initial;
+    }
+    const runIsolatedTask = async (): Promise<ToolResult> => {
+      throw new Error("provider socket reset");
+    };
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, maxRounds: 2 }),
+    );
+
+    expect(result.stopReason).toBe("error");
+    expect(result.rounds).toHaveLength(1);
+    expect(result.rounds[0].fixerSuccess).toBe(false);
+    expect(result.final).toBe(initial);
+    expect(verifyPassCalls).toBe(0);
+  });
+
+  it("no isolated-task capability: stopReason is error, nothing dispatched", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      return initial;
+    }
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, initial, runVerifyPass, maxRounds: 2, runIsolatedTask: undefined }),
+    );
+    expect(result.triggered).toBe(true);
+    expect(result.stopReason).toBe("error");
+    expect(result.rounds).toEqual([]);
+  });
+
+  it("the MEASURED zero_coverage case triggers the loop", async () => {
+    const initial = outcome({
+      verifyVerdict: "PASS",
+      recipeFromVerify: recipe({ testCommands: ["dotnet test"], coverage: 0, coverageSource: "measured" }),
+    });
+    const fixed = outcome({
+      verifyVerdict: "PASS",
+      recipeFromVerify: recipe({ testCommands: ["dotnet test"], coverage: 80, coverageSource: "measured" }),
+    });
+    const { fn: runVerifyPass } = sequencePass(fixed);
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "registered the project" });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, maxRounds: 2 }),
+    );
+
+    expect(result.triggered).toBe(true);
+    expect(result.stopReason).toBe("pass");
+    expect(result.rounds[0].failureKeyBefore).toContain("zero_coverage");
+  });
+
+  // The other half: the same PASS + zero, with nothing proving the zero was
+  // measured, must not start the loop at all — no round, no fixer call, no cost.
+  it("the UNSTAMPED zero_coverage case does not start the loop", async () => {
+    const initial = outcome({
+      verifyVerdict: "PASS",
+      recipeFromVerify: recipe({ testCommands: ["dotnet test"], coverage: 0 }),
+    });
+    let verifyPassCalls = 0;
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      verifyPassCalls++;
+      return initial;
+    }
+    let fixerCalls = 0;
+    const runIsolatedTask = async (): Promise<ToolResult> => {
+      fixerCalls++;
+      return { success: true, output: "should never be reached" };
+    };
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, maxRounds: 2 }),
+    );
+
+    expect(result.triggered).toBe(false);
+    expect(result.rounds).toEqual([]);
+    expect(verifyPassCalls).toBe(0);
+    expect(fixerCalls).toBe(0);
+  });
+
+  it("an already-aborted signal stops the loop before any round runs", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    let verifyPassCalls = 0;
+    let fixerCalls = 0;
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      verifyPassCalls++;
+      return initial;
+    }
+    const runIsolatedTask = async (): Promise<ToolResult> => {
+      fixerCalls++;
+      return { success: true, output: "" };
+    };
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        maxRounds: 2,
+        abortSignal: controller.signal,
+      }),
+    );
+
+    expect(result.stopReason).toBe("aborted");
+    expect(verifyPassCalls).toBe(0);
+    expect(fixerCalls).toBe(0);
+  });
+
+  it("calls onRoundStart before dispatching each round's fixer", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const fixed = outcome({ verifyVerdict: "PASS" });
+    const { fn: runVerifyPass } = sequencePass(fixed);
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "applied the fix" });
+    const startedRounds: number[] = [];
+
+    await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        maxRounds: 2,
+        onRoundStart: (round) => startedRounds.push(round),
+      }),
+    );
+
+    expect(startedRounds).toEqual([1]);
+  });
+
+  it("a signal that fires AFTER round 1's fixer stops before the re-verify — no round 2, stopReason aborted, round 1 still recorded", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const controller = new AbortController();
+    let verifyPassCalls = 0;
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      verifyPassCalls++;
+      return outcome({ verifyVerdict: "PASS" });
+    }
+    // The signal fires as a SIDE EFFECT of the fixer call resolving — exactly
+    // "abort landed between the fixer and the re-verify".
+    const runIsolatedTask = async (): Promise<ToolResult> => {
+      controller.abort();
+      return { success: true, output: "applied the fix" };
+    };
+
+    const result = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        maxRounds: 3,
+        abortSignal: controller.signal,
+      }),
+    );
+
+    expect(result.stopReason).toBe("aborted");
+    expect(verifyPassCalls).toBe(0); // no re-verify, no round 2
+    expect(result.rounds).toHaveLength(1);
+    expect(result.rounds[0]).toMatchObject({ round: 1, fixerRan: true, fixerSuccess: true });
+    // The record persisted to disk is built from exactly this result by
+    // sprint-runner.ts, unconditionally — see the "S4 — bounded verify-fix
+    // loop" describe block in sprint-runner.test.ts for the on-disk proof.
+  });
+});
+
+describe("isCheapRecheckEligible", () => {
+  it("is eligible for a run-introduced build failure", () => {
+    const identity = deriveFailureIdentity({
+      verifyVerdict: "FAIL",
+      floorDelta: buildFailedFloor,
+      recipe: recipe(),
+      verifyOutput: "",
+    });
+    expect(isCheapRecheckEligible(identity)).toBe(true);
+  });
+
+  it("is NOT eligible for zero_coverage (needs the sub-agent's own recipe read)", () => {
+    const identity = deriveFailureIdentity({
+      verifyVerdict: "PASS",
+      recipe: recipe({ testCommands: ["dotnet test"], coverage: 0, coverageSource: "measured" }),
+      verifyOutput: "",
+    });
+    // Asserted, not assumed: the premise of this test is that the identity IS
+    // `zero_coverage`, and that now requires the zero to be a MEASURED one.
+    expect(identity.reason).toBe("zero_coverage");
+    expect(isCheapRecheckEligible(identity)).toBe(false);
+  });
+
+  it("an unstamped zero does not even produce a zero_coverage identity", () => {
+    const identity = deriveFailureIdentity({
+      verifyVerdict: "PASS",
+      recipe: recipe({ testCommands: ["dotnet test"], coverage: 0 }),
+      verifyOutput: "",
+    });
+    expect(identity.reason).not.toBe("zero_coverage");
+    expect(identity.failedCondition).toBe("verify_verdict");
+  });
+
+  it("is NOT eligible for a plain verify_verdict failure, even with a recognizable error code", () => {
+    const identity = deriveFailureIdentity({
+      verifyVerdict: "FAIL",
+      recipe: recipe(),
+      verifyOutput: "error TS2345: argument mismatch",
+    });
+    expect(identity.failedCondition).toBe("verify_verdict");
+    expect(isCheapRecheckEligible(identity)).toBe(false);
+  });
+
+  it("is NOT eligible for a combined build+registration identity (needs the structure check too)", () => {
+    const combined = deriveFailureIdentity({
+      verifyVerdict: "FAIL",
+      floorDelta: buildFailedFloor,
+      recipe: recipe(),
+      verifyOutput: "",
+      structureCheck: {
+        ecosystems: [
+          {
+            ecosystem: "C#",
+            solutionFile: "src/Acme.sln",
+            status: "violations",
+            unregistered: [
+              {
+                manifest: "src/Acme.Widgets/Acme.Widgets.csproj",
+                reason: "not referenced by src/Acme.sln",
+                solutionFile: "src/Acme.sln",
+              },
+            ],
+          },
+        ],
+        addedFilesSource: "git-status-fallback",
+        addedFilesCount: 1,
+      },
+    });
+    expect(combined.reason).toContain("+project_not_registered");
+    expect(isCheapRecheckEligible(combined)).toBe(false);
+  });
+});
+
+describe("isCheapRecheckEnabled", () => {
+  const KEY = "MUONROI_IDEAL_VERIFY_FIX_CHEAP_RECHECK";
+  let prev: string | undefined;
+  beforeEach(() => {
+    prev = process.env[KEY];
+  });
+  afterEach(() => {
+    if (prev === undefined) delete process.env[KEY];
+    else process.env[KEY] = prev;
+  });
+
+  it("defaults to enabled", () => {
+    delete process.env[KEY];
+    expect(isCheapRecheckEnabled()).toBe(true);
+  });
+
+  it("=0 disables it", () => {
+    process.env[KEY] = "0";
+    expect(isCheapRecheckEnabled()).toBe(false);
+  });
+});
+
+describe("runVerifyFixLoop — D2 cheap deterministic re-check", () => {
+  const ENV_KEY = "MUONROI_IDEAL_VERIFY_FIX_CHEAP_RECHECK";
+  let prevEnv: string | undefined;
+  beforeEach(() => {
+    prevEnv = process.env[ENV_KEY];
+  });
+  afterEach(() => {
+    if (prevEnv === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = prevEnv;
+  });
+
+  it("round 1 fixer, build still broken: no verify sub-agent call that round, and the round is recorded as cheap", async () => {
+    const initial = outcome({
+      verifyVerdict: "FAIL",
+      floorDelta: buildFailedFloor,
+      floorChecks: [buildCheck({ errorSet: ["CS0103"] })],
+    });
+    let verifyPassCalls = 0;
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      verifyPassCalls++;
+      return initial;
+    }
+    const { fn: runFloorRecheck, calls: floorCalls } = sequenceFloorRecheck({
+      ranOk: true,
+      floorDelta: buildFailedFloor,
+      floorChecks: [buildCheck({ errorSet: ["CS0103"] })],
+    });
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "tried a fix" });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 1 }),
+    );
+
+    // No verify sub-agent turn was dispatched this round — the deterministic
+    // floor alone already proved nothing changed.
+    expect(verifyPassCalls).toBe(0);
+    expect(floorCalls).toHaveLength(1);
+    expect(result.rounds).toHaveLength(1);
+    expect(result.rounds[0].passKind).toBe("cheap");
+    // Never fabricated: the final verdict is exactly the last one the verify
+    // sub-agent actually produced (the initial one — no full pass ran).
+    expect(result.final.verifyVerdict).toBe(initial.verifyVerdict);
+  });
+
+  it("round 1 fixer, build now green: a full pass runs, and the loop can pass", async () => {
+    const initial = outcome({
+      verifyVerdict: "FAIL",
+      floorDelta: buildFailedFloor,
+      floorChecks: [buildCheck({ errorSet: ["CS0103"] })],
+    });
+    const fixed = outcome({ verifyVerdict: "PASS" });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(fixed);
+    const { fn: runFloorRecheck, calls: floorCalls } = sequenceFloorRecheck({
+      ranOk: true,
+      floorDelta: passingFloor,
+      floorChecks: [],
+    });
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "fixed the build" });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 2 }),
+    );
+
+    expect(floorCalls).toHaveLength(1);
+    expect(verifyCalls).toHaveLength(1);
+    expect(result.stopReason).toBe("pass");
+    expect(result.rounds).toHaveLength(1);
+    expect(result.rounds[0].passKind).toBe("full");
+    expect(result.final.verifyVerdict).toBe("PASS");
+  });
+
+  it("no recipe: always full (verify_verdict identity is never cheap-recheck eligible)", async () => {
+    const initial = outcome({
+      verifyVerdict: "FAIL",
+      recipeFromVerify: null,
+      verifyResult: { success: false, output: "VERIFY_FAIL\nerror TS2345: argument mismatch" },
+    });
+    const fixed = outcome({ verifyVerdict: "PASS", recipeFromVerify: null });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(fixed);
+    const { fn: runFloorRecheck, calls: floorCalls } = sequenceFloorRecheck({ ranOk: true, floorDelta: passingFloor });
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "applied" });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 2 }),
+    );
+
+    expect(floorCalls).toHaveLength(0);
+    expect(verifyCalls).toHaveLength(1);
+    expect(result.rounds[0].passKind).toBe("full");
+  });
+
+  it("a verify_verdict failure with an empty error set: always full", async () => {
+    const initial = outcome({
+      verifyVerdict: "FAIL",
+      verifyResult: { success: false, output: "VERIFY_FAIL\nsomething went wrong, no code here" },
+    });
+    const fixed = outcome({ verifyVerdict: "PASS" });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(fixed);
+    const { fn: runFloorRecheck, calls: floorCalls } = sequenceFloorRecheck({ ranOk: true, floorDelta: passingFloor });
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "applied" });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 2 }),
+    );
+
+    expect(floorCalls).toHaveLength(0);
+    expect(verifyCalls).toHaveLength(1);
+    expect(result.rounds[0].passKind).toBe("full");
+  });
+
+  it("MUONROI_IDEAL_VERIFY_FIX_CHEAP_RECHECK=0: always full, byte-identical to pre-D2 behaviour", async () => {
+    process.env[ENV_KEY] = "0";
+    const initial = outcome({
+      verifyVerdict: "FAIL",
+      floorDelta: buildFailedFloor,
+      floorChecks: [buildCheck({ errorSet: ["CS0103"] })],
+    });
+    const fixed = outcome({ verifyVerdict: "PASS" });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(fixed);
+    const { fn: runFloorRecheck, calls: floorCalls } = sequenceFloorRecheck({
+      ranOk: true,
+      floorDelta: passingFloor,
+    });
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "fixed the build" });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 2 }),
+    );
+
+    expect(floorCalls).toHaveLength(0);
+    expect(verifyCalls).toHaveLength(1);
+    expect(result.stopReason).toBe("pass");
+    expect(result.rounds[0].passKind).toBe("full");
+  });
+
+  it("no runFloorRecheck provided: always full, same as today (the arg is optional)", async () => {
+    const initial = outcome({
+      verifyVerdict: "FAIL",
+      floorDelta: buildFailedFloor,
+      floorChecks: [buildCheck({ errorSet: ["CS0103"] })],
+    });
+    const fixed = outcome({ verifyVerdict: "PASS" });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(fixed);
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "fixed the build" });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, maxRounds: 2 }),
+    );
+
+    expect(verifyCalls).toHaveLength(1);
+    expect(result.rounds[0].passKind).toBe("full");
+  });
+
+  it("the floor is not run twice in a single round: the saving is measurable — a 2-round loop where round 1 still fails deterministically calls the verify sub-agent only ONCE instead of twice", async () => {
+    const initial = outcome({
+      verifyVerdict: "FAIL",
+      floorDelta: buildFailedFloor,
+      floorChecks: [buildCheck({ errorSet: ["CS0103"] })],
+    });
+    // Round 1's fix is incomplete: the floor still fails, but on a DIFFERENT
+    // error than before — decidable progress, so no_progress does not fire.
+    const round1StillBroken: FloorRecheckOutcome = {
+      ranOk: true,
+      floorDelta: buildFailedFloor,
+      floorChecks: [buildCheck({ errorSet: ["CS0104"] })],
+    };
+    // Round 2's fix finishes the job: the floor is green.
+    const round2Fixed: FloorRecheckOutcome = { ranOk: true, floorDelta: passingFloor, floorChecks: [] };
+    const { fn: runFloorRecheck, calls: floorCalls } = sequenceFloorRecheck(round1StillBroken, round2Fixed);
+    const fixed = outcome({ verifyVerdict: "PASS" });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(fixed);
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "tried a fix" });
+
+    // BEFORE D2 (no runFloorRecheck wired): every round pays for a full pass.
+    const before = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass: sequencePass(fixed, fixed).fn,
+        maxRounds: 2,
+      }),
+    );
+    expect(before.rounds.filter((r) => r.passKind !== "cheap")).toHaveLength(before.rounds.length);
+
+    // AFTER D2: round 1 is cheap-only (floor still fails), round 2 is full
+    // (floor now passes) — the sub-agent is dispatched ONCE, not twice.
+    const after = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 2 }),
+    );
+
+    expect(after.rounds).toHaveLength(2);
+    expect(after.rounds[0].passKind).toBe("cheap");
+    expect(after.rounds[1].passKind).toBe("full");
+    // Per round, exactly ONE of {floor-recheck, full pass} ran — never both —
+    // so the floor itself is never invoked twice for the same round.
+    expect(floorCalls).toHaveLength(2);
+    expect(verifyCalls).toHaveLength(1);
+    expect(after.stopReason).toBe("pass");
+  });
+});
+
+describe("verify_verdict errorSet (S5 extractErrorSet + failing test names)", () => {
+  it("a recognizable build/typecheck error code makes two rounds with DIFFERENT codes distinguishable — no premature no_progress", async () => {
+    const initial = outcome({
+      verifyVerdict: "FAIL",
+      verifyResult: { success: false, output: "VERIFY_FAIL\nerror NU1107: version conflict on Foo.Bar" },
+    });
+    const round1 = outcome({
+      verifyVerdict: "FAIL",
+      verifyResult: { success: false, output: "VERIFY_FAIL\nerror CS0103: the name 'x' does not exist" },
+    });
+    const round2 = outcome({
+      verifyVerdict: "FAIL",
+      verifyResult: { success: false, output: "VERIFY_FAIL\nerror CS0103: the name 'x' does not exist" },
+    });
+    const { fn: runVerifyPass } = sequencePass(round1, round2);
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "tried a fix" });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, maxRounds: 3 }),
+    );
+
+    // Round 1 (NU1107 -> CS0103) is a DIFFERENT decidable key: no no_progress.
+    // Round 2 repeats round 1's CS0103 key exactly: no_progress fires there.
+    expect(result.rounds).toHaveLength(2);
+    expect(result.rounds[0].noProgressUndecidable).toBeUndefined();
+    expect(result.rounds[1].noProgressUndecidable).toBeUndefined();
+    expect(result.stopReason).toBe("no_progress");
+  });
+
+  it("plain prose with no recognizable code is UNDECIDABLE — the round cap bounds the loop instead of a false no_progress stop", async () => {
+    const initial = outcome({
+      verifyVerdict: "FAIL",
+      verifyResult: { success: false, output: "VERIFY_FAIL\nsomething went wrong, no code here" },
+    });
+    const stillFailingProse = outcome({
+      verifyVerdict: "FAIL",
+      verifyResult: { success: false, output: "VERIFY_FAIL\nsomething went wrong, no code here" },
+    });
+    const { fn: runVerifyPass } = sequencePass(stillFailingProse, stillFailingProse, stillFailingProse);
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "tried a fix" });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, maxRounds: 3 }),
+    );
+
+    // Without the fix this would stop with "no_progress" after round 1.
+    expect(result.stopReason).toBe("round_cap");
+    expect(result.rounds).toHaveLength(3);
+    for (const r of result.rounds) {
+      expect(r.noProgressUndecidable).toBe(true);
+      expect(r.failureKeyAfter).toBe("verify_verdict:FAIL:");
+    }
+  });
+
+  it("isFailureKeyUndecidable is true only for an empty-errorSet verify_verdict identity", () => {
+    const decidableEngineeringFloor = deriveFailureIdentity({
+      verifyVerdict: "FAIL",
+      floorDelta: testRegressionFloor(["MyTests.Foo"]),
+      recipe: recipe(),
+      verifyOutput: "",
+    });
+    const undecidableVerdict = deriveFailureIdentity({
+      verifyVerdict: "FAIL",
+      recipe: recipe(),
+      verifyOutput: "plain prose, no code",
+    });
+    const decidableVerdict = deriveFailureIdentity({
+      verifyVerdict: "FAIL",
+      recipe: recipe(),
+      verifyOutput: "error TS2345: argument mismatch",
+    });
+    expect(isFailureKeyUndecidable(decidableEngineeringFloor)).toBe(false);
+    expect(isFailureKeyUndecidable(undecidableVerdict)).toBe(true);
+    expect(isFailureKeyUndecidable(decidableVerdict)).toBe(false);
+  });
+});
+
+describe("getVerifyFixDeadlineMs", () => {
+  const KEY = "MUONROI_IDEAL_VERIFY_FIX_DEADLINE_MS";
+  let prev: string | undefined;
+
+  beforeEach(() => {
+    prev = process.env[KEY];
+  });
+  afterEach(() => {
+    if (prev === undefined) delete process.env[KEY];
+    else process.env[KEY] = prev;
+  });
+
+  it("defaults to 30 minutes when unset", () => {
+    delete process.env[KEY];
+    expect(getVerifyFixDeadlineMs()).toBe(DEFAULT_VERIFY_FIX_DEADLINE_MS);
+    expect(DEFAULT_VERIFY_FIX_DEADLINE_MS).toBe(1_800_000);
+  });
+
+  it("honours an explicit positive integer", () => {
+    process.env[KEY] = "60000";
+    expect(getVerifyFixDeadlineMs()).toBe(60_000);
+  });
+
+  it("falls back to the default (logged) on an invalid value — 0 is invalid here, unlike the rounds env", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      process.env[KEY] = "0";
+      expect(getVerifyFixDeadlineMs()).toBe(DEFAULT_VERIFY_FIX_DEADLINE_MS);
+      process.env[KEY] = "-5";
+      expect(getVerifyFixDeadlineMs()).toBe(DEFAULT_VERIFY_FIX_DEADLINE_MS);
+      process.env[KEY] = "abc";
+      expect(getVerifyFixDeadlineMs()).toBe(DEFAULT_VERIFY_FIX_DEADLINE_MS);
+      expect(errSpy).toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});
+
+describe("runVerifyFixLoop — total-elapsed deadline", () => {
+  it("with an injected clock, the deadline trips before round 2 and the result carries the last completed verify", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.A"]) });
+    const round1 = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.B"]) });
+    // The clock reports "past the deadline" only once round 1's re-verify has
+    // actually completed — tied to a FUNCTIONAL milestone, not a call count,
+    // so this test does not depend on how many times the implementation
+    // happens to call `nowFn` internally.
+    let round1ReVerifyDone = false;
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      round1ReVerifyDone = true;
+      return round1;
+    }
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "tried a fix" });
+    const nowFn = () => (round1ReVerifyDone ? 100_000 : 0);
+
+    const result = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        maxRounds: 5,
+        maxTotalMs: 10_000,
+        nowFn,
+      }),
+    );
+
+    expect(result.stopReason).toBe("deadline");
+    expect(result.rounds).toHaveLength(1);
+    // The last COMPLETED verify (round 1's outcome), not a half-finished one —
+    // round 2 never dispatched a fixer at all.
+    expect(result.final).toBe(round1);
+  });
+
+  it("a deadline that has already elapsed before round 1 stops immediately with no fixer/re-verify dispatched", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    let verifyPassCalls = 0;
+    let fixerCalls = 0;
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      verifyPassCalls++;
+      return initial;
+    }
+    const runIsolatedTask = async (): Promise<ToolResult> => {
+      fixerCalls++;
+      return { success: true, output: "" };
+    };
+
+    // The FIRST call seeds `loopStartedAt`; every call after that must look
+    // like time has already passed the 1ms deadline — a CONSTANT clock can
+    // never show elapsed time relative to its own seed, so this steps once.
+    let calls = 0;
+    const nowFn = () => (calls++ === 0 ? 0 : 1000);
+
+    const result = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        maxRounds: 2,
+        maxTotalMs: 1,
+        nowFn,
+      }),
+    );
+
+    expect(result.stopReason).toBe("deadline");
+    expect(result.rounds).toEqual([]);
+    expect(verifyPassCalls).toBe(0);
+    expect(fixerCalls).toBe(0);
+  });
+});
+
+/**
+ * D9 — the fixer's own dedicated (smaller) deadline, and the observation it
+ * now carries into a timeout's `fixerSummary`.
+ *
+ * Evidence this section pins: live run `mu75rurpf9ec` sprint 1's round 1
+ * spent the FULL generic 900_000ms isolated-task ceiling
+ * (`sprints/1-verify-fix.json`: `roundElapsedMs: 900009`) and that alone
+ * equalled the loop's whole measured lifetime (`startedAt`..`finishedAt` =
+ * 900011ms) — the loop never reached a re-verify pass or a second round.
+ */
+describe("getVerifyFixFixerDeadlineMs", () => {
+  const ORIGINAL = process.env.MUONROI_IDEAL_VERIFY_FIX_FIXER_MS;
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.MUONROI_IDEAL_VERIFY_FIX_FIXER_MS;
+    else process.env.MUONROI_IDEAL_VERIFY_FIX_FIXER_MS = ORIGINAL;
+  });
+
+  it("returns the default when unset", () => {
+    delete process.env.MUONROI_IDEAL_VERIFY_FIX_FIXER_MS;
+    expect(getVerifyFixFixerDeadlineMs()).toBe(DEFAULT_VERIFY_FIX_FIXER_DEADLINE_MS);
+  });
+
+  it("honours a valid override", () => {
+    process.env.MUONROI_IDEAL_VERIFY_FIX_FIXER_MS = "12345";
+    expect(getVerifyFixFixerDeadlineMs()).toBe(12345);
+  });
+
+  it("ignores an invalid override and logs why", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.MUONROI_IDEAL_VERIFY_FIX_FIXER_MS = "not-a-number";
+    expect(getVerifyFixFixerDeadlineMs()).toBe(DEFAULT_VERIFY_FIX_FIXER_DEADLINE_MS);
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
+
+  it("is strictly smaller than the loop's own default total deadline, and smaller than the generic 900_000ms isolated-task ceiling", () => {
+    // The whole point (see module doc on getVerifyFixFixerDeadlineMs): 2
+    // default rounds at the generic ceiling alone would equal or exceed the
+    // loop's total budget, leaving no room for either re-verify pass.
+    expect(DEFAULT_VERIFY_FIX_FIXER_DEADLINE_MS).toBeLessThan(900_000);
+    expect(DEFAULT_VERIFY_FIX_FIXER_DEADLINE_MS * 2).toBeLessThan(DEFAULT_VERIFY_FIX_DEADLINE_MS);
+  });
+});
+
+describe("runVerifyFixLoop — D9 the fixer's dedicated deadline + observation", () => {
+  it("a fixer that never settles is cut at the DEDICATED (smaller) fixer deadline, not the generic 900_000ms isolated-task ceiling", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      return outcome({ verifyVerdict: "PASS" });
+    }
+    const runIsolatedTask = () => new Promise<ToolResult>(() => {}); // never settles
+
+    const start = Date.now();
+    const result = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        maxRounds: 2,
+        maxFixerMs: 10,
+      }),
+    );
+    const elapsed = Date.now() - start;
+
+    expect(result.stopReason).toBe("error");
+    expect(result.rounds).toHaveLength(1);
+    expect(result.rounds[0].fixerSuccess).toBe(false);
+    expect(result.rounds[0].fixerSummary).toContain("exceeded 10ms deadline");
+    // Proves the SMALL override actually fired rather than the 900s default.
+    expect(elapsed).toBeLessThan(5_000);
+  });
+
+  it("a timed-out fixer's summary carries the last observed activity, not only elapsed time", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      return outcome({ verifyVerdict: "PASS" });
+    }
+    const runIsolatedTask = (_req: TaskRequest, opts?: { onActivity?: (detail: string) => void }) => {
+      opts?.onActivity?.("editing src/widget.ts");
+      return new Promise<ToolResult>(() => {});
+    };
+
+    const result = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        maxRounds: 2,
+        maxFixerMs: 10,
+      }),
+    );
+
+    expect(result.rounds[0].fixerSummary).toContain("observed 1 sub-agent activity event(s)");
+    expect(result.rounds[0].fixerSummary).toContain("last activity: editing src/widget.ts");
+  });
+
+  it("a timed-out round is counted honestly — the loop stops with stopReason error rather than silently retrying, even with rounds left in the cap", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    let verifyPassCalls = 0;
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      verifyPassCalls++;
+      return outcome({ verifyVerdict: "PASS" });
+    }
+    const runIsolatedTask = () => new Promise<ToolResult>(() => {});
+
+    const result = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        maxRounds: 5, // plenty of rounds left in the cap
+        maxFixerMs: 10,
+      }),
+    );
+
+    expect(result.rounds).toHaveLength(1);
+    expect(result.stopReason).toBe("error");
+    expect(verifyPassCalls).toBe(0); // the re-verify never ran after a failed fixer
+  });
+
+  it("the loop's OWN total deadline still bounds everything even with an absurdly large per-fixer override in play", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.A"]) });
+    const round1 = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.B"]) });
+    let round1ReVerifyDone = false;
+    // biome-ignore lint/correctness/useYield: test stub never needs to yield a StreamChunk
+    async function* runVerifyPass(): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+      round1ReVerifyDone = true;
+      return round1;
+    }
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: true, output: "tried a fix" });
+    const nowFn = () => (round1ReVerifyDone ? 100_000 : 0);
+
+    const result = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        maxRounds: 5,
+        maxTotalMs: 10_000,
+        maxFixerMs: 999_999_999, // must not shadow or replace the outer total
+        nowFn,
+      }),
+    );
+
+    expect(result.stopReason).toBe("deadline");
+    expect(result.rounds).toHaveLength(1);
+  });
+});
+
+describe("runVerifyFixLoop — D12 re-check after a fixer timeout", () => {
+  /** The exact shape `withDeadlineRace` stamps on a timeout, as
+   * `runIsolatedGuarded` returns it via `ToolResult.error` (never a throw). */
+  const timeoutError =
+    "verify-fix-s1-r1 exceeded 600000ms deadline (timeout); observed 12 sub-agent activity event(s), " +
+    "the last 0.3s before the timeout";
+
+  it("a timed-out fixer still triggers the D2 cheap floor re-check instead of stopping outright", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(outcome({ verifyVerdict: "PASS" }));
+    const { fn: runFloorRecheck, calls: recheckCalls } = sequenceFloorRecheck({
+      ranOk: true,
+      floorDelta: testRegressionFloor(["MyTests.Foo"]),
+    });
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: false, error: timeoutError });
+
+    await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 2 }),
+    );
+
+    expect(recheckCalls).toHaveLength(1);
+    expect(recheckCalls[0]).toBe("fix-r1-timeout-recheck");
+    expect(verifyCalls).toHaveLength(0); // no full pass paid for on a timed-out round
+  });
+
+  it("a re-check showing a CHANGED failure lets the loop continue to another round, and the round records both the timeout and the re-check", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const fixed = outcome({ verifyVerdict: "PASS" });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(fixed);
+    // Round 1's post-timeout recheck sees a DIFFERENT failing test (progress).
+    // Round 2 still goes through D2's own pre-existing cheap-recheck (its
+    // failure is still `engineering_floor`-eligible) before paying for a full
+    // pass, so a second outcome reporting the floor now clean lets it fall
+    // through to `runVerifyPass` exactly as D2 already does outside a timeout.
+    const { fn: runFloorRecheck } = sequenceFloorRecheck(
+      { ranOk: true, floorDelta: testRegressionFloor(["MyTests.Bar"]) },
+      { ranOk: true, floorDelta: passingFloor },
+    );
+    let attempt = 0;
+    const runIsolatedTask = async (): Promise<ToolResult> => {
+      attempt++;
+      if (attempt === 1) return { success: false, error: timeoutError };
+      return { success: true, output: "applied a fix" };
+    };
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 2 }),
+    );
+
+    expect(result.rounds).toHaveLength(2);
+    // The round keeps its timeout reason...
+    expect(result.rounds[0].fixerSuccess).toBe(false);
+    expect(result.rounds[0].fixerSummary).toContain("exceeded 600000ms deadline");
+    // ...AND gains the re-check's outcome.
+    expect(result.rounds[0].passKind).toBe("cheap");
+    expect(result.rounds[0].failureKeyAfter).toContain("MyTests.Bar");
+    expect(result.stopReason).toBe("pass");
+    expect(verifyCalls).toHaveLength(1); // only round 2 pays for a full pass
+  });
+
+  it("a re-check showing the SAME failure stops as no_progress, not error", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(outcome({ verifyVerdict: "PASS" }));
+    const { fn: runFloorRecheck } = sequenceFloorRecheck({
+      ranOk: true,
+      floorDelta: testRegressionFloor(["MyTests.Foo"]), // identical failure
+    });
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: false, error: timeoutError });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 5 }),
+    );
+
+    expect(result.stopReason).toBe("no_progress");
+    expect(result.rounds).toHaveLength(1);
+    expect(result.rounds[0].fixerSuccess).toBe(false);
+    expect(verifyCalls).toHaveLength(0);
+  });
+
+  it("a spent total budget skips the re-check even when the fixer reports a timeout", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(outcome({ verifyVerdict: "PASS" }));
+    const { fn: runFloorRecheck, calls: recheckCalls } = sequenceFloorRecheck({
+      ranOk: true,
+      floorDelta: passingFloor,
+    });
+    let fixerSettled = false;
+    const runIsolatedTask = async (): Promise<ToolResult> => {
+      fixerSettled = true;
+      return { success: false, error: timeoutError };
+    };
+    const nowFn = () => (fixerSettled ? 999_000 : 0);
+
+    const result = await drain(
+      runVerifyFixLoop({
+        ...noopArgsBase,
+        runIsolatedTask,
+        initial,
+        runVerifyPass,
+        runFloorRecheck,
+        maxRounds: 5,
+        maxTotalMs: 10_000,
+        nowFn,
+      }),
+    );
+
+    expect(result.stopReason).toBe("deadline");
+    expect(recheckCalls).toHaveLength(0);
+    expect(verifyCalls).toHaveLength(0);
+  });
+
+  it("a timeout on a failure the cheap path is NOT eligible for (zero_coverage) stops as error, never attempting a recheck", async () => {
+    // The zero must be a MEASURED one for this to be a zero_coverage failure at
+    // all — an unstamped zero no longer triggers the loop, so it could not reach
+    // the timeout this test is about (that case is pinned separately above).
+    const initial = outcome({
+      verifyVerdict: "PASS",
+      recipeFromVerify: recipe({ testCommands: ["dotnet test"], coverage: 0, coverageSource: "measured" }),
+    });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(outcome({ verifyVerdict: "PASS" }));
+    const { fn: runFloorRecheck, calls: recheckCalls } = sequenceFloorRecheck({
+      ranOk: true,
+      floorDelta: passingFloor,
+    });
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: false, error: timeoutError });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 2 }),
+    );
+
+    expect(result.stopReason).toBe("error");
+    expect(recheckCalls).toHaveLength(0);
+    expect(verifyCalls).toHaveLength(0);
+  });
+
+  it("no runFloorRecheck provided: a timeout stops as error exactly as before D12", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(outcome({ verifyVerdict: "PASS" }));
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: false, error: timeoutError });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, maxRounds: 5 }),
+    );
+
+    expect(result.stopReason).toBe("error");
+    expect(verifyCalls).toHaveLength(0);
+  });
+
+  it("a plain (non-timeout) fixer failure never triggers the post-timeout recheck", async () => {
+    const initial = outcome({ verifyVerdict: "FAIL", floorDelta: testRegressionFloor(["MyTests.Foo"]) });
+    const { fn: runVerifyPass, calls: verifyCalls } = sequencePass(outcome({ verifyVerdict: "PASS" }));
+    const { fn: runFloorRecheck, calls: recheckCalls } = sequenceFloorRecheck({
+      ranOk: true,
+      floorDelta: testRegressionFloor(["MyTests.Bar"]),
+    });
+    const runIsolatedTask = async (): Promise<ToolResult> => ({ success: false, error: "the isolated task crashed" });
+
+    const result = await drain(
+      runVerifyFixLoop({ ...noopArgsBase, runIsolatedTask, initial, runVerifyPass, runFloorRecheck, maxRounds: 2 }),
+    );
+
+    expect(result.stopReason).toBe("error");
+    expect(recheckCalls).toHaveLength(0);
+    expect(verifyCalls).toHaveLength(0);
+  });
+});

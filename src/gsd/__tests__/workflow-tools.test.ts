@@ -1,12 +1,13 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadCatalog } from "../../models/registry.js";
 import { BashTool } from "../../tools/bash.js";
 import { createBuiltinTools } from "../../tools/registry.js";
 import { ensurePlanningWorkspace } from "../config-bridge.js";
 import { planningArtifact } from "../paths.js";
+import { VERDICT_OUTPUT_CONTRACT } from "../verdict-schema.js";
 
 describe("gsd workflow tools registry", () => {
   let tmp: string;
@@ -23,7 +24,7 @@ describe("gsd workflow tools registry", () => {
 
   afterEach(() => {
     process.env.MUONROI_GSD_NATIVE = prev;
-    if (tmp) rmSync(tmp, { recursive: true, force: true });
+    if (tmp) rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("registers gsd_* tools when native flag on", () => {
@@ -46,6 +47,42 @@ describe("gsd workflow tools registry", () => {
     const parsed = JSON.parse(out) as { blocked?: boolean; reason?: string };
     expect(parsed.blocked).toBe(true);
     expect(parsed.reason).toContain("plan-verify");
+  });
+
+  it.each(["gsd_plan_review", "gsd_verify"])("threads the owning SDK cancellation through %s", async (name) => {
+    const leader = await import("../../council/leader.js");
+    const resolution = vi.spyOn(leader, "resolvePlanCouncilLeader").mockResolvedValue({ modelId: "test-leader" });
+    ensurePlanningWorkspace(tmp, "test-model");
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), "# Plan\n1. Implement change\n2. Verify tests\n", "utf8");
+    const controller = new AbortController();
+    let childSignal: AbortSignal | undefined;
+    const debate = vi.fn(async (_topic: string, signal?: AbortSignal, _contract?: string) => {
+      childSignal = signal;
+      controller.abort(new DOMException("Owning tool cancelled", "AbortError"));
+      return '```council-verdict\n{"verdict":"approve","concerns":[]}\n```';
+    });
+    const tools = createBuiltinTools(new BashTool(tmp), "agent", {
+      modelId: "test-model",
+      depthTier: "standard",
+      runDebate: debate,
+    });
+    const execute = tools[name].execute as (...args: any[]) => Promise<unknown>;
+    try {
+      await expect(
+        execute(
+          { passed: true, evidence: "tests passed" },
+          { toolCallId: "cancel-review", messages: [], abortSignal: controller.signal },
+        ),
+      ).rejects.toThrow("Owning tool cancelled");
+      expect(childSignal).toBe(controller.signal);
+      expect(debate).toHaveBeenCalledTimes(1);
+      expect(debate.mock.calls[0]?.[2]).toBe(VERDICT_OUTPUT_CONTRACT);
+      expect(existsSync(planningArtifact(tmp, name === "gsd_verify" ? "VERIFY-COUNCIL.md" : "PLAN-VERIFY.md"))).toBe(
+        false,
+      );
+    } finally {
+      resolution.mockRestore();
+    }
   });
 
   it("gsd_execute allowed after plan-review council pass", async () => {

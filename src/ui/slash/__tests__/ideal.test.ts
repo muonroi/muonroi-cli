@@ -32,8 +32,10 @@ describe("/ideal slash parser", () => {
     const r = parseIdealArgs(["build a CLI for X"]);
     expect(r.subcommand).toBe("start");
     expect(r.idea).toBe("build a CLI for X");
-    expect(r.flags.maxCost).toBe(50);
-    expect(r.flags.maxSprints).toBe(8);
+    // /ideal has no spend cap and no default sprint ceiling (user decision: no
+    // limits). Previously pinned maxCost=50 / maxSprints=8.
+    expect(r.flags.maxCost).toBeUndefined();
+    expect(r.flags.maxSprints).toBeUndefined();
     expect(r.flags.doneThreshold).toBe(0.9);
   });
 
@@ -49,17 +51,21 @@ describe("/ideal slash parser", () => {
     expect(r.runId).toBe("abc123");
   });
 
-  it("/ideal --max-cost 999 idea -> flags.maxCost=999", () => {
+  // `/ideal` has no spend cap (user decision). --max-cost still parses so existing
+  // invocations keep working, but it is ignored with a warning and never becomes a
+  // cap. These previously pinned flags.maxCost=999 and a [1, 1000] range error.
+  it("/ideal --max-cost 999 idea -> accepted, ignored with a warning, no cap", () => {
     const r = parseIdealArgs(["--max-cost", "999", "todo", "app"]);
     expect(r.subcommand).toBe("start");
-    expect(r.flags.maxCost).toBe(999);
+    expect(r.flags.maxCost).toBeUndefined();
     expect(r.idea).toBe("todo app");
+    expect(r.warnings.some((w) => /--max-cost 999 ignored/.test(w))).toBe(true);
   });
 
-  it("/ideal --max-cost 9999 idea -> falls back to help with range error", () => {
+  it("/ideal --max-cost 9999 idea -> no range error, still a start with no cap", () => {
     const r = parseIdealArgs(["--max-cost", "9999", "idea"]);
-    expect(r.subcommand).toBe("help");
-    expect(r.warnings.some((w) => /max-cost|1, 1000|range/i.test(w))).toBe(true);
+    expect(r.subcommand).toBe("start");
+    expect(r.flags.maxCost).toBeUndefined();
   });
 
   it("--done-threshold below 0.7 is clamped with a warning", () => {

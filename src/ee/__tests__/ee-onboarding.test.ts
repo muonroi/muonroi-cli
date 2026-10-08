@@ -10,7 +10,7 @@ describe("writeExperienceConfig", () => {
     home = mkdtempSync(join(tmpdir(), "ee-cfg-"));
   });
   afterEach(() => {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   const read = (): ExperienceConfig => JSON.parse(readFileSync(join(home, ".experience", "config.json"), "utf8"));

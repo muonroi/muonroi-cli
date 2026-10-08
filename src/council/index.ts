@@ -10,6 +10,7 @@ import { planningArtifact } from "../gsd/paths.js";
 import type { PerspectiveVerdict } from "../gsd/plan-council.js";
 import { advancePhase, canExecute, readState, setStateField } from "../gsd/workflow-engine.js";
 import { runPipeline } from "../pil/pipeline.js";
+import { turnWantsImplementation as turnWantsImplementationSignal } from "../pil/turn-intent.js";
 import type { PipelineContext } from "../pil/types.js";
 import { idealTrace } from "../product-loop/ideal-trace.js";
 import { detectProviderForModel } from "../providers/runtime.js";
@@ -57,6 +58,7 @@ import type {
   EnhancedCouncilOutcome,
   IntentKind,
   IsolatedTaskRunner,
+  ItemDebateFocus,
   PhaseOutcomeEnvelope,
   PreflightResponder,
   QuestionResponder,
@@ -71,24 +73,42 @@ import {
 } from "./types.js";
 
 /**
- * Wrap a CouncilLLM so every `generate` call inherits the council-wide abort
+ * Wrap a CouncilLLM so every model call inherits the council-wide abort
  * signal. The whole generate-based call path (clarifier, research-need eval,
  * leader round-eval, opening statements, round summary, spec/plan synthesis,
  * and the debate-planner retry) calls `llm.generate(...)` with NO signal arg —
  * none of those sites thread one. Injecting it here in ONE place makes them all
- * cancellable without touching each signature. `debate`/`research` already get
- * `config.signal` explicitly, so they pass through unchanged.
+ * cancellable without touching each signature.
  *
- * An explicit per-call signal (none exist today, but the param is there) wins
- * over the injected one. Returns the original llm untouched when no signal is
- * configured (e.g. the sprint-planner path, which has no user-abort signal).
+ * `debate`/`research` are wrapped for the SAME reason, for a different caller.
+ * Inside `runCouncil` they already receive `config.signal` explicitly, so the
+ * `sig ?? signal` precedence below makes the wrap a no-op there. But `/ideal`
+ * reaches `runDebate` through `loop-driver.ts:761` with a config that carries
+ * NO `signal` field at all (and `debate.ts:692` reads `config.signal`), and it
+ * reaches the sprint-planning `runCouncil` (`sprint-runner.ts:821`) with no
+ * `options.signal` either — so on the product-loop path every debate/research
+ * call was uncancellable for exactly the same reason generate was. Wrapping all
+ * three here is what lets `Agent.abort()` reach a pending `/ideal` council
+ * without threading a signal through ten product-loop modules.
+ *
+ * An explicit per-call signal wins over the injected one. Returns the original
+ * llm untouched when no signal is configured.
  */
 export function withCouncilSignal(llm: CouncilLLM, signal: AbortSignal | undefined): CouncilLLM {
   if (!signal) return llm;
   return {
     ...llm,
-    generate: (modelId, system, prompt, maxTokens, onUsage, sig) =>
-      llm.generate(modelId, system, prompt, maxTokens, onUsage, sig ?? signal),
+    // onDiagnostics MUST be forwarded: it is the 7th parameter and the ONLY
+    // channel carrying per-call forensics (requestIssued / streamedChars /
+    // elapsed) up to the candidate-failure record. Dropping it here would make
+    // the G2 fields silently undefined on exactly the wrapped path — the
+    // product loop, i.e. `/ideal`, i.e. the run that crashed.
+    generate: (modelId, system, prompt, maxTokens, onUsage, sig, onDiagnostics) =>
+      llm.generate(modelId, system, prompt, maxTokens, onUsage, sig ?? signal, onDiagnostics),
+    debate: (modelId, system, prompt, sig, persistTrace, options, onUsage) =>
+      llm.debate(modelId, system, prompt, sig ?? signal, persistTrace, options, onUsage),
+    research: (modelId, topic, conversationContext, sig, persistTrace, options, onUsage) =>
+      llm.research(modelId, topic, conversationContext, sig ?? signal, persistTrace, options, onUsage),
   };
 }
 
@@ -157,6 +177,8 @@ export function resolveCappedChoice(choice: string): string {
 }
 
 export interface RunCouncilOptions {
+  /** Final leader contract survives spec inference and debate shape selection. */
+  synthesisOutputContract?: string;
   skipClarification?: boolean;
   userModelMessage?: ModelMessage;
   signal?: AbortSignal;
@@ -298,6 +320,17 @@ export interface RunCouncilOptions {
    * derivation below); undefined falls through to self-classify.
    */
   externalTopic?: boolean;
+  /** Model tool entry already owns its context; never wait for server PIL again. */
+  skipPil?: boolean;
+  /**
+   * C5 — per-item debate scoping, forwarded verbatim onto
+   * `CouncilConfig.perRoundFocus` (see `debate.ts`): when set and non-empty,
+   * round N argues `perRoundFocus[N-1]` instead of the whole plan every
+   * round. Set by `product-loop/item-debate-runner.ts` (C5); absent for
+   * every other caller (sprint planning, `/council`, agent-convened runs),
+   * which keeps their debates byte-identical to before this field existed.
+   */
+  perRoundFocus?: readonly ItemDebateFocus[];
 }
 
 export type PostDebateAction = "save_exit" | "implement" | "refine" | "ask_followup" | "retry_synthesis";
@@ -365,6 +398,20 @@ export function pickPostDebateRecommendation(input: {
    * output-kind heuristics below.
    */
   criteriaUnmet?: number;
+  /**
+   * Session 115a59c9bb9e/49f6b8c1d8d6 — THIS turn's own PIL classification says
+   * the user wants to build (pilCtx.intentKind==="task" AND
+   * (pilCtx.deliverableKind==="code" OR pilCtx.taskType is code-producing)),
+   * independent of what `outputKind` (the council's own locked debate-shape
+   * kind) concluded. `outputKind` can be stale/mis-classified relative to a
+   * later follow-up in the same debate (the launch-card lock is set once, from
+   * the ORIGINAL topic) — the live defect was a turn that literally said "tiến
+   * hành implement" (taskType=generate, intentKind=task) still recommending
+   * "Save & Exit" because the locked kind read as analysis-shape. Optional so
+   * every existing caller/test keeps working unchanged when the signal isn't
+   * available.
+   */
+  turnWantsImplementation?: boolean;
 }): { value: PostDebateAction; reason: string } {
   if (input.synthesisFailed) {
     return {
@@ -379,7 +426,14 @@ export function pickPostDebateRecommendation(input: {
       reason: `${n} success criteri${n === 1 ? "on" : "a"} still unmet — press the council to close ${n === 1 ? "it" : "them"} before treating this as settled.`,
     };
   }
-  if (input.hasEmptySections) {
+  // RULE (evidence: plan-phase.ts runPlannerPhase drafts PLAN.md from the full
+  // synthesis text + exchange transcript, never from outcome.sections) — an
+  // empty structured section can only block "refine" being unnecessary IF this
+  // debate's deliverable actually IS its structured sections; for an
+  // implementation-shape debate (by locked kind OR by this turn's own PIL
+  // signal) it is not, so empty sections never veto recommending implement.
+  const implementationLeaning = isImplementationKind(input.outputKind) || !!input.turnWantsImplementation;
+  if (input.hasEmptySections && !implementationLeaning) {
     return { value: "refine", reason: `Fill in ${input.refinementTopics.length} section(s) the debate left empty.` };
   }
   if (input.confidenceLevel === "low") {
@@ -389,12 +443,19 @@ export function pickPostDebateRecommendation(input: {
     };
   }
   if (!input.hasPlan) {
-    return isImplementationKind(input.outputKind)
-      ? { value: "implement", reason: "Convert the agreed outcome into concrete steps." }
-      : {
-          value: "save_exit",
-          reason: `This was a ${input.outputKind} debate — the synthesis above is the deliverable; save it.`,
-        };
+    if (implementationLeaning) {
+      return {
+        value: "implement",
+        reason:
+          !isImplementationKind(input.outputKind) && input.turnWantsImplementation
+            ? "This turn asked to implement — convert the agreed outcome into concrete steps."
+            : "Convert the agreed outcome into concrete steps.",
+      };
+    }
+    return {
+      value: "save_exit",
+      reason: `This was a ${input.outputKind} debate — the synthesis above is the deliverable; save it.`,
+    };
   }
   return { value: "save_exit", reason: "Outcome looks solid — save and move on." };
 }
@@ -450,35 +511,52 @@ export function resolveRunKind(locked: IntentKind | undefined, synthesis: string
 }
 
 /**
- * Amendment A1 (session 947db934b573) — resolve the post-debate DEFAULT index
- * without ever landing on a default-ineligible option (isDefaultEligiblePostDebateAction)
- * when an eligible one exists elsewhere in the list. Never filters `options` —
- * every entry stays visible; this only picks which one is pre-selected.
+ * Amendment A2 (session 115a59c9bb9e/49f6b8c1d8d6) — resolve the post-debate
+ * DEFAULT index by finding `recommendedAction` (pickPostDebateRecommendation's
+ * own verdict) inside `options`. Never filters `options` — every entry stays
+ * visible; this only picks which one is pre-selected.
  *
- * Returns the first default-eligible option in `options`' own order — this IS
- * the model's own best-first ranking on the model-first path (baseOptions is
- * built straight from outcome.nextActions), and the deterministic build order
- * on the fallback path — or 0 if none is eligible.
+ * This REPLACES Amendment A1's "first default-eligible option in list order"
+ * rule. A1 never looked at what was actually recommended — it just picked the
+ * first option `isDefaultEligiblePostDebateAction` didn't reject, and that
+ * predicate accepts everything except "implement" on an analysis-shape kind.
+ * So in practice A1 almost always resolved to index 0 regardless of the
+ * recommendation, because index 0 (typically "Save & Exit" / "Retry
+ * Synthesis") is essentially always eligible — the exact live defect: the
+ * card's label read "Save & Exit" next to a reason computed for "refine"
+ * ("Fill in 9 section(s)..."), because the label came from this function
+ * (index 0, list order) and the reason came from `recommendation` (a totally
+ * separate computation) — two independent answers about "what's the default"
+ * that had no mechanism keeping them in agreement.
  *
- * That "0 if none is eligible" floor is deliberately NOT a recommendation-value
- * lookup or an explicit save_exit/continue_session search. With the current
- * predicate, isDefaultEligiblePostDebateAction gates ONLY "implement", and only
- * for analysis-shape kinds — so `eligibleIndex === -1` can happen ONLY when
- * every single entry in `options` has value "implement" (any other value is
- * always eligible, so its presence would have already satisfied the findIndex
- * above). In that situation there is no non-"implement" entry anywhere in the
- * list to fall back to, so a recommendation-value or escape-hatch lookup could
- * only ever re-find the same ineligible "implement" entry or come up empty —
- * it cannot produce an answer this floor doesn't already give. An earlier
- * version of this function carried those two extra lookup tiers; code review
- * (2026-08-07) found no input that could make them return anything different
- * from this floor, so no test could fail without them — removed per YAGNI.
- * If isDefaultEligiblePostDebateAction is ever widened to gate more than
- * "implement", that widening is exactly when a recommendation/escape-hatch
- * fallback becomes meaningful again — re-add it there, together with a test
- * that is provably impossible to write against today's narrower predicate.
+ * The invariant this restores: the pre-selected default, its rendered label,
+ * and its rendered reason must always name the SAME option — enforced by
+ * having them all read from `options[resolvePostDebateDefaultIndex(...)]`
+ * rather than from two different computations. See the call site
+ * (`recommendReason`/`recommendLine`) for the other half.
+ *
+ * `recommendedAction` is expected to already be present in `options` — every
+ * value `pickPostDebateRecommendation` can return ("save_exit" | "implement" |
+ * "refine" | "ask_followup" | "retry_synthesis") is unconditionally added to
+ * `options` by the block(s) that build it before this is called (the
+ * canonicalization block, and the hasEmptySections/synthesisFailed additions
+ * in both the model-first and deterministic branches). When it is somehow
+ * still missing — a contract violation, not a normal path — fall back to the
+ * old A1 ranking (first `isDefaultEligiblePostDebateAction`-eligible option)
+ * and log it loudly rather than silently mismatching label and reason again.
  */
-export function resolvePostDebateDefaultIndex(options: Array<{ value: string }>, intentKind: IntentKind): number {
+export function resolvePostDebateDefaultIndex(
+  options: Array<{ value: string }>,
+  intentKind: IntentKind,
+  recommendedAction: string,
+): number {
+  const recommendedIndex = options.findIndex((o) => o.value === recommendedAction);
+  if (recommendedIndex >= 0) return recommendedIndex;
+  console.error(
+    `[council] recommended post-debate action "${recommendedAction}" is missing from the offered options ` +
+      `(${options.map((o) => o.value).join(", ")}) for intent kind "${intentKind}" — falling back to the first ` +
+      `default-eligible option instead of leaving the default unresolved.`,
+  );
   const eligibleIndex = options.findIndex((o) => isDefaultEligiblePostDebateAction(intentKind, o.value));
   return eligibleIndex >= 0 ? eligibleIndex : 0;
 }
@@ -785,7 +863,11 @@ export function buildNeutralPostCouncilContinuation(synthesis: string): string {
  * parser). The two paths cannot collide because they are different
  * question/answer round-trips, not different branches of the same one.
  */
-async function* collectSpecEdit(
+// Exported (only) so U1's Set-leak regression test can drive this
+// "council-setup"-phase askcard directly against a real CouncilManager
+// without standing up the whole runCouncil machinery — see
+// src/council/__tests__/council-setup-set-leak.test.ts.
+export async function* collectSpecEdit(
   spec: ClarifiedSpec,
   sessionId: string,
   round: number,
@@ -806,6 +888,11 @@ async function* collectSpecEdit(
     },
   } as StreamChunk;
   const topicAnswer = (await respondToQuestion(topicQuestionId)).trim();
+  // U1 — this "council-setup" card is never echoed (its answer is applied
+  // directly to `spec`, never printed back), so nothing else will ever
+  // consume `wasAnsweredByCard` for this questionId. Drain it here so it
+  // cannot linger in CouncilManager's `_cardAnsweredQuestionIds` set.
+  respondToQuestion.wasAnsweredByCard?.(topicQuestionId);
 
   const outcomeQuestionId = `council-edit-outcome-${sessionId}-${round}`;
   yield {
@@ -822,6 +909,8 @@ async function* collectSpecEdit(
     },
   } as StreamChunk;
   const outcomeAnswer = (await respondToQuestion(outcomeQuestionId)).trim();
+  // U1 — same drain as topicQuestionId above.
+  respondToQuestion.wasAnsweredByCard?.(outcomeQuestionId);
   const successCriteria = outcomeAnswer
     ? outcomeAnswer
         .split("\n")
@@ -862,6 +951,26 @@ export async function* runCouncil(
   // LLM budget. Cancellation latency is bounded by one in-flight sub-call.
   const userAborted = (): boolean => options?.signal?.aborted === true;
 
+  /**
+   * The TURN terminator, emitted only when this council IS a turn.
+   *
+   * `{type:"done"}` is what the TUI's `for await` over a run treats as "the turn
+   * ended" (`use-app-logic.tsx`: `if (chunk.type === "done") break;`). Under
+   * `sprintPlanningMode` this council is a SUB-STEP of `/ideal`'s sprint runner,
+   * not a turn — so a `done` leaking out of here breaks the enclosing `/ideal`
+   * for-await and tears the whole product-loop run down with no halt card, no
+   * error and no terminal event (the P0-1 "wedge": measured 2026-09-04, sprint 1
+   * Planning bailed at the `participants.length < 2` guard below and the run
+   * simply stopped, `sprint.planCouncil.after` never reached).
+   *
+   * The terminal `done` at the end of the run was already gated on this flag;
+   * the eight EARLY-BAIL sites were not. Route every one of them through here so
+   * a future bail cannot reintroduce the leak.
+   */
+  const terminalDone = function* (): Generator<StreamChunk, void, unknown> {
+    if (!options?.sprintPlanningMode) yield { type: "done" };
+  };
+
   // ── Resolve models ──────────────────────────────────────────────────────────
   const leaderResolution = await resolveLeaderModelDetailed(sessionModelId);
   const leaderModelId = leaderResolution.modelId;
@@ -881,11 +990,13 @@ export async function* runCouncil(
   }
 
   if (participants.length < 2) {
+    const noReachableProviderMsg = "No reachable provider. Check API keys in user-settings.json or environment.";
+    stats.bailReason = { kind: "no-reachable-participants", detail: noReachableProviderMsg };
     yield {
       type: "content",
-      content: "\nNo reachable provider. Check API keys in user-settings.json or environment.\n",
+      content: `\n${noReachableProviderMsg}\n`,
     };
-    yield { type: "done" };
+    yield* terminalDone();
     return null;
   }
 
@@ -936,12 +1047,18 @@ export async function* runCouncil(
   const conversationContext = projectInfo.snapshot
     ? `## Current Project\n${projectInfo.snapshot}\n\n---\n\n${baseContext}`
     : baseContext;
-  const internetFirst = projectInfo.isEmpty;
+  // A HINT, not the research-mode decision. "Is the repo empty?" is unrelated
+  // to "where does the answer live?", and using it as the determinant meant the
+  // larger the repo the harder research steered away from external sources —
+  // exactly where third-party contracts bite. Both research paths now resolve
+  // the mode with decideInternetFirst (research-mode.ts) at the call site,
+  // against the web tier they actually have.
+  const repoIsEmpty = projectInfo.isEmpty;
   const active: CouncilParticipant[] = participants.map((p) => ({ ...p, position: "" }));
 
   if (userAborted()) {
     yield { type: "content", content: "\n> Council cancelled by user.\n" };
-    yield { type: "done" };
+    yield* terminalDone();
     return null;
   }
 
@@ -957,17 +1074,19 @@ export async function* runCouncil(
   // Gate A permanently dead in production (only hand-built CouncilConfig in
   // tests exercised it).
   let llmFallback: import("../pil/llm-classify.js").LlmClassifyFn | undefined;
-  try {
-    const { createLlmClassifier } = await import("../pil/llm-classify.js");
-    llmFallback = createLlmClassifier(sessionModelId, { routeFastTier: true });
-  } catch (err) {
-    console.error(`[council] classifier wiring failed for scope detection: ${(err as Error)?.message}`);
-  }
   let pilCtx: PipelineContext | undefined;
-  try {
-    pilCtx = await runPipeline(topic, { sessionId, llmFallback });
-  } catch (err) {
-    console.error(`[council] PIL pipeline failed (fail-open, no scope grounding): ${(err as Error)?.message}`);
+  if (!options?.skipPil) {
+    try {
+      const { createLlmClassifier } = await import("../pil/llm-classify.js");
+      llmFallback = createLlmClassifier(sessionModelId, { routeFastTier: true });
+    } catch (err) {
+      console.error(`[council] classifier wiring failed for scope detection: ${(err as Error)?.message}`);
+    }
+    try {
+      pilCtx = await runPipeline(topic, { sessionId, llmFallback });
+    } catch (err) {
+      console.error(`[council] PIL pipeline failed (fail-open, no scope grounding): ${(err as Error)?.message}`);
+    }
   }
 
   // Gate A — out-of-repo ("external") questions must not trigger any repo read
@@ -1007,6 +1126,9 @@ export async function* runCouncil(
         undefined,
         costAware,
         participants.map((p) => p.model),
+        // Same hint the debate research phase gets — so scope research and
+        // debate research resolve the mode identically (research-mode.ts).
+        repoIsEmpty,
       );
       let clarifyResult: IteratorResult<StreamChunk, ClarifiedSpec>;
       do {
@@ -1107,7 +1229,7 @@ export async function* runCouncil(
     // ROI: when the clarifier judged the spec ready (high confidence, no gaps),
     // the approve card is a rubber-stamp — auto-approve after showing the brief.
     const preflightGen = runPreflight(spec, participants, researchNeeded, respondToPreflight, {
-      repoEmpty: internetFirst,
+      repoEmpty: repoIsEmpty,
       researchOverridable: true,
       // An agent-convened run auto-approves the pre-debate plan card too: the
       // agent already decided to convene and no human is there to answer, so a
@@ -1131,7 +1253,7 @@ export async function* runCouncil(
 
   if (userAborted()) {
     yield { type: "content", content: "\n> Council cancelled by user.\n" };
-    yield { type: "done" };
+    yield* terminalDone();
     return null;
   }
 
@@ -1177,7 +1299,7 @@ export async function* runCouncil(
       if (leaderNeedsResearch) {
         yield {
           type: "content",
-          content: `\n  ↳ Leader recommends research${internetFirst ? " (internet-first — empty workspace)" : " (codebase-first)"} — running it.\n`,
+          content: `\n  ↳ Leader recommends research${repoIsEmpty ? " (empty workspace — internet-first if a web tier is reachable)" : " (codebase-first)"} — running it.\n`,
         };
       }
     } catch (err) {
@@ -1197,7 +1319,7 @@ export async function* runCouncil(
 
   if (userAborted()) {
     yield { type: "content", content: "\n> Council cancelled by user.\n" };
-    yield { type: "done" };
+    yield* terminalDone();
     return null;
   }
 
@@ -1263,7 +1385,7 @@ export async function* runCouncil(
 
   if (userAborted()) {
     yield { type: "content", content: "\n> Council cancelled by user.\n" };
-    yield { type: "done" };
+    yield* terminalDone();
     return null;
   }
 
@@ -1294,6 +1416,17 @@ export async function* runCouncil(
   let launchRounds = debatePlan.plannedRounds ?? 3;
   let launchParticipants = active;
   let launchCostAware = costAware;
+  // Debt 3 reachability audit: the `respondToQuestion` await inside this block
+  // (~line 1420) has no deadline, but `willShowLaunchCard` already excludes
+  // every unattended caller: /ideal's sprint-internal `runCouncil` calls pass
+  // `sprintPlanningMode: true` (product-loop/item-debate-runner.ts:539,
+  // product-loop/sprint-runner.ts:1841), and every agent-convened council
+  // (`convene_council`, the runDebate tool, tool-engine.ts:1172/3940) sets
+  // `suppressPreDebateCards: true`. /ideal's own initial (CB-1) debate never
+  // reaches this module at all — it calls `runDebate` directly, and the launch
+  // card lives only inside `runCouncil`. Only the interactive `/council` slash
+  // command and the CLI-heuristic auto-council (tool-engine.ts:915) leave the
+  // card live, and both run with a human at the composer — correct to wait.
   if (willShowLaunchCard(sessionId, options?.suppressPreDebateCards, options?.sprintPlanningMode, userAborted())) {
     const proposedKind = coerceIntentKind(debatePlan.outputShape.kind);
     // Amendment A2 — the card is rendered in a loop so "Edit topic or outcome"
@@ -1348,6 +1481,13 @@ export async function* runCouncil(
         },
       } as StreamChunk;
       choice = (await respondToQuestion(setupQuestionId)).trim();
+      // U1 — this "council-setup" launch card is never echoed as a literal
+      // "↳ <answer>" (the narrative lines below report DIFFERENT information —
+      // intent lock / cheap-run shape / cancel — never the raw choice), so
+      // nothing downstream consumes `wasAnsweredByCard` for this questionId.
+      // Drain it on every loop iteration (including the one that breaks the
+      // loop) so it cannot linger in CouncilManager's `_cardAnsweredQuestionIds`.
+      respondToQuestion.wasAnsweredByCard?.(setupQuestionId);
 
       // Trap 2 — this check runs BEFORE parseIntentAnswer and is an exact-
       // string match against a sentinel that is not a member of IntentKind
@@ -1389,7 +1529,7 @@ export async function* runCouncil(
             ? "\n> Council not started — refine the topic and run `/council` again. Nothing was spent.\n"
             : "\n> Council cancelled before the debate started. Nothing was spent.\n",
       };
-      yield { type: "done" };
+      yield* terminalDone();
       return null;
     }
     // Only lock spec.intentKind (and confirm it) once the run is actually
@@ -1428,7 +1568,7 @@ export async function* runCouncil(
       signal: options?.signal,
       researchSkipOverride,
       leaderNeedsResearch,
-      internetFirst,
+      repoIsEmpty,
       externalTopic,
       // S1 — a "cheap run" pick at the launch card flips this on for the debate.
       costAware: launchCostAware,
@@ -1457,7 +1597,29 @@ export async function* runCouncil(
       respondToQuestion,
       // Agent-convened run — auto-accept escalation (no blocking card) since the
       // council runs autonomously mid-agent-turn with no interactive user.
-      autoAcceptEscalation: options?.suppressPreDebateCards,
+      // D6 fix: also OR in `sprintPlanningMode` — every other askcard gate in
+      // this file (willShowLaunchCard, the preflight autoApprove, the whole
+      // post-debate branch tree) already treats sprintPlanningMode as "no
+      // human is present", but this one line didn't. Both sprintPlanningMode
+      // callers (`sprint-runner.ts` for sprint planning, `item-debate-runner.ts`
+      // for the per-item debate) use `skipClarification: true`, so BOTH get the
+      // same single degenerate pinned criterion from `buildSpecFromTopic`
+      // (clarifier.ts) — `"Address the topic: <topic>"` — never zero criteria.
+      // Sprint planning's debate argues that actual topic directly each round,
+      // so the leader typically judges it met by round 1-2, well under the
+      // round ceiling. The item debate is what actually reaches the
+      // stop-with-unmet boundary: `perRoundFocus` (C2) scopes each round to
+      // argue ONE selected plan item, never the whole topic, so the leader's
+      // per-round evaluation of that same degenerate criterion can stay unmet
+      // for the debate's entire (short, per-item-capped) round budget. That is
+      // what hung an unattended `/ideal` run on the mid-debate escalation card
+      // for 38h (run mu75rurpf9ec / session f52d9bfc50a2, "1 criterion still
+      // unmet").
+      autoAcceptEscalation: options?.suppressPreDebateCards === true || options?.sprintPlanningMode === true,
+      // C5 — per-item debate scoping (see RunCouncilOptions.perRoundFocus doc).
+      // Absent for every caller except item-debate-runner.ts, so this line is
+      // a no-op (undefined) for every other call site.
+      perRoundFocus: options?.perRoundFocus,
     },
     llm,
   );
@@ -1471,11 +1633,20 @@ export async function* runCouncil(
   } while (!debateResult.done);
   const debateState = debateResult.value;
   stats.phases.push({ name: "debate", durationMs: Date.now() - debateStart });
+  // D6 — thread the debate's own escalation outcome (if any) back through the
+  // shared stats object, same by-reference pattern as `bailReason` /
+  // `structuredActionItems` above: `runCouncil` returns only a `string | null`,
+  // so a caller like item-debate-runner.ts (which reads `itemDebateCouncilStats`
+  // for `stats.calls` already) has no other way to see whether the debate
+  // stopped with criteria unmet and how that stop was resolved.
+  if (debateState.escalation) {
+    stats.escalation = debateState.escalation;
+  }
 
   // Store debate transcript as individual message — strip failed/empty turns
   // so future context loads don't carry noise. The failure metadata still
   // exists in interaction_logs for debugging.
-  if (sessionId && debateState.exchangeLogs) {
+  if (sessionId && debateState.exchangeLogs && !userAborted()) {
     try {
       const filtered = [...debateState.exchangeLogs.values()].flat().filter((line) => {
         const trimmed = line.trim();
@@ -1501,8 +1672,9 @@ export async function* runCouncil(
   });
 
   if (userAborted()) {
+    stats.bailReason = { kind: "aborted", detail: "Council cancelled by user before synthesis." };
     yield { type: "content", content: "\n> Council cancelled by user — skipping synthesis.\n" };
-    yield { type: "done" };
+    yield* terminalDone();
     return null;
   }
 
@@ -1520,6 +1692,10 @@ export async function* runCouncil(
   if (debateState.active.length === 0) {
     const reasons = debateState.openingFailures ?? [];
     const detail = reasons.length > 0 ? `\n${reasons.map((r) => `  • ${r.model}: ${r.error}`).join("\n")}` : "";
+    stats.bailReason = {
+      kind: "no-openings",
+      detail: `Every panelist failed to produce an opening statement after ${MAX_OPENING_ATTEMPTS} attempts.${detail}`,
+    };
     yield {
       type: "content",
       content:
@@ -1532,7 +1708,7 @@ export async function* runCouncil(
       eventSubtype: "aborted_no_openings",
       data: { topic, failures: reasons },
     });
-    yield { type: "done" };
+    yield* terminalDone();
     return null;
   }
 
@@ -1547,6 +1723,9 @@ export async function* runCouncil(
     llm,
     debatePlan,
     pilCtx?.outputStyle ?? undefined, // CQ-18: propagate outputStyle
+    undefined,
+    undefined,
+    options?.synthesisOutputContract,
   );
 
   let planResult: IteratorResult<
@@ -1564,8 +1743,18 @@ export async function* runCouncil(
       yield planResult.value;
     }
   } while (!planResult.done);
+  if (userAborted()) {
+    stats.bailReason = { kind: "aborted", detail: "Council cancelled during synthesis." };
+    yield* terminalDone();
+    return null;
+  }
   let { outcome, plan, synthesisText } = planResult.value;
-  const synthesisFailReason = planResult.value.synthesisFailReason;
+  // `let`, not `const`: sprintPlanningMode re-invokes `runPlanning` a SECOND
+  // time (the plan-lock re-synthesis below) and reassigns `synthesisText` from
+  // that call's result — this must track the reason for THAT run's failure,
+  // not go stale on whichever ran first. See the "empty-synthesis" bailReason
+  // set at this function's final `return`.
+  let synthesisFailReason = planResult.value.synthesisFailReason;
   const criteriaOutcome = summarizeCriteriaOutcome(
     spec.successCriteria,
     debateState.finalCriteriaMet,
@@ -1746,9 +1935,19 @@ export async function* runCouncil(
 
       // The run's authoritative intent kind (launch-card lock wins — see
       // resolveRunKind's doc comment). Reused below by resolvePostDebateDefaultIndex
-      // (Amendment A1) so the default-index resolution reads the same lock the
+      // (Amendment A2) so the fallback ranking reads the same lock the
       // recommendation itself was computed from — a single source, not two.
       const runKind = resolveRunKind(spec.intentKind, synthesisText);
+
+      // Session 115a59c9bb9e/49f6b8c1d8d6 — the intent signal reachable at this
+      // call site beyond the council's own locked `runKind`. `pilCtx` (set
+      // earlier in this function from `runPipeline`) carries the PIL
+      // classification of THIS turn's raw message, independent of when the
+      // debate's launch card locked its shape. Shared with
+      // src/orchestrator/settled-synthesis-gate.ts's suppression gate so the
+      // two can never disagree about what counts as implementation-shaped —
+      // see pil/turn-intent.ts for the full rule.
+      const turnWantsImplementation = turnWantsImplementationSignal(pilCtx);
 
       // Recommendation surfaced to the user as the default action. The
       // implementation_plan-vs-decision/evaluation split lives in
@@ -1761,6 +1960,7 @@ export async function* runCouncil(
         hasPlan: !!hasPlan,
         outputKind: runKind,
         criteriaUnmet: inconclusive ? critOutcome.unmetLabels.length : 0,
+        turnWantsImplementation,
       });
 
       const baseOptions: Array<{ label: string; description: string; value: string; kind: "choice" | "freetext" }> = [];
@@ -1885,10 +2085,12 @@ export async function* runCouncil(
         if (!baseOptions.some((o) => o.value === "continue_session")) baseOptions.push({ ...CONTINUE_OPT });
         if (!synthesisFailed && !inconclusive && !baseOptions.some((o) => o.value === "implement")) {
           // Insert at index 1, NOT 0 — the model's own best-first pick (index 0)
-          // stays first in the ranking that resolvePostDebateDefaultIndex reads
-          // below (Amendment A1). We only GUARANTEE the build path is present +
-          // prominent; we don't override the model's judgment that building
-          // wasn't the recommended next move.
+          // stays first. resolvePostDebateDefaultIndex (Amendment A2) no longer
+          // reads list position for its primary answer — it looks up
+          // `recommendation.value` by VALUE — so this insertion position only
+          // affects list-order fallbacks, not the normal default. We only
+          // GUARANTEE the build path is present + prominent; we don't override
+          // the model's judgment that building wasn't the recommended next move.
           baseOptions.splice(1, 0, {
             label: "Start Implementation",
             description: "Load the council conclusion as the spec and build it (plan → change → verify)",
@@ -1969,43 +2171,30 @@ export async function* runCouncil(
         });
       }
 
-      // Amendment A1 (session 947db934b573) — defaultIndex must never select an
-      // action inconsistent with the locked runKind (isDefaultEligiblePostDebateAction),
-      // even though the model orders baseOptions best-first. See
-      // resolvePostDebateDefaultIndex's doc comment for the fallback order.
+      // Amendment A2 (session 115a59c9bb9e/49f6b8c1d8d6) — defaultIndex must
+      // point at the SAME option that `recommendLine`'s label and reason
+      // describe. See resolvePostDebateDefaultIndex's doc comment for why A1's
+      // "first eligible option in list order" rule is gone: it computed the
+      // default independently of `recommendation`, so the two could (and did)
+      // disagree — the card once showed label "Save & Exit" next to a reason
+      // written for "refine".
       //
-      // inconclusive/lowGrounding keep the hardcoded 0 they had before this
-      // amendment: both branches unshift an `ask_followup` option ("Keep
-      // working the N unmet criteria" / "Raise confidence — have the council
-      // cite & verify", built in the two `if` blocks directly above this one)
-      // as the honest default regardless of intent. ask_followup is never
-      // default-ineligible — only "implement" is, and only for analysis-shape
-      // kinds — so that forced index 0 is itself always a legal default under
-      // the new predicate and does not need to route through
-      // resolvePostDebateDefaultIndex. If a future option ever became the
-      // pinned index-0 choice in this branch AND were default-ineligible, this
-      // comment is your signal to re-derive the ordering instead of trusting it.
-      const defaultIndex = inconclusive || lowGrounding ? 0 : resolvePostDebateDefaultIndex(baseOptions, runKind);
-      // recommendReason's TEXT SOURCE (code review round 1): inconclusive/
-      // lowGrounding and the model-first path both PIN the default to an
-      // option index.ts itself constructed/ranked for this exact turn (the
-      // criteria/confidence follow-up, or the model's own best-first pick), so
-      // that option's own `description` is the right explanation — read via
-      // `baseOptions[defaultIndex]`, NOT the literal index 0, since defaultIndex
-      // is no longer necessarily 0 on the model-first path (that's the whole
-      // point of this amendment). The deterministic fallback path has no such
-      // freshly-authored option — its options are a fixed, reusable menu — so
-      // it keeps using `recommendation.reason`, the curated per-recommendation
-      // text pickPostDebateRecommendation already produced. Do not swap the
-      // deterministic branch to `baseOptions[defaultIndex]?.description`: that
-      // trades curated reasoning for generic option copy with no test coverage
-      // for the regression (this was flagged in round 1 review).
-      const recommendReason =
-        inconclusive || lowGrounding
-          ? (baseOptions[defaultIndex]?.description ?? recommendation.reason)
-          : modelActions
-            ? (baseOptions[defaultIndex]?.description ?? recommendation.reason)
-            : recommendation.reason;
+      // inconclusive/lowGrounding keep the hardcoded 0 they had before A1: both
+      // branches unshift a fresh `ask_followup` option ("Keep working the N
+      // unmet criteria" / "Raise confidence — have the council cite & verify",
+      // built in the two `if` blocks directly above this one) as the honest
+      // default regardless of intent, and that option IS index 0 by
+      // construction (unshift), so there is nothing for
+      // resolvePostDebateDefaultIndex to resolve.
+      const defaultIndex =
+        inconclusive || lowGrounding ? 0 : resolvePostDebateDefaultIndex(baseOptions, runKind, recommendation.value);
+      // Single source for BOTH the label (`recommendLine` below) and the
+      // reason: whatever option ended up at `defaultIndex` — never
+      // `recommendation.reason` read independently of it — so the two can
+      // never again name different options. `?? recommendation.reason` is
+      // purely a defensive fallback for the (should-never-happen) case of an
+      // empty `baseOptions`.
+      const recommendReason = baseOptions[defaultIndex]?.description ?? recommendation.reason;
 
       const runReceipt = formatRunReceipt({
         rounds: debateState.roundCount,
@@ -2090,7 +2279,11 @@ export async function* runCouncil(
                 ? `\nDeferred to implementation: ${critOutcome.deferredLabels.join("; ")}`
                 : "") +
               (hasEmptySections ? `\nUnresolved areas: ${refinementTopics.join(", ")}` : "") +
-              `\n→ ${recommendation.reason}`,
+              // Same invariant as `recommendLine` above — this must name the same
+              // option as `defaultIndex`/`recommendReason`, not `recommendation`
+              // directly (which can differ from the resolved default on the
+              // explicit-fallback path in resolvePostDebateDefaultIndex).
+              `\n→ ${recommendReason}`,
             isRequired: false,
             options: baseOptions,
             defaultIndex,
@@ -2160,7 +2353,11 @@ export async function* runCouncil(
       const answeredLabel = baseOptions.find((o) => o.value === answer)?.label ?? answer;
       // No "↳ choice" echo in sprint-planning mode — there was no user choice to
       // echo (the plan was auto-locked above with its own status line).
-      if (!options?.sprintPlanningMode) {
+      // U1 — nor when the interactive askcard UI already rendered a paired
+      // question+answer transcript record for this questionId (see
+      // `QuestionResponder.wasAnsweredByCard`); headless never sets that flag,
+      // so its echo — the only record it has — is unaffected.
+      if (!options?.sprintPlanningMode && !respondToQuestion.wasAnsweredByCard?.(questionId)) {
         yield { type: "content", content: `\n  ↳ ${answeredLabel}\n` };
       }
 
@@ -2216,6 +2413,7 @@ export async function* runCouncil(
         outcome = refineResult.value.outcome;
         plan = refineResult.value.plan;
         synthesisText = refineResult.value.synthesisText;
+        synthesisFailReason = refineResult.value.synthesisFailReason;
       } else if (isFollowupText) {
         // Re-synthesize with the follow-up framed as user input. `answer` carries
         // the user's own text when they typed one; when they picked the pinned
@@ -2244,6 +2442,7 @@ export async function* runCouncil(
         outcome = refineResult.value.outcome;
         plan = refineResult.value.plan;
         synthesisText = refineResult.value.synthesisText;
+        synthesisFailReason = refineResult.value.synthesisFailReason;
       } else if (options?.sprintPlanningMode) {
         // A1 FIX: "Lock plan and execute Sprint 1" — stay within sprint-runner.
         //
@@ -2264,6 +2463,10 @@ export async function* runCouncil(
         // P7 optimization: skip re-synthesis when action items already exist.
         const existingActionItems = pickActionItemsFromOutcome(outcome);
         if (existingActionItems.length >= 3) {
+          // S3a: carry the raw action-item objects out to sprint-runner.ts via the
+          // by-reference stats object BEFORE synthesizePlanFromActionItems flattens
+          // them below — see CouncilStats.structuredActionItems.
+          stats.structuredActionItems = existingActionItems;
           const synthesizedPlan = synthesizePlanFromActionItems(existingActionItems);
           plan = synthesizedPlan;
           // Mirror plan onto the outcome so downstream persistence sees it.
@@ -2308,6 +2511,7 @@ export async function* runCouncil(
           outcome = refineResult.value.outcome;
           plan = refineResult.value.plan;
           synthesisText = refineResult.value.synthesisText;
+          synthesisFailReason = refineResult.value.synthesisFailReason;
           yield {
             type: "content",
             content:
@@ -2349,12 +2553,18 @@ export async function* runCouncil(
             },
           } as StreamChunk;
           const ans = await respondToQuestion(sqId);
+          // U1 — read (consume) this once regardless of the skip/blank branch
+          // below, so the flag can never linger in CouncilManager's set.
+          const answeredByCard = respondToQuestion.wasAnsweredByCard?.(sqId) ?? false;
           refinedAnswers.push({ section: label, answer: ans });
           // Only echo sections the user actually filled. "Skip — leave as-is"
           // returns an empty value; echoing it emits a blank "↳ " bubble per
           // section (6 skips = 6 empty rows of transcript garbage). Prefix the
           // section label so a real answer reads as "↳ <section>: <answer>".
-          if (ans.trim().length > 0) {
+          // Also skip when the askcard UI already rendered this section's
+          // question+answer as one transcript record (headless is unaffected —
+          // see `QuestionResponder.wasAnsweredByCard`).
+          if (ans.trim().length > 0 && !answeredByCard) {
             yield { type: "content", content: `\n  ↳ ${label}: ${ans}\n` };
           }
         }
@@ -2385,6 +2595,7 @@ export async function* runCouncil(
         outcome = refineResult.value.outcome;
         plan = refineResult.value.plan;
         synthesisText = refineResult.value.synthesisText;
+        synthesisFailReason = refineResult.value.synthesisFailReason;
       } else if (answer === "implement") {
         // D3/Task 8 — the reviewed-plan handoff. Previously "implement" fell
         // through to normal persistence and postDebateContinuation fed the RAW
@@ -2568,7 +2779,12 @@ export async function* runCouncil(
             planAnswer = card.options[card.defaultIndex]?.value ?? "save_exit";
           }
           const planAnswerLabel = card.options.find((o) => o.value === planAnswer)?.label ?? planAnswer;
-          yield { type: "content", content: `\n  ↳ ${planAnswerLabel}\n` };
+          // U1 — skip when the askcard UI already rendered this plan-confirm
+          // question+answer as one transcript record (headless is unaffected —
+          // see `QuestionResponder.wasAnsweredByCard`).
+          if (!respondToQuestion.wasAnsweredByCard?.(planQuestionId)) {
+            yield { type: "content", content: `\n  ↳ ${planAnswerLabel}\n` };
+          }
 
           if (planAnswer === "execute_plan") {
             executePlanPath = plannerOutcome.planPath;
@@ -2637,6 +2853,11 @@ export async function* runCouncil(
   }
 
   idealTrace("council.persist.start", { sessionId, hasOutcome: !!outcome, postDebateAction });
+  if (userAborted()) {
+    stats.bailReason = { kind: "aborted", detail: "Council cancelled before persistence." };
+    yield* terminalDone();
+    return null;
+  }
   // ── Persist outcome ─────────────────────────────────────────────────────────
   if (sessionId) {
     try {
@@ -2716,8 +2937,19 @@ export async function* runCouncil(
           runDir: options.runDir,
           spec,
           timestamp: new Date().toISOString(),
+          // Role → model provenance. Under sprintPlanningMode the [Council
+          // Memory] record above is skipped entirely (FK guard, see :2851), so
+          // this file is the ONLY artifact that can answer "which role ran the
+          // model I am looking at in the billing table". Both halves are passed
+          // straight from the resolver / debate state — never re-derived here.
+          leader: {
+            modelId: leaderResolution.modelId,
+            ...(leaderResolution.promotedFrom ? { promotedFrom: leaderResolution.promotedFrom } : {}),
+            ...(leaderResolution.defaulted ? { defaulted: leaderResolution.defaulted } : {}),
+          },
           participants: debateState.active.map((a) => ({
             role: a.role,
+            model: a.model,
             stance: a.stance,
             position: a.position,
           })),
@@ -2763,6 +2995,7 @@ export async function* runCouncil(
   // CQ-17: Record council outcome to EE brain (fire-and-forget)
   void judgeCouncilOutcome(synthesisText)
     .then((verdict) => {
+      if (userAborted()) return;
       // CQ-16: Append review flag if confidence < 0.5
       if (verdict.confidence < 0.5 && sessionId) {
         try {
@@ -2884,6 +3117,16 @@ export async function* runCouncil(
     yield { type: "done" };
   }
   idealTrace("council.return", { sessionId, synthesisLen: (synthesisText || "").length });
+  // The debate and synthesis both genuinely RAN here (unlike the early bails
+  // above) — an empty `synthesisText` at this point means the synthesizer
+  // itself produced nothing usable, which is a materially different failure
+  // from "no reachable provider" or "no panelist opened". Record it only when
+  // there is nothing else to return, so a later refinement that DID succeed
+  // (synthesisFailReason cleared by that call) never gets overwritten by a
+  // stale early failure.
+  if (!synthesisText.trim() && synthesisFailReason) {
+    stats.bailReason = { kind: "empty-synthesis", detail: synthesisFailReason };
+  }
   return synthesisText || null;
 }
 
