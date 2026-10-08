@@ -28,7 +28,9 @@
     "drift": 1,
     "fixtureOnlyChangedAfterFullSuite": "src/orchestrator/__tests__/delegation-oauth-init.test.ts",
     "followUpFocusedPassed": 125,
-    "unchangedProduction": true
+    "unchangedProduction": true,
+    "hookFixtureNormalization": "Three edited fixture line endings normalized to CRLF; reconstructed pre-hook SHA256 matched exactly",
+    "committedFixtureTestPassed": 1
   },
   "changedSources": [
     {
@@ -41,7 +43,7 @@
     },
     {
       "path": "src/orchestrator/__tests__/delegation-oauth-init.test.ts",
-      "sha256": "0E1D69A13B6C14411B2277B1DCF3629789E1865E5D2FBF4B7DCD7EB613696EAA"
+      "sha256": "6EDE2CD3F4ECD71B4374DD76639CD0A29FA3321B1E9A677BE68DEA08F56884DB"
     },
     {
       "path": "src/orchestrator/__tests__/heavy-gate-research.test.ts",

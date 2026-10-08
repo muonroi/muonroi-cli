@@ -1,8 +1,9 @@
 - Active run: runs/delegation-runtime-errors.md
-- Gate: verified; P1/W1 and P2/W1 complete; 8869 full configured units passed, zero failed
+- Gate: done; P1/W1 and P2/W1 released; 8869 full configured units passed, zero failed
 - Mode: auto; single agent; main owns plan/acceptance, helpers support research
 - Current implementation: helper OAuth init, original SDK errors, no replay after progress, todo gate exemption
 - Build clean; 125 focused units; 4 TUI fixture tests; native workspace smoke boot passed
 - Council currently returns genuine structured revise; user plan/verdict unchanged; shell/source writes stay gated
-- Remaining: normal commit/push, verify remote ref and tested source hashes
+- Implementation: 18d993a9 pushed to origin/develop and remote ref verified; no production hash drift
+- Remaining: none in this runtime repair; remote CI and live paid-provider task were not exercised
 - Runtime next step: restart CLI and resume ea7378aab8f8; historical helper HTTP detail was not persisted

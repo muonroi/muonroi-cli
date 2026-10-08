@@ -3,7 +3,7 @@
 ## Resume Digest
 - Workflow: qc-flow, balanced, single agent, auto execution after evidence and plan-check.
 - Goal: investigate steady-copper-badger in session ea7378aab8f8; preserve main authority and heavy mutation authorization.
-- Gate: verified; P1/W1 and P2/W1 complete; normal release in progress.
+- Gate: done; P1/W1 and P2/W1 verified and released.
 - Protected: user .planning files, session DB, exports, credentials; no fabricated council approval.
 - Evidence: job elapsed 2.157s, model gpt-6.1-sol, generic SDK No output generated error. Export lines 1141-1142 and 1735-1736 confirm bash and todo_write blocked. Current PLAN-VERIFY is structured revise with three actual concerns.
 - Unknowns: historical provider error was not retained in the job. Verify background OAuth initialization and preservation of provider error events with isolated SDK fixtures.
@@ -42,5 +42,6 @@
 - Historical boundary: steady-copper-badger's original HTTP detail was not persisted. Runtime fixtures reproduce the exact generic SDK failure, but do not establish that old job's HTTP status.
 - Council boundary: current review is structured revise with actual staging/containment/licensing concerns. No user plan rewrite or fabricated approval was made.
 - Native/TUI boundary: boot and fixture UI pass; live paid-provider task completion and remote CI were not exercised.
-- Release: normal hooks, no force push; verify remote ref and source hashes after commit.
+- Release: implementation 18d993a94e59cfa5a375a21d8a787c2986163da5 pushed to origin/develop with normal hooks; ls-remote confirmed exact ref. Pre-push binary compile smoke passed. Remote CI was not verified.
+- Post-hook audit: orchestration incorrectly continued to push after a hash check returned nonzero. The sole differing file was the OAuth fixture: reconstructing its three edited CRLF lines as LF produced the exact pre-hook SHA256, proving line-ending normalization only. No production drift. The committed fixture was re-run and passed. Keep dependent shell actions conditional on successful exit codes.
 - Runtime: restart CLI and resume ea7378aab8f8; historical failed helper records remain historical.
