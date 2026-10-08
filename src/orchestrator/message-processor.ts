@@ -217,6 +217,7 @@ import {
   recordCompaction,
   recordElision,
 } from "./session-experience.js";
+import { refreshSessionGuidance } from "./session-guidance.js";
 import { shouldRunGate } from "./should-run-gate.js";
 import { attemptStallRescue, pushStallToolResult, type StallToolResult } from "./stall-rescue.js";
 import {
@@ -277,12 +278,10 @@ import {
 import type { TurnRunnerDepsBase } from "./turn-runner-deps.js";
 
 /**
- * Session-scoped cache for [EE Session Guidance] dedup. Maps sessionId to the
- * sha256 prefix of the last-injected guidance content. Prevents the same block
- * from being re-injected on every turn — once the model has seen a set of
- * guidance entries it stays informed until new entries arrive.
+ * Dedup cache for recall-feedback reminders. Current guidance is reconciled
+ * against the transcript itself by refreshSessionGuidance.
  */
-const _injectedGuidanceSha = new Map<string, string>();
+const _injectedRecallSha = new Map<string, string>();
 
 /**
  * Stable marker prefix for the SessionStart-hook system message (round 2,
@@ -1094,7 +1093,7 @@ export class MessageProcessor {
       // shown — mirrored here as a `system` message, once per session (same
       // guard as the display loop above), ordered before this turn's own
       // user message so it reads as prior context, not a reply to ask about.
-      if (_sessionStartContexts.length > 0) {
+      if (_sessionStartNotice) {
         // Round 2 (G1 HIGH): REPLACE, don't append — a `--resume` process
         // rehydrates the persisted transcript first, so a tagged message
         // from a PRIOR process may already be sitting in `deps.messages`.
@@ -1109,7 +1108,7 @@ export class MessageProcessor {
         }
         deps.messages.push({
           role: "system",
-          content: `${SESSION_START_SYSTEM_TAG} — already shown to the user verbatim above; do not re-run it or repeat it\n${_sessionStartContexts.join("\n")}`,
+          content: `${SESSION_START_SYSTEM_TAG} — already shown to the user verbatim above; do not re-run it or repeat it\n${_sessionStartNotice.slice(SESSION_START_SYSTEM_TAG.length + 1)}`,
         });
         deps.messageSeqs.push(null);
       }
@@ -1615,25 +1614,16 @@ export class MessageProcessor {
 
       // Inject accumulated EE session guidance as a system message so the model
       // is informed of past warnings before making tool decisions this turn.
-      // Cross-turn dedup: compute sha of the rendered guidance; skip if identical
-      // to the previous turn (same guidance, same ~200-800 tokens saved per turn).
+      // Keep one current snapshot, including after resume or compaction.
+      let guidanceContent: string | undefined;
       if (deps.sessionEEGuidance.size > 0) {
         const lines = Array.from(deps.sessionEEGuidance.entries()).map(([, g]) => {
           const pct = Math.round(g.confidence * 100);
           return `- [${g.toolName}] ${g.message} (Why: ${g.why}) [${pct}%]`;
         });
-        const content = `[EE Session Guidance — avoid these patterns when using tools]\n${lines.join("\n")}`;
-        const sid = deps.session?.id ?? "_anon";
-        const { createHash: _guidanceHash } = await import("node:crypto");
-        const sha = _guidanceHash("sha256").update(content).digest("hex").slice(0, 16);
-        if (_injectedGuidanceSha.get(sid) === sha) {
-          // Identical guidance already injected — skip.
-        } else {
-          _injectedGuidanceSha.set(sid, sha);
-          deps.messages.push({ role: "system", content });
-          deps.messageSeqs.push(null);
-        }
+        guidanceContent = `[EE Session Guidance — avoid these patterns when using tools]\n${lines.join("\n")}`;
       }
+      refreshSessionGuidance(deps.messages, deps.messageSeqs, guidanceContent);
 
       // Fix 3: inject pending recall-feedback nudge as a system message the
       // model can actually see. Previously recall reminders were yield-content
@@ -1670,8 +1660,8 @@ export class MessageProcessor {
             const { createHash: _recallHash } = await import("node:crypto");
             const recallSha = _recallHash("sha256").update(recallContent).digest("hex").slice(0, 16);
             const recallKey = `recall_${sid}`;
-            if (_injectedGuidanceSha.get(recallKey) !== recallSha) {
-              _injectedGuidanceSha.set(recallKey, recallSha);
+            if (_injectedRecallSha.get(recallKey) !== recallSha) {
+              _injectedRecallSha.set(recallKey, recallSha);
               deps.messages.push({ role: "system", content: recallContent });
               deps.messageSeqs.push(null);
             }

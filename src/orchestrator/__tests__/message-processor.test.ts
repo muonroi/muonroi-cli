@@ -230,7 +230,7 @@ describe("MessageProcessor — DI surface invariants", () => {
   // the log, not a bare, indistinguishable content chunk, and never
   // unbounded regardless of what the hook script prints.
   it("tags the rendered SessionStart notice and truncates a huge hook output instead of flooding the turn", async () => {
-    const HUGE = "Z".repeat(20_000);
+    const HUGE = "\u001b[31m" + "Z".repeat(20_000) + "\u001b[0m";
     const deps = makeDeps({
       batchApi: true,
       getSessionStartHookFired: () => false,
@@ -269,6 +269,15 @@ describe("MessageProcessor — DI surface invariants", () => {
     expect(notice?.content).toContain("truncated: showed 16384 of 20000 chars");
     // Never renders the full 20_000-char blast into one chunk.
     expect(notice!.content!.length).toBeLessThan(20_000);
+    const modelNotice = deps.messages.find(
+      (m) => m.role === "system" && typeof m.content === "string" && m.content.startsWith("[SessionStart hook output]"),
+    );
+    expect(modelNotice).toBeDefined();
+    expect(modelNotice!.content).toContain("truncated: showed 16384 of 20000 chars");
+    expect(modelNotice!.content).not.toContain("\u001b");
+    expect(modelNotice!.content.length).toBeLessThan(17_000);
+    // The model gets exactly the bounded body displayed in the TUI, not raw hook stdout.
+    expect(modelNotice!.content).toContain(notice!.content!.trim().split("\n").slice(1).join("\n"));
   });
 
   // Parity fix (G1): the yield-loop above is UI-only — it never told the

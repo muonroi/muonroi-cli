@@ -187,6 +187,7 @@ import { buildInterruptedTurnNote } from "./interrupted-turn.js";
 import { createNoProgressGuard } from "./no-progress-guard.js";
 import type { PendingCallsLog } from "./pending-calls.js";
 import { stableCallId } from "./pending-calls.js";
+import { createPromptMeasurer } from "./prompt-breakdown.js";
 import {
   applyModelConstraints,
   buildMcpCapabilityBlock,
@@ -1558,49 +1559,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             ? _nonClaudeFront
             : systemWithCaps;
 
-        // Capture prompt-size breakdown so recordUsage can attach it to the
-        // cost-log entry. Without this, "system prompt is huge" is unfalsifiable.
-        // chars/4 ≈ tokens for English; reported as chars to keep math obvious.
-        const messagesChars = (deps.messages as any[]).reduce((s: number, m: any) => {
-          const c = m.content;
-          if (typeof c === "string") return s + c.length;
-          if (Array.isArray(c)) {
-            for (const part of c) {
-              if (typeof (part as { text?: unknown }).text === "string") {
-                s += (part as { text: string }).text.length;
-              }
-            }
-          }
-          return s;
-        }, 0);
-        let toolsChars = 0;
-        let toolsCount = 0;
-        for (const [name, t] of Object.entries(tools)) {
-          toolsCount += 1;
-          toolsChars += name.length;
-          const desc = (t as { description?: string }).description;
-          if (typeof desc === "string") toolsChars += desc.length;
-          try {
-            // Schemas often dominate tool size on non-Anthropic providers
-            // (Zod-derived JSON schemas can be 2-5K chars per tool).
-            const params =
-              (t as { parameters?: unknown; inputSchema?: unknown }).parameters ??
-              (t as { inputSchema?: unknown }).inputSchema;
-            if (params) toolsChars += JSON.stringify(params).length;
-          } catch {
-            /* best-effort */
-          }
-        }
-        deps.setLastPromptBreakdown({
-          systemChars: system.length,
-          staticPrefixChars: systemParts.staticPrefix.length,
-          dynamicSuffixChars: systemParts.dynamicSuffix.length,
-          playwrightGuidanceChars: playwrightGuidance.length,
-          messagesChars,
-          messagesCount: deps.messages.length,
-          toolsChars,
-          toolsCount,
-        });
+        const measurePrompt = await createPromptMeasurer(systemForModel, tools);
+        const capturePromptBreakdown = (messages: readonly ModelMessage[]) => {
+          deps.setLastPromptBreakdown({
+            ...measurePrompt(messages),
+            staticPrefixChars: systemParts.staticPrefix.length,
+            dynamicSuffixChars: systemParts.dynamicSuffix.length,
+            playwrightGuidanceChars: playwrightGuidance.length,
+          });
+        };
 
         // Task 2.6a — assign a fresh correlation ID for this top-level streamText call.
         const _topCallId = crypto.randomUUID();
@@ -1674,6 +1641,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           ) as typeof deps.messages,
           runtime.modelId,
         );
+        capturePromptBreakdown(_topMessagesForCall);
         // Closure-mutable cap for the tool-loop askcard rescue.
         // Phase 1 (SAMR) skips the dynamic cap (it's a single-step path).
         // Algorithm extracted to ./tool-loop-cap.ts so it can be unit-tested.
@@ -2206,6 +2174,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               if (_mirrorNote && baseRes.messages) {
                 baseRes.messages = attachReminderToMessages(baseRes.messages, _mirrorNote) as typeof stepMessages;
               }
+              capturePromptBreakdown(baseRes.messages ?? stepMessages);
               return baseRes;
             };
             // Compute the mirror once per prepareStep call. Empty on early steps

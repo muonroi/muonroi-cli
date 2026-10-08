@@ -1447,7 +1447,9 @@ export class Agent {
     const breakdown = source === "message" ? (this._lastPromptBreakdown ?? undefined) : undefined;
     // Sanitize actualInputTokens for providers that return
     // implausibly low prompt_tokens (e.g. 10) regardless of prompt size.
-    const estIn = breakdown ? Math.ceil(((breakdown.systemChars ?? 0) + (breakdown.messagesChars ?? 0)) / 4) : 0;
+    const estIn = breakdown
+      ? Math.ceil(((breakdown.systemChars ?? 0) + (breakdown.messagesChars ?? 0) + (breakdown.toolsChars ?? 0)) / 4)
+      : 0;
     const actualInput = sanitizeInputTokens(totalInput, estIn);
     appendCostLog({
       ts: Date.now(),
@@ -4097,7 +4099,7 @@ export class Agent {
               `1. You have full access to tools (bash, edit_file, read_file, grep, etc.). Execute them as needed to build, debug, and verify the work.\n` +
               `2. Stay strictly focused on completing the request. Do not engage in social chat or pleasantries.\n` +
               `3. Once the goal is achieved and verified, you MUST return your final response using the 'respond_general' (or final answer) tool.\n` +
-              `4. Your final response MUST contain a structured summary (Key Changes, Verification Details, Result Summary).\n` +
+              `4. Your final response MUST contain a structured summary: Key Changes (file paths), Verification Details (commands and observed results), Remaining Blockers, and Result Summary. Cite tool/artifact IDs where available so main can retrieve full evidence.\n` +
               `5. All intermediate tool calls, raw tool outputs, and diagnostic traces will remain isolated inside this sub-session and will not bloat the parent session.`,
           };
           seedMessages.push(overlayMessage);

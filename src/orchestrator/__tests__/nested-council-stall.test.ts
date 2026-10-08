@@ -71,8 +71,14 @@ describe("nested plan review liveness (ea7378aab8f8)", () => {
       },
     });
     const originalStream = handle.model.doStream.bind(handle.model);
+    const promptSnapshots: Array<{ hasTool: boolean; messagesChars: number }> = [];
+    const reviewSynthesis = "PLAN_REVIEW_READY" + (scenario === "slow" ? "p".repeat(8_000) : "");
     let delayedContinuation = 0;
     const streamSpy = vi.spyOn(handle.model, "doStream").mockImplementation(async (options) => {
+      promptSnapshots.push({
+        hasTool: options.prompt.some((message) => message.role === "tool"),
+        messagesChars: (agent as any)._lastPromptBreakdown?.messagesChars ?? 0,
+      });
       const response = await originalStream(options);
       if (scenario !== "slow continuation" || !options.prompt.some((message) => message.role === "tool"))
         return response;
@@ -125,8 +131,8 @@ describe("nested plan review liveness (ea7378aab8f8)", () => {
       clearInterval(deltaTimer);
       if (childSignal?.aborted) return;
       lateWrite = true;
-      (agent as any).councilManager.setLastSynthesis("PLAN_REVIEW_READY");
-      yield { type: "content", content: "PLAN_REVIEW_READY" };
+      (agent as any).councilManager.setLastSynthesis(reviewSynthesis);
+      yield { type: "content", content: reviewSynthesis };
     });
     try {
       const chunks: any[] = [];
@@ -143,6 +149,12 @@ describe("nested plan review liveness (ea7378aab8f8)", () => {
         expect(chunks.filter((chunk) => chunk.type === "error")).toEqual([]);
         expect(chunks.map((chunk) => chunk.content ?? "").join("")).toContain("IMPLEMENTATION_CONTINUES");
         expect(lateWrite).toBe(true);
+        if (scenario === "slow") {
+          const initial = promptSnapshots.find((snapshot) => !snapshot.hasTool);
+          const continuation = promptSnapshots.find((snapshot) => snapshot.hasTool);
+          expect(continuation?.messagesChars).toBeGreaterThanOrEqual(reviewSynthesis.length);
+          expect(continuation!.messagesChars).toBeGreaterThan(initial!.messagesChars);
+        }
       } else {
         expect(childSignal?.aborted).toBe(true);
         if (scenario === "overdue")

@@ -1,6 +1,6 @@
-- Active run: runs/session-ea7378-stops.md
-- Gate: complete; full configured suite 8841 passed, zero failed; source hashes unchanged
+- Active run: runs/context-quality.md
+- Gate: phase-close; phase P1 / wave W1 verified; 8853 full units passed, zero failed
 - Mode: auto; single agent; preserve user task state and WIP
 - Branch: develop; background PIL/model-owned council released at bc8fe0ee, release record 1af5d374
-- Release: d3f1a51deb3bba390ac753aea06b371734260fef pushed to origin/develop and verified by ls-remote
-- Remaining limitation: Bun native harness shutdown crash remains open; remote CI not verified
+- Release: context quality checkpoint/push pending; previous interruption repair d3f1a51d
+- Remaining limitation: Bun native harness shutdown crash and external npx selfverify packaging issue; remote CI not verified
