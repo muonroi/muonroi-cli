@@ -74,5 +74,13 @@
   "nativeQaRunId": "1af75a8c-dee9-4c43-bb77-1353d55b5f82",
   "focusedPassed": 228,
   "tuiQuestionTestsPassed": 3,
-  "fullSuiteStatus": "running"
+  "fullSuiteStatus": "passed",
+  "fullSuitePassed": 8860,
+  "fullSuiteFailed": 0,
+  "fullSuiteSkipped": 14,
+  "fullSuiteTodo": 2,
+  "fullSuiteDurationSeconds": 840.1,
+  "implementationCommit": "c957f10bdc93883cfb2bbc7394da03b8186e1a48",
+  "releasedMergeCommit": "a5acbd28364cf9643133d139c357bd98cb8100fe",
+  "remoteCiVerified": false
 }

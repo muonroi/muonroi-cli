@@ -1,6 +1,7 @@
 - Active run: runs/council-review-gate.md
-- Gate: execute; phase P1 / wave W1; parent and explore shell authorization repaired
-- Mode: auto; single agent; preserve user task state, DB, settings and exports
-- Verification: final build clean; 228 focused units passed; 3 TUI question tests passed
-- Full suite session 66728 / council-review-full-unit-final.log; fresh 1933-path hash manifest
-- Next: final native QA result, full suite zero failures, source hash parity, normal commit/push
+- Gate: done; phase P1 / wave W1 released; 8860 full units passed, zero failed
+- Mode: auto; single agent; main owns plan/acceptance, helpers support research
+- Implementation c957f10b; remote history integrated and released at a5acbd28
+- Build clean; 228 focused units; 3 question TUI tests; native workspace smoke boot passed
+- Model missing JSON remains revise; main can research/ask; main and explore shell writes stay gated
+- Runtime next step: restart CLI and resume ea7378aab8f8; remote CI and live provider review not verified

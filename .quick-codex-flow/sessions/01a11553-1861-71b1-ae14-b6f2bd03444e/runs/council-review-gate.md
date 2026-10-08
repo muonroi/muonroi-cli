@@ -72,3 +72,24 @@
 - Next: await complete green unit summary, compare source map, normal hooks/commit/push, remote SHA, final receipt.
 - Final-source native run: 1af75a8c-dee9-4c43-bb77-1353d55b5f82, workspace tools-mcp, smoke-boot 1 pass / 0 fail / 0 inconclusive.
 - Experience feedback closed: c2d2f6cc followed for model-first verdict; 00d7f8c6 followed for protecting cwd-owned state; cb5558f9 ignored because no depth-to-council policy changed.
+
+## Commit checkpoint
+- Implementation commit c957f10b created with normal secret scan, lint-staged and commit-message hooks.
+- Post-hook comparison: all 1933 tested paths match baseline SHA256; no source drift.
+- Full unit suite still pending; no push attempted. Final native QA evidence supersedes initial boot run.
+- Raw synthesis return verified at council/index.ts:3130; GSD consumes full councilManager.lastSynthesis rather than readable-only UI text, preserving the additional verdict block.
+
+## Concurrent remote integration
+- Full suite completed: 8860 passed, 0 failed, 14 skipped, 2 todo; 946 passed files / 6 skipped; 840.10s. Source map checked after suite: 1933 paths, zero hash or path drift.
+- First push passed native pre-push and binary compile hooks, then remote rejected non-fast-forward.
+- origin/develop advanced to ab12c5b2 via a master/develop merge. Compare the exact baseline 7a2694c8 to the fetched remote tree before integrating; no force-push or reset.
+
+## Phase / feature close
+- P1 W1 DONE. Required outcomes verified: research and questions available during heavy/revise; mutations gated in main and explore shell; final leader receives explicit verdict contract on normal and compact synthesis attempts; actual pass and opt-out remain supported.
+- Full suite 8860 passed, 0 failed; build clean; 228 focused units; 3 TUI question tests; workspace native smoke 1 passed / 0 failed / 0 inconclusive.
+- Source unchanged through commit hooks and history-only remote integration: 1933 hashes match, no path drift. Remote ab12c5b2 had an identical tree to the original baseline; integrated via merge without reset/rebase/force.
+- Implementation c957f10bdc93883cfb2bbc7394da03b8186e1a48 and merge a5acbd28364cf9643133d139c357bd98cb8100fe pushed with normal hooks; origin/develop SHA confirmed a5acbd28364cf9643133d139c357bd98cb8100fe.
+- Remote required-check expectations were reported by the server; remote CI is not verified by this local release.
+- Model compliance remains probabilistic: missing JSON keeps conservative revise, with research/clarification usable. No live paid-provider review was invoked, no user plan verdict overridden, no DB/settings/export edited.
+- Execution gate: done. Mode auto; session/context/burn risk low; stall none; approval local-only; phase relation feature-close.
+- User runtime next step: restart CLI and resume ea7378aab8f8 so the rebuilt junction-linked CLI loads the new code. Main remains responsible for the current plan and any genuine review concerns.
