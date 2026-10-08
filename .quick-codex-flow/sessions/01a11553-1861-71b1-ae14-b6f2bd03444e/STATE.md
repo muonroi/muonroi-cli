@@ -1,6 +1,6 @@
-- Active run: runs/context-quality.md
-- Gate: done; phase P1 / wave W1 released; 8853 full units passed, zero failed
-- Mode: auto; single agent; preserve user task state and WIP
-- Branch: develop; background PIL/model-owned council released at bc8fe0ee, release record 1af5d374
-- Release: f42283a2ff8ccf9ff8d00a5a556170510bd36776 pushed to origin/develop with normal hooks
-- Remaining limitation: Bun native harness shutdown crash and external npx selfverify packaging issue; remote CI not verified
+- Active run: runs/council-review-gate.md
+- Gate: execute; phase P1 / wave W1; parent and explore shell authorization repaired
+- Mode: auto; single agent; preserve user task state, DB, settings and exports
+- Verification: final build clean; 228 focused units passed; 3 TUI question tests passed
+- Full suite session 66728 / council-review-full-unit-final.log; fresh 1933-path hash manifest
+- Next: final native QA result, full suite zero failures, source hash parity, normal commit/push

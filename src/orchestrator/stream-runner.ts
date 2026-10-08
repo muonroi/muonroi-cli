@@ -32,6 +32,8 @@ import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
 import { breadcrumb } from "../council/crash-breadcrumb.js";
 import { recordArtifact } from "../ee/artifact-cache.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
+import { isGsdHardGateEnabled } from "../gsd/flags.js";
+import { evaluateMutationGate } from "../gsd/mutation-gate.js";
 import { acquireMcpTools } from "../mcp/client-pool";
 import { normalizeModelId } from "../models/registry.js";
 import {
@@ -396,6 +398,20 @@ export class StreamRunner {
       modelId: childModelId,
       sessionId: this.deps.getSessionId(),
     });
+    // Explore mode still has a shell. Research cannot use it to route around
+    // the originating main session's locked plan gate (ea7378aab8f8).
+    const shellTool = childBaseToolsRaw.bash;
+    if (isExplore && shellTool?.execute) {
+      const executeShell = shellTool.execute;
+      shellTool.execute = async (input, context) => {
+        const gate = evaluateMutationGate(topBash.getCwd(), {
+          toolName: "bash",
+          hardGateEnabled: isGsdHardGateEnabled(),
+        });
+        if (gate.blocked) return gate.reason;
+        return executeShell(input, context);
+      };
+    }
     // Wrap with the cumulative cap so the sub-agent's tool loop cannot
     // accumulate unbounded tool_result tokens. See sub-agent-cap.ts for the
     // tiered compression schedule. The cap is per-invocation; each sub-agent

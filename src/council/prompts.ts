@@ -947,6 +947,7 @@ export function buildSynthesisPrompt(ctx: {
   outputStyle?: string | null; // CQ-18: from PIL Layer 6 ctx.outputStyle
   refineContext?: string; // User answers from post-debate refinement askcard
   planEmphasis?: boolean; // If true, instruct LLM to produce a concrete action plan
+  synthesisOutputContract?: string;
   /** Feature B — resolved council debate language (undefined → English). */
   language?: string;
 }): { system: string; prompt: string } {
@@ -1052,6 +1053,14 @@ export function buildSynthesisPrompt(ctx: {
 
   if (styleDirective) {
     system = `${styleDirective}\n\n${system}`;
+  }
+
+  if (ctx.synthesisOutputContract) {
+    system +=
+      `\n\n## Caller-required final output\n` +
+      `Preserve the outcome JSON and readable synthesis above. Additionally emit the following ` +
+      `decision block in your final answer; prose alone does not satisfy the caller.\n` +
+      ctx.synthesisOutputContract;
   }
 
   let extraContext = "";

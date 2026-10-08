@@ -177,6 +177,8 @@ export function resolveCappedChoice(choice: string): string {
 }
 
 export interface RunCouncilOptions {
+  /** Final leader contract survives spec inference and debate shape selection. */
+  synthesisOutputContract?: string;
   skipClarification?: boolean;
   userModelMessage?: ModelMessage;
   signal?: AbortSignal;
@@ -1721,6 +1723,9 @@ export async function* runCouncil(
     llm,
     debatePlan,
     pilCtx?.outputStyle ?? undefined, // CQ-18: propagate outputStyle
+    undefined,
+    undefined,
+    options?.synthesisOutputContract,
   );
 
   let planResult: IteratorResult<

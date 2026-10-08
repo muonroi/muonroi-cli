@@ -12,7 +12,7 @@ import {
   type PlanPerspectiveId,
   perspectivesForDepth,
 } from "./plan-council-prompts.js";
-import { extractStructuredVerdict, type PlanCouncilVerdict } from "./verdict-schema.js";
+import { extractStructuredVerdict, type PlanCouncilVerdict, VERDICT_OUTPUT_CONTRACT } from "./verdict-schema.js";
 import { advancePhase, setStateField } from "./workflow-engine.js";
 
 export type PerspectiveVerdict = "approve" | "revise" | "block";
@@ -56,7 +56,7 @@ export interface PlanCouncilOpts {
   /** Optional LLM runner for perspective sub-agents (tests use heuristic when omitted). */
   runPerspectiveFn?: RunPerspectiveFn;
   revisionCycle?: number;
-  runDebate?: (topic: string) => Promise<string>;
+  runDebate?: (topic: string, synthesisOutputContract?: string) => Promise<string>;
   abortSignal?: AbortSignal;
 }
 
@@ -223,7 +223,7 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       opts.abortSignal?.throwIfAborted();
       try {
-        synthesis = (await opts.runDebate(topic)) ?? "";
+        synthesis = (await opts.runDebate(topic, VERDICT_OUTPUT_CONTRACT)) ?? "";
       } catch (err) {
         lastDebateError = (err as Error).message;
         console.error(`[gsd] plan-review debate threw (attempt ${attempt + 1}/${maxRetries + 1}): ${lastDebateError}`);

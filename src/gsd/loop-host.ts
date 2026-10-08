@@ -37,7 +37,7 @@ export interface LoopHostContext {
   planTitle?: string;
   shipNotes?: string[];
   commitMessage?: string;
-  runDebate?: (topic: string) => Promise<string>;
+  runDebate?: (topic: string, synthesisOutputContract?: string) => Promise<string>;
   abortSignal?: AbortSignal;
 }
 

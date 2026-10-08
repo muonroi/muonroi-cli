@@ -6,7 +6,19 @@ export interface MutationGateDecision {
 }
 
 const NEVER_GATED_PREFIXES = ["gsd_", "respond_"];
-const NEVER_GATED = new Set(["read_file", "grep", "glob", "bash_output_get", "gsd_status", "compact"]);
+const NEVER_GATED = new Set([
+  "read_file",
+  "grep",
+  "glob",
+  "bash_output_get",
+  "gsd_status",
+  "compact",
+  // Background delegation enforces explore-only. Research and human questions
+  // are prerequisites for reviewing a plan, not authorization to mutate code.
+  "delegate",
+  "ask_user",
+  "delegation_kill",
+]);
 function isNeverGated(t: string): boolean {
   return NEVER_GATED.has(t) || NEVER_GATED_PREFIXES.some((p) => t.startsWith(p));
 }

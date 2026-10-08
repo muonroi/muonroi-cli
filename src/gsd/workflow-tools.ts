@@ -34,7 +34,7 @@ export interface GsdWorkflowToolOpts {
   sessionId?: string;
   depth?: string;
   runTask?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
-  runDebate?: (topic: string, abortSignal?: AbortSignal) => Promise<string>;
+  runDebate?: (topic: string, abortSignal?: AbortSignal, synthesisOutputContract?: string) => Promise<string>;
 }
 
 function json(data: unknown): string {
@@ -163,7 +163,7 @@ export function registerGsdWorkflowTools(tools: ToolSet, opts: GsdWorkflowToolOp
           runPerspectiveFn: runTask
             ? taskToRunPerspectiveFn((request) => runTask(request, abortSignal), sessionModelId)
             : undefined,
-          runDebate: opts.runDebate ? (topic) => opts.runDebate!(topic, abortSignal) : undefined,
+          runDebate: opts.runDebate ? (topic, contract) => opts.runDebate!(topic, abortSignal, contract) : undefined,
         });
         await host.firePoint("plan:post", ctx);
         const reviewResult = await host.firePoint("plan-review:post", ctx);
@@ -240,7 +240,7 @@ export function registerGsdWorkflowTools(tools: ToolSet, opts: GsdWorkflowToolOp
             runPerspectiveFn: runTask
               ? verifyRunPerspectiveFn((request) => runTask(request, abortSignal), sessionModelId)
               : undefined,
-            runDebate: opts.runDebate ? (topic) => opts.runDebate!(topic, abortSignal) : undefined,
+            runDebate: opts.runDebate ? (topic, contract) => opts.runDebate!(topic, abortSignal, contract) : undefined,
           });
           if (!council.skipped && council.verdict !== "pass") {
             effectivePassed = false;

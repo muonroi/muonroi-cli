@@ -459,6 +459,7 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
       /** Gate A — thread the main turn's already-classified scopeKind so runCouncil skips a redundant self-classify round-trip. */
       externalTopic?: boolean;
       skipPil?: boolean;
+      synthesisOutputContract?: string;
       abortSignal?: AbortSignal;
     },
   ): AsyncGenerator<StreamChunk, void, unknown>;
@@ -1055,7 +1056,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           readPilContext: args.pilSupplement ? () => args.pilSupplement.read() : undefined,
           askUser: deps.askUser,
           enterIdeal: deps.enterIdeal,
-          runDebate: async (topic: string, abortSignal?: AbortSignal) => {
+          runDebate: async (topic: string, abortSignal?: AbortSignal, synthesisOutputContract?: string) => {
             abortSignal?.throwIfAborted();
             // Reset before draining so a generator that throws BEFORE setting
             // synthesis (orchestrator.setLastSynthesis) cannot return a STALE
@@ -1065,6 +1066,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               abortSignal: combineAbortSignals(signal, abortSignal),
               skipClarification: true,
               skipPil: true,
+              synthesisOutputContract,
               userModelMessage: { role: "user", content: `/council ${topic}` },
               // Model-callable debate: no human is at the composer mid-tool-call
               // (suppressPreDebateCards) and the synthesis is returned to the
@@ -1313,6 +1315,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           "process_list",
           "delegation_read",
           "delegation_list",
+          "delegate",
+          "ask_user",
+          "delegation_kill",
           "ee_query",
           "ee_health",
           "usage_forensics",

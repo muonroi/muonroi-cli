@@ -5,6 +5,7 @@ import { dynamicTool, jsonSchema } from "ai";
 import { describe, expect, it, vi } from "vitest";
 import { installMockModel, textOnlyStream, toolCallStream } from "../../agent-harness/mock-model.js";
 import { noteCouncilStreamDelta } from "../../council/llm.js";
+import { VERDICT_OUTPUT_CONTRACT } from "../../gsd/verdict-schema.js";
 import { loadCatalog } from "../../models/registry.js";
 import { closeDatabase, getDatabase } from "../../storage/db.js";
 import * as settings from "../../utils/settings.js";
@@ -23,7 +24,8 @@ vi.mock("../../gsd/workflow-tools.js", () => ({
     tools.gsd_plan_review = dynamicTool({
       description: "Review the plan",
       inputSchema: jsonSchema({ type: "object", properties: {}, additionalProperties: false }),
-      execute: async (_input, context) => opts.runDebate("Review this plan", context.abortSignal),
+      execute: async (_input, context) =>
+        opts.runDebate("Review this plan", context.abortSignal, VERDICT_OUTPUT_CONTRACT),
     });
   },
 }));
@@ -111,6 +113,7 @@ describe("nested plan review liveness (ea7378aab8f8)", () => {
     let deltaTimer: ReturnType<typeof setInterval> | undefined;
     const council = vi.spyOn(agent, "runCouncilV2").mockImplementation(async function* (_topic, opts) {
       councilStarted = true;
+      expect(opts?.synthesisOutputContract).toBe(VERDICT_OUTPUT_CONTRACT);
       childSignal = (opts as { abortSignal?: AbortSignal })?.abortSignal;
       if (scenario === "cancelled") cancelTimer = setTimeout(() => agent.abort(), 30);
       if (scenario === "streaming") deltaTimer = setInterval(() => noteCouncilStreamDelta(1), 80);

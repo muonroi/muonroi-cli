@@ -74,7 +74,7 @@ interface ToolRegistryOpts {
    * isolated state (legacy per-closure behaviour).
    */
   sessionId?: string;
-  runDebate?: (topic: string, abortSignal?: AbortSignal) => Promise<string>;
+  runDebate?: (topic: string, abortSignal?: AbortSignal, synthesisOutputContract?: string) => Promise<string>;
   /**
    * When true, the `convene_council` tool is registered so the agent can
    * convene the multi-model council on demand mid-turn. Set by the tool-engine

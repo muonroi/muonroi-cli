@@ -7,6 +7,7 @@ import { BashTool } from "../../tools/bash.js";
 import { createBuiltinTools } from "../../tools/registry.js";
 import { ensurePlanningWorkspace } from "../config-bridge.js";
 import { planningArtifact } from "../paths.js";
+import { VERDICT_OUTPUT_CONTRACT } from "../verdict-schema.js";
 
 describe("gsd workflow tools registry", () => {
   let tmp: string;
@@ -55,7 +56,7 @@ describe("gsd workflow tools registry", () => {
     writeFileSync(planningArtifact(tmp, "PLAN.md"), "# Plan\n1. Implement change\n2. Verify tests\n", "utf8");
     const controller = new AbortController();
     let childSignal: AbortSignal | undefined;
-    const debate = vi.fn(async (_topic: string, signal?: AbortSignal) => {
+    const debate = vi.fn(async (_topic: string, signal?: AbortSignal, _contract?: string) => {
       childSignal = signal;
       controller.abort(new DOMException("Owning tool cancelled", "AbortError"));
       return '```council-verdict\n{"verdict":"approve","concerns":[]}\n```';
@@ -75,6 +76,7 @@ describe("gsd workflow tools registry", () => {
       ).rejects.toThrow("Owning tool cancelled");
       expect(childSignal).toBe(controller.signal);
       expect(debate).toHaveBeenCalledTimes(1);
+      expect(debate.mock.calls[0]?.[2]).toBe(VERDICT_OUTPUT_CONTRACT);
       expect(existsSync(planningArtifact(tmp, name === "gsd_verify" ? "VERIFY-COUNCIL.md" : "PLAN-VERIFY.md"))).toBe(
         false,
       );

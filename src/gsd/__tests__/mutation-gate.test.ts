@@ -50,6 +50,13 @@ describe("evaluateMutationGate (delegates to canExecute, depth from SDK STATE)",
     for (const t of ["gsd_plan", "respond_report", "read_file", "grep"])
       expect(evaluateMutationGate(cwd, { ...on, toolName: t }).blocked).toBe(false);
   });
+  it("allows bounded background research and human clarification without unlocking mutations", () => {
+    seed(cwd, "plan", "revise", "heavy");
+    for (const toolName of ["delegate", "ask_user", "delegation_kill"])
+      expect(evaluateMutationGate(cwd, { ...on, toolName }).blocked, toolName).toBe(false);
+    for (const toolName of ["task", "bash", "write_file", "edit_file", "unknown_tool"])
+      expect(evaluateMutationGate(cwd, { ...on, toolName }).blocked, toolName).toBe(true);
+  });
   it("never gates when disabled or directAnswer", () => {
     seed(cwd, "plan", "revise", "heavy");
     expect(evaluateMutationGate(cwd, { toolName: "edit_file", hardGateEnabled: false }).blocked).toBe(false);

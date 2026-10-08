@@ -92,6 +92,7 @@ export async function* runPlanning(
   outputStyle?: string | null,
   refineContext?: string, // User refinement answers from post-debate askcard
   planEmphasis?: boolean, // If true, emphasize action plan generation
+  synthesisOutputContract?: string,
 ): AsyncGenerator<
   StreamChunk,
   {
@@ -134,6 +135,7 @@ export async function* runPlanning(
       outputStyle: outputStyle ?? undefined,
       refineContext,
       planEmphasis,
+      synthesisOutputContract,
       // Feature B — synthesis output language follows the resolved council
       // debate language (auto → detect from the brief; pinned → that locale).
       language: getCouncilLanguage(),

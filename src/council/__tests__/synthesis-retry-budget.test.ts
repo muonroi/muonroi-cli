@@ -12,6 +12,7 @@
  * the ACTUAL wire budget planner.ts requests — never on an inferred constant.
  */
 import { beforeAll, describe, expect, it } from "vitest";
+import { VERDICT_OUTPUT_CONTRACT } from "../../gsd/verdict-schema.js";
 import { loadCatalog } from "../../models/registry.js";
 import type { CouncilLLM, DebatePlan } from "../types.js";
 
@@ -25,6 +26,7 @@ async function runPlanningCapturingCalls(opts: {
   /** Sequential synthesisText replies, one per `generate()` call. */
   replies: string[];
   debatePlan?: DebatePlan;
+  synthesisOutputContract?: string;
 }): Promise<{
   result: { outcome: unknown; plan: unknown; synthesisText: string; synthesisFailReason?: string };
   calls: RecordedCall[];
@@ -61,7 +63,19 @@ async function runPlanningCapturingCalls(opts: {
   };
   // biome-ignore lint/suspicious/noExplicitAny: minimal CouncilParticipant stub
   const participants: any = [{ role: "primary", model: opts.leaderModelId, position: "pos1" }];
-  const gen = runPlanning(debateState, spec, participants, opts.leaderModelId, async () => false, llm, opts.debatePlan);
+  const gen = runPlanning(
+    debateState,
+    spec,
+    participants,
+    opts.leaderModelId,
+    async () => false,
+    llm,
+    opts.debatePlan,
+    undefined,
+    undefined,
+    undefined,
+    opts.synthesisOutputContract,
+  );
   let result: { outcome: unknown; plan: unknown; synthesisText: string; synthesisFailReason?: string } | undefined;
   while (true) {
     // biome-ignore lint/suspicious/noExplicitAny: generator yields StreamChunk we don't need to inspect here
@@ -78,6 +92,25 @@ async function runPlanningCapturingCalls(opts: {
 describe("planner.ts — synthesis retry output budget", () => {
   beforeAll(async () => {
     await loadCatalog();
+  });
+
+  it("delivers the GSD verdict contract to the final leader and compact retry after spec transformation", async () => {
+    const { calls } = await runPlanningCapturingCalls({
+      leaderModelId: "step-3.7-flash",
+      replies: ["", '{"type":"decision","summary":"Review requires scope evidence."}'],
+      synthesisOutputContract: VERDICT_OUTPUT_CONTRACT,
+    });
+    expect(calls).toHaveLength(2);
+    for (const call of calls) expect(call.system).toContain(VERDICT_OUTPUT_CONTRACT);
+  });
+
+  it("does not impose GSD verdict format on ordinary council synthesis", async () => {
+    const { calls } = await runPlanningCapturingCalls({
+      leaderModelId: "step-3.7-flash",
+      replies: ['{"type":"decision","summary":"Ordinary discussion is complete."}'],
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.system).not.toContain("council-verdict");
   });
 
   it("an empty first attempt retries with a budget >= the first attempt (fails today: it halves it)", async () => {

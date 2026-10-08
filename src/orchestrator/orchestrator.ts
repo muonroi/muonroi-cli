@@ -2544,6 +2544,8 @@ export class Agent {
       externalTopic?: boolean;
       /** Model-convened council must not reintroduce a foreground PIL wait. */
       skipPil?: boolean;
+      /** Caller-owned final output format, independent of spec inference. */
+      synthesisOutputContract?: string;
       /** Cancellation of the SDK tool that owns a nested council. */
       abortSignal?: AbortSignal;
     },
@@ -2635,6 +2637,7 @@ export class Agent {
           // doesn't pay for a second self-classify round-trip.
           externalTopic: options?.externalTopic,
           skipPil: options?.skipPil,
+          synthesisOutputContract: options?.synthesisOutputContract,
           // When the Context Rail is active it carries leader/panel/cost as
           // ambient sidebar rows, so suppress the duplicate inline summary.
           suppressInlineMeta: isContextRailEnabled(),
