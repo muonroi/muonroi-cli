@@ -1,6 +1,6 @@
 - Active run: runs/context-quality.md
-- Gate: phase-close; phase P1 / wave W1 verified; 8853 full units passed, zero failed
+- Gate: done; phase P1 / wave W1 released; 8853 full units passed, zero failed
 - Mode: auto; single agent; preserve user task state and WIP
 - Branch: develop; background PIL/model-owned council released at bc8fe0ee, release record 1af5d374
-- Release: context quality checkpoint/push pending; previous interruption repair d3f1a51d
+- Release: f42283a2ff8ccf9ff8d00a5a556170510bd36776 pushed to origin/develop with normal hooks
 - Remaining limitation: Bun native harness shutdown crash and external npx selfverify packaging issue; remote CI not verified

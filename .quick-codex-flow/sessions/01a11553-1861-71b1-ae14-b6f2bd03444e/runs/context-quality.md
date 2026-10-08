@@ -19,14 +19,14 @@ P1/W1: implement the four repairs and runtime regressions sequentially, with foc
 
 ## Execution / Resume Digest / Compact-Safe Summary
 - Mode: auto under user authorization and developer persistence requirements; single agent.
-- Gate: phase-close; phase P1, wave W1 verified; context risk low, session risk low, burn risk low.
+- Gate: done; phase P1, wave W1 verified and released; context risk low, session risk low, burn risk low.
 - Delegation: none. All source changes owned by main.
 - Approval strategy: authorized reversible edits and verification; do not ask again for routine implementation choices.
 - Experience snapshot: recall returned unrelated EE-connect surface; no recalled rule acted on.
-- Next verify: verify commit hooks leave tested source unchanged, then verify pushed remote SHA.
+- Next verify: none; all four required outcomes and local release checks complete.
 - Carry forward: main owns acceptance; background PIL remains optional; preserve transcript sequence alignment and reasoning metadata; measurements are character estimates, not provider billing.
-- Next Wave Pack / Wave Handoff: W1 verified; commit/push and final release receipt remain.
-- Recommended next command: continue qc-flow context-quality release automatically.
+- Next Wave Pack / Wave Handoff: W1 done. Restart the junction-linked CLI to load the rebuilt modules.
+- Recommended next command: none; requested fixes are complete.
 
 ## Verification Ledger
 - Metrics + existing compactor: 37 passed; full SDK slow-council continuation now checks that post-tool input includes the 8,000-character synthesis and exceeds initial input.
@@ -47,4 +47,4 @@ P1/W1: implement the four repairs and runtime regressions sequentially, with foc
 P1/W1 verified. Build/typecheck passed without errors/warnings; relevant focused tests 152 passed; full configured units 8853 passed with zero failed; Bun-only storage 10 passed; mounted TUI 5 passed/1 skipped; workspace native selfverify smoke-boot 1 passed/0 failed/0 inconclusive. Secrets and staged lint passed, tested source unchanged. No live paid-provider or remote CI claim. Existing Bun child shutdown crash and external npx native-server packaging failure remain outside scope.
 
 ## Release / Goal Audit
-All R1-R4 outcomes have measured tests. Main owns decisions and acceptance; no extra LLM calls, schema/policy/settings/user DB migrations, or watchdog changes. Next action: checkpoint commit with normal hooks, verify source hashes again, then push to develop under prior commit/push authorization only after the green full-suite receipt.
+All R1-R4 outcomes have measured tests. Main owns decisions and acceptance; no extra LLM calls, schema/policy/settings/user DB migrations, or watchdog changes. Implementation f42283a2ff8ccf9ff8d00a5a556170510bd36776 committed and pushed to origin/develop with normal hooks after the green full-suite receipt. All 1953 source hashes remained unchanged after commit hooks. CLI global package is a junction to this workspace; restart loads the rebuilt dist. Remote CI is not verified; native QA limitations above remain explicit. This final release-receipt update is docs only.
