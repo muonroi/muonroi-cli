@@ -987,10 +987,9 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           required: ["agent", "description", "prompt"],
         }),
         execute: async (input: any) => {
-          // Auto-route long research (explore agent or high round count) to true background delegation
-          // to prevent blocking the main turn and causing stall timeouts.
-          const isLongResearch =
-            input.agent === "explore" || (typeof input.maxToolRounds === "number" && input.maxToolRounds > 25);
+          // Background workers accept only read-only explore. A round budget
+          // does not change an editing/verification task into research.
+          const isLongResearch = input.agent === "explore";
 
           const executor = isLongResearch && runDelegationFn ? runDelegationFn : runTaskFn;
 

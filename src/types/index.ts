@@ -849,6 +849,8 @@ export interface ModelInfo {
   outputPrice: number;
   cachedInputPrice?: number;
   cacheWritePrice?: number;
+  /** Per-request prompt threshold; input multiplier also covers cache reads/writes. */
+  longContextPricing?: { inputTokenThreshold: number; inputMultiplier: number; outputMultiplier: number };
   reasoning: boolean;
   description: string;
   tier?: ModelTier;

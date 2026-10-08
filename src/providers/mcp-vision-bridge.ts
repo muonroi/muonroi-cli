@@ -984,7 +984,11 @@ function stripBase64FromOutput(output: unknown): unknown {
 }
 
 function walkAndStrip(obj: Record<string, unknown>): void {
+  // Thinking/signatures and provider metadata are opaque replay state, not
+  // screenshot bytes (session d78d41cab2b8, error event 53830).
+  if (obj.type === "reasoning") return;
   for (const [key, value] of Object.entries(obj)) {
+    if (key === "providerOptions" || key === "providerMetadata") continue;
     if (typeof value === "string" && value.length > 500 && isLikelyBase64Image(value)) {
       obj[key] = "[image data removed — see vision description below]";
     } else if (typeof value === "object" && value !== null) {

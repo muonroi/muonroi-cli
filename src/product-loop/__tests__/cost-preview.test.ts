@@ -1,11 +1,37 @@
-import { describe, expect, it } from "vitest";
+import { createRequire } from "node:module";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { loadCatalog } from "../../models/registry.js";
 import { DEFAULT_HEURISTIC, formatCostPreview, previewRunCost } from "../cost-preview.js";
+
+vi.mock("../../models/catalog-client.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../models/catalog-client.js")>()),
+  fetchCatalogDocument: async () => createRequire(import.meta.url)("../../models/catalog.json"),
+}));
+beforeAll(async () => {
+  await loadCatalog();
+});
 
 // The preview used to compare the estimate against `--max-cost` (willExceedCap)
 // and recommend a smaller `--max-sprints` to fit it. `/ideal` has no spend cap
 // (user decision): the preview is an estimate for the user's information only.
 
 describe("previewRunCost — an estimate, never a cap", () => {
+  it("does not apply Haiku prompt surcharges to cumulative sprint volume", () => {
+    const p = previewRunCost({
+      sessionModelId: "claude-haiku-5-5",
+      heuristic: {
+        ...DEFAULT_HEURISTIC,
+        callsPerSprint: 6,
+        inputTokensPerCall: 20_000,
+        outputTokensPerCall: 1_000,
+        debateInputPerSprint: 120_000,
+        debateOutputPerSprint: 4_000,
+        cacheHitRate: 0,
+      },
+    });
+    expect(p.estPerSprintUsd).toBeCloseTo(0.029);
+  });
+
   it("uses cached_input price when model has one (DeepSeek flash)", () => {
     const p = previewRunCost({ sessionModelId: "deepseek-v4-flash", maxSprints: 8 });
     expect(p.pricingKnown).toBe(true);

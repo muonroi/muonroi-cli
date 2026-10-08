@@ -1,10 +1,11 @@
-import { spawn } from "child_process";
-import { createHash } from "crypto";
+import { execFile, spawn } from "child_process";
+import { createHash, randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
 import type { DelegationRun, DelegationStatus, TaskRequest, ToolResult } from "../types/index";
-import { redactSecrets } from "../utils/logger.js";
+import { withFileLock } from "../utils/file-lock.js";
+import { logger, redactSecrets } from "../utils/logger.js";
 import type { SandboxMode, SandboxSettings } from "../utils/settings";
 
 const ID_ADJECTIVES = ["brisk", "calm", "clever", "eager", "gentle", "keen", "lively", "nimble", "quiet", "steady"];
@@ -34,6 +35,7 @@ export interface StoredDelegation {
   summary?: string;
   outputPath: string;
   notifiedAt?: string;
+  parentSessionId?: string;
 }
 
 export interface DelegationNotification {
@@ -51,7 +53,11 @@ interface StartDelegationOptions {
 }
 
 export class DelegationManager {
-  constructor(private readonly getCwd: () => string) {}
+  constructor(
+    private readonly getCwd: () => string,
+    private readonly getOwnerId: () => string | undefined = () => undefined,
+    private readonly getStorageCwd: () => string = getCwd,
+  ) {}
 
   async start(request: TaskRequest, options: StartDelegationOptions): Promise<ToolResult> {
     if (process.env.MUONROI_BACKGROUND_CHILD === "1") {
@@ -70,7 +76,7 @@ export class DelegationManager {
     }
 
     const cwd = this.getCwd();
-    const dir = await ensureDelegationsDir(cwd);
+    const dir = await ensureDelegationsDir(this.getStorageCwd());
     const id = await generateUniqueId(dir);
     const outputPath = path.join(dir, `${id}.md`);
     const jobPath = path.join(dir, `${id}.json`);
@@ -90,6 +96,7 @@ export class DelegationManager {
       status: "running",
       startedAt: new Date().toISOString(),
       outputPath,
+      parentSessionId: this.getOwnerId(),
     };
 
     await writeRecord(jobPath, record);
@@ -113,8 +120,17 @@ export class DelegationManager {
     );
     child.unref();
 
-    record.pid = child.pid;
-    await writeRecord(jobPath, record);
+    child.once("error", (err) => {
+      logger.error("orchestrator", "Background delegation spawn failed", { id, error: err.message });
+      failDelegation(jobPath, err.message).catch((writeErr) => {
+        logger.error("orchestrator", "Failed to persist delegation spawn error", { id, error: writeErr.message });
+      });
+    });
+    await withFileLock(jobPath, async () => {
+      const current = await loadDelegation(jobPath);
+      current.pid = child.pid;
+      await writeRecord(jobPath, current);
+    });
 
     const output = [
       `Delegation started: ${id}`,
@@ -137,12 +153,13 @@ export class DelegationManager {
   }
 
   async list(): Promise<DelegationRun[]> {
-    const dir = await ensureDelegationsDir(this.getCwd());
+    const dir = await ensureDelegationsDir(this.getStorageCwd());
     const files = await readDelegationFiles(dir);
-    const items = await Promise.all(files.map(async (file) => readRecord(path.join(dir, file))));
+    const items = await Promise.all(files.map(async (file) => this.reconcile(path.join(dir, file))));
 
     return items
       .filter((item): item is StoredDelegation => item !== null)
+      .filter((item) => this.canAccess(item))
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
       .map(toDelegationRun);
   }
@@ -159,7 +176,8 @@ export class DelegationManager {
 
     try {
       return await fs.readFile(record.outputPath, "utf8");
-    } catch {
+    } catch (err) {
+      logger.warn("orchestrator", "Failed to read delegation output", { id, error: String(err) });
       if (record.error) {
         return `Delegation "${id}" failed.\n\n${record.error}`;
       }
@@ -168,7 +186,13 @@ export class DelegationManager {
   }
 
   async kill(id: string): Promise<ToolResult> {
-    const record = await this.getById(id);
+    const dir = await ensureDelegationsDir(this.getStorageCwd());
+    const jobPath = path.join(dir, `${id}.json`);
+    const stored = await readRecord(jobPath);
+    if (stored && !this.canAccess(stored)) {
+      return { success: false, output: `Delegation "${id}" belongs to another session.` };
+    }
+    const record = await this.reconcile(jobPath);
     if (!record) {
       return {
         success: false,
@@ -177,6 +201,9 @@ export class DelegationManager {
     }
 
     if (record.status !== "running") {
+      if (stored?.status === "running" && record.status === "error") {
+        return { success: true, output: `Delegation "${id}" already exited; recorded its failure.` };
+      }
       return {
         success: false,
         output: `Delegation "${id}" is not running (status: ${record.status}).`,
@@ -185,7 +212,6 @@ export class DelegationManager {
 
     const pid = record.pid;
     if (!pid) {
-      const jobPath = path.join(await ensureDelegationsDir(this.getCwd()), `${id}.json`);
       await failDelegation(jobPath, "Cancelled: Process PID was not recorded.");
       return {
         success: true,
@@ -195,15 +221,25 @@ export class DelegationManager {
 
     try {
       if (process.platform === "win32") {
-        spawn("taskkill", ["/F", "/T", "/PID", pid.toString()]).unref();
+        await new Promise<void>((resolve, reject) => {
+          execFile("taskkill", ["/F", "/T", "/PID", pid.toString()], { timeout: 3000, windowsHide: true }, (err) =>
+            err ? reject(err) : resolve(),
+          );
+        });
       } else {
         process.kill(pid, "SIGTERM");
       }
+      const deadline = Date.now() + 3000;
+      while (isProcessAlive(pid) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      if (isProcessAlive(pid)) throw new Error("Worker remained alive after termination request");
     } catch (err) {
-      // ignore
+      logger.error("orchestrator", "Delegation termination failed", { id, pid, error: String(err) });
+      if (isProcessAlive(pid))
+        return { success: false, output: `Failed to terminate delegation "${id}": ${String(err)}` };
     }
 
-    const jobPath = path.join(await ensureDelegationsDir(this.getCwd()), `${id}.json`);
     await failDelegation(jobPath, "Cancelled by user.");
 
     return {
@@ -213,20 +249,20 @@ export class DelegationManager {
   }
 
   async consumeNotifications(): Promise<DelegationNotification[]> {
-    const dir = await ensureDelegationsDir(this.getCwd());
+    const dir = await ensureDelegationsDir(this.getStorageCwd());
     const files = await readDelegationFiles(dir);
     const notifications: DelegationNotification[] = [];
 
     for (const file of files) {
       const jobPath = path.join(dir, file);
-      const record = await readRecord(jobPath);
-      if (!record || record.status === "running" || record.notifiedAt) continue;
-
-      record.notifiedAt = new Date().toISOString();
-      await writeRecord(jobPath, record);
-      notifications.push({
-        id: record.id,
-        message: formatNotification(record),
+      await this.reconcile(jobPath);
+      await withFileLock(jobPath, async () => {
+        const record = await readRecord(jobPath);
+        if (!record || record.parentSessionId !== this.getOwnerId() || record.status === "running" || record.notifiedAt)
+          return;
+        record.notifiedAt = new Date().toISOString();
+        await writeRecord(jobPath, record);
+        notifications.push({ id: record.id, message: formatNotification(record) });
       });
     }
 
@@ -234,8 +270,35 @@ export class DelegationManager {
   }
 
   private async getById(id: string): Promise<StoredDelegation | null> {
-    const dir = await ensureDelegationsDir(this.getCwd());
-    return readRecord(path.join(dir, `${id}.json`));
+    const dir = await ensureDelegationsDir(this.getStorageCwd());
+    const record = await this.reconcile(path.join(dir, `${id}.json`));
+    return record && this.canAccess(record) ? record : null;
+  }
+
+  private canAccess(record: StoredDelegation): boolean {
+    return !record.parentSessionId || record.parentSessionId === this.getOwnerId();
+  }
+
+  private async reconcile(jobPath: string): Promise<StoredDelegation | null> {
+    const initial = await readRecord(jobPath);
+    if (!initial || !this.canAccess(initial) || initial.status !== "running") return initial;
+    // start() persists the job before spawning; do not race the PID handoff.
+    if (!initial.pid && Date.now() - Date.parse(initial.startedAt) < 10_000) return initial;
+    if (initial.pid && isProcessAlive(initial.pid)) return initial;
+    await failDelegation(jobPath, "Background worker exited before saving a result.");
+    return readRecord(jobPath);
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    logger.debug("orchestrator", "Delegation PID check", { pid, code, error: String(err) });
+    // An access denial is not evidence of death.
+    return code !== "ESRCH";
   }
 }
 
@@ -248,40 +311,46 @@ export async function loadDelegation(jobPath: string): Promise<StoredDelegation>
 }
 
 export async function completeDelegation(jobPath: string, output: string, fallbackSummary?: string): Promise<void> {
-  const record = await loadDelegation(jobPath);
-  record.status = "complete";
-  record.completedAt = new Date().toISOString();
-  record.title = record.title || createTitle(output, record.description);
-  record.summary = createSummary(output || fallbackSummary || record.description);
+  await withFileLock(jobPath, async () => {
+    const record = await loadDelegation(jobPath);
+    if (record.status !== "running") return;
+    record.status = "complete";
+    record.completedAt = new Date().toISOString();
+    record.title = record.title || createTitle(output, record.description);
+    record.summary = createSummary(output || fallbackSummary || record.description);
 
-  await fs.mkdir(path.dirname(record.outputPath), { recursive: true });
-  await fs.writeFile(record.outputPath, renderOutput(record, output), "utf8");
-  await writeRecord(jobPath, record);
+    await fs.mkdir(path.dirname(record.outputPath), { recursive: true });
+    await fs.writeFile(record.outputPath, renderOutput(record, output), "utf8");
+    await writeRecord(jobPath, record);
+  });
 }
 
 export async function failDelegation(jobPath: string, error: string, output = ""): Promise<void> {
-  const record = await loadDelegation(jobPath);
-  // `error` is a caught failure's text from the delegated run. It reaches TWO
-  // durable artifacts — the job JSON (`record.error`, via writeRecord) and the
-  // rendered `.md` (`renderOutput`'s `**Error:**` line + the body fallback) —
-  // so it is redacted ONCE here, before either is built.
-  //
-  // Scoped deliberately to `error` alone. `record.prompt`, `record.description`
-  // and `output` are the delegation's functional payload: the record is read
-  // back by `loadDelegation` and the `.md` IS the deliverable. Scrubbing those
-  // would corrupt a delegation whose legitimate job was to produce a config or
-  // a credential-adjacent snippet. A caught error message is the only field
-  // here that is pure diagnostics.
-  const safeError = redactSecrets(error);
-  record.status = "error";
-  record.completedAt = new Date().toISOString();
-  record.error = safeError;
-  record.title = record.title || createTitle(output || safeError, record.description);
-  record.summary = createSummary(output || safeError);
+  await withFileLock(jobPath, async () => {
+    const record = await loadDelegation(jobPath);
+    if (record.status !== "running") return;
+    // `error` is a caught failure's text from the delegated run. It reaches TWO
+    // durable artifacts — the job JSON (`record.error`, via writeRecord) and the
+    // rendered `.md` (`renderOutput`'s `**Error:**` line + the body fallback) —
+    // so it is redacted ONCE here, before either is built.
+    //
+    // Scoped deliberately to `error` alone. `record.prompt`, `record.description`
+    // and `output` are the delegation's functional payload: the record is read
+    // back by `loadDelegation` and the `.md` IS the deliverable. Scrubbing those
+    // would corrupt a delegation whose legitimate job was to produce a config or
+    // a credential-adjacent snippet. A caught error message is the only field
+    // here that is pure diagnostics.
+    const safeError = redactSecrets(error);
+    record.status = "error";
+    record.completedAt = new Date().toISOString();
+    record.error = safeError;
+    record.title = record.title || createTitle(output || safeError, record.description);
+    record.summary = createSummary(output || safeError);
 
-  await fs.mkdir(path.dirname(record.outputPath), { recursive: true });
-  await fs.writeFile(record.outputPath, renderOutput(record, output || `Error: ${safeError}`), "utf8");
-  await writeRecord(jobPath, record);
+    await fs.mkdir(path.dirname(record.outputPath), { recursive: true });
+    await fs.writeFile(record.outputPath, renderOutput(record, output || `Error: ${safeError}`), "utf8");
+    await writeRecord(jobPath, record);
+  });
 }
 
 async function ensureDelegationsDir(cwd: string): Promise<string> {
@@ -295,7 +364,8 @@ async function readDelegationFiles(dir: string): Promise<string[]> {
   try {
     const files = await fs.readdir(dir);
     return files.filter((file) => file.endsWith(".json"));
-  } catch {
+  } catch (err) {
+    logger.warn("orchestrator", "Failed to list delegation records", { dir, error: String(err) });
     return [];
   }
 }
@@ -304,14 +374,21 @@ async function readRecord(filePath: string): Promise<StoredDelegation | null> {
   try {
     const raw = await fs.readFile(filePath, "utf8");
     return JSON.parse(raw) as StoredDelegation;
-  } catch {
+  } catch (err) {
+    logger.debug("orchestrator", "Failed to load delegation record", { filePath, error: String(err) });
     return null;
   }
 }
 
 async function writeRecord(filePath: string, record: StoredDelegation): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(record, null, 2), "utf8");
+  const tempPath = `${filePath}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(tempPath, JSON.stringify(record, null, 2), "utf8");
+    await fs.rename(tempPath, filePath);
+  } finally {
+    await fs.rm(tempPath, { force: true });
+  }
 }
 
 async function generateUniqueId(dir: string): Promise<string> {
@@ -319,7 +396,8 @@ async function generateUniqueId(dir: string): Promise<string> {
     const id = randomId();
     try {
       await fs.access(path.join(dir, `${id}.json`));
-    } catch {
+    } catch (err) {
+      logger.debug("orchestrator", "Delegation ID availability check", { id, error: String(err) });
       return id;
     }
   }

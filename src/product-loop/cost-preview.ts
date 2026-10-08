@@ -21,6 +21,8 @@ export interface SprintHeuristic {
   outputTokensPerCall: number;
   debateInputPerSprint: number;
   debateOutputPerSprint: number;
+  /** Number of requests represented by the aggregated debate volume. */
+  debateCallsPerSprint?: number;
   /** Fraction of input that hits the prompt cache after sprint 1 (0..1). */
   cacheHitRate: number;
 }
@@ -31,6 +33,7 @@ export const DEFAULT_HEURISTIC: SprintHeuristic = {
   outputTokensPerCall: 2_000,
   debateInputPerSprint: 30_000,
   debateOutputPerSprint: 6_000,
+  debateCallsPerSprint: 4,
   cacheHitRate: 0.7,
 };
 
@@ -78,15 +81,17 @@ export function previewRunCost(args: {
   const pricing = lookupPricing(provider, args.sessionModelId);
   if (!pricing) return unpriced(provider);
 
-  const inputPerSprint = h.callsPerSprint * h.inputTokensPerCall + h.debateInputPerSprint;
-  const outputPerSprint = h.callsPerSprint * h.outputTokensPerCall + h.debateOutputPerSprint;
-
   const cachedInputAvailable = typeof pricing.cached_input_per_million_usd === "number";
   const hitRate = cachedInputAvailable ? h.cacheHitRate : 0;
-  const inputHit = Math.round(inputPerSprint * hitRate);
-  const inputMiss = inputPerSprint - inputHit;
-
-  const estPerSprintUsd = projectCostUSDWithCache(provider, args.sessionModelId, inputMiss, inputHit, outputPerSprint);
+  // Prompt-length surcharges apply per request, never to cumulative sprint volume.
+  const costForRequest = (input: number, output: number) => {
+    const hit = Math.round(input * hitRate);
+    return projectCostUSDWithCache(provider, args.sessionModelId, input - hit, hit, output);
+  };
+  const debateCalls = h.debateCallsPerSprint ?? 1;
+  const estPerSprintUsd =
+    h.callsPerSprint * costForRequest(h.inputTokensPerCall, h.outputTokensPerCall) +
+    debateCalls * costForRequest(h.debateInputPerSprint / debateCalls, h.debateOutputPerSprint / debateCalls);
   return {
     modelId: args.sessionModelId,
     provider,

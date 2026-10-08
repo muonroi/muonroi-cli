@@ -93,7 +93,7 @@ function loadMessageRows(sessionId: string): MessageRow[] {
   `)
     .all(sessionId) as MessageRow[];
   for (const row of rows) {
-    row.message_json = sanitizeBase64InMessageJson(row.message_json);
+    if (row.role === "tool") row.message_json = sanitizeBase64InMessageJson(row.message_json);
   }
   return rows;
 }
@@ -1076,12 +1076,24 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
   // where the user actually asked — and drop the child's, mirroring how the
   // child's duplicated user prompt is handled above.
   const absorbedByChild = new Map<string, string>();
+  const reviewedHelpers = new Set<string>();
   for (let i = 1; i < chain.length; i++) {
     const sid = chain[i];
     const parentId = sessionMeta.get(sid)?.parent_session_id;
     if (!parentId) continue;
     const parentRecords = recordsBySession.get(parentId);
     if (!parentRecords) continue;
+    if (
+      sid !== sessionId &&
+      parentRecords.some(
+        (r) =>
+          r.message.role === "system" &&
+          typeof r.message.content === "string" &&
+          r.message.content.startsWith(`[Helper receipt: ${sid}]`),
+      )
+    ) {
+      reviewedHelpers.add(sid);
+    }
     const text = lastAssistantText(recordsBySession.get(sid) ?? []);
     if (text && parentRecords.some((r) => r.message.role === "assistant" && assistantText(r.message) === text)) {
       absorbedByChild.set(sid, text);
@@ -1125,7 +1137,7 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
           continue;
         }
         const content = summaryText ?? (typeof message.content === "string" ? message.content.trim() : "");
-        if (content && !isInternalCouncilMarker(content)) {
+        if (content && !isInternalCouncilMarker(content) && !content.startsWith("[Helper receipt:")) {
           entries.push(
             summaryText !== null
               ? { type: "assistant", content, timestamp, sourceLabel: "⋯ context checkpoint (auto-compacted)" }
@@ -1141,6 +1153,7 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
         // message itself is skipped as an absorbed duplicate.
         const text = renderAssistantContent(message.content, callMap);
         if (text) {
+          if (reviewedHelpers.has(sid)) continue;
           if (absorbedPending !== undefined && text === absorbedPending) {
             absorbedPending = undefined;
             continue;
@@ -1154,6 +1167,7 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
         for (const part of message.content) {
           if (part.type !== "tool-result") continue;
           if (isResponseTool(part.toolName)) {
+            if (reviewedHelpers.has(sid)) continue;
             renderedResponseCallIds.add(part.toolCallId);
             const rawOutput = part.output as unknown;
             const unwrapped =

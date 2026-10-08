@@ -1,0 +1,18 @@
+{
+  "runtime": "node",
+  "parentId": "a46297357d2b",
+  "restoredParentId": "a46297357d2b",
+  "output": "MAIN_FINAL: verified answer is four.",
+  "child": [
+    {
+      "id": "f514773f085f",
+      "kind": "subagent",
+      "parent_session_id": "a46297357d2b"
+    }
+  ],
+  "parentHasReceipt": true,
+  "parentHasMainAnswer": true,
+  "contentIsMainOnly": true,
+  "modelCalls": 11,
+  "requestedBackgroundRounds": 60
+}

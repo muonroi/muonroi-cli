@@ -92,6 +92,8 @@ const capturedTurnModelIds: Array<{ sessionId: string | undefined; modelId: stri
 // whole Agent instance, so this is exactly what a real sub-session tool
 // call does to it.
 let simulatedCdTo: string | null = null;
+let cancelHelper = false;
+let failHelper = false;
 
 // Simulate a read-heavy turn: write intermediate clutter to the CHILD session
 // (real DB), and leave [.., final assistant, final tool] in the in-memory working
@@ -104,6 +106,7 @@ vi.mock("../message-processor.js", () => ({
       reportTurnToolLoad?: (n: number) => void;
       modelId?: string;
       bash?: { setCwd: (p: string) => void; getCwd: () => string };
+      getAbortController?: () => AbortController | null;
     };
     constructor(deps: {
       messages: unknown[];
@@ -111,11 +114,26 @@ vi.mock("../message-processor.js", () => ({
       reportTurnToolLoad?: (n: number) => void;
       modelId?: string;
       bash?: { setCwd: (p: string) => void; getCwd: () => string };
+      getAbortController?: () => AbortController | null;
     }) {
       this.deps = deps;
       capturedTurnModelIds.push({ sessionId: deps.session?.id, modelId: deps.modelId });
     }
     async *run() {
+      if (this.deps.messages.some((m: any) => m.role === "system" && String(m.content).startsWith("[Helper receipt"))) {
+        const answer = { role: "assistant", content: "MAIN accepted the evidence and produced the final answer" };
+        appendMessages(this.deps.session!.id, [answer] as never);
+        this.deps.messages.push(answer);
+        yield { type: "content", content: answer.content };
+        yield { type: "done" };
+        return;
+      }
+      if (cancelHelper) {
+        this.deps.getAbortController?.()?.abort();
+        yield { type: "done" };
+        return;
+      }
+      if (failHelper) throw new Error("Controlled helper failure");
       this.deps.reportTurnToolLoad?.(reportedLoad);
       if (simulatedCdTo) this.deps.bash?.setCwd(simulatedCdTo);
       const childId = this.deps.session?.id;
@@ -159,6 +177,8 @@ beforeEach(() => {
   process.env.MUONROI_FORCE_ROUTING_CLASSIFY = "1";
   reportedLoad = 0;
   simulatedCdTo = null;
+  cancelHelper = false;
+  failHelper = false;
   capturedTurnModelIds.length = 0;
   capturedResolveModelForTaskCalls.length = 0;
   closeDatabase();
@@ -179,6 +199,115 @@ afterEach(() => {
 });
 
 describe("sub-session SPAWN on real SQLite — labeling + absorption + parent leanness", () => {
+  it("retains the original main owner through a nested helper handoff", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    (agent as any)._helperParentSessionId = "original-main";
+    for await (const _ of agent.processMessage("Inspect nested task")) {
+      /* drain */
+    }
+    expect((agent as any)._helperParentSessionId).toBe("original-main");
+    expect((agent as any).delegations.getOwnerId()).toBe("original-main");
+  });
+
+  it("consults the parent's configured model and propagates cancellation when a helper asks for guidance", async () => {
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-pro", undefined, { persistSession: true });
+    const state = agent as any;
+    const parentId = agent.getSessionId();
+    const child = state.sessionStore.createSession("deepseek-v4-flash", "agent", process.cwd());
+    state.sessionStore.linkChild(child.id, parentId, "subagent");
+    state.session = child;
+    state.modelId = child.model;
+    state.abortController = new AbortController();
+    const providerRuntime = await import("../../providers/runtime.js");
+    const generate = await import("../../providers/streamed-generate.js");
+    const resolve = vi.spyOn(providerRuntime, "resolveModelRuntime");
+    const stream = vi
+      .spyOn(generate, "generateTextStreamed")
+      .mockResolvedValue({ text: "Parent guidance", toolCalls: [] });
+    try {
+      const advice = await state._buildMessageProcessorDeps().consultParentSession("Need guidance");
+      expect(advice).toBe("Parent guidance");
+      expect(resolve).toHaveBeenCalledWith("deepseek-v4-pro");
+      const options = stream.mock.calls[0]?.[0];
+      state.abortController.abort();
+      expect(options?.abortSignal?.aborted).toBe(true);
+    } finally {
+      resolve.mockRestore();
+      stream.mockRestore();
+    }
+  });
+
+  it("defers main-owned notifications while the Agent is executing its helper context", async () => {
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId();
+    (agent as any)._helperParentSessionId = parentId;
+    (agent as any).session = { ...(agent as any).session, id: "child-context" };
+    const consume = vi.spyOn((agent as any).delegations, "consumeNotifications").mockResolvedValue([]);
+    expect((agent as any).delegations.getOwnerId()).toBe(parentId);
+    await agent.consumeBackgroundNotifications();
+    expect(consume).not.toHaveBeenCalled();
+    consume.mockRestore();
+  });
+
+  it("restores main after cancellation without starting a new decision step", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    cancelHelper = true;
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId();
+    for await (const _ of agent.processMessage("Inspect")) {
+      /* drain */
+    }
+    expect(agent.getSessionId()).toBe(parentId);
+    expect(capturedTurnModelIds).toHaveLength(1);
+    expect((agent as any).abortController).toBeNull();
+  });
+
+  it("restores parent when the consumer closes the generator during helper work", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId();
+    const stream = agent.processMessage("Inspect");
+    while (capturedTurnModelIds.length === 0) await stream.next();
+    await stream.return();
+    expect(agent.getSessionId()).toBe(parentId);
+    expect(capturedTurnModelIds).toHaveLength(1);
+    expect((agent as any).abortController).toBeNull();
+  });
+
+  it("returns helper failures to main for a decision rather than finalizing them as an answer", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    failHelper = true;
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    for await (const _ of agent.processMessage("Inspect")) {
+      /* drain */
+    }
+    expect(capturedTurnModelIds).toHaveLength(2);
+    expect(JSON.stringify((agent as any).messages)).toContain("Status: failed");
+    expect((agent as any).abortController).toBeNull();
+  });
+
+  it("returns a bounded helper receipt to main and only main produces the final answer", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId()!;
+    const chunks = [];
+    for await (const chunk of agent.processMessage("Inspect implementation and report evidence")) chunks.push(chunk);
+    expect(capturedTurnModelIds).toHaveLength(2);
+    expect(capturedTurnModelIds[1]?.sessionId).toBe(parentId);
+    expect(chunks.filter((c) => c.type === "content").map((c) => c.content)).toEqual([
+      "MAIN accepted the evidence and produced the final answer",
+    ]);
+    expect(chunks.filter((c) => c.type === "done")).toHaveLength(1);
+    const parentRows = getDatabase()
+      .prepare("SELECT message_json FROM messages WHERE session_id = ? ORDER BY seq")
+      .all(parentId);
+    const text = JSON.stringify(parentRows);
+    expect(text).toContain("Helper receipt");
+    expect(text).not.toContain("CLUTTER_");
+    expect(text).toContain("MAIN accepted");
+  });
+
   it("creates a kind='subagent' child, isolates 50KB clutter in it, and absorbs ONLY the outcome to a lean parent", async () => {
     mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
 
@@ -259,11 +388,13 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
 
     const entries = buildChatEntries(parentId);
     const answers = entries.filter((e) => e.type === "assistant" && e.content.includes(FINAL_OUTCOME));
-    expect(answers).toHaveLength(1);
+    expect(answers).toHaveLength(0); // Helper evidence is internal; main owns the displayed answer.
+    expect(entries.filter((e) => e.type === "assistant" && e.content.includes("MAIN accepted"))).toHaveLength(1);
+    expect(entries.some((e) => e.content.startsWith("[Helper receipt:"))).toBe(false);
 
     // The child's OTHER assistant work is untouched — only the absorbed message
     // is dropped, not the whole child transcript.
-    expect(entries.some((e) => e.type === "assistant" && e.content === "intermediate analysis step")).toBe(true);
+    expect(entries.some((e) => e.type === "assistant" && e.content === "intermediate analysis step")).toBe(false);
   });
 
   it("DIRECT_ANSWER runs in the parent — no child session created (baseline)", async () => {
@@ -396,7 +527,7 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
       // run) was constructed against the CHILD session, with the pinned
       // modelId — not just the session row, the actual deps its tool loop
       // runs with.
-      expect(capturedTurnModelIds).toHaveLength(1);
+      expect(capturedTurnModelIds).toHaveLength(2);
       expect(capturedTurnModelIds[0]?.sessionId).toBe(child?.id);
       expect(capturedTurnModelIds[0]?.modelId).toBe(PIN_MODEL);
     } finally {
@@ -635,7 +766,7 @@ describe("subAgentModel — round 9 (HR8): sub-agent/sub-session dispatch can ru
       // The child gets subAgentModel, not the main session's pin.
       expect(child).toBeDefined();
       expect(child?.model).toBe(SUB_AGENT_MODEL);
-      expect(capturedTurnModelIds).toHaveLength(1);
+      expect(capturedTurnModelIds).toHaveLength(2);
       expect(capturedTurnModelIds[0]?.sessionId).toBe(child?.id);
       expect(capturedTurnModelIds[0]?.modelId).toBe(SUB_AGENT_MODEL);
     } finally {
@@ -693,7 +824,8 @@ describe("subAgentModel — round 9 (HR8): sub-agent/sub-session dispatch can ru
       for await (const _ of agent.processMessage("review toàn bộ src/council và liệt kê silent catch")) {
         // drain
       }
-      expect(capturedTurnModelIds.at(-1)?.modelId).toBe(SUB_AGENT_MODEL);
+      expect(capturedTurnModelIds.at(-2)?.modelId).toBe(SUB_AGENT_MODEL);
+      expect(capturedTurnModelIds.at(-1)?.modelId).toBe(MAIN_MODEL);
 
       // Turn 2: a plain DIRECT_ANSWER turn on the (now restored) main
       // session — must run on MAIN_MODEL, not the sub-agent override left
@@ -745,7 +877,8 @@ describe("subAgentModel — round 9 (HR8): sub-agent/sub-session dispatch can ru
       for await (const _ of agent.processMessage("review toàn bộ src/council và liệt kê silent catch")) {
         // drain
       }
-      expect(capturedTurnModelIds.at(-1)?.modelId).toBe(SUB_AGENT_MODEL);
+      expect(capturedTurnModelIds.at(-2)?.modelId).toBe(SUB_AGENT_MODEL);
+      expect(capturedTurnModelIds.at(-1)?.modelId).toBe(MAIN_MODEL);
       const childBefore = getDatabase().prepare("SELECT id FROM sessions WHERE parent_session_id = ?").get(parentId) as
         | { id: string }
         | undefined;

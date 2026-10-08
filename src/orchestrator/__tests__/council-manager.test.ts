@@ -5,7 +5,7 @@
 // src/council/__tests__/*.test.ts.
 
 import type { ModelMessage } from "ai";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BashTool } from "../../tools/bash";
 import { CouncilManager, type CouncilManagerDeps } from "../council-manager";
 import { __resetInteractivePauseForTests, isInteractivePaused } from "../interactive-pause.js";
@@ -70,6 +70,45 @@ describe("CouncilManager — state isolation", () => {
 });
 
 describe("CouncilManager — question resolver lifecycle", () => {
+  it("cancelling a PIL answer withdraws its resolver and releases only its watchdog hold", async () => {
+    __resetInteractivePauseForTests();
+    const m = new CouncilManager(makeDeps());
+    const other = m.createQuestionResponder()("other-question");
+    const controller = new AbortController();
+    const pending = m.createQuestionResponder(controller.signal)("pil-question");
+    const rejection = expect(pending).rejects.toThrow("PIL cancelled");
+    controller.abort(new Error("PIL cancelled"));
+    await rejection;
+    expect(m.respondToQuestion("pil-question", "late answer").stale).toBe(true);
+    expect(isInteractivePaused()).toBe(true);
+    m.respondToQuestion("other-question", "answer");
+    await other;
+    expect(isInteractivePaused()).toBe(false);
+  });
+
+  it("an answered PIL card removes its abort listener and does not become stale later", async () => {
+    __resetInteractivePauseForTests();
+    const m = new CouncilManager(makeDeps());
+    const controller = new AbortController();
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    const pending = m.createQuestionResponder(controller.signal)("answered-pil-question");
+    m.respondToQuestion("answered-pil-question", "proceed");
+    await expect(pending).resolves.toBe("proceed");
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+    controller.abort(new Error("later turn cancelled"));
+    expect(m.respondToQuestion("answered-pil-question", "another answer").stale).toBe(false);
+    expect(isInteractivePaused()).toBe(false);
+  });
+
+  it("an already-cancelled PIL request never registers a human watchdog hold", async () => {
+    __resetInteractivePauseForTests();
+    const controller = new AbortController();
+    controller.abort(new Error("already cancelled"));
+    const m = new CouncilManager(makeDeps());
+    await expect(m.createQuestionResponder(controller.signal)("never-opened")).rejects.toThrow("already cancelled");
+    expect(isInteractivePaused()).toBe(false);
+  });
+
   it("buffers question answers that arrive before the responder registers", async () => {
     const m = new CouncilManager(makeDeps());
     m.respondToQuestion("qid-1", "buffered-answer");

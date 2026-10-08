@@ -22,6 +22,7 @@
  * Use both together: pass the signal into the call for clean cancellation, and
  * wrap the await in the race for a hard caller-side guarantee.
  */
+import { logger } from "./logger.js";
 
 /**
  * Combine an optional parent AbortSignal with a wall-clock deadline. Returns
@@ -149,6 +150,51 @@ export async function withDeadlineRace<T>(
     if (timer) clearTimeout(timer);
     if (abortTimer) clearTimeout(abortTimer);
     if (abortListener && abortSignal) abortSignal.removeEventListener("abort", abortListener);
+  }
+}
+
+/** Abort the consumer even when an SDK/provider ignores abort in a pending next(). */
+export async function* abortableStream<T>(
+  stream: AsyncIterable<T>,
+  signal: AbortSignal,
+  label: string,
+  abortValue?: T,
+): AsyncGenerator<T> {
+  const iterator = stream[Symbol.asyncIterator]();
+  let completed = false;
+  try {
+    while (true) {
+      signal.throwIfAborted();
+      const next = await withDeadlineRace(() => iterator.next(), 0, label, signal, 0);
+      if (next.done) {
+        completed = true;
+        return;
+      }
+      yield next.value;
+    }
+  } catch (err) {
+    logger.debug("orchestrator", "Provider stream drain interrupted", {
+      label,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    if (!signal.aborted || abortValue === undefined) throw err;
+    // Preserve the engine's abort-part path (mid-loop continuation and rescue).
+    yield abortValue;
+  } finally {
+    if (!completed && iterator.return) {
+      // Queued return can itself wait behind the wedged next; never await it.
+      try {
+        void Promise.resolve(iterator.return()).catch((err: unknown) => {
+          console.error(
+            `[llm-deadline] ${label}: stream cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+      } catch (err) {
+        console.error(
+          `[llm-deadline] ${label}: stream cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
 }
 

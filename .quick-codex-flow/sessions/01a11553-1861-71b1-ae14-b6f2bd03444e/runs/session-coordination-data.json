@@ -1,0 +1,313 @@
+{
+  "window": {
+    "start": "2026-09-30T08:39:55.574Z",
+    "end": "2026-10-07T08:39:55.574Z"
+  },
+  "sessions": [
+    {
+      "kind": "conversation",
+      "status": "active",
+      "n": 22
+    },
+    {
+      "kind": "conversation",
+      "status": "completed",
+      "n": 1
+    },
+    {
+      "kind": "rotation",
+      "status": "active",
+      "n": 1
+    },
+    {
+      "kind": "subagent",
+      "status": "abandoned",
+      "n": 4
+    },
+    {
+      "kind": "subagent",
+      "status": "active",
+      "n": 4
+    }
+  ],
+  "parents": [
+    {
+      "parent_session_id": "32efda080753",
+      "kind": "subagent",
+      "status": "abandoned",
+      "children": 2
+    },
+    {
+      "parent_session_id": "32efda080753",
+      "kind": "subagent",
+      "status": "active",
+      "children": 1
+    },
+    {
+      "parent_session_id": "3b04adc4a30d",
+      "kind": "subagent",
+      "status": "abandoned",
+      "children": 1
+    },
+    {
+      "parent_session_id": "3b04adc4a30d",
+      "kind": "subagent",
+      "status": "active",
+      "children": 1
+    },
+    {
+      "parent_session_id": "cde402aafc74",
+      "kind": "subagent",
+      "status": "active",
+      "children": 1
+    },
+    {
+      "parent_session_id": "debd73186e90",
+      "kind": "rotation",
+      "status": "active",
+      "children": 1
+    },
+    {
+      "parent_session_id": "debd73186e90",
+      "kind": "subagent",
+      "status": "abandoned",
+      "children": 1
+    },
+    {
+      "parent_session_id": "debd73186e90",
+      "kind": "subagent",
+      "status": "active",
+      "children": 1
+    }
+  ],
+  "rootTree": [
+    {
+      "id": "cde402aafc74",
+      "parent_session_id": null,
+      "root_session_id": "cde402aafc74",
+      "kind": "conversation",
+      "status": "active",
+      "model": "step-3.5-flash",
+      "created_at": "2026-10-07T07:37:23.523Z",
+      "updated_at": "2026-10-07T07:41:44.232Z",
+      "depth": 0,
+      "messages": 3,
+      "tools": 0,
+      "errors": 1
+    },
+    {
+      "id": "5e827c722715",
+      "parent_session_id": "cde402aafc74",
+      "root_session_id": "cde402aafc74",
+      "kind": "subagent",
+      "status": "active",
+      "model": "step-3.5-flash",
+      "created_at": "2026-10-07T07:38:21.536Z",
+      "updated_at": "2026-10-07T07:41:40.110Z",
+      "depth": 1,
+      "messages": 32,
+      "tools": 30,
+      "errors": 0
+    }
+  ],
+  "coordinationTools": [
+    {
+      "tool_name": "delegate",
+      "status": "completed",
+      "n": 5
+    },
+    {
+      "tool_name": "delegation_list",
+      "status": "completed",
+      "n": 6
+    },
+    {
+      "tool_name": "delegation_read",
+      "status": "completed",
+      "n": 13
+    },
+    {
+      "tool_name": "task",
+      "status": "aborted",
+      "n": 1
+    },
+    {
+      "tool_name": "task",
+      "status": "completed",
+      "n": 3
+    }
+  ],
+  "subagentAccounting": [
+    {
+      "session_id": "3b04adc4a30d",
+      "calls": 438,
+      "peak_est": 85433
+    },
+    {
+      "session_id": "debd73186e90",
+      "calls": 25,
+      "peak_est": 54044
+    },
+    {
+      "session_id": "f257aff144a9",
+      "calls": 5,
+      "peak_est": 13863
+    }
+  ],
+  "delegations": [
+    {
+      "id": "brisk-amber-panda",
+      "project": "muonroi-cli-f3baaa188f",
+      "status": "error",
+      "startedAt": "2026-07-29T09:41:19.390Z",
+      "completedAt": "2026-07-29T09:41:21.009Z",
+      "pid": 4876,
+      "pidExists": false,
+      "parentSessionId": null,
+      "notified": true
+    },
+    {
+      "id": "brisk-silver-owl",
+      "project": "muonroi-cli-f3baaa188f",
+      "status": "complete",
+      "startedAt": "2026-10-06T06:05:12.486Z",
+      "completedAt": "2026-10-06T06:06:08.645Z",
+      "pid": 28296,
+      "pidExists": false,
+      "parentSessionId": null,
+      "notified": true
+    },
+    {
+      "id": "calm-amber-lynx",
+      "project": "muonroi-cli-f3baaa188f",
+      "status": "complete",
+      "startedAt": "2026-07-27T04:14:17.045Z",
+      "completedAt": "2026-07-27T04:15:50.998Z",
+      "pid": 135212,
+      "pidExists": false,
+      "parentSessionId": null,
+      "notified": true
+    },
+    {
+      "id": "clever-silver-owl",
+      "project": "muonroi-cli-f3baaa188f",
+      "status": "complete",
+      "startedAt": "2026-10-06T06:05:12.527Z",
+      "completedAt": "2026-10-06T06:08:38.205Z",
+      "pid": 56536,
+      "pidExists": false,
+      "parentSessionId": null,
+      "notified": true
+    },
+    {
+      "id": "eager-ivory-owl",
+      "project": "muonroi-cli-f3baaa188f",
+      "status": "complete",
+      "startedAt": "2026-07-27T03:34:34.815Z",
+      "completedAt": "2026-07-27T03:39:27.352Z",
+      "pid": 101032,
+      "pidExists": false,
+      "parentSessionId": null,
+      "notified": true
+    },
+    {
+      "id": "eager-silver-fox",
+      "project": "muonroi-cli-f3baaa188f",
+      "status": "complete",
+      "startedAt": "2026-10-06T05:11:07.652Z",
+      "completedAt": "2026-10-06T05:12:08.199Z",
+      "pid": 100940,
+      "pidExists": false,
+      "parentSessionId": null,
+      "notified": true
+    },
+    {
+      "id": "gentle-silver-fox",
+      "project": "muonroi-cli-f3baaa188f",
+      "status": "complete",
+      "startedAt": "2026-07-27T01:57:23.348Z",
+      "completedAt": "2026-07-27T02:03:20.786Z",
+      "pid": 125968,
+      "pidExists": false,
+      "parentSessionId": null,
+      "notified": true
+    },
+    {
+      "id": "gentle-silver-otter",
+      "project": "muonroi-cli-f3baaa188f",
+      "status": "complete",
+      "startedAt": "2026-10-06T06:05:00.985Z",
+      "completedAt": "2026-10-06T06:05:44.468Z",
+      "pid": 45780,
+      "pidExists": false,
+      "parentSessionId": null,
+      "notified": true
+    },
+    {
+      "id": "lively-blue-badger",
+      "project": "muonroi-cli-f3baaa188f",
+      "status": "complete",
+      "startedAt": "2026-10-06T05:14:16.729Z",
+      "completedAt": "2026-10-06T05:16:36.983Z",
+      "pid": 69736,
+      "pidExists": false,
+      "parentSessionId": null,
+      "notified": true
+    },
+    {
+      "id": "clever-copper-fox",
+      "project": "qa-platform-5226706352",
+      "status": "complete",
+      "startedAt": "2026-09-23T01:17:22.298Z",
+      "completedAt": "2026-09-23T01:18:16.729Z",
+      "pid": 35968,
+      "pidExists": false,
+      "parentSessionId": null,
+      "notified": true
+    },
+    {
+      "id": "clever-indigo-panda",
+      "project": "qa-platform-5226706352",
+      "status": "complete",
+      "startedAt": "2026-09-23T01:17:20.850Z",
+      "completedAt": "2026-09-23T01:18:16.968Z",
+      "pid": 24720,
+      "pidExists": false,
+      "parentSessionId": null,
+      "notified": true
+    },
+    {
+      "id": "eager-silver-badger",
+      "project": "qa-platform-5226706352",
+      "status": "complete",
+      "startedAt": "2026-09-23T01:17:22.268Z",
+      "completedAt": "2026-09-23T01:18:46.743Z",
+      "pid": 27888,
+      "pidExists": false,
+      "parentSessionId": null,
+      "notified": true
+    },
+    {
+      "id": "nimble-teal-wolf",
+      "project": "qa-platform-5226706352",
+      "status": "complete",
+      "startedAt": "2026-09-22T02:07:57.120Z",
+      "completedAt": "2026-09-22T02:10:36.962Z",
+      "pid": 20152,
+      "pidExists": false,
+      "parentSessionId": null,
+      "notified": true
+    },
+    {
+      "id": "steady-violet-wolf",
+      "project": "qa-platform-5226706352",
+      "status": "complete",
+      "startedAt": "2026-09-23T01:17:21.540Z",
+      "completedAt": "2026-09-23T01:19:13.997Z",
+      "pid": 16520,
+      "pidExists": false,
+      "parentSessionId": null,
+      "notified": true
+    }
+  ]
+}

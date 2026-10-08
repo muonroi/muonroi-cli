@@ -948,6 +948,7 @@ export class MessageProcessor {
     userMessage: string,
     observer?: ProcessMessageObserver,
     images?: Array<{ path: string; mediaType: string; base64: string }>,
+    options?: { retainModel?: boolean },
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const deps = this.deps;
     // A1 fix: mirror the existing `ownsController` pattern (orchestrator.ts
@@ -1201,12 +1202,9 @@ export class MessageProcessor {
     const _debugTurnId = deps.messages.filter((m) => m.role === "user").length + 1;
 
     // PIL: enrich prompt before pushing to messages (D-01, D-03, D-04)
-    // Promise.race timeout of 200ms is inside runPipeline — fail-open guaranteed
-    // NOTE this guarantee is NOT unconditional: runPipeline() takes the
-    // Promise.race path only when discovery is off or non-interactive; the
-    // live interactive-discovery path (the default) awaits runLayers()
-    // directly with no outer race — see pil/pipeline.ts runPipeline(). This
-    // phase's own breadcrumb pair is the backstop for that gap.
+    // PIL bounds automated work and pauses its budget only for actual human
+    // answers. Parent cancellation stops preparation; layer breadcrumbs name
+    // the await that failed instead of leaving only a coarse pilPrep marker.
     // Route-history advice (EE vector search, no LLM) runs while PIL classifies, so
     // decide() gets it without adding turn latency. Never rejects.
     const routeHistoryPromise = import("../ee/bridge.js")
@@ -1462,7 +1460,7 @@ export class MessageProcessor {
     // decide()/routeModel() through their own, separate paths and are
     // unaffected — they may still downgrade independently of the pin.
     {
-      const pinnedModel = isModelPinnedByProject() ? deps.modelId : undefined;
+      const pinnedModel = options?.retainModel || isModelPinnedByProject() ? deps.modelId : undefined;
       try {
         const { decide } = await import("../router/decide.js");
         const compactionMsg = deps.messages.find(
@@ -1927,7 +1925,7 @@ export class MessageProcessor {
     // pinned orchestrator turn's tool-continuation steps. See
     // decideStepRouting's `opts.pinned` doc comment in router/step-router.ts.
     const stepRouterDecision = decideStepRouting(turnModelId, deps.providerId, stepRouterCfg, {
-      pinned: isModelPinnedByProject(),
+      pinned: options?.retainModel || isModelPinnedByProject(),
     });
     const stepRouterPhase: "phase1" | "phase2" | "done" = stepRouterDecision.phase2ModelId ? "phase1" : "done";
     const phase2Runtime = stepRouterDecision.phase2ModelId

@@ -1,77 +1,54 @@
 # Catalog policy
 
-`catalog.json` is the **local fallback** the CLI uses when the control-plane
-endpoint `https://cp.muonroi.com/api/v1/models` is unreachable. The CP catalog
-is the source of truth in production. Keep this file conservative: only ship
-entries the splash UI is actively maintained for.
+`src/models/catalog.json` is the canonical dataset. FastAPI copies it into its
+Docker image and serves `https://catalog.muonroi.com/api/v1/models`. The CLI
+uses that endpoint, a 24-hour local cache, and this bundled file as fallback.
+Override with `MUONROI_CATALOG_URL`; protected catalogs require
+`MUONROI_CATALOG_API_KEY`.
 
-Pricing snapshot date: **2026-05-21**. Re-verify quarterly or after any provider
-pricing announcement; commit a bump to `version` and `updated_at` when prices
-drift > 10%.
+OpenAI and Anthropic snapshot: **2026-10-08**, catalog **2.20**. Other providers
+retain their existing verification dates. Active providers: `openai`,
+`anthropic`, `deepseek`, `zai`, `opencode-go`, `xai`, and `stepfun`.
 
-## Active providers
+## Current tier defaults
 
-Catalog model entries currently ship for:
+| Provider | Fast | Balanced | Premium |
+|---|---|---|---|
+| OpenAI | GPT-6 Luna | GPT-6.1 Sol | GPT-6 Astra |
+| Anthropic | Claude Haiku 5.5 | Claude Sonnet 5.5 | Claude Opus 5.5 |
 
-| Provider | Why it ships | Tool-call support |
-|---|---|---|
-| `deepseek` | Native API; cheap premium reasoning tier ($0.55/$2.19) | Yes (v4-flash, v4-pro) |
-| `xai` | Grok models via OpenAI-compatible API + OAuth subscription | Yes |
-| `zai` | GLM family (coding + vision) via the Z.ai coding endpoint | Yes |
-| `opencode-go` | OpenCode Go aggregator | Yes |
-| `stepfun` | Native OpenAI-compatible API; Step 3.5 Flash agent/coding model | Yes |
-| `openai` | Static fallback pricing only (not tier-routed by default) | Yes |
+GPT-6 Sol and Claude Fable 5.1 also remain selectable. Existing canonical IDs
+and version-specific aliases remain selectable; legacy rows have
+`tier_routing: false`. Short Claude aliases follow the current family version.
+Tier routing uses the first eligible same-provider row in array order.
 
-## Removed providers (kept in code, dropped from catalog)
+## Contracts and pricing
 
-The CLI **code** still supports `anthropic`, `openai`, and `ollama` — adapters
-live under `src/providers/strategies/`, capability classes in
-`src/providers/capabilities.ts`, and the keychain accepts their keys via
-`muonroi-cli keys set <provider>`. They were removed from this catalog because:
+Use official [OpenAI model pages](https://developers.openai.com/api/docs/models)
+and [Claude model pages](https://platform.claude.com/docs/en/models/overview).
+Verify ID, context/output limits, modalities, tool support, thinking mode,
+default effort, and standard USD/MTok input/output/cache rates together.
+Reasoning OpenAI tool calls use Responses; adaptive Claude requests use
+`thinking.type=adaptive`, with effort when supported.
 
-1. The splash UI hides them, so users would never reach them via tier-routing.
-2. Tier-routing fallback (`getModelByTier`) was leaking cross-provider when the
-   default provider had no model for a tier — see
-   `src/router/decide.ts`. Removing the catalog entries closes that leak more
-   aggressively than the runtime guard alone.
+Prices in new rows are standard API list prices. OAuth/subscription availability
+and billing depend on the account; adding a row does not grant access.
+`cache_write_price_per_million` records the standard 5-minute write rate.
 
-Programmatic use of removed providers still works:
-- Pass `--model <id>` with an explicit model ID at startup.
-- Or push entries via the CP catalog endpoint at runtime.
+`long_context_pricing` is optional. Above `input_token_threshold` (strictly
+greater), `input_multiplier` scales uncached input, cache reads and cache
+writes; `output_multiplier` scales output for the **entire request**. Current
+GPT-6 models use 272K/2x input/1.5x output. Haiku 5.5 uses 100K/5x all rates.
+Cost projections apply this per request, including cached input in prompt size;
+aggregated sprint volume must not trigger a request surcharge.
 
-> Note: the `google` (Gemini/Agy) and `siliconflow` providers were fully
-> removed from the codebase — they are no longer valid `ProviderId` values and
-> cannot be reintroduced without re-adding the adapters, strategies, and
-> capability classes.
+## Updating and verification
 
-## Tier ordering
+Add verified rows before legacy rows for that provider, keep aliases unique,
+and bump `version`/`updated_at`. Declare `modalities` and `native_web_research`
+explicitly. Keep FastAPI Pydantic and CLI Zod/runtime mappings aligned.
 
-`getModelByTier(tier, provider)` stops at the first same-provider match, so
-order within a tier in `catalog.json` matters. The preferred default for each
-tier sits first.
-
-## How to reintroduce a removed provider
-
-1. Add provider id back to `SPLASH_PROVIDERS` in `src/ui/app.tsx`.
-2. Add at least one model entry per tier (`fast`/`balanced`/`premium`) to
-   `catalog.json` with `"provider": "<id>"`.
-3. Verify provider strategy in `src/providers/strategies/<id>.strategy.ts` and
-   `src/providers/adapter.test.ts` still cover the id.
-4. Update this README.
-
-## How to add a new model
-
-1. Confirm tool-call support if the model will be used in agentic loops. If it
-   does not support tool calls, do NOT mark any tier — surface only via
-   explicit `--model <id>`.
-2. Look up live pricing from the provider's official pricing page.
-3. Add the entry with `"provider": "<id>"`. Place it in tier-order: the first
-   same-provider match in `getModelByTier` wins.
-4. Bump `version` + `updated_at` at the top of `catalog.json`.
-
-## Verification before merge
-
-- `bunx vitest run src/models/__tests__/registry.test.ts` — catalog parses.
-- `bunx vitest run src/providers/__tests__/capabilities-cosmetic.test.ts` — capability lookups still resolve.
-- Manual TUI smoke: splash shows the active providers, defaulting to one works,
-  `/models` modal opens.
+Run catalog/registry/pricing/provider contract tests, FastAPI tests, build and
+typecheck. For picker/routing workflows, run native selfverify. Deploy only
+catalog and verify the public endpoint and CLI validation of its response.
+Existing CLI caches can take 24 hours to refresh.

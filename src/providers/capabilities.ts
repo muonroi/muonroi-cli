@@ -26,6 +26,8 @@
  */
 
 import { createHash } from "node:crypto";
+import type { ModelMessage } from "ai";
+import { sanitizeCorruptedThinkingBlocks } from "../orchestrator/reasoning.js";
 import type { ModelInfo } from "../types/index.js";
 import { consoleUrlFor } from "./endpoints.js";
 import type { ProviderId } from "./types.js";
@@ -65,6 +67,8 @@ export interface BuildProviderOptionsCtx {
  * "just work" until proven otherwise.
  */
 export interface ProviderCapabilities {
+  /** Extra workspace selection needed by API keys that are not workspace-scoped. */
+  workspaceSetup(): { header: string; idPrefix: string; help: string } | undefined;
   /**
    * True when the provider can reliably emit Zod-validated tool-call input
    * for a `respond_<taskType>` tool. False forces PIL Layer 6 to drop the
@@ -157,6 +161,9 @@ export interface ProviderCapabilities {
  * override individual methods when the provider has a known quirk.
  */
 class ReliableProviderCapabilities implements ProviderCapabilities {
+  workspaceSetup(): { header: string; idPrefix: string; help: string } | undefined {
+    return undefined;
+  }
   supportsResponseTool(_taskType: string): boolean {
     return true;
   }
@@ -214,14 +221,24 @@ function computePromptCacheKey(sessionId: string | undefined): string | undefine
  * the orchestrator because it depends on PIL task-type context.
  */
 class AnthropicProviderCapabilities extends ReliableProviderCapabilities {
+  override sanitizeHistory<T>(messages: readonly T[]): readonly T[] {
+    return sanitizeCorruptedThinkingBlocks(messages as readonly ModelMessage[]) as readonly T[];
+  }
+  override workspaceSetup() {
+    return {
+      header: "anthropic-workspace-id",
+      idPrefix: "wrkspc_",
+      help: "Find the workspace ID in Claude Console > Settings > Workspaces (ID column).",
+    };
+  }
   override buildProviderOptions(ctx: BuildProviderOptionsCtx): Record<string, unknown> | undefined {
     const m = ctx.model;
-    // A format-only call (see `minimizeReasoning`) must not be handed a 8–10K
-    // thinking budget. Omitting the field leaves thinking off, which is what
-    // Anthropic defaults to — so this is a no-op for normal turns.
+    // Omit explicit thinking options for format-only calls. Provider defaults
+    // still apply: models with always-on thinking cannot disable it this way.
     if (ctx.minimizeReasoning) return undefined;
     if (m?.thinkingType === "adaptive") {
-      return { anthropic: { thinking: { type: "enabled", budgetTokens: 10_000 } } };
+      const effort = m.supportsReasoningEffort ? (ctx.reasoningEffort ?? m.defaultReasoningEffort) : undefined;
+      return { anthropic: { thinking: { type: "adaptive" }, ...(effort ? { effort } : {}) } };
     }
     if (m?.thinkingType === "enabled") {
       return { anthropic: { thinking: { type: "enabled", budgetTokens: 8_000 } } };

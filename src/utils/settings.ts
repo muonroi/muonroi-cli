@@ -168,6 +168,8 @@ export interface ProviderKeyConfig {
    */
   apiKey?: string;
   baseURL?: string;
+  /** Anthropic workspace selection for API keys that are not workspace-scoped. */
+  workspaceId?: string;
 }
 
 export interface UserSettings {

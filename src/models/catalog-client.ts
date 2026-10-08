@@ -132,6 +132,12 @@ export interface CatalogModel {
   output_price_per_million: number;
   cached_input_price_per_million?: number;
   cache_write_price_per_million?: number;
+  /** Above this per-request input threshold, scale all input categories and output. */
+  long_context_pricing?: {
+    input_token_threshold: number;
+    input_multiplier: number;
+    output_multiplier: number;
+  };
   /** Unit used by `unit_price` when the model is not billed per token. */
   pricing_unit?: string;
   /** Official price for `pricing_unit`, expressed in USD. */
@@ -207,6 +213,13 @@ const CatalogModelSchema = z
     output_price_per_million: z.number(),
     cached_input_price_per_million: z.number().optional(),
     cache_write_price_per_million: z.number().optional(),
+    long_context_pricing: z
+      .object({
+        input_token_threshold: z.number().int().positive(),
+        input_multiplier: z.number().positive(),
+        output_multiplier: z.number().positive(),
+      })
+      .optional(),
     pricing_unit: z.string().optional(),
     unit_price: z.number().optional(),
     rate_limits: z
@@ -490,6 +503,13 @@ export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
     outputPrice: m.output_price_per_million,
     cachedInputPrice: m.cached_input_price_per_million,
     cacheWritePrice: m.cache_write_price_per_million,
+    longContextPricing: m.long_context_pricing
+      ? {
+          inputTokenThreshold: m.long_context_pricing.input_token_threshold,
+          inputMultiplier: m.long_context_pricing.input_multiplier,
+          outputMultiplier: m.long_context_pricing.output_multiplier,
+        }
+      : undefined,
     reasoning: m.reasoning,
     description: m.description,
     tier: m.tier as ModelTier | undefined,

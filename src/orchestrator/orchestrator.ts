@@ -1,5 +1,6 @@
 // Multi-provider wired — runtime dispatch via providers/runtime.ts.
 
+import { randomUUID } from "node:crypto";
 import type { ModelMessage, ToolSet } from "ai";
 import { breadcrumb, getLastOpenPhase } from "../council/crash-breadcrumb.js";
 import { extractSession } from "../ee/extract-session.js";
@@ -185,6 +186,7 @@ import { CouncilManager } from "./council-manager.js";
 import { CrossTurnDedup, isCrossTurnDedupEnabled } from "./cross-turn-dedup.js";
 import { DelegationManager } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
+import { buildHelperReceipt } from "./helper-receipt.js";
 import { beginInteractivePause, endInteractivePause, isInteractivePaused } from "./interactive-pause.js";
 import {
   MessageProcessor,
@@ -383,6 +385,8 @@ export class Agent {
   private baseURL: string | null = null;
   private bash: BashTool;
   private delegations: DelegationManager;
+  private _helperParentSessionId: string | null = null;
+  private _helperParentCwd: string | null = null;
   private schedules: ScheduleManager;
   private sessionStore: SessionStore | null = null;
   private workspace: WorkspaceInfo | null = null;
@@ -616,7 +620,12 @@ export class Agent {
       sandboxSettings: options.sandboxSettings,
       shellSettings: options.shellSettings ?? getCurrentShellSettings(),
     });
-    this.delegations = new DelegationManager(() => this.bash.getCwd());
+    const transientOwnerId = randomUUID();
+    this.delegations = new DelegationManager(
+      () => this.bash.getCwd(),
+      () => this._helperParentSessionId ?? this.session?.id ?? transientOwnerId,
+      () => this._helperParentCwd ?? this.bash.getCwd(),
+    );
     // Phase 12.1-02: council state + helpers live in CouncilManager. DI via
     // getter callbacks so the manager reads live Agent state without holding
     // a circular reference to the Agent instance.
@@ -1460,6 +1469,9 @@ export class Agent {
   }
 
   async consumeBackgroundNotifications(): Promise<string[]> {
+    // The manager's owner remains main while this Agent temporarily executes
+    // a child. Leave notifications unclaimed until main's context is restored.
+    if (this._helperParentSessionId && this.session?.id !== this._helperParentSessionId) return [];
     try {
       const notifications = await this.delegations.consumeNotifications();
       for (const notification of notifications) {
@@ -1476,10 +1488,16 @@ export class Agent {
           session_id: this.session?.id,
           cwd: this.bash.getCwd(),
         };
-        this.fireHook(notifInput).catch(() => {});
+        this.fireHook(notifInput).catch((err) => {
+          logger.warn("orchestrator", "Background notification hook failed", { error: String(err) });
+        });
       }
       return notifications.map((notification) => notification.message);
-    } catch {
+    } catch (err) {
+      logger.error("orchestrator", "Background notification delivery failed", {
+        sessionId: this.session?.id,
+        error: String(err),
+      });
       return [];
     }
   }
@@ -1898,7 +1916,7 @@ export class Agent {
         model: this.modelId,
         sandboxMode: this.bash.getSandboxMode(),
         sandboxSettings: this.bash.getSandboxSettings(),
-        maxToolRounds: this.maxToolRounds,
+        maxToolRounds: request.maxToolRounds ?? this.maxToolRounds,
         maxTokens: this.maxTokens,
         batchApi: this.batchApi,
       });
@@ -3879,6 +3897,8 @@ export class Agent {
     // below, so the child's cwd changes never leak back to the parent —
     // "isolate per session" without the cost of a second BashTool.
     const parentCwdAtFork = this.bash.getCwd();
+    const previousHelperOwner = this._helperParentSessionId;
+    const previousHelperCwd = this._helperParentCwd;
 
     // Round 12 (G15): `routerSubSessions: false` keeps the CURRENT turn on
     // the main session/main model — router SPAWN_SUB_SESSION and reactive
@@ -4000,6 +4020,8 @@ export class Agent {
           this.messageSeqs = childState.seqs;
           this.sessionStore.touchSession(subSessionId, this.bash.getCwd());
           isSubSessionForked = true;
+          this._helperParentSessionId = previousHelperOwner ?? parentSessionId;
+          this._helperParentCwd = previousHelperCwd ?? parentCwdAtFork;
           logger.info("orchestrator", "Resumed child sub-session successfully", {
             parentSessionId,
             subSessionId,
@@ -4057,7 +4079,8 @@ export class Agent {
             role: "system",
             content:
               `You are executing a sub-task delegated by the Main Session in an isolated, temporary Sub-Session.\n` +
-              `Your goal is to satisfy the user's request: "${userMessage}"\n\n` +
+              `Your assignment is to gather evidence and perform the scoped work needed for: "${userMessage}"\n` +
+              `The Main Session owns the goal, acceptance decision and final user-facing answer. Return a concise deliverable to main, not a final answer on its behalf.\n\n` +
               `Your Operating Boundaries & Rules:\n` +
               `1. You have full access to tools (bash, edit_file, read_file, grep, etc.). Execute them as needed to build, debug, and verify the work.\n` +
               `2. Stay strictly focused on completing the request. Do not engage in social chat or pleasantries.\n` +
@@ -4078,6 +4101,8 @@ export class Agent {
           if (subAgentModelOverride) this.modelId = subAgentModelOverride;
 
           isSubSessionForked = true;
+          this._helperParentSessionId = previousHelperOwner ?? parentSessionId;
+          this._helperParentCwd = previousHelperCwd ?? parentCwdAtFork;
           logger.info("orchestrator", "Forked child sub-session successfully", {
             parentSessionId,
             subSessionId,
@@ -4127,6 +4152,19 @@ export class Agent {
     const { withTurnWatchdog, TurnStallError } = await import("./turn-watchdog.js");
     const turnIdleMs = Number(process.env.MUONROI_TURN_IDLE_MS ?? 120_000);
     const turnTotalMs = Number(process.env.MUONROI_TURN_TOTAL_MS ?? 0);
+    // One controller owns helper execution AND main's acceptance step. Nested
+    // processors must not clear it between those two parts of the same turn.
+    const ownsHelperController = isSubSessionForked && !this.abortController;
+    if (ownsHelperController) this.abortController = new AbortController();
+    const helperController = isSubSessionForked ? this.abortController : null;
+    const forwardHelperAbort = () => helperController?.abort(this.externalAbortContext?.reason());
+    if (ownsHelperController && this.externalAbortContext) {
+      if (this.externalAbortContext.signal.aborted) forwardHelperAbort();
+      else this.externalAbortContext.signal.addEventListener("abort", forwardHelperAbort, { once: true });
+    }
+    let helperTurnSettled = false;
+    let helperFailure: string | undefined;
+    let helperReceipt: string | null = null;
 
     try {
       let attempts = 0;
@@ -4138,7 +4176,7 @@ export class Agent {
         try {
           attempts++;
           try {
-            yield* withTurnWatchdog(processor.run(userMessage, observer, images), {
+            const stream = withTurnWatchdog(processor.run(userMessage, observer, images), {
               idleMs: turnIdleMs,
               totalMs: turnTotalMs,
               label: "assistant turn",
@@ -4154,6 +4192,18 @@ export class Agent {
               // single 120s budget. See turn-progress.ts.
               hasProgressSince: (sinceMs) => hasTurnProgressSince(sinceMs),
             });
+            for await (const chunk of stream) {
+              if (isSubSessionForked) {
+                if (chunk.type === "error") {
+                  helperFailure = chunk.content ?? "Helper reported an error";
+                  yield { type: "toast", toastLevel: "warn", content: helperFailure };
+                  continue;
+                }
+                // Helper prose is evidence for main, not the user's final answer.
+                if (["content", "reasoning", "structured_response", "done"].includes(chunk.type)) continue;
+              }
+              yield chunk;
+            }
           } catch (stallErr) {
             // A hung turn is NOT a transient error — retrying it (below) would
             // just hang again. Abort, surface a toast, and terminate the turn.
@@ -4232,11 +4282,20 @@ export class Agent {
             this.messages = [...messagesSnapshot];
             this.messageSeqs = [...seqsSnapshot];
             processor = new MessageProcessor(this._buildMessageProcessorDeps());
+          } else if (isSubSessionForked && !helperController?.signal.aborted) {
+            helperFailure = err instanceof Error ? err.message : String(err);
+            logger.error("orchestrator", "Helper failed; returning control to main", {
+              subSessionId,
+              error: helperFailure,
+            });
+            yield { type: "toast", toastLevel: "warn", content: helperFailure };
+            break;
           } else {
             throw err;
           }
         }
       }
+      helperTurnSettled = true;
 
       if (autoCommitOn) {
         const auto = await maybeAutoCommitTurn({ cwd, dirtyBefore, userMessage }).catch((err) => {
@@ -4259,59 +4318,99 @@ export class Agent {
         }
       }
     } finally {
-      if (isSubSessionForked && parentSessionId && this.sessionStore) {
-        try {
-          const finalMessages = salvageSubSessionOutput(this.messages, preTurnMessageCount);
-
-          // Restore parent session
-          this.session = this.sessionStore.getRequiredSession(parentSessionId);
-          // Round 9 (HR8): `this.modelId` may have been switched to
-          // `subAgentModel` for the child's own turn (see the fork branch
-          // above) — restore it to the PARENT's own model so the main
-          // session's NEXT turn keeps running on `model`, never leaking the
-          // sub-agent override past the sub-session's lifetime.
-          this.modelId = this.session.model;
-          // Round 9 (G13): restore the cwd the PARENT actually had before
-          // the fork — undoes whatever `cd` the child ran, so the child's
-          // tool-cwd changes never leak into the parent's next turn (see
-          // `parentCwdAtFork`'s doc comment above). Best-effort: a path that
-          // no longer exists (rare — the child deleted its own cwd) must not
-          // block absorbing the child's output, so this never throws past
-          // the finally's own try/catch either way.
+      try {
+        if (isSubSessionForked && parentSessionId && this.sessionStore) {
           try {
-            this.bash.setCwd(parentCwdAtFork);
-          } catch (cwdErr) {
-            logger.warn("orchestrator", "Failed to restore parent cwd after sub-session absorb", {
-              parentCwdAtFork,
-              error: cwdErr instanceof Error ? cwdErr.message : String(cwdErr),
-            });
+            const finalMessages = salvageSubSessionOutput(this.messages, preTurnMessageCount);
+
+            // Restore parent session
+            this.session = this.sessionStore.getRequiredSession(parentSessionId);
+            // Round 9 (HR8): `this.modelId` may have been switched to
+            // `subAgentModel` for the child's own turn (see the fork branch
+            // above) — restore it to the PARENT's own model so the main
+            // session's NEXT turn keeps running on `model`, never leaking the
+            // sub-agent override past the sub-session's lifetime.
+            this.modelId = this.session.model;
+            // Round 9 (G13): restore the cwd the PARENT actually had before
+            // the fork — undoes whatever `cd` the child ran, so the child's
+            // tool-cwd changes never leak into the parent's next turn (see
+            // `parentCwdAtFork`'s doc comment above). Best-effort: a path that
+            // no longer exists (rare — the child deleted its own cwd) must not
+            // block absorbing the child's output, so this never throws past
+            // the finally's own try/catch either way.
+            try {
+              this.bash.setCwd(parentCwdAtFork);
+            } catch (cwdErr) {
+              logger.warn("orchestrator", "Failed to restore parent cwd after sub-session absorb", {
+                parentCwdAtFork,
+                error: cwdErr instanceof Error ? cwdErr.message : String(cwdErr),
+              });
+            }
+
+            const { loadTranscriptState } = await import("../storage/transcript.js");
+            const parentState = loadTranscriptState(parentSessionId);
+            this.messages = parentState.messages;
+            this.messageSeqs = parentState.seqs;
+
+            this._helperParentSessionId = previousHelperOwner;
+            this._helperParentCwd = previousHelperCwd;
+            if (helperTurnSettled && !helperController?.signal.aborted) {
+              helperReceipt = buildHelperReceipt(subSessionId!, finalMessages, helperFailure);
+              const receiptMessage: ModelMessage = { role: "system", content: helperReceipt };
+              const receiptSeqs = appendMessages(parentSessionId, [receiptMessage]);
+              this.messages.push(receiptMessage);
+              this.messageSeqs.push(...receiptSeqs);
+              logger.info("orchestrator", "Returned helper evidence to main for acceptance", {
+                parentSessionId,
+                subSessionId,
+                absorbedMessagesCount: finalMessages.length,
+              });
+            }
+          } catch (err) {
+            logger.error("orchestrator", "Failed to absorb sub-session final summary", { error: err });
           }
-
-          const { loadTranscriptState } = await import("../storage/transcript.js");
-          const parentState = loadTranscriptState(parentSessionId);
-          this.messages = parentState.messages;
-          this.messageSeqs = parentState.seqs;
-
-          const userModelMessage: ModelMessage = {
-            role: "user",
-            content: userMessage,
-          };
-
-          if (finalMessages.length > 0) {
-            this.appendCompletedTurn(userModelMessage, finalMessages);
-            logger.info("orchestrator", "Absorbed sub-session outcome into parent session", {
-              parentSessionId,
-              subSessionId,
-              absorbedMessagesCount: finalMessages.length,
+        }
+        if (
+          helperReceipt &&
+          helperTurnSettled &&
+          !helperController?.signal.aborted &&
+          this.session?.id === parentSessionId
+        ) {
+          yield { type: "toast", toastLevel: "info", content: "Main đang đánh giá kết quả từ helper..." };
+          const mainProcessor = new MessageProcessor(this._buildMessageProcessorDeps());
+          try {
+            yield* withTurnWatchdog(mainProcessor.run(userMessage, observer, images, { retainModel: true }), {
+              idleMs: turnIdleMs,
+              totalMs: turnTotalMs,
+              label: "main acceptance turn",
+              shouldSuppressFire: () => isInteractivePaused() || isToolActivityLive(),
+              hasProgressSince: (sinceMs) => hasTurnProgressSince(sinceMs),
             });
-          } else {
-            logger.warn("orchestrator", "No assistant messages found to absorb from sub-session", {
-              parentSessionId,
-              subSessionId,
-            });
+          } catch (err) {
+            logger.error("orchestrator", "Main helper acceptance failed", { parentSessionId, error: String(err) });
+            if (err instanceof TurnStallError) {
+              helperController?.abort(new DOMException(err.message, "TimeoutError"));
+              if (this.session) {
+                logInteraction(this.session.id, "error", {
+                  eventSubtype: "watchdog",
+                  data: { message: err.message, phase: "main-acceptance" },
+                });
+                markLatestPendingMessageErrored(this.session.id);
+              }
+              yield { type: "error", content: `Turn ended by watchdog: ${err.message}`, isAuthError: false };
+              yield { type: "done" };
+            } else {
+              // biome-ignore lint/correctness/noUnsafeFinally: Main acceptance is a new turn; propagate its failure after the nested ownership cleanup.
+              throw err;
+            }
           }
-        } catch (err) {
-          logger.error("orchestrator", "Failed to absorb sub-session final summary", { error: err });
+        }
+      } finally {
+        this._helperParentSessionId = previousHelperOwner;
+        this._helperParentCwd = previousHelperCwd;
+        if (ownsHelperController) {
+          this.externalAbortContext?.signal.removeEventListener("abort", forwardHelperAbort);
+          if (this.abortController === helperController) this.abortController = null;
         }
       }
     }
@@ -4544,7 +4643,8 @@ export class Agent {
           `Provide clear, actionable guidance to resolve the child's query.`;
 
         const { generateTextStreamed } = await import("../providers/streamed-generate.js");
-        const modelId = self.modelId;
+        const modelId = self.sessionStore?.getRequiredSession(parentSessionId).model;
+        if (!modelId) throw new Error(`Parent session model is unavailable: ${parentSessionId}`);
         const runtime = resolveModelRuntime(modelId);
 
         // Stream + collect (NOT generateText): codex/oauth 400s non-stream requests.
@@ -4552,6 +4652,7 @@ export class Agent {
           model: runtime.model,
           system: systemPrompt,
           prompt: `Child Sub-session is stuck. Question:\n${question}`,
+          abortSignal: combineAbortSignals(self.abortController?.signal, AbortSignal.timeout(30_000)),
           ...resolveTemperatureParam(runtime, 0.2),
           ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
         });

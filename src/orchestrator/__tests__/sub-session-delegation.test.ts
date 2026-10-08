@@ -143,7 +143,7 @@ vi.mock("../../storage/index.js", () => {
         return {
           id,
           workspaceId: "workspace-1",
-          model: "dummy-model",
+          model: "deepseek-v4-flash",
           mode: "agent",
           cwdAtStart: "/dummy",
           cwdLast: "/dummy",
@@ -176,6 +176,15 @@ vi.mock("../message-processor.js", () => {
         this.deps = deps;
       }
       async *run(userMessage: string) {
+        if (
+          this.deps.messages.some((m: any) => m.role === "system" && String(m.content).startsWith("[Helper receipt"))
+        ) {
+          const answer = { role: "assistant", content: "Main accepted helper evidence" };
+          this.deps.appendCompletedTurn({ role: "user", content: userMessage }, [answer]);
+          yield { type: "content", content: answer.content };
+          yield { type: "done" };
+          return;
+        }
         if (userMessage === "trigger error") {
           throw new Error("Simulated MessageProcessor crash");
         }
@@ -313,23 +322,20 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
     // It should NOT contain:
     // - intermediate assistant: "Intermediate assistant prompt analysis"
     // - intermediate tool: "Intermediate tool result that should be ignored"
-    expect((agent as any).messages).toHaveLength(3); // Hello parent + absorbed assistant + absorbed tool
-    expect((agent as any).messages[1]).toEqual({
-      role: "assistant",
-      content: "Sub-session final structured response",
-    });
-    expect((agent as any).messages[2]).toEqual({
-      role: "tool",
-      content: "Final tool outcome (should be copied)",
-    });
+    expect((agent as any).messages).toHaveLength(3); // Parent history + helper receipt + main answer
+    expect((agent as any).messages[1].role).toBe("system");
+    expect((agent as any).messages[1].content).toContain("Sub-session final structured response");
+    expect((agent as any).messages[1].content).toContain("Final tool outcome (should be copied)");
+    expect((agent as any).messages[2]).toEqual({ role: "assistant", content: "Main accepted helper evidence" });
+    expect(JSON.stringify((agent as any).messages)).not.toContain("Intermediate tool result");
+    expect(chunks.filter((c) => c.type === "done")).toHaveLength(1);
 
     // 4. Verify appendMessages was called to persist the absorbed turn in the parent
     expect(mockAppendMessages).toHaveBeenCalledWith(
       "session-parent",
       expect.arrayContaining([
         expect.objectContaining({ role: "user", content: "Implement auth and write tests" }),
-        expect.objectContaining({ role: "assistant", content: "Sub-session final structured response" }),
-        expect.objectContaining({ role: "tool", content: "Final tool outcome (should be copied)" }),
+        expect.objectContaining({ role: "assistant", content: "Main accepted helper evidence" }),
       ]),
     );
   });
@@ -399,7 +405,8 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
       threw = true;
     }
 
-    expect(threw).toBe(true);
+    expect(threw).toBe(false); // Main receives a failed helper receipt and decides next steps.
+    expect(JSON.stringify((agent as any).messages)).toContain("Simulated MessageProcessor crash");
 
     // Verify parent session is restored even after crash
     expect(agent.getSessionId()).toBe("session-parent");

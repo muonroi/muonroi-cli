@@ -39,7 +39,7 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from typing_extensions import Self
 
 
@@ -62,6 +62,17 @@ def catalog_path() -> Path:
 # --------------------------------------------------------------------------- #
 # Schema — mirrors CatalogModel in src/models/catalog-client.ts
 # --------------------------------------------------------------------------- #
+class CatalogModalities(BaseModel):
+    input: list[str]
+    output: list[str]
+
+
+class CatalogLongContextPricing(BaseModel):
+    input_token_threshold: int = Field(gt=0)
+    input_multiplier: float = Field(gt=0)
+    output_multiplier: float = Field(gt=0)
+
+
 class CatalogModel(BaseModel):
     id: str
     name: str
@@ -73,6 +84,8 @@ class CatalogModel(BaseModel):
     output_price_per_million: float
     cached_input_price_per_million: Optional[float] = None
     cache_write_price_per_million: Optional[float] = None
+    long_context_pricing: Optional[CatalogLongContextPricing] = None
+    modalities: Optional[CatalogModalities] = None
     pricing_unit: Optional[str] = None
     unit_price: Optional[float] = None
     rate_limits: Optional["CatalogRateLimits"] = None

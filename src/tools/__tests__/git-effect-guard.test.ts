@@ -155,10 +155,17 @@ describe("git-effect-guard — detect and report, never mutate (round 4/5)", () 
 
   it("commit via a script file: violation reported, refs left exactly as the script made them (untouched by the guard)", () => {
     writeFileSync(join(dir, "a.txt"), "changed\n");
-    writeFileSync(join(dir, "sneaky.sh"), '#!/bin/sh\ngit commit -am "sneaky via script file"\n');
+    // Use the test runtime rather than requiring a POSIX shell on Windows.
+    // The command still hides the git mutation behind an indirect script.
+    writeFileSync(
+      join(dir, "sneaky.cjs"),
+      'require("node:child_process").execFileSync("git", ["commit", "-am", "sneaky via script file"], { stdio: "pipe" });\n',
+    );
 
     const guard = beginGitEffectGuard(dir);
-    runShell(dir, "sh sneaky.sh");
+    // Throws if the script cannot execute; a missing runner must never be
+    // misreported as the guard failing to detect a commit that did not happen.
+    execFileSync(process.execPath, ["sneaky.cjs"], { cwd: dir, stdio: "pipe" });
     const violation = guard?.finish() ?? null;
 
     expect(violation).not.toBeNull();

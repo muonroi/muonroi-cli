@@ -353,7 +353,9 @@ JSON format:
         model: runtime.model,
         prompt,
         maxOutputTokens: 600,
-        abortSignal: AbortSignal.timeout(15000),
+        abortSignal: input.signal
+          ? AbortSignal.any([input.signal, AbortSignal.timeout(15000)])
+          : AbortSignal.timeout(15000),
       });
 
       let items: ModelCard[];

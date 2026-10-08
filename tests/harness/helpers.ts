@@ -22,6 +22,8 @@ export type HarnessContext = {
 };
 
 export type SpawnHarnessOptions = {
+  /** Test-only bootstrap for local provider transports; defaults to the real CLI entry. */
+  entry?: string;
   /** Extra CLI args inserted after the entry point and --agent-mode. */
   extraArgs?: string[];
   /** Extra env vars forwarded to the child. Merged with process.env. */
@@ -55,7 +57,7 @@ const ENTRY = resolve("src/index.ts");
  */
 export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<HarnessContext> {
   const fixtures = opts.fixturesDir ?? DEFAULT_FIXTURES;
-  const args = [ENTRY, "--agent-mode", "--mock-llm", fixtures, ...(opts.extraArgs ?? [])];
+  const args = [opts.entry ?? ENTRY, "--agent-mode", "--mock-llm", fixtures, ...(opts.extraArgs ?? [])];
 
   let tempHome: string | undefined;
   let homeDir = opts.cwd;

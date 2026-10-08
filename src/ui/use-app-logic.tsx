@@ -53,6 +53,9 @@ import { planSafetyAskcard } from "../orchestrator/safety-askcard.js";
 
 import { deriveHaltRecommendation } from "../product-loop/halt-recommendation.js";
 import type { HaltChunk, ProductStatusCardData, RecoveryOption } from "../product-loop/types.js";
+import { getProviderCapabilities } from "../providers/capabilities.js";
+import { saveProviderCredentials, workspaceIdError } from "../providers/credential-setup.js";
+import type { ApiKeyPromptState } from "./modals/model-picker-modal.js";
 import { getConfiguredProviders, setKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
 import { buildAdoptExistingContinuationPrompt, buildIdealContinuationPrompt } from "../scaffold/continuation-prompt.js";
@@ -979,44 +982,7 @@ export function useAppLogic(props: AppLogicProps) {
     };
   }, [setConfiguredProviders, refreshProvidersWithKey]);
 
-  const [apiKeyPrompt, setApiKeyPrompt] = useState<{
-    provider: ProviderId;
-    value: string;
-    error: string | null;
-    reveal?: boolean;
-  } | null>(null);
-  const submitProviderKey = useCallback(async () => {
-    if (!apiKeyPrompt) return;
-    const key = apiKeyPrompt.value.trim();
-    if (!key) {
-      setApiKeyPrompt({ ...apiKeyPrompt, error: "Key cannot be empty" });
-      return;
-    }
-    try {
-      const ok = await setKeyForProvider(apiKeyPrompt.provider, key);
-      if (!ok) {
-        setApiKeyPrompt({ ...apiKeyPrompt, error: "Could not store key. Try `export <PROVIDER>_API_KEY=…`." });
-        return;
-      }
-      // Same reason as the OAuth path: boot skips a provider with no
-      // credentials, so without this the key is stored but the provider stays
-      // unusable until the next start.
-      try {
-        const { rewarmProviderFactory } = await import("../providers/warm.js");
-        await rewarmProviderFactory(apiKeyPrompt.provider);
-      } catch (err) {
-        console.error(
-          `[providers] ${apiKeyPrompt.provider} key stored but its factory could not be rebuilt; a restart may be needed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-      await refreshProvidersWithKey();
-      setApiKeyPrompt(null);
-    } catch (e) {
-      setApiKeyPrompt({ ...apiKeyPrompt, error: (e as Error).message });
-    }
-  }, [apiKeyPrompt, refreshProvidersWithKey]);
+  const [apiKeyPrompt, setApiKeyPrompt] = useState<ApiKeyPromptState | null>(null);
 
   // ── OAuth subscription login (browser-based) for openai / xai ───────────
   // One auth mode per provider: a successful OAuth login clears any stored API
@@ -1045,64 +1011,6 @@ export function useAppLogic(props: AppLogicProps) {
       alive = false;
     };
   }, []);
-
-  const startProviderOAuth = useCallback(
-    async (provider: ProviderId) => {
-      oauthCancelRef.current = false;
-      // Abort the PREVIOUS attempt's server before starting another: the
-      // browser flow binds a loopback callback on a two-port set, so a
-      // still-running one would make this attempt fail to bind.
-      oauthAbortRef.current?.abort();
-      oauthAbortRef.current = new AbortController();
-      setOAuthLogin({ provider, error: null });
-      try {
-        const { getOAuthProviderConfig } = await import("../providers/auth/registry.js");
-        const cfg = await getOAuthProviderConfig(provider);
-        if (!cfg) {
-          setOAuthLogin({ provider, error: "OAuth is not available for this provider." });
-          return;
-        }
-        // No allowManualCodePaste here: OpenTUI owns stdin. A flow that reads
-        // it takes every keystroke from the TUI and its readline close() leaves
-        // stdin paused — the "TUI is dead after signing in" bug.
-        const tokens = await cfg.provider.login({ signal: oauthAbortRef.current?.signal });
-        if (oauthCancelRef.current) return;
-        const { saveTokens } = await import("../providers/auth/token-store.js");
-        await saveTokens(provider, tokens);
-        // Exclusivity: OAuth login clears any stored API key for this provider.
-        try {
-          const { clearEnvVar } = await import("../providers/env-store.js");
-          const { ENV_BY_PROVIDER } = await import("../providers/keychain.js");
-          clearEnvVar(ENV_BY_PROVIDER[provider]);
-        } catch (err) {
-          console.error(
-            `[providers] could not clear the stored ${provider} key after OAuth login: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
-        // The factory bakes in the auth it saw when it was built, so the tokens
-        // we just saved reach nothing until it is rebuilt — that is why signing
-        // in only took effect after restarting the session.
-        try {
-          const { rewarmProviderFactory } = await import("../providers/warm.js");
-          await rewarmProviderFactory(provider);
-        } catch (err) {
-          console.error(
-            `[providers] ${provider} signed in but its factory could not be rebuilt; a restart may be needed: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
-        await refreshProvidersWithKey();
-        setOAuthLogin(null);
-      } catch (e) {
-        if (oauthCancelRef.current) return;
-        setOAuthLogin({ provider, error: (e as Error).message });
-      }
-    },
-    [refreshProvidersWithKey],
-  );
 
   const cancelProviderOAuth = useCallback(() => {
     oauthCancelRef.current = true;
@@ -2327,8 +2235,6 @@ export function useAppLogic(props: AppLogicProps) {
 
   const setAsDefaultProvider = useCallback(
     (provider: ProviderId) => {
-      // Disabled providers cannot be default — router would just skip them.
-      if (disabledProviders.includes(provider)) return;
       const pickModel = (id: ProviderId): string | null => {
         for (const tier of ["balanced", "fast", "premium"] as const) {
           const m = getModelByTier(tier, id);
@@ -2339,6 +2245,9 @@ export function useAppLogic(props: AppLogicProps) {
       };
       const modelId = pickModel(provider);
       if (!modelId) return;
+      // Enter/D explicitly selects this provider. Re-enable it before switching
+      // models so the router and picker honor the selection after OAuth login.
+      setDisabledProvidersState(setProviderDisabled(provider, false));
       setDefaultProvider(provider);
       setDefaultProviderState(provider);
       agent.setModel(modelId);
@@ -2347,7 +2256,134 @@ export function useAppLogic(props: AppLogicProps) {
       saveProjectSettings({ model: modelId });
       saveUserSettings({ defaultModel: modelId, defaultProvider: provider });
     },
-    [agent, disabledProviders, setDefaultProviderState, setModel],
+    [agent, setDisabledProvidersState, setDefaultProviderState, setModel],
+  );
+
+  const submitProviderKey = useCallback(async () => {
+    if (!apiKeyPrompt) return;
+    if (apiKeyPrompt.saving) return;
+    const step = apiKeyPrompt.step ?? "key";
+    const setup = getProviderCapabilities(apiKeyPrompt.provider).workspaceSetup();
+    const key = step === "key" ? apiKeyPrompt.value.trim() : apiKeyPrompt.apiKey!;
+    if (!key || key.length < 20) {
+      setApiKeyPrompt({ ...apiKeyPrompt, error: "API key must contain at least 20 characters" });
+      return;
+    }
+    if (step === "key" && setup) {
+      setApiKeyPrompt({
+        ...apiKeyPrompt,
+        apiKey: key,
+        value: "",
+        step: "scope",
+        workspaceScoped: false,
+        reveal: false,
+        error: null,
+      });
+      return;
+    }
+    if (step === "scope" && !apiKeyPrompt.workspaceScoped) {
+      setApiKeyPrompt({ ...apiKeyPrompt, step: "workspace", value: "", error: null });
+      return;
+    }
+    if (step === "workspace") {
+      const error = workspaceIdError(apiKeyPrompt.provider, apiKeyPrompt.value);
+      if (error) {
+        setApiKeyPrompt({ ...apiKeyPrompt, error });
+        return;
+      }
+    }
+    setApiKeyPrompt({ ...apiKeyPrompt, saving: true, error: null });
+    try {
+      const ok = await saveProviderCredentials(apiKeyPrompt.provider, {
+        apiKey: key,
+        ...(step === "workspace" ? { workspaceId: apiKeyPrompt.value.trim() } : {}),
+      });
+      if (!ok) {
+        setApiKeyPrompt({ ...apiKeyPrompt, saving: false, error: "Could not store credentials. Please retry setup." });
+        return;
+      }
+      // Same reason as the OAuth path: boot skips a provider with no
+      // credentials, so without this the key is stored but the provider stays
+      // unusable until the next start.
+      const { rewarmProviderFactory } = await import("../providers/warm.js");
+      if (!(await rewarmProviderFactory(apiKeyPrompt.provider))) {
+        throw new Error("Credentials saved, but the provider connection could not be rebuilt. Press Enter to retry.");
+      }
+      await refreshProvidersWithKey();
+      if (apiKeyPrompt.activateAfterSave) setAsDefaultProvider(apiKeyPrompt.provider);
+      setApiKeyPrompt(null);
+    } catch (e) {
+      console.error(`[providers] ${apiKeyPrompt.provider} credential setup failed: ${(e as Error).message}`);
+      setApiKeyPrompt({ ...apiKeyPrompt, saving: false, error: (e as Error).message });
+    }
+  }, [apiKeyPrompt, refreshProvidersWithKey, setAsDefaultProvider]);
+
+  const startProviderOAuth = useCallback(
+    async (provider: ProviderId, activateAfterLogin = false) => {
+      oauthCancelRef.current = false;
+      // Abort the PREVIOUS attempt's server before starting another: the
+      // browser flow binds a loopback callback on a two-port set, so a
+      // still-running one would make this attempt fail to bind.
+      oauthAbortRef.current?.abort();
+      const attempt = new AbortController();
+      oauthAbortRef.current = attempt;
+      setOAuthLogin({ provider, error: null });
+      try {
+        const { getOAuthProviderConfig } = await import("../providers/auth/registry.js");
+        const cfg = await getOAuthProviderConfig(provider);
+        if (!cfg) {
+          setOAuthLogin({ provider, error: "OAuth is not available for this provider." });
+          return;
+        }
+        // No allowManualCodePaste here: OpenTUI owns stdin. A flow that reads
+        // it takes every keystroke from the TUI and its readline close() leaves
+        // stdin paused — the "TUI is dead after signing in" bug.
+        const tokens = await cfg.provider.login({ signal: attempt.signal });
+        if (attempt.signal.aborted || oauthCancelRef.current) return;
+        const { saveTokens } = await import("../providers/auth/token-store.js");
+        await saveTokens(provider, tokens);
+        // Exclusivity: OAuth login clears any stored API key for this provider.
+        try {
+          const { clearEnvVar } = await import("../providers/env-store.js");
+          const { ENV_BY_PROVIDER } = await import("../providers/keychain.js");
+          clearEnvVar(ENV_BY_PROVIDER[provider]);
+        } catch (err) {
+          console.error(
+            `[providers] could not clear the stored ${provider} key after OAuth login: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        // The factory bakes in the auth it saw when it was built, so the tokens
+        // we just saved reach nothing until it is rebuilt — that is why signing
+        // in only took effect after restarting the session.
+        try {
+          const { rewarmProviderFactory } = await import("../providers/warm.js");
+          await rewarmProviderFactory(provider);
+        } catch (err) {
+          console.error(
+            `[providers] ${provider} signed in but its factory could not be rebuilt; a restart may be needed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        await refreshProvidersWithKey();
+        if (attempt.signal.aborted || oauthCancelRef.current) return;
+        if (activateAfterLogin) setAsDefaultProvider(provider);
+        setOAuthLogin(null);
+        pushToast(
+          "info",
+          activateAfterLogin
+            ? `Signed in to ${cfg.displayName}. Active model: ${agent.getModel()}.`
+            : `Signed in to ${cfg.displayName}. Select a model to use this provider.`,
+        );
+      } catch (e) {
+        if (attempt.signal.aborted || oauthCancelRef.current) return;
+        logger.warn("ui", "Provider OAuth sign-in failed", { providerId: provider, error: (e as Error).message });
+        setOAuthLogin({ provider, error: (e as Error).message });
+      }
+    },
+    [refreshProvidersWithKey, setAsDefaultProvider, pushToast, agent],
   );
 
   const toggleModelDisabled = useCallback(
@@ -7853,12 +7889,21 @@ export function useAppLogic(props: AppLogicProps) {
         }
         // Sub-modal: API key prompt for the focused provider.
         if (apiKeyPrompt) {
+          if (apiKeyPrompt.saving) return;
           if (isEscapeKey(key)) {
             setApiKeyPrompt(null);
             return;
           }
           if (key.name === "return") {
             void submitProviderKey();
+            return;
+          }
+          if (apiKeyPrompt.step === "scope") {
+            if (key.name === "up" || key.name === "1") {
+              setApiKeyPrompt((s) => (s ? { ...s, workspaceScoped: true } : s));
+            } else if (key.name === "down" || key.name === "2") {
+              setApiKeyPrompt((s) => (s ? { ...s, workspaceScoped: false } : s));
+            }
             return;
           }
           if (key.name === "backspace") {
@@ -7869,7 +7914,7 @@ export function useAppLogic(props: AppLogicProps) {
             return;
           }
           // Ctrl+R toggles plaintext reveal so the user can verify a pasted key.
-          if (key.name === "r" && key.ctrl && !key.meta) {
+          if (key.name === "r" && key.ctrl && !key.meta && (!apiKeyPrompt.step || apiKeyPrompt.step === "key")) {
             setApiKeyPrompt((s) => (s ? { ...s, reveal: !s.reveal } : s));
             return;
           }
@@ -7923,7 +7968,8 @@ export function useAppLogic(props: AppLogicProps) {
           // /login is gone, so this picker is the single auth surface: K adds a
           // key, Enter signs in via OAuth where the provider supports it.
           if (providersWithKey.has(p)) setAsDefaultProvider(p);
-          else if (oauthProviders.has(p)) void startProviderOAuth(p);
+          else if (oauthProviders.has(p)) void startProviderOAuth(p, true);
+          else setApiKeyPrompt({ provider: p, value: "", error: null, activateAfterSave: true });
           return;
         }
         return;
@@ -8029,7 +8075,7 @@ export function useAppLogic(props: AppLogicProps) {
             key.name === "right" ? options[Math.min(options.length - 1, idx + 1)] : options[Math.max(0, idx - 1)];
           if (next && next !== current && focusedWalletRow.apply) {
             const patch = focusedWalletRow.apply(walletSettings, next);
-            applyWalletSettings({ ...walletSettings, ...patch });
+            setWalletSettings({ ...walletSettings, ...patch });
           }
           return;
         }
@@ -8041,7 +8087,7 @@ export function useAppLogic(props: AppLogicProps) {
           const next = options[(idx + 1) % options.length];
           if (next && focusedWalletRow.apply) {
             const patch = focusedWalletRow.apply(walletSettings, next);
-            applyWalletSettings({ ...walletSettings, ...patch });
+            setWalletSettings({ ...walletSettings, ...patch });
           }
           return;
         }
@@ -8405,7 +8451,7 @@ export function useAppLogic(props: AppLogicProps) {
       walletSettings,
       walletFocusIndex,
       walletDisplayInfo,
-      applyWalletSettings,
+      setWalletSettings,
       slashMenuIndex,
       submitApiKey,
       submitPlanAnswers,
@@ -8453,7 +8499,10 @@ export function useAppLogic(props: AppLogicProps) {
       if (apiKeyPrompt) {
         event.preventDefault();
         const pasted = sanitizeSecretInput(decodePasteBytes(event.bytes));
-        if (pasted) setApiKeyPrompt((s) => (s ? { ...s, value: s.value + pasted, error: null } : s));
+        if (pasted)
+          setApiKeyPrompt((s) =>
+            s && s.step !== "scope" && !s.saving ? { ...s, value: s.value + pasted, error: null } : s,
+          );
         return;
       }
 

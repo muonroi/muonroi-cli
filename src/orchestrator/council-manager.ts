@@ -310,9 +310,13 @@ export class CouncilManager {
     }
   }
 
-  createQuestionResponder(): QuestionResponder {
+  createQuestionResponder(signal?: AbortSignal): QuestionResponder {
     const responder: QuestionResponder = (questionId: string) =>
-      new Promise<string>((resolve) => {
+      new Promise<string>((resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
         const buffered = this._bufferedQuestionAnswers.get(questionId);
         if (buffered !== undefined) {
           if (process.env.MUONROI_DEBUG_LEADER === "1") {
@@ -338,7 +342,14 @@ export class CouncilManager {
         // the killed turn never reached appendMessages. Only the `ask_user` TOOL
         // path was bracketed; every council card was not.
         const release = this.holdWatchdogOpen();
+        const abort = () => {
+          this.withdrawQuestion(questionId, "turn cancelled");
+          release();
+          reject(signal?.reason);
+        };
+        signal?.addEventListener("abort", abort, { once: true });
         this._questionResolvers.set(questionId, (answer) => {
+          signal?.removeEventListener("abort", abort);
           release();
           resolve(answer);
         });

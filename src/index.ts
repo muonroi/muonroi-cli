@@ -1469,6 +1469,8 @@ keys
   .action(async (provider: string) => {
     const { runKeysSet } = await import("./cli/keys.js");
     await runKeysSet(provider);
+    // Credentials are fully persisted; drain the confirmation before exiting.
+    process.stdout.write("", () => process.exit(0));
   });
 
 keys

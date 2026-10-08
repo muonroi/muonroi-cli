@@ -144,6 +144,7 @@ import { visionToolsNeeded } from "../tools/vision-gate.js";
 import type { SessionInfo, StreamChunk, SubagentStatus, ToolCall } from "../types/index";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { setLoopBreadcrumb } from "../utils/event-loop-monitor.js";
+import { abortableStream } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
 import { openUrl } from "../utils/open-url.js";
 import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
@@ -1124,6 +1125,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       // request got zero bytes while every prior step completed) from a stall
       // that interrupted text mid-generation. See shouldContinueAfterMidLoopStall.
       let chunksThisStep = 0;
+      let completedStepMessages: ModelMessage[] = [];
       // Decide whether a fired stall watchdog should re-prompt (re-issue the
       // same request) instead of falling through to rescue/error. Returns the
       // backoff ms to wait before re-issuing, or null to NOT re-prompt. Reads
@@ -1190,6 +1192,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       let encryptedReasoningHidden = false;
       let streamOk = false;
       let closeMcp: (() => Promise<void>) | undefined;
+      let disposeProviderWatchdog: (() => void) | undefined;
       let stepNumber = -1;
       const activeToolCalls: ToolCall[] = [];
       // Capped digest of tool outputs gathered this attempt — fuels the
@@ -2200,15 +2203,34 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // The progress timer is reset ONLY by stall.petProgress() on real output
         // (text-delta / tool-call), aborting a runaway-reasoning loop while a
         // legitimately long reasoning burst that DOES emit output survives.
+        const recordProviderStall = (kind: "idle" | "progress") => {
+          stallTriggered = true;
+          const data = {
+            kind,
+            callId: _topCallId,
+            model: runtime.modelId,
+            phase: "provider-stream",
+            chunksThisAttempt,
+            chunksThisStep,
+          };
+          breadcrumb("mainStream.provider.stall", { sessionId: deps.session?.id, ...data });
+          logger.warn("orchestrator", "Provider stream deadline fired", data);
+          try {
+            if (deps.session) logInteraction(deps.session.id, "error", { eventSubtype: "provider-stall", data });
+          } catch (err) {
+            logger.error("orchestrator", "Failed to record provider stall", {
+              error: err instanceof Error ? err.message : String(err),
+              ...data,
+            });
+          }
+        };
         const stall = createStallWatchdog(
           getProviderStallTimeoutMs(),
-          () => {
-            stallTriggered = true;
-          },
+          () => recordProviderStall("idle"),
           {
             progressTimeoutMs: getProviderProgressTimeoutMs(),
             onProgressFire: () => {
-              stallTriggered = true;
+              recordProviderStall("progress");
               console.error(
                 `[tool-engine] stream aborted: no text/tool output for ${getProviderProgressTimeoutMs()}ms ` +
                   `(runaway reasoning / no forward progress) model=${runtime.modelId}`,
@@ -2255,6 +2277,11 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           stopFirstTokenPing();
           _origStallDispose();
         };
+        disposeProviderWatchdog = () => {
+          stall.dispose();
+          breadcrumb("mainStream.provider.end", { sessionId: deps.session?.id, callId: _topCallId });
+        };
+        const providerSignal = combineAbortSignals(signal, stall.signal) ?? signal;
         // F3c — hard-cap LLM calls per turn before this streamText()
         if (++llmCallsThisTurn > MAX_LLM_CALLS_PER_TURN) {
           stall.dispose();
@@ -2266,6 +2293,11 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           yield { type: "done" };
           return;
         }
+        breadcrumb("mainStream.provider.start", {
+          sessionId: deps.session?.id,
+          callId: _topCallId,
+          model: runtime.modelId,
+        });
         const result = streamText({
           model: runtime.model,
           system: systemForModel,
@@ -2274,7 +2306,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           toolChoice: _finalToolChoice,
           stopWhen: stepRouterPhase === "phase1" ? stepCountIs(1) : dynamicStopWhen,
           maxRetries: 0,
-          abortSignal: combineAbortSignals(signal, stall.signal),
+          abortSignal: providerSignal,
           // Repair malformed tool-call JSON args before they bubble up as
           // InvalidToolInputError → tool-error → repetition-detector abort.
           // Conservative: only fixes the two observed Qwen-style defects.
@@ -2783,21 +2815,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
           experimental_onStepStart: (event: unknown) => {
             stepNumber = getStepNumber(event, stepNumber + 1);
-            notifyObserver(observer?.onStepStart, {
-              stepNumber,
-              timestamp: Date.now(),
-            });
           },
-          onStepFinish: (event: unknown) => {
+          onStepFinish: (event) => {
+            if (providerSignal.aborted) return;
+            completedStepMessages = event.response.messages as ModelMessage[];
             const currentStep = getStepNumber(event, Math.max(stepNumber, 0));
             stepNumber = Math.max(stepNumber, currentStep);
             const stepUsage = getUsage(event);
-            notifyObserver(observer?.onStepFinish, {
-              stepNumber: currentStep,
-              timestamp: Date.now(),
-              finishReason: getFinishReason(event),
-              usage: stepUsage,
-            });
 
             // Pull any completed background delegations so their results can be
             // injected (as system messages) for the *next* LLM step in this same turn.
@@ -2826,6 +2850,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             recordAssistantBurst(_ceilingSessionId, _stepText);
           },
           onFinish: ({ finishReason }) => {
+            if (providerSignal.aborted) return;
             _lastFinishReason = finishReason ?? null;
             // Task 2.6b — emit llm-done (agent-mode only).
             try {
@@ -2856,19 +2881,34 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         });
 
         let _topTokenIndex = 0;
+        let observedStepNumber = -1;
         const _wireProviderIdTop = runtime.modelInfo?.provider ?? "unknown";
-        for await (const part of result.fullStream) {
-          stall.pet(); // chunk arrived — reset the stall watchdog
+        for await (const part of abortableStream(result.fullStream, providerSignal, `provider stream ${_topCallId}`, {
+          type: "abort",
+        })) {
+          // AI SDK emits start before doStream resolves; this is not a provider byte.
+          const providerPart = part.type !== "start" && part.type !== "start-step" && part.type !== "abort";
+          if (providerPart) {
+            if (chunksThisAttempt === 0)
+              breadcrumb("mainStream.firstProviderPart", {
+                sessionId: deps.session?.id,
+                callId: _topCallId,
+                partType: part.type,
+              });
+            stall.pet();
+          }
           // Breadcrumb the chunk type: if the loop blocks while draining the
           // stream, this says which part kind we were handling when it froze.
           setLoopBreadcrumb(`stream:${String(part.type ?? "unknown")}`);
           // Count only real content parts. The watchdog abort itself surfaces
           // as an "abort" part — counting it would defeat the TTFB-stall gate
           // (a frozen-before-first-byte stall yields ONLY the abort part).
-          if (part.type !== "abort") {
+          if (providerPart) {
             chunksThisAttempt++;
             chunksThisStep++;
           }
+          // SDK can prepare the next request before its previous step tail is drained.
+          if (part.type === "finish-step") chunksThisStep = 0;
           if (signal.aborted) {
             yield { type: "content", content: "\n\n[Cancelled]" };
             break;
@@ -2906,6 +2946,20 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           }
 
           switch (part.type) {
+            // SDK callbacks can run ahead of this consumer. Ordered lifecycle
+            // parts ensure JSON observers flush text after receiving it.
+            case "start-step":
+              observedStepNumber++;
+              notifyObserver(observer?.onStepStart, { stepNumber: observedStepNumber, timestamp: Date.now() });
+              break;
+            case "finish-step":
+              notifyObserver(observer?.onStepFinish, {
+                stepNumber: Math.max(observedStepNumber, 0),
+                timestamp: Date.now(),
+                finishReason: getFinishReason(part),
+                usage: getUsage(part),
+              });
+              break;
             case "text-delta":
               stall.petProgress(); // real forward progress — reset the no-progress guard
               assistantText += part.text;
@@ -3677,10 +3731,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 if (_contTransient && midLoopStallRetryCount < maxStallRetries && !signal.aborted && !stallTriggered) {
                   let _appended = 0;
                   try {
-                    const _resp = (await Promise.race([
-                      result.response,
-                      new Promise((_r, rej) => setTimeout(() => rej(new Error("response-timeout")), 3_000)),
-                    ])) as { messages: ModelMessage[] };
+                    const _resp = (
+                      completedStepMessages.length
+                        ? { messages: completedStepMessages }
+                        : await Promise.race([
+                            result.response,
+                            new Promise((_r, rej) => setTimeout(() => rej(new Error("response-timeout")), 3_000)),
+                          ])
+                    ) as { messages: ModelMessage[] };
                     const _gen = sanitizeModelMessages(scrubImagePayloadsInMessages(_resp.messages)) as ModelMessage[];
                     for (const _m of _gen) {
                       deps.messages.push(_m);
@@ -3843,10 +3901,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                     // result.response settles fast here (the stream was already
                     // aborted via stall.signal). Race a short timeout so a
                     // doubly-wedged provider can't re-hang the recovery itself.
-                    const _resp = (await Promise.race([
-                      result.response,
-                      new Promise((_r, rej) => setTimeout(() => rej(new Error("response-timeout")), 3_000)),
-                    ])) as { messages: ModelMessage[] };
+                    const _resp = (
+                      completedStepMessages.length
+                        ? { messages: completedStepMessages }
+                        : await Promise.race([
+                            result.response,
+                            new Promise((_r, rej) => setTimeout(() => rej(new Error("response-timeout")), 3_000)),
+                          ])
+                    ) as { messages: ModelMessage[] };
                     const _gen = sanitizeModelMessages(scrubImagePayloadsInMessages(_resp.messages)) as ModelMessage[];
                     for (const _m of _gen) {
                       deps.messages.push(_m);
@@ -4968,6 +5030,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         yield { type: "done" };
         return;
       } finally {
+        disposeProviderWatchdog?.();
         await closeMcp?.().catch(() => {});
       }
     }

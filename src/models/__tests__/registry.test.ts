@@ -1,4 +1,5 @@
-import { beforeAll, describe, expect, test } from "vitest";
+import { createRequire } from "node:module";
+import { beforeAll, describe, expect, test, vi } from "vitest";
 import { resolveModelForTask, type TierLookup } from "../../orchestrator/sub-agent-model-tier.js";
 import {
   getCatalogCouncilRouting,
@@ -18,6 +19,11 @@ import {
   normalizeModelId,
   SWITCH_PROVIDER_ORDER,
 } from "../registry";
+
+vi.mock("../catalog-client.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../catalog-client.js")>()),
+  fetchCatalogDocument: async () => createRequire(import.meta.url)("../catalog.json"),
+}));
 
 beforeAll(async () => {
   await loadCatalog();
@@ -184,6 +190,18 @@ describe("isReasoningModel", () => {
 });
 
 describe("tier_routing catalog flag", () => {
+  test("routes current OpenAI and Claude tiers while retaining older explicit IDs", () => {
+    expect(getModelByTier("fast", "openai")?.id).toBe("gpt-6-luna");
+    expect(getModelByTier("balanced", "openai")?.id).toBe("gpt-6.1-sol");
+    expect(getModelByTier("premium", "openai")?.id).toBe("gpt-6-astra");
+    expect(getModelByTier("fast", "anthropic")?.id).toBe("claude-haiku-5-5");
+    expect(getModelByTier("balanced", "anthropic")?.id).toBe("claude-sonnet-5-5");
+    expect(getModelByTier("premium", "anthropic")?.id).toBe("claude-opus-5-5");
+    expect(getModelInfo("sonnet")?.id).toBe("claude-sonnet-5-5");
+    expect(getModelInfo("claude-sonnet-5")?.tierRouting).toBe(false);
+    expect(getModelInfo("gpt-5.5")?.tierRouting).toBe(false);
+  });
+
   test("StepFun routes text models by tier and leaves specialized media models explicit-only", () => {
     expect(getModelByTier("fast", "stepfun")?.id).toBe("step-3.5-flash");
     expect(getModelByTier("premium", "stepfun")?.id).toBe("step-3.7-flash");

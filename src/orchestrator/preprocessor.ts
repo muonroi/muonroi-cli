@@ -1,3 +1,4 @@
+import { breadcrumb } from "../council/crash-breadcrumb.js";
 import { readState } from "../gsd/workflow-engine.js";
 import type { DiscoveryInteractionHandler } from "../pil/discovery-types.js";
 import { runPipeline } from "../pil/pipeline.js";
@@ -5,6 +6,7 @@ import type { StreamChunk } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import type { MessageProcessorDeps } from "./message-processor.js";
 import { type ComplexitySize, getSessionLastTask, recordSessionLastTask, resolveCeiling } from "./scope-ceiling.js";
+import { pingTurnProgress } from "./turn-progress.js";
 
 export interface PreprocessorResult {
   pilCtx: Awaited<ReturnType<typeof runPipeline>>;
@@ -38,11 +40,11 @@ export async function* prepareTurnContext(
   userMessage: string,
   _budgetOverride: any,
 ): AsyncGenerator<StreamChunk, PreprocessorResult, unknown> {
-  // PIL: enrich prompt before pushing to messages (D-01, D-03, D-04)
-  // Promise.race timeout of 200ms is inside runPipeline — fail-open guaranteed
-  // --- PIL with discovery (interactive path) ---
+  // The pipeline bounds automatic preparation, pausing only for human answers.
+  const signal = deps.getAbortController()?.signal;
   const pilChunkQueue: StreamChunk[] = [];
-  const pilResponder = deps.councilManager.createQuestionResponder();
+  const pilResponder = deps.councilManager.createQuestionResponder(signal);
+  let wake: (() => void) | undefined;
 
   const discoveryHandler: DiscoveryInteractionHandler = {
     askQuestion: async (question) => {
@@ -51,6 +53,7 @@ export async function* prepareTurnContext(
         content: question.question,
         councilQuestion: question,
       } as StreamChunk);
+      wake?.();
       const text = await pilResponder(question.questionId);
       return { questionId: question.questionId, text, kind: "choice" as const };
     },
@@ -85,6 +88,14 @@ export async function* prepareTurnContext(
       }
 
       pilCtxResolved = await runPipeline(userMessage, {
+        signal,
+        onPhase: (name, state, error) => {
+          pingTurnProgress();
+          breadcrumb(`pre-stream.pilPrep.${name}.${state === "error" ? "end" : state}`, {
+            sessionId: deps.session?.id,
+            ...(error ? { error } : {}),
+          });
+        },
         resumeDigest: deps.getResumeDigest(),
         activeRunId: deps.getActiveRunId(),
         sessionId: deps.session?.id ?? null,
@@ -100,6 +111,10 @@ export async function* prepareTurnContext(
         priorDepthTier: readPriorDepthTier(deps.bash.getCwd()),
       });
     } catch (err) {
+      logger.error("pil", "Turn preparation failed", {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: deps.session?.id,
+      });
       pilCtxResolved = {
         raw: userMessage,
         enriched: userMessage,
@@ -117,21 +132,23 @@ export async function* prepareTurnContext(
       };
     } finally {
       pilDone = true;
+      wake?.();
     }
   })();
 
-  while (!pilDone) {
-    while (pilChunkQueue.length > 0) {
-      yield pilChunkQueue.shift()!;
+  while (!pilDone || pilChunkQueue.length > 0) {
+    const chunk = pilChunkQueue.shift();
+    if (chunk) {
+      if (!signal?.aborted) yield chunk;
+    } else {
+      await new Promise<void>((resolve) => {
+        wake = resolve;
+      });
+      wake = undefined;
     }
-    if (!pilDone) {
-      await new Promise((resolve) => setImmediate(resolve));
-    }
-  }
-  while (pilChunkQueue.length > 0) {
-    yield pilChunkQueue.shift()!;
   }
   await pilTask;
+  signal?.throwIfAborted();
 
   const pilCtx = pilCtxResolved!;
 
