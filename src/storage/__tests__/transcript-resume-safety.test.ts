@@ -84,6 +84,65 @@ describe("transcript resume safety — round 9 (G11c)", () => {
     vi.restoreAllMocks();
   });
 
+  it("preserves long opaque thinking signatures when resuming a large assistant message", () => {
+    const signature = "A".repeat(4096);
+    const message = {
+      role: "assistant",
+      content: [
+        { type: "reasoning", text: "", providerOptions: { anthropic: { signature } } },
+        { type: "text", text: "Long answer ".repeat(6000) },
+      ],
+    };
+    messagesDb.set("thinking-resume", [
+      {
+        session_id: "thinking-resume",
+        seq: 1,
+        role: "assistant",
+        message_json: JSON.stringify(message),
+        created_at: "2026-10-08T04:00:00Z",
+      },
+    ]);
+    const loaded = loadRawTranscript("thinking-resume");
+    expect(loaded).toEqual([message]);
+  });
+
+  it("still removes historical oversized image bytes from tool results on resume", () => {
+    const image = "A".repeat(4096);
+    messagesDb.set("image-resume", [
+      {
+        session_id: "image-resume",
+        seq: 1,
+        role: "assistant",
+        created_at: "2026-10-08T04:00:00Z",
+        message_json: JSON.stringify({
+          role: "assistant",
+          content: [{ type: "tool-call", toolCallId: "image1", toolName: "screenshot", input: {} }],
+        }),
+      },
+      {
+        session_id: "image-resume",
+        seq: 2,
+        role: "tool",
+        created_at: "2026-10-08T04:00:01Z",
+        message_json: JSON.stringify({
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "image1",
+              toolName: "screenshot",
+              output: { type: "json", value: { data: image, text: "Description ".repeat(6000) } },
+            },
+          ],
+        }),
+      },
+    ]);
+    const loaded = JSON.stringify(loadRawTranscript("image-resume"));
+    expect(loaded).not.toContain(image);
+    expect(loaded).toContain("[image data removed on resume]");
+    expect(loaded).toContain("Description");
+  });
+
   it("loadTranscriptState skips an unparseable row and keeps every valid one, without throwing", () => {
     sessionsDb.set("sess-1", { parent_session_id: null });
     messagesDb.set("sess-1", [

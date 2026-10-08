@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { getTestModels, getTestProviders } from "../__test-helpers__/catalog-fixtures.js";
+import { getTestModelForProvider, getTestModels, getTestProviders } from "../__test-helpers__/catalog-fixtures.js";
 import { type StubHandle, startStubEEServer } from "../__test-stubs__/ee-server.js";
 import { createEEClient } from "../ee/client.js";
 import { setDefaultEEClient } from "../ee/intercept.js";
@@ -283,13 +283,13 @@ describe("PIL step-0 uses the real taskType→tier map", () => {
 });
 
 describe("tier evidence: bounded demotion, route history, escalation", () => {
-  // openai resolves each tier to a distinct model: fast gpt-5.4-mini,
-  // balanced gpt-5.4, premium gpt-5.5.
+  // Resolve tier fixtures from the current catalog; new releases may change IDs.
+  const tierModel = (tier: "fast" | "balanced" | "premium") => getTestModelForProvider("openai", tier);
   const pilFor = (taskType: string) =>
     ({ domain: null, taskType, confidence: 0.75, gsdPhase: null }) as DecideOpts["pil"];
   const openai = (extra: Partial<DecideOpts> = {}): DecideOpts => ({
     ...BASE_OPTS,
-    defaultModel: "gpt-5.4",
+    defaultModel: tierModel("balanced"),
     defaultProvider: "openai",
     ...extra,
   });
@@ -304,13 +304,13 @@ describe("tier evidence: bounded demotion, route history, escalation", () => {
 
   it("demotes a documentation turn below the session model down to routingDemoteMin", async () => {
     const d = await decide("write docs for the ledger module", openai({ pil: pilFor("documentation") }));
-    expect(d.model).toBe("gpt-5.4-mini");
+    expect(d.model).toBe(tierModel("fast"));
   });
 
   it("routingDemoteMin=off keeps the session model as the floor", async () => {
     (globalThis as { routingDemoteMin?: string }).routingDemoteMin = "off";
     const d = await decide("write docs for the ledger module", openai({ pil: pilFor("documentation") }));
-    expect(d.model).toBe("gpt-5.4");
+    expect(d.model).toBe(tierModel("balanced"));
     expect(d.reason).toContain("demote-floor");
   });
 
@@ -319,7 +319,7 @@ describe("tier evidence: bounded demotion, route history, escalation", () => {
       "fix the flaky retry test",
       openai({ pil: pilFor("debug"), history: { floorTier: null, suggestedTier: "fast" } }),
     );
-    expect(d.model).toBe("gpt-5.4-mini");
+    expect(d.model).toBe(tierModel("fast"));
     expect(d.reason).toContain("history-down");
   });
 
@@ -328,7 +328,7 @@ describe("tier evidence: bounded demotion, route history, escalation", () => {
       "fix the flaky retry test",
       openai({ pil: pilFor("debug"), history: { floorTier: "premium", suggestedTier: null } }),
     );
-    expect(d.model).toBe("gpt-5.5");
+    expect(d.model).toBe(tierModel("premium"));
     expect(d.reason).toContain("history-floor");
   });
 
@@ -336,7 +336,7 @@ describe("tier evidence: bounded demotion, route history, escalation", () => {
     reportRouteOutcome("h-prev", "fail", 1000);
     expect(routerStore.getState().recentFailures).toBe(1);
     const d = await decide("fix the flaky retry test", openai({ pil: pilFor("debug") }));
-    expect(d.model).toBe("gpt-5.5");
+    expect(d.model).toBe(tierModel("premium"));
     expect(d.reason).toContain("escalate:prev-fail");
     reportRouteOutcome(d.taskHash as string, "success", 1000);
     expect(routerStore.getState().recentFailures).toBe(0);
@@ -347,7 +347,7 @@ describe("tier evidence: bounded demotion, route history, escalation", () => {
       "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
       openai({ history: { floorTier: "premium", suggestedTier: null } }),
     );
-    expect(d.model).toBe("gpt-5.5");
+    expect(d.model).toBe(tierModel("premium"));
     expect(d.source).toBe("evidence");
   });
 
@@ -392,7 +392,7 @@ describe("tier evidence: bounded demotion, route history, escalation", () => {
       "design the billing ledger schema",
       openai({ defaultModel: "claude-opus-5", defaultProvider: "anthropic", pil: pilFor("plan") }),
     );
-    expect(d.model).toBe("claude-fable-5");
+    expect(d.model).toBe(getTestModelForProvider("anthropic", "premium"));
     expect(d.reason).not.toContain("promo-cap");
   });
 
@@ -403,7 +403,7 @@ describe("tier evidence: bounded demotion, route history, escalation", () => {
     );
     // "debug" maps to tier "balanced" — same as the session default (gpt-5.4). A
     // garbage suggestedTier must not demote this to "fast" (gpt-5.4-mini).
-    expect(d.model).toBe("gpt-5.4");
+    expect(d.model).toBe(tierModel("balanced"));
     expect(d.reason).not.toContain("history-down");
   });
 
@@ -414,7 +414,7 @@ describe("tier evidence: bounded demotion, route history, escalation", () => {
       "fix the flaky retry test",
       openai({ pil: pilFor("debug"), history: { floorTier: null, suggestedTier: "ultra" as never } }),
     );
-    expect(d.model).toBe("gpt-5.5"); // escalated to premium — NOT demoted to fast
+    expect(d.model).toBe(tierModel("premium")); // escalated to premium — NOT demoted to fast
     expect(d.reason).toContain("escalate:prev-fail");
     reportRouteOutcome(d.taskHash as string, "success", 1000);
   });
