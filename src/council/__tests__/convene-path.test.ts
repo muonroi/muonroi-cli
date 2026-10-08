@@ -131,6 +131,35 @@ describe("suppressPostDebate post-debate suppression", () => {
     expect(ret as string).toContain("clear recommendation");
   });
 
+  it("model tool entry completes while the server PIL pipeline never responds", async () => {
+    const { runCouncil } = await import("../index.js");
+    const { runPipeline } = await import("../../pil/pipeline.js");
+    const pipeline = vi.mocked(runPipeline);
+    const previous = pipeline.getMockImplementation();
+    pipeline.mockClear().mockImplementation(() => new Promise(() => {}));
+    try {
+      const { ret } = await runToEnd(
+        runCouncil(
+          "Review conflicting tradeoffs",
+          "mock-model",
+          [],
+          "sess-model-entry",
+          buildMockLLM(),
+          vi.fn().mockResolvedValue("unused"),
+          vi.fn().mockResolvedValue(true),
+          async function* () {
+            yield { type: "done" };
+          },
+          { skipClarification: true, suppressPreDebateCards: true, suppressPostDebate: true, skipPil: true },
+        ),
+      );
+      expect(pipeline).not.toHaveBeenCalled();
+      expect(ret).toContain("clear recommendation");
+    } finally {
+      pipeline.mockImplementation(previous!);
+    }
+  });
+
   it("suppressPostDebate:false (default) DOES emit the post-debate card (no over-suppression)", async () => {
     const { runCouncil } = await import("../index.js");
     const respondToQuestion = vi.fn().mockResolvedValue("save_exit");

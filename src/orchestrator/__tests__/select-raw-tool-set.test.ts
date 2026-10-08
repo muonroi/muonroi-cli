@@ -108,4 +108,18 @@ describe("selectRawToolSet", () => {
     });
     expect(result).toBe(baseTools);
   });
+  it.each(["chitchat", "direct answer"])("keeps leader council and optional PIL reads on %s turns", (kind) => {
+    const tools = { ...baseTools, convene_council: {}, read_pil_context: {} } as unknown as ToolSet;
+    const result = selectRawToolSet({
+      baseTools: tools,
+      supportsClientTools: true,
+      firstTurnToolsEnabled: false,
+      isChitchat: kind === "chitchat",
+      isDirectAnswer: kind === "direct answer",
+      priorTurnHadTools: false,
+    });
+    expect(result).toHaveProperty("convene_council");
+    expect(result).toHaveProperty("read_pil_context");
+    expect(result).not.toHaveProperty("edit_file");
+  });
 });

@@ -42,3 +42,16 @@ describe("convene_council tool registration + queueing", () => {
     expect(consumeCouncilConvene()).toEqual({ reason: null, toolCallId: "tc-1" });
   });
 });
+
+describe("read_pil_context nonblocking tool", () => {
+  it("is absent without a turn-local supplement", () => {
+    expect(createBuiltinTools(new BashTool(os.tmpdir()), "agent").read_pil_context).toBeUndefined();
+  });
+  it.each(["pending", "available SERVER_SUPPLEMENT", "unavailable"])("returns %s immediately", async (state) => {
+    const tools = createBuiltinTools(new BashTool(os.tmpdir()), "agent", {
+      readPilContext: () => ({ success: true, output: state }),
+    });
+    const tool = tools.read_pil_context as unknown as { execute: () => Promise<string> };
+    expect(await tool.execute()).toContain(state);
+  });
+});

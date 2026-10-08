@@ -219,40 +219,15 @@ export interface UserSettings {
   autoCompactAbsoluteFloorTokens?: number;
   roleModels?: Partial<Record<ModelRole, string>>;
   councilRounds?: number;
+  /** Allow the leader model to request council using convene_council. */
   autoCouncil?: boolean;
-  /**
-   * Minimum PIL confidence required to auto-trigger council for plan/analyze
-   * tasks. Default 0.85. Range 0.5-1.0. Lower values trigger council more
-   * eagerly (better debate coverage, higher cost); higher values restrict it
-   * to clearly-architectural prompts.
-   */
+  /** Legacy PIL trigger setting, retained for settings compatibility only. */
   autoCouncilConfidence?: number;
-  /**
-   * Minimum number of configured roleModels required before auto-council
-   * triggers. Default 2 — a "debate" needs at least two participants. Range 1-4.
-   * Set to 1 to allow single-model auto-council (degenerate; mostly useful for
-   * preserving legacy behavior).
-   */
+  /** Minimum configured roles before offering model-owned council. Default 2. */
   autoCouncilMinRoles?: number;
-  /**
-   * Whether an auto-triggered council/debate runs the pre-debate clarification
-   * interview (model-designed askcards) before debating, instead of jumping
-   * straight into the debate on the bare prompt. Default true — a broad request
-   * like "dùng debate mode thảo luận lên plan" is exactly the kind of ambiguous
-   * scope the interview is meant to chốt first (prevents the debate drifting /
-   * "lan man"). The clarifier is ROI-gated and returns 0 cards on already-detailed
-   * topics, so enabling it is safe. Set false (or env MUONROI_AUTOCOUNCIL_CLARIFY=0)
-   * to restore the old skip-clarification behaviour.
-   */
+  /** Legacy automatic-entry interview setting; main asks through ask_user. */
   autoCouncilClarify?: boolean;
-  /**
-   * When true (default), auto-council is skipped if the current session model is
-   * a reasoning model (catalog `reasoning: true`). Reasoning models already
-   * perform an internal self-debate via extended thinking, so running an
-   * explicit multi-role council on the same prompt is usually low-ROI and
-   * expensive. Set false (or env MUONROI_AUTOCOUNCIL_SKIP_REASONING=0) to force
-   * council even for reasoning models.
-   */
+  /** Legacy PIL trigger setting; reasoning models now decide council themselves. */
   autoCouncilSkipReasoning?: boolean;
   councilPreferMultiProvider?: boolean;
   /** EE involvement level in council debates. Default: advisory. CQ-19. */

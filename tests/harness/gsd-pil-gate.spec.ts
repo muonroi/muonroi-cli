@@ -1,91 +1,10 @@
 /**
- * tests/harness/gsd-pil-gate.spec.ts
- *
- * Task 8 (final task) of the PIL Prompt Gate plan — deterministic harness E2E
- * for the gate wired in src/orchestrator/message-processor.ts:706-789.
- *
- * The gate reuses the SAME leader-tier complexity assessor as the GSD hard
- * mutation gate (see gsd-hard-gate.spec.ts's header comment for the full
- * rationale on why the assessor is the only deterministic way to reach a
- * non-"standard" depth in this mock harness). Task 8 extends that pattern to
- * assert on the ENRICHMENT side of the assessor's verdict:
- *
- *   - assessComplexity() (src/gsd/complexity-assessor.ts) now also returns
- *     `quality: {verdict, missing, noiseRisk}` + `enrichedPrompt`.
- *   - When depth === "heavy" AND MUONROI_PIL_GATE_ENRICH is on, 3 critics run
- *     (src/gsd/pil-gate-critic.ts) via the SAME createCouncilLLM.generate ->
- *     mock.complete({prompt}) mechanism as the assessor — NOT the doStream/
- *     doGenerate `model` fixture. mock.complete matches on the literal
- *     `prompt` argument (see packages/agent-harness-core/src/mock-llm.ts:114),
- *     which for critics is built by buildCriticPrompt() and begins
- *     "You are the ${role} critic for a prompt-enrichment gate." — the
- *     common, role-independent substring "critic for a prompt-enrichment
- *     gate" is what a fixture must `match` against (NOT the literal system
- *     string "You are a prompt-enrichment critic." passed as `llm.generate`'s
- *     2nd arg — that string is never seen by mock.complete, which only
- *     receives `{prompt}`, confirmed by reading council/llm.ts:356-360 and
- *     message-processor.ts:462-469).
- *   - When the resolved verdict !== "adequate", message-processor.ts:781-783
- *     prepends `[PIL Gate brief]\n<brief, sliced to 1500 chars>\n\n` to
- *     `pilCtx.enriched`. That text (plus a `[Raw user input]\n<raw>` suffix
- *     appended at line 1066-1067 whenever raw !== enriched) becomes the user
- *     message content of the FIRST main-agent doStream call — dumped via
- *     MUONROI_MOCK_MODEL_DUMP and inspected with loadDumpedRecordings, exactly
- *     as gsd-hard-gate.spec.ts inspects tool-call feedback. There is no
- *     gate-specific LiveEvent kind (checked packages/agent-harness-core/src/
- *     protocol.ts's full LiveEvent union) — the dump-and-inspect pattern is
- *     the only harness-observable signal for this feature.
- *
- * Cases shipped as real, deterministic tests:
- *   1. Vague heavy prompt -> assessor verdict "enriched" + critics (heavy)
- *      agree "enriched" -> brief prepended, contains "confirm via grep", and
- *      the original raw prompt still appears after it (via the `[Raw user
- *      input]` suffix line 1066-1067 — no separate assertion needed for that
- *      half, it is a structural guarantee of the code path, verified here by
- *      checking the raw prompt text's index is greater than the brief's).
- *   2. Crisp/adequate prompt -> assessor returns quality.verdict:"adequate",
- *      enrichedPrompt:"" -> the enrichment `if` (message-processor.ts:759)
- *      short-circuits entirely (empty string is falsy) -> no critics call,
- *      no "[PIL Gate brief]" prefix.
- *   4. Standard-depth prompt -> assessor returns depth:"standard" with a
- *      non-empty enrichedPrompt containing a unique marker string; critics
- *      are gated by `if (depth === "heavy")` (message-processor.ts:762) so
- *      they must NOT run. Proven by giving the critic fixture a DIFFERENT,
- *      distinguishable marker string ("CRITIC-WAS-CALLED-MARKER") and
- *      asserting it never reaches the final user message — if critics had
- *      run, `runGateCritics` would have replaced the brief with the (mocked)
- *      critic's `strippedBrief`, so its absence is a real, sensitive negative
- *      signal, not just "we didn't call it directly".
- *
- *   3. quick + high-confidence -> the assessor pre-filter skips and NO assessor
- *      call fires (assessComplexity's shouldAssess(), complexity-assessor.ts:53).
- *
- *      This case previously shipped as an `it.todo` whose stated blocker was
- *      that `pilCtx.modelDepthTier` — the source of a "quick" `priorDepth`
- *      (message-processor.ts:735) — comes only from the model-first classify
- *      path, which "every harness spec keeps OFF via MUONROI_LLM_FIRST_CLASSIFY=0".
- *      Both halves of that premise are stale, verified by reading the code:
- *        - `isLlmFirstClassifyEnabled()` (src/pil/config.ts:36) is referenced by
- *          NOTHING in src/ except its own unit test, so `MUONROI_LLM_FIRST_CLASSIFY=0`
- *          is a NO-OP; layer1-intent.ts:652 gates model-first classify solely on
- *          `opts.llmFallback`, which preprocessor.ts:71 always wires.
- *        - The classify call needs no new mock surface: the mock already
- *          intercepts it by system prompt (mock-model.ts CLASSIFY_SIGNATURE +
- *          `autoClassify`, on by default for file fixtures) and answers with the
- *          fixture's `classify` line WITHOUT consuming a stream round. Omitting
- *          that field is what yields DEFAULT_CLASSIFY_LINE ("…,standard,…") —
- *          the REAL reason every gsd spec sees depth "standard". Setting its
- *          fifth word to "quick" (classifyDepthWord) reaches this case.
- *      Confidence is a constant 0.75 (llm-classify.ts:464), above the 0.7
- *      CONFIDENCE_FLOOR, and a first turn has no conversation digest so the 0.85
- *      continuation floor does not apply.
- *
- *      Observed with a deliberately LOUD assessor fixture (depth heavy +
- *      "ASSESSOR-WAS-CALLED-MARKER"): if the call fired, ASSESSMENT.md would
- *      exist, STATE.md Depth would read heavy, and the marker would be in the
- *      user message. All three are asserted absent, so the fixture is its own
- *      negative control. Falsifiability CONFIRMED by flipping classifyDepthWord
- *      to "standard": the ASSESSMENT.md assertion fails (assessor ran).
+ * Real mounted TUI regression for the background-only PIL contract.
+ * Legacy assessor/critic fixtures are deliberately loud negative controls:
+ * neither may rewrite the leader prompt or override local workflow state.
+ * Foreground streaming must complete with the original user request even
+ * when server/model enrichment describes a heavy task. The real SDK unit
+ * tests separately prove pending/failed/never responding PIL and stale cleanup.
  */
 
 import type { ChildProcess } from "node:child_process";
@@ -287,7 +206,7 @@ async function waitForFirstAgentCall(handle: GateHarness): Promise<void> {
   }
 }
 
-describe("PIL Prompt Gate — E2E via real TUI turn pipeline", { retry: 0 }, () => {
+describe("Background PIL — E2E via real TUI turn pipeline", { retry: 0 }, () => {
   let handle: GateHarness | null = null;
   let workDir: string | undefined;
 
@@ -300,7 +219,7 @@ describe("PIL Prompt Gate — E2E via real TUI turn pipeline", { retry: 0 }, () 
     }
   });
 
-  it("vague heavy prompt: brief prepended, original prompt preserved after it", async () => {
+  it("heavy enrichment cannot rewrite the leader prompt", async () => {
     workDir = mkdtempSync(join(tmpdir(), "muonroi-pil-gate-enriched-"));
 
     const rawPrompt = "please clean up the auth stuff, it's kind of a mess";
@@ -332,11 +251,12 @@ describe("PIL Prompt Gate — E2E via real TUI turn pipeline", { retry: 0 }, () 
     const userText = userTextOf(agentCalls[0]);
 
     const briefIdx = userText.indexOf("[PIL Gate brief]");
-    expect(briefIdx).toBe(0);
-    expect(userText).toContain("confirm via grep");
+    expect(briefIdx).toBe(-1);
+    expect(userText).not.toContain("confirm via grep");
+    expect(existsSync(planningFile(workDir, "ASSESSMENT.md"))).toBe(false);
 
     const rawIdx = userText.indexOf(rawPrompt);
-    expect(rawIdx).toBeGreaterThan(briefIdx);
+    expect(rawIdx).toBe(0);
   }, 120_000);
 
   it("crisp/adequate prompt: no brief prefix (raw passthrough)", async () => {
@@ -365,7 +285,7 @@ describe("PIL Prompt Gate — E2E via real TUI turn pipeline", { retry: 0 }, () 
     expect(userText).toContain(rawPrompt);
   }, 120_000);
 
-  it("standard-depth prompt: no critic call (producer verdict used as-is)", async () => {
+  it("standard enrichment remains outside the initial leader prompt", async () => {
     workDir = mkdtempSync(join(tmpdir(), "muonroi-pil-gate-standard-"));
 
     const rawPrompt = "Add input validation to the signup form handler";
@@ -396,12 +316,12 @@ describe("PIL Prompt Gate — E2E via real TUI turn pipeline", { retry: 0 }, () 
     expect(agentCalls.length).toBeGreaterThanOrEqual(1);
     const userText = userTextOf(agentCalls[0]);
 
-    expect(userText).toContain("[PIL Gate brief]");
-    expect(userText).toContain("STANDARD-PATH-MARKER");
+    expect(userText).not.toContain("[PIL Gate brief]");
+    expect(userText).not.toContain("STANDARD-PATH-MARKER");
     expect(userText).not.toContain("CRITIC-WAS-CALLED-MARKER");
   }, 120_000);
 
-  it("quick + high-confidence prompt: assessor pre-filter skips, no assessor call fires", async () => {
+  it("background quick classification cannot override local default depth", async () => {
     workDir = mkdtempSync(join(tmpdir(), "muonroi-pil-gate-quick-"));
 
     const rawPrompt = "Add input validation to the signup form handler";
@@ -443,9 +363,8 @@ describe("PIL Prompt Gate — E2E via real TUI turn pipeline", { retry: 0 }, () 
     // 2. Its brief never reached the model, so no enrichment ran at all.
     expect(userText).not.toContain("ASSESSOR-WAS-CALLED-MARKER");
     expect(userText).not.toContain("[PIL Gate brief]");
-    // 3. The depth the fast classifier chose survived to STATE.md unmodified —
-    //    had the assessor run, its "heavy" verdict would be here instead.
-    expect(readFileSync(planningFile(workDir, "STATE.md"), "utf8")).toMatch(/\|\s*Depth\s*\|\s*quick\s*\|/);
+    // 3. Background classification cannot replace the local default depth.
+    expect(readFileSync(planningFile(workDir, "STATE.md"), "utf8")).toMatch(/\|\s*Depth\s*\|\s*standard\s*\|/);
     // 4. The turn still ran normally on the raw prompt.
     expect(userText).toContain(rawPrompt);
   }, 120_000);

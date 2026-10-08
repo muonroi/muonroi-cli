@@ -25,7 +25,7 @@ describe("spliceConveneToolResult", () => {
     expect(replaced).toBe(true);
     const toolMsg = messages.find((m) => m.role === "tool")!;
     const part = (toolMsg.content as any[])[0];
-    expect(part.output).toBe("SYNTHESIS TEXT");
+    expect(part.output).toEqual({ type: "text", value: "SYNTHESIS TEXT" });
     expect(part.result).toBe("SYNTHESIS TEXT");
     expect(part.isError).toBe(false);
     // toolCallId preserved → the assistant tool-call still pairs with it.
@@ -55,6 +55,6 @@ describe("spliceConveneToolResult", () => {
     ];
     const { messages } = spliceConveneToolResult(h, "tc-1", "NEW");
     expect((messages[0].content as any[])[0].output).toBe("keep");
-    expect((messages[1].content as any[])[0].output).toBe("NEW");
+    expect((messages[1].content as any[])[0].output).toEqual({ type: "text", value: "NEW" });
   });
 });

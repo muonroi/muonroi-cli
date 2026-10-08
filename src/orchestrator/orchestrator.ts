@@ -2540,6 +2540,8 @@ export class Agent {
        * round-trip. Undefined falls through to runCouncil's own self-classify.
        */
       externalTopic?: boolean;
+      /** Model-convened council must not reintroduce a foreground PIL wait. */
+      skipPil?: boolean;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const { runCouncil, buildNeutralPostCouncilContinuation, extractReadableSynthesis } = await import(
@@ -2627,6 +2629,7 @@ export class Agent {
           // Gate A — thread the caller's already-classified scope so runCouncil
           // doesn't pay for a second self-classify round-trip.
           externalTopic: options?.externalTopic,
+          skipPil: options?.skipPil,
           // When the Context Rail is active it carries leader/panel/cost as
           // ambient sidebar rows, so suppress the duplicate inline summary.
           suppressInlineMeta: isContextRailEnabled(),

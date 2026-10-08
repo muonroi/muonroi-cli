@@ -20,6 +20,8 @@
   <img src="https://raw.githubusercontent.com/muonroi/muonroi-cli/master/docs/demo.gif" alt="Council debate — REST vs gRPC decision" width="840" />
 </p>
 
+The leader owns the conversation and decides whether to convene a council. PIL prepares optional information in the background: a fast result is available through `read_pil_context`; a slow, failed, or missing result never holds up the leader. The leader can continue without it. Completed-turn results are discarded, and helper sessions return evidence for the leader's own final answer. `/council` remains available for an explicit debate.
+
 ## Quick Start
 
 ### Install

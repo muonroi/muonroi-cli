@@ -77,7 +77,7 @@ import type {
 import { acquireMcpTools } from "../mcp/client-pool";
 import { publishNeedsKey } from "../mcp/needs-key-bus";
 import { dropRedundantFsMcpTools, filterMcpServersByMessage } from "../mcp/smart-filter";
-import { getModelInfo, isReasoningModel } from "../models/registry.js";
+import { getModelInfo } from "../models/registry.js";
 import {
   cheapModelShellLine,
   injectCheapModelPlaybook,
@@ -97,7 +97,6 @@ import {
 } from "../pil/index.js";
 import { isMetaAnalysisPrompt, isPlanExecution } from "../pil/layer6-output.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
-import { turnWantsImplementation } from "../pil/turn-intent.js";
 import { mentionsEcosystemScope } from "../playbook/directives.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
@@ -150,7 +149,6 @@ import { openUrl } from "../utils/open-url.js";
 import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
 import {
   effectiveCompactionWindowTokens,
-  getAutoCouncilConfidence,
   getAutoCouncilMinRoles,
   getFirstTokenTimeoutMs,
   getProviderProgressTimeoutMs,
@@ -162,13 +160,12 @@ import {
   getTopLevelCompactTailBudgetChars,
   getTopLevelCompactThresholdChars,
   getTopLevelToolBudgetChars,
-  isAutoCouncilClarifyEnabled,
   isAutoCouncilEnabled,
   isProviderDisabled,
   loadMcpServers,
   loadValidSubAgents,
 } from "../utils/settings";
-import { isAutoCouncilSkipReasoning, isFirstTurnToolsEnabledByProject } from "../utils/settings.js";
+import { isFirstTurnToolsEnabledByProject } from "../utils/settings.js";
 import { resolveShell } from "../utils/shell.js";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
@@ -181,7 +178,6 @@ import { takeProposerStallNotice } from "./compaction-stall-notice.js";
 import { buildConvergenceMirror } from "./convergence-mirror.js";
 import type { CouncilManager } from "./council-manager.js";
 import { consumeCouncilConvene, hasPendingCouncilConvene, peekCouncilConveneToolCallId } from "./council-request.js";
-import { resolveCouncilTopic } from "./council-topic.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
 import { humanizeApiError, isAuthenticationError, isContextLimitError, summarizeApiErrorForLog } from "./error-utils";
@@ -236,7 +232,6 @@ import {
   recordCompaction,
   recordElision,
 } from "./session-experience.js";
-import { applySettledSynthesisGate } from "./settled-synthesis-gate.js";
 import { attemptStallRescue, pushStallToolResult, type StallToolResult } from "./stall-rescue.js";
 import {
   createStallWatchdog,
@@ -462,6 +457,7 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
       suppressPostDebate?: boolean;
       /** Gate A — thread the main turn's already-classified scopeKind so runCouncil skips a redundant self-classify round-trip. */
       externalTopic?: boolean;
+      skipPil?: boolean;
     },
   ): AsyncGenerator<StreamChunk, void, unknown>;
   processMessage(
@@ -561,10 +557,9 @@ export function spliceConveneToolResult<T extends { role: string; content?: any 
       if (part?.type === "tool-result" && part?.toolCallId === toolCallId) {
         changed = true;
         replaced = true;
-        // AI SDK v6 tool-result parts carry the value under `output` (typed) or
-        // `result` (legacy). Set both so whichever the provider serializer reads
-        // sees the synthesis, and clear any error flag.
-        return { ...part, isError: false, output: value, result: value };
+        // SDK v6 validates output as a typed value before the next model call.
+        // Keep the legacy result field for older consumers and preserve pairing.
+        return { ...part, isError: false, output: { type: "text", value }, result: value };
       }
       return part;
     });
@@ -645,6 +640,8 @@ function stripWriteTools(tools: ToolSet): ToolSet {
     "usage_forensics",
     "lsp_query",
     "setup_guide",
+    "convene_council",
+    "read_pil_context",
     "selfverify_status",
     "selfverify_result",
     "selfverify_list",
@@ -702,7 +699,13 @@ export function selectRawToolSet(opts: {
 }): ToolSet {
   if (!opts.supportsClientTools) return {};
   if (opts.firstTurnToolsEnabled) return opts.baseTools;
-  if (opts.isChitchat && !opts.priorTurnHadTools) return {};
+  if (opts.isChitchat && !opts.priorTurnHadTools) {
+    const controls: ToolSet = {};
+    for (const name of ["convene_council", "read_pil_context"]) {
+      if (opts.baseTools[name]) controls[name] = opts.baseTools[name];
+    }
+    return controls;
+  }
   if (opts.isDirectAnswer && !opts.priorTurnHadTools) return stripWriteTools(opts.baseTools);
   return opts.baseTools;
 }
@@ -842,244 +845,20 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   const pendingSteers: ModelMessage[] = [];
   const steerEnabled = getSteerInjectionEnabled();
 
-  // Auto-council: route to multi-model debate when EITHER
-  //   (a) PIL classified taskType=plan|analyze with high confidence AND the
-  //       prompt is complex enough to justify the debate cost, OR
-  //   (b) GSD-native tier === "heavy" (wholesale / multi-step / cross-repo work).
-  // After the debate finishes, runCouncilV2 records synthesis on
-  // councilManager.lastSynthesis; we then re-enter processMessage with the synthesis
-  // as the next user turn so the main loop continues with full debate context.
-  // Skip if this is already a council continuation turn (prevent infinite recursion).
-  //
-  // Phase 5 BUG-I (session f1a2a2a547db) — the gate previously fired on
-  // taskType=analyze + conf≥0.85 alone, with no complexity check. Result:
-  // "improve test coverage cho src/X.ts" (single-file, scoreComplexity=low,
-  // score=2) sank 13 minutes into council debate, then halted on pattern-loop
-  // after sprint 1 read 6 files. The complexity gate below bypasses council
-  // for low-complexity analyze prompts — they get the hot-path direct exec
-  // and stay productive. `plan` keeps the old behaviour (architectural
-  // decisions deserve debate regardless of length).
-  const autoCouncilTypes = new Set(["plan", "analyze"]);
+  // Council entry belongs to the leader's tool call, never PIL labels.
   const configuredRoleCount = getEffectiveCouncilRoleCount();
-  // Task 8 Step 7: prefer the complexity assessor's own auto-council verdict
-  // (pilCtx.gsdAutoCouncil, set at message-processor.ts:685 when the assessor ran)
-  // over the raw heavy-tier heuristic below — the assessor already reasoned about
-  // depth + task shape, so its verdict is the more intelligent router. Fall back to
-  // the heuristic when the assessor didn't run (gsdAutoCouncil undefined).
-  const assessorAutoCouncil = (pilCtx as { gsdAutoCouncil?: boolean }).gsdAutoCouncil;
-  // Distinguishes a REAL assessor verdict from the raw complexityTier=="heavy"
-  // heuristic fallback below — both collapse into the same `heavyTier` boolean,
-  // so without this flag a decision-log reader cannot tell "the leader-tier
-  // assessor reasoned about this and said heavy" from "the fast classifier's
-  // own complexityTier happened to read heavy and the assessor never ran".
-  const assessorFired = typeof assessorAutoCouncil === "boolean";
-  const heavyTier = assessorFired
-    ? (assessorAutoCouncil as boolean)
-    : (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
-  const autoCouncilConfidence = getAutoCouncilConfidence();
   const autoCouncilMinRoles = getAutoCouncilMinRoles();
-  const sessionModelIsReasoning = isReasoningModel(deps.modelId);
-  const skipReasoningSetting = isAutoCouncilSkipReasoning();
-  const _complexityFromTrace = (pilCtx as { _intentTrace?: { complexity?: "low" | "medium" | "high" } })._intentTrace
-    ?.complexity;
-  const _complexityGatePassed =
-    pilCtx.taskType === "plan" || _complexityFromTrace === undefined || _complexityFromTrace !== "low";
-  const taskTypeMatch =
-    pilCtx.taskType &&
-    autoCouncilTypes.has(pilCtx.taskType) &&
-    pilCtx.confidence >= autoCouncilConfidence &&
-    _complexityGatePassed;
-  // Skip reasoning-model skip for heavy/complex tasks — they benefit from
-  // multi-role diversity even when the session model already does extended thinking.
-  const shouldSkipForReasoning = sessionModelIsReasoning && skipReasoningSetting && !heavyTier;
-  let shouldAutoCouncil =
-    !deps.councilManager.isContinuation &&
-    isAutoCouncilEnabled() &&
-    configuredRoleCount >= autoCouncilMinRoles &&
-    !shouldSkipForReasoning &&
-    (taskTypeMatch || heavyTier);
-
-  // Always log the auto-council decision (taken or skipped) with the gate
-  // values that decided it. Lets reports answer "why did this turn cost
-  // $0.30?" and "is the confidence floor tuned wrong for my prompts?".
-  const preSettledGateReason = (() => {
-    if (deps.councilManager.isContinuation) return "continuation-turn";
-    if (!isAutoCouncilEnabled()) return "feature-disabled";
-    if (configuredRoleCount < autoCouncilMinRoles)
-      return `role-count<${autoCouncilMinRoles} (have ${configuredRoleCount})`;
-    if (shouldSkipForReasoning)
-      return `reasoning-model=${deps.modelId} (internal self-debate active; skip with MUONROI_AUTOCOUNCIL_SKIP_REASONING=0)`;
-    if (!taskTypeMatch && !heavyTier) {
-      if (!pilCtx.taskType || !autoCouncilTypes.has(pilCtx.taskType))
-        return `taskType=${pilCtx.taskType ?? "null"} not in plan|analyze`;
-      if (pilCtx.confidence < autoCouncilConfidence)
-        return `confidence<${autoCouncilConfidence} (got ${pilCtx.confidence.toFixed(2)})`;
-      if (!_complexityGatePassed)
-        return `complexity=low + taskType=${pilCtx.taskType} (analyze needs medium+; plan bypasses gate)`;
-      return "no-trigger";
-    }
-    return "taken";
-  })();
-
-  // Settled-synthesis override (session 115a59c9bb9e -> child 49f6b8c1d8d6):
-  // only applies to the heavy-tier-ONLY trigger (never an explicit plan|analyze
-  // debate request) and only when a code-authored [Council Memory] record in
-  // THIS session's own DB parent chain already settles this turn. See
-  // settled-synthesis-gate.ts / council/prior-synthesis.ts for the evidence rule.
-  const heavyTierOnly = heavyTier && !taskTypeMatch;
-  // Shared with council/index.ts's post-debate recommendation
-  // (pil/turn-intent.ts) — the two can never disagree about what counts as
-  // an implementation-shaped turn. Only computed when it could matter.
-  const turnImplementationSignal = heavyTierOnly ? turnWantsImplementation(pilCtx) : false;
-  const settledSynthesisGate =
-    shouldAutoCouncil && heavyTierOnly
-      ? applySettledSynthesisGate({
-          wouldConvene: true,
-          heavyTierOnly: true,
-          turnWantsImplementation: turnImplementationSignal,
-          topic: resolveCouncilTopic(userMessage, deps.messages as Array<{ role?: string }>),
-          sessionId: deps.session?.id ?? null,
-        })
-      : { suppressed: false, evidence: { found: false } };
-  if (settledSynthesisGate.suppressed) {
-    shouldAutoCouncil = false;
-  }
-  const autoCouncilSkipReason = settledSynthesisGate.suppressed
-    ? (settledSynthesisGate.reason ?? "settled-prior-synthesis")
-    : preSettledGateReason;
-
+  const councilConfigured = isAutoCouncilEnabled() && configuredRoleCount >= autoCouncilMinRoles;
   appendDecisionLog({
     ts: Date.now(),
     sessionId: deps.session?.id ?? null,
     kind: "auto-council",
-    taken: shouldAutoCouncil,
-    reason: autoCouncilSkipReason,
-    meta: {
-      taskType: pilCtx.taskType ?? null,
-      confidence: pilCtx.confidence,
-      complexityTier: (pilCtx as { complexityTier?: string | null }).complexityTier ?? null,
-      modelDepthTier: (pilCtx as { modelDepthTier?: string | null }).modelDepthTier ?? null,
-      complexityScore: _complexityFromTrace ?? null,
-      complexityGatePassed: _complexityGatePassed,
-      configuredRoleCount,
-      autoCouncilConfidence,
-      autoCouncilMinRoles,
-      heavyTier,
-      // Distinguishes "leader-tier assessor reasoned heavy" from "heuristic
-      // complexityTier fallback read heavy, assessor never ran" — task #1's gap.
-      assessorFired,
-      sessionModelIsReasoning,
-      skipReasoningSetting,
-      isContinuation: deps.councilManager.isContinuation,
-      // Whether prior settled context existed for this topic, and what was
-      // found — the observability this decision previously had no way to answer.
-      // turnWantsImplementation + priorSynthesisSimilarity are the two facts
-      // the suppression decision is actually made from — similarity is
-      // informational only (never a veto; see prior-synthesis.ts module doc).
-      heavyTierOnly,
-      turnWantsImplementation: turnImplementationSignal,
-      priorSynthesisFound: settledSynthesisGate.evidence.found,
-      priorSynthesisTopic: settledSynthesisGate.evidence.recordTopic ?? null,
-      priorSynthesisSimilarity: settledSynthesisGate.evidence.similarity ?? null,
-      suppressedForSettledSynthesis: settledSynthesisGate.suppressed,
-    },
+    taken: false,
+    reason: "leader-model-decides",
+    meta: { councilConfigured, configuredRoleCount, autoCouncilMinRoles },
   }).catch((err) => {
-    console.error(`[tool-engine] auto-council decision-log append failed: ${(err as Error)?.message}`);
+    logger.error("orchestrator", "Council entry policy logging failed", { error: String(err) });
   });
-
-  if (shouldAutoCouncil) {
-    const reason = heavyTier
-      ? `complexity=heavy${pilCtx.taskType ? ` task=${pilCtx.taskType}` : ""}`
-      : `${pilCtx.taskType} task detected with ${(pilCtx.confidence * 100).toFixed(0)}% confidence`;
-    yield { type: "content", content: `\n[Auto-council triggered: ${reason}]\n` };
-    // Reset the three relay fields BEFORE draining, mirroring the runDebate
-    // builtin (~:1077). A generator that throws before the post-debate block
-    // runs — or an analysis run that never reaches it at all — would otherwise
-    // leave the PREVIOUS council's synthesis / action / intent kind in place,
-    // and the continuation below would act on them as if they belonged to this
-    // debate. The reads at :851-858 clear them again after use; this closes the
-    // window before the run, which only runDebate was doing.
-    deps.councilManager.setLastSynthesis(null);
-    deps.councilManager.setLastPostDebateAction(null);
-    deps.councilManager.setLastIntentKind(null);
-    // Pre-debate interview: unless disabled, run the model-designed clarification
-    // askcards BEFORE the debate so a broadly-scoped "debate mode" request is
-    // chốt-ed first (each card's options carry a recommended default + per-option
-    // why — see runClarification/buildClarifyOptions). The clarifier is ROI-gated
-    // and yields 0 cards on already-detailed topics, so this stays quiet when the
-    // prompt is already specific. Skip only when the user turned it off. The
-    // clarifier reuses PIL gray-areas as seed questions (no hardcoded questions),
-    // and its models come from pickCouncilTaskModel (no hardcoded model/provider).
-    // A continuation utterance names no subject — pinning it verbatim gives every
-    // debate round a contentless topic ("Topic for discussion: tiếp tục nhé",
-    // session 3f998bfef7db). Resolve to the work actually in flight.
-    yield* deps.runCouncilV2(resolveCouncilTopic(userMessage, deps.messages as Array<{ role?: string }>), {
-      skipClarification: !isAutoCouncilClarifyEnabled(),
-      observer,
-      userModelMessage,
-      // Deliberately NOT convenePath. This council was convened by the CLI —
-      // the user never asked for it and no model called it — so there is no
-      // agent to hand the post-debate decision to. Suppressing the card here
-      // (a72731e6) did not delegate the choice, it hardcoded a different one:
-      // the synthesis was fed straight into an implementing turn and work began
-      // without the user ever being asked (user report 2026-07-27, session
-      // 3f998bfef7db seq 21-22). The model-callable paths (convene_council and
-      // the runDebate tool) keep convenePath — there the synthesis really IS a
-      // tool result the model reasons about.
-      // Gate A — thread the main turn's already-classified scope so runCouncil
-      // skips a redundant self-classify round-trip inside its own runPipeline.
-      externalTopic: pilCtx.scopeKind === "external",
-    });
-    const synthesis = deps.councilManager.lastSynthesis;
-    const chosenAction = deps.councilManager.lastPostDebateAction;
-    // This auto-council dispatch is deliberately NOT convenePath (see the
-    // comment above), so the launch card DOES fire and lock spec.intentKind —
-    // relay it the same way chosenAction is relayed, so postDebateContinuation
-    // resolves the run's authoritative kind instead of falling back to the
-    // post-hoc synthesis regex.
-    const lockedIntentKind = deps.councilManager.lastIntentKind;
-    deps.councilManager.setLastSynthesis(null);
-    deps.councilManager.setLastPostDebateAction(null);
-    deps.councilManager.setLastIntentKind(null);
-    // Honour the user's post-debate choice. `postDebateContinuation` returns
-    // null when no action was picked (card dismissed) and for an
-    // analysis/evaluation/decision debate whose deliverable IS the conclusion —
-    // so nothing runs unless the user asked for it.
-    //
-    // C1: an IMPLEMENT pick never reaches here as "implement". runCouncil owns
-    // that path (plan → review → post-plan card → gated per-phase loop) and
-    // relays the TERMINAL outcome instead — `execute_plan` (the phases already
-    // ran, gated) or `save_exit` (nothing ran). Both return null below, so this
-    // block can no longer start a second, ungated implementation turn on the raw
-    // synthesis after the phase loop already finished. Only `continue_session`
-    // still re-enters, and only for an implementation-shaped debate (/ideal).
-    // Shared with the /council slash path (orchestrator.runCouncilV2).
-    const { postDebateContinuation } = await import("../council/index.js");
-    const continuationPrompt = synthesis
-      ? postDebateContinuation(chosenAction ?? undefined, synthesis, lockedIntentKind ?? undefined)
-      : null;
-    if (continuationPrompt) {
-      // Collapse the live debate block BEFORE the continuation streams. It is
-      // rendered below the transcript and is otherwise only torn down at a turn
-      // boundary — which this continuation does not cross, so everything it
-      // produces would render above a still-mounted council block and look
-      // swallowed until the turn ended.
-      yield { type: "council_collapse" };
-      yield { type: "content", content: "\n[Auto-continuing with council recommendations...]\n" };
-      deps.councilManager.setContinuation(true);
-      try {
-        yield* deps.processMessage(continuationPrompt, observer);
-      } finally {
-        deps.councilManager.setContinuation(false);
-      }
-    }
-    return;
-  }
-
-  // Skipping auto-council is the normal, expected path for a reasoning model —
-  // not an event the user needs narrated on every turn. The decision (and the
-  // gate values behind it) is still recorded via autoCouncilSkipReason above,
-  // so forensics keep the full story without the transcript noise.
 
   if (deps.batchApi) {
     try {
@@ -1267,7 +1046,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // Register convene_council only when the council is actually usable
           // for this session (enough configured roles) — else the model could
           // call a council that can't convene.
-          councilConfigured: configuredRoleCount >= autoCouncilMinRoles,
+          councilConfigured,
+          readPilContext: args.pilSupplement ? () => args.pilSupplement.read() : undefined,
           askUser: deps.askUser,
           enterIdeal: deps.enterIdeal,
           runDebate: async (topic: string) => {
@@ -1277,6 +1057,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             deps.councilManager.setLastSynthesis(null);
             const gen = deps.runCouncilV2(topic, {
               skipClarification: true,
+              skipPil: true,
               userModelMessage: { role: "user", content: `/council ${topic}` },
               // Model-callable debate: no human is at the composer mid-tool-call
               // (suppressPreDebateCards) and the synthesis is returned to the
@@ -1528,6 +1309,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           "usage_forensics",
           "lsp_query",
           "setup_guide",
+          "convene_council",
+          "read_pil_context",
           "selfverify_status",
           "selfverify_result",
           "selfverify_list",
@@ -4181,6 +3964,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 suppressPreDebateCards: true,
                 suppressPostDebate: true,
                 skipClarification: true,
+                skipPil: true,
                 observer,
                 userModelMessage,
                 // Gate A — thread the main turn's already-classified scope so
@@ -5058,6 +4842,8 @@ export function coalesceReadOnlyMessages(messages: any[]): any[] {
     "usage_forensics",
     "lsp_query",
     "setup_guide",
+    "convene_council",
+    "read_pil_context",
     "selfverify_status",
     "selfverify_result",
     "selfverify_list",

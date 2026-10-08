@@ -318,6 +318,8 @@ export interface RunCouncilOptions {
    * derivation below); undefined falls through to self-classify.
    */
   externalTopic?: boolean;
+  /** Model tool entry already owns its context; never wait for server PIL again. */
+  skipPil?: boolean;
   /**
    * C5 — per-item debate scoping, forwarded verbatim onto
    * `CouncilConfig.perRoundFocus` (see `debate.ts`): when set and non-empty,
@@ -1070,17 +1072,19 @@ export async function* runCouncil(
   // Gate A permanently dead in production (only hand-built CouncilConfig in
   // tests exercised it).
   let llmFallback: import("../pil/llm-classify.js").LlmClassifyFn | undefined;
-  try {
-    const { createLlmClassifier } = await import("../pil/llm-classify.js");
-    llmFallback = createLlmClassifier(sessionModelId, { routeFastTier: true });
-  } catch (err) {
-    console.error(`[council] classifier wiring failed for scope detection: ${(err as Error)?.message}`);
-  }
   let pilCtx: PipelineContext | undefined;
-  try {
-    pilCtx = await runPipeline(topic, { sessionId, llmFallback });
-  } catch (err) {
-    console.error(`[council] PIL pipeline failed (fail-open, no scope grounding): ${(err as Error)?.message}`);
+  if (!options?.skipPil) {
+    try {
+      const { createLlmClassifier } = await import("../pil/llm-classify.js");
+      llmFallback = createLlmClassifier(sessionModelId, { routeFastTier: true });
+    } catch (err) {
+      console.error(`[council] classifier wiring failed for scope detection: ${(err as Error)?.message}`);
+    }
+    try {
+      pilCtx = await runPipeline(topic, { sessionId, llmFallback });
+    } catch (err) {
+      console.error(`[council] PIL pipeline failed (fail-open, no scope grounding): ${(err as Error)?.message}`);
+    }
   }
 
   // Gate A — out-of-repo ("external") questions must not trigger any repo read

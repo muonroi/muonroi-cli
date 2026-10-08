@@ -1,5 +1,5 @@
-- Active run: runs/commit-push-all.md
-- Gate: full suite 8807 passed / 0 failed; commit and push with hooks
-- Mode: auto; user authorizes commit/push all and queued PIL/council repair
-- Branch: develop; origin fetched
-- Next: confirm remote SHA, then background PIL and model-owned council
+- Active run: runs/background-pil-model-council.md
+- Gate: full configured unit suite passed 8827 tests / 0 failures; build/typecheck/native selfverify passed
+- Mode: auto; background informational PIL and model-owned council implemented
+- Branch: develop; previous push 103c693f confirmed
+- Next: normal commit/push hooks and verify remote SHA

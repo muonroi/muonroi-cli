@@ -83,6 +83,8 @@ interface ToolRegistryOpts {
    * tool is absent so the model never calls a council that cannot convene.
    */
   councilConfigured?: boolean;
+  /** Optional turn-local background information; never waits for PIL. */
+  readPilContext?: () => ToolResult;
   /**
    * When provided, the `ask_user` tool is registered so the agent can ask the
    * human a question mid-turn and receive their answer AS the tool result. The
@@ -363,6 +365,14 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // tool_result, and restarts the step so the model reads the conclusion as the
   // result and continues. Registered only when the council is usable so the
   // model never calls a council that cannot convene.
+  if (opts?.readPilContext) {
+    tools.read_pil_context = dynamicTool({
+      description:
+        "Read optional PIL information prepared in the background for this turn. Returns immediately with available information or pending/unavailable status. You own task, routing, and council decisions. If pending, continue without waiting or repeatedly polling. Ask human questions through ask_user.",
+      inputSchema: jsonSchema({ type: "object", properties: {} }),
+      execute: async () => formatResult(opts.readPilContext!()),
+    });
+  }
   if (opts?.councilConfigured) {
     tools.convene_council = dynamicTool({
       description:
