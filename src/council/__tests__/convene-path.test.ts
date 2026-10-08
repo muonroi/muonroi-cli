@@ -106,6 +106,48 @@ async function runToEnd(gen: AsyncGenerator<unknown, unknown, unknown>): Promise
 const isPostDebateCard = (c: any) => c?.type === "council_question" && c?.councilQuestion?.phase === "post-debate";
 
 describe("suppressPostDebate post-debate suppression", () => {
+  it("does not persist a synthesis that finishes after council cancellation", async () => {
+    const { runCouncil } = await import("../index.js");
+    const planning = await import("../planner.js");
+    const { appendSystemMessage } = await import("../../storage/index.js");
+    const controller = new AbortController();
+    let writesAtCancellation = -1;
+    const phase = vi.spyOn(planning, "runPlanning").mockImplementation(async function* () {
+      yield { type: "content", content: "Synthesis pending" };
+      writesAtCancellation = vi.mocked(appendSystemMessage).mock.calls.length;
+      controller.abort(new DOMException("Tool timed out", "AbortError"));
+      return { outcome: null, plan: null, synthesisText: "LATE_SYNTHESIS" };
+    });
+    try {
+      const { ret } = await runToEnd(
+        runCouncil(
+          "Review this design",
+          "mock-model",
+          [],
+          "sess-cancelled",
+          buildMockLLM(),
+          vi.fn().mockResolvedValue("unused"),
+          vi.fn().mockResolvedValue(true),
+          async function* () {
+            yield { type: "done" };
+          },
+          {
+            skipClarification: true,
+            suppressPreDebateCards: true,
+            suppressPostDebate: true,
+            skipPil: true,
+            signal: controller.signal,
+          },
+        ),
+      );
+      expect(phase).toHaveBeenCalledTimes(1);
+      expect(ret).toBeNull();
+      expect(vi.mocked(appendSystemMessage).mock.calls.length).toBe(writesAtCancellation);
+    } finally {
+      phase.mockRestore();
+    }
+  });
+
   it("suppressPostDebate:true emits NO post-debate card, never calls respondToQuestion, returns the synthesis", async () => {
     const { runCouncil } = await import("../index.js");
     const respondToQuestion = vi.fn().mockResolvedValue("save_exit");

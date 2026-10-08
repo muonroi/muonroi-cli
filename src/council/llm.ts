@@ -10,6 +10,7 @@ import { getModelInfo } from "../models/registry.js";
 import { isAuthenticationError, summarizeApiErrorForLog } from "../orchestrator/error-utils.js";
 import { createNoProgressStopWhen } from "../orchestrator/no-progress-guard.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "../orchestrator/stall-watchdog.js";
+import { noteToolActivityProgress } from "../orchestrator/tool-activity.js";
 import { combineAbortSignals } from "../orchestrator/tool-utils.js";
 import { pingTurnProgress, startPeriodicTurnProgressPing } from "../orchestrator/turn-progress.js";
 import { getProviderCapabilities, resolveTemperature } from "../providers/capabilities.js";
@@ -522,6 +523,7 @@ let councilLastDeltaAt = 0;
 /** Record `chars` of streamed output (text OR reasoning) against the live window. */
 export function noteCouncilStreamDelta(chars: number): void {
   if (chars <= 0) return;
+  noteToolActivityProgress();
   councilStreamedCharsTotal += chars;
   councilLastDeltaAt = Date.now();
 }

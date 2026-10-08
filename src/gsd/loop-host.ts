@@ -38,6 +38,7 @@ export interface LoopHostContext {
   shipNotes?: string[];
   commitMessage?: string;
   runDebate?: (topic: string) => Promise<string>;
+  abortSignal?: AbortSignal;
 }
 
 export interface LoopPointResult {
@@ -95,6 +96,7 @@ export class GsdLoopHost {
    * then muonroi overlay (plan-council, phase advance).
    */
   async firePoint(point: string, ctx: LoopHostContext): Promise<LoopPointResult> {
+    ctx.abortSignal?.throwIfAborted();
     this.ensureHost(ctx.cwd, ctx.sessionModelId);
 
     const canonical = this.canonicalPoints();
@@ -120,6 +122,7 @@ export class GsdLoopHost {
       } catch (err) {
         overlayError = (err as Error).message;
         console.error(`[gsd-loop-host] overlay ${point} failed: ${overlayError}`);
+        ctx.abortSignal?.throwIfAborted();
       }
     }
 
@@ -189,6 +192,7 @@ export class GsdLoopHost {
         runPerspectiveFn: ctx.runPerspectiveFn,
         revisionCycle: ctx.revisionCycle,
         runDebate: ctx.runDebate,
+        abortSignal: ctx.abortSignal,
       });
       logGsdNativeEvent(ctx.sessionId ?? "gsd-native", {
         phase: ctx.phase ?? readState(ctx.cwd).phase,
@@ -313,6 +317,7 @@ export function loopHostContext(
     | "shipNotes"
     | "commitMessage"
     | "runDebate"
+    | "abortSignal"
   >,
 ): LoopHostContext {
   return {
@@ -330,5 +335,6 @@ export function loopHostContext(
     shipNotes: opts?.shipNotes,
     commitMessage: opts?.commitMessage,
     runDebate: opts?.runDebate,
+    abortSignal: opts?.abortSignal,
   };
 }

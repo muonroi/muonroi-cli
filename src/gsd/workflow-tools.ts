@@ -34,7 +34,7 @@ export interface GsdWorkflowToolOpts {
   sessionId?: string;
   depth?: string;
   runTask?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
-  runDebate?: (topic: string) => Promise<string>;
+  runDebate?: (topic: string, abortSignal?: AbortSignal) => Promise<string>;
 }
 
 function json(data: unknown): string {
@@ -154,12 +154,16 @@ export function registerGsdWorkflowTools(tools: ToolSet, opts: GsdWorkflowToolOp
       description:
         "Run multi-perspective plan council (research + skeptic at standard; full council at heavy). Mandatory before gsd_execute at standard/heavy depth.",
       inputSchema: jsonSchema({ type: "object", properties: {}, additionalProperties: false }),
-      execute: async () => {
+      execute: async (_input, context) => {
+        const abortSignal = context?.abortSignal;
         const host = getGsdLoopHost();
         const ctx = loopHostContext(cwd, sessionModelId, depth, {
           sessionId,
-          runPerspectiveFn: runTask ? taskToRunPerspectiveFn(runTask, sessionModelId) : undefined,
-          runDebate: opts.runDebate,
+          abortSignal,
+          runPerspectiveFn: runTask
+            ? taskToRunPerspectiveFn((request) => runTask(request, abortSignal), sessionModelId)
+            : undefined,
+          runDebate: opts.runDebate ? (topic) => opts.runDebate!(topic, abortSignal) : undefined,
         });
         await host.firePoint("plan:post", ctx);
         const reviewResult = await host.firePoint("plan-review:post", ctx);
@@ -206,7 +210,9 @@ export function registerGsdWorkflowTools(tools: ToolSet, opts: GsdWorkflowToolOp
       required: ["passed"],
       additionalProperties: false,
     }),
-    execute: async (input: any) => {
+    execute: async (input: any, context) => {
+      const abortSignal = context?.abortSignal;
+      abortSignal?.throwIfAborted();
       const passed = input.passed === true;
       if (passed && !input.evidence?.trim()) {
         return json({
@@ -230,8 +236,11 @@ export function registerGsdWorkflowTools(tools: ToolSet, opts: GsdWorkflowToolOp
             depth,
             evidence: input.evidence?.trim(),
             diff,
-            runPerspectiveFn: runTask ? verifyRunPerspectiveFn(runTask, sessionModelId) : undefined,
-            runDebate: opts.runDebate,
+            abortSignal,
+            runPerspectiveFn: runTask
+              ? verifyRunPerspectiveFn((request) => runTask(request, abortSignal), sessionModelId)
+              : undefined,
+            runDebate: opts.runDebate ? (topic) => opts.runDebate!(topic, abortSignal) : undefined,
           });
           if (!council.skipped && council.verdict !== "pass") {
             effectivePassed = false;
@@ -241,9 +250,11 @@ export function registerGsdWorkflowTools(tools: ToolSet, opts: GsdWorkflowToolOp
           // Fail OPEN — a council wiring failure must not block a genuinely-passing verify;
           // honor the deterministic floor's verdict. Log per No-Silent-Catch.
           console.error(`[gsd] verify-council wiring failed, honoring deterministic floor: ${(err as Error).message}`);
+          abortSignal?.throwIfAborted();
         }
       }
 
+      abortSignal?.throwIfAborted();
       const verdictLine = effectivePassed ? "verdict: pass" : "verdict: fail";
       const concernBlock = councilConcerns.length
         ? `\n\n## Council concerns\n${councilConcerns.map((c) => `- ${c}`).join("\n")}`
@@ -260,6 +271,7 @@ export function registerGsdWorkflowTools(tools: ToolSet, opts: GsdWorkflowToolOp
       const ctx = loopHostContext(cwd, sessionModelId, depth, {
         sessionId,
         verifyPassed: effectivePassed,
+        abortSignal,
         verifyEvidence: {
           evidence: input.evidence?.trim(),
           evidenceChars: input.evidence?.length ?? 0,

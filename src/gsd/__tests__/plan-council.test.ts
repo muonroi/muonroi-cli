@@ -73,6 +73,37 @@ describe("plan-council", () => {
     expect(perspectivesForDepth("quick")).toHaveLength(0);
   });
 
+  it.each([
+    "returns late",
+    "throws",
+  ])("does not retry or overwrite review artifacts when an aborted debate %s", async (mode) => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-cancel-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+    const reviewPath = planningArtifact(tmp, "PLAN-REVIEW.md");
+    const verifyPath = planningArtifact(tmp, "PLAN-VERIFY.md");
+    writeFileSync(reviewPath, "EXISTING_REVIEW", "utf8");
+    writeFileSync(verifyPath, "EXISTING_VERDICT", "utf8");
+    const controller = new AbortController();
+    const runDebate = vi.fn(async () => {
+      controller.abort(new DOMException("Review cancelled", "AbortError"));
+      if (mode === "throws") throw controller.signal.reason;
+      return '```council-verdict\n{"verdict":"approve","concerns":[]}\n```';
+    });
+    await expect(
+      runPlanCouncil({
+        cwd: tmp,
+        sessionModelId: SESSION_MODEL,
+        depth: "standard",
+        runDebate,
+        abortSignal: controller.signal,
+      }),
+    ).rejects.toThrow("Review cancelled");
+    expect(runDebate).toHaveBeenCalledTimes(1);
+    expect(readFileSync(reviewPath, "utf8")).toBe("EXISTING_REVIEW");
+    expect(readFileSync(verifyPath, "utf8")).toBe("EXISTING_VERDICT");
+  });
+
   it("runs 2 perspectives at standard depth and writes PLAN-VERIFY.md", async () => {
     tmp = mkdtempSync(join(tmpdir(), "pc-"));
     ensurePlanningWorkspace(tmp, SESSION_MODEL);

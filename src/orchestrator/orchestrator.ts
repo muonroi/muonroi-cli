@@ -2542,6 +2542,8 @@ export class Agent {
       externalTopic?: boolean;
       /** Model-convened council must not reintroduce a foreground PIL wait. */
       skipPil?: boolean;
+      /** Cancellation of the SDK tool that owns a nested council. */
+      abortSignal?: AbortSignal;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const { runCouncil, buildNeutralPostCouncilContinuation, extractReadableSynthesis } = await import(
@@ -2566,7 +2568,8 @@ export class Agent {
     if (ownsController) {
       this.abortController = new AbortController();
     }
-    const signal = this.abortController?.signal;
+    const controllerSignal = this.abortController?.signal;
+    const signal = combineAbortSignals(controllerSignal, options?.abortSignal);
 
     // B1: Resolve a run directory so runCouncil persists decisions.lock.md after
     // synthesis. The auto-council/sprint paths get a runDir from their own flow
@@ -2687,6 +2690,9 @@ export class Agent {
         }
       } while (!result.done);
 
+      // A cancelled tool must not commit a late council result to the main session.
+      if (signal?.aborted) return;
+
       const synthesis = result.value;
       // Keep lastSynthesis FULL (the raw JSON is needed for output-kind detection
       // in the convene follow-up), but persist only the READABLE prose as the
@@ -2799,7 +2805,7 @@ export class Agent {
       // beginInteractivePause() would leak and suppress the turn watchdog for the
       // rest of the process. Runs on every exit path — normal, throw, unwind.
       this.councilManager.releasePendingWaits();
-      if (ownsController && this.abortController?.signal === signal) {
+      if (ownsController && this.abortController?.signal === controllerSignal) {
         this.abortController = null;
       }
     }
@@ -3860,6 +3866,9 @@ export class Agent {
         const { appendCompaction, getNextMessageSequence } = await import("../storage/transcript.js");
 
         const cr = await deliberateCompact(flowDir, this.messages, "", 4096, this.modelId);
+        if (!cr.summary.trim()) {
+          throw new Error("Compaction returned an empty summary; retaining the main session and history");
+        }
 
         const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
         const db = getDatabase();

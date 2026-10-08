@@ -253,7 +253,7 @@ import {
 } from "./subagent-compactor.js";
 import { foldMidConversationSystemMessages } from "./system-message-fold.js";
 import { detectTextEmittedToolCall, parseLeakedToolCalls } from "./text-tool-call-detector.js";
-import { beginToolActivity, endToolActivity } from "./tool-activity.js";
+import { beginToolActivity, endToolActivity, isToolActivityLive, withToolActivity } from "./tool-activity.js";
 import { getToolLimitAutoRecoverCap, shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
 import { createToolLoopCapPredicate, resolveTurnStepLimits, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 import {
@@ -458,6 +458,7 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
       /** Gate A — thread the main turn's already-classified scopeKind so runCouncil skips a redundant self-classify round-trip. */
       externalTopic?: boolean;
       skipPil?: boolean;
+      abortSignal?: AbortSignal;
     },
   ): AsyncGenerator<StreamChunk, void, unknown>;
   processMessage(
@@ -974,6 +975,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       let disposeProviderWatchdog: (() => void) | undefined;
       let stepNumber = -1;
       const activeToolCalls: ToolCall[] = [];
+      const ownedToolActivities = new Set<number>();
+      let stallErrorMessage = STALL_ERROR_MESSAGE;
+      let toolActivityExpired = false;
       // Capped digest of tool outputs gathered this attempt — fuels the
       // best-effort answer rescue if the stream stalls mid-turn (see
       // stall-rescue.ts). Reset per attempt; only the most recent results win.
@@ -1050,12 +1054,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           readPilContext: args.pilSupplement ? () => args.pilSupplement.read() : undefined,
           askUser: deps.askUser,
           enterIdeal: deps.enterIdeal,
-          runDebate: async (topic: string) => {
+          runDebate: async (topic: string, abortSignal?: AbortSignal) => {
+            abortSignal?.throwIfAborted();
             // Reset before draining so a generator that throws BEFORE setting
             // synthesis (orchestrator.setLastSynthesis) cannot return a STALE
             // synthesis from a prior council run.
             deps.councilManager.setLastSynthesis(null);
             const gen = deps.runCouncilV2(topic, {
+              abortSignal: combineAbortSignals(signal, abortSignal),
               skipClarification: true,
               skipPil: true,
               userModelMessage: { role: "user", content: `/council ${topic}` },
@@ -1073,11 +1079,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // the log instead of a silent "".
             let lastContentHint = "";
             for await (const chunk of gen) {
+              abortSignal?.throwIfAborted();
               const text = (chunk as { type?: string; content?: string })?.content;
               if ((chunk as { type?: string })?.type === "content" && typeof text === "string" && text.trim()) {
                 lastContentHint = text.trim().slice(-200);
               }
             }
+            abortSignal?.throwIfAborted();
             const synthesis = deps.councilManager.lastSynthesis ?? "";
             if (!synthesis.trim()) {
               // No-Silent-Catch: the debate produced no synthesis. plan-council
@@ -1356,32 +1364,36 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // `bun test` with timeout=120000 against a 120s turn-idle window)
             // trips the idle timer and a healthy turn is killed as hung.
             const activityId = beginToolActivity((input as { timeout?: number } | undefined)?.timeout);
-            try {
-              if (!guarded) return await originalExecute(input, context);
-              const gate = evaluateMutationGate(deps.bash.getCwd(), {
-                toolName: name,
-                hardGateEnabled: gsdHardGateEnabled,
-                directAnswer: gsdDirectAnswer,
-              });
-              if (gate.blocked) {
-                // Return the SAME shape the wrapped tool returns — a string. The
-                // guarded tools (write_file/edit_file/bash/…) all resolve to a
-                // string via formatResult, and the AI SDK feeds `execute`'s return
-                // value straight back as the tool-result the model reads. Returning
-                // a `{success,output,error}` object here made that value serialize
-                // to EMPTY: the gate still prevented the write (verified: target
-                // file absent), but the model was told nothing, so it could not act
-                // on "call gsd_status → gsd_discuss → gsd_plan → gsd_plan_review"
-                // and just saw a blank result. Measured in gsd-hard-gate: round 2's
-                // tool-result value was "\n\n[step 1 mirror] …" — only the
-                // convergence-mirror note appended to an empty string.
-                return gate.reason;
+            ownedToolActivities.add(activityId);
+            return await withToolActivity(activityId, async () => {
+              try {
+                if (!guarded) return await originalExecute(input, context);
+                const gate = evaluateMutationGate(deps.bash.getCwd(), {
+                  toolName: name,
+                  hardGateEnabled: gsdHardGateEnabled,
+                  directAnswer: gsdDirectAnswer,
+                });
+                if (gate.blocked) {
+                  // Return the SAME shape the wrapped tool returns — a string. The
+                  // guarded tools (write_file/edit_file/bash/…) all resolve to a
+                  // string via formatResult, and the AI SDK feeds `execute`'s return
+                  // value straight back as the tool-result the model reads. Returning
+                  // a `{success,output,error}` object here made that value serialize
+                  // to EMPTY: the gate still prevented the write (verified: target
+                  // file absent), but the model was told nothing, so it could not act
+                  // on "call gsd_status → gsd_discuss → gsd_plan → gsd_plan_review"
+                  // and just saw a blank result. Measured in gsd-hard-gate: round 2's
+                  // tool-result value was "\n\n[step 1 mirror] …" — only the
+                  // convergence-mirror note appended to an empty string.
+                  return gate.reason;
+                }
+                return await writeMutex.run(() => originalExecute(input, context));
+              } finally {
+                endToolActivity(activityId);
+                ownedToolActivities.delete(activityId);
+                setLoopBreadcrumb(`after-tool:${name}`);
               }
-              return await writeMutex.run(() => originalExecute(input, context));
-            } finally {
-              endToolActivity(activityId);
-              setLoopBreadcrumb(`after-tool:${name}`);
-            }
+            });
           };
         }
 
@@ -1988,18 +2000,31 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // legitimately long reasoning burst that DOES emit output survives.
         const recordProviderStall = (kind: "idle" | "progress") => {
           stallTriggered = true;
+          toolActivityExpired = ownedToolActivities.size > 0;
+          if (toolActivityExpired) {
+            stallErrorMessage =
+              "Tool execution exceeded its activity budget. The request was cancelled; review partial changes before retrying.";
+          }
           const data = {
             kind,
             callId: _topCallId,
             model: runtime.modelId,
-            phase: "provider-stream",
+            phase: toolActivityExpired ? "tool-execution" : "provider-stream",
             chunksThisAttempt,
             chunksThisStep,
           };
           breadcrumb("mainStream.provider.stall", { sessionId: deps.session?.id, ...data });
-          logger.warn("orchestrator", "Provider stream deadline fired", data);
+          logger.warn(
+            "orchestrator",
+            toolActivityExpired ? "Tool activity deadline fired" : "Provider stream deadline fired",
+            data,
+          );
           try {
-            if (deps.session) logInteraction(deps.session.id, "error", { eventSubtype: "provider-stall", data });
+            if (deps.session)
+              logInteraction(deps.session.id, "error", {
+                eventSubtype: toolActivityExpired ? "tool-stall" : "provider-stall",
+                data,
+              });
           } catch (err) {
             logger.error("orchestrator", "Failed to record provider stall", {
               error: err instanceof Error ? err.message : String(err),
@@ -2021,7 +2046,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             },
           },
           // Hold the stream open while a blocking `ask_user` card awaits a human.
-          isInteractivePaused,
+          () => isInteractivePaused() || isToolActivityLive(Date.now(), ownedToolActivities),
         );
         // Round 5 (G8 HIGH #2): a request is now genuinely in flight, awaiting
         // its first byte. The single `pingTurnProgress()` above buys the
@@ -3799,7 +3824,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 // over the gathered tool outputs. forcedFinalize has its own
                 // stall timeout, so a still-dead provider just falls through.
                 let _rescued: string | null = null;
-                if (turnToolResults.length > 0) {
+                if (turnToolResults.length > 0 && !toolActivityExpired) {
                   try {
                     const _userText =
                       typeof userModelMessage?.content === "string"
@@ -3866,8 +3891,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   yield { type: "done" };
                   return;
                 }
-                notifyObserver(observer?.onError, { message: STALL_ERROR_MESSAGE, timestamp: Date.now() });
-                yield { type: "error", content: STALL_ERROR_MESSAGE, isAuthError: false };
+                notifyObserver(observer?.onError, { message: stallErrorMessage, timestamp: Date.now() });
+                yield { type: "error", content: stallErrorMessage, isAuthError: false };
                 yield { type: "done" };
                 return;
               }
@@ -4759,7 +4784,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Stall aborts carry an opaque DOMException; show the clear stall
         // message instead of the raw abort reason.
         const friendly = stallTriggered
-          ? STALL_ERROR_MESSAGE
+          ? stallErrorMessage
           : humanizeApiError(err, { modelId: runtime.modelId, providerId: runtime.modelInfo?.provider });
         notifyObserver(observer?.onError, {
           message: friendly,

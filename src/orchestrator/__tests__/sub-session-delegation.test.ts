@@ -486,6 +486,22 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
     expect(mockLoadTranscriptState).toHaveBeenCalledWith("session-active-child");
   });
 
+  it("retains the main session and original task when rotation returns an empty summary (ea7378aab8f8)", async () => {
+    mockClassifySubSessionAction.mockResolvedValue({ action: "ROTATE_SESSION", confidence: 0.9 });
+    mockDeliberateCompact.mockResolvedValueOnce({ summary: "   ", tokensBeforeCompress: 100 });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      session: "session-parent",
+    });
+    (agent as any).messages = [{ role: "user", content: "Implement the approved migration plan" }];
+    for await (const _chunk of agent.processMessage("continue")) {
+      /* drain */
+    }
+    expect(agent.getSessionId()).toBe("session-parent");
+    expect(JSON.stringify((agent as any).messages)).toContain("Implement the approved migration plan");
+    expect(mockAppendCompaction).not.toHaveBeenCalled();
+  });
+
   it("triggers session rotation if the model decides ROTATE_SESSION", async () => {
     mockClassifySubSessionAction.mockResolvedValue({
       action: "ROTATE_SESSION",

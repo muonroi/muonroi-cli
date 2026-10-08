@@ -57,6 +57,7 @@ export interface PlanCouncilOpts {
   runPerspectiveFn?: RunPerspectiveFn;
   revisionCycle?: number;
   runDebate?: (topic: string) => Promise<string>;
+  abortSignal?: AbortSignal;
 }
 
 function readPlanBody(cwd: string): string {
@@ -186,6 +187,7 @@ function applyVerdict(cwd: string, verdict: PerspectiveVerdict | "pass"): void {
 }
 
 export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncilResult> {
+  opts.abortSignal?.throwIfAborted();
   const { cwd, sessionModelId, depth, runPerspectiveFn, revisionCycle = 0 } = opts;
   const perspectives = perspectivesForDepth(depth);
 
@@ -219,13 +221,16 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
     let synthesis = "";
     let lastDebateError: string | undefined;
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      opts.abortSignal?.throwIfAborted();
       try {
         synthesis = (await opts.runDebate(topic)) ?? "";
       } catch (err) {
         lastDebateError = (err as Error).message;
         console.error(`[gsd] plan-review debate threw (attempt ${attempt + 1}/${maxRetries + 1}): ${lastDebateError}`);
+        opts.abortSignal?.throwIfAborted();
         synthesis = "";
       }
+      opts.abortSignal?.throwIfAborted();
       if (synthesis.trim()) break;
       if (attempt < maxRetries) {
         console.error(
@@ -305,6 +310,7 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
         concerns.length ? concerns.map((c) => `- ${c}`).join("\n") : "- (none)",
       ].join("\n");
 
+      opts.abortSignal?.throwIfAborted();
       writeFileSync(planReviewPath, reviewContent, "utf8");
       writeFileSync(planVerifyPath, verifyContent, "utf8");
 
@@ -332,6 +338,7 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
 
   // Perspectives are independent — run in parallel, preserve declared order.
   const settled = await Promise.all(perspectives.map((p) => runPerspective(planBody, p, runPerspectiveFn, bundle)));
+  opts.abortSignal?.throwIfAborted();
   const results: PerspectiveResult[] = settled;
 
   const verdict = mergeVerdict(results);

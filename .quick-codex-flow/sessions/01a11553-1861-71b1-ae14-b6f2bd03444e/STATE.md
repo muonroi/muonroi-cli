@@ -1,7 +1,5 @@
-- Active run: runs/background-pil-model-council.md
-- Gate: complete; full configured unit suite passed 8827 tests / 0 failures; build/typecheck/native selfverify passed
-- Mode: auto; background informational PIL and model-owned council implemented
-- Branch: develop; implementation bc8fe0ee61f0c9e48703b562554fe3e6c53af6bf pushed and remote SHA verified
-- Local CLI: global package junction targets this workspace; built dist is current; restart the CLI to load it
-- Remaining within this scope: none
-- Recorded limit: mounted assertions pass; Bun/opentui shutdown crash output is not resolved or claimed fixed
+- Active run: runs/session-ea7378-stops.md
+- Gate: release; full configured suite 8841 passed, zero failed; source hashes unchanged
+- Mode: auto; single agent; preserve user task state and WIP
+- Branch: develop; background PIL/model-owned council released at bc8fe0ee, release record 1af5d374
+- Next: normal commit/push hooks, remote SHA verification, release receipt

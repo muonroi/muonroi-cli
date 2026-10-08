@@ -29,6 +29,7 @@ export interface VerifyCouncilOpts {
   diff?: string;
   runPerspectiveFn?: (prompt: string, p: VerifyPerspective) => Promise<string>;
   runDebate?: (topic: string) => Promise<string>;
+  abortSignal?: AbortSignal;
 }
 
 /** approve → pass; else the worst verdict wins (block > revise). */
@@ -66,6 +67,7 @@ function writeArtifact(
  * Never silently approves: a missing structured verdict forces "revise".
  */
 export async function runVerifyCouncil(opts: VerifyCouncilOpts): Promise<VerifyCouncilResult> {
+  opts.abortSignal?.throwIfAborted();
   const perspectives = verifyPerspectivesForDepth(opts.depth);
   if (perspectives.length === 0) {
     return { skipped: true, verdict: "pass", concerns: [], verdictSource: "structured" };
@@ -82,6 +84,7 @@ export async function runVerifyCouncil(opts: VerifyCouncilOpts): Promise<VerifyC
     } catch (err) {
       console.error(`[gsd] verify-council debate failed: ${(err as Error).message}`);
     }
+    opts.abortSignal?.throwIfAborted();
     const parsed = extractStructuredVerdict(synthesis);
     if (!parsed) {
       const concerns = ["Verify council leader emitted no structured verdict — forcing revision."];
@@ -138,6 +141,7 @@ export async function runVerifyCouncil(opts: VerifyCouncilOpts): Promise<VerifyC
       }
     }),
   );
+  opts.abortSignal?.throwIfAborted();
   const verdict = mergeVerdict(results.map((r) => r.verdict));
   const concerns = results.flatMap((r) => r.concerns);
   const anyParseFailed = results.some((r) => r.parseFailed);

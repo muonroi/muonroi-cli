@@ -1644,7 +1644,7 @@ export async function* runCouncil(
   // Store debate transcript as individual message — strip failed/empty turns
   // so future context loads don't carry noise. The failure metadata still
   // exists in interaction_logs for debugging.
-  if (sessionId && debateState.exchangeLogs) {
+  if (sessionId && debateState.exchangeLogs && !userAborted()) {
     try {
       const filtered = [...debateState.exchangeLogs.values()].flat().filter((line) => {
         const trimmed = line.trim();
@@ -1738,6 +1738,11 @@ export async function* runCouncil(
       yield planResult.value;
     }
   } while (!planResult.done);
+  if (userAborted()) {
+    stats.bailReason = { kind: "aborted", detail: "Council cancelled during synthesis." };
+    yield* terminalDone();
+    return null;
+  }
   let { outcome, plan, synthesisText } = planResult.value;
   // `let`, not `const`: sprintPlanningMode re-invokes `runPlanning` a SECOND
   // time (the plan-lock re-synthesis below) and reassigns `synthesisText` from
@@ -2843,6 +2848,11 @@ export async function* runCouncil(
   }
 
   idealTrace("council.persist.start", { sessionId, hasOutcome: !!outcome, postDebateAction });
+  if (userAborted()) {
+    stats.bailReason = { kind: "aborted", detail: "Council cancelled before persistence." };
+    yield* terminalDone();
+    return null;
+  }
   // ── Persist outcome ─────────────────────────────────────────────────────────
   if (sessionId) {
     try {
@@ -2980,6 +2990,7 @@ export async function* runCouncil(
   // CQ-17: Record council outcome to EE brain (fire-and-forget)
   void judgeCouncilOutcome(synthesisText)
     .then((verdict) => {
+      if (userAborted()) return;
       // CQ-16: Append review flag if confidence < 0.5
       if (verdict.confidence < 0.5 && sessionId) {
         try {
