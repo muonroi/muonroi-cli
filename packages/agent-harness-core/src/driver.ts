@@ -22,9 +22,18 @@ type WaitConditionEvent = {
   /** Optional: only satisfy if at least one buffered event of this kind passes this check. */
   match?: (e: LiveEvent) => boolean;
 };
-type WaitConditionAll = { all: (WaitConditionIdle | WaitConditionSelector | WaitConditionEvent)[] };
+/**
+ * Satisfied once the latest VisualFrame (the real rendered cell grid, see
+ * `render_visual()`) contains `visualText`. The visual frame is written to the
+ * sidechannel AFTER the semantic frame of the same render pass, so a selector
+ * wait on the semantic tree can resolve one line before the matching visual
+ * frame has been ingested — wait on this instead of polling `render_visual()`.
+ */
+type WaitConditionVisual = { visualText: string };
+type WaitCondition = WaitConditionIdle | WaitConditionSelector | WaitConditionEvent | WaitConditionVisual;
+type WaitConditionAll = { all: WaitCondition[] };
 
-export type WaitArgs = (WaitConditionIdle | WaitConditionSelector | WaitConditionEvent | WaitConditionAll) & {
+export type WaitArgs = (WaitCondition | WaitConditionAll) & {
   timeoutMs?: number;
 };
 
@@ -297,7 +306,7 @@ export function createDriver(deps: DriverDeps): Driver {
     return undefined;
   }
 
-  function buildCheck(cond: WaitConditionIdle | WaitConditionSelector | WaitConditionEvent): () => boolean {
+  function buildCheck(cond: WaitCondition): () => boolean {
     if ("idle" in cond && cond.idle) {
       const capturedStart = Date.now();
       return () => lastIdleAt >= capturedStart;
@@ -310,6 +319,10 @@ export function createDriver(deps: DriverDeps): Driver {
       const kind = (cond as WaitConditionEvent).event;
       const matchFn = (cond as WaitConditionEvent).match;
       return () => eventBuffer.some((e) => e.t === "event" && e.kind === kind && (matchFn ? matchFn(e) : true));
+    }
+    if ("visualText" in cond) {
+      const needle = (cond as WaitConditionVisual).visualText;
+      return () => latestVisualFrame !== null && driver.render_visual().includes(needle);
     }
     return () => false;
   }
@@ -404,6 +417,8 @@ export function createDriver(deps: DriverDeps): Driver {
         check = buildCheck(args as WaitConditionSelector);
       } else if ("event" in args) {
         check = buildCheck(args as WaitConditionEvent);
+      } else if ("visualText" in args) {
+        check = buildCheck(args as WaitConditionVisual);
       } else {
         check = () => false;
       }

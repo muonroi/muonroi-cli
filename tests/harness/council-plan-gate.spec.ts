@@ -42,7 +42,7 @@ describe("council intent gate + plan card", () => {
       // real (possibly reachable) default host — mirrors council-flow.spec.ts.
       // MUONROI_GSD_ASSESSOR=0 skips the leader-tier complexity assessor (an
       // unfixtured extra LLM call) — depth comes only from the fixture's
-      // `classify` line, which is all this spec needs to trigger auto-council.
+      // `classify` line (consumed by runCouncil's own PIL pass).
       // MUONROI_GSD_NATIVE=0 keeps the native GSD directive/mutation-gate
       // machinery out of scope: this spec asserts the intent gate, not the
       // GSD pipeline, and PIL still sets pilCtx.complexityTier regardless of
@@ -60,9 +60,10 @@ describe("council intent gate + plan card", () => {
     driver = ctx.driver;
     cleanup = ctx.cleanup;
 
-    await driver.wait_for({ idle: true, timeoutMs: 15_000 });
-    // POSIX race: idle can fire on the empty seq=0 frame before React mounts.
-    await driver.wait_for({ selector: "role=textbox", timeoutMs: 5_000 });
+    // `input-ready` is the readiness signal; idle can fire on the empty seq=0
+    // frame before React mounts (see agent-mode.ts).
+    await driver.wait_for({ event: "input-ready", timeoutMs: 60_000 });
+    await driver.wait_for({ selector: "role=textbox", timeoutMs: 10_000 });
   }, 120_000);
 
   afterAll(() => {
@@ -81,20 +82,28 @@ describe("council intent gate + plan card", () => {
   });
 
   it("the launch card leads with the intent options", async () => {
-    // Drives AUTO-council (a plain chat message PIL classifies as
-    // taskType=plan / depth=heavy), not the `/council <topic>` slash command.
+    // Drives the `/council <topic>` slash command — the one entry point that
+    // still shows this card.
     //
-    // History, since the original note here is now wrong: the `/council`
-    // handler used to call `agent.runCouncilV2(topic, { convenePath: true })`
-    // and the S1 gate was `!options?.convenePath`, so the slash command never
-    // showed this card at all. Task 10 added `allowLaunchCard` (card shown, but
-    // `convenePath` still skipped every consumer of the lock), and C2
-    // (2026-08-06) split the flag into `suppressPreDebateCards` /
-    // `suppressPostDebate` and made `/council` set NEITHER — so both entry
-    // points now show this card and both reach the plan gate behind it.
-    // Auto-council is kept as the driver here because it needs no slash parsing
-    // and is the path a user hits without asking for a debate.
-    driver.type("design the council intent-gate sentinel transition test");
+    // History: C2 (2026-08-06) split the old `convenePath` flag into
+    // `suppressPreDebateCards` / `suppressPostDebate` and made `/council` set
+    // NEITHER, so the S1 launch card and the plan gate behind it run for it.
+    // This spec used to drive AUTO-council instead (a plain chat message PIL
+    // classified as plan/heavy). bc8fe0e ("make PIL background advice and let
+    // the leader convene council") removed that PIL-triggered entry on
+    // purpose: council is now entered only by the leader's `convene_council`
+    // tool call, which runs with `suppressPreDebateCards: true` (no launch
+    // card — see the convene_council consumer in src/orchestrator/tool-engine.ts),
+    // or by a human typing `/council` (src/ui/use-app-logic.tsx, which passes
+    // NO options). A plain chat message therefore never reaches this card any
+    // more, and waiting for it timed out after 60s.
+    const command = "/council design the council intent-gate sentinel transition test";
+    driver.type(command);
+    // Gate Enter on the composer holding the full command AND the UI settling:
+    // the slash menu filters as the query grows, and an Enter that lands while
+    // it still lists items selects the first item instead of submitting.
+    await driver.wait_for({ selector: `id=composer value="${command}"`, timeoutMs: 15_000 });
+    await driver.wait_for({ idle: true, timeoutMs: 10_000 });
     driver.press("Enter");
 
     // The S1 launch configurator (council/index.ts) is the FIRST askcard-open

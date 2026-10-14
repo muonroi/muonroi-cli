@@ -6,8 +6,10 @@
  * `tests/harness/bash-output-get-tui.spec.ts`).
  *
  * Five assertion categories per the locked must_haves:
- *   1. Reminder injection — "[scope-check step 3/" + verbatim prompt snippet
- *      appears in a recorded LLM prompt at step >= 3 (cadence K=3 for small).
+ *   1. Reminder injection — "[scope-check step K/" + verbatim prompt snippet
+ *      appears in a recorded LLM prompt at step K. Since bc8fe0e (background
+ *      PIL) the foreground ceiling row of a fresh session is general × medium
+ *      (ceiling 10, cadence K=5) — PIL's (debug, small) label is advisory only.
  *   2. Soft-warn — `shouldInjectSoftWarn` fires at floor(6 * 0.7) = 4 and the
  *      reminder for that step carries the "approaching ceiling" prefix.
  *   3. Hard halt + forced-finalize — `agentCalls.length <= ceiling+1` AND the
@@ -44,9 +46,17 @@ import { scoreComplexitySize } from "../../src/pil/layer1_5-complexity-size.js";
 import { type CostLeakHarness, exitTuiAndWaitForDump, spawnCostLeakHarness } from "./cost-leak-tui-helpers.js";
 import { loadDumpedRecordings } from "./recording.js";
 
-// Locked test prompt — empirically classified as (debug, small) by Layer 1.5
-// (78 chars under the <80 small threshold, no sweep words, no path tokens).
-// Drives ceiling = 6 → reminder cadence K=3 → soft-warn at step 4.
+// Locked test prompt — classified as (debug, small) by Layer 1.5 (78 chars
+// under the <80 small threshold, no sweep words, no path tokens) → matrix
+// ceiling 6 / cadence K=3 / soft-warn at step 4 (asserted at module level).
+//
+// The LIVE turn no longer uses that row: since bc8fe0e ("make PIL background
+// advice") prepareTurnContext returns without awaiting PIL, and PIL's
+// taskType/size never reach foreground control — the ceiling row is the
+// session's recorded last task, else general × medium. See
+// src/orchestrator/preprocessor.ts (prepareTurnContext).
+const LIVE_TASK_TYPE = "general";
+const LIVE_SIZE = "medium";
 const TEST_PROMPT = "debug why the json parser drops single-char tokens in src/parsers/lex.ts";
 
 function bashCallRound(callId: string, cmd: string): unknown[] {
@@ -175,16 +185,15 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
       handle = await spawnCostLeakHarness({
         provider: "deepseek",
         modelId: "deepseek-v4-flash",
-        // PIL Layer 1 classifier does NOT fire a streamText round in this
-        // harness (unified-brain flag default OFF + EE bridge uses /api/classify
-        // outside the mock model). Empirically the very first round in the
-        // queue is consumed by the main agent. Round 0..2 → bash tool-calls so
-        // the step counter reaches 3 → first reminder fires at step 3 (cadence
-        // K=3 for size=small). Round 3 → final stop.
+        // PIL runs in the background and (MUONROI_LLM_FIRST_CLASSIFY=0 in the
+        // helper) does not consume a scripted round, so the queue is the main
+        // agent's. Rounds 0..K-1 → bash tool-calls so the step counter reaches
+        // K = cadenceForSize("medium") = 5 → the first reminder is attached to
+        // the call for step K. Round K → final stop.
         stream: [
-          bashCallRound("bash-1", "echo step1"),
-          bashCallRound("bash-2", "echo step2"),
-          bashCallRound("bash-3", "echo step3"),
+          ...Array.from({ length: cadenceForSize(LIVE_SIZE) }, (_, i) =>
+            bashCallRound(`bash-${i + 1}`, `echo step${i + 1}`),
+          ),
           finalTextRound("done"),
         ],
       });
@@ -194,13 +203,18 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
       handle?.cleanup();
     });
 
-    it("reminder marker '[scope-check step 3/' + prompt snippet visible in recorded LLM prompt", async () => {
+    it("reminder marker '[scope-check step K/' + prompt snippet visible in recorded LLM prompt", async () => {
       if (!handle) throw new Error("harness failed to spawn");
 
       // Cadence math we depend on for this assertion is independent of the
       // spawn — assert it inline so a fail here pinpoints the cause:
       expect(cadenceForSize("small")).toBe(3);
       expect(shouldInjectReminder(3, 3)).toBe(true);
+      const liveK = cadenceForSize(LIVE_SIZE);
+      const liveCeiling = resolveCeiling(LIVE_TASK_TYPE, LIVE_SIZE);
+      expect(liveK).toBe(5);
+      expect(liveCeiling).toBe(10);
+      expect(shouldInjectReminder(liveK, liveK)).toBe(true);
 
       // Sample reminder string proves buildScopeReminder produces the locked
       // header format the assertion below greps for in the recorded prompt:
@@ -218,14 +232,14 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
       expect(sample.length).toBeLessThanOrEqual(200);
 
       handle.driver.type(TEST_PROMPT);
+      // Gate Enter on the composer actually holding the prompt — keystrokes
+      // sent before the input bridge mounts are queued, not applied.
+      await handle.driver.wait_for({ selector: `id=composer value="${TEST_PROMPT}"`, timeoutMs: 15_000 });
       handle.driver.press("Enter");
 
-      // Wait for the round-trips to settle: PIL absorber + 3 bash rounds + final.
-      await handle.driver.wait_for({ selector: "role=log", timeoutMs: 20_000 });
-      // Generous sleep — PIL classifier + 3 real bash executions (each ~50-200ms)
-      // + dump atomic-rename. Mirrors the 25s wait in the template
-      // bash-output-get-tui.spec.ts which also drives 3+ rounds.
-      await new Promise((r) => setTimeout(r, 25_000));
+      // `llm-done` fires once from the top-level streamText onFinish — i.e.
+      // after every bash round AND the final text round have completed.
+      await handle.driver.wait_for({ event: "llm-done", timeoutMs: 60_000 });
 
       await exitTuiAndWaitForDump(handle, 20_000);
 
@@ -262,10 +276,15 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
       // for the reminder marker injected by prepareStep on/after step 3.
       const joinedPromptText = agentCalls.map((c) => JSON.stringify(c?.options?.prompt ?? {})).join("\n");
 
-      // Primary assertion (4V locked): "[scope-check step 3/" appears.
-      // The reminder is injected by message-processor.ts::prepareStep at the
-      // tool-result tail when step % K === 0 (K=3 for small).
-      expect(joinedPromptText).toContain("[scope-check step 3/");
+      // Primary assertion (4V): the cadence reminder appears, with the header
+      // naming the ceiling row the live turn actually used. Injected by
+      // tool-engine.ts prepareStep at the tool-result tail when step % K === 0.
+      expect(joinedPromptText).toContain(
+        `[scope-check step ${liveK}/${liveCeiling} — task=${LIVE_TASK_TYPE} size=${LIVE_SIZE}]`,
+      );
+      // ...and NOT the (debug, small) K=3 reminder: PIL's late classification
+      // must never steer the foreground turn (bc8fe0e).
+      expect(joinedPromptText).not.toContain("[scope-check step 3/");
 
       // Verbatim prompt snippet (first 100 chars) is embedded in the reminder:
       expect(joinedPromptText).toContain(TEST_PROMPT.slice(0, 50));

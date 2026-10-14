@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createDriver } from "../src/driver.js";
-import type { LiveEvent } from "../src/protocol.js";
+import { type LiveEvent, PROTOCOL_VERSION, type VisualFrame } from "../src/protocol.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -510,5 +510,58 @@ describe("wait_for event (no match — backward compat)", () => {
     const driver = makeDriver();
     ingestEvent(driver, "toast", { level: "info", text: "pre" });
     await driver.wait_for({ event: "toast", timeoutMs: 100 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// wait_for visualText — the rendered cell grid, not the semantic tree
+// ---------------------------------------------------------------------------
+
+function makeVisualFrame(seq: number, lines: string[]): VisualFrame {
+  return {
+    mode: "visual",
+    version: PROTOCOL_VERSION,
+    seq,
+    ts: seq,
+    cols: 80,
+    rows: lines.length,
+    cursor: null,
+    lines: lines.map((text) => ({
+      spans: [{ text, fg: "#ffffff", bg: "#000000", attrs: 0, width: text.length }],
+    })),
+  };
+}
+
+describe("wait_for visualText", () => {
+  it("skips a visual frame that lacks the text and resolves on the one that has it", async () => {
+    const driver = makeDriver();
+    // The splash frame is already buffered — an "any visual frame" check would
+    // resolve here, which is exactly the visual-capture.spec race this guards.
+    driver._ingest({ kind: "visual", frame: makeVisualFrame(0, ["What are we building?"]) });
+    let resolved = false;
+    const p = driver.wait_for({ visualText: "hello visual world", timeoutMs: 1000 }).then(() => {
+      resolved = true;
+    });
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+    driver._ingest({ kind: "visual", frame: makeVisualFrame(1, ["Agent  hello visual world"]) });
+    await p;
+    expect(resolved).toBe(true);
+  });
+
+  it("times out when no visual frame ever contains the text", async () => {
+    const driver = makeDriver();
+    await expect(driver.wait_for({ visualText: "never", timeoutMs: 50 })).rejects.toThrow(/timeout/);
+  });
+
+  it("composes inside all: [...]", async () => {
+    const driver = makeDriver();
+    driver._ingest({ kind: "visual", frame: makeVisualFrame(0, ["hi there"]) });
+    driver._ingest({ kind: "idle" });
+    await driver.wait_for({ all: [{ visualText: "hi there" }, { event: "never" }], timeoutMs: 50 }).then(
+      () => expect.unreachable("must not resolve while the event condition is unmet"),
+      (err: Error) => expect(err.message).toMatch(/timeout/),
+    );
+    await driver.wait_for({ all: [{ visualText: "hi there" }], timeoutMs: 100 });
   });
 });

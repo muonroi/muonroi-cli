@@ -164,3 +164,36 @@ describe("background PIL ownership", () => {
     expect(mocks.runPipeline).not.toHaveBeenCalled();
   });
 });
+
+describe("--budget-rounds override toast", () => {
+  const runtimeKey = "__muonroiAgentRuntime";
+  let previous: unknown;
+  const emitEvent = vi.fn();
+  beforeEach(() => {
+    previous = (globalThis as Record<string, unknown>)[runtimeKey];
+    (globalThis as Record<string, unknown>)[runtimeKey] = { emitEvent };
+    emitEvent.mockReset();
+  });
+  afterEach(() => {
+    (globalThis as Record<string, unknown>)[runtimeKey] = previous;
+  });
+  function prepareWith(override: { override?: number }) {
+    const result = prepareTurnContext(deps(new AbortController()), context.raw, override);
+    supplements.push(result.pilSupplement);
+    return result;
+  }
+  it("announces an explicit cap that differs from the natural ceiling", () => {
+    const result = prepareWith({ override: 20 });
+    expect(result._stepCeiling).toBe(20);
+    const toast = emitEvent.mock.calls.map(([e]) => e).find((e) => e?.kind === "toast");
+    expect(toast).toMatchObject({ t: "event", kind: "toast", level: "info" });
+    expect(toast.text).toBe(
+      `override active: ceiling 20, default was ${result._naturalCeiling} (task=${result._ceilingTaskType}/size=${result._ceilingSize})`,
+    );
+  });
+  it("stays silent without an override, or when it equals the natural ceiling", () => {
+    const natural = prepareWith({})._naturalCeiling;
+    prepareWith({ override: natural });
+    expect(emitEvent.mock.calls.some(([e]) => e?.kind === "toast")).toBe(false);
+  });
+});

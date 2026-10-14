@@ -130,6 +130,18 @@ function startPilSupplement(
   };
 }
 
+function emitOverrideToast(text: string): void {
+  try {
+    const runtime = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent?: (e: unknown) => void }
+      | undefined;
+    runtime?.emitEvent?.({ t: "event", kind: "toast", level: "info", text });
+  } catch (err) {
+    // A toast is informational; a broken sink must not fail the turn.
+    logger.debug("pil", "override toast emit failed", { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 export function prepareTurnContext(
   deps: MessageProcessorDeps,
   userMessage: string,
@@ -160,6 +172,16 @@ export function prepareTurnContext(
   const _ceilingTaskType = lastTask?.taskType ?? "general";
   const _ceilingSize = lastTask?.size ?? "medium";
   const _naturalCeiling = resolveCeiling(_ceilingTaskType, _ceilingSize);
+  // Phase 4 Plan 04 (4B) — `--budget-rounds N` (parsed and stripped by the
+  // caller) wins over the matrix ceiling; tell the user the explicit cap is in
+  // force. This needs only the local override + natural ceiling, never PIL, so
+  // it survived the background-PIL move in bc8fe0e by intent — it was dropped
+  // there only as collateral of rewriting this function.
+  if (_budgetOverride.override !== undefined && _budgetOverride.override !== _naturalCeiling) {
+    emitOverrideToast(
+      `override active: ceiling ${_budgetOverride.override}, default was ${_naturalCeiling} (task=${_ceilingTaskType}/size=${_ceilingSize})`,
+    );
+  }
   const pilSupplement = startPilSupplement(deps, userMessage, priorDepthTier);
   return {
     pilCtx,

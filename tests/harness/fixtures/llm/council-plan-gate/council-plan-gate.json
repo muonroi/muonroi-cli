@@ -1,12 +1,12 @@
 {
   "___comment": "Dedicated fixture dir (NOT the shared tests/harness/fixtures/llm/ pool) — a sequence fixture is tried on EVERY llm.generate()/debate()/research() call across ALL fixtures in the loaded dir (packages/agent-harness-core/src/mock-llm.ts), so dropping this file into the shared pool would let it compete with council.json/ideal.json on every other spec that uses the default fixtures dir. helpers.ts documents exactly this hazard for fixturesDir. See tests/harness/council-plan-gate.spec.ts.",
   "model": {
-    "___comment": "Minimal AI-SDK-level block. --mock-llm <dir> refuses to boot (exit 78) unless some file in the dir declares a {model:...} block (src/index.ts). This spec drives a PLAIN chat turn (not the /council slash command — see council-plan-gate.spec.ts for why), so this stream backs PIL's model-first classify call (auto-intercepted below by 'classify') and would back an actual assistant reply if one were needed.",
+    "___comment": "Minimal AI-SDK-level block. --mock-llm <dir> refuses to boot (exit 78) unless some file in the dir declares a {model:...} block (src/index.ts). This spec drives the /council slash command (a plain chat turn no longer reaches the launch card since bc8fe0e — see council-plan-gate.spec.ts), so this stream backs runCouncil's own PIL classify call (auto-intercepted below by 'classify') and would back an actual assistant reply if one were needed.",
     "provider": "mock",
     "modelId": "council-plan-gate-mock",
     "classify": "plan,balanced,task,report,heavy,local,english,clear",
     "stream": [
-      { "type": "text-delta", "delta": "(unused — the turn is intercepted by the auto-council gate before any reply)" },
+      { "type": "text-delta", "delta": "(unused — /council runs the council directly; no leader reply is streamed)" },
       { "type": "finish", "finishReason": "stop" }
     ]
   },
