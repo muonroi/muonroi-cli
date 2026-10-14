@@ -29,6 +29,7 @@ export type InteractionEventType =
   | "stall_rescue"
   | "stream_start"
   | "text_tool_resteer"
+  | "output_limit"
   | "turn_tool_load"
   | "dedup"
   | "call_accounting"

@@ -42,7 +42,7 @@
 // Cost-leak code paths preserved here:
 //   - F1 (top-level cumulative cap)         — wrapToolSetWithCap (top-level)
 //   - F1 (openai.promptCacheKey)            — buildTurnProviderOptions
-//   - G1 (OAuth `maxOutputTokens` drop)     — shouldDropParam(runtime, ...)
+//   - G1 (OAuth `maxOutputTokens` drop)     — resolveMaxOutputTokensParam → shouldDropParam
 //   - B4 (top-level prepareStep compaction) — compactSubAgentMessages
 //   - C3 (cross-turn dedup wrap)            — wrapToolSetWithDedup
 //   - A4 (tool_call write-ahead)            — persistToolCallWriteAhead
@@ -113,9 +113,9 @@ import {
   detectProviderForModel,
   type ResolvedModelRuntime,
   requireRuntimeProvider,
+  resolveMaxOutputTokensParam,
   type resolveModelRuntime,
   resolveTemperatureParam,
-  shouldDropParam,
 } from "../providers/runtime.js";
 import { generateTextStreamed } from "../providers/streamed-generate.js";
 import type { ProviderId } from "../providers/types.js";
@@ -185,6 +185,14 @@ import { buildGroundingFootnote, findUnverifiedClaims } from "./grounding-check.
 import { isInteractivePaused } from "./interactive-pause.js";
 import { buildInterruptedTurnNote } from "./interrupted-turn.js";
 import { createNoProgressGuard } from "./no-progress-guard.js";
+import {
+  appendNoticeToFinalMessages,
+  buildOutputLimitContinuationPrompt,
+  buildOutputLimitNotice,
+  decideOutputLimitAction,
+  getOutputLimitContinuationCap,
+  type OutputLimitAction,
+} from "./output-limit-continuation.js";
 import type { PendingCallsLog } from "./pending-calls.js";
 import { stableCallId } from "./pending-calls.js";
 import { createPromptMeasurer } from "./prompt-breakdown.js";
@@ -824,6 +832,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // Bounded by the same maxStallRetries cap so a persistently-dead provider
   // still falls through to the partial-answer rescue.
   let midLoopStallRetryCount = 0;
+  // Output-limit continuation counter (turn-scoped, so a `continue
+  // streamAttempt` cannot reset it). A stream attempt that ends with
+  // finishReason "length" re-runs with a "continue from where you stopped"
+  // message at most this many times; past the cap the reply gets a visible
+  // cut-off notice instead. See output-limit-continuation.ts.
+  let outputLimitContinuations = 0;
+  const outputLimitContinuationCap = getOutputLimitContinuationCap();
 
   // F3c — per-turn LLM call cap: counts every streamText() invocation
   // (tool round-trip, stall re-prompt, stream retry) and hard-aborts
@@ -1464,9 +1479,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // the auth registry. Both flow through resolveModelRuntime →
         // runtime.providerOptions → buildTurnProviderOptions and arrive
         // here merged into providerOpts.openai.
-        // Top-level dropParam — shared with sub-agent path via shouldDropParam.
-        // See src/providers/runtime.ts for the central rule.
-        const dropParam = (p: "maxOutputTokens" | "temperature" | "topP"): boolean => shouldDropParam(runtime, p);
+        // The G1 maxOutputTokens drop is applied by resolveMaxOutputTokensParam
+        // (which delegates to shouldDropParam) at the streamText call below.
 
         // Tier-aware behavioural suffix. Cheap models (DeepSeek V4 Flash etc.)
         // ignore well-worded tool descriptions but DO adopt instructions when
@@ -1582,6 +1596,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // stepCountIs(maxToolRounds) fires and the user sees the TUI freeze
         // (session 7dcf8fd7d6a4 hit exactly 100 rounds → looked like a crash).
         let _lastFinishReason: string | null = null;
+        // Output-limit handling decided once the stream drained (see the
+        // `_finalMessages` assembly below); acted on after the turn is persisted.
+        let _outputLimitAction: OutputLimitAction = "none";
         // F3b — track hard cap hit for visible toast after stream ends.
         let _hardCapHit = false;
         // Phase B4: compact older tool_result parts before each top-level
@@ -2079,6 +2096,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           callId: _topCallId,
           model: runtime.modelId,
         });
+        // The per-turn budget is a VISIBLE-output number. On a reasoning model
+        // the thinking block shares `max_tokens` and is emitted first, so the
+        // bare taskType budget (4_096 for analyze/conversational) let thinking
+        // eat most of it and cut long answers mid-sentence with
+        // finishReason "length" (live: a StepFun reasoning model's long report
+        // ended at "…vẫn 429 sau 2.6–"). resolveMaxOutputTokensParam widens a
+        // reasoning model to its catalog-declared ceiling and also owns the
+        // OAuth/capability drop rule — same helper every council call uses.
+        const turnMaxOutputTokensParam = resolveMaxOutputTokensParam(runtime, resolveTurnMaxOutputTokens(pilCtx));
         const result = streamText({
           model: runtime.model,
           system: systemForModel,
@@ -2593,7 +2619,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             return withSteers({ messages: coalesced });
           },
           ...resolveTemperatureParam(runtime, 0.7),
-          ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: resolveTurnMaxOutputTokens(pilCtx) }),
+          ...turnMaxOutputTokensParam,
           ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
           experimental_onStepStart: (event: unknown) => {
             stepNumber = getStepNumber(event, stepNumber + 1);
@@ -4210,6 +4236,18 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               /* telemetry is best-effort */
             }
 
+            // Output limit: the final step stopped on finishReason "length"
+            // (the provider ran out of maxOutputTokens, usually mid-sentence).
+            // Decide now — before the grounding footnote, which must not land
+            // between the cut text and its continuation. An answer that came
+            // from a response tool or the F6 synthesis is already complete.
+            _outputLimitAction = decideOutputLimitAction({
+              finishReason: _lastFinishReason,
+              answeredElsewhere: responseToolCalled || _f6SynthesisText !== null,
+              continuations: outputLimitContinuations,
+              cap: outputLimitContinuationCap,
+            });
+
             // Summary-phase grounding check (Agent Operating Contract, runtime
             // half). Soft-flag counts / file:line refs in the final synthesis
             // that don't appear in this turn's tool outputs — possible
@@ -4217,7 +4255,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // warn toast + an inline advisory footnote. Only runs when the
             // turn actually produced tool output (a corpus to ground against)
             // and is not chitchat. See grounding-check.ts.
-            if (process.env.MUONROI_DISABLE_GROUNDING_CHECK !== "1" && !isChitchat && assistantText.trim().length > 0) {
+            if (
+              process.env.MUONROI_DISABLE_GROUNDING_CHECK !== "1" &&
+              !isChitchat &&
+              _outputLimitAction !== "continue" &&
+              assistantText.trim().length > 0
+            ) {
               try {
                 const _gParts: string[] = [];
                 let _gHadTool = false;
@@ -4272,6 +4315,32 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 role: "assistant",
                 content: _f6SynthesisText,
               } as ModelMessage);
+            }
+            // Out of continuations (or disabled): never let a cut reply pass
+            // as finished. The notice goes into the persisted messages too —
+            // the TUI re-renders the transcript from them when the turn ends.
+            if (_outputLimitAction === "notice") {
+              const _notice = buildOutputLimitNotice({
+                maxOutputTokens: turnMaxOutputTokensParam.maxOutputTokens,
+                continuations: outputLimitContinuations,
+              });
+              assistantText += _notice;
+              yield { type: "content", content: _notice };
+              appendNoticeToFinalMessages(_finalMessages, _notice);
+              try {
+                if (deps.session) {
+                  logInteraction(deps.session.id, "output_limit", {
+                    model: turnModelId,
+                    data: {
+                      action: "notice",
+                      continuations: outputLimitContinuations,
+                      maxOutputTokens: turnMaxOutputTokensParam.maxOutputTokens ?? null,
+                    },
+                  });
+                }
+              } catch {
+                /* telemetry is best-effort */
+              }
             }
             deps.appendCompletedTurn(userModelMessage, _finalMessages);
             streamOk = true;
@@ -4474,6 +4543,49 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               `If you want to continue the current task, simply reply with "continue" or "tiếp tục". ` +
               `For long tasks, we strongly recommend running the \`/compact\` command first to free up context memory before continuing.]\n`,
           };
+        }
+
+        // Output-limit continuation: the reply was cut by maxOutputTokens
+        // (finishReason "length") and is already persisted above. Ask the model
+        // to resume from the exact cut point and re-run the attempt, so the
+        // remaining text streams straight after the cut one. Same re-entry shape
+        // as the text-tool re-steer below (in-memory user message + `continue`);
+        // bounded per turn by outputLimitContinuationCap, after which the
+        // finalize path appends a visible cut-off notice instead.
+        if (_outputLimitAction === "continue" && streamOk && !signal.aborted) {
+          outputLimitContinuations++;
+          deps.messages.push({ role: "user", content: buildOutputLimitContinuationPrompt(assistantText) });
+          deps.messageSeqs.push(null);
+          if (deps.session) {
+            try {
+              logInteraction(deps.session.id, "output_limit", {
+                model: turnModelId,
+                data: {
+                  action: "continue",
+                  attempt: outputLimitContinuations,
+                  cap: outputLimitContinuationCap,
+                  maxOutputTokens: turnMaxOutputTokensParam.maxOutputTokens ?? null,
+                },
+              });
+            } catch {
+              /* telemetry best-effort */
+            }
+          }
+          try {
+            const _oar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+              | { emitEvent: (e: unknown) => void }
+              | undefined;
+            _oar?.emitEvent({
+              t: "event",
+              kind: "toast",
+              level: "info",
+              text: `reply hit the output-token limit — continuing (${outputLimitContinuations}/${outputLimitContinuationCap})`,
+            });
+          } catch {
+            /* best-effort */
+          }
+          await closeMcp?.().catch(() => {});
+          continue;
         }
 
         // Tool-call-as-text leak: the model wrote a tool invocation as plain
