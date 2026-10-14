@@ -108,6 +108,15 @@ import {
 } from "../providers/mcp-vision-bridge.js";
 import { InputCeilingExceededError } from "../providers/model-gate";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
+import { noteProviderRateLimited } from "../providers/rate-ledger.js";
+import {
+  beginProviderBackoff,
+  endProviderBackoff,
+  isRateLimitError,
+  isRateLimitRetryExhausted,
+  rateLimitBackoffMs,
+  retryAfterMsFromError,
+} from "../providers/rate-limit-backoff.js";
 import {
   buildTurnProviderOptions,
   detectProviderForModel,
@@ -3485,7 +3494,24 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   const baseMs = 500;
                   const expMs = Math.min(baseMs * 4 ** (streamRetryCount - 1), 8_000);
                   const spread = expMs * 0.25;
-                  const nextDelayMs = Math.round(expMs + (Math.random() * 2 - 1) * spread);
+                  let nextDelayMs = Math.round(expMs + (Math.random() * 2 - 1) * spread);
+                  // A rate limit delivered as an error PART (the request was
+                  // accepted, then refused in-stream) never reaches the gate's
+                  // 429 retry, which only sees rejected requests. An 8 s ceiling
+                  // cannot outlast a per-minute window, so wait on the rate-limit
+                  // schedule and publish the shared cooldown — the background
+                  // agents on the same account then hold too.
+                  const _rateLimited = isRateLimitError(part.error) && !isRateLimitRetryExhausted(part.error);
+                  if (_rateLimited) {
+                    const _proposal = {
+                      proposedMs: rateLimitBackoffMs(streamRetryCount),
+                      hintMs: retryAfterMsFromError(part.error),
+                    };
+                    const _provider = runtime.modelInfo?.provider;
+                    nextDelayMs = _provider
+                      ? await noteProviderRateLimited(_provider, _proposal)
+                      : (_proposal.hintMs ?? _proposal.proposedMs);
+                  }
                   const errName = part.error instanceof Error ? part.error.name : "Error";
                   const errMsg = part.error instanceof Error ? part.error.message : String(part.error);
                   try {
@@ -3520,7 +3546,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   } catch (logErr) {
                     console.error(`[message-processor] error-part retry log failed: ${(logErr as Error)?.message}`);
                   }
-                  await new Promise<void>((resolve) => setTimeout(resolve, nextDelayMs));
+                  // An announced rate-limit wait is not a stall: keep the
+                  // watchdogs from firing on it (same counter the gate uses).
+                  if (_rateLimited) beginProviderBackoff();
+                  try {
+                    await new Promise<void>((resolve) => setTimeout(resolve, nextDelayMs));
+                  } finally {
+                    if (_rateLimited) endProviderBackoff();
+                  }
                   if (!signal.aborted) {
                     continue streamAttempt;
                   }

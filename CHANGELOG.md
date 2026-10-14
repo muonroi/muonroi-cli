@@ -52,6 +52,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agents plus main meant 7× the account limit and 429s. Disable with
   `MUONROI_RATE_LEDGER=0`. A delegation started at the provider's concurrency
   limit tells the agent so, instead of letting it fan out blind.
+- **Provider 429s are waited out, for every provider**: a rate-limited request
+  is retried on a schedule that can outlast a per-minute window (Retry-After
+  honoured, else 4 s doubling to 60 s, 4 min budget —
+  `MUONROI_RATE_LIMIT_RETRY_BUDGET_MS`), at the gate so any step of the main
+  agent, sub-agents and council is covered — and also when the 429 arrives
+  mid-stream as an error part. The pushback is shared as a machine-wide
+  cooldown so every muonroi process holds. Background delegations previously had
+  no retry at all and died on their first 429; a delegation that still fails is
+  marked `failureKind: "rate-limited"` with guidance to wait / launch fewer.
+- **Fan-out rule + guard for every provider**: the main agent's system prompt
+  states the provider's limits and the max parallel background agents; the CLI
+  refuses a delegation past that same number (`MUONROI_MAX_PARALLEL_DELEGATIONS`).
+- **Replies no longer cut off silently**: the main turn's output budget now goes
+  through `resolveMaxOutputTokensParam` (a reasoning model's thinking shares the
+  budget, so 4,096 tokens cut long answers); a `finishReason: "length"` reply is
+  auto-continued (`MUONROI_OUTPUT_LIMIT_CONTINUATIONS`, default 2) and otherwise
+  ends with a visible notice.
 - **Per-account rate limits**: `settings.rateLimitOverrides` (keyed by provider or
   model id, catalog snake_case shape) overrides the catalog's `rate_limits`,
   because limits depend on the account tier. StepFun catalog limits updated to
