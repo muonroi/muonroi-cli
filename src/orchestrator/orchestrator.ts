@@ -43,6 +43,7 @@ import {
   createProviderFactory,
   createProviderFactoryAsync,
   detectProviderForModel,
+  effectiveRateLimits,
   requireRuntimeProvider,
   resolveModelRuntime,
   resolveTemperatureParam,
@@ -90,6 +91,7 @@ import type {
 import { appendCostLog } from "../usage/cost-log.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { projectCostUSD, sanitizeInputTokens } from "../usage/estimator.js";
+import { type BackgroundJobSnapshot, providerCapacityNote } from "../utils/background-jobs.js";
 import { scopeGeneratorToIdealRun } from "../utils/ideal-run-scope.js";
 import { logger } from "../utils/logger.js";
 import type { PermissionMode } from "../utils/permission-mode.js";
@@ -625,6 +627,10 @@ export class Agent {
       () => this.bash.getCwd(),
       () => this._helperParentSessionId ?? this.session?.id ?? transientOwnerId,
       () => this._helperParentCwd ?? this.bash.getCwd(),
+    );
+    // The bash sleep-poll guard must see delegations too, not just shells.
+    this.bash.setBackgroundJobProbe(async () =>
+      (await this.delegations.list()).some((delegation) => delegation.status === "running"),
     );
     // Phase 12.1-02: council state + helpers live in CouncilManager. DI via
     // getter callbacks so the manager reads live Agent state without holding
@@ -1475,7 +1481,9 @@ export class Agent {
     // a child. Leave notifications unclaimed until main's context is restored.
     if (this._helperParentSessionId && this.session?.id !== this._helperParentSessionId) return [];
     try {
-      const notifications = await this.delegations.consumeNotifications();
+      const delegationNotices = await this.delegations.consumeNotifications();
+      const processNotices = (await this.bash.consumeExitNotifications()).map((message) => ({ message }));
+      const notifications = [...delegationNotices, ...processNotices];
       for (const notification of notifications) {
         this.messages.push({ role: "system", content: notification.message });
         let seq: number | null = null;
@@ -1502,6 +1510,37 @@ export class Agent {
       });
       return [];
     }
+  }
+
+  /**
+   * Live state of every background job (delegations + backgrounded shells),
+   * for the UI's Agents rail and /jobs view. A spawning tool's result only
+   * says the job STARTED; this is where its real state lives.
+   */
+  async getBackgroundJobSnapshot(): Promise<BackgroundJobSnapshot> {
+    const delegations: BackgroundJobSnapshot["delegations"] = {};
+    try {
+      for (const d of await this.delegations.list()) {
+        delegations[d.id] = {
+          state: d.status === "running" ? "running" : d.status === "complete" ? "done" : "failed",
+          ...(d.status === "running" ? {} : { summary: d.summary }),
+        };
+      }
+    } catch (err) {
+      logger.warn("orchestrator", "Background delegation snapshot failed", { error: String(err) });
+    }
+    return {
+      delegations,
+      processes: this.bash.getBackgroundProcessStates(),
+      processesSince: this.bash.createdAt,
+    };
+  }
+
+  /** Stop a background job from the /jobs view: a delegation id or a shell process id. */
+  async stopBackgroundJob(job: { delegationId?: string; processId?: number }): Promise<ToolResult> {
+    if (job.delegationId) return this.killDelegation(job.delegationId);
+    if (job.processId !== undefined) return this.bash.stopProcess(job.processId);
+    return { success: false, output: "No background job given." };
   }
 
   private getBatchClientOptions(signal?: AbortSignal): BatchClientOptions {
@@ -1924,6 +1963,10 @@ export class Agent {
         maxTokens: this.maxTokens,
         batchApi: this.batchApi,
       });
+      if (result.success) {
+        const note = await this.delegationCapacityNote();
+        if (note) result = { ...result, output: `${result.output ?? ""}\n${note}` };
+      }
     } catch (err: unknown) {
       if (abortSignal?.aborted) throw err;
       const msg = err instanceof Error ? err.message : String(err);
@@ -1944,6 +1987,20 @@ export class Agent {
     await this.fireHook(taskCompletedInput, abortSignal).catch(() => {});
 
     return result;
+  }
+
+  /** Capacity warning for the provider this session's agents share, or null below its limit. */
+  private async delegationCapacityNote(): Promise<string | null> {
+    try {
+      const info = getModelInfo(this.modelId);
+      const limits = effectiveRateLimits(info);
+      if (!info?.provider || !limits?.concurrency) return null;
+      const running = (await this.delegations.list()).filter((d) => d.status === "running").length;
+      return providerCapacityNote({ provider: info.provider, ...limits, agents: running + 1 });
+    } catch (err) {
+      logger.debug("orchestrator", "delegation capacity note skipped", { error: String(err) });
+      return null;
+    }
   }
 
   private async readDelegation(id: string): Promise<ToolResult> {

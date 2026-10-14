@@ -172,6 +172,12 @@ export interface ProviderKeyConfig {
   workspaceId?: string;
 }
 
+export interface RateLimitOverride {
+  concurrency?: number;
+  requests_per_minute?: number;
+  tokens_per_minute?: number;
+}
+
 export interface UserSettings {
   apiKey?: string;
   /**
@@ -198,6 +204,15 @@ export interface UserSettings {
   maxLlmCallsPerTurn?: number;
   /** Shell used by the bash tool. On Windows, defaults to Git Bash when present. */
   shell?: ShellSettings;
+  /**
+   * Per-account provider rate limits, overriding the catalog's `rate_limits`.
+   * Provider limits depend on the account's tier (StepFun V0 allows 10 RPM, a
+   * higher tier 100), so the catalog can only hold one tier's numbers. Keyed by
+   * model id or provider id — a model-id entry wins; each field overrides only
+   * itself. Same snake_case shape as catalog.json, e.g.
+   * `{"stepfun": {"requests_per_minute": 10}}`.
+   */
+  rateLimitOverrides?: Record<string, RateLimitOverride>;
   lsp?: LspSettings;
   reasoningEffortByModel?: Record<string, ReasoningEffort>;
   telegram?: TelegramSettings;

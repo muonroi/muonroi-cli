@@ -425,7 +425,7 @@ export type LiveEvent =
       /** Pipeline stage of the held call (main / council / subagent / …). */
       stage: string;
       /** Which declared budget bound: the per-minute request count, or in-flight concurrency. */
-      limitKind: "requests-per-minute" | "concurrency";
+      limitKind: "requests-per-minute" | "concurrency" | "tokens-per-minute";
       /** The declared ceiling that produced the wait, verbatim from the catalog. */
       limit: number;
       /** How long the call was held, in ms. */

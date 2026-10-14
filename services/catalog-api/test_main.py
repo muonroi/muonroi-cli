@@ -340,6 +340,6 @@ def test_real_catalog_serves_every_stepfun_model_with_billing_and_limits(monkeyp
     assert tts["unit_price"] == 0.85
     assert tts["rate_limits"] == {
         "concurrency": 5,
-        "requests_per_minute": 10,
-        "tokens_per_minute": 5000000,
+        "requests_per_minute": 100,
+        "tokens_per_minute": 500000,
     }

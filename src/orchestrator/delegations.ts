@@ -4,6 +4,7 @@ import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
 import type { DelegationRun, DelegationStatus, TaskRequest, ToolResult } from "../types/index";
+import { BACKGROUND_WAIT_GUIDANCE, formatDelegationStarted } from "../utils/background-jobs.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { logger, redactSecrets } from "../utils/logger.js";
 import type { SandboxMode, SandboxSettings } from "../utils/settings";
@@ -133,9 +134,9 @@ export class DelegationManager {
     });
 
     const output = [
-      `Delegation started: ${id}`,
+      formatDelegationStarted(id),
       "Agent: explore",
-      "You will be notified when it completes.",
+      BACKGROUND_WAIT_GUIDANCE,
       `Use \`delegation_read("${id}")\` to retrieve the full result later.`,
     ].join("\n");
 
@@ -171,7 +172,7 @@ export class DelegationManager {
     }
 
     if (record.status === "running") {
-      return `Delegation "${id}" is still running. Continue working and wait for the completion notice.`;
+      return `Delegation "${id}" is still running. ${BACKGROUND_WAIT_GUIDANCE}`;
     }
 
     try {

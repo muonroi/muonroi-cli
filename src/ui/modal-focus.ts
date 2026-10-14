@@ -78,6 +78,7 @@ export type ModalSurfaceId =
   | "mcp-modal"
   | "mcp-editor"
   | "schedule-modal"
+  | "jobs-modal"
   | "subagents-modal"
   | "subagent-editor"
   | "model-picker"
@@ -114,6 +115,7 @@ export const MODAL_SURFACE_PRIORITY: readonly ModalSurfaceId[] = [
   "mcp-modal",
   "mcp-editor",
   "schedule-modal",
+  "jobs-modal",
   "subagents-modal",
   "subagent-editor",
   "model-picker",
@@ -149,6 +151,7 @@ export interface OpenModalFlags {
   mcpModal?: boolean;
   mcpEditor?: boolean;
   scheduleModal?: boolean;
+  jobsModal?: boolean;
   subagentsModal?: boolean;
   subagentEditor?: boolean;
   modelPicker?: boolean;
@@ -190,6 +193,7 @@ export function collectOpenModalSurfaces(flags: OpenModalFlags): ModalSurfaceId[
   if (flags.mcpModal) open.push("mcp-modal");
   if (flags.mcpEditor) open.push("mcp-editor");
   if (flags.scheduleModal) open.push("schedule-modal");
+  if (flags.jobsModal) open.push("jobs-modal");
   if (flags.subagentsModal) open.push("subagents-modal");
   if (flags.subagentEditor) open.push("subagent-editor");
   if (flags.modelPicker) open.push("model-picker");

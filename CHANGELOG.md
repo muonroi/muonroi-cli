@@ -28,6 +28,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `for await` loops.
 
 ### Added
+- **Background jobs that actually free the main agent**:
+  - The Agents rail now shows a job's REAL state. A background delegation
+    (`delegate`, or `task` with the explore agent) and a backgrounded shell return
+    as soon as they start; the rail used to read that "started" result as done and
+    painted a green check on agents still working. State now comes from a live
+    snapshot (`Agent.getBackgroundJobSnapshot`). Finished rows leave the rail and
+    collapse into a "N done · M failed — /jobs" line.
+  - `/jobs` (alias `/bg`): every sub-agent and background job of the session,
+    running first — open a row for its prompt and result, `ctrl+x` stops a running
+    background job.
+  - Auto-wake: when background jobs finish while the agent is idle, their notices
+    start a new turn so the agent continues by itself. Opt out with
+    `MUONROI_BACKGROUND_AUTOWAKE=0`. Background shells now report their exit (with
+    the log tail) like delegations do.
+  - The agent is told to END its turn instead of waiting, and a foreground
+    `sleep` ≥ 20s while background jobs run is refused — that poll kept the turn
+    "running" and locked the user out for the whole job.
+- **Machine-wide provider budget** (`src/providers/rate-ledger.ts`): one ledger per
+  provider shared by every muonroi process, enforcing catalog `concurrency`,
+  `requests_per_minute` and now `tokens_per_minute`. Background delegations run as
+  separate processes, so each used to get a full budget of its own — six explore
+  agents plus main meant 7× the account limit and 429s. Disable with
+  `MUONROI_RATE_LEDGER=0`. A delegation started at the provider's concurrency
+  limit tells the agent so, instead of letting it fan out blind.
+- **Per-account rate limits**: `settings.rateLimitOverrides` (keyed by provider or
+  model id, catalog snake_case shape) overrides the catalog's `rate_limits`,
+  because limits depend on the account tier. StepFun catalog limits updated to
+  concurrency 5 / 100 RPM / 500k TPM.
 - **Phase 06**: 4 upgrades (Security, Performance, Reporting, UI). Wave 0 (ROADMAP/CHANGELOG/STATE) done. See `.planning/phases/06-4-upgrades-security-perf-report-ui/PLAN.md`.
 - **`/ideal` × BB ecosystem**: scaffold flow now injects Experience Engine
   context at CB-1 when the target resolves to `muonroi-building-block`.

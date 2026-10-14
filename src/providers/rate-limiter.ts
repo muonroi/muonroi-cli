@@ -40,13 +40,11 @@
  * -----------------------------------
  *  - `requests_per_minute` — enforced, as a rolling window (see below).
  *  - `concurrency`         — enforced, as a FIFO semaphore.
- *  - `tokens_per_minute`   — deliberately NOT enforced. A call's token cost is
- *    not known until the response arrives (output tokens are unknowable up
- *    front), so any pre-flight enforcement would have to guess. The declared
- *    stepfun value is 5,000,000/min against a measured peak of ~49k input tokens
- *    per call — three orders of magnitude of headroom — so a guess would buy
- *    nothing and could throttle a correct run. Revisit only with measured
- *    evidence of a TPM rejection.
+ *  - `tokens_per_minute`   — not enforced HERE (this pacer is per-process and
+ *    counts requests, not tokens). It IS enforced by the machine-wide ledger
+ *    (`rate-ledger.ts`), which sits behind this pacer in the metered gate: the
+ *    per-call headroom argument that once justified skipping TPM does not hold
+ *    per ACCOUNT once parallel sub-agents each send ~50k-token prompts.
  *
  * ROLLING WINDOW, NOT A FIXED ONE
  * -------------------------------
@@ -100,7 +98,8 @@ export const UNDECLARED_RATE_LIMITS: ModelRateLimits = Object.freeze({
 });
 
 /** Why a call was made to wait. Distinguishes the two independent budgets. */
-export type RateLimitKind = "requests-per-minute" | "concurrency";
+/** `tokens-per-minute` waits come from the machine-wide ledger (rate-ledger.ts). */
+export type RateLimitKind = "requests-per-minute" | "concurrency" | "tokens-per-minute";
 
 /** Reported to the caller so a wait can be surfaced to a driving agent. */
 export interface RateLimitWait {

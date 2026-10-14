@@ -140,6 +140,13 @@ try {
   );
 }
 
+// The machine-wide provider ledger (src/providers/rate-ledger.ts) paces on the
+// REAL clock and shares state across processes — inside the suite that would
+// make every test that declares catalog rate limits sleep in wall time and let
+// parallel test files throttle each other. Its own tests opt back in with
+// injected deps; an explicit export still wins.
+process.env.MUONROI_RATE_LEDGER ??= "0";
+
 if (typeof Bun === "undefined") {
   vi.mock("bun:sqlite", () => {
     const mockRun = vi.fn();

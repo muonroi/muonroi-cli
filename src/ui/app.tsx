@@ -182,6 +182,7 @@ import { UpdateModal } from "./modals/update-modal.js";
 import { PaymentApprovalPanel, WalletPickerModal } from "./modals/wallet-picker-modal.js";
 import { resolvePickerProviders } from "./picker-providers.js";
 import { formatPlanAnswers, initialPlanQuestionsState, PlanQuestionsPanel, type PlanQuestionsState } from "./plan";
+import { JobsModal } from "./modals/jobs-modal.js";
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
 import { SLASH_MENU_ITEMS, type SlashMenuItem, VISIBLE_SLASH_MENU_ITEMS } from "./slash/menu-items.js";
 import { dispatchSlash } from "./slash/registry.js";
@@ -248,7 +249,6 @@ import {
 } from "./utils/format.js";
 import { isEscapeKey } from "./utils/modal.js";
 import { sanitizeContent } from "./utils/text.js";
-import { collectAgentActivities } from "./utils/agent-activities.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
 /**
@@ -513,6 +513,8 @@ const BUILTIN_TYPED_SLASH_COMMANDS = new Set([
   "/agent",
   "/schedule",
   "/schedules",
+  "/jobs",
+  "/bg",
   "/quit",
   "/exit",
   "/q",
@@ -732,6 +734,12 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     scheduleModalIndex,
     scheduleRows,
     scheduleSearchQuery,
+    agentActivities,
+    jobRows,
+    jobsModalIndex,
+    jobsExpandedId,
+    showJobsModal,
+    openJobsModal,
     scrollRef,
     newSinceLock,
     scrollLockedAway,
@@ -794,9 +802,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   );
 
   // Roster of every sub-agent / background job spawned this session, for the
-  // rail. Derived from the transcript + in-flight calls, so it cannot drift from
-  // what actually ran.
-  const agentActivities = useMemo(() => collectAgentActivities(messages, activeToolCalls), [messages, activeToolCalls]);
+  // rail — derived in use-app-logic from the transcript, in-flight calls and the
+  // live background-job snapshot (shared with the /jobs view).
   const [selectedActivity, setSelectedActivity] = useState<string | null>(null);
 
   // Agent-mode input bridge: translate harness {op:"type"/"press"} commands into
@@ -1319,6 +1326,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               activities={agentActivities}
               selected={selectedActivity}
               onSelect={setSelectedActivity}
+              onOpenJobs={openJobsModal}
               width={councilSurfaceRailWidth}
               t={t}
             />
@@ -1987,6 +1995,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         activities={agentActivities}
                         selected={selectedActivity}
                         onSelect={setSelectedActivity}
+                        onOpenJobs={openJobsModal}
                         width={railWidth}
                         t={t}
                       />
@@ -2205,6 +2214,17 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             selectedIndex={scheduleModalIndex}
             searchQuery={scheduleSearchQuery}
             rows={scheduleRows}
+          />
+        )}
+        {showJobsModal && (
+          <JobsModal
+            focused={modalKeyboardOwner === "jobs-modal"}
+            t={t}
+            width={width}
+            height={height}
+            rows={jobRows}
+            selectedIndex={jobsModalIndex}
+            expandedId={jobsExpandedId}
           />
         )}
         {showAgentsModal && !showAgentsEditor && (

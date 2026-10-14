@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
-import type { ModelInfo } from "../types/index.js";
-import { getReasoningEffortForModel, loadUserSettings } from "../utils/settings.js";
+import type { ModelInfo, ModelRateLimits } from "../types/index.js";
+import { getReasoningEffortForModel, loadUserSettings, type RateLimitOverride } from "../utils/settings.js";
 import { getProviderCapabilities, resolveMaxOutputTokens } from "./capabilities.js";
 import { isProviderDefaultApiBase } from "./endpoints.js";
 import { ceilingForCall, type GateStage, wrapModelWithGate } from "./model-gate.js";
@@ -305,7 +305,7 @@ export function resolveModelRuntime(modelId: string, opts?: ResolveRuntimeOpts):
     // window (and, worse, block on a concurrency slot held by a stream a test
     // never drains). Metering still runs on the mock path — only enforcement of
     // someone else's rate limit is skipped, because that limit cannot be reached.
-    rateLimits: mockModel ? undefined : resolved.modelInfo?.rateLimits,
+    rateLimits: mockModel ? undefined : effectiveRateLimits(resolved.modelInfo),
   });
 
   // P0-5b — provider-boundary output guard. StepFun emits its native
@@ -499,4 +499,29 @@ export function requireRuntimeProvider(runtime: ResolvedModelRuntime): ProviderI
   const p = runtime.modelInfo?.provider;
   if (!p) throw new Error(`Model "${runtime.modelId}" has no provider in catalog.`);
   return p as ProviderId;
+}
+
+/**
+ * The model's catalog `rate_limits` with the account's
+ * `settings.rateLimitOverrides` applied (provider entry, then model entry).
+ * Limits are per account tier, so the catalog value is a default, not a fact
+ * about every account.
+ */
+export function effectiveRateLimits(
+  modelInfo: Pick<ModelInfo, "id" | "provider" | "rateLimits"> | undefined,
+  overrides: Record<string, RateLimitOverride> | undefined = loadUserSettings().rateLimitOverrides,
+): ModelRateLimits | undefined {
+  if (!modelInfo) return undefined;
+  const layers = [modelInfo.provider ? overrides?.[modelInfo.provider] : undefined, overrides?.[modelInfo.id]].filter(
+    (o): o is RateLimitOverride => !!o && typeof o === "object",
+  );
+  if (layers.length === 0) return modelInfo.rateLimits;
+  const out: ModelRateLimits = { ...modelInfo.rateLimits };
+  const valid = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+  for (const o of layers) {
+    if (valid(o.concurrency)) out.concurrency = o.concurrency;
+    if (valid(o.requests_per_minute)) out.requestsPerMinute = o.requests_per_minute;
+    if (valid(o.tokens_per_minute)) out.tokensPerMinute = o.tokens_per_minute;
+  }
+  return out;
 }

@@ -1,11 +1,17 @@
 import { type ChildProcess, spawn } from "child_process";
 import { createReadStream, createWriteStream, existsSync } from "fs";
-import { mkdtemp, stat, unlink } from "fs/promises";
+import { mkdtemp, open, stat, unlink } from "fs/promises";
 import os from "os";
 import path from "path";
 import { executeEventHooks } from "../hooks/index";
 import type { CwdChangedHookInput } from "../hooks/types";
 import type { ToolResult } from "../types/index";
+import {
+  BACKGROUND_WAIT_GUIDANCE,
+  type BackgroundProcessState,
+  formatBackgroundProcessStarted,
+  processJobKey,
+} from "../utils/background-jobs.js";
 import { removeTreeLoggingFailure } from "../utils/fs-cleanup.js";
 import { logger } from "../utils/logger.js";
 import { checkCatastrophicCommand, type SafetyBlockResult } from "../utils/permission-mode.js";
@@ -91,7 +97,15 @@ export interface BackgroundProcess {
   logPath: string;
   alive: boolean;
   exitCode: number | null;
+  /** Stopped on request (process_stop) — an intended end, not a result to report. */
+  stopped?: boolean;
+  /** Exit already reported to the agent by consumeExitNotifications. */
+  notified?: boolean;
 }
+
+/** Lines of a finished background process's log quoted in its exit notice. */
+const EXIT_NOTICE_TAIL_LINES = 20;
+const EXIT_NOTICE_TAIL_CHARS = 2_000;
 
 interface BashToolOptions {
   /**
@@ -114,6 +128,10 @@ export class BashTool {
   private shellSettings: ShellSettings;
   private resolvedShell: ResolvedShell;
   private sandboxSettings: SandboxSettings = {};
+  /** Reports whether background work this tool cannot see (delegations) is running. */
+  private backgroundJobProbe: (() => Promise<boolean>) | null = null;
+  /** Epoch ms this tool was created — every background process it owns started after. */
+  readonly createdAt = Date.now();
 
   constructor(initialCwd = process.cwd(), options: BashToolOptions = {}) {
     this.cwd = initialCwd;
@@ -509,9 +527,10 @@ export class BashTool {
       return {
         success: true,
         output: [
-          `Background process started (id: ${id}, pid: ${entry.pid})`,
+          formatBackgroundProcessStarted(id, entry.pid),
           `Command: ${truncCmd(command, 80)}`,
           `Use process_logs(${id}) to view output, process_stop(${id}) to terminate.`,
+          BACKGROUND_WAIT_GUIDANCE,
         ].join("\n"),
         backgroundProcess: { id, pid: entry.pid, command },
       };
@@ -575,6 +594,7 @@ export class BashTool {
     try {
       entry.child.kill("SIGTERM");
       entry.alive = false;
+      entry.stopped = true;
       return { success: true, output: `Process ${id} terminated.` };
     } catch (err: unknown) {
       return {
@@ -600,6 +620,86 @@ export class BashTool {
       success: true,
       output: ["ID  STATUS       PID    AGE     COMMAND", ...lines].join("\n"),
     };
+  }
+
+  /**
+   * Let the owner report background work outside this tool (delegations), so
+   * {@link hasRunningBackgroundJobs} sees every job the agent is waiting on.
+   */
+  setBackgroundJobProbe(probe: (() => Promise<boolean>) | null): void {
+    this.backgroundJobProbe = probe;
+  }
+
+  /** True while any background process — or probed background job — is still running. */
+  async hasRunningBackgroundJobs(): Promise<boolean> {
+    for (const entry of this.bgProcesses.values()) if (entry.alive) return true;
+    if (!this.backgroundJobProbe) return false;
+    try {
+      return await this.backgroundJobProbe();
+    } catch (err) {
+      logger.warn("orchestrator", "bash: background job probe failed — treating as no running jobs", {
+        message: (err as Error)?.message,
+      });
+      return false;
+    }
+  }
+
+  /** Live state of every background process this tool started, keyed by processJobKey. */
+  getBackgroundProcessStates(): Record<string, BackgroundProcessState> {
+    const out: Record<string, BackgroundProcessState> = {};
+    for (const entry of this.bgProcesses.values()) {
+      const state = entry.alive ? "running" : entry.stopped || entry.exitCode === 0 ? "done" : "failed";
+      out[processJobKey(entry.id, entry.pid)] = { state, exitCode: entry.exitCode };
+    }
+    return out;
+  }
+
+  /**
+   * One notice per background process that exited on its own since the last
+   * call, quoting the tail of its log. A process stopped via process_stop is
+   * not reported — the agent asked for that end and already knows.
+   */
+  async consumeExitNotifications(): Promise<string[]> {
+    const notices: string[] = [];
+    for (const entry of this.bgProcesses.values()) {
+      if (entry.alive || entry.stopped || entry.notified) continue;
+      entry.notified = true;
+      const status = entry.exitCode === 0 ? "finished" : "failed";
+      const lines = [
+        `Background process ${status}: id ${entry.id} (exit code ${entry.exitCode ?? "unknown"})`,
+        `Command: ${truncCmd(entry.command, 120)}`,
+      ];
+      const tail = await this.readLogTail(entry.logPath);
+      lines.push(tail ? `Last output:\n${tail}` : "Last output: (none)");
+      lines.push(`Use process_logs(${entry.id}) to view more output.`);
+      notices.push(lines.join("\n"));
+    }
+    return notices;
+  }
+
+  private async readLogTail(logPath: string): Promise<string> {
+    try {
+      // Read only the end — a long-running job's log can be arbitrarily large.
+      const { size } = await stat(logPath);
+      const fh = await open(logPath, "r");
+      let content: string;
+      try {
+        const length = Math.min(size, EXIT_NOTICE_TAIL_CHARS * 4);
+        const buf = Buffer.alloc(length);
+        await fh.read(buf, 0, length, size - length);
+        content = buf.toString("utf8");
+      } finally {
+        await fh.close();
+      }
+      const tail = content.trimEnd().split("\n").slice(-EXIT_NOTICE_TAIL_LINES).join("\n");
+      return tail.length > EXIT_NOTICE_TAIL_CHARS ? tail.slice(-EXIT_NOTICE_TAIL_CHARS) : tail;
+    } catch (err) {
+      logger.debug("orchestrator", "bash: background log unreadable for exit notice", {
+        target: logPath,
+        message: (err as Error)?.message,
+      });
+      return "";
+    }
   }
 
   async cleanup(): Promise<void> {

@@ -834,9 +834,9 @@ export interface ModelRateLimits {
   /** Maximum requests started per minute. */
   requestsPerMinute?: number;
   /**
-   * Maximum tokens per minute. Carried for completeness and forensics; NOT
-   * enforced by the pacer, because a call's token cost is not knowable before
-   * the response. See the SCOPE note in src/providers/rate-limiter.ts.
+   * Maximum tokens per minute. Enforced machine-wide by src/providers/rate-ledger.ts
+   * (estimate reserved before the call, corrected with reported usage after);
+   * the per-process pacer in rate-limiter.ts does not count tokens.
    */
   tokensPerMinute?: number;
 }

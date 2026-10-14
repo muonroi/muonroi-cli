@@ -34,7 +34,19 @@ import { wrapLanguageModel } from "ai";
 import { logInteraction } from "../storage/interaction-log.js";
 import type { ModelInfo, ModelRateLimits } from "../types/index.js";
 import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
+import { acquireLedgerSlot, TPM_ESTIMATE_CALIBRATION, usageTotalTokens } from "./rate-ledger.js";
 import { acquireRateLimitSlot, type RateLimitLease, type RateLimitWait } from "./rate-limiter.js";
+
+/**
+ * The combined pacing lease: the in-process pacer's slot plus the machine-wide
+ * ledger's (rate-ledger.ts). `settle` corrects the ledger's TPM reservation with
+ * the provider-reported usage once the call ends.
+ */
+interface PaceLease extends RateLimitLease {
+  settle: (usage: unknown) => void;
+}
+
+const UNPACED: PaceLease = { waits: [], holdsSlot: false, release: () => {}, settle: () => {} };
 
 /**
  * The pipeline stage a call belongs to. `unattributed` means the resolve site
@@ -321,7 +333,7 @@ export function enforceCeiling(comp: CallComposition, ctx: GateContext): void {
  * Meter + enforce a single call. Walks the prompt ONCE, records the accounting
  * row, then applies the ceiling policy (which may throw before delegating).
  */
-function gateCall(prompt: unknown, ctx: GateContext, op: "stream" | "generate"): void {
+function gateCall(prompt: unknown, ctx: GateContext, op: "stream" | "generate"): CallComposition | undefined {
   let comp: CallComposition | undefined;
   try {
     comp = analyzePrompt(prompt);
@@ -334,6 +346,21 @@ function gateCall(prompt: unknown, ctx: GateContext, op: "stream" | "generate"):
   }
   // Enforce OUTSIDE the fail-open catch so a genuine ceiling throw propagates.
   if (comp) enforceCeiling(comp, ctx);
+  return comp;
+}
+
+/**
+ * Real-token estimate of a call's input, for the ledger's TPM reservation.
+ * Reuses the gate's composition when the meter already walked the prompt.
+ */
+function estimateCallTokens(prompt: unknown, comp: CallComposition | undefined, ctx: GateContext): number {
+  if (!ctx.rateLimits?.tokensPerMinute) return 0;
+  try {
+    return (comp ?? analyzePrompt(prompt)).estInputTokens * TPM_ESTIMATE_CALIBRATION;
+  } catch {
+    // An unwalkable prompt reserves nothing; settle() records the real usage.
+    return 0;
+  }
 }
 
 /**
@@ -356,8 +383,9 @@ export function wrapModelWithGate(model: any, ctx: GateContext): any {
     middleware: {
       specificationVersion: "v3",
       wrapStream: async ({ doStream, params }) => {
-        if (!gateDisabled()) gateCall((params as { prompt?: unknown }).prompt, ctx, "stream");
-        const lease = await paceCall(ctx);
+        const prompt = (params as { prompt?: unknown }).prompt;
+        const comp = gateDisabled() ? undefined : gateCall(prompt, ctx, "stream");
+        const lease = await paceCall(ctx, estimateCallTokens(prompt, comp, ctx));
         let result: Awaited<ReturnType<typeof doStream>>;
         try {
           result = await doStream();
@@ -373,10 +401,13 @@ export function wrapModelWithGate(model: any, ctx: GateContext): any {
         return { ...result, stream: releaseOnStreamEnd(result.stream, lease, ctx) };
       },
       wrapGenerate: async ({ doGenerate, params }) => {
-        if (!gateDisabled()) gateCall((params as { prompt?: unknown }).prompt, ctx, "generate");
-        const lease = await paceCall(ctx);
+        const prompt = (params as { prompt?: unknown }).prompt;
+        const comp = gateDisabled() ? undefined : gateCall(prompt, ctx, "generate");
+        const lease = await paceCall(ctx, estimateCallTokens(prompt, comp, ctx));
         try {
-          return await doGenerate();
+          const result = await doGenerate();
+          lease.settle((result as { usage?: unknown }).usage);
+          return result;
         } finally {
           lease.release();
         }
@@ -388,7 +419,7 @@ export function wrapModelWithGate(model: any, ctx: GateContext): any {
 /** Whether this context declares anything the pacer would act on. */
 function pacingApplies(ctx: GateContext): boolean {
   const rl = ctx.rateLimits;
-  return Boolean(ctx.providerId && rl && (rl.requestsPerMinute || rl.concurrency));
+  return Boolean(ctx.providerId && rl && (rl.requestsPerMinute || rl.concurrency || rl.tokensPerMinute));
 }
 
 /**
@@ -398,13 +429,14 @@ function pacingApplies(ctx: GateContext): boolean {
  * the app unable to talk to a provider. A 429 is recoverable; a wedged pacer is
  * not.
  */
-async function paceCall(ctx: GateContext): Promise<RateLimitLease> {
-  if (!pacingApplies(ctx)) return { waits: [], holdsSlot: false, release: () => {} };
+async function paceCall(ctx: GateContext, estTokens: number): Promise<PaceLease> {
+  if (!pacingApplies(ctx)) return UNPACED;
+  let local: RateLimitLease;
   try {
     // Emit through the callback, NOT by walking `lease.waits` afterwards: the
     // lease only resolves once the wait is OVER, so reporting from it would hide
     // the hold for exactly as long as the hold lasts.
-    return await acquireRateLimitSlot(ctx.providerId!, ctx.rateLimits, undefined, (wait) =>
+    local = await acquireRateLimitSlot(ctx.providerId!, ctx.rateLimits, undefined, (wait) =>
       emitRateLimitWait(wait, ctx),
     );
   } catch (err) {
@@ -413,8 +445,26 @@ async function paceCall(ctx: GateContext): Promise<RateLimitLease> {
       model: ctx.modelId,
       stage: ctx.stage,
     });
-    return { waits: [], holdsSlot: false, release: () => {} };
+    return UNPACED;
   }
+  // In-process first (FIFO among this process's callers), then the machine-wide
+  // ledger shared with background delegations. The ledger is fail-open itself.
+  const waits = local.waits;
+  const shared = await acquireLedgerSlot(ctx.providerId!, ctx.rateLimits, estTokens, (wait) => {
+    waits.push(wait);
+    emitRateLimitWait(wait, ctx);
+  });
+  return {
+    waits,
+    // The ledger entry is in flight until the call ends, so its release must
+    // ride the stream's end exactly like a local concurrency slot.
+    holdsSlot: true,
+    release: () => {
+      local.release();
+      shared.release();
+    },
+    settle: (usage) => shared.settle(usageTotalTokens(usage)),
+  };
 }
 
 /**
@@ -428,7 +478,7 @@ async function paceCall(ctx: GateContext): Promise<RateLimitLease> {
  * stranded slot would deadlock every later call to that provider — a far worse
  * failure than the 429 this module exists to prevent.
  */
-function releaseOnStreamEnd<T extends ReadableStream<unknown>>(stream: T, lease: RateLimitLease, ctx: GateContext): T {
+function releaseOnStreamEnd<T extends ReadableStream<unknown>>(stream: T, lease: PaceLease, ctx: GateContext): T {
   const watchdog = setTimeout(() => {
     console.error(
       `[model-gate] rate-limit concurrency slot force-released after ${STREAM_SLOT_WATCHDOG_MS}ms — ` +
@@ -446,7 +496,12 @@ function releaseOnStreamEnd<T extends ReadableStream<unknown>>(stream: T, lease:
   try {
     return stream.pipeThrough(
       new TransformStream({
-        transform: (chunk, controller) => controller.enqueue(chunk),
+        transform: (chunk, controller) => {
+          // The finish part carries the provider-reported usage — the real TPM cost.
+          const part = chunk as { type?: string; usage?: unknown } | null;
+          if (part && part.type === "finish") lease.settle(part.usage);
+          controller.enqueue(chunk);
+        },
         flush: done,
         cancel: done,
       }),

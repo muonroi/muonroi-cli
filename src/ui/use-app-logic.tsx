@@ -95,6 +95,13 @@ import { processAtMentions } from "../utils/at-mentions.js";
 import { readClipboardImage } from "../utils/clipboard-image";
 import { FileIndex } from "../utils/file-index.js";
 import { copyTextToHostClipboard, readTextFromHostClipboard } from "../utils/host-clipboard";
+import {
+  type BackgroundJobSnapshot,
+  backgroundWakeLabel,
+  buildBackgroundWakePrompt,
+  EMPTY_BACKGROUND_SNAPSHOT,
+  isBackgroundAutoWakeEnabled,
+} from "../utils/background-jobs.js";
 import { logger } from "../utils/logger.js";
 import {
   type CustomSubagentConfig,
@@ -159,6 +166,7 @@ import {
   initialInitNewFormState,
 } from "./components/init-new-form-card.js";
 import { computeMcpRunInfo, findLastCollapsibleIndex, MessageView } from "./components/message-view.js";
+import { type AgentActivity, collectAgentActivities, orderForJobsView } from "./utils/agent-activities.js";
 import { groupToolEntries } from "./utils/group-tool-entries.js";
 import {
   initialPointToExistingFormState,
@@ -591,6 +599,8 @@ const BUILTIN_TYPED_SLASH_COMMANDS = new Set([
   "/agent",
   "/schedule",
   "/schedules",
+  "/jobs",
+  "/bg",
   "/quit",
   "/exit",
   "/q",
@@ -2578,6 +2588,60 @@ export function useAppLogic(props: AppLogicProps) {
         setMessages((prev) => [...prev, buildAssistantEntry(`Failed to load schedules: ${message}`)]);
       });
   }, [agent]);
+
+  // ── Sub-agents & background jobs (Agents rail + /jobs) ────────────────────
+  // A background job's tool result only says it STARTED; its real state comes
+  // from the orchestrator's live snapshot, polled with the notification tick.
+  const [backgroundSnapshot, setBackgroundSnapshot] = useState<BackgroundJobSnapshot>(EMPTY_BACKGROUND_SNAPSHOT);
+  const backgroundSnapshotKeyRef = useRef("");
+  const refreshBackgroundSnapshot = useCallback(() => {
+    void agent
+      .getBackgroundJobSnapshot()
+      .then((snap) => {
+        // Polled every tick — only a real change may re-render the rail.
+        const key = JSON.stringify(snap);
+        if (key === backgroundSnapshotKeyRef.current) return;
+        backgroundSnapshotKeyRef.current = key;
+        setBackgroundSnapshot(snap);
+      })
+      .catch((err: unknown) => {
+        logger.warn("ui", "background job snapshot failed — rail may show stale job states", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+  }, [agent]);
+  const agentActivities = useMemo(
+    () => collectAgentActivities(messages, activeToolCalls, backgroundSnapshot),
+    [messages, activeToolCalls, backgroundSnapshot],
+  );
+  const jobRows = useMemo(() => orderForJobsView(agentActivities), [agentActivities]);
+  const [showJobsModal, setShowJobsModal] = useState(false);
+  const showJobsModalRef = useRef(false);
+  useEffect(() => {
+    showJobsModalRef.current = showJobsModal;
+  }, [showJobsModal]);
+  const [jobsModalIndex, setJobsModalIndex] = useState(0);
+  const [jobsExpandedId, setJobsExpandedId] = useState<string | null>(null);
+  useEffect(() => {
+    setJobsModalIndex((idx) => Math.max(0, Math.min(idx, Math.max(0, jobRows.length - 1))));
+  }, [jobRows.length]);
+  const openJobsModal = useCallback(() => {
+    refreshBackgroundSnapshot();
+    setJobsModalIndex(0);
+    setJobsExpandedId(null);
+    setShowJobsModal(true);
+  }, [refreshBackgroundSnapshot]);
+  const stopBackgroundJob = useCallback(
+    (row: AgentActivity) => {
+      if (!row.job || row.status !== "running") return;
+      void agent
+        .stopBackgroundJob(row.job)
+        .then((result) => pushToast(result.success ? "info" : "warn", result.output || result.error || ""))
+        .catch((err: unknown) => pushToast("error", err instanceof Error ? err.message : String(err)))
+        .finally(refreshBackgroundSnapshot);
+    },
+    [agent, pushToast, refreshBackgroundSnapshot],
+  );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: setMessages is stable, setScheduleModalIndex is stable useState setter from useAgentEditor hook
   const showScheduleDetails = useCallback(
@@ -4749,6 +4813,11 @@ export function useAppLogic(props: AppLogicProps) {
   useEffect(() => {
     let active = true;
     const id = setInterval(() => {
+      refreshBackgroundSnapshot();
+      // While a turn runs, leave notices queued: the model cannot see a notice
+      // claimed mid-turn, and the next turn's pre-stream consume delivers it.
+      // Once the turn ends this tick claims it and wakes the agent.
+      if (isProcessingRef.current) return;
       agent
         .consumeBackgroundNotifications()
         .then((notifications) => {
@@ -4762,15 +4831,27 @@ export function useAppLogic(props: AppLogicProps) {
             })),
           ]);
           setTimeout(scrollToBottom, 10);
+          // The callback half of "run it in the background": the agent ended
+          // its turn instead of waiting, so the finished job starts the next one.
+          if (isBackgroundAutoWakeEnabled() && !isProcessingRef.current) {
+            void processMessageRef.current(
+              buildBackgroundWakePrompt(notifications),
+              backgroundWakeLabel(notifications.length),
+            );
+          }
         })
-        .catch(() => {});
+        .catch((err: unknown) => {
+          logger.warn("ui", "background notification poll failed", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
     }, 2000);
 
     return () => {
       active = false;
       clearInterval(id);
     };
-  }, [agent, scrollToBottom]);
+  }, [agent, scrollToBottom, refreshBackgroundSnapshot]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: getSide, resolveStyle, storeQuote are stable hooks/callbacks; adding them to deps would unnecessarily recreate handleCommand on each render
   const handleCommand = useCallback(
@@ -4825,6 +4906,10 @@ export function useAppLogic(props: AppLogicProps) {
       }
       if (c === "/agents" || c === "/agent") {
         openAgentsModal();
+        return true;
+      }
+      if (c === "/jobs" || c === "/bg") {
+        openJobsModal();
         return true;
       }
       if (c === "/schedule" || c === "/schedules") {
@@ -5779,6 +5864,7 @@ export function useAppLogic(props: AppLogicProps) {
       openSandboxPicker,
       openWalletPicker,
       openScheduleModal,
+      openJobsModal,
       processMessage,
       pushToast,
       resetToNewSession,
@@ -5829,6 +5915,9 @@ export function useAppLogic(props: AppLogicProps) {
               timestamp: new Date(),
             },
           ]);
+          break;
+        case "jobs":
+          openJobsModal();
           break;
         case "mcp":
           openMcpModal();
@@ -6053,6 +6142,7 @@ export function useAppLogic(props: AppLogicProps) {
       openMcpModal,
       openSandboxPicker,
       openWalletPicker,
+      openJobsModal,
       processMessage,
       resetToNewSession,
       setShowSlashMenuSync,
@@ -6078,6 +6168,7 @@ export function useAppLogic(props: AppLogicProps) {
     showWalletPicker ||
     !!pendingPaymentApproval ||
     showScheduleModal ||
+    showJobsModal ||
     showAgentsModal ||
     showAgentsEditor ||
     showUpdateModal ||
@@ -6121,6 +6212,7 @@ export function useAppLogic(props: AppLogicProps) {
       mcpModal: showMcpModal && !showMcpEditor,
       mcpEditor: showMcpEditor,
       scheduleModal: showScheduleModal,
+      jobsModal: showJobsModal,
       subagentsModal: showAgentsModal && !showAgentsEditor,
       subagentEditor: showAgentsEditor,
       modelPicker: showModelPicker,
@@ -6149,6 +6241,7 @@ export function useAppLogic(props: AppLogicProps) {
     showMcpModal,
     showMcpEditor,
     showScheduleModal,
+    showJobsModal,
     showAgentsModal,
     showAgentsEditor,
     showModelPicker,
@@ -6469,6 +6562,7 @@ export function useAppLogic(props: AppLogicProps) {
         mcpModal: showMcpModalRef.current && !showMcpEditorRef.current,
         mcpEditor: showMcpEditorRef.current,
         scheduleModal: showScheduleModalRef.current,
+        jobsModal: showJobsModalRef.current,
         subagentsModal: showAgentsModalRef.current && !showAgentsEditorRef.current,
         subagentEditor: showAgentsEditorRef.current,
         modelPicker: showModelPicker,
@@ -7484,6 +7578,31 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
+      if (showJobsModalRef.current && modalOwnsKeyboard(modalOwnerNow, "jobs-modal")) {
+        const row = jobRows[jobsModalIndex];
+        if (isEscapeKey(key)) {
+          setShowJobsModal(false);
+          setJobsExpandedId(null);
+          return;
+        }
+        if (key.name === "up") {
+          setJobsModalIndex((index) => Math.max(0, index - 1));
+          return;
+        }
+        if (key.name === "down") {
+          setJobsModalIndex((index) => Math.min(Math.max(0, jobRows.length - 1), index + 1));
+          return;
+        }
+        if (key.name === "return") {
+          if (row) setJobsExpandedId((open) => (open === row.id ? null : row.id));
+          return;
+        }
+        if (key.name === "x" && key.ctrl && row) {
+          stopBackgroundJob(row);
+          return;
+        }
+        return;
+      }
       if (
         showAgentsModalRef.current &&
         !showAgentsEditorRef.current &&
@@ -8417,6 +8536,9 @@ export function useAppLogic(props: AppLogicProps) {
       openSubagentEditor,
       removeSchedule,
       scheduleModalIndex,
+      jobRows,
+      jobsModalIndex,
+      stopBackgroundJob,
       scheduleRows,
       showScheduleDetails,
       submitTelegramPair,
@@ -8876,6 +8998,12 @@ export function useAppLogic(props: AppLogicProps) {
     scheduleModalIndex,
     scheduleRows,
     scheduleSearchQuery,
+    agentActivities,
+    jobRows,
+    jobsModalIndex,
+    jobsExpandedId,
+    showJobsModal,
+    openJobsModal,
     scrollRef,
     scrollToBottomForced,
     newSinceLock,

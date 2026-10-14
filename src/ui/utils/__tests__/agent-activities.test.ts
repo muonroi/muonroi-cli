@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChatEntry, ToolCall, ToolResult } from "../../../types/index";
-import { activityKindFor, collectAgentActivities } from "../agent-activities.js";
+import { formatBackgroundProcessStarted, formatDelegationStarted } from "../../../utils/background-jobs.js";
+import { activityKindFor, collectAgentActivities, orderForJobsView, partitionForRail } from "../agent-activities.js";
 
 const call = (id: string, name: string, args: unknown): ToolCall => ({
   id,
@@ -100,6 +101,82 @@ describe("collectAgentActivities", () => {
       resultEntry(DELEGATE, ok("3")),
     ]);
     expect(list.map((a) => a.kind)).toEqual(["subagent", "background", "delegate"]);
+  });
+});
+
+// The spawning tools return when the job STARTS. Their "started" line is not an
+// outcome — reading it as one put a green check on agents still working.
+describe("background jobs take their state from the live snapshot", () => {
+  const EXPLORE = call("e1", "task", { agent: "explore", description: "Hunt screen", prompt: "Explore" });
+  const started = ok(`${formatDelegationStarted("brisk-amber-fox")}\nAgent: explore`);
+
+  it("keeps a started delegation running until the snapshot says otherwise", () => {
+    const [a] = collectAgentActivities([resultEntry(EXPLORE, started)]);
+    expect(a.status).toBe("running");
+    expect(a.job).toEqual({ delegationId: "brisk-amber-fox" });
+  });
+
+  it("is running while the snapshot has not caught up with a fresh delegation", () => {
+    const [a] = collectAgentActivities([resultEntry(EXPLORE, started)], [], { delegations: {}, processes: {} });
+    expect(a.status).toBe("running");
+  });
+
+  it("finishes with the snapshot, carrying the result summary into the detail", () => {
+    const live = {
+      delegations: { "brisk-amber-fox": { state: "done" as const, summary: "Found 3 screens." } },
+      processes: {},
+    };
+    const [a] = collectAgentActivities([resultEntry(EXPLORE, started)], [], live);
+    expect(a.status).toBe("done");
+    expect(a.detail).toContain("Result: Found 3 screens.");
+  });
+
+  it("fails with the snapshot", () => {
+    const live = { delegations: { "brisk-amber-fox": { state: "failed" as const } }, processes: {} };
+    expect(collectAgentActivities([resultEntry(EXPLORE, started)], [], live)[0].status).toBe("failed");
+  });
+
+  it("tracks a background shell by id+pid", () => {
+    const bgStarted = ok(formatBackgroundProcessStarted(3, 4242));
+    expect(collectAgentActivities([resultEntry(BG, bgStarted)])[0]).toMatchObject({
+      status: "running",
+      job: { processId: 3 },
+    });
+    const live = { delegations: {}, processes: { "3:4242": { state: "failed" as const, exitCode: 2 } } };
+    const [a] = collectAgentActivities([resultEntry(BG, bgStarted)], [], live);
+    expect(a.status).toBe("failed");
+    expect(a.detail).toContain("Exited with code 2");
+  });
+
+  // Process ids restart every CLI run; a resumed transcript's shell is gone.
+  it("does not show a shell from an earlier CLI run as running forever", () => {
+    const entry = { ...resultEntry(BG, ok(formatBackgroundProcessStarted(1, 99))), timestamp: new Date(1_000) };
+    const live = { delegations: {}, processes: {}, processesSince: 5_000 };
+    expect(collectAgentActivities([entry as ChatEntry], [], live)[0].status).toBe("done");
+  });
+
+  it("recognises a shell bash auto-backgrounded without background:true", () => {
+    const devServer = call("b2", "bash", { command: "npm run dev" });
+    const [a] = collectAgentActivities([resultEntry(devServer, ok(formatBackgroundProcessStarted(5, 7)))]);
+    expect(a.kind).toBe("background");
+    expect(a.status).toBe("running");
+  });
+});
+
+describe("partitionForRail / orderForJobsView", () => {
+  const mk = (id: string, status: "running" | "done" | "failed") =>
+    ({ id, kind: "subagent", label: id, agent: "explore", status, detail: "" }) as const;
+
+  it("lists only running work on the rail and counts the rest", () => {
+    const r = partitionForRail([mk("a", "done"), mk("b", "running"), mk("c", "failed"), mk("d", "done")]);
+    expect(r.running.map((a) => a.id)).toEqual(["b"]);
+    expect(r.done).toBe(2);
+    expect(r.failed).toBe(1);
+  });
+
+  it("puts running jobs first, then newest first", () => {
+    const order = orderForJobsView([mk("a", "done"), mk("b", "running"), mk("c", "done"), mk("d", "running")]);
+    expect(order.map((a) => a.id)).toEqual(["d", "b", "c", "a"]);
   });
 });
 

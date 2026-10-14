@@ -25,6 +25,7 @@ import {
 import { needsVisionProxy } from "../providers/vision-proxy.js";
 import { mostRecentVisionSessionId } from "../providers/vision-session.js";
 import type { AgentMode, TaskRequest, ToolResult } from "../types/index.js";
+import { longestSleepSeconds, SLEEP_POLL_THRESHOLD_SECONDS, sleepPollRefusal } from "../utils/background-jobs.js";
 import { loadMcpServers } from "../utils/settings.js";
 import { installArgGuards } from "./arg-guard.js";
 import type { BashTool } from "./bash.js";
@@ -701,6 +702,13 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       if (input.background || isLongRunning(cmd)) {
         const result = await bash.startBackground(input.command);
         return formatResult(result);
+      }
+      // A long foreground sleep while background jobs run is the agent waiting
+      // on them — which keeps the turn "running" and locks the user out for the
+      // whole job. Refuse it; the job's completion wakes the agent instead.
+      const sleepSeconds = longestSleepSeconds(cmd);
+      if (sleepSeconds >= SLEEP_POLL_THRESHOLD_SECONDS && (await bash.hasRunningBackgroundJobs())) {
+        return formatResult({ success: false, output: sleepPollRefusal(sleepSeconds) });
       }
       // 3-3: compute canonical form BEFORE running so we can attach an
       // inline reminder if it matches the previous bash call.

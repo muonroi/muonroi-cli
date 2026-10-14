@@ -307,7 +307,7 @@ DEFAULT DELEGATION POLICY (critical for avoiding stalls/timeouts):
 - Prefer delegate + explore for anything that needs reading many files or long reasoning.
 - Use general sub-agent only when edits/commands are required.
 - Never use delegate for write/edit/shell changes.
-- After launching a background delegate, continue useful work. Check results later with delegation_read / list only when needed.
+- After launching a background delegate or background shell, continue useful work if there is any. If there is nothing else to do, END YOUR TURN — do not wait with sleep, a polling loop, or repeated delegation_list / process_logs calls. Each job wakes you automatically with its result when it finishes, and ending the turn frees the user to keep talking to you meanwhile.
 - The model choosing task for long research is a common mistake that leads to timeouts — prefer delegate.
 
 WRITING A GOOD DELEGATION PROMPT (the sub-agent sees ONLY what you put in the prompt field — it does NOT share your context):

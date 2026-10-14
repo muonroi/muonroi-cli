@@ -56,7 +56,7 @@ describe("catalog schema validation", () => {
 
     const tts = stepfun.find((model) => model.id === "stepaudio-2.5-tts");
     expect(tts).toMatchObject({ pricing_unit: "per_10000_characters", unit_price: 0.85 });
-    expect(tts?.rate_limits).toEqual({ concurrency: 5, requests_per_minute: 10, tokens_per_minute: 5_000_000 });
+    expect(tts?.rate_limits).toEqual({ concurrency: 5, requests_per_minute: 100, tokens_per_minute: 500_000 });
   });
 
   // Part E — drift guard: every bundled model MUST declare native_web_research
