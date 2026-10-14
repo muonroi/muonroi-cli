@@ -14,6 +14,7 @@ import {
 } from "../utils/background-jobs.js";
 import { removeTreeLoggingFailure } from "../utils/fs-cleanup.js";
 import { logger } from "../utils/logger.js";
+import { killProcessTree } from "../utils/process-tree.js";
 import { checkCatastrophicCommand, type SafetyBlockResult } from "../utils/permission-mode.js";
 import type { SandboxMode, SandboxSettings } from "../utils/settings.js";
 import { posixToNative, type ResolvedShell, resolveShell, type ShellSettings } from "../utils/shell";
@@ -32,60 +33,6 @@ const MAX_BACKGROUND_PROCESSES = 8;
  * settle anyway rather than wedge the turn. See the timeout/abort paths below.
  */
 const POST_KILL_SETTLE_MS = 2_000;
-
-/**
- * Kill a process and everything it spawned.
- *
- * `child.kill()` signals ONLY the direct child. That is not enough here:
- * `bash -lc "<cmd>"` re-execs itself (observed live: bash.exe 21272 → bash.exe
- * 5024 → bun.exe 7464), so signalling the top shell leaves the real workload
- * running AND holding the stdio handles. Session 7ec700df5589's
- * `bun test src/providers --runInBand; bun run typecheck` survived that way for
- * over 24 hours and burned 59,244s of CPU until it was reaped by hand with
- * `taskkill /F /T`. `src/orchestrator/delegations.ts` already used this pattern;
- * the foreground bash path did not.
- */
-function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
-  const pid = child.pid;
-  if (typeof pid !== "number") return;
-
-  if (process.platform === "win32") {
-    try {
-      // /T = tree, /F = force. The only reliable tree kill on Windows — there is
-      // no process-group signalling to fall back on.
-      spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { windowsHide: true, stdio: "ignore" }).unref();
-      return;
-    } catch (err) {
-      console.error(
-        `[bash] taskkill tree-kill failed for pid ${pid}, falling back to child.kill: ${(err as Error)?.message}`,
-      );
-    }
-  } else {
-    // POSIX: the child is spawned `detached`, making it its own process-group
-    // leader, so a NEGATIVE pid signals the whole group — shell, its re-exec, and
-    // every grandchild. `child.kill()` alone reaches only the direct child, which
-    // CI caught on ubuntu/macos: the grandchild kept ticking (43 -> 63 writes)
-    // after the "tree kill" while the Windows job passed.
-    try {
-      process.kill(-pid, signal);
-      return;
-    } catch (err) {
-      // ESRCH: the group is already gone. Anything else (e.g. the child never
-      // became a group leader) falls through to the single-process kill below.
-      const code = (err as NodeJS.ErrnoException)?.code;
-      if (code === "ESRCH") return;
-      console.error(
-        `[bash] process-group kill failed for pgid ${pid} (${code ?? "?"}), falling back to child.kill: ${(err as Error)?.message}`,
-      );
-    }
-  }
-  try {
-    child.kill(signal);
-  } catch (err) {
-    // Already exited — the caller's settle path still runs, so this is benign.
-    console.error(`[bash] kill(${signal}) failed for pid ${pid}: ${(err as Error)?.message}`);
-  }
-}
 
 export interface BackgroundProcess {
   id: number;
@@ -340,7 +287,7 @@ export class BashTool {
           chunks.push(s);
           if (bufferedLen > MAX_BUFFER) {
             maxBufferHit = true;
-            killProcessTree(child, "SIGKILL");
+            killProcessTree(child, "SIGKILL", "bash");
             // Same `close`-never-fires hazard as the timeout/abort paths.
             settleTimer = setTimeout(
               () => finishAfterKill(`[output exceeded ${MAX_BUFFER} bytes; process killed]`),
@@ -354,9 +301,9 @@ export class BashTool {
         if (timeout && timeout > 0) {
           timeoutTimer = setTimeout(() => {
             timedOut = true;
-            killProcessTree(child, "SIGTERM");
+            killProcessTree(child, "SIGTERM", "bash");
             forceKillTimer = setTimeout(() => {
-              killProcessTree(child, "SIGKILL");
+              killProcessTree(child, "SIGKILL", "bash");
               // Do NOT depend on `close` to settle: if anything in the tree
               // survived holding our stdio, it never fires.
               settleTimer = setTimeout(
@@ -444,9 +391,9 @@ export class BashTool {
 
         const onAbort = () => {
           aborted = true;
-          killProcessTree(child, "SIGTERM");
+          killProcessTree(child, "SIGTERM", "bash");
           forceKillTimer = setTimeout(() => {
-            killProcessTree(child, "SIGKILL");
+            killProcessTree(child, "SIGKILL", "bash");
             // Same backstop as the timeout path — an abort must not be able to
             // leave the turn waiting on a `close` that will never arrive.
             settleTimer = setTimeout(() => finishAfterKill("[Cancelled]"), POST_KILL_SETTLE_MS);

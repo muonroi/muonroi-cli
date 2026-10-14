@@ -56,6 +56,7 @@ import type { VerifyRecipe } from "../types/index.js";
 import { createGitSpawnBudget, type GitSpawnBudget, runGitSpawn } from "../utils/git-spawn.js";
 import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { logger } from "../utils/logger.js";
+import { killProcessTree } from "../utils/process-tree.js";
 import { extractCoverageFromOutput } from "../verify/coverage-parsers.js";
 import { inferVerifyProjectProfile } from "../verify/recipes.js";
 import { parseFailingTestIds, type TestRunnerFormat } from "./test-failure-parse.js";
@@ -90,6 +91,14 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
 /** Cap captured output so a chatty runner cannot blow up the sprint feedback. */
 const OUTPUT_TAIL_CHARS = 4000;
 const MAX_BUFFER_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Grace between a timed-out gate's tree kill and settling without its `close`
+ * event — same value and reason as `src/tools/bash.ts`: `close` needs every
+ * inherited stdio handle closed, and one process escaping the kill must not
+ * wedge the floor.
+ */
+const POST_KILL_SETTLE_MS = 2_000;
 
 export type FloorVerdict = "pass" | "fail" | "unavailable";
 
@@ -467,6 +476,11 @@ export async function runFloorCommand(
         // The gate must never wait on a prompt; keep stdin closed.
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        // POSIX only: own process group, so the timeout's tree kill reaches the
+        // real gate process and not just the `/bin/sh` wrapper (see the timer
+        // below). win32 must not set it — `detached` there opens a new console;
+        // `taskkill /T` walks the tree instead.
+        detached: process.platform !== "win32",
       });
     } catch (err) {
       spawnError = err instanceof Error ? err.message : String(err);
@@ -482,24 +496,40 @@ export async function runFloorCommand(
 
     let settled = false;
     let timer: ReturnType<typeof setTimeout>;
+    let postKillTimer: ReturnType<typeof setTimeout> | undefined;
     const finish = (): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (postKillTimer) clearTimeout(postKillTimer);
       resolveRun();
     };
     const armTimer = (): void => {
       timer = setTimeout(() => {
         timedOut = true;
-        try {
-          child.kill();
-        } catch (err) {
-          logger.warn("orchestrator", `[verify-floor] could not kill timed-out command "${command}"`, {
-            operation: "runFloorCommand",
-            cwd,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
+        // A TREE kill, not `child.kill()`. With `shell: true` the child is the
+        // shell: on win32 always `cmd.exe /d /s /c <command>`, which never execs
+        // its command, so `child.kill()` ended cmd.exe and left the real gate
+        // (node / npm / dotnet) running AND holding the stdout/stderr pipes —
+        // `close` then waited for the gate to finish on its own, i.e. the timeout
+        // was not honoured at all. Measured on the windows-latest CI leg:
+        // `verify-baseline-nonblocking.test.ts` asks for a 600 ms timeout on a
+        // 10 s command and got 10.1 s (macOS: 0.66 s, because `/bin/sh` execs a
+        // single command so the kill happened to land on it). The same leak hits
+        // POSIX whenever the shell forks instead of exec'ing (`npm test` → sh →
+        // node, a `;`/`&&` chain).
+        killProcessTree(child, "SIGKILL", "verify-floor");
+        // `close` needs every inherited stdio handle closed; a process that
+        // escaped the kill would still wedge the floor, so settle after a grace.
+        postKillTimer = setTimeout(() => {
+          if (settled) return;
+          logger.warn(
+            "orchestrator",
+            `[verify-floor] timed-out command "${command}" did not close its pipes ${POST_KILL_SETTLE_MS}ms after the tree kill — settling without it`,
+            { operation: "runFloorCommand", cwd, command },
+          );
+          finish();
+        }, POST_KILL_SETTLE_MS);
       }, timeoutMs);
     };
     armTimer();

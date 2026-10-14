@@ -188,6 +188,29 @@ describe("withVisibleRetry", () => {
  * attempt was a silent one-shot. A transport teardown is retryable.
  */
 describe("isRetryableError — transport faults", () => {
+  // Fake timers: these cases assert CLASSIFICATION (retry or not), and each
+  // retryable one used to sleep the real default 2 s backoff — 7 × 2 s = 14 s,
+  // the 3rd-slowest unit file on macOS. The backoff is still taken, just on the
+  // fake clock (`runAllTimersAsync` drains it).
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Run `p` to completion, draining any backoff sleep on the fake clock. */
+  async function settle<T>(p: Promise<T>): Promise<T> {
+    const guarded = p.then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    await vi.runAllTimersAsync();
+    const r = await guarded;
+    if (!r.ok) throw r.error;
+    return r.value;
+  }
+
   it.each([
     "The socket connection was closed unexpectedly",
     "socket hang up",
@@ -198,7 +221,7 @@ describe("isRetryableError — transport faults", () => {
   ])("retries %s", async (message) => {
     const fn = vi.fn().mockRejectedValueOnce(new Error(message)).mockResolvedValueOnce("recovered");
     const onRetry = vi.fn();
-    await expect(withVisibleRetry(fn, { onRetry })).resolves.toBe("recovered");
+    await expect(settle(withVisibleRetry(fn, { onRetry }))).resolves.toBe("recovered");
     expect(fn).toHaveBeenCalledTimes(2);
     expect(onRetry).toHaveBeenCalledOnce();
   });
@@ -206,21 +229,21 @@ describe("isRetryableError — transport faults", () => {
   it("retries on a bare errno code with no message match", async () => {
     const error = Object.assign(new Error("request failed"), { code: "ECONNRESET" });
     const fn = vi.fn().mockRejectedValueOnce(error).mockResolvedValueOnce("recovered");
-    await expect(withVisibleRetry(fn)).resolves.toBe("recovered");
+    await expect(settle(withVisibleRetry(fn))).resolves.toBe("recovered");
     expect(fn).toHaveBeenCalledTimes(2);
   });
 
   it("does NOT retry a user abort", async () => {
     const error = Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
     const fn = vi.fn().mockRejectedValue(error);
-    await expect(withVisibleRetry(fn)).rejects.toThrow("aborted");
+    await expect(settle(withVisibleRetry(fn))).rejects.toThrow("aborted");
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
   it("does NOT retry a 401 even when the message mentions a connection", async () => {
     const error = Object.assign(new Error("connection closed: unauthorized"), { statusCode: 401 });
     const fn = vi.fn().mockRejectedValue(error);
-    await expect(withVisibleRetry(fn)).rejects.toThrow("unauthorized");
+    await expect(settle(withVisibleRetry(fn))).rejects.toThrow("unauthorized");
     expect(fn).toHaveBeenCalledTimes(1);
   });
 });

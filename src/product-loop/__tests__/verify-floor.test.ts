@@ -123,6 +123,23 @@ describe("runFloorCommand — exit codes are authoritative", () => {
     const check = await runFloorCommand("build", "definitely-not-a-real-binary-xyz --version", cwd, 30_000);
     expect(check.ok).toBe(false);
   });
+
+  // The timeout used to `child.kill()` the SHELL only. When the shell forks its
+  // command instead of exec'ing it — always on win32 (`cmd.exe /c`), and on
+  // POSIX for any `&&`/`;` chain or `npm test`-style wrapper — the real gate
+  // survived holding the pipes, and the floor waited for it to finish on its
+  // own: a 600 ms budget took 10.1 s on the windows-latest CI leg. The `&&`
+  // below forces the fork on every OS, so this fails on Linux too without the
+  // tree kill (it took the full 10 s).
+  it("honours the timeout when the shell FORKS the gate (tree kill, not a shell-only kill)", async () => {
+    const forking = 'node -e "setTimeout(()=>{},10000)" && node -e "process.exit(0)"';
+    const started = Date.now();
+    const check = await runFloorCommand("build", forking, cwd, 500);
+    expect(check.timedOut).toBe(true);
+    expect(check.ok).toBe(false);
+    // Well under the 10 s the surviving grandchild would have held it open.
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 20_000);
 });
 
 describe("runVerifyFloor", () => {

@@ -10,7 +10,12 @@ function tmpPathFor(filePath: string): string {
 }
 
 const RETRIES = 3;
-const STEP_TIMEOUT_MS = 10_000;
+/** Per-step (writeFile / rename) hang budget. Exported so tests can drive it on fake timers. */
+export const STEP_TIMEOUT_MS = 10_000;
+/** Backoff before retry `attempt` (0-based). Exported for the same reason. */
+export function retryBackoffMs(attempt: number): number {
+  return 50 * 2 ** attempt;
+}
 
 /**
  * Sentinel `code` stamped on a `withTimeout` rejection. The hang case carries no
@@ -102,7 +107,7 @@ async function writeThenRenameWithRetry(
       // losing the write is far more expensive than one wasted attempt.
       if (FAIL_FAST_WRITE_CODES.has(e?.code ?? "")) break;
       if (attempt < RETRIES - 1) {
-        await new Promise((r) => setTimeout(r, 50 * 2 ** attempt));
+        await new Promise((r) => setTimeout(r, retryBackoffMs(attempt)));
       }
     }
   }

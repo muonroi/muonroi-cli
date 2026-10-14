@@ -2,7 +2,14 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { atomicReadJSON, atomicWriteJSON, atomicWriteText, sweepStaleAtomicTemps } from "./atomic-io.js";
+import {
+  atomicReadJSON,
+  atomicWriteJSON,
+  atomicWriteText,
+  retryBackoffMs,
+  STEP_TIMEOUT_MS,
+  sweepStaleAtomicTemps,
+} from "./atomic-io.js";
 
 let tmpDir: string;
 
@@ -11,9 +18,53 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
+
+/**
+ * Fake ONLY setTimeout/clearTimeout — the step timeout and the retry backoff.
+ *
+ * The hang tests below used to wait out the REAL 10 s step budget: Test 11 one
+ * of them, Test 14 three (one per attempt). That was 41 s of the CI wall clock
+ * on every OS (atomic-io was the single slowest unit file on macOS, 2nd on
+ * Windows) for an assertion about control flow, not about time. Everything else
+ * stays real — `fs.writeFile`/`unlink` still hit the disk, `setImmediate` and
+ * `Date` keep working — so the test still exercises the real write path.
+ */
+function fakeStepTimers(): void {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+}
+
+/**
+ * Yield to the REAL event loop (real I/O completes) until `cond` holds. Does not
+ * touch fake time — unlike `vi.waitFor`, which advances fake timers per check
+ * and could fire a step timeout this test did not mean to fire.
+ */
+async function until(cond: () => boolean, what: string): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for: ${what}`);
+    await new Promise((r) => setImmediate(r));
+  }
+}
+
+/**
+ * Drive one hung rename through its timeout and, if another attempt follows,
+ * through the backoff. Ordered by the real control flow: when the rename is in
+ * flight the ONLY pending fake timer is its step timeout (the writeFile's was
+ * cleared when the write settled); the backoff timer is armed only after the
+ * real `unlink` cleanup, so it is awaited before it is advanced.
+ */
+async function expireHungRename(renameCalls: () => number, attempt: number, moreAttempts: boolean): Promise<void> {
+  await until(() => renameCalls() === attempt + 1, `rename attempt ${attempt + 1}`);
+  expect(vi.getTimerCount()).toBe(1);
+  await vi.advanceTimersByTimeAsync(STEP_TIMEOUT_MS);
+  if (!moreAttempts) return;
+  await until(() => vi.getTimerCount() === 1, `backoff after attempt ${attempt + 1}`);
+  await vi.advanceTimersByTimeAsync(retryBackoffMs(attempt));
+}
 
 /** Build an errno error the way libuv does, so `err.code` is the real signal. */
 function errno(code: string, syscall: string): NodeJS.ErrnoException {
@@ -151,12 +202,15 @@ describe("atomicWriteJSON — transient rename contention", () => {
       if (calls === 1) return new Promise<void>(() => {}); // never settles
       return real(from, to);
     });
+    fakeStepTimers();
 
-    await expect(atomicWriteJSON(filePath, { recovered: true })).resolves.toBeUndefined();
+    const write = atomicWriteJSON(filePath, { recovered: true });
+    await expireHungRename(() => calls, 0, true);
+    await expect(write).resolves.toBeUndefined();
 
     expect(calls).toBe(2);
     expect(JSON.parse(await fs.readFile(filePath, "utf8"))).toEqual({ recovered: true });
-  }, 25_000);
+  });
 
   it("Test 12: the ENOENT race loser still reports success", async () => {
     const filePath = path.join(tmpDir, "raced.json");
@@ -181,13 +235,24 @@ describe("atomicWriteJSON — transient rename contention", () => {
 
   it("Test 14: a timeout names the JSON function, not its text sibling", async () => {
     const filePath = path.join(tmpDir, "labelled.json");
-    vi.spyOn(fs, "rename").mockImplementation(() => new Promise<void>(() => {}));
+    let calls = 0;
+    vi.spyOn(fs, "rename").mockImplementation(() => {
+      calls++;
+      return new Promise<void>(() => {});
+    });
+    fakeStepTimers();
 
-    const err = await atomicWriteJSON(filePath, { a: 1 }).catch((e: Error) => e);
+    const settled = atomicWriteJSON(filePath, { a: 1 }).catch((e: Error) => e);
+    // Every attempt hangs: three step timeouts, two backoffs in between.
+    await expireHungRename(() => calls, 0, true);
+    await expireHungRename(() => calls, 1, true);
+    await expireHungRename(() => calls, 2, false);
+    const err = await settled;
 
+    expect(calls).toBe(3);
     expect((err as Error).message).toContain("atomicWriteJSON.rename timed out");
     expect((err as Error).message).not.toContain("atomicWriteText");
-  }, 45_000);
+  });
 });
 
 describe("atomicWriteText", () => {
